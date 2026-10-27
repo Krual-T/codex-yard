@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t={benchmark:`monopoly`},n=e=>({benchmark:e.benchmark===`efficient`?`efficient`:`monopoly`}),r={quantityMax:80,priceMax:100,monopolyQuantity:28,monopolyPrice:62,monopolyCost:34,efficientQuantity:140/3,efficientPrice:130/3}})))()}export{n as i,r as n,i as r,t};
+//# sourceMappingURL=model-a37d3dac8047.js.map

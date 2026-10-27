@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{equilibrium_constant:1e-100,initial_reaction_quotient:0}},{name:`Maximum supported values`,initialValues:{equilibrium_constant:1e100,initial_reaction_quotient:1e101}},{name:`Product-rich mixture`,initialValues:{equilibrium_constant:.1,initial_reaction_quotient:10}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-48f99c83d6fa.js.map

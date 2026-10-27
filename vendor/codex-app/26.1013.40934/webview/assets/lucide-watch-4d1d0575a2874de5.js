@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Watch`,[[`circle`,{cx:`12`,cy:`12`,r:`6`,key:`1vlfrh`}],[`polyline`,{points:`12 10 12 12 13 13`,key:`19dquz`}],[`path`,{d:`m16.13 7.66-.81-4.05a2 2 0 0 0-2-1.61h-2.68a2 2 0 0 0-2 1.61l-.78 4.05`,key:`18k57s`}],[`path`,{d:`m7.88 16.36.8 4a2 2 0 0 0 2 1.61h2.72a2 2 0 0 0 2-1.61l.81-4.05`,key:`16ny36`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-watch-4d1d0575a2874de5.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`EPIDERMAL_KERATINOCYTE_RENEWAL_AND_SHEDDING`,n=`epidermal-keratinocyte-renewal-and-shedding-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-5ff6311826ce.js.map

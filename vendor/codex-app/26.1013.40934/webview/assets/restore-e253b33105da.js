@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{nst as t}from"./app-shared-61271c39e3c5.js";import{BMr as n,UMr as r,WMr as i,XMr as a,eIr as o,kL as s,lL as c}from"./app-initial-a68277f60b93.js";async function l(e,t,a){let{scope:o}=e;return await o.when(({get:e})=>e(r)&&(e(n)!==t.accountId||e(i)!=null)),!1}function u(){return(u=e((()=>{t(),a(),s(),o(),c()})))()}u();export{l as restoreDurableSideChat};
+//# sourceMappingURL=restore-e253b33105da.js.map

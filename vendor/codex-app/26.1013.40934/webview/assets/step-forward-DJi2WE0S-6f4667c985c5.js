@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`StepForward`,[[`line`,{x1:`6`,x2:`6`,y1:`4`,y2:`20`,key:`fy8qot`}],[`polygon`,{points:`10,4 20,12 10,20`,key:`1mc1pf`}]])})))()}export{r as n,i as t};
+//# sourceMappingURL=step-forward-DJi2WE0S-6f4667c985c5.js.map

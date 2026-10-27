@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`CLASSIFICATION_THRESHOLD`,n=`classification-threshold-v1`,r={threshold:{kind:`number`,defaultValue:.5,min:0,max:1}},i={type:t,version:5,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-dca95d451915.js.map

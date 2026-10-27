@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_mutation: silent-substitution`,initialValues:{initial_mutation:`silent-substitution`}},{name:`initial_mutation: nonsense-substitution`,initialValues:{initial_mutation:`nonsense-substitution`}},{name:`initial_mutation: insertion`,initialValues:{initial_mutation:`insertion`}},{name:`initial_mutation: deletion`,initialValues:{initial_mutation:`deletion`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-f3b99238be01.js.map

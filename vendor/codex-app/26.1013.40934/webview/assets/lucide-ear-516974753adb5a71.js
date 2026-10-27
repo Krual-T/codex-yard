@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Ear`,[[`path`,{d:`M6 8.5a6.5 6.5 0 1 1 13 0c0 6-6 6-6 10a3.5 3.5 0 1 1-7 0`,key:`1dfaln`}],[`path`,{d:`M15 8.5a2.5 2.5 0 0 0-5 0v1a2 2 0 1 1 0 4`,key:`1qnva7`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-ear-516974753adb5a71.js.map

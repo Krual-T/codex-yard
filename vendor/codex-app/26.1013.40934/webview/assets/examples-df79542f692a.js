@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`joinType: left`,initialValues:{joinType:`left`}},{name:`joinType: right`,initialValues:{joinType:`right`}},{name:`joinType: full`,initialValues:{joinType:`full`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-df79542f692a.js.map

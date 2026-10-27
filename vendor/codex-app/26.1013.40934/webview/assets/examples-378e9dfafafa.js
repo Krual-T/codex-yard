@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`exampleContext: vehicle-features`,initialValues:{exampleContext:`vehicle-features`}},{name:`exampleContext: student-survey`,initialValues:{exampleContext:`student-survey`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-378e9dfafafa.js.map

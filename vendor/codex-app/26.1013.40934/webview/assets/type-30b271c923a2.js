@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`STRUCTURE_OF_WATER_HYDROGEN_BONDING`,n=`structure-of-water-hydrogen-bonding-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-30b271c923a2.js.map

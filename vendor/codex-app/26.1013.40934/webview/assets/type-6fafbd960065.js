@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`HYBRIDIZATION_SIGMA_PI_BONDS`,n=`hybridization-sigma-pi-bonds-v2`,r={hybridization:{kind:`enum`,defaultValue:`sp2`,allowedValues:[`sp3`,`sp2`,`sp`]}},i={type:t,version:1,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-6fafbd960065.js.map

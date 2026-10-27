@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`SINGULAR_VALUE_DECOMPOSITION`,n=`singular-value-decomposition-v1`,r=`A=U\\Sigma V^{\\mathsf T}`,i={rank:{kind:`integer`,defaultValue:2,min:1,max:4}},a={type:t,version:1,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-3a822ada5784.js.map

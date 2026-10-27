@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`CENTRAL_LIMIT_THEOREM`,n=`central-limit-theorem-v1`,r={population_shape:{kind:`enum`,defaultValue:`right-skewed`,allowedValues:[`right-skewed`,`uniform`,`bimodal`,`normal`]},sample_size:{kind:`integer`,defaultValue:5,min:1,max:100}},i={type:t,version:4,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-c608c5f26be7.js.map

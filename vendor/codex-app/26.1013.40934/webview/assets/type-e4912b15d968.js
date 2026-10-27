@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_ECHINODERM_WATER_VASCULAR_TUBE_FEET`,n=`animal-echinoderm-water-vascular-tube-feet-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-e4912b15d968.js.map

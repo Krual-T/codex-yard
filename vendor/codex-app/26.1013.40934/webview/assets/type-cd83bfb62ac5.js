@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`CODING_TEMPLATE_RNA_STRAND_COMPARISON`,n=`coding-template-rna-strand-comparison-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-cd83bfb62ac5.js.map

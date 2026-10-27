@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { rendererVersion } from '../scripts/copy-renderer.ts';
+import { rendererVersion } from '../lib/app-resources.ts';
 
 // The fake daemon never launches an MCP adapter. Supply a readable fixture
 // path for the host's configuration checks, without installing Codex Desktop.

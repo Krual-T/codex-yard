@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PLANT_XYLEM_TRANSPIRATION_COHESION_PULL`,n=`plant-xylem-transpiration-cohesion-pull-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-b52ed19f6540.js.map

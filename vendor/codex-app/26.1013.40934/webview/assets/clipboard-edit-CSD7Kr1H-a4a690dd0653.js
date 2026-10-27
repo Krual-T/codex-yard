@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./clipboard-pen-yWbhVbAU-cd8059fc85b1.js";function r(){return(r=e((()=>{n()})))()}r();export{t as default};
+//# sourceMappingURL=clipboard-edit-CSD7Kr1H-a4a690dd0653.js.map

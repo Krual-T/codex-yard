@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`Axis3d`,[[`path`,{d:`M4 4v16h16`,key:`1s015l`}],[`path`,{d:`m4 20 7-7`,key:`17qe9y`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=axis-3d-Cv9ha8Ch-42225dffb4a2.js.map

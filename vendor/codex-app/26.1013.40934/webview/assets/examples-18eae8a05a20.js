@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`recurrence_example: T(n) = 2T(n/2) + 1`,initialValues:{recurrence_example:`T(n) = 2T(n/2) + 1`}},{name:`recurrence_example: T(n) = 2T(n/2) + n^2`,initialValues:{recurrence_example:`T(n) = 2T(n/2) + n^2`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-18eae8a05a20.js.map

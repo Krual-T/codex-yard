@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`FREE_FALL`,n=`free-fall-v1`,r=`h(t) = h_0 + v_0t - \\frac{1}{2}gt^2`,i={initialHeightMeters:{kind:`number`,defaultValue:14,min:4,max:18},initialVelocityMetersPerSecond:{kind:`number`,defaultValue:0,min:-8,max:8}},a={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-f5876f848904.js.map

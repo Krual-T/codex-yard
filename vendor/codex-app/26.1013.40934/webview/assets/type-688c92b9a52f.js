@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOLOGICAL_PH_SCALE_TENFOLD_PROTON_CHANGE`,n=`biological-ph-scale-tenfold-proton-change-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-688c92b9a52f.js.map

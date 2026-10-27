@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MENDELIAN_AUTOSOMAL_VERSUS_X_LINKED_PEDIGREE_TRANSMISSION`,n=`mendelian-autosomal-versus-x-linked-pedigree-transmission-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-71af11eb5df9.js.map

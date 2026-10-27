@@ -1,0 +1,1 @@
+import{n as e,t}from"./lucide-stethoscope-28e297a9ecd31591.js";e();export{t as default};

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ORGANISM_SEED_DISPERSAL_AND_NEXT_GENERATION`,n=`organism-seed-dispersal-and-next-generation-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-558840ae4c86.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOME_WHITTAKER_CLIMATE_DIAGRAM`,n=`biome-whittaker-climate-diagram-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-36653fcd2e7f.js.map

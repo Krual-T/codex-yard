@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PLANT_ROOT_CROSS_SECTION_TISSUE_SYSTEMS`,n=`plant-root-cross-section-tissue-systems-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-1b82a77caf7f.js.map

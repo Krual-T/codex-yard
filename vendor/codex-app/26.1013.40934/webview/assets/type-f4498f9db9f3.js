@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MICRORNA_MRNA_TRANSLATIONAL_SILENCING`,n=`microrna-mrna-translational-silencing-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-f4498f9db9f3.js.map

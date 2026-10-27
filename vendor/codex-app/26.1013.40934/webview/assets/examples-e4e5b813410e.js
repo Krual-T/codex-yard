@@ -1,0 +1,4 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{content:`\\begin{aligned} y &= x^2 \\\\ y &= 2x + 1 \\end{aligned}`},{content:`\\begin{aligned} y &= x^2 \\\\ y &= 2x - 1 \\end{aligned}`},{content:`\\begin{aligned} y &= x + 3 \\\\ y &= x - 2 \\end{aligned}`},{content:`\\left\\{\\begin{aligned} y &= x^2 \\\\ y &= -x + 3 \\end{aligned}\\right.`},{content:`y = x^2
+y = x + 1`},{content:`y = x + 3
+y = x - 2`},{content:`\\begin{aligned} y &= x^2 \\\\ y &= 2x + 1 \\\\ y &= -x + 3 \\end{aligned}`},{content:`\\begin{aligned} y &= x + 3 \\\\ y &= x - 2 \\\\ y &= -x + 1 \\\\ y &= 2x - 4 \\end{aligned}`},{name:`Horizontal line intersection`,content:`\\begin{aligned} y &= x + 5 \\\\ y &= 12 \\end{aligned}`}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-e4e5b813410e.js.map

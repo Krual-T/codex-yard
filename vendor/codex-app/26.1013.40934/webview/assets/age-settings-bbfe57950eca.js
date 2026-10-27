@@ -1,0 +1,1 @@
+import"./app-shared-61271c39e3c5.js";import{n as e,r as t}from"./age-settings-e88e8b146fc2.js";t();export{e as ChatGptAgeSettings};

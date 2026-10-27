@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`decay_mode: beta-minus`,initialValues:{decay_mode:`beta-minus`}},{name:`decay_mode: gamma`,initialValues:{decay_mode:`gamma`}},{name:`decay_mode: beta-plus`,initialValues:{decay_mode:`beta-plus`}},{name:`decay_mode: electron-capture`,initialValues:{decay_mode:`electron-capture`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-25409b28c9ac.js.map

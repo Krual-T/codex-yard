@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PREDATOR_REINTRODUCTION_TROPHIC_RECOVERY`,n=`predator-reintroduction-trophic-recovery-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-38f3976a9f65.js.map

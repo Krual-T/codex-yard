@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_INCOMPLETE_VERSUS_COMPLETE_DIGESTIVE_TRACT`,n=`animal-incomplete-versus-complete-digestive-tract-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-23c40861ef25.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`example: acetic-acid-and-water`,initialValues:{example:`acetic-acid-and-water`}},{name:`example: hydrogen-fluoride-and-water`,initialValues:{example:`hydrogen-fluoride-and-water`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-21fada1d05f9.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{zScore:-3.5}},{name:`Maximum supported values`,initialValues:{zScore:3.5}},{name:`testType: one-sided`,initialValues:{testType:`one-sided`}},{name:`Continuous z-score`,initialValues:{zScore:1.645}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-63bf5d7b8fe5.js.map

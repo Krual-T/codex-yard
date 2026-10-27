@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`ATHEROSCLEROSIS`,n=`atherosclerosis-v3`,r={initial_stage:{kind:`enum`,defaultValue:`established plaque`,allowedValues:[`healthy artery`,`fatty streak`,`established plaque`,`plaque rupture and thrombus`]}},i={type:t,version:4,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-c62486043386.js.map

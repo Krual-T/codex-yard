@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MENDELIAN_AUTOSOMAL_RECESSIVE_PEDIGREE_CARRIER_INFERENCE`,n=`mendelian-autosomal-recessive-pedigree-carrier-inference-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-4d9f48837c76.js.map

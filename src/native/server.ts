@@ -12,7 +12,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { CodexConnection } from '../../lib/codex.ts';
 import { createAppTools } from '../../lib/app-tools.ts';
 import { appToolCatalog, createHostToolHandler } from '../../lib/host-tools.ts';
-import { projectRoot, rendererRoot, rendererVersion } from '../../scripts/copy-renderer.ts';
+import { projectRoot, rendererRoot, rendererVersion } from '../../lib/app-resources.ts';
 import { record, publicConfig, readMethods, writeMethods } from './protocol.ts';
 import type { HostMessage, ObjectValue } from './protocol.ts';
 import { createThreadProjects } from './thread-projects.ts';
@@ -78,7 +78,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     }
   }
   const metadata = JSON.parse(await readFile(join(renderer, 'renderer.json'), 'utf8'));
-  if (metadata.version !== rendererVersion) throw new Error('原版资源版本不匹配，请运行 npm run copy:renderer');
+  if (metadata.version !== rendererVersion) throw new Error('仓库内的 App 资源版本不匹配，请核对 vendor/codex-app 与当前代码版本');
   const browserHost = await readFile(join(projectRoot, '.local', 'native-host.js'));
   const browserEntry = await readFile(join(projectRoot, '.local', 'workbench-entry.js'));
   const sandboxScript = await readFile(join(projectRoot, '.local', 'visualization-sandbox.js'), 'utf8');

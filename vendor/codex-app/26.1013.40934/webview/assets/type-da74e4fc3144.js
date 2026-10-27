@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SKIN_SWEAT_EVAPORATION_COOLING`,n=`skin-sweat-evaporation-cooling-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-da74e4fc3144.js.map

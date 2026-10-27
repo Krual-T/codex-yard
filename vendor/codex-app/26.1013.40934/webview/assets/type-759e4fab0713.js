@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`DEMAND_CURVE`,n=`demand-curve-v1`,r={price:{kind:`number`,defaultValue:5,min:1,max:9},demand_shift:{kind:`number`,defaultValue:0,min:-1,max:1}},i={type:t,version:3,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-759e4fab0713.js.map

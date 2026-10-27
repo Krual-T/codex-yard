@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`NATURAL_SELECTION_DIFFERENTIAL_REPRODUCTION`,n=`natural-selection-differential-reproduction-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-9f3be931acd6.js.map

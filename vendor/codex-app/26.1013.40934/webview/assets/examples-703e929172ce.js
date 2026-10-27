@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`endpoint: death`,initialValues:{endpoint:`death`}},{name:`endpoint: device failure`,initialValues:{endpoint:`device failure`}},{name:`time_unit: days`,initialValues:{time_unit:`days`}},{name:`time_unit: years`,initialValues:{time_unit:`years`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-703e929172ce.js.map

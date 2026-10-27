@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ALTERNATIVE_RNA_SPLICING_ISOFORMS`,n=`alternative-rna-splicing-isoforms-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-f192ed5b50f7.js.map

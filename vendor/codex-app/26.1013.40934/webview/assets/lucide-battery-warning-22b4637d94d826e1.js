@@ -1,0 +1,1 @@
+import{n as e,t}from"./lucide-battery-warning-8de003becd0b4c8f.js";e();export{t as default};

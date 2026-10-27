@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`PHOTOELECTRIC_ENERGY_BALANCE`,n=`photoelectric-energy-balance-v1`,r=`hf = \\phi + K_{\\max}`,i={frequencyTimes10To14Hertz:{kind:`number`,defaultValue:8,min:3,max:15},intensityPercent:{kind:`number`,defaultValue:50,min:10,max:100},workFunctionElectronVolts:{kind:`number`,defaultValue:2.3,min:1.5,max:6}},a={type:t,version:1,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-389cfab21292.js.map

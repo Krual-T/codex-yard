@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`NON_ENVELOPED_VIRUS_ENDOCYTOSIS_AND_UNCOATING`,n=`non-enveloped-virus-endocytosis-and-uncoating-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-95dd63dfb100.js.map

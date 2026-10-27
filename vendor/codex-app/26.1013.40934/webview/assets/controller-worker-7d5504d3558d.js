@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t}from"./worker-preparation-505a0301a18e.js";function n(){return new Worker(new URL(``+new URL(`runtime.worker-e77831d98354.js`,import.meta.url).href,``+import.meta.url),{type:`module`,name:`popcorn-presentation-controller-worker`})}function r(){return t(n)}function i(){return(i=e((()=>{})))()}export{i as n,r,n as t};
+//# sourceMappingURL=controller-worker-7d5504d3558d.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{earlier_cpi:50,later_cpi:50}},{name:`Maximum supported values`,initialValues:{earlier_cpi:300,later_cpi:300}},{name:`comparison_interval: one_month`,initialValues:{comparison_interval:`one_month`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-e027cd51b04a.js.map

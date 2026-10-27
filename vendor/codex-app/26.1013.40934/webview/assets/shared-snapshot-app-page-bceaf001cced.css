@@ -1,0 +1,1 @@
+@layer components{._header_12nhh_1{grid-template-columns:minmax(max-content, max(0px, calc((100% - var(--container-3xl)) / 2))) minmax(0, 1fr) auto}}

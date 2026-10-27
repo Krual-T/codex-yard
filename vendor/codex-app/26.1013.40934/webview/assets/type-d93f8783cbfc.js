@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`REACTION_ORDER_PLOTS`,n=`reaction-order-plots-v1`,r={reaction_order:{kind:`enum`,defaultValue:`first-order`,allowedValues:[`zero-order`,`first-order`,`second-order`]}},i={type:t,version:3,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-d93f8783cbfc.js.map

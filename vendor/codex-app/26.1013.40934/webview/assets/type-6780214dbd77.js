@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_VIRUS_GENOME_REPLICATION_AND_CAPSID_ASSEMBLY`,n=`animal-virus-genome-replication-and-capsid-assembly-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-6780214dbd77.js.map

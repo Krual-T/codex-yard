@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`WashingMachine`,[[`path`,{d:`M3 6h3`,key:`155dbl`}],[`path`,{d:`M17 6h.01`,key:`e2y6kg`}],[`rect`,{width:`18`,height:`20`,x:`3`,y:`2`,rx:`2`,key:`od3kk9`}],[`circle`,{cx:`12`,cy:`13`,r:`5`,key:`nlbqau`}],[`path`,{d:`M12 18a2.5 2.5 0 0 0 0-5 2.5 2.5 0 0 1 0-5`,key:`17lach`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-washing-machine-999852f06fe4d9b0.js.map

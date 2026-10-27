@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`RANDOMIZED_EXPERIMENT`,n=`randomized-experiment-v1`,r={experimental_units:{kind:`integer`,defaultValue:16,min:6,max:30},treatment_effect:{kind:`number`,defaultValue:8,min:-20,max:20}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-b2315d4b532d.js.map

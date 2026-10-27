@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`B_CELL_PLASMA_CELL_ANTIBODY_SECRETION`,n=`b-cell-plasma-cell-antibody-secretion-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-b5c2097cd130.js.map

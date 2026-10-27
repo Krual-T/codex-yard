@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`CircleChevronLeft`,[[`circle`,{cx:`12`,cy:`12`,r:`10`,key:`1mglay`}],[`path`,{d:`m14 16-4-4 4-4`,key:`ojs7w8`}]])})))()}export{r as n,i as t};
+//# sourceMappingURL=circle-chevron-left-CN2AyJNs-9b750c02bd74.js.map

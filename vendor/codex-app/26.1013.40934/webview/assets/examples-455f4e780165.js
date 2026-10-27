@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{labor_supply_shift:-1,labor_demand_shift:-1}},{name:`Maximum supported values`,initialValues:{labor_supply_shift:1,labor_demand_shift:1}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-455f4e780165.js.map

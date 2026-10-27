@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SENSORY_RECEPTOR_POTENTIAL_THRESHOLD`,n=`sensory-receptor-potential-threshold-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-66bccf0a3d32.js.map

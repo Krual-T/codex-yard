@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`GYMNOSPERM_CONE_POLLINATION_AND_EXPOSED_SEEDS`,n=`gymnosperm-cone-pollination-and-exposed-seeds-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ce71b0df47d1.js.map

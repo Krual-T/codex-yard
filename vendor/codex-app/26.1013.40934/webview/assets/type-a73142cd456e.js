@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`VERTEBRATE_FISH_OPERCULUM_GILL_VENTILATION`,n=`vertebrate-fish-operculum-gill-ventilation-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-a73142cd456e.js.map

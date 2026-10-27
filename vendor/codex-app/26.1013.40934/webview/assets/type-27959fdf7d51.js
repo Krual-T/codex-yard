@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`POINT_SLOPE_LINE`,n=`point-slope-line-v1`,r=`y - y_1 = m(x - x_1)`,i={x1:{kind:`number`,defaultValue:-3,min:-100,max:100},y1:{kind:`number`,defaultValue:-2,min:-100,max:100},slope:{kind:`number`,defaultValue:.75,min:-20,max:20}},a={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-27959fdf7d51.js.map

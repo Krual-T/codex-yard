@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e,t){let r=e?.trim()??``,i=r.length>0&&n.test(r);return{checkoutEmail:r,hasCheckoutEmail:i,defaultEmail:i?``:t??``}}var n;function r(){return(r=e((()=>{n=/^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/})))()}export{t as n,r,n as t};
+//# sourceMappingURL=email-133e9bdb45ab.js.map

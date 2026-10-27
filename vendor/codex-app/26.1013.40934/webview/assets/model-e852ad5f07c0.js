@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=e=>{let t=Number.isFinite(e.soluteAddedGrams)?Math.min(Math.max(e.soluteAddedGrams,0),72):48,n=Math.min(t,36);return{addedGrams:t,dissolvedGrams:n,excessGrams:t-n,isSaturated:t>=36}}})))()}export{n,t};
+//# sourceMappingURL=model-e852ad5f07c0.js.map

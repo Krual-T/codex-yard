@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`LIKELIHOOD_FUNCTION`,n=`likelihood-function-v1`,r=`L(p\\mid k,n) \\propto p^k(1-p)^{n-k}`,i={successes:{kind:`integer`,defaultValue:3,min:0,max:48},trials:{kind:`integer`,defaultValue:12,min:12,max:48}},a={type:t,version:3,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-8c2ee062fabe.js.map

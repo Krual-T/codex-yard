@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`nutrient: protein`,initialValues:{nutrient:`protein`}},{name:`nutrient: long-chain fat`,initialValues:{nutrient:`long-chain fat`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-902fd465a34e.js.map

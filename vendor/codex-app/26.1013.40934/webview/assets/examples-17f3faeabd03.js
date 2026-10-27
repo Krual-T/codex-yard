@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`reaction_example: barium-sulfate-precipitation`,initialValues:{reaction_example:`barium-sulfate-precipitation`}},{name:`reaction_example: strong-acid-base-neutralization`,initialValues:{reaction_example:`strong-acid-base-neutralization`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-17f3faeabd03.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`Codepen`,[[`polygon`,{points:`12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2`,key:`srzb37`}],[`line`,{x1:`12`,x2:`12`,y1:`22`,y2:`15.5`,key:`1t73f2`}],[`polyline`,{points:`22 8.5 12 15.5 2 8.5`,key:`ajlxae`}],[`polyline`,{points:`2 15.5 12 8.5 22 15.5`,key:`susrui`}],[`line`,{x1:`12`,x2:`12`,y1:`2`,y2:`8.5`,key:`2cldga`}]])})))()}export{r as n,i as t};
+//# sourceMappingURL=codepen-DsyszU-6-8588444a7be0.js.map

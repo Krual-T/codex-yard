@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_SINGLE_VERSUS_DOUBLE_CIRCULATION`,n=`animal-single-versus-double-circulation-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-5166bb8452fd.js.map

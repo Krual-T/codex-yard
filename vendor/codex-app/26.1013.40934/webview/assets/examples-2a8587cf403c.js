@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{mean:-1e4,standard_deviation:.1}},{name:`Maximum supported values`,initialValues:{mean:1e4,standard_deviation:3e3}},{name:`Test scores with a narrow spread`,initialValues:{mean:72.5,standard_deviation:4.25}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-2a8587cf403c.js.map

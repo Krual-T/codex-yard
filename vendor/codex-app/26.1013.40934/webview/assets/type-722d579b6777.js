@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a,o;function s(){return(s=e((()=>{t=`WEIGHT_FORCE`,n=`weight-force-v1`,r=`F_g = mg`,i=[`F_G = m g`,`w = mg`,`F_g = m\\,g`,`P = m \\cdot g`,`F_g = m \\cdot g`,`F_g = m \\times g`,`m = \\frac{F_g}{g}`,`g = \\frac{F_g}{m}`],a={mass:{kind:`number`,defaultValue:8,min:.01,max:1e4},gravity:{kind:`number`,defaultValue:9.8,min:0,max:1e4}},o={type:t,version:3,thumbnailAssetKey:n,canonicalFormula:r,canonicalFormulaAliases:i,parameters:a}})))()}export{o as n,s as t};
+//# sourceMappingURL=type-722d579b6777.js.map

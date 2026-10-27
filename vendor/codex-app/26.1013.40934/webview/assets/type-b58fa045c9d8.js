@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_ECHINODERM_LARVAL_TO_ADULT_SYMMETRY`,n=`animal-echinoderm-larval-to-adult-symmetry-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-b58fa045c9d8.js.map

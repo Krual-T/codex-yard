@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{temperature_c:-10}},{name:`Maximum supported values`,initialValues:{temperature_c:110}},{name:`microbial_group: psychrophile`,initialValues:{microbial_group:`psychrophile`}},{name:`microbial_group: thermophile`,initialValues:{microbial_group:`thermophile`}},{name:`microbial_group: hyperthermophile`,initialValues:{microbial_group:`hyperthermophile`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-675ae5328886.js.map

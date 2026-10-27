@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`state: liquid`,initialValues:{state:`liquid`}},{name:`state: gas`,initialValues:{state:`gas`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-1686d2e21bdb.js.map

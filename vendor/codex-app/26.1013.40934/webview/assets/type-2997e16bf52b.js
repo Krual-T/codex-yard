@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MUSCULOSKELETAL_ANTAGONISTIC_ELBOW_FLEXION_EXTENSION`,n=`musculoskeletal-antagonistic-elbow-flexion-extension-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-2997e16bf52b.js.map

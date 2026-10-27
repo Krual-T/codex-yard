@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MENDELIAN_X_LINKED_PEDIGREE_GRANDFATHER_TO_GRANDSON_TRANSMISSION`,n=`mendelian-x-linked-pedigree-grandfather-to-grandson-transmission-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-385e9e52f941.js.map

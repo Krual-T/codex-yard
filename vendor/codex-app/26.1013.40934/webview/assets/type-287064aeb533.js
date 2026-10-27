@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`POPULATION_ECOLOGY_DENSITY_DEPENDENT_LIMITING_FACTORS`,n=`population-ecology-density-dependent-limiting-factors-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-287064aeb533.js.map

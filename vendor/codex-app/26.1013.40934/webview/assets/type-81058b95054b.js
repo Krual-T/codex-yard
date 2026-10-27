@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`EARLY_EARTH_PREBIOTIC_ENVIRONMENTS`,n=`early-earth-prebiotic-environments-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-81058b95054b.js.map

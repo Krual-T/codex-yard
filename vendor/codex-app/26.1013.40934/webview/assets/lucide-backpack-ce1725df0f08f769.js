@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Backpack`,[[`path`,{d:`M4 10a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z`,key:`1ol0lm`}],[`path`,{d:`M8 10h8`,key:`c7uz4u`}],[`path`,{d:`M8 18h8`,key:`1no2b1`}],[`path`,{d:`M8 22v-6a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v6`,key:`1fr6do`}],[`path`,{d:`M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2`,key:`donm21`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-backpack-ce1725df0f08f769.js.map

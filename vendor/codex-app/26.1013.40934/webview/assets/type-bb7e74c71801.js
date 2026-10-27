@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`LOOP_OF_HENLE_COUNTERCURRENT_CONCENTRATION`,n=`loop-of-henle-countercurrent-concentration-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-bb7e74c71801.js.map

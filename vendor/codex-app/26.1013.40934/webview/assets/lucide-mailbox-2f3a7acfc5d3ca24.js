@@ -1,0 +1,1 @@
+import{n as e,t}from"./lucide-mailbox-a39f76b9add11c82.js";e();export{t as default};

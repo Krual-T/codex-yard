@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`FEEDBACK_SENSOR_AND_EFFECTOR_ROLES`,n=`feedback-sensor-and-effector-roles-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-fbf512d18a6c.js.map

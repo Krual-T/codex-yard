@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MYELINATED_VERSUS_UNMYELINATED_CONDUCTION`,n=`myelinated-versus-unmyelinated-conduction-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-cd97efba78f5.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ORGANISM_FLOWERING_PLANT_LIFE_CYCLE`,n=`organism-flowering-plant-life-cycle-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-324c515c6607.js.map

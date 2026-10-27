@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`CAMBRIAN_ANIMAL_BODY_PLAN_DIVERSIFICATION`,n=`cambrian-animal-body-plan-diversification-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-b439c29dc06d.js.map

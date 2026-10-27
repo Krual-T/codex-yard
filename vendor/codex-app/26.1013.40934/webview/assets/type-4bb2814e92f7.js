@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MUTATION_FRAMESHIFT_VERSUS_IN_FRAME`,n=`mutation-frameshift-versus-in-frame-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-4bb2814e92f7.js.map

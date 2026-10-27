@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`fern-sporophyte-v1@3x-995a607fc9ea.webp`,import.meta.url).href})))()}export{n,t};
+//# sourceMappingURL=fern-sporophyte-v1@3x-22ce1d4c9727.js.map

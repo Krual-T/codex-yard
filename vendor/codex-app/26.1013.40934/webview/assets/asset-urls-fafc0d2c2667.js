@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`ant-behavior-animal-v1@3x-ab5638b79679.webp?as=url`,import.meta.url).href})))()}var r;function i(){return(i=e((()=>{r=``+new URL(`honeybee-behavior-animal-v1@3x-4876aaa4985a.webp?as=url`,import.meta.url).href})))()}var a;function o(){return(o=e((()=>{n(),i(),a={"ant-behavior-animal-v1@3x.webp":t,"honeybee-behavior-animal-v1@3x.webp":r}})))()}export{a as n,o as t};
+//# sourceMappingURL=asset-urls-fafc0d2c2667.js.map

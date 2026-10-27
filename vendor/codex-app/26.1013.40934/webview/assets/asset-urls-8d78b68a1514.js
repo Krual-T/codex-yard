@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`chloroplast-cutaway-v1@3x-31241648bdcb.webp?as=url`,import.meta.url).href})))()}var r;function i(){return(i=e((()=>{r=``+new URL(`leaf-scaffold-v1@3x-5d8dd3d6ef9a.webp?as=url`,import.meta.url).href})))()}var a,o;function s(){return(s=e((()=>{n(),i(),a=t.slice(0,t.lastIndexOf(`/`)+1),o={"chloroplast-cutaway-v1@3x.webp":t,"leaf-scaffold-v1@3x.webp":r}})))()}export{o as n,a as r,s as t};
+//# sourceMappingURL=asset-urls-8d78b68a1514.js.map

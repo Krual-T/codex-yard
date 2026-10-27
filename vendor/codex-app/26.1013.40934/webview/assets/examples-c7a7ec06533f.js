@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`environmental_factor: salinity`,initialValues:{environmental_factor:`salinity`}},{name:`environmental_factor: pH`,initialValues:{environmental_factor:`pH`}},{name:`environmental_factor: dissolved oxygen`,initialValues:{environmental_factor:`dissolved oxygen`}},{name:`environmental_factor: moisture`,initialValues:{environmental_factor:`moisture`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-c7a7ec06533f.js.map

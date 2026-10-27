@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`AUXIN_ACID_GROWTH_CELL_ELONGATION`,n=`auxin-acid-growth-cell-elongation-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-1805cba087c8.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{initial_value:-32768}},{name:`Maximum supported values`,initialValues:{initial_value:32767}},{name:`bit_width: 4`,initialValues:{bit_width:`4`}},{name:`All ones is negative one`,initialValues:{bit_width:`8`,initial_value:-1}},{name:`All zeros is zero`,initialValues:{bit_width:`8`,initial_value:0}},{name:`bit_width: 16`,initialValues:{bit_width:`16`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-c43582346d10.js.map

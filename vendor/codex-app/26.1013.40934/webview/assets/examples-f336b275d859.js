@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{input_energy_joules:1,initial_efficiency_percent:0}},{name:`Maximum supported values`,initialValues:{input_energy_joules:1e4,initial_efficiency_percent:100}},{name:`energy_system: electric motor`,initialValues:{energy_system:`electric motor`}},{name:`energy_system: car engine`,initialValues:{energy_system:`car engine`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-f336b275d859.js.map

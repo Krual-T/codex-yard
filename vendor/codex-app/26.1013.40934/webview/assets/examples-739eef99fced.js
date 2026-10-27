@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_example: sports drink vs oil and vinegar`,initialValues:{initial_example:`sports drink vs oil and vinegar`}},{name:`initial_example: air vs granite`,initialValues:{initial_example:`air vs granite`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-739eef99fced.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`LEWIS_DOT_SYMBOLS`,n=`lewis-dot-symbols-v1`,r={element:{kind:`enum`,defaultValue:`C`,allowedValues:[`H`,`He`,`Li`,`Be`,`B`,`C`,`N`,`O`,`F`,`Ne`,`Na`,`Mg`,`Al`,`Si`,`P`,`S`,`Cl`,`Ar`]}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-84ec9bea3a73.js.map

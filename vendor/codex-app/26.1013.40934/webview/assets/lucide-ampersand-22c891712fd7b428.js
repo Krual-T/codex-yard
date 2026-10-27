@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Ampersand`,[[`path`,{d:`M17.5 12c0 4.4-3.6 8-8 8A4.5 4.5 0 0 1 5 15.5c0-6 8-4 8-8.5a3 3 0 1 0-6 0c0 3 2.5 8.5 12 13`,key:`1o9ehi`}],[`path`,{d:`M16 12h3`,key:`4uvgyw`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-ampersand-22c891712fd7b428.js.map

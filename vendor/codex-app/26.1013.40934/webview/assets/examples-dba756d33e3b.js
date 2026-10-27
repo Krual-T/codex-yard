@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`element: boron`,initialValues:{element:`boron`}},{name:`element: carbon`,initialValues:{element:`carbon`}},{name:`element: neon`,initialValues:{element:`neon`}},{name:`element: magnesium`,initialValues:{element:`magnesium`}},{name:`element: sulfur`,initialValues:{element:`sulfur`}},{name:`element: copper`,initialValues:{element:`copper`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-dba756d33e3b.js.map

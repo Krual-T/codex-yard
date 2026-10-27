@@ -1,0 +1,1 @@
+import{n as e,t}from"./lucide-route-2429d97f040bc33a.js";e();export{t as default};

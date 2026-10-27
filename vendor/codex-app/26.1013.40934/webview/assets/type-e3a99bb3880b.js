@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SIGNAL_RESPONSE_GENE_EXPRESSION_VERSUS_ENZYME_ACTIVATION`,n=`signal-response-gene-expression-versus-enzyme-activation-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-e3a99bb3880b.js.map

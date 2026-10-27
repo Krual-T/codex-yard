@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{latitude:-90,longitude:-180}},{name:`Maximum supported values`,initialValues:{latitude:90,longitude:180}},{name:`Northern and eastern location`,initialValues:{latitude:30,longitude:45}},{name:`Southern and western location`,initialValues:{latitude:-34,longitude:-70}},{name:`North Pole`,initialValues:{latitude:90,longitude:120}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-73052c40593c.js.map

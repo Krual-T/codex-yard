@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`VERTEBRATE_BIRDS_NESTED_WITHIN_REPTILES`,n=`vertebrate-birds-nested-within-reptiles-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-938843672aa6.js.map

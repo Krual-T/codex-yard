@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`hair-follicle-v1@3x-e8398cceb174.webp?as=url`,import.meta.url).href})))()}var r;function i(){return(i=e((()=>{n(),r={"hair-follicle-v1@3x.webp":t}})))()}var a;function o(){return(o=e((()=>{a=``+new URL(`hair-follicle-v1@3x-e8398cceb174.webp`,import.meta.url).href})))()}export{r as i,o as n,i as r,a as t};
+//# sourceMappingURL=hair-follicle-v1@3x-9335c0f8868a.js.map

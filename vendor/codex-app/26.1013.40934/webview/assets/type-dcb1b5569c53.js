@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`ELECTRIC_CURRENT_CHARGE_FLOW`,n=`electric-current-charge-flow-v2`,r=`I = \\frac{Q}{t}`,i={packetRatePerSecond:{kind:`number`,defaultValue:4,min:1,max:8},chargePerPacketCoulombs:{kind:`number`,defaultValue:1,min:.5,max:3}},a={type:t,version:3,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-dcb1b5569c53.js.map

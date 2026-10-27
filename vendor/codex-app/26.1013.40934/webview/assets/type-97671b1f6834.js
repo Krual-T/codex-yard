@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ACTIVE_HABITAT_RESTORATION_POPULATION_RECOVERY`,n=`active-habitat-restoration-population-recovery-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-97671b1f6834.js.map

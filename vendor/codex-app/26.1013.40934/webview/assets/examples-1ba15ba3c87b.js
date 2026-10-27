@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{content:`(x-3)^2+(y+2)^2=16`},{content:`(x+1)^2+(y-4)^2=9`},{content:`x^2 + y^2 = 4`},{content:`(x-1.5)^2 + (y+0.5)^2 = 2.25`},{content:`(x-\\frac{1}{2})^2+(y+\\frac{3}{2})^2=(\\frac{5}{2})^2`}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-1ba15ba3c87b.js.map

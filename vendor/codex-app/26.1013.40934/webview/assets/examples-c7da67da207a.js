@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_stage: vasoconstriction`,initialValues:{initial_stage:`vasoconstriction`}},{name:`initial_stage: platelet plug`,initialValues:{initial_stage:`platelet plug`}},{name:`initial_stage: fibrin-stabilized clot`,initialValues:{initial_stage:`fibrin-stabilized clot`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-c7da67da207a.js.map

@@ -1,0 +1,1 @@
+@layer components{._desktopGrid_1krbq_1{grid-template-columns:repeat(2,minmax(0,1fr));column-gap:1rem;display:grid}._mobileGrid_1krbq_7{display:none}@container (width<=27.99rem){._desktopGrid_1krbq_1{display:none}._mobileGrid_1krbq_7{grid-template-columns:minmax(0,1fr);row-gap:.25rem;display:grid}}}

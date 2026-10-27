@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PLANT_CELL_STRUCTURE_AND_FUNCTION`,n=`plant-cell-structure-and-function-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-3112f6a513b6.js.map

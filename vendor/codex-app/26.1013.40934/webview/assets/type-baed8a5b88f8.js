@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MUSCULOSKELETAL_SKELETAL_MUSCLE_ORGANIZATION`,n=`musculoskeletal-skeletal-muscle-organization-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-baed8a5b88f8.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ECOSYSTEM_SERVICE_WETLAND_FLOOD_BUFFERING`,n=`ecosystem-service-wetland-flood-buffering-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-d5b67a9d1e52.js.map

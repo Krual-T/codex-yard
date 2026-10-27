@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a,o;function s(){return(s=e((()=>{t={label:`Percent of the whole`,min:0,max:100,step:1,defaultValue:37},n=100,r=(e,t,n)=>Math.min(Math.max(e,t),n),i=e=>Number.isFinite(e)?Math.round(r(e??t.defaultValue,t.min,t.max)):t.defaultValue,a=e=>({percent:i(e.percent)}),o=e=>{let{percent:t}=a(e),r=t/n;return{percent:t,highlightedParts:t,totalParts:n,decimal:r,decimalLabel:r.toFixed(2)}}})))()}export{a as i,o as n,s as r,t};
+//# sourceMappingURL=model-d5476457f411.js.map

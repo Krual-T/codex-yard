@@ -1,0 +1,1 @@
+import{n as e,t}from"./book-open-text-C4zfXl48-bacf2ab66cb1.js";t();export{e as default};

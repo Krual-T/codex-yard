@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MICROSCOPY_COMPOUND_MICROSCOPE_ANATOMY`,n=`microscopy-compound-microscope-anatomy-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-1c20da86be71.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`isotope_system: potassium-40-to-argon-40`,initialValues:{isotope_system:`potassium-40-to-argon-40`}},{name:`isotope_system: uranium-238-to-lead-206`,initialValues:{isotope_system:`uranium-238-to-lead-206`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-84aa2e46734f.js.map

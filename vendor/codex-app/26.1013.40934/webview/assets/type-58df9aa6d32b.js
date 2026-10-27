@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`COMPOUND_PULLEY_MECHANICAL_ADVANTAGE`,n=`compound-pulley-mechanical-advantage-v1`,r=`\\mathrm{IMA}=n`,i={supportSegments:{kind:`integer`,defaultValue:2,min:2,max:6}},a={type:t,version:4,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-58df9aa6d32b.js.map

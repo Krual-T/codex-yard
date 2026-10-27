@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`EUTROPHICATION_NUTRIENT_RUNOFF_ALGAL_BLOOM`,n=`eutrophication-nutrient-runoff-algal-bloom-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-371d3382c4cc.js.map

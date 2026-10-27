@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`PLACE_VALUE`,n=`place-value-v1`,r={number:{kind:`integer`,defaultValue:2654,min:0,max:9999}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-3be9f9a369b1.js.map

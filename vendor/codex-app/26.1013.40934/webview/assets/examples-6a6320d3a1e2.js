@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`circulation: systemic`,initialValues:{circulation:`systemic`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-6a6320d3a1e2.js.map

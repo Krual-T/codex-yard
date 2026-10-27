@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e){r=e}function n(){if(r==null)throw Error(`ChatGPT entity side panel tab was not registered`);return r()}var r;function i(){return(i=e((()=>{r=null})))()}export{i as n,t as r,n as t};
+//# sourceMappingURL=chatgpt-entity-side-panel-tab-registry-7861cacc37dd.js.map

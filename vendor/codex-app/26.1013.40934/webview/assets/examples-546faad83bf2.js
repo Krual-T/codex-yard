@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{content:`\\int_{0}^{5} x \\, dx`},{content:`\\int_{0}^{5} x^2 \\, dx`},{content:`\\int_{0}^{5} x+1 \\, dx`},{content:`\\int_{0}^{5} e/pi*x \\, dx`},{content:`\\int_{0}^{5} \\frac{x+1}{2} \\, dx`}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-546faad83bf2.js.map

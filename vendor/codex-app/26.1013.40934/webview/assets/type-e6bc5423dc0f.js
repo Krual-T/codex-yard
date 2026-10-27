@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`CHROMATIN_ACCESSIBILITY_GENE_EXPRESSION`,n=`chromatin-accessibility-gene-expression-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-e6bc5423dc0f.js.map

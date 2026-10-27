@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`LIFE_THREE_DOMAINS_AND_COMMON_ANCESTOR`,n=`life-three-domains-and-common-ancestor-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-83c27ef11d12.js.map

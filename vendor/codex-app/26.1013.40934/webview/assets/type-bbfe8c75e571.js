@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PLANT_STEM_VASCULAR_BUNDLE_CROSS_SECTION`,n=`plant-stem-vascular-bundle-cross-section-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-bbfe8c75e571.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n;function r(){return(r=e((()=>{t=`_inline_1fm20_1`,n={inline:t}})))()}export{r as n,n as t};
+//# sourceMappingURL=entity.module-8388af796d53.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`INTERFERON_ANTIVIRAL_SIGNALING_BETWEEN_CELLS`,n=`interferon-antiviral-signaling-between-cells-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-afc926098422.js.map

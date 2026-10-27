@@ -1,0 +1,1 @@
+import{n as e,t}from"./monitor-dot-COUSLjkg-311f4b62f8a5.js";e();export{t as default};

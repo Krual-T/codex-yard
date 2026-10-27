@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`pattern: negative`,initialValues:{pattern:`negative`}},{name:`pattern: none`,initialValues:{pattern:`none`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-1437d337715c.js.map

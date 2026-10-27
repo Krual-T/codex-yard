@@ -1,0 +1,1 @@
+import{n as e,t}from"./lucide-arrow-right-to-line-f36f456d769a3b7f.js";e();export{t as default};

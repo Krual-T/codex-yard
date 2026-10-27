@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{melting_temperature_k:200,boiling_temperature_k:360,molar_enthalpy_of_fusion_kj_per_mol:2,molar_enthalpy_of_vaporization_kj_per_mol:20}},{name:`Maximum supported values`,initialValues:{melting_temperature_k:350,boiling_temperature_k:650,molar_enthalpy_of_fusion_kj_per_mol:20,molar_enthalpy_of_vaporization_kj_per_mol:100}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-34d1d1f8414f.js.map

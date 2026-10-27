@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_PLACENTAL_MATERNAL_FETAL_EXCHANGE`,n=`animal-placental-maternal-fetal-exchange-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-1b121da66991.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`PRODUCTION_POSSIBILITIES_FRONTIER`,n=`production-possibilities-frontier-v1`,r={wheat:{kind:`number`,defaultValue:4,min:0,max:9},computers:{kind:`number`,defaultValue:4,min:0,max:9}},i={type:t,version:5,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-f06e3a1bfe5a.js.map

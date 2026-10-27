@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`KINETIC_AND_POTENTIAL_ENERGY`,n=`kinetic-and-potential-energy-v1`,r=`E_{\\text{total}} = PE + KE`,i={startHeightMeters:{kind:`number`,defaultValue:6,min:2,max:10}},a={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-ae7b919b937d.js.map

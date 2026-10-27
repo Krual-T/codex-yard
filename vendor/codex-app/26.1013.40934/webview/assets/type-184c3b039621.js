@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ENVELOPED_VIRUS_MEMBRANE_FUSION_AND_UNCOATING`,n=`enveloped-virus-membrane-fusion-and-uncoating-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-184c3b039621.js.map

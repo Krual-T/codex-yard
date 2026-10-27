@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`GALVANIC_CELL`,n=`galvanic-cell-v2`,r={cell_pair:{kind:`enum`,defaultValue:`zinc-copper`,allowedValues:[`zinc-copper`,`copper-silver`]}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-448ce06dc011.js.map

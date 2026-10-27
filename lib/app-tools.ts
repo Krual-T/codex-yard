@@ -5,7 +5,7 @@ import type { Socket } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { errorMessage, isRecord } from './codex-protocol.ts';
 import type { RpcId } from './codex-protocol.ts';
-import { bundledAppToolsAdapter } from '../scripts/copy-renderer.ts';
+import { bundledAppToolsAdapter } from './app-resources.ts';
 
 export const defaultAppToolsAdapter = bundledAppToolsAdapter;
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`learning-block-color-scope`,n=[`blue`,`green`,`yellow`,`orange`,`purple`,`pink`],r=`--learning-block-accent`})))()}export{i,n,t as r,r as t};
+//# sourceMappingURL=color-roles-cd6b3c2b72e9.js.map

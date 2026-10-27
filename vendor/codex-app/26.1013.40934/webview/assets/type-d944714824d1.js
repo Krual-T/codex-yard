@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PHOTOSYNTHESIS_CHEMIOSMOSIS_ATP_PRODUCTION`,n=`photosynthesis-chemiosmosis-atp-production-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-d944714824d1.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_pressure_condition: low`,initialValues:{initial_pressure_condition:`low`}},{name:`initial_pressure_condition: normal`,initialValues:{initial_pressure_condition:`normal`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-b4547334ece8.js.map

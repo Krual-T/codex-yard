@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`ANIMAL_LIFE_CYCLE`,n=`animal-life-cycle-v2`,r={animal:{kind:`enum`,defaultValue:`butterfly`,allowedValues:[`butterfly`,`frog`,`chicken`,`mammal`]}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-11d77b78e3d4.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_RESPIRATORY_AIRWAY_AND_LUNG_ANATOMY`,n=`animal-respiratory-airway-and-lung-anatomy-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-e72cfd1bca46.js.map

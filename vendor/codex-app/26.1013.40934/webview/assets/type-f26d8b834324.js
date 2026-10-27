@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`TROPHIC_TRANSFER_EFFICIENCY_AND_HEAT_LOSS`,n=`trophic-transfer-efficiency-and-heat-loss-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-f26d8b834324.js.map

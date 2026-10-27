@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`PoundSterling`,[[`path`,{d:`M18 7c0-5.333-8-5.333-8 0`,key:`1prm2n`}],[`path`,{d:`M10 7v14`,key:`18tmcs`}],[`path`,{d:`M6 21h12`,key:`4dkmi1`}],[`path`,{d:`M6 13h10`,key:`ybwr4a`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=pound-sterling-C3aYcJJA-30b4e2c9dbbd.js.map

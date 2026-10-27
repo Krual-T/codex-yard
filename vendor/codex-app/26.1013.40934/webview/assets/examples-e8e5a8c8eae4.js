@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`example: spread-out`,initialValues:{example:`spread-out`}},{name:`example: gap-and-unusual-value`,initialValues:{example:`gap-and-unusual-value`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-e8e5a8c8eae4.js.map

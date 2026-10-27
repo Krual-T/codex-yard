@@ -1,0 +1,1 @@
+import{n as e,t}from"./lucide-book-up-2-52840ac96847f310.js";e();export{t as default};

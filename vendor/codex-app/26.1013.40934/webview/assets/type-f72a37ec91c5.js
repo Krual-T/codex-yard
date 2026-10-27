@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`JACOBIAN_GRID_TRANSFORMATION`,n=`jacobian-grid-transformation-v1`,r=`dA=\\left|\\det J\\right|\\,du\\,dv`,i={scale:{kind:`number`,defaultValue:1.4,min:.7,max:2},shear:{kind:`number`,defaultValue:.6,min:-.95,max:.95}},a={type:t,version:1,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-f72a37ec91c5.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`FOSSILIZATION_BURIAL_MINERALIZATION_EXPOSURE`,n=`fossilization-burial-mineralization-exposure-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-16af45aaa5a5.js.map

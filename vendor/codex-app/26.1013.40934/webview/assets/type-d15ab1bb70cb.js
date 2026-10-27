@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOGEOCHEMICAL_NITROGEN_RESERVOIRS_AND_TRANSFORMATIONS`,n=`biogeochemical-nitrogen-reservoirs-and-transformations-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-d15ab1bb70cb.js.map

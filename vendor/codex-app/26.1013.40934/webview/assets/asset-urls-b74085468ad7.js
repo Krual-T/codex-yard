@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`dna-polymerase-scaffold-v1@3x-a8d77429f39a.webp?as=url`,import.meta.url).href})))()}var r;function i(){return(i=e((()=>{r=``+new URL(`rna-polymerase-ii-v1@3x-a4a966005404.webp?as=url`,import.meta.url).href})))()}var a,o;function s(){return(s=e((()=>{n(),i(),a=t.slice(0,t.lastIndexOf(`/`)+1),o={"dna-polymerase-scaffold-v1@3x.webp":t,"rna-polymerase-ii-v1@3x.webp":r}})))()}export{s as n,o as r,a as t};
+//# sourceMappingURL=asset-urls-b74085468ad7.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`CONTINUOUS_UNIFORM_DISTRIBUTION`,n=`continuous-uniform-distribution-v1`,r={lower_bound:{kind:`number`,defaultValue:0,min:-20,max:10},upper_bound:{kind:`number`,defaultValue:15,min:11,max:40}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-19d8b437a2d9.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MEIOTIC_CHROMOSOME_CHROMATID_ACCOUNTING`,n=`meiotic-chromosome-chromatid-accounting-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-d0a4b5e77aed.js.map

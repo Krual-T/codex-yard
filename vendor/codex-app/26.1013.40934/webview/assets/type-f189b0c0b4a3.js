@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SENSORY_OLFACTORY_DIRECT_CORTICAL_PATHWAY`,n=`sensory-olfactory-direct-cortical-pathway-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-f189b0c0b4a3.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`NEURONS_SYNAPSES_AND_NEURAL_CIRCUITS`,n=`neurons-synapses-and-neural-circuits-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-f20bb932bb7c.js.map

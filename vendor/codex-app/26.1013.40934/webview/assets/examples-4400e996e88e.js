@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_selection_pattern: directional`,initialValues:{initial_selection_pattern:`directional`}},{name:`initial_selection_pattern: disruptive`,initialValues:{initial_selection_pattern:`disruptive`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-4400e996e88e.js.map

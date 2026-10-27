@@ -1,0 +1,1 @@
+import{n as e,t}from"./asterisk-Dy26r3QG-a1e7515d4080.js";e();export{t as default};

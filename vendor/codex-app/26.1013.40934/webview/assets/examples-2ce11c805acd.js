@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{producer_energy:1e3,transfer_efficiency_percent:5}},{name:`Maximum supported values`,initialValues:{producer_energy:1e5,transfer_efficiency_percent:20}},{name:`High producer energy, low transfer`,initialValues:{producer_energy:1e5,transfer_efficiency_percent:5}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-2ce11c805acd.js.map

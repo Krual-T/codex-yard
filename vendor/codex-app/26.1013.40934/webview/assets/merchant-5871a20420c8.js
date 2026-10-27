@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e){let t=e.marketplace_seller?.trim(),n=e.seller_name?.trim();if(t&&n&&t!==n)return`${t} - ${n}`;if(t||n)return t||n||``;if(e.url)try{return new URL(e.url).hostname.replace(/^www\./,``)}catch{return e.merchant_name??``}return e.merchant_name??``}function n(){return(n=e((()=>{})))()}export{n,t};
+//# sourceMappingURL=merchant-5871a20420c8.js.map

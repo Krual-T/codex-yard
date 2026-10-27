@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`cargo_destination: plasma membrane`,initialValues:{cargo_destination:`plasma membrane`}},{name:`cargo_destination: lysosome`,initialValues:{cargo_destination:`lysosome`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-a23c5804116d.js.map

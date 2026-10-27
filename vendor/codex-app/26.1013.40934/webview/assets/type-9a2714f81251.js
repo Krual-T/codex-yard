@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`RNA_POLYMERASE_TEMPLATE_DIRECTED_SYNTHESIS`,n=`rna-polymerase-template-directed-synthesis-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-9a2714f81251.js.map

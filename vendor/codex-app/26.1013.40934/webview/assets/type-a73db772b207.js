@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`ACTIVATION_ENERGY_DISTRIBUTION`,n=`activation-energy-distribution-v1`,r={initial_temperature_k:{kind:`number`,defaultValue:600,min:300,max:900},activation_energy_kj_mol:{kind:`number`,defaultValue:16,min:8,max:28}},i={type:t,version:4,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-a73db772b207.js.map

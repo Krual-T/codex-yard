@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MUSCULOSKELETAL_MOTOR_UNIT_RECRUITMENT`,n=`musculoskeletal-motor-unit-recruitment-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-eefe1b0d8c69.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`CELL_THEORY_CELLS_FROM_EXISTING_CELLS`,n=`cell-theory-cells-from-existing-cells-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-e98c48550afd.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`topology: mesh`,initialValues:{topology:`mesh`}},{name:`topology: star`,initialValues:{topology:`star`}},{name:`topology: tree`,initialValues:{topology:`tree`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-535ea5727e32.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ENZYME_ACTIVATION_ENERGY_PROFILE`,n=`enzyme-activation-energy-profile-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-42aa1ee5e675.js.map

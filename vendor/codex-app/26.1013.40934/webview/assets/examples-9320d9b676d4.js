@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`mixture_example: colored solution`,initialValues:{mixture_example:`colored solution`}},{name:`mixture_example: widely separated liquids`,initialValues:{mixture_example:`widely separated liquids`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-9320d9b676d4.js.map

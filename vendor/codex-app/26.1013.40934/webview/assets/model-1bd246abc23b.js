@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=[`glucose`,`maltose`,`amylose`,`amylopectin`,`glycogen`,`cellulose`],n=e=>typeof e==`string`&&t.includes(e)?e:`amylopectin`,r=e=>Number.isFinite(e)?Math.min(2,Math.max(0,Math.round(e))):0,i=e=>e===`cellulose`?2:+(e===`amylopectin`||e===`glycogen`),a=(e,t)=>t===0?e===`maltose`?`maltose`:`amylose`:t===1?e===`glycogen`?`glycogen`:`amylopectin`:`cellulose`})))()}export{n as a,o as i,i as n,r as o,a as r,t};
+//# sourceMappingURL=model-1bd246abc23b.js.map

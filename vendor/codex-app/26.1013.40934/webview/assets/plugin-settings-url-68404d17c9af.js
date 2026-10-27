@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{r as t}from"./plugin-settings-url-shared-4acdac1f9085.js";function n(){return(n=e((()=>{t()})))()}export{n as t};
+//# sourceMappingURL=plugin-settings-url-68404d17c9af.js.map

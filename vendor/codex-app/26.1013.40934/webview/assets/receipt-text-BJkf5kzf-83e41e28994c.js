@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`ReceiptText`,[[`path`,{d:`M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z`,key:`q3az6g`}],[`path`,{d:`M14 8H8`,key:`1l3xfs`}],[`path`,{d:`M16 12H8`,key:`1fr5h0`}],[`path`,{d:`M13 16H8`,key:`wsln4y`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=receipt-text-BJkf5kzf-83e41e28994c.js.map

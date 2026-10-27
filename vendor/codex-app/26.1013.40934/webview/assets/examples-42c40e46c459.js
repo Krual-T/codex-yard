@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`solvent: benzene`,initialValues:{solvent:`benzene`}},{name:`solvent: cyclohexane`,initialValues:{solvent:`cyclohexane`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-42c40e46c459.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`NATURAL_KILLER_CELL_MISSING_SELF_RECOGNITION`,n=`natural-killer-cell-missing-self-recognition-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-a79320848a80.js.map

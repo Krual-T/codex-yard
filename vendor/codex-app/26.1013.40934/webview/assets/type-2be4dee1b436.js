@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PHENOTYPIC_PLASTICITY_ENVIRONMENTAL_RESPONSE`,n=`phenotypic-plasticity-environmental-response-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-2be4dee1b436.js.map

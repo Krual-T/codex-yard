@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`insertionSequence: balanced`,initialValues:{insertionSequence:`balanced`}},{name:`insertionSequence: ascending`,initialValues:{insertionSequence:`ascending`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-ba58e78054a5.js.map

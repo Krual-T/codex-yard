@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`CELL_THEORY_CELL_SIZE_SCALE_COMPARISON`,n=`cell-theory-cell-size-scale-comparison-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-4918d12b14e8.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MENDELIAN_PEDIGREE_SYMBOLS_AND_GENERATIONS`,n=`mendelian-pedigree-symbols-and-generations-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-2a06bceb3c0b.js.map

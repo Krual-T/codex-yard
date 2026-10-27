@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a,o;function s(){return(s=e((()=>{t=`SLOPE_INTERCEPT`,n=`slope-intercept-v1`,r=`y = mx + b`,i=[`f(x)=mx+b`,`y = mx + c`],a={slope:{kind:`number`,defaultValue:1,min:-1e4,max:1e4},intercept:{kind:`number`,defaultValue:5,min:-1e4,max:1e4}},o={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,canonicalFormulaAliases:i,parameters:a}})))()}export{o as n,s as t};
+//# sourceMappingURL=type-110ca488953a.js.map

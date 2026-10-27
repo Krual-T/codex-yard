@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`DENIAL_OF_SERVICE_OVERLOAD`,n=`denial-of-service-overload-v1`,r={server_capacity:{kind:`integer`,defaultValue:120,min:100,max:300},legitimate_request_rate:{kind:`integer`,defaultValue:40,min:10,max:80}},i={type:t,version:5,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-253ef788d0bb.js.map

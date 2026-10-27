@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`NEURONAL_RESTING_POTENTIAL_ION_GRADIENTS`,n=`neuronal-resting-potential-ion-gradients-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ca7d004370ba.js.map

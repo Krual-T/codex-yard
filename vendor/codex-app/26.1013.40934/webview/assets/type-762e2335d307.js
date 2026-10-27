@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MUSCULOSKELETAL_HINGE_VERSUS_BALL_AND_SOCKET`,n=`musculoskeletal-hinge-versus-ball-and-socket-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-762e2335d307.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`waterBody: estuary`,initialValues:{waterBody:`estuary`}},{name:`waterBody: coastal bay`,initialValues:{waterBody:`coastal bay`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-92df380ff6a7.js.map

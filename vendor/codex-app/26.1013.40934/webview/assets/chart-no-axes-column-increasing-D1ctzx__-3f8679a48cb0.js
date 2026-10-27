@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`ChartNoAxesColumnIncreasing`,[[`line`,{x1:`12`,x2:`12`,y1:`20`,y2:`10`,key:`1vz5eb`}],[`line`,{x1:`18`,x2:`18`,y1:`20`,y2:`4`,key:`cun8e5`}],[`line`,{x1:`6`,x2:`6`,y1:`20`,y2:`16`,key:`hq0ia6`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=chart-no-axes-column-increasing-D1ctzx__-3f8679a48cb0.js.map

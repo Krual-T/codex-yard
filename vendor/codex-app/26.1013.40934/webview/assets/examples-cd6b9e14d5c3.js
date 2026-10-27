@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`mixture: salt solution`,initialValues:{mixture:`salt solution`}},{name:`mixture: sand and salt solution`,initialValues:{mixture:`sand and salt solution`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-cd6b9e14d5c3.js.map

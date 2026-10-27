@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`SwitchCamera`,[[`path`,{d:`M11 19H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5`,key:`mtk2lu`}],[`path`,{d:`M13 5h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5`,key:`120jsl`}],[`circle`,{cx:`12`,cy:`12`,r:`3`,key:`1v7zrd`}],[`path`,{d:`m18 22-3-3 3-3`,key:`kgdoj7`}],[`path`,{d:`m6 2 3 3-3 3`,key:`1fnbkv`}]])})))()}export{r as n,i as t};
+//# sourceMappingURL=switch-camera-D_xqQD41-cd43e4fd4107.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`INDEPENDENT_ASSORTMENT_CHROMOSOME_SEGREGATION`,n=`independent-assortment-chromosome-segregation-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-9e2e4f96d5df.js.map

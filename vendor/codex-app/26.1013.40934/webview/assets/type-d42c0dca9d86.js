@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MICROSCOPY_PHASE_CONTRAST_LIVE_CELLS`,n=`microscopy-phase-contrast-live-cells-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-d42c0dca9d86.js.map

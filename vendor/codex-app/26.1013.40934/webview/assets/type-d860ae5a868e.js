@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`CELL_THEORY_SURFACE_AREA_TO_VOLUME_RATIO`,n=`cell-theory-surface-area-to-volume-ratio-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-d860ae5a868e.js.map

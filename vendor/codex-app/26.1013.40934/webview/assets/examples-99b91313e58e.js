@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`monomer: propene`,initialValues:{monomer:`propene`}},{name:`monomer: chloroethene`,initialValues:{monomer:`chloroethene`}},{name:`monomer: tetrafluoroethene`,initialValues:{monomer:`tetrafluoroethene`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-99b91313e58e.js.map

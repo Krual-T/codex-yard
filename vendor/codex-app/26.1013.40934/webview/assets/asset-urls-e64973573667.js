@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`image-icon-animal-digestive-tract-anatomy-v1@3x-67100abe8cb8.webp?as=url`,import.meta.url).href})))()}var r;function i(){return(i=e((()=>{n(),r={"image-icon-animal-digestive-tract-anatomy-v1@3x.webp":t}})))()}export{n as i,r as n,t as r,i as t};
+//# sourceMappingURL=asset-urls-e64973573667.js.map

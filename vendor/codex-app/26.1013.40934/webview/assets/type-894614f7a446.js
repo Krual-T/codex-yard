@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`BIOME_CLIMATOGRAPH`,n=`biome-climatograph-v2`,r={mean_annual_temperature_c:{kind:`number`,defaultValue:18,min:-15,max:30},annual_precipitation_cm:{kind:`number`,defaultValue:100,min:0,max:450}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-894614f7a446.js.map

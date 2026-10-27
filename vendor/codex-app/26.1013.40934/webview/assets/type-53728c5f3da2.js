@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`INNATE_VERSUS_ADAPTIVE_IMMUNE_RESPONSE_TIMING`,n=`innate-versus-adaptive-immune-response-timing-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-53728c5f3da2.js.map

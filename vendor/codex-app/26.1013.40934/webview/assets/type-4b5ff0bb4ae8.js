@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`ADD_FRACTIONS`,n=`add-fractions-v1`,r={firstNumerator:{kind:`integer`,defaultValue:1,min:1,max:4},firstDenominator:{kind:`integer`,defaultValue:3,min:2,max:6},secondNumerator:{kind:`integer`,defaultValue:3,min:1,max:4},secondDenominator:{kind:`integer`,defaultValue:6,min:2,max:6}},i={type:t,version:4,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-4b5ff0bb4ae8.js.map

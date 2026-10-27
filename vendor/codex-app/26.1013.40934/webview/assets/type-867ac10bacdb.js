@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MUTATION_DNA_RNA_PROTEIN_PHENOTYPE`,n=`mutation-dna-rna-protein-phenotype-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-867ac10bacdb.js.map

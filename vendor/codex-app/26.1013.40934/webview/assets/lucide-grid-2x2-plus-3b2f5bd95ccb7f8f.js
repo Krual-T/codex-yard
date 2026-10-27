@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Grid2x2Plus`,[[`path`,{d:`M12 3v17a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a1 1 0 0 1-1 1H3`,key:`11za1p`}],[`path`,{d:`M16 19h6`,key:`xwg31i`}],[`path`,{d:`M19 22v-6`,key:`qhmiwi`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-grid-2x2-plus-3b2f5bd95ccb7f8f.js.map

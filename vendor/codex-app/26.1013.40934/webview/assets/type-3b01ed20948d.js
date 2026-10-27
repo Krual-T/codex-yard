@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`INTEGUMENT_SWEAT_VERSUS_SEBACEOUS_GLAND_SECRETION`,n=`integument-sweat-versus-sebaceous-gland-secretion-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-3b01ed20948d.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e){for(let t=e.commandActions.length-1;t>=0;--t){let r=e.commandActions[t]?.command.trim()??``;if(r.length>0&&!n(r))return r}let t=e.command.trim();return n(t)?``:t}function n(e){return/^(?:.*[/\\])?(?:bash|cmd(?:\.exe)?|fish|powershell(?:\.exe)?|pwsh(?:\.exe)?|sh|zsh)(?:\s|$)/i.test(e)}function r(){return(r=e((()=>{})))()}export{r as n,t};
+//# sourceMappingURL=command-execution-command-615dea847916.js.map

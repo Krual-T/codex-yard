@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{pKa1:0,pKa2:7.5}},{name:`Maximum supported values`,initialValues:{pKa1:6.5,pKa2:14}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-9d85a0423c40.js.map

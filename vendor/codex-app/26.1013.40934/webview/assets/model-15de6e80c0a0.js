@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`single-price`,n=e=>({pricingMode:e.pricingMode===`perfect-discrimination`?`perfect-discrimination`:t}),r=e=>{let{pricingMode:t}=n(e);return{pricingMode:t,demandIntercept:10,marginalCost:2,monopolyQuantity:4,monopolyPrice:6,efficientQuantity:8,consumerSurplus:8,singlePriceFirmSurplus:16,deadweightLoss:8,perfectDiscriminationFirmSurplus:32}}})))()}export{n as i,r as n,i as r,t};
+//# sourceMappingURL=model-15de6e80c0a0.js.map

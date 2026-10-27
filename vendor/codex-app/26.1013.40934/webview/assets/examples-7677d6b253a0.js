@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`meanPosition: offset`,initialValues:{meanPosition:`offset`}},{name:`measurementSpread: large`,initialValues:{measurementSpread:`large`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-7677d6b253a0.js.map

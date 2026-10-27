@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_pathway: ocean exchange`,initialValues:{initial_pathway:`ocean exchange`}},{name:`initial_pathway: long-term storage and combustion`,initialValues:{initial_pathway:`long-term storage and combustion`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-3ceb03e03cca.js.map

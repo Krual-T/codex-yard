@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_variance_pattern: increasing`,initialValues:{initial_variance_pattern:`increasing`}},{name:`initial_variance_pattern: decreasing`,initialValues:{initial_variance_pattern:`decreasing`}},{name:`initial_variance_pattern: bulge`,initialValues:{initial_variance_pattern:`bulge`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-bfa94fef2251.js.map

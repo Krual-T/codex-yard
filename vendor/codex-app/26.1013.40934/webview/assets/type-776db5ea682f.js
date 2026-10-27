@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BEHAVIORAL_THERMOREGULATION_MICROHABITAT_CHOICE`,n=`behavioral-thermoregulation-microhabitat-choice-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-776db5ea682f.js.map

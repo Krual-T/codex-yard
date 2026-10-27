@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`reaction_type: decomposition`,initialValues:{reaction_type:`decomposition`}},{name:`reaction_type: single replacement`,initialValues:{reaction_type:`single replacement`}},{name:`reaction_type: double replacement`,initialValues:{reaction_type:`double replacement`}},{name:`reaction_type: combustion`,initialValues:{reaction_type:`combustion`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-fc6d0d9cdb2d.js.map

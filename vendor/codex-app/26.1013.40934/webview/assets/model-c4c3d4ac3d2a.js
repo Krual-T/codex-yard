@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t={min:0,max:100,step:1,defaultValue:55},n=(e,t,n)=>Math.min(Math.max(e,t),n),r=e=>Number.isFinite(e)?n(Math.round(e),t.min,t.max):t.defaultValue,i=e=>({greenhouseGasLevel:r(e.greenhouseGasLevel)}),a=e=>{let n=i(e),r=(n.greenhouseGasLevel-t.min)/(t.max-t.min);return{safeValues:n,gasRatio:r,retainedInfraredRatio:r*.72,escapingInfraredRatio:1-r*.72}}})))()}export{a as n,o as r,t};
+//# sourceMappingURL=model-c4c3d4ac3d2a.js.map

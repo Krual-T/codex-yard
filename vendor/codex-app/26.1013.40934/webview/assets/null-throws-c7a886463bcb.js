@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=e=>{if(e==null)throw Error(`Unexpected null or undefined value`);return e}})))()}export{t as n,n as t};
+//# sourceMappingURL=null-throws-c7a886463bcb.js.map

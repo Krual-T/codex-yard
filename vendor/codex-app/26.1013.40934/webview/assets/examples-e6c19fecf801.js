@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`crystallization_method: evaporation`,initialValues:{crystallization_method:`evaporation`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-e6c19fecf801.js.map

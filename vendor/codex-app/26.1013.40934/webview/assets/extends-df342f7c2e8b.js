@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(){return t=Object.assign?Object.assign.bind():function(e){for(var t=1;t<arguments.length;t++){var n=arguments[t];for(var r in n)({}).hasOwnProperty.call(n,r)&&(e[r]=n[r])}return e},t.apply(null,arguments)}function n(){return(n=e((()=>{})))()}export{n,t};
+//# sourceMappingURL=extends-df342f7c2e8b.js.map

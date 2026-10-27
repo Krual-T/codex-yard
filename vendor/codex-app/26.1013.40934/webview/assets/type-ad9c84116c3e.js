@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PREBIOTIC_ORGANIC_MOLECULE_SYNTHESIS`,n=`prebiotic-organic-molecule-synthesis-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ad9c84116c3e.js.map

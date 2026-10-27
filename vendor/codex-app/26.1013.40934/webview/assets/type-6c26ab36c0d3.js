@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`OSMOTIC_NEGATIVE_FEEDBACK_RESPONSE`,n=`osmotic-negative-feedback-response-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-6c26ab36c0d3.js.map

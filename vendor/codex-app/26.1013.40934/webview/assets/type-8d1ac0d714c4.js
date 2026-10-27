@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`ELECTRIC_FLUX_FLAT_SURFACE`,n=`electric-flux-flat-surface-v1`,r=`\\Phi_E = EA\\cos(\\theta)`,i={fieldStrengthNewtonsPerCoulomb:{kind:`number`,defaultValue:6,min:0,max:10},areaSquareMeters:{kind:`number`,defaultValue:3,min:.5,max:5},angleDegrees:{kind:`number`,defaultValue:30,min:0,max:90}},a={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-8d1ac0d714c4.js.map

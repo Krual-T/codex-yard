@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MEIOSIS_ONE_VERSUS_MEIOSIS_TWO`,n=`meiosis-one-versus-meiosis-two-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-eab69d4e0986.js.map

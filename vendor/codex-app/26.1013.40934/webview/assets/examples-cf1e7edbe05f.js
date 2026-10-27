@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{solution1VolumeLiters:.01,solution1ConcentrationMolesPerLiter:0,solution2VolumeLiters:.01,solution2ConcentrationMolesPerLiter:0}},{name:`Maximum supported values`,initialValues:{solution1VolumeLiters:1e3,solution1ConcentrationMolesPerLiter:20,solution2VolumeLiters:1e3,solution2ConcentrationMolesPerLiter:20}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-cf1e7edbe05f.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOLOGICAL_PH_ENZYME_ACTIVE_SITE_CHARGE`,n=`biological-ph-enzyme-active-site-charge-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-a9265b5284a6.js.map

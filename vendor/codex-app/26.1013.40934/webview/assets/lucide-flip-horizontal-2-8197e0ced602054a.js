@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`FlipHorizontal2`,[[`path`,{d:`m3 7 5 5-5 5V7`,key:`couhi7`}],[`path`,{d:`m21 7-5 5 5 5V7`,key:`6ouia7`}],[`path`,{d:`M12 20v2`,key:`1lh1kg`}],[`path`,{d:`M12 14v2`,key:`8jcxud`}],[`path`,{d:`M12 8v2`,key:`1woqiv`}],[`path`,{d:`M12 2v2`,key:`tus03m`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-flip-horizontal-2-8197e0ced602054a.js.map

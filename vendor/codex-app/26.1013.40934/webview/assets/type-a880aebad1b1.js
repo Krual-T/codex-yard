@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`MASS_SPRING_SHM`,n=`mass-spring-shm-v1`,r=`T = 2\\pi\\sqrt{\\frac{m}{k}}`,i={massKilograms:{kind:`number`,defaultValue:1.5,min:.5,max:5},springConstantNewtonsPerMeter:{kind:`number`,defaultValue:40,min:10,max:100},amplitudeMeters:{kind:`number`,defaultValue:.25,min:.05,max:.5}},a={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-a880aebad1b1.js.map

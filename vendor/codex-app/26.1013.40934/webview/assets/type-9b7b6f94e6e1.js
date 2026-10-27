@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`BIOLOGICAL_PH_AND_BUFFERS`,n=`biological-ph-and-buffers-v1`,r=`\\mathrm{pH}=\\mathrm{p}K_a+\\log_{10}\\!\\left(\\frac{[A^-]}{[HA]}\\right)`,i={pKa:{kind:`number`,defaultValue:7.2,min:4.5,max:9.5}},a={type:t,version:3,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-9b7b6f94e6e1.js.map

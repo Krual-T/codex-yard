@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOME_TUNDRA_ACTIVE_LAYER_AND_PERMAFROST`,n=`biome-tundra-active-layer-and-permafrost-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-8924d3f45e80.js.map

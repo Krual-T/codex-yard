@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n;function r(){return(r=e((()=>{t=[`aldehyde`,`ketone`],n=e=>({substrateClass:t.includes(e.substrate_class)?e.substrate_class:`aldehyde`,stage:Number.isFinite(e.stage)?Math.max(0,Math.min(3,Math.round(e.stage))):0})})))()}export{r as n,n as r,t};
+//# sourceMappingURL=model-3074940ffbb8.js.map

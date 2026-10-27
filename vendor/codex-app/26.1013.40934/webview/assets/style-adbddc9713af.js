@@ -1,0 +1,1 @@
+import{a as e,i as t,n,o as r,r as i,t as a}from"./style-70526dc84b07.js";r();export{a as BROWSER_ANNOTATION_ACCENT_COLOR,n as BROWSER_COMMENT_ROOT_STYLE,i as BROWSER_COMMENT_STYLE_TEXT,t as COMMENT_BUBBLE_ICON,e as getElementMetadataTooltipStyle};

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_INTERNAL_VERSUS_EXTERNAL_FERTILIZATION`,n=`animal-internal-versus-external-fertilization-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-c7ac3f150e46.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`X_LINKED_DOMINANT_FATHER_DAUGHTER_TRANSMISSION`,n=`x-linked-dominant-father-daughter-transmission-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-c705ba5329ea.js.map

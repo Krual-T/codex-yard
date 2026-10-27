@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`EIGENDIRECTIONS`,n=`eigendirections-v1`,r=`A\\mathbf{v}=\\lambda\\mathbf{v}`,i={a11:{kind:`number`,defaultValue:2,min:-2,max:2},a12:{kind:`number`,defaultValue:1,min:-2,max:2},a21:{kind:`number`,defaultValue:1,min:-2,max:2},a22:{kind:`number`,defaultValue:2,min:-2,max:2}},a={type:t,version:3,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-9dd1c641b080.js.map

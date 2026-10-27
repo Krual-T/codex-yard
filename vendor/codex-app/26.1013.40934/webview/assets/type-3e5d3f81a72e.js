@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`TANGENT_PLANE_LINEARIZATION`,n=`tangent-plane-linearization-v1`,r=`\\small f(x_0,y_0)+\\nabla f(x_0,y_0)\\cdot{\\langle x-x_0,y-y_0\\rangle}`,i={contactX:{kind:`number`,defaultValue:.65,min:-1.2,max:1.2},contactY:{kind:`number`,defaultValue:-.45,min:-1.2,max:1.2}},a={type:t,version:1,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-3e5d3f81a72e.js.map

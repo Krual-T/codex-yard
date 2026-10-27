@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{initial_concentration:.1}},{name:`Maximum supported values`,initialValues:{initial_concentration:1}},{name:`initial_solution: acetic-acid`,initialValues:{initial_solution:`acetic-acid`}},{name:`initial_solution: ethanol`,initialValues:{initial_solution:`ethanol`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-8bbcc5743665.js.map

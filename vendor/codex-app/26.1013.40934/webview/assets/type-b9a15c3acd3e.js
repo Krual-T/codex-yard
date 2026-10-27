@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ECOSYSTEM_SERVICE_VEGETATION_SOIL_EROSION_PREVENTION`,n=`ecosystem-service-vegetation-soil-erosion-prevention-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-b9a15c3acd3e.js.map

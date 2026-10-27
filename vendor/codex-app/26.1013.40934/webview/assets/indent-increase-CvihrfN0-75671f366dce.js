@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`IndentIncrease`,[[`path`,{d:`M21 12H11`,key:`wd7e0v`}],[`path`,{d:`M21 18H11`,key:`4wu86t`}],[`path`,{d:`M21 6H11`,key:`6dy1d6`}],[`path`,{d:`m3 8 4 4-4 4`,key:`1a3j6y`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=indent-increase-CvihrfN0-75671f366dce.js.map

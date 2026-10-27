@@ -6,9 +6,9 @@
 
 A self-hosted browser workspace for Codex. Continue local and SSH-hosted conversations, inspect files, use terminals, and work with Chrome from one interface.
 
-Install Node.js and Codex CLI, sign in, and start the workspace. A desktop Codex App installation is not required. On first start, the setup script downloads a fixed official package and extracts the web interface and Node tool adapter; later starts reuse that local cache.
+Install Node.js and Codex CLI, sign in, and start the workspace. The fixed web interface and Node tool adapter are checked into Git under `vendor/codex-app/26.1013.40934/`. A normal clone contains the runtime resources, with no desktop App installation or App package download during build or startup.
 
-This is an experimental, independent project with a TypeScript host and React extensions. Its current interface is based on **Codex App 26.1013.40934**. OpenAI's compiled resources are downloaded from OpenAI and excluded from this repository. See [third-party components](THIRD_PARTY.md).
+This is an experimental, independent project with a TypeScript host and React extensions. Its current interface is based on **Codex App 26.1013.40934**. The vendored interface is compiled upstream JavaScript, CSS, fonts and assets; the App's original TypeScript/TSX source is not included. See [third-party components](THIRD_PARTY.md).
 
 ## Current capabilities
 
@@ -26,7 +26,7 @@ The next product direction is a task dashboard: clarify and assign work, see whi
 | --- | --- | --- |
 | Codex CLI / fresh daemon | `0.164.0` | Verified without a desktop installation: automatic backend startup, web interface, and a real model reply |
 | Existing Codex daemon | `0.163.0` | Previously validated with local and SSH conversations, files, terminals, and browser integration |
-| Codex App interface | `26.1013.40934` | Fixed UI reference and downloaded resource version |
+| Codex App interface | `26.1013.40934` | Fixed UI reference and resource snapshot tracked in Git |
 | Node.js | `>=24.5` | Tested with `24.16.0`; server platform currently validated on Linux x64 |
 
 The CLI on your PATH and an already-running daemon can have different versions. `codex app-server daemon version` reports both; the workspace's `/api/status` reports `appServerVersion` and `rendererVersion`. Other combinations require validation before being listed as supported.
@@ -49,11 +49,11 @@ npm ci
 npm start
 ```
 
-The first run downloads about **494 MiB** from OpenAI's versioned distribution URL and prepares the local web resources. It does not install or launch the desktop app. `npm start` builds this project's host, then asks Codex CLI to start or reuse its daemon. Closing the web server leaves that shared daemon running.
+`npm start` builds this project's host, reads the checked-in resources, then asks Codex CLI to start or reuse its daemon. Closing the web server leaves that shared daemon running. The resource snapshot occupies about **531 MiB** in the checkout and uses ordinary Git files, so Git LFS and a separate App resource download are unnecessary.
 
-The cached interface and tool adapter stay pinned when Codex App updates. CLI and daemon compatibility are tracked separately. A fresh setup needs access to the official download; an existing cache is reused without downloading again. For an offline setup with that same official Arch package already available, run `npm run copy:renderer -- --package /path/to/chatgpt-bin-26.1013.40934-1-x86_64.pkg.tar.zst` first.
+The interface and tool adapter change only when their Git snapshot is updated; local Codex App updates do not replace them. CLI and daemon compatibility are tracked separately. Package installation and model requests still need their normal network access.
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765). To customize the server, copy `.env.example` to `.env`. `AGENTS_CODEX_BIN` selects a CLI executable; `AGENTS_CODEX_SOCKET` connects directly to an existing backend and skips automatic daemon startup. `AGENTS_APP_TOOLS_ADAPTER` overrides the cached adapter if needed. Use a short private `AGENTS_DATA_DIR` when necessary: the complete Unix socket path must fit within 107 bytes.
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765). To customize the server, copy `.env.example` to `.env`. `AGENTS_CODEX_BIN` selects a CLI executable; `AGENTS_CODEX_SOCKET` connects directly to an existing backend and skips automatic daemon startup. `AGENTS_APP_TOOLS_ADAPTER` overrides the vendored adapter if needed. Use a short private `AGENTS_DATA_DIR` when necessary: the complete Unix socket path must fit within 107 bytes.
 
 For remote access, set `AGENTS_PUBLIC_ORIGIN` to the exact HTTPS origin and use a private tunnel or an authenticated reverse proxy. The server listens on loopback. It exposes file access and command execution with the connected account's permissions; it does not provide a multi-user login system. See [deployment boundaries](SECURITY.md).
 
@@ -67,23 +67,24 @@ npm run typecheck
 npm test
 ```
 
-`npm test` builds only this project's host bundles and uses disposable daemon/renderer fixtures. Two tests that execute the official MCP adapter are excluded from this default run. After preparing the fixed resources, run them explicitly:
+`npm test` builds this project's host bundles and uses disposable backends. It checks that the vendored interface is served and runs the official MCP adapter integration tests using the checked-in adapter. To run just the adapter tests:
 
 ```bash
 npm run test:app-tools
 ```
 
-Full UI validation scripts in `scripts/verify-*.ts` use a configured CLI backend and prepared web resources and may create real test conversations or execute commands. Inspect a script's configuration before running it against your own account. GitHub CI runs the portable tests, not these live checks.
+Full UI validation scripts in `scripts/verify-*.ts` use a configured CLI backend and may create real test conversations or execute commands. Inspect a script's configuration before running it against your own account. GitHub CI runs the portable tests, not these live checks.
 
 | Directory | Purpose |
 | --- | --- |
 | `src/native/` | Browser bridge, HTTP/WebSocket host, files, terminals, preferences, visualizations |
 | `src/browser-reuse/` | Chrome pairing, panel integration, element references |
 | `lib/` | Codex transport, host tools, permissions, protocol types |
-| `scripts/` | Build, local renderer import, optional live validation |
-| `test/` | Portable tests and opt-in installed-adapter checks |
+| `scripts/` | Build and optional live validation |
+| `test/` | Portable tests, including the vendored official adapter |
+| `vendor/codex-app/` | Fixed upstream compiled interface, assets, notices, and Node tool adapter |
 
-State, imported renderer resources, build output, and generated Chrome companion packages live in ignored `.local/`. Conversations remain in Codex; browser drafts remain in the browser's storage. No account data or configuration snapshot is supplied with this repository.
+Runtime state, host build output, and generated Chrome companion packages live in ignored `.local/`. Conversations remain in Codex; browser drafts remain in the browser's storage. No account data or configuration snapshot is supplied with this repository.
 
 ## Known limits
 
@@ -95,4 +96,4 @@ State, imported renderer resources, build output, and generated Chrome companion
 
 ## License
 
-Project source is supplied under the [MIT license](LICENSE). Downloaded Codex App resources and third-party dependencies retain their own terms. This project is not affiliated with or endorsed by OpenAI.
+Project-authored source is supplied under the [MIT license](LICENSE). Files under `vendor/codex-app/` are third-party compiled resources and are excluded from that MIT grant; their existing copyrights, notices and terms remain applicable. See the [vendor notice](vendor/codex-app/LICENSE). This project is not affiliated with or endorsed by OpenAI.

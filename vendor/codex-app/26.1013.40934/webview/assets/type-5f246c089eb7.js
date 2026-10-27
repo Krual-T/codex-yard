@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`FIVE_MAJOR_MASS_EXTINCTIONS_IN_GEOLOGIC_TIME`,n=`five-major-mass-extinctions-in-geologic-time-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-5f246c089eb7.js.map

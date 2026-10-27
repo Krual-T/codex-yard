@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_TISSUES_INTEGUMENT_AND_BARRIER_REPAIR`,n=`animal-tissues-integument-and-barrier-repair-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-6e4674121c5a.js.map

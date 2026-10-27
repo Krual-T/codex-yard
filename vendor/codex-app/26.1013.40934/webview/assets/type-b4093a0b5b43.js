@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PHOTOSYNTHESIS_LIGHT_CALVIN_STAGE_COUPLING`,n=`photosynthesis-light-calvin-stage-coupling-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-b4093a0b5b43.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOLOGICAL_BUFFER_CONJUGATE_PAIR`,n=`biological-buffer-conjugate-pair-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-8eeb77b86b9e.js.map

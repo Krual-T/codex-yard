@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`protocol: udp`,initialValues:{protocol:`udp`}},{name:`lossMode: none`,initialValues:{lossMode:`none`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-f9ae09744fae.js.map

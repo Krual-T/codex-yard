@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`BOOLEAN_LOGIC`,n=`boolean-logic-v1`,r={inputA:{kind:`boolean`,defaultValue:!0},inputB:{kind:`boolean`,defaultValue:!1},operator:{kind:`enum`,defaultValue:`and`,allowedValues:[`and`,`or`]}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-8da18ccae221.js.map

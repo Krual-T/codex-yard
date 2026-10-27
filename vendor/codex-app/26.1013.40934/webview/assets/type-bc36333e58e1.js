@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`SINGLY_LINKED_LIST_POINTERS`,n=`singly-linked-list-pointers-v1`,r={operation:{kind:`enum`,defaultValue:`insert`,allowedValues:[`insert`,`delete`]}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-bc36333e58e1.js.map

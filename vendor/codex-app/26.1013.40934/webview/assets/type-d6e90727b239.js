@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_EUSOCIAL_COLONY_DIVISION_OF_LABOR`,n=`animal-eusocial-colony-division-of-labor-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-d6e90727b239.js.map

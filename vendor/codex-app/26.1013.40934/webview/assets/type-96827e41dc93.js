@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`EPITHELIAL_SIMPLE_VERSUS_STRATIFIED_BARRIERS`,n=`epithelial-simple-versus-stratified-barriers-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-96827e41dc93.js.map

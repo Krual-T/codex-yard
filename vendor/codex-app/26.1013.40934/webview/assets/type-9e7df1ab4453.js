@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`DNA_REPLICATION_LAGGING_OKAZAKI_FRAGMENTS`,n=`dna-replication-lagging-okazaki-fragments-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-9e7df1ab4453.js.map

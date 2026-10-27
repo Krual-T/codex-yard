@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`SOLENOID_INTERNAL_FIELD`,n=`solenoid-internal-field-v2`,r=`B = \\mu_0 n I`,i={currentAmperes:{kind:`number`,defaultValue:2,min:.5,max:5},turnsPerMeter:{kind:`number`,defaultValue:500,min:100,max:1e3},direction:{kind:`enum`,defaultValue:`counterclockwise`,allowedValues:[`clockwise`,`counterclockwise`]}},a={type:t,version:1,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-17796e12b6d2.js.map

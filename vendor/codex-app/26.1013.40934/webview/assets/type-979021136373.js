@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_DIPLOBLASTIC_VERSUS_TRIPLOBLASTIC_ORGANIZATION`,n=`animal-diploblastic-versus-triploblastic-organization-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-979021136373.js.map

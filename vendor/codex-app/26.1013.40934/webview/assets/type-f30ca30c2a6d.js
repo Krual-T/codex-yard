@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`HIBERNATION_SEASONAL_ENERGY_CONSERVATION`,n=`hibernation-seasonal-energy-conservation-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-f30ca30c2a6d.js.map

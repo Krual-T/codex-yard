@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{content:`e^x \\approx 1 + x + \\frac{x^2}{2} + \\frac{x^3}{6}`},{content:`\\sin(x) \\approx x - \\frac{x^3}{6} + \\frac{x^5}{120} - \\frac{x^7}{5040}`},{content:`\\cos(x) \\approx 1 - \\frac{x^2}{2} + \\frac{x^4}{24} - \\frac{x^6}{720}`},{content:`\\arctan(x) \\approx x - \\frac{x^3}{3} + \\frac{x^5}{5} - \\frac{x^7}{7}`}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-f440b44527eb.js.map

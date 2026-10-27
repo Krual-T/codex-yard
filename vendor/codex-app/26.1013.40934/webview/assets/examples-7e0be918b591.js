@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_example: glucose`,initialValues:{initial_example:`glucose`}},{name:`initial_example: maltose`,initialValues:{initial_example:`maltose`}},{name:`initial_example: amylose`,initialValues:{initial_example:`amylose`}},{name:`initial_example: glycogen`,initialValues:{initial_example:`glycogen`}},{name:`initial_example: cellulose`,initialValues:{initial_example:`cellulose`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-7e0be918b591.js.map

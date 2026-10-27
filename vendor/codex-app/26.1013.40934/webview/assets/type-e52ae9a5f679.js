@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`MEDIATION_INDIRECT_EFFECT`,n=`mediation-indirect-effect-v1`,r=`c = c^{\\prime} + a \\times b`,i={a:{kind:`number`,defaultValue:.6,min:-1,max:1},b:{kind:`number`,defaultValue:.5,min:-1,max:1},directEffect:{kind:`number`,defaultValue:.2,min:-1,max:1}},a={type:t,version:1,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-e52ae9a5f679.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`PERIODIC_TRENDS`,n=`periodic-trends-v1`,r={initial_trend:{kind:`enum`,defaultValue:`atomic radius`,allowedValues:[`atomic radius`,`first ionization energy`,`electronegativity`]}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-5d4a85edaa4f.js.map

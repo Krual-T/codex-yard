@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`TANGENT_SEGMENTS_COMMON_POINT`,n=`tangent-segments-common-point-v1`,r=`PA = PB`,i={radius:{kind:`number`,defaultValue:3.5,min:2.5,max:4.5},pointDistance:{kind:`number`,defaultValue:7.2,min:5.8,max:7.2},pointAngleDeg:{kind:`number`,defaultValue:180,min:145,max:215}},a={type:t,version:1,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-32562c107c2d.js.map

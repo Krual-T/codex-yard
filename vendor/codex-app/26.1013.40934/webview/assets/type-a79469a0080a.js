@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BACTERIAL_CELL_ENVELOPE_AND_ACCESSORY_STRUCTURES`,n=`bacterial-cell-envelope-and-accessory-structures-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-a79469a0080a.js.map

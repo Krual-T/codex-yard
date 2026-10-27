@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`AMINO_ACID_SIDE_CHAIN_PROPERTIES`,n=`amino-acid-side-chain-properties-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-8d32179b3852.js.map

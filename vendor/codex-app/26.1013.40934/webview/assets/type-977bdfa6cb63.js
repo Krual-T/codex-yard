@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`GRADIENT_DIRECTIONAL_DERIVATIVE`,n=`gradient-directional-derivative-v1`,r=`D_{\\mathbf u}f=\\nabla f\\cdot\\mathbf u`,i={angle:{kind:`number`,defaultValue:35,min:0,max:360},pointX:{kind:`number`,defaultValue:1,min:-2.2,max:2.2},pointY:{kind:`number`,defaultValue:.65,min:-1.6,max:1.6}},a={type:t,version:1,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-977bdfa6cb63.js.map

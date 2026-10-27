@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e){let t=new URLSearchParams(e).getAll(`plugin_id`);return t.length===1&&t[0].trim()||null}function n(e){let t=new URLSearchParams(e),n=new URLSearchParams;for(let e of[`utm_source`,`utm_medium`,`utm_campaign`,`utm_content`,`utm_term`]){let r=t.get(e);r!=null&&n.set(e,r)}let r=t.get(`prompt`);return r!=null&&n.set(`prompt`,r),`/work?${n}`}function r(){return(r=e((()=>{})))()}export{t as n,r,n as t};
+//# sourceMappingURL=url-15a20d86aee5.js.map

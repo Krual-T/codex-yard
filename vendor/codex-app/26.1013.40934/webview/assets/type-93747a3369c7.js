@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`HELPER_T_CELL_COORDINATES_ADAPTIVE_IMMUNITY`,n=`helper-t-cell-coordinates-adaptive-immunity-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-93747a3369c7.js.map

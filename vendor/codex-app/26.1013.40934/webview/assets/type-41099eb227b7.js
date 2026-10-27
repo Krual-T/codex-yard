@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SHADE_AVOIDANCE_RED_FAR_RED_SIGNALING`,n=`shade-avoidance-red-far-red-signaling-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-41099eb227b7.js.map

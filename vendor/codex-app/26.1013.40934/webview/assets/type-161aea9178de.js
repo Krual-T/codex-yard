@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`WHILE_LOOP_BOOLEAN_CONDITION`,n=`while-loop-boolean-condition-v1`,r={initial_counter:{kind:`integer`,defaultValue:2,min:0,max:8},stopping_bound:{kind:`integer`,defaultValue:5,min:0,max:8}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-161aea9178de.js.map

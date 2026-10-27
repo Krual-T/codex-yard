@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BACTERIAL_CHEMOTAXIS_RUN_AND_TUMBLE`,n=`bacterial-chemotaxis-run-and-tumble-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-d1b77d25749f.js.map

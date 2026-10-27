@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`ELEMENT_VS_COMPOUND_VS_MIXTURE`,n=`element-vs-compound-vs-mixture-v1`,r={initial_sample:{kind:`enum`,defaultValue:`monatomic element`,allowedValues:[`monatomic element`,`diatomic element`,`molecular compound`,`mixture of elements`,`mixture of element and compound`,`mixture of compounds`]}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-ea91da6d3b05.js.map

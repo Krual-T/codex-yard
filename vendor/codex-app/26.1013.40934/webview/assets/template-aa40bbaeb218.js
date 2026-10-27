@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t={min:4,max:12,step:.1},n={...t,label:`a`,defaultValue:7},r={...t,label:`b`,defaultValue:8},i={...t,label:`c`,defaultValue:9},a={properties:{a:n,b:r,c:i}}})))()}export{o as a,a as i,r as n,i as r,n as t};
+//# sourceMappingURL=template-aa40bbaeb218.js.map

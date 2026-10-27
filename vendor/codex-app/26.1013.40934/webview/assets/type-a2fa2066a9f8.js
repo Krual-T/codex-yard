@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`gcd-v1`,n={first_number:{kind:`integer`,defaultValue:18,min:2,max:24},second_number:{kind:`integer`,defaultValue:12,min:2,max:24}},r={type:`GCD`,version:1,thumbnailAssetKey:t,parameters:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-a2fa2066a9f8.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`example_pattern: alternating`,initialValues:{example_pattern:`alternating`}},{name:`example_pattern: seasonal`,initialValues:{example_pattern:`seasonal`}},{name:`example_pattern: uncorrelated`,initialValues:{example_pattern:`uncorrelated`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-c71f23c3dd72.js.map

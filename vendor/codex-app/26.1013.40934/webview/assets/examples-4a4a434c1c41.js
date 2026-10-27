@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{rank:1,inputX:-1.5,inputY:-1.5,inputZ:-1.5}},{name:`Rank two: a column-space plane`,initialValues:{rank:2,inputX:.5,inputY:1,inputZ:0}},{name:`Rank three: full three-dimensional column space`,initialValues:{rank:3,inputX:.5,inputY:.5,inputZ:.5}},{name:`Maximum supported values`,initialValues:{rank:3,inputX:1.5,inputY:1.5,inputZ:1.5}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-4a4a434c1c41.js.map

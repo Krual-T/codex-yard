@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`VAPOR_PRESSURE`,n=`vapor-pressure-v1`,r={initial_temperature_c:{kind:`number`,defaultValue:25,min:0,max:60},surrounding_pressure_kpa:{kind:`number`,defaultValue:101.325,min:40,max:160}},i={type:t,version:5,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-15f2f7d7853c.js.map

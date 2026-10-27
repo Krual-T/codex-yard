@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`PROBABILITY_TREE`,n=`probability-tree-v1`,r={first_outcome_count:{kind:`integer`,defaultValue:3,min:1,max:12},second_outcome_count:{kind:`integer`,defaultValue:8,min:1,max:12},with_replacement:{kind:`boolean`,defaultValue:!1}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-bb80ea70b787.js.map

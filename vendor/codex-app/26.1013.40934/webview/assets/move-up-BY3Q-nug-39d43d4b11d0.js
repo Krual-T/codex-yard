@@ -1,0 +1,1 @@
+import{n as e,t}from"./move-up-BY3Q-nug-3a52bf58127c.js";t();export{e as default};

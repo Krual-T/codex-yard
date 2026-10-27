@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SENSORY_VISUAL_RODS_CONES_LIGHT_SENSITIVITY`,n=`sensory-visual-rods-cones-light-sensitivity-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-6afae062f026.js.map

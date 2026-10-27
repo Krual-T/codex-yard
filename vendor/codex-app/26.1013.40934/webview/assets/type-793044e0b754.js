@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`MASS_SPECTRUM`,n=`mass-spectrum-v1`,r={example:{kind:`enum`,defaultValue:`fragment-dominant`,allowedValues:[`fragment-dominant`,`molecular-ion-dominant`,`chlorine-isotope-pattern`,`bromine-isotope-pattern`]}},i={type:t,version:4,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-793044e0b754.js.map

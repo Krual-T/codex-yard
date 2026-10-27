@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_subshell: s`,initialValues:{initial_subshell:`s`}},{name:`initial_subshell: d`,initialValues:{initial_subshell:`d`}},{name:`initial_subshell: f`,initialValues:{initial_subshell:`f`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-f6cf4461c8ff.js.map

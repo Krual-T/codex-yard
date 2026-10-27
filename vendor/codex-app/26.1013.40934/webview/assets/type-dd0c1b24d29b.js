@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PHOSPHOLIPID_BILAYER_SELF_ASSEMBLY`,n=`phospholipid-bilayer-self-assembly-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-dd0c1b24d29b.js.map

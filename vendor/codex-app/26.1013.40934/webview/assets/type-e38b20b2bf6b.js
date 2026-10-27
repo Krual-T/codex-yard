@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`EVOLUTION_HOMOLOGOUS_VERTEBRATE_FORELIMBS`,n=`evolution-homologous-vertebrate-forelimbs-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-e38b20b2bf6b.js.map

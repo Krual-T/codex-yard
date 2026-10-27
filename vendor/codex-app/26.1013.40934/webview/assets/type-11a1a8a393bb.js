@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`HUMORAL_VERSUS_CELL_MEDIATED_IMMUNITY`,n=`humoral-versus-cell-mediated-immunity-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-11a1a8a393bb.js.map

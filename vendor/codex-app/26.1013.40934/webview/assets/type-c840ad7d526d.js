@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_EMBRYONIC_DEVELOPMENT_STAGE_SEQUENCE`,n=`animal-embryonic-development-stage-sequence-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-c840ad7d526d.js.map

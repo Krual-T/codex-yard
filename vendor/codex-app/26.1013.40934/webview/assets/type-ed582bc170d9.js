@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`GAMETE_CHROMOSOME_COMBINATION_DIVERSITY`,n=`gamete-chromosome-combination-diversity-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ed582bc170d9.js.map

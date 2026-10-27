@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`relationship_kind: one-to-one`,initialValues:{relationship_kind:`one-to-one`}},{name:`relationship_kind: many-to-many`,initialValues:{relationship_kind:`many-to-many`}},{name:`include_relationship_attribute: false`,initialValues:{include_relationship_attribute:!1}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-51e5ed08af51.js.map

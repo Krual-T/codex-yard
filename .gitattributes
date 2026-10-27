@@ -1,0 +1,2 @@
+# Preserve the upstream compiled resources byte-for-byte across platforms.
+vendor/codex-app/** -text linguist-vendored

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ROUGH_VERSUS_SMOOTH_ENDOPLASMIC_RETICULUM`,n=`rough-versus-smooth-endoplasmic-reticulum-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-12cccf874cb5.js.map

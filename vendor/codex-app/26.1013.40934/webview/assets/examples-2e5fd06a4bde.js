@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{reference_amount_mol:.25,reference_volume_l:1}},{name:`Maximum supported values`,initialValues:{reference_amount_mol:5,reference_volume_l:120}},{name:`Argon comparison`,initialValues:{reference_amount_mol:2.45,reference_volume_l:89}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-2e5fd06a4bde.js.map

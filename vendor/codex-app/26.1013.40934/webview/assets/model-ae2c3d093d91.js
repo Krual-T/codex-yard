@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t={min:0,max:40,step:.5,defaultValue:12},n=2.4,r=e=>e<=20?n+(20-e)*.24:n+(e-20)*.2,i=e=>{let n=Number.isFinite(e.addedVolumeMl)?Math.min(t.max,Math.max(t.min,e.addedVolumeMl)):t.defaultValue;return{addedVolumeMl:n,conductivity:r(n),regime:n<20?`before`:n>20?`after`:`equivalence`}}})))()}export{a,r as i,t as n,i as r,n as t};
+//# sourceMappingURL=model-ae2c3d093d91.js.map

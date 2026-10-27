@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`resource_dimension: habitat space`,initialValues:{resource_dimension:`habitat space`}},{name:`resource_dimension: feeding time`,initialValues:{resource_dimension:`feeding time`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-2581a835558b.js.map

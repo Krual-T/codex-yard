@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`ABSORBANCE_SPECTRUM`,n=`absorbance-spectrum-v1`,r={lambda_max_nm:{kind:`number`,defaultValue:520,min:210,max:740}},i={type:t,version:4,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-dfeec9c7c75e.js.map

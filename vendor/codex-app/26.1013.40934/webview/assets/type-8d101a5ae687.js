@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`RESTRICTION_ENZYME_STICKY_END_CLEAVAGE`,n=`restriction-enzyme-sticky-end-cleavage-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-8d101a5ae687.js.map

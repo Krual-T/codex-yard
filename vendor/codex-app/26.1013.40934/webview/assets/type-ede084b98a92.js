@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`P_SERIES_THRESHOLD`,n=`p-series-threshold-v1`,r=`\\sum_{n=1}^{\\infty}\\frac{1}{n^p}`,i={p:{kind:`number`,defaultValue:1,min:.6,max:1.4},termCount:{kind:`integer`,defaultValue:12,min:4,max:30}},a={type:t,version:3,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-ede084b98a92.js.map

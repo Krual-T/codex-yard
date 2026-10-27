@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{gross_primary_productivity:100,autotrophic_respiration:0}},{name:`Maximum supported values`,initialValues:{gross_primary_productivity:400,autotrophic_respiration:100}},{name:`All production used in respiration`,initialValues:{gross_primary_productivity:100,autotrophic_respiration:100}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-60dda43fd6d6.js.map

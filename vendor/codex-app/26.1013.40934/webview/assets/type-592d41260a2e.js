@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`SUPPLY_CURVE`,n=`supply-curve-v1`,r={price:{kind:`number`,defaultValue:5,min:2,max:8},supplyShift:{kind:`number`,defaultValue:0,min:-1,max:1}},i={type:t,version:1,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-592d41260a2e.js.map

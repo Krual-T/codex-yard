@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ECOSYSTEM_PRIMARY_PRODUCTIVITY_GPP_NPP`,n=`ecosystem-primary-productivity-gpp-npp-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-b1aa2146fe45.js.map

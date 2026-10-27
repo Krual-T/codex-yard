@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`ChevronUp`,[[`path`,{d:`m18 15-6-6-6 6`,key:`153udz`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-chevron-up-8d32e6b8f846d342.js.map

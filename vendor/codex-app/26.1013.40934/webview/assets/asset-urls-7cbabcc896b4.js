@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`eukaryotic-cell-v1@3x-61cd6b1f08e3.webp?as=url`,import.meta.url).href})))()}var r;function i(){return(i=e((()=>{r=``+new URL(`freshwater-protist-v1@3x-9f34b472531d.webp?as=url`,import.meta.url).href})))()}var a,o;function s(){return(s=e((()=>{n(),i(),a=r.slice(0,r.lastIndexOf(`/`)+1),o={"eukaryotic-cell-v1@3x.webp":t,"freshwater-protist-v1@3x.webp":r}})))()}export{s as n,o as r,a as t};
+//# sourceMappingURL=asset-urls-7cbabcc896b4.js.map

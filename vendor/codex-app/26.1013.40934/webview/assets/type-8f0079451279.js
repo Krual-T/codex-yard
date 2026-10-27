@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MASS_EXTINCTION_SURVIVAL_AND_ADAPTIVE_RADIATION`,n=`mass-extinction-survival-and-adaptive-radiation-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-8f0079451279.js.map

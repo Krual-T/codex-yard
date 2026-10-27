@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`QUADRATIC_VERTEX_FORM`,n=`quadratic-vertex-form-v1`,r=`y = a(x - h)^2 + k`,i={h:{kind:`number`,defaultValue:0,min:-5,max:5},k:{kind:`number`,defaultValue:0,min:-5,max:5}},a={type:t,version:3,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}var s;function c(){return(c=e((()=>{s={defaultValue:1,min:-3,max:3}})))()}export{a as i,c as n,o as r,s as t};
+//# sourceMappingURL=model-870129d9ea20.js.map

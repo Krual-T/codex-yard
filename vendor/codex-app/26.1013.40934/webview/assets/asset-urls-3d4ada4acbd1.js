@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`ribosome-scaffold-v1@3x-aa3fb31d9263.webp?as=url`,import.meta.url).href})))()}var r;function i(){return(i=e((()=>{n(),r={"ribosome-scaffold-v1@3x.webp":t}})))()}export{t as i,r as n,n as r,i as t};
+//# sourceMappingURL=asset-urls-3d4ada4acbd1.js.map

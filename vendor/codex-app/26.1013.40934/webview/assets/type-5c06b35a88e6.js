@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`LINKAGE_DISTANCE_AND_RECOMBINATION_FREQUENCY`,n=`linkage-distance-and-recombination-frequency-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-5c06b35a88e6.js.map

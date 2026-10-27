@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a,o;function s(){return(s=e((()=>{t=`PRESSURE`,n=`pressure-v1`,r=`P = \\frac{F}{A}`,i=[`P = F/A`,`F = PA`,`A = F/P`],a={forceNewtons:{kind:`number`,defaultValue:100,min:0,max:200},areaSquareMeters:{kind:`number`,defaultValue:2,min:.25,max:5}},o={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,canonicalFormulaAliases:i,parameters:a}})))()}export{o as n,s as t};
+//# sourceMappingURL=type-e210bd3bc009.js.map

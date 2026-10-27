@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`waste_stream: packaging`,initialValues:{waste_stream:`packaging`}},{name:`waste_stream: food`,initialValues:{waste_stream:`food`}},{name:`waste_stream: clothing`,initialValues:{waste_stream:`clothing`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-1aace72a5517.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`INDEX_FOSSIL_CORRELATION_ACROSS_ROCK_LAYERS`,n=`index-fossil-correlation-across-rock-layers-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ea30f50b04d8.js.map
