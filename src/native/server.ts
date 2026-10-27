@@ -164,13 +164,17 @@ export async function createNativeWorkbench(options: Options = {}) {
     if (key === 'remote_wsl_connections' || key === 'remote_control_connections') return [];
     return undefined;
   }
-  const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'), tools: appToolCatalog, callTool: createHostToolHandler({
+  const callHostTool = createHostToolHandler({
     connection: control,
     knownThread: async (id: string) => control.request('thread/read', { threadId: id, includeTurns: false }),
     listProjects: async () => ({ projects, workspace }),
     listThreads: async params => control.request('thread/list', { ...params, archived: false }),
     readThread: async params => control.request('thread/read', { threadId: params.threadId, includeTurns: true }),
-  }) });
+  });
+  const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'), tools: appToolCatalog, callTool: callHostTool });
+  // A daemon request is broadcast to every page subscribed to its thread.
+  // Retain each result through the turn so another page or a replay only replies.
+  const legacyTitleCalls = new Map<string, Map<string, ReturnType<typeof callHostTool>>>();
   const reconnectControl = setInterval(() => {
     if (!control.connected) void control.connect().catch(() => {});
   }, 2000);
@@ -377,6 +381,33 @@ export async function createNativeWorkbench(options: Options = {}) {
     connections.set(hostId, connection);
     const current = connection;
     current.on('message', (message: { id?: string | number; method: string; params: unknown }) => {
+      const params = record(message.params);
+      if (hostId === 'local' && message.method === 'turn/completed') {
+        legacyTitleCalls.delete(JSON.stringify([params.threadId, record(params.turn).id]));
+      }
+      // Resumed desktop threads retain their dynamic title tool. The pinned
+      // renderer rejects that transport before it reaches a host. Reuse the
+      // same current-thread handler as MCP without replacing a loaded session.
+      if (hostId === 'local' && message.id != null && message.method === 'item/tool/call' &&
+          params.namespace === 'codex_app' && params.tool === 'set_thread_title' &&
+          typeof params.threadId === 'string' && typeof params.turnId === 'string' && typeof params.callId === 'string') {
+        const turnKey = JSON.stringify([params.threadId, params.turnId]);
+        let calls = legacyTitleCalls.get(turnKey);
+        if (!calls) { calls = new Map(); legacyTitleCalls.set(turnKey, calls); }
+        let result = calls.get(params.callId);
+        if (!result) {
+          result = callHostTool({ callerSource: 'codex', hostId: 'local', namespace: 'codex_app', tool: 'set_thread_title',
+            threadId: params.threadId, turnId: params.turnId, callId: params.callId, arguments: params.arguments });
+          calls.set(params.callId, result);
+        }
+        const socket = current.socket;
+        void result.then(reply => {
+          if (current.socket === socket && current.connected) return current.respond(message.id!, reply);
+        })
+          // A lost reply is uncertain; never retry a title write on reconnect.
+          .catch(() => {});
+        return;
+      }
       send(client, message.id != null ? { type: 'mcp-request', hostId, request: message }
         : { type: 'mcp-notification', hostId, method: message.method, params: message.params });
     });
