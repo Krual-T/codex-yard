@@ -1,0 +1,82 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { createPetOverlay } from '../src/native/pet-overlay.ts';
+import { createPetAssets } from '../src/native/pet-assets.ts';
+import type { HostMessage, ObjectValue } from '../src/native/protocol.ts';
+
+test('Mini toggle, close, selection, visibility and position survive a host restart', async t => {
+  const root = await mkdtemp('/tmp/aw-pet-state-');
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const globals: ObjectValue = {}, settings: ObjectValue = {};
+  const broadcasts: HostMessage[] = [], replies: HostMessage[] = [];
+  const emit = (message: HostMessage) => broadcasts.push(message);
+  const reply = (message: HostMessage) => replies.push(message);
+  const persist = () => writeFile(join(root, 'state.json'), JSON.stringify({ globals, settings }));
+  const pet = createPetOverlay(globals, settings, persist, emit);
+  await pet.handle({ type: 'avatar-overlay-open-state-request' }, reply);
+  assert.equal(replies[0].isOpen, false);
+  assert.equal(broadcasts.length, 0);
+  await pet.handle({ type: 'avatar-overlay-open' }, reply);
+  settings['selected-avatar-id'] = 'hoots';
+  settings['avatar-overlay-mascot-width-px'] = 168;
+  settings['avatar-overlay-pet-visible'] = false;
+  settings['pet-visibility'] = 'on-demand';
+  await pet.handle({ type: 'workbench-pet-position', position: { x: 0.7, y: 0.25 } }, reply);
+  const saved = JSON.parse(await readFile(join(root, 'state.json'), 'utf8'));
+  const restarted = createPetOverlay(saved.globals, saved.settings, persist, emit);
+  assert.deepEqual(saved.settings, settings);
+  assert.deepEqual(restarted.snapshot(), { isOpen: true, visibility: 'on-demand', position: { x: 0.7, y: 0.25 } });
+  await pet.handle({ type: 'avatar-overlay-open' }, reply);
+  assert.equal(pet.snapshot().isOpen, false);
+  await pet.handle({ type: 'avatar-overlay-open' }, reply);
+  await pet.handle({ type: 'avatar-overlay-close' }, reply);
+  const closed = JSON.parse(await readFile(join(root, 'state.json'), 'utf8'));
+  assert.equal(createPetOverlay(closed.globals, closed.settings, persist, emit).snapshot().isOpen, false);
+  await pet.handle({ type: 'avatar-overlay-open' }, reply);
+  await pet.handle({ type: 'avatar-overlay-hide' }, reply);
+  assert.equal(pet.snapshot().isOpen, false);
+  const count = broadcasts.length;
+  pet.settingChanged('selected-avatar-id');
+  assert.equal(broadcasts.length, count + 3);
+  assert.deepEqual(broadcasts.at(-1), { type: 'workbench-mini-setting', key: 'selected-avatar-id', value: 'hoots' });
+  assert.equal(await pet.handle({ type: 'mcp-request' }, reply), false);
+});
+
+test('failed writes keep the prior visibility and malformed drag positions do not persist', async () => {
+  const messages: HostMessage[] = [];
+  let writes = 0;
+  const pet = createPetOverlay({}, {}, async () => { writes++; throw Error('disk full'); }, message => messages.push(message));
+  await pet.handle({ type: 'avatar-overlay-open' }, message => messages.push(message));
+  assert.equal(pet.snapshot().isOpen, false);
+  assert.equal(messages.at(-1)?.type, 'workbench-pet-error');
+  await pet.handle({ type: 'workbench-pet-position', position: { x: 2, y: 0 } }, message => messages.push(message));
+  assert.equal(writes, 1);
+});
+
+test('the original custom pet manifest is read without creating directories or accepting paths outside the pet', async t => {
+  const root = await mkdtemp('/tmp/aw-pet-assets-');
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const assets = createPetAssets(root);
+  assert.deepEqual((await assets.load()).avatars, []);
+  await assert.rejects(readFile(join(root, 'pets')), { code: 'ENOENT' });
+  const pet = join(root, 'pets', 'bird');
+  await mkdir(pet, { recursive: true });
+  // Header fixture checks the same version-dependent dimensions as the App.
+  const png = Buffer.alloc(24);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png);
+  png.write('IHDR', 12);
+  png.writeUInt32BE(1536, 16);
+  png.writeUInt32BE(2288, 20);
+  await writeFile(join(pet, 'sprite.png'), png);
+  await writeFile(join(pet, 'pet.json'), JSON.stringify({ displayName: 'Bird', spriteVersionNumber: 2, spritesheetPath: 'sprite.png' }));
+  assert.equal((await assets.load()).avatars[0].displayName, 'Bird');
+  assert.equal((await assets.loadAvatar('custom:bird'))?.spritesheetDataUrl, 'data:image/png;base64,' + png.toString('base64'));
+  assert.equal(await assets.loadAvatar('custom:../bird'), null);
+  png.writeUInt32BE(1872, 20);
+  await writeFile(join(pet, 'sprite.png'), png);
+  assert.equal(await assets.loadAvatar('custom:bird'), null);
+  await writeFile(join(pet, 'pet.json'), JSON.stringify({ spritesheetPath: '../../outside.png' }));
+  assert.equal(await assets.loadAvatar('custom:bird'), null);
+});
