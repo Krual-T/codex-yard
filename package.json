@@ -27,6 +27,7 @@
     "test:visual": "node --use-env-proxy scripts/verify-visual-feedback.ts",
     "test:visualizations": "node --use-env-proxy scripts/verify-visualizations.ts",
     "test:tabs:ui": "node --use-env-proxy scripts/verify-workspace-tabs.ts",
+    "test:tablet:ui": "node --use-env-proxy scripts/verify-tablet-sidebar.ts",
     "test:terminal:ui": "node --use-env-proxy scripts/verify-terminal.ts"
   },
   "dependencies": {

@@ -55,6 +55,16 @@ ${sidebarWordmark}::after {
 @media (max-width: 600px) {
   ${sidebarWordmark}::after { content: "Yard"; font-size: 16px; }
 }
+@media (hover: none), (any-pointer: coarse) {
+  /* The desktop project drag wrapper also encloses its conversation list. */
+  #app-shell-sidebar .touch-none { touch-action: pan-y pinch-zoom; }
+  #app-shell-sidebar [class~="group/folder-row"] {
+    --sidebar-row-action-opacity: 1;
+    --sidebar-row-action-width: 20px;
+    --sidebar-row-menu-width: auto;
+    --sidebar-row-menu-overflow: visible;
+  }
+}
 @media (prefers-reduced-motion: no-preference) {
   :root:not([data-reduced-motion="true"]) :is(${startupLogo}) {
     opacity: 1;

@@ -36,6 +36,17 @@ interface RendererApplication {
 }
 
 performance.mark('workbench-entry');
+// Sidebar row drags capture touch pointers before native scrolling can start.
+// Keep touch taps (click) and the rows' actual buttons, while leaving mouse and
+// keyboard drag behavior with the original renderer.
+document.addEventListener('pointerdown', event => {
+  if (event.pointerType !== 'touch' || !(event.target instanceof Element)) return;
+  const target = event.target;
+  if (target.closest('button, a, input, textarea, select, [contenteditable="true"]')) return;
+  if (target.closest('#app-shell-sidebar [data-app-action-sidebar-thread-row], #app-shell-sidebar [class~="group/folder-row"]')) {
+    event.stopPropagation();
+  }
+}, { capture: true });
 const configurationStorage = openStatsigStorage();
 const [client, runtime] = await Promise.all([
   import(assets.client) as Promise<{ n(): void; t(): void }>,
