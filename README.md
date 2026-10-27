@@ -1,3 +1,5 @@
+<img src="public/brand/icon.svg" alt="Codex Yard" width="72" height="72">
+
 # Codex Yard
 
 [简体中文](README.zh-CN.md)

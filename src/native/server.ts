@@ -29,7 +29,7 @@ import { createFiles, fileEndpoints, fileMethods } from './files.ts';
 import type { RemoteFileCommand } from './files.ts';
 import { createPetOverlay } from './pet-overlay.ts';
 import { createPetAssets } from './pet-assets.ts';
-import { withVisualFeedback, webManifest } from './visual-feedback.ts';
+import { withVisualFeedback, webManifest, brandAssets } from './visual-feedback.ts';
 import { TerminalHost } from './terminal.ts';
 import type { TerminalOperation } from './terminal-protocol.ts';
 import { chromeConnectionFromEnv } from '../browser-reuse/panel-host.ts';
@@ -254,7 +254,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         return;
       }
       if (path === '/favicon.ico') {
-        response.writeHead(302, { Location: assets.brandIcon });
+        response.writeHead(302, { Location: brandAssets.icon });
         response.end();
         return;
       }
@@ -286,8 +286,9 @@ export async function createNativeWorkbench(options: Options = {}) {
       }
       const webRenderer = path.startsWith(webRendererPrefix + '/');
       if (webRenderer) path = path.slice(webRendererPrefix.length);
-      const file = resolve(renderer, '.' + path);
-      if (!file.startsWith(renderer + sep)) { response.writeHead(404); response.end(); return; }
+      const assetRoot = path.startsWith('/brand/') ? join(projectRoot, 'public') : renderer;
+      const file = resolve(assetRoot, '.' + path);
+      if (!file.startsWith(assetRoot + sep)) { response.writeHead(404); response.end(); return; }
       let content: Buffer = await readFile(file);
       if (webRenderer && path.endsWith('.js')) content = adaptVisualizationModule(path, content);
       if (path.startsWith('/assets/') && /-[a-f0-9]{8,}\.[^.]+$/.test(path)) {

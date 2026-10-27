@@ -13,6 +13,7 @@ import { record, updatedAtom } from '../src/native/protocol.ts';
 import { createThreadProjects } from '../src/native/thread-projects.ts';
 import { BrowserHttpFetch } from '../src/native/browser-http-fetch.ts';
 import { rendererAssets } from '../src/native/renderer-assets.ts';
+import { brandAssets } from '../src/native/visual-feedback.ts';
 import type { HostCatalog } from '../src/native/hosts.ts';
 import type { createSshProxyStream } from '../src/native/ssh.ts';
 import type { RemoteFileCommand } from '../src/native/files.ts';
@@ -567,30 +568,40 @@ test('hashed renderer assets are compressed and reusable while the HTML and owne
 
 test('web branding resolves from both native routes and the default favicon request', async t => {
   const h = await fixture(t);
-  await mkdir(join(h.root, 'renderer', 'assets'));
-  const icon = Buffer.from('original renderer brand image');
-  await writeFile(join(h.root, 'renderer', rendererAssets.brandIcon.slice(1)), icon);
   for (const path of ['/', '/local/test-thread']) {
     const html = await (await fetch(h.app.url + path)).text();
-    assert.ok(html.includes(`rel="icon" type="image/png" sizes="240x240" href="${rendererAssets.brandIcon}"`));
-    assert.ok(html.includes(`rel="apple-touch-icon" sizes="240x240" href="${rendererAssets.brandIcon}"`));
+    assert.match(html, /<title>Codex Yard<\/title>/);
+    assert.ok(html.includes(`rel="icon" type="image/svg+xml" sizes="any" href="${brandAssets.icon}"`));
+    assert.ok(html.includes(`rel="apple-touch-icon" sizes="180x180" href="${brandAssets.apple}"`));
     assert.match(html, /rel="manifest" href="\/site.webmanifest"/);
     assert.match(html, /content="manifest-src &#39;self&#39;; default-src &#39;none&#39;;"/);
   }
   const response = await fetch(h.app.url + '/site.webmanifest');
   assert.equal(response.headers.get('content-type'), 'application/manifest+json');
   const manifest = await response.json();
+  assert.equal(manifest.name, 'Codex Yard');
   assert.equal(manifest.start_url, '/');
   assert.equal(manifest.display, 'standalone');
   for (const entry of manifest.icons) {
     const image = await fetch(h.app.url + entry.src);
+    assert.equal(image.status, 200);
     assert.equal(image.headers.get('content-type'), entry.type);
-    assert.deepEqual(Buffer.from(await image.arrayBuffer()), icon);
+    const bytes = Buffer.from(await image.arrayBuffer());
+    if (entry.type === 'image/png') {
+      assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+      assert.equal(`${bytes.readUInt32BE(16)}x${bytes.readUInt32BE(20)}`, entry.sizes);
+    } else assert.match(bytes.toString(), /<title>Codex Yard<\/title>/);
   }
   const favicon = await fetch(h.app.url + '/favicon.ico');
-  assert.equal(favicon.url, h.app.url + rendererAssets.brandIcon);
-  assert.equal(favicon.headers.get('content-type'), 'image/png');
-  assert.deepEqual(Buffer.from(await favicon.arrayBuffer()), icon);
+  assert.equal(favicon.url, h.app.url + brandAssets.icon);
+  assert.equal(favicon.headers.get('content-type'), 'image/svg+xml');
+  const apple = Buffer.from(await (await fetch(h.app.url + brandAssets.apple)).arrayBuffer());
+  assert.equal(apple.readUInt32BE(16), 180);
+  assert.equal(apple.readUInt32BE(20), 180);
+  assert.equal((await fetch(h.app.url + brandAssets.icon, { method: 'HEAD' })).status, 200);
+  assert.equal((await fetch(h.app.url + brandAssets.icon, { method: 'HEAD' })).headers.get('content-type'), 'image/svg+xml');
+  assert.equal((await fetch(h.app.url + '/brand/missing.svg')).status, 404);
+  assert.equal((await fetch(h.app.url + '/brand/%2e%2e%2f%2e%2e%2fpackage.json')).status, 404);
   assert.equal((await fetch(h.app.url + '/site.webmanifest', { method: 'HEAD' })).status, 200);
 });
 

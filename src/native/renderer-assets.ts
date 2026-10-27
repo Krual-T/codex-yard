@@ -5,7 +5,6 @@ const asset = (name: string) => webRendererPrefix + '/assets/' + name;
 export const rendererAssets = {
   miniRoute: '/avatar-overlay?initialRoute=%2Favatar-overlay',
   mini: asset('avatar-overlay-native-page-d1ea5f6255c7.js'),
-  brandIcon: '/assets/desktop-app-icon-dc43ed691390.png',
   client: asset('index.client-17f4cd7252fb.js'),
   shared: asset('app-shared-61271c39e3c5.js'),
   rpc: asset('rpc-e690e45d1264.js'),

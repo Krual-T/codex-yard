@@ -129,14 +129,19 @@ try {
   for (const href of icons) {
     const image = await page.request.get(href);
     assert.equal(image.status(), 200);
-    assert.equal(image.headers()['content-type'], 'image/png');
-    assert.deepEqual([...await image.body()].slice(0, 8), [137, 80, 78, 71, 13, 10, 26, 10]);
+    if (href.endsWith('.svg')) {
+      assert.equal(image.headers()['content-type'], 'image/svg+xml');
+      assert.match(await image.text(), /<title>Codex Yard<\/title>/);
+    } else {
+      assert.equal(image.headers()['content-type'], 'image/png');
+      assert.deepEqual([...await image.body()].slice(0, 8), [137, 80, 78, 71, 13, 10, 26, 10]);
+    }
   }
   results.iconSizes = await page.evaluate(async sources => await Promise.all(sources.map(async src => {
     const image = new Image(); image.src = src; await image.decode();
     return { width: image.naturalWidth, height: image.naturalHeight };
   })), icons);
-  assert.deepEqual(results.iconSizes, [{ width: 240, height: 240 }, { width: 240, height: 240 }]);
+  assert.deepEqual(results.iconSizes, [{ width: 64, height: 64 }, { width: 180, height: 180 }]);
   results.icons = icons;
   const cdp = await page.context().newCDPSession(page);
   const manifest = await cdp.send('Page.getAppManifest');
@@ -144,7 +149,7 @@ try {
   assert.equal(JSON.parse(manifest.data!).display, 'standalone');
   results.manifest = manifest;
   await cdp.detach();
-  phase('Startup motion, original branding and browser manifest passed');
+  phase('Startup motion, Codex Yard branding and browser manifest passed');
 
   await page.waitForFunction(() => !document.querySelector('[data-codex-intelligence-trigger][aria-busy="true"]'), undefined, { timeout: 120000 });
   const uiCompleted = waitForCompletion('UI turn', 180000);
