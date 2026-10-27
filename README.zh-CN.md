@@ -20,13 +20,12 @@
 
 | 组件 | 版本 | 用途与验证范围 |
 | --- | --- | --- |
-| Codex CLI 及其 app-server 后端 | `0.164.0` | 全新部署验收中两者均为此版本；无需桌面 App，已通过自动启动后端、网页加载与真实模型回复 |
+| Codex | `0.164.0` | 已验证无需桌面 App 的部署：自动启动后端、网页加载与真实模型回复 |
+| Codex | `0.163.0` | 已验证本机和 SSH 对话、文件、终端与浏览器接入 |
 | Codex App 界面 | `26.1013.40934` | 对标复刻基准，也是 Git 跟踪的固定资源版本 |
 | Node.js | `>=24.5` | 使用 `24.16.0` 验证；当前已验证的服务端平台为 Linux x64 |
 
-daemon 是 Codex app-server 常驻后台的运行形式，由 CLI 管理。已有环境可能为后端保留单独托管的 Codex 可执行文件，因此 PATH 上的 CLI、托管包和正在运行的后端可能版本不同。`codex app-server daemon version` 分别返回 `cliVersion`、`managedCodexVersion` 和 `appServerVersion`；工作台的 `/api/status` 返回所连接后端的 `appServerVersion` 与界面资源的 `rendererVersion`。
-
-历史兼容记录：此前使用已有的 `0.163.0` app-server 后端验证过本机和 SSH 对话、文件、终端与浏览器接入。此处保留当时的验收范围；全新部署的验证版本是上表的 `0.164.0`。其他版本需要验证后再标记为支持。
+上表记录已验证的版本和对应范围，其他 Codex 版本暂未验证。
 
 ## 运行
 

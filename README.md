@@ -24,13 +24,12 @@ The next product direction is a task dashboard: clarify and assign work, see whi
 
 | Component | Version | Role |
 | --- | --- | --- |
-| Codex CLI and its app-server backend | `0.164.0` | Both used this version in fresh-deployment validation without a desktop App: automatic backend startup, web interface, and a real model reply |
+| Codex | `0.164.0` | Verified deployment without the desktop App: automatic backend startup, web interface, and a real model reply |
+| Codex | `0.163.0` | Verified local and SSH conversations, files, terminals, and browser integration |
 | Codex App interface | `26.1013.40934` | Fixed UI reference and resource snapshot tracked in Git |
 | Node.js | `>=24.5` | Tested with `24.16.0`; server platform currently validated on Linux x64 |
 
-The daemon is Codex's app-server running as a persistent background process, managed through the CLI. An existing installation can retain a separately managed Codex executable for that backend, so the CLI on your PATH, the managed package, and the running backend can have different versions. `codex app-server daemon version` reports `cliVersion`, `managedCodexVersion`, and `appServerVersion`; the workspace's `/api/status` reports the connected backend's `appServerVersion` and the UI's `rendererVersion`.
-
-Historical compatibility: an existing app-server backend at `0.163.0` was previously validated with local and SSH conversations, files, terminals, and browser integration. This records earlier coverage; the fresh-deployment version is `0.164.0` as listed above. Other versions require validation before being listed as supported.
+The table records tested versions and their validation scope. Other Codex versions have not yet been validated.
 
 ## Run from source
 
