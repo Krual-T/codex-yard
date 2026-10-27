@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`moss-with-sporophyte-v1@3x-8cafb70ecab9.webp`,import.meta.url).href})))()}export{t as n,n as t};
+//# sourceMappingURL=moss-with-sporophyte-v1@3x-c149ec38b5d8.js.map

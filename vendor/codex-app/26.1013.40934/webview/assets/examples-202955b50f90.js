@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{initial_temperature_c:0,surrounding_pressure_kpa:40}},{name:`Maximum supported values`,initialValues:{initial_temperature_c:60,surrounding_pressure_kpa:160}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-202955b50f90.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ACTION_POTENTIAL_DEPOLARIZATION_AND_REPOLARIZATION`,n=`action-potential-depolarization-and-repolarization-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-bd392aa3db83.js.map

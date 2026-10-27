@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOGEOCHEMICAL_PHOSPHORUS_RESERVOIRS_AND_RETURN_PATHWAYS`,n=`biogeochemical-phosphorus-reservoirs-and-return-pathways-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-a557c884f6f0.js.map

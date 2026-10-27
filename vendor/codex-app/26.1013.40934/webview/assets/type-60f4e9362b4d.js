@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`DEGREE_OF_UNSATURATION`,n=`degree-of-unsaturation-v1`,r={example_formula:{kind:`enum`,defaultValue:`C6H10`,allowedValues:[`C2H6`,`C4H8`,`C6H10`,`C6H6`,`C4H6Br2`,`C5H8O`,`C5H9N`]}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-60f4e9362b4d.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ADH_OSMOREGULATION_NEUROENDOCRINE_LOOP`,n=`adh-osmoregulation-neuroendocrine-loop-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-3727660a2c24.js.map

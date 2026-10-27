@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`route: direct`,initialValues:{route:`direct`}},{name:`route: round_trip`,initialValues:{route:`round_trip`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-f17c370e3e94.js.map

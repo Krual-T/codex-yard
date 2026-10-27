@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{initialConcentrationMolesPerLiter:.1,initialVolumeLiters:.5,waterAddedLiters:0}},{name:`Maximum supported values`,initialValues:{initialConcentrationMolesPerLiter:3,initialVolumeLiters:5,waterAddedLiters:5}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-180e85f5e6a7.js.map

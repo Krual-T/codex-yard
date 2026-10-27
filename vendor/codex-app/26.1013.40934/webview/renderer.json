@@ -1,0 +1,7 @@
+{
+  "version": "26.1013.40934",
+  "source": "https://persistent.oaistatic.com/codex-app-prod/linux/arch/26.1013.40934/x86_64/chatgpt-bin-26.1013.40934-1-x86_64.pkg.tar.zst",
+  "upstreamPath": "usr/lib/chatgpt/resources/app.asar/webview/",
+  "files": 20201,
+  "bytes": 556021197
+}

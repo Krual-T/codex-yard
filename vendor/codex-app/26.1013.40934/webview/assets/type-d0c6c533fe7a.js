@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_DIGESTIVE_TRACT_ORGAN_SEQUENCE`,n=`animal-digestive-tract-organ-sequence-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-d0c6c533fe7a.js.map

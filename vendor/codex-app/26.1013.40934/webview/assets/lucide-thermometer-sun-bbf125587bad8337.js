@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`ThermometerSun`,[[`path`,{d:`M12 9a4 4 0 0 0-2 7.5`,key:`1jvsq6`}],[`path`,{d:`M12 3v2`,key:`1w22ol`}],[`path`,{d:`m6.6 18.4-1.4 1.4`,key:`w2yidj`}],[`path`,{d:`M20 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z`,key:`iof6y5`}],[`path`,{d:`M4 13H2`,key:`118le4`}],[`path`,{d:`M6.34 7.34 4.93 5.93`,key:`1brd51`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-thermometer-sun-bbf125587bad8337.js.map

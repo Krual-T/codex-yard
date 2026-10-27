@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BACTERIAL_HORIZONTAL_GENE_TRANSFER_ROUTES`,n=`bacterial-horizontal-gene-transfer-routes-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-4842463d2b9c.js.map

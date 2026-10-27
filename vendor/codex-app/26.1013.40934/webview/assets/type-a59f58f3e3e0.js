@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`DIVERGENCE_THEOREM_FLUX`,n=`divergence-theorem-flux-v1`,r=`\\iint_{\\partial V}\\mathbf F\\cdot\\mathbf n\\,dS=\\iiint_V\\nabla\\cdot\\mathbf F\\,dV`,i={radius:{kind:`number`,defaultValue:1.35,min:.8,max:1.9},strength:{kind:`number`,defaultValue:.75,min:-1.2,max:1.2}},a={type:t,version:1,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-a59f58f3e3e0.js.map

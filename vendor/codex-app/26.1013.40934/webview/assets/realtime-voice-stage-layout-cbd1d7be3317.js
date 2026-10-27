@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`pointer-events-none absolute inset-x-0 bottom-0 z-20 mx-auto h-52 w-full max-w-[900px] px-12`,n=`absolute inset-x-12 top-0 flex flex-col items-center gap-1`,r=`translateY(52px)`,i=`translateY(-28px)`})))()}export{a,i,t as n,r,n as t};
+//# sourceMappingURL=realtime-voice-stage-layout-cbd1d7be3317.js.map

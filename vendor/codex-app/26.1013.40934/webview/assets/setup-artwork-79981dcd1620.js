@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`setup-artwork-8805a57043b0.png`,import.meta.url).href})))()}export{t as n,n as t};
+//# sourceMappingURL=setup-artwork-79981dcd1620.js.map

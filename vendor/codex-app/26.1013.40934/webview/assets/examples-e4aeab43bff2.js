@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_junction: adherens junction`,initialValues:{initial_junction:`adherens junction`}},{name:`initial_junction: desmosome`,initialValues:{initial_junction:`desmosome`}},{name:`initial_junction: gap junction`,initialValues:{initial_junction:`gap junction`}},{name:`initial_junction: hemidesmosome`,initialValues:{initial_junction:`hemidesmosome`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-e4aeab43bff2.js.map

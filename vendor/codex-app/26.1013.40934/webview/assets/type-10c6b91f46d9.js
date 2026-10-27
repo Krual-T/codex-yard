@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PARAMECIUM_CONJUGATION_GENETIC_EXCHANGE`,n=`paramecium-conjugation-genetic-exchange-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-10c6b91f46d9.js.map

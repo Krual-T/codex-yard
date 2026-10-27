@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`animal-cell-v1@3x-37af814715a0.webp?as=url`,import.meta.url).href})))()}var r;function i(){return(i=e((()=>{n(),r={"animal-cell-v1@3x.webp":t}})))()}export{r as n,i as t};
+//# sourceMappingURL=asset-urls-48b0c7f31f30.js.map

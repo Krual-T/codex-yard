@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`TWO_CABLE_STATIC_EQUILIBRIUM`,n=`two-cable-static-equilibrium-v1`,r={leftAngleDegrees:{kind:`number`,defaultValue:45,min:10,max:80},rightAngleDegrees:{kind:`number`,defaultValue:45,min:10,max:80},weightNewtons:{kind:`number`,defaultValue:200,min:50,max:500}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-3854ea3b6661.js.map

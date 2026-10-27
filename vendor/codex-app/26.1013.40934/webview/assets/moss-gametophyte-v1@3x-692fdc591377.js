@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`moss-gametophyte-v1@3x-b74bbdafc1b8.webp`,import.meta.url).href})))()}export{t as n,n as t};
+//# sourceMappingURL=moss-gametophyte-v1@3x-692fdc591377.js.map

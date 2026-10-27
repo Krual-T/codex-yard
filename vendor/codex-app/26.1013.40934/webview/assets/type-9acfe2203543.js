@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`WATER_PHASE_DIAGRAM`,n=`water-phase-diagram-v1`,r={temperature_c:{kind:`number`,defaultValue:25,min:-80,max:450},pressure_kpa:{kind:`number`,defaultValue:101.325,min:.001,max:5e4}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-9acfe2203543.js.map

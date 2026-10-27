@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e){return!e.defaultPrevented&&(e.type!==`keydown`||e.key!==`Meta`&&e.key!==`Control`&&e.key!==`Alt`&&e.key!==`AltGraph`&&e.key!==`Shift`)}function n(){return(n=e((()=>{})))()}export{t as n,n as t};
+//# sourceMappingURL=read-interaction-event-f939001e491d.js.map

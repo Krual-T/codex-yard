@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{taxPerUnit:5}},{name:`Maximum supported values`,initialValues:{taxPerUnit:35}},{name:`relativeElasticity: demand_more_inelastic`,initialValues:{relativeElasticity:`demand_more_inelastic`}},{name:`relativeElasticity: supply_more_inelastic`,initialValues:{relativeElasticity:`supply_more_inelastic`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-ca79153164fc.js.map

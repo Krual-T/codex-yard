@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`mitochondrion-cutaway-v1@3x-6a2af055e2d8.webp?as=url`,import.meta.url).href})))()}var r,i;function a(){return(a=e((()=>{n(),r=t.slice(0,t.lastIndexOf(`/`)+1),i={"mitochondrion-cutaway-v1@3x.webp":t}})))()}export{a as n,i as r,r as t};
+//# sourceMappingURL=asset-urls-1d42b581ac8f.js.map

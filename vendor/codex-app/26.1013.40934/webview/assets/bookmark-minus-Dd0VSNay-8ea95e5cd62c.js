@@ -1,0 +1,1 @@
+import{n as e,t}from"./bookmark-minus-Dd0VSNay-5246490f55f6.js";e();export{t as default};

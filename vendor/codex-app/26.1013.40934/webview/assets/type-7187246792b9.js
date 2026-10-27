@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOLOGICAL_SERIAL_DILUTION_AND_CONCENTRATION`,n=`biological-serial-dilution-and-concentration-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-7187246792b9.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`CHECKPOINT_FAILURE_UNCONTROLLED_PROLIFERATION`,n=`checkpoint-failure-uncontrolled-proliferation-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-8a0ed2c5e436.js.map

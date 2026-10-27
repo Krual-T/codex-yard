@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_ARTHROPOD_BODY_PLAN_JOINTED_APPENDAGES`,n=`animal-arthropod-body-plan-jointed-appendages-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-153bd2ef9e5e.js.map

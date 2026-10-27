@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`ToyBrick`,[[`rect`,{width:`18`,height:`12`,x:`3`,y:`8`,rx:`1`,key:`158fvp`}],[`path`,{d:`M10 8V5c0-.6-.4-1-1-1H6a1 1 0 0 0-1 1v3`,key:`s0042v`}],[`path`,{d:`M19 8V5c0-.6-.4-1-1-1h-3a1 1 0 0 0-1 1v3`,key:`9wmeh2`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-toy-brick-a083919b3f3f683a.js.map

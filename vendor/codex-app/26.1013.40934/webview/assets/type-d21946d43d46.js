@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`SUCCESSIVE_PERCENT_CHANGE`,n=`successive-percent-change-v1`,r=`100\\left(1+\\frac{p_1}{100}\\right)\\left(1+\\frac{p_2}{100}\\right)`,i={firstChangePercent:{kind:`number`,defaultValue:50,min:-95,max:100},secondChangePercent:{kind:`number`,defaultValue:-50,min:-100,max:100}},a={type:t,version:3,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-d21946d43d46.js.map

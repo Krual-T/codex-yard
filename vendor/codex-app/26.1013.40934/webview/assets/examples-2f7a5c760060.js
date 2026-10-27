@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{oxygenPartialPressureMmHg:0,ph:7.2,carbonDioxidePartialPressureMmHg:20,temperatureCelsius:35}},{name:`Maximum supported values`,initialValues:{oxygenPartialPressureMmHg:120,ph:7.6,carbonDioxidePartialPressureMmHg:60,temperatureCelsius:39}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-2f7a5c760060.js.map

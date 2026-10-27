@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a,o;function s(){return(s=e((()=>{t=`KINETIC_ENERGY`,n=`kinetic-energy-v1`,r=`\\mathrm{KE} = \\frac{1}{2}mv^2`,i=[`KE = \\frac{1}{2}mv^2`,`K = \\frac{1}{2}mv^2`,`KE = mv^2/2`,`K = mv^2/2`,`\\frac{1}{2}mv^2 = KE`,`mv^2/2 = KE`],a={mass:{kind:`number`,defaultValue:5,min:1,max:9},velocity:{kind:`number`,defaultValue:0,min:-10,max:10}},o={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,canonicalFormulaAliases:i,parameters:a}})))()}export{o as n,s as t};
+//# sourceMappingURL=type-e6de8eed347a.js.map

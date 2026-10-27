@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`chainState: tamper_block_1`,initialValues:{chainState:`tamper_block_1`}},{name:`chainState: tamper_block_2`,initialValues:{chainState:`tamper_block_2`}},{name:`chainState: tamper_block_3`,initialValues:{chainState:`tamper_block_3`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-c8ff53ee7897.js.map

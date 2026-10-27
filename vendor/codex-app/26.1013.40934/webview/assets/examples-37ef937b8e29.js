@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`population_pair: rabbit-and-fox`,initialValues:{population_pair:`rabbit-and-fox`}},{name:`population_pair: generic-prey-and-predator`,initialValues:{population_pair:`generic-prey-and-predator`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-37ef937b8e29.js.map

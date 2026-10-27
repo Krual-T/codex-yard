@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`OSMOTIC_PRESSURE`,n=`osmotic-pressure-v2`,r=`\\pi = i c R T`,i={solute_concentration_molar:{kind:`number`,defaultValue:.2,min:.05,max:.5},vant_hoff_factor:{kind:`number`,defaultValue:2,min:1,max:3},temperature_kelvin:{kind:`number`,defaultValue:298,min:273,max:323}},a={type:t,version:3,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-3a57bdeab4d8.js.map

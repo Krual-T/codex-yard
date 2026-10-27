@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PROTOCELL_MEMBRANE_SELF_ASSEMBLY`,n=`protocell-membrane-self-assembly-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-65e5956bead2.js.map

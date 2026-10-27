@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOLOGICAL_PHOSPHATE_FUNCTIONAL_GROUP_CHARGE`,n=`biological-phosphate-functional-group-charge-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-e70e31610f3c.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`PH_FROM_CONCENTRATION`,n=`ph-from-concentration-v1`,r=`\\mathrm{pH}=-\\log_{10}([\\mathrm{H_3O^+}])`,i={hydronium_concentration_molar:{kind:`number`,defaultValue:1e-7,min:1e-12,max:.01}},a={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-5afefdccef0f.js.map

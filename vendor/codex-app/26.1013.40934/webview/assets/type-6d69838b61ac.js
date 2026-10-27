@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`FIXED_RATIO_SCALING`,n=`fixed-ratio-scaling-v1`,r={scaleFactor:{kind:`number`,defaultValue:1.5,min:.5,max:2}},i={type:t,version:3,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-6d69838b61ac.js.map

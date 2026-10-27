@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PLANT_GUARD_CELL_TURGOR_STOMATAL_OPENING`,n=`plant-guard-cell-turgor-stomatal-opening-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-4e450da83722.js.map

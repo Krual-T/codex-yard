@@ -10,7 +10,7 @@ import { CodexConnection } from '../lib/codex.ts';
 import type { RpcMessage } from '../lib/codex.ts';
 import { record } from '../src/native/protocol.ts';
 import { createNativeWorkbench } from '../src/native/server.ts';
-import { projectRoot } from './copy-renderer.ts';
+import { projectRoot } from '../lib/app-resources.ts';
 
 interface LogoFrame { at: number; present: boolean; visible: boolean; editor: boolean; transform?: string; animations: string[] }
 interface CaptureWindow extends Window { visualFrames: LogoFrame[] }

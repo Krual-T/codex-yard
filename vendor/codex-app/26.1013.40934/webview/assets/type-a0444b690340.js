@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`PHARMACOKINETIC_CURVE`,n=`pharmacokinetic-curve-v1`,r={dose_mg:{kind:`number`,defaultValue:240,min:80,max:400},elimination_half_life_hours:{kind:`number`,defaultValue:6,min:2,max:10},minimum_effective_concentration:{kind:`number`,defaultValue:1.5,min:.8,max:2.5},minimum_toxic_concentration:{kind:`number`,defaultValue:5.5,min:4,max:8}},i={type:t,version:4,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-a0444b690340.js.map

@@ -1,0 +1,1 @@
+import{n as e,t}from"./lucide-printer-ba504a68d6b44602.js";e();export{t as default};

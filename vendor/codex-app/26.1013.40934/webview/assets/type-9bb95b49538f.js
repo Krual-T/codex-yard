@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`TRANSCRIPTION_FACTOR_COMBINATORIAL_CONTROL`,n=`transcription-factor-combinatorial-control-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-9bb95b49538f.js.map

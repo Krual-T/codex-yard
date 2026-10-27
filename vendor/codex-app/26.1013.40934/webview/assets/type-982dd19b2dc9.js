@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANTIGEN_SPECIFIC_CLONAL_SELECTION_AND_EXPANSION`,n=`antigen-specific-clonal-selection-and-expansion-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-982dd19b2dc9.js.map

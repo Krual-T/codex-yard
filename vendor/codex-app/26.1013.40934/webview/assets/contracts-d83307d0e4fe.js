@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`/epic/launch`,n=`oai-epic-launch-changed`,r=/^[A-Za-z0-9_-]{80,16384}={0,2}$/,`${r}${n}${n}${n}`})))()}export{t as n,i as r,n as t};
+//# sourceMappingURL=contracts-d83307d0e4fe.js.map

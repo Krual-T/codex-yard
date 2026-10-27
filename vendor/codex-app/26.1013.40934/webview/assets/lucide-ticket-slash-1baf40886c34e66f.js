@@ -1,0 +1,1 @@
+import{n as e,t}from"./lucide-ticket-slash-77e1dce2c4754919.js";e();export{t as default};

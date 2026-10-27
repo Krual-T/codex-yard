@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`MUSICAL_INTERVAL_CHART`,n=`musical-interval-chart-v2`,r={lower_note:{kind:`enum`,defaultValue:`C`,allowedValues:[`C`,`C-sharp`,`D-flat`,`D`,`E-flat`,`E`,`F`,`F-sharp`,`G-flat`,`G`,`A-flat`,`A`,`B-flat`,`B`]}},i={type:t,version:4,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-d4074e9cd37d.js.map

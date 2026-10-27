@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ABA_VERSUS_GIBBERELLIN_SEED_DORMANCY`,n=`aba-versus-gibberellin-seed-dormancy-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-888603d16da6.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`focused_family: woodwinds`,initialValues:{focused_family:`woodwinds`}},{name:`focused_family: brass`,initialValues:{focused_family:`brass`}},{name:`focused_family: percussion`,initialValues:{focused_family:`percussion`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-2ad862232e3e.js.map

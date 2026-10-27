@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_METAMORPHOSIS_LARVA_TO_ADULT`,n=`animal-metamorphosis-larva-to-adult-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-c0c9f0d5ebec.js.map

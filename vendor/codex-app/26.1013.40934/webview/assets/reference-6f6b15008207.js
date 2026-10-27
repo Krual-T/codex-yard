@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e){if(!URL.canParse(e))return null;let t=new URL(e);if(t.origin!==`https://chatgpt.com`||t.username!==``||t.password!==``)return null;let n=/^\/s\/(cx_[0-9a-f]{32})$/.exec(t.pathname)?.[1];return n==null?null:{shareId:n,messageId:t.hash.slice(1)||null}}function n(){return(n=e((()=>{})))()}export{t as n,n as t};
+//# sourceMappingURL=reference-6f6b15008207.js.map

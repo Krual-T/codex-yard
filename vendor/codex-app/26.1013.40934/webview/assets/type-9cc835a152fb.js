@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MITOCHONDRIAL_MATERNAL_INHERITANCE`,n=`mitochondrial-maternal-inheritance-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-9cc835a152fb.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ENVELOPED_VIRUS_BUDDING_AND_ENVELOPE_ACQUISITION`,n=`enveloped-virus-budding-and-envelope-acquisition-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-811713f4a622.js.map

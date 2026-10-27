@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ORGANISM_SEED_STRUCTURE_AND_STORED_FOOD`,n=`organism-seed-structure-and-stored-food-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-c8498b391a03.js.map

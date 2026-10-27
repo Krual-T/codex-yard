@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MEIOSIS_TWO_NONDISJUNCTION_SEGREGATION`,n=`meiosis-two-nondisjunction-segregation-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-8520cf5c3419.js.map

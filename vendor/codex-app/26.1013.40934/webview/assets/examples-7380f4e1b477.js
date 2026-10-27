@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{angleDeg:.01}},{name:`Maximum supported values`,initialValues:{angleDeg:89.99}},{name:`angleLabel: α`,initialValues:{angleLabel:`α`}},{name:`angleLabel: β`,initialValues:{angleLabel:`β`}},{name:`angleLabel: φ`,initialValues:{angleLabel:`φ`}},{name:`angleLabel: γ`,initialValues:{angleLabel:`γ`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-7380f4e1b477.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{Dnt as t,Ont as n,cwn as r,own as i,oxn as a,sxn as o}from"./app-initial-a68277f60b93.js";function s(e,t,{tabId:n,insertPosition:i,revealAndFocus:a=!0,target:s=`right`}={}){return c.isAvailable(e)?(r(e,c,{kind:c.kind,id:n??`profile:${crypto.randomUUID()}`,insertPosition:i,props:{username:t},target:s,revealAndFocus:a}),a&&o(e,s),!0):!1}var c;function l(){return(l=e((()=>{i(),t(),a(),c=n({open:s})})))()}export{s as n,l as t};
+//# sourceMappingURL=tab-e0eb41994f58.js.map

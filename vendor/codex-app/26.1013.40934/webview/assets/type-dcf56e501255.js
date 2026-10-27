@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PLANT_FLOWER_TO_FRUIT_SEED_DEVELOPMENT`,n=`plant-flower-to-fruit-seed-development-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-dcf56e501255.js.map

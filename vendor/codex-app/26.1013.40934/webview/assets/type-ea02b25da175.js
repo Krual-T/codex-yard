@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`COMPOUND_INTEREST`,n=`compound-interest-v1`,r={amount:{kind:`number`,defaultValue:1e3,min:.01,max:1e9},ratePercent:{kind:`number`,defaultValue:5,min:0,max:100},periods:{kind:`integer`,defaultValue:20,min:0,max:1e3}},i={type:t,version:9,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-ea02b25da175.js.map

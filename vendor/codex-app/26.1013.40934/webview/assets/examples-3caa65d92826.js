@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{enthalpyChangeKilojoules:-100}},{name:`Maximum supported values`,initialValues:{enthalpyChangeKilojoules:100}},{name:`No net enthalpy change`,initialValues:{enthalpyChangeKilojoules:0}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-3caa65d92826.js.map

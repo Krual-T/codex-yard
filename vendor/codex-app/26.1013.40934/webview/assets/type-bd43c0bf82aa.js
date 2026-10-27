@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`DIRECT_INVERSE_PROPORTION`,n=`direct-inverse-proportion-v1`,r={x:{kind:`number`,defaultValue:1,min:.5,max:2.5}},i={type:t,version:4,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-bd43c0bf82aa.js.map

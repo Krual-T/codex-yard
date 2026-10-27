@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`crop-plant-v1@3x-1cf0070dd545.webp?as=url`,import.meta.url).href})))()}var r;function i(){return(i=e((()=>{r=``+new URL(`ground-finch-v1@3x-371980a151aa.webp?as=url`,import.meta.url).href})))()}var a;function o(){return(o=e((()=>{n(),i(),a={"crop-plant-v1@3x.webp":t,"ground-finch-v1@3x.webp":r}})))()}export{t as a,i,a as n,n as o,r,o as t};
+//# sourceMappingURL=asset-urls-a8a6829a1934.js.map

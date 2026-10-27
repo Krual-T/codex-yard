@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`catchment_condition: permeable-vegetated`,initialValues:{catchment_condition:`permeable-vegetated`}},{name:`catchment_condition: urban-impermeable`,initialValues:{catchment_condition:`urban-impermeable`}},{name:`storm_intensity: light`,initialValues:{storm_intensity:`light`}},{name:`storm_intensity: intense`,initialValues:{storm_intensity:`intense`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-20678ae3d7b8.js.map

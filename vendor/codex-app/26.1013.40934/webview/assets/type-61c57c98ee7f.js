@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SEQUENTIAL_COLONIZATION_OF_LAND_BY_LIFE`,n=`sequential-colonization-of-land-by-life-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-61c57c98ee7f.js.map

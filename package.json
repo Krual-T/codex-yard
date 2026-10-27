@@ -9,16 +9,15 @@
     "node": ">=24.5"
   },
   "scripts": {
-    "build": "npm run copy:renderer && npm run build:host",
+    "build": "npm run build:host",
     "build:host": "node scripts/build-native.ts",
     "typecheck": "tsc --noEmit",
     "thread:title": "node scripts/set-thread-title.ts",
     "prestart": "npm run build",
     "start": "node --env-file-if-exists=.env --env-file-if-exists=.local/chrome.env --use-env-proxy src/native/server.ts",
-    "copy:renderer": "node scripts/copy-renderer.ts",
     "pretest": "npm run build:host",
     "test": "node --test test/*.test.mjs test/*.test.ts",
-    "test:app-tools": "AGENTS_TEST_OFFICIAL_ADAPTER=1 node --test test/app-tools.test.mjs",
+    "test:app-tools": "node --test test/app-tools.test.mjs",
     "browser:poc": "node scripts/browser-reuse-poc.ts",
     "test:browser-reuse": "node --use-env-proxy scripts/verify-browser-reuse.ts",
     "test:element-context": "node --use-env-proxy scripts/verify-element-context.ts",
@@ -31,7 +30,6 @@
     "test:terminal:ui": "node --use-env-proxy scripts/verify-terminal.ts"
   },
   "dependencies": {
-    "@electron/asar": "4.2.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "ws": "8.21.3"

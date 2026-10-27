@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{content:`f(x) = x^3 - 3x`},{content:`f(x) = x^2`},{content:`f(x) = \\sin(x)`},{content:`f(x) = \\cos(x)`},{content:`f(x) = e^x`},{content:`f(x) = \\ln(x)`},{content:`f(x) = |x|`},{content:`f(x) = \\frac{1}{x}`}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-cf2c52adf0a4.js.map

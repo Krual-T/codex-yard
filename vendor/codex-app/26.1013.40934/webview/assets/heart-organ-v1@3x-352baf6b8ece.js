@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`heart-organ-v1@3x-8b0f9f36c7e1.webp`,import.meta.url).href})))()}export{n,t};
+//# sourceMappingURL=heart-organ-v1@3x-352baf6b8ece.js.map

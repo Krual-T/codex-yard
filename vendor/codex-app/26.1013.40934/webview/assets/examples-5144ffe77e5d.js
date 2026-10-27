@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`karyotype_example: typical-xy`,initialValues:{karyotype_example:`typical-xy`}},{name:`karyotype_example: trisomy-21-xx`,initialValues:{karyotype_example:`trisomy-21-xx`}},{name:`karyotype_example: trisomy-21-xy`,initialValues:{karyotype_example:`trisomy-21-xy`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-5144ffe77e5d.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`FOSSIL_AGE_BRACKETING_WITH_VOLCANIC_ASH`,n=`fossil-age-bracketing-with-volcanic-ash-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-70f88dbb98e8.js.map

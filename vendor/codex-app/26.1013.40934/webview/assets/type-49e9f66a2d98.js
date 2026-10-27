@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`FOIL_BINOMIAL`,n=`foil-binomial-v1`,r={a:{kind:`number`,defaultValue:1,min:-12,max:12},b:{kind:`number`,defaultValue:3,min:-12,max:12},c:{kind:`number`,defaultValue:1,min:-12,max:12},d:{kind:`number`,defaultValue:2,min:-12,max:12}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-49e9f66a2d98.js.map

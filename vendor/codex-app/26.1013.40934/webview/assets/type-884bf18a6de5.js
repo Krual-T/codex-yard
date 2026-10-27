@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`REFLEX_ARC_NEURAL_CIRCUIT_WIRING`,n=`reflex-arc-neural-circuit-wiring-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-884bf18a6de5.js.map

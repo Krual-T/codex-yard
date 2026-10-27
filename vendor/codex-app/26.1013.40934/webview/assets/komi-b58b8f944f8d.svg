@@ -1,0 +1,16 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<mask id="komi-mask" style="mask-type:luminance" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
+<path d="M13.3112 2.6888C11.5192 0.896 9.7592 0 8 0C6.2408 0 4.4808 0.896 2.6888 2.6888C0.896 4.4808 0 6.2408 0 8C0 9.7592 0.896 11.5192 2.6888 13.3112C4.4816 15.104 6.2408 16 8 16C9.7592 16 11.5192 15.104 13.3112 13.3112C15.104 11.5184 16 9.7592 16 8C16 6.2408 15.104 4.4808 13.3112 2.6888ZM12.0528 12.0528C11.2352 12.8672 9.928 13.2 8 13.2C6.072 13.2 4.7648 12.8664 3.9472 12.0528C3.1272 11.236 2.7912 9.9352 2.7912 8C2.7912 6.0648 3.1272 4.7648 3.9472 3.9472C4.7648 3.1328 6.072 2.8 8 2.8C9.928 2.8 11.2352 3.1336 12.0528 3.9472C12.8728 4.764 13.2088 6.0648 13.2088 8C13.2088 9.9352 12.8728 11.2352 12.0528 12.0528Z" fill="white"/>
+</mask>
+<g mask="url(#komi-mask)">
+<rect width="16" height="16" fill="url(#komi-gradient)"/>
+</g>
+<defs>
+<linearGradient id="komi-gradient" x1="0" y1="0" x2="16" y2="12" gradientUnits="userSpaceOnUse">
+<stop stop-color="#FF00A8"/>
+<stop offset="0.5" stop-color="#FF5CB8"/>
+<stop offset="0.72" stop-color="#FF8F3D"/>
+<stop offset="1" stop-color="#FFD000"/>
+</linearGradient>
+</defs>
+</svg>

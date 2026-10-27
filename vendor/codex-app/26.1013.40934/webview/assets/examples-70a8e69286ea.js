@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{initial_population:20,growth_rate_percent:4,elapsed_periods:0}},{name:`Maximum supported values`,initialValues:{initial_population:2e3,growth_rate_percent:15,elapsed_periods:20}},{name:`Small population with faster growth`,initialValues:{initial_population:80,growth_rate_percent:12.5,elapsed_periods:15}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-70a8e69286ea.js.map

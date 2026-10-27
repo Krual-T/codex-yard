@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ECOSYSTEM_ENERGY_FLOW_VERSUS_MATTER_CYCLING`,n=`ecosystem-energy-flow-versus-matter-cycling-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-e29ca0dd9ed3.js.map

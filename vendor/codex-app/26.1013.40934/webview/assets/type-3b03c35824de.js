@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`CENTRIPETAL_FORCE_MVR`,n=`centripetal-force-mvr-v1`,r=`F_c = \\frac{mv^2}{r}`,i={massKilograms:{kind:`number`,defaultValue:2,min:.5,max:5},speedMetersPerSecond:{kind:`number`,defaultValue:4,min:0,max:8},radiusMeters:{kind:`number`,defaultValue:2,min:1,max:5}},a={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-3b03c35824de.js.map

@@ -1,0 +1,1 @@
+import{n as e,t}from"./lucide-dna-1ef0a98033b16cdf.js";e();export{t as default};

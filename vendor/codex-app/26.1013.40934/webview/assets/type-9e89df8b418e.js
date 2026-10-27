@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`INTERMOLECULAR_FORCES`,n=`intermolecular-forces-v2`,r={initial_example:{kind:`enum`,defaultValue:`water`,allowedValues:[`methane`,`hydrogen chloride`,`water`]}},i={type:t,version:1,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-9e89df8b418e.js.map

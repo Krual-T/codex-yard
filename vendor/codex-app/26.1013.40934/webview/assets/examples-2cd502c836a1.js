@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`regulation: marginal_cost`,initialValues:{regulation:`marginal_cost`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-2cd502c836a1.js.map

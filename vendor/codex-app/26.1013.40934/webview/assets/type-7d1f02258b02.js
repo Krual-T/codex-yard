@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`DEVELOPMENTAL_CELL_FATE_INDUCTION`,n=`developmental-cell-fate-induction-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-7d1f02258b02.js.map

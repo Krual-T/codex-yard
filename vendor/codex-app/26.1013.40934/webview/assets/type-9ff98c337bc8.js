@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`VIRAL_MUTATION_AND_ANTIGENIC_RECOGNITION`,n=`viral-mutation-and-antigenic-recognition-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-9ff98c337bc8.js.map

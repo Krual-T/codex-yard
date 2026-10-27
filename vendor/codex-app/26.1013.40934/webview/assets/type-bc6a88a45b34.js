@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PRODUCER_TO_CONSUMER_ENERGY_TRANSFER`,n=`producer-to-consumer-energy-transfer-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-bc6a88a45b34.js.map

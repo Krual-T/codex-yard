@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`example: molecular-ion-dominant`,initialValues:{example:`molecular-ion-dominant`}},{name:`example: chlorine-isotope-pattern`,initialValues:{example:`chlorine-isotope-pattern`}},{name:`example: bromine-isotope-pattern`,initialValues:{example:`bromine-isotope-pattern`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-ab3afcd27c5d.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`DERIVATIVE_AS_SECANT`,n=`derivative-as-secant-v1`,r=`f'(a)=\\lim_{h\\to0^+}\\frac{f(a+h)-f(a)}{h}`,i={functionExpression:{kind:`enum`,defaultValue:`x^2`,allowedValues:[`x^2`,`x^3`,`x^3-x`,`sin(x)`,`cos(x)`,`e^x`]},xValue:{kind:`number`,defaultValue:1,min:-10,max:10},h:{kind:`number`,defaultValue:2,min:.05,max:4}},a={type:t,version:3,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-b5036e205e38.js.map

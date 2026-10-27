@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`ClockArrowDown`,[[`path`,{d:`M12.338 21.994A10 10 0 1 1 21.925 13.227`,key:`1i7shu`}],[`path`,{d:`M12 6v6l2 1`,key:`19cm8n`}],[`path`,{d:`m14 18 4 4 4-4`,key:`1waygx`}],[`path`,{d:`M18 14v8`,key:`irew45`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=clock-arrow-down-DfAW6pv2-946804ac1837.js.map

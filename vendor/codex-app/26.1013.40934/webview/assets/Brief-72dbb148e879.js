@@ -1,0 +1,1 @@
+import"./app-shared-61271c39e3c5.js";import{n as e,r as t,t as n}from"./Brief-a5adc0cd21f4.js";t();export{n as BriefIcon,e as BriefIconSm};

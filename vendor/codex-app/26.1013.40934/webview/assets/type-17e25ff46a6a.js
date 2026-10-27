@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOLOGICAL_OUTLIER_EFFECTS_ON_MEAN_AND_MEDIAN`,n=`biological-outlier-effects-on-mean-and-median-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-17e25ff46a6a.js.map

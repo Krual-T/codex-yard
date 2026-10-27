@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=Object.defineProperty,n=(e,n)=>t(e,`name`,{value:n,configurable:!0}),r=(e,n)=>{for(var r in n)t(e,r,{get:n[r],enumerable:!0})}})))()}export{n,i as r,r as t};
+//# sourceMappingURL=chunk-Y2CYZVJY-24cce454fd91.js.map

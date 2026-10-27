@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SEASONAL_MIGRATION_ENVIRONMENTAL_CUES`,n=`seasonal-migration-environmental-cues-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-7f09749cfe46.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`CirclePercent`,[[`circle`,{cx:`12`,cy:`12`,r:`10`,key:`1mglay`}],[`path`,{d:`m15 9-6 6`,key:`1uzhvr`}],[`path`,{d:`M9 9h.01`,key:`1q5me6`}],[`path`,{d:`M15 15h.01`,key:`lqbp3k`}]])})))()}export{r as n,i as t};
+//# sourceMappingURL=circle-percent-BcK2i9sC-9211e52cf0d4.js.map

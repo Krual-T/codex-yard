@@ -340,15 +340,19 @@ test('protocol readiness and unrelated reads do not wait for the model catalog',
   assert.equal(client.messages.some(message => message.message?.id === 50), false);
 });
 
-test('ready replays the initialized version when startup RPCs connected before the renderer subscribed', async t => {
+for (const [userAgent, version] of [
+  ['codex-tui/0.163.0 (Linux)', '0.163.0'],
+  ['agents_workbench/0.164.0 (Linux)', '0.164.0'],
+]) test(`ready replays the initialized ${version} version when startup RPCs connected before the renderer subscribed`, async t => {
   const h = await fixture(t);
-  h.fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.163.0 (Linux)' }));
+  h.fake.handlers.set('initialize', () => ({ userAgent }));
   const client = await h.connect();
   await client.rpc(1, 'config/read');
   client.messages.length = 0;
   client.send({ type: 'ready' });
   const snapshot = await client.until(message => message.type === 'codex-app-server-initialized' && message.isSnapshot);
-  assert.equal(snapshot.appServerVersion, '0.163.0');
+  assert.equal(snapshot.appServerVersion, version);
+  assert.equal(snapshot.installedCodexVersion, version);
   assert.equal(snapshot.transport, 'websocket');
   assert.equal(h.fake.calls('initialize').length, 2); // Control client and this page.
 });

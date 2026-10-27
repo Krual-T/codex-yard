@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`WalletMinimal`,[[`path`,{d:`M17 14h.01`,key:`7oqj8z`}],[`path`,{d:`M7 7h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14`,key:`u1rqew`}]])})))()}export{r as n,i as t};
+//# sourceMappingURL=wallet-minimal-DMOz2YUg-8b8f6d3df971.js.map

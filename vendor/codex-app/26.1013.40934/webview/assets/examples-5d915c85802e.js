@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{red:0,green:0,blue:0}},{name:`Maximum supported values`,initialValues:{red:255,green:255,blue:255}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-5d915c85802e.js.map

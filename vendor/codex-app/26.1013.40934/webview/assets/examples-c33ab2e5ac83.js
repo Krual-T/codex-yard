@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`example: cis-1,2-dimethylcyclohexane`,initialValues:{example:`cis-1,2-dimethylcyclohexane`}},{name:`example: trans-1,2-dimethylcyclohexane`,initialValues:{example:`trans-1,2-dimethylcyclohexane`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-c33ab2e5ac83.js.map

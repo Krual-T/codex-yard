@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`LIFE_CHLOROPLAST_ENDOSYMBIOTIC_ORIGIN`,n=`life-chloroplast-endosymbiotic-origin-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-94f29a3fe0fe.js.map

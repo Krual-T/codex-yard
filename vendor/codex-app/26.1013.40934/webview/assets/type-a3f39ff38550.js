@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`GEOLOGIC_DEEP_TIME_PRECAMBRIAN_PHANEROZOIC_SCALE`,n=`geologic-deep-time-precambrian-phanerozoic-scale-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-a3f39ff38550.js.map

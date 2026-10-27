@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANGIOSPERM_DOUBLE_FERTILIZATION_EMBRYO_AND_ENDOSPERM`,n=`angiosperm-double-fertilization-embryo-and-endosperm-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-cbad57cb2e22.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{Ewn as t,Swn as n,Ubn as r,Zbn as i,axn as a,oxn as o}from"./app-initial-a68277f60b93.js";async function s(e){let{scope:t,descriptor:r,isDisconnected:o}=e;if(o()||t.value.routeKind!==`local-thread`)return`deferred`;let s=t.value.conversationId,c=()=>o()||t.get(i)===s;return!c()&&a(t,r.tabId)==null&&!await n(r.kind)?.({...e,isDisconnected:c})||o()||a(t,r.tabId)==null?`deferred`:`prepared`}function c(){return(c=e((()=>{t(),o(),r()})))()}export{s as n,c as t};
+//# sourceMappingURL=preload-467988490eee.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`MOLE_AVOGADRO_NUMBER_VISUAL`,n=`mole-avogadro-number-visual-v1`,r={substance:{kind:`enum`,defaultValue:`copper`,allowedValues:[`carbon`,`copper`,`water`]},initial_moles:{kind:`number`,defaultValue:1,min:.25,max:5}},i={type:t,version:1,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-bd9c85267933.js.map

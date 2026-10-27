@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ROOT_HYDROTROPISM_MOISTURE_GRADIENT`,n=`root-hydrotropism-moisture-gradient-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ae71bdeade15.js.map

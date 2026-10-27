@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`atom1: C`,initialValues:{atom1:`C`}},{name:`atom1: O`,initialValues:{atom1:`O`}},{name:`atom1: F`,initialValues:{atom1:`F`}},{name:`atom1: Cl`,initialValues:{atom1:`Cl`}},{name:`atom2: H`,initialValues:{atom2:`H`}},{name:`atom2: C`,initialValues:{atom2:`C`}},{name:`atom2: O`,initialValues:{atom2:`O`}},{name:`atom2: F`,initialValues:{atom2:`F`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-4d79ce92d747.js.map

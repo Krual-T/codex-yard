@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ATP_SYNTHASE_CHEMIOSMOSIS`,n=`atp-synthase-chemiosmosis-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-6cbf6f94a417.js.map

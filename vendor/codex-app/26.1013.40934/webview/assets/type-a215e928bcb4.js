@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MEMBRANE_CHANNEL_CARRIER_SPECIFICITY`,n=`membrane-channel-carrier-specificity-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-a215e928bcb4.js.map

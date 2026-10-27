@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`HOMOGENEOUS_ODE_ROOTS`,n=`homogenous-ode-roots-v1`,r=`ay''+by'+cy=0`,i={a:{kind:`number`,defaultValue:1,min:.1,max:100},b:{kind:`number`,defaultValue:2,min:-1e4,max:1e4},c:{kind:`number`,defaultValue:5,min:-1e4,max:1e4}},a={type:t,version:3,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-9e1fda92abdc.js.map

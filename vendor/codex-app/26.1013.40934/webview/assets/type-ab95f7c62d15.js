@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BACTERIOPHAGE_STRUCTURE_AND_HOST_RECOGNITION`,n=`bacteriophage-structure-and-host-recognition-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ab95f7c62d15.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MICROSCOPY_IMAGE_SIZE_ACTUAL_SIZE_MAGNIFICATION`,n=`microscopy-image-size-actual-size-magnification-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-aa7e4e9c7882.js.map

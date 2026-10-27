@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`TicketPercent`,[[`path`,{d:`M2 9a3 3 0 1 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 1 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z`,key:`1l48ns`}],[`path`,{d:`M9 9h.01`,key:`1q5me6`}],[`path`,{d:`m15 9-6 6`,key:`1uzhvr`}],[`path`,{d:`M15 15h.01`,key:`lqbp3k`}]])})))()}export{r as n,i as t};
+//# sourceMappingURL=ticket-percent-C2omfwv0-de0ffc9c5e23.js.map

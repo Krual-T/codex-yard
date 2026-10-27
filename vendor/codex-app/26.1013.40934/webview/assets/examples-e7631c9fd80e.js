@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{hydronium_concentration_molar:1e-12}},{name:`Maximum supported values`,initialValues:{hydronium_concentration_molar:.01}},{name:`Intermediate concentration`,initialValues:{hydronium_concentration_molar:32e-7}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-e7631c9fd80e.js.map

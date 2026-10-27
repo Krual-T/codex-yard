@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`precision: double`,initialValues:{precision:`double`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-f9e92a7c6ee4.js.map

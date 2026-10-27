@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIODIVERSITY_GENETIC_DIVERSITY_WITHIN_SPECIES`,n=`biodiversity-genetic-diversity-within-species-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-7ead817c9a68.js.map

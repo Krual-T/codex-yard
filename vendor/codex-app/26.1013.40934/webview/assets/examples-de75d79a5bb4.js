@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`operation: intersection`,initialValues:{operation:`intersection`}},{name:`operation: a_minus_b`,initialValues:{operation:`a_minus_b`}},{name:`operation: b_minus_a`,initialValues:{operation:`b_minus_a`}},{name:`operation: a_complement`,initialValues:{operation:`a_complement`}},{name:`operation: b_complement`,initialValues:{operation:`b_complement`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-de75d79a5bb4.js.map

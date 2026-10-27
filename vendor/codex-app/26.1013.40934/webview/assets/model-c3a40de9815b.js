@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`pushingBox`,n=e=>{switch(e.example){case`pushingBox`:case`collidingBalls`:case`boxOnTable`:return{example:e.example};default:return{example:t}}},r=e=>{switch(e){case`pushingBox`:return 0;case`collidingBalls`:return 1;case`boxOnTable`:return 2}},i=e=>{switch(e){case 1:return`collidingBalls`;case 2:return`boxOnTable`;default:return`pushingBox`}}})))()}export{n as a,a as i,i as n,r,t};
+//# sourceMappingURL=model-c3a40de9815b.js.map

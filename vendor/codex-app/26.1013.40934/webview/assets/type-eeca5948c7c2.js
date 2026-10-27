@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`VERTEBRATE_JAWLESS_VERSUS_JAWED_FISH`,n=`vertebrate-jawless-versus-jawed-fish-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-eeca5948c7c2.js.map

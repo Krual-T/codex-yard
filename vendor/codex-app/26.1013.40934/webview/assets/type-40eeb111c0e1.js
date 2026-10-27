@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANTIBODY_HEAVY_LIGHT_CHAIN_FAB_FC_STRUCTURE`,n=`antibody-heavy-light-chain-fab-fc-structure-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-40eeb111c0e1.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MICROSCOPY_ILLUMINATION_TO_EYEPIECE_PATH`,n=`microscopy-illumination-to-eyepiece-path-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-3c830228c3fc.js.map

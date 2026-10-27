@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`terrain_example: single-hill`,initialValues:{terrain_example:`single-hill`}},{name:`terrain_example: valley-and-ridge`,initialValues:{terrain_example:`valley-and-ridge`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-aa154cb169a4.js.map

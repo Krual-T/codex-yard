@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`INTERPHASE_GROWTH_AND_DNA_REPLICATION`,n=`interphase-growth-and-dna-replication-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ce51cb96bd01.js.map

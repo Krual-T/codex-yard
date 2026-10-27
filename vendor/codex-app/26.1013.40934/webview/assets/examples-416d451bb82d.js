@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`island_area: small`,initialValues:{island_area:`small`}},{name:`isolation: far`,initialValues:{isolation:`far`}},{name:`Small, far island`,initialValues:{island_area:`small`,isolation:`far`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-416d451bb82d.js.map

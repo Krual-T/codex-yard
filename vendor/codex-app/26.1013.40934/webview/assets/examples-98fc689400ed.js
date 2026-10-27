@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`design_variant: self-paired`,initialValues:{design_variant:`self-paired`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-98fc689400ed.js.map

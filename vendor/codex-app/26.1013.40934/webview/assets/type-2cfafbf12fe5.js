@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`QT_PROLONGATION_TORSADES`,n=`qt-prolongation-torsades-v1`,r={qtcMs:{kind:`number`,defaultValue:420,min:360,max:560}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-2cfafbf12fe5.js.map

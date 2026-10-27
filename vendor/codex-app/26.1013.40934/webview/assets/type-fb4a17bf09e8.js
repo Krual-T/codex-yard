@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_CONNECTIVE_TISSUE_CELLS_FIBERS_MATRIX`,n=`animal-connective-tissue-cells-fibers-matrix-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-fb4a17bf09e8.js.map

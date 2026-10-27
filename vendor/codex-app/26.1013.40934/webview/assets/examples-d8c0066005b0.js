@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`cell_pair: copper-silver`,initialValues:{cell_pair:`copper-silver`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-d8c0066005b0.js.map

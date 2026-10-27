@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`anode_material: zinc`,initialValues:{anode_material:`zinc`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-87e5e556b5a1.js.map

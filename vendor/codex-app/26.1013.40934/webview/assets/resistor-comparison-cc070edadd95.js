@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=(e,t,n)=>Math.min(Math.max(e,t),n),n=e=>({min:Math.min(...e.map(e=>e.min)),max:Math.max(...e.map(e=>e.max))}),r=(e,r)=>{let i=n(r),a=i.max-i.min;return e.map(e=>a===0?0:t((e-i.min)/a,0,1))},i=(e,t)=>{let n=Math.max(e,0);return n/(n+Math.max(t,2**-52))},a=(e,t)=>e.map(e=>i(e,t))})))()}export{o as i,a as n,r,i as t};
+//# sourceMappingURL=resistor-comparison-cc070edadd95.js.map

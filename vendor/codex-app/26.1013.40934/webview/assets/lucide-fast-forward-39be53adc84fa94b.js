@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`FastForward`,[[`polygon`,{points:`13 19 22 12 13 5 13 19`,key:`587y9g`}],[`polygon`,{points:`2 19 11 12 2 5 2 19`,key:`3pweh0`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-fast-forward-39be53adc84fa94b.js.map

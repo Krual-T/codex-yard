@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{_ as t,b as n,d as r,l as i,n as a,t as o}from"./builder-analytics-8d7200c66a4b.js";function s(e,n,o,s){a(e,{...s,agentId:n,isPublished:o,isReadonly:s.isReadonly??!1,isPreviewVersion:!1,page:s.page??i.CHATGPT_AGENT_BUILDER_PAGE_UNKNOWN,source:s.source??t.CHATGPT_AGENT_BUILDER_SOURCE_SLACK_CHANNEL,resourceType:s.slack==null?void 0:r.CHATGPT_AGENT_BUILDER_RESOURCE_TYPE_SLACK_CHANNEL})}function c(){return(c=e((()=>{n(),o()})))()}export{s as n,c as t};
+//# sourceMappingURL=slack-channel-analytics-956284857359.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_example: cyclobutadiene`,initialValues:{initial_example:`cyclobutadiene`}},{name:`initial_example: cyclooctatetraene`,initialValues:{initial_example:`cyclooctatetraene`}},{name:`initial_example: cyclopentadienyl-anion`,initialValues:{initial_example:`cyclopentadienyl-anion`}},{name:`initial_example: cyclopropenyl-cation`,initialValues:{initial_example:`cyclopropenyl-cation`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-7ab2f70b6f85.js.map

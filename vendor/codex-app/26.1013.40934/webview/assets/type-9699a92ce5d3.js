@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PLANT_PHOTOPERIOD_SEASONAL_FLOWERING`,n=`plant-photoperiod-seasonal-flowering-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-9699a92ce5d3.js.map

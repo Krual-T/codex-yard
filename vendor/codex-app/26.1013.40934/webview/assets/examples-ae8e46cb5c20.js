@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`leverClass: second`,initialValues:{leverClass:`second`}},{name:`leverClass: third`,initialValues:{leverClass:`third`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-ae8e46cb5c20.js.map

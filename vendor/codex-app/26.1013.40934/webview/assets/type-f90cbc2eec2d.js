@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`IDEAL_TRANSFORMER`,n=`ideal-transformer-v2`,r=`\\frac{V_s}{V_p}=\\frac{N_s}{N_p}`,i={turnsRatio:{kind:`number`,defaultValue:2,min:.1,max:10},loadResistanceOhms:{kind:`number`,defaultValue:30,min:1,max:1e4}},a={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-f90cbc2eec2d.js.map

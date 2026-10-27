@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`VERTEBRATE_SKIN_AND_REPRODUCTION_ON_LAND`,n=`vertebrate-skin-and-reproduction-on-land-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-59d01fc89060.js.map

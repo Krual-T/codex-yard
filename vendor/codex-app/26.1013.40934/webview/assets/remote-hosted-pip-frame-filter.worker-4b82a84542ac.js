@@ -1,0 +1,2 @@
+const e=new OffscreenCanvas(8,8).getContext(`2d`,{alpha:!0,willReadFrequently:!0});let t=0,n=0,r=0;self.onmessage=({data:i})=>{if(e!=null){e.clearRect(0,0,8,8),e.drawImage(i,0,0,8,8);let{data:a}=e.getImageData(0,0,8,8),o=0;for(let e=3;e<a.length;e+=4)o+=a[e];let s=n===i.displayWidth&&r===i.displayHeight?t:0;if(o===0||s>0&&o<s*.98){i.close(),self.postMessage(null);return}t=Math.max(s,o),n=i.displayWidth,r=i.displayHeight}self.postMessage(i,{transfer:[i]})};
+//# sourceMappingURL=remote-hosted-pip-frame-filter.worker-4b82a84542ac.js.map

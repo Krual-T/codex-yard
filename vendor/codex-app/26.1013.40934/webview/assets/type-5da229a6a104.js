@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`EXPONENTIAL_POPULATION_GROWTH`,n=`exponential-population-growth-v1`,r=`N(t)=N_0(1+r)^t`,i={initial_population:{kind:`integer`,defaultValue:200,min:20,max:2e3},growth_rate_percent:{kind:`number`,defaultValue:10,min:4,max:15},elapsed_periods:{kind:`number`,defaultValue:10,min:0,max:20}},a={type:t,version:3,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-5da229a6a104.js.map

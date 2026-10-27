@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`LIPID_HYDROPHOBICITY_IN_WATER`,n=`lipid-hydrophobicity-in-water-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-a315e1c4a7f6.js.map

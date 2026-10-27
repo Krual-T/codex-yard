@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`PERPENDICULAR_LINE`,n=`perpendicular-line-v1`,r={slope:{kind:`number`,defaultValue:2,min:-1e4,max:1e4,multipleOf:1e-4},intercept:{kind:`number`,defaultValue:1,min:-1e4,max:1e4},perpendicularIntercept:{kind:`number`,defaultValue:-2,min:-1e4,max:1e4}},i={type:t,version:4,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-edfc78ae68b7.js.map

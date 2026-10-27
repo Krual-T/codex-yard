@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Magnet`,[[`path`,{d:`m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15`,key:`1i3lhw`}],[`path`,{d:`m5 8 4 4`,key:`j6kj7e`}],[`path`,{d:`m12 15 4 4`,key:`lnac28`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-magnet-2577b06505a57801.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`DNA_METHYLATION_TRANSCRIPTIONAL_SILENCING`,n=`dna-methylation-transcriptional-silencing-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-681a2655f19a.js.map

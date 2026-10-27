@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`molecule: CO2`,initialValues:{molecule:`CO2`}},{name:`molecule: BF3`,initialValues:{molecule:`BF3`}},{name:`molecule: NH3`,initialValues:{molecule:`NH3`}},{name:`molecule: CCl4`,initialValues:{molecule:`CCl4`}},{name:`molecule: CH3Cl`,initialValues:{molecule:`CH3Cl`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-71412c2b80cd.js.map

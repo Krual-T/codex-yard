@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`CLIMATE_MITIGATION_WEDGES`,n=`climate-mitigation-wedges-v1`,r={required_wedges:{kind:`integer`,defaultValue:7,min:3,max:12},horizon_years:{kind:`integer`,defaultValue:50,min:20,max:100}},i={type:t,version:3,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-6a0aad7ace5c.js.map

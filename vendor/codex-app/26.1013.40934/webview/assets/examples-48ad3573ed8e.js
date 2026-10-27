@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`bondType: covalent`,initialValues:{bondType:`covalent`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-48ad3573ed8e.js.map

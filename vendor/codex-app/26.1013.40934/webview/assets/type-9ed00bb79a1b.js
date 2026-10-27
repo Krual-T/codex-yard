@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PLANT_CELL_WALL_MEMBRANE_AND_VACUOLE`,n=`plant-cell-wall-membrane-and-vacuole-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-9ed00bb79a1b.js.map

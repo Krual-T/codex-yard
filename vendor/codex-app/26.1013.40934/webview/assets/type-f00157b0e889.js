@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SKIN_MUCUS_PHYSICAL_CHEMICAL_BARRIERS`,n=`skin-mucus-physical-chemical-barriers-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-f00157b0e889.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`TouchpadOff`,[[`path`,{d:`M4 4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16`,key:`lnt0bk`}],[`path`,{d:`M2 14h12`,key:`d8icqz`}],[`path`,{d:`M22 14h-2`,key:`jrx26d`}],[`path`,{d:`M12 20v-6`,key:`1rm09r`}],[`path`,{d:`m2 2 20 20`,key:`1ooewy`}],[`path`,{d:`M22 16V6a2 2 0 0 0-2-2H10`,key:`11y8e4`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-touchpad-off-e808186a72c7407a.js.map

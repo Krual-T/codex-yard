@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{inputForceNewtons:20,inputAreaSquareCentimeters:5,outputAreaSquareCentimeters:25}},{name:`Maximum supported values`,initialValues:{inputForceNewtons:200,inputAreaSquareCentimeters:25,outputAreaSquareCentimeters:100}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-5b2746317651.js.map

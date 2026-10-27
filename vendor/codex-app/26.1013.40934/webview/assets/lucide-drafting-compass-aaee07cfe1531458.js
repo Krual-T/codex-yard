@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`DraftingCompass`,[[`path`,{d:`m12.99 6.74 1.93 3.44`,key:`iwagvd`}],[`path`,{d:`M19.136 12a10 10 0 0 1-14.271 0`,key:`ppmlo4`}],[`path`,{d:`m21 21-2.16-3.84`,key:`vylbct`}],[`path`,{d:`m3 21 8.02-14.26`,key:`1ssaw4`}],[`circle`,{cx:`12`,cy:`5`,r:`2`,key:`f1ur92`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-drafting-compass-aaee07cfe1531458.js.map

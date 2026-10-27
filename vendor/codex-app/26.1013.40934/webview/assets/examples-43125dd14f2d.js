@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{frequencyTimes10To14Hertz:3,intensityPercent:10,workFunctionElectronVolts:1.5}},{name:`Maximum supported values`,initialValues:{frequencyTimes10To14Hertz:15,intensityPercent:100,workFunctionElectronVolts:6}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-43125dd14f2d.js.map

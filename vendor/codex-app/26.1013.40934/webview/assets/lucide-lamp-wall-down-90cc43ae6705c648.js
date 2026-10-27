@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`LampWallDown`,[[`path`,{d:`M11 13h6l3 7H8l3-7Z`,key:`9n3qlo`}],[`path`,{d:`M14 13V8a2 2 0 0 0-2-2H8`,key:`1hu4hb`}],[`path`,{d:`M4 9h2a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H4v6Z`,key:`s053bc`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-lamp-wall-down-90cc43ae6705c648.js.map

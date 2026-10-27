@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{base:.01,height:.01}},{name:`Maximum supported values`,initialValues:{base:1e4,height:1e4}},{name:`Tall and narrow`,initialValues:{base:.01,height:1e4}},{name:`Wide and short`,initialValues:{base:1e4,height:.01}},{name:`Same area, tall and narrow`,initialValues:{base:1,height:100}},{name:`Same area, wide and short`,initialValues:{base:100,height:1}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-fd9650bf576f.js.map

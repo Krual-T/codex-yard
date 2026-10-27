@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_FOUR_TISSUE_TYPES_STRUCTURE_AND_FUNCTION`,n=`animal-four-tissue-types-structure-and-function-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-4bad07577538.js.map

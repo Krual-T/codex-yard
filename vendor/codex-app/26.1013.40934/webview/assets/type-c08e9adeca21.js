@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PLANT_EVOLUTION_VASCULAR_TISSUE_SEEDS_AND_FLOWERS`,n=`plant-evolution-vascular-tissue-seeds-and-flowers-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-c08e9adeca21.js.map

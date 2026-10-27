@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./chart-scatter-DDffYThc-7ba28f11ef1d.js";function r(){return(r=e((()=>{t()})))()}r();export{n as default};
+//# sourceMappingURL=scatter-chart-CFZHN9qR-355ccfcbd45f.js.map

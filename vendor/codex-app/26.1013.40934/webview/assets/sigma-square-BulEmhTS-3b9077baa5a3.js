@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./square-sigma-BMHXKLkH-2b1e6c67fda2.js";function r(){return(r=e((()=>{n()})))()}r();export{t as default};
+//# sourceMappingURL=sigma-square-BulEmhTS-3b9077baa5a3.js.map

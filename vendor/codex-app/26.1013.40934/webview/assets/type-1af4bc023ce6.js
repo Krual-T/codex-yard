@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`PERMUTATION_FORMULA`,n=`permutation-formula-v1`,r={n:{kind:`integer`,defaultValue:6,min:4,max:8},r:{kind:`integer`,defaultValue:3,min:2,max:4}},i={type:t,version:3,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-1af4bc023ce6.js.map

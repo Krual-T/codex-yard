@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a,o,s;function c(){return(c=e((()=>{t={min:0,max:100,step:1,defaultValue:45},n={defaultValue:`leachate`},r={min:0,max:1,step:1,defaultValue:0},i=e=>({waterEntry:Number.isFinite(e.waterEntry)?Math.min(t.max,Math.max(t.min,e.waterEntry??0)):t.defaultValue,pathway:e.pathway===`gas`?`gas`:`leachate`}),a=e=>+(e===`gas`),o=e=>e>=.5?`gas`:`leachate`,s=e=>e<20?`dry`:e<65?`moderate`:`heavy`})))()}export{a,i as c,o as i,r as n,s as o,t as r,c as s,n as t};
+//# sourceMappingURL=model-8e907fa97b63.js.map

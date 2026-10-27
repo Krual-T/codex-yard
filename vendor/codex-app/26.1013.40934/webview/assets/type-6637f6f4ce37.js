@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`HALF_FULL_ADDER_LOGIC`,n=`half-full-adder-logic-v1`,r={a:{kind:`boolean`,defaultValue:!0},b:{kind:`boolean`,defaultValue:!1},carryIn:{kind:`boolean`,defaultValue:!0}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-6637f6f4ce37.js.map

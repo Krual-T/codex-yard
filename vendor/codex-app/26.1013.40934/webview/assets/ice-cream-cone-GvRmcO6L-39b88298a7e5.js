@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`IceCreamCone`,[[`path`,{d:`m7 11 4.08 10.35a1 1 0 0 0 1.84 0L17 11`,key:`1v6356`}],[`path`,{d:`M17 7A5 5 0 0 0 7 7`,key:`151p3v`}],[`path`,{d:`M17 7a2 2 0 0 1 0 4H7a2 2 0 0 1 0-4`,key:`1sdaij`}]])})))()}export{r as n,i as t};
+//# sourceMappingURL=ice-cream-cone-GvRmcO6L-39b88298a7e5.js.map

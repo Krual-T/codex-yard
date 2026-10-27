@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`animal-cell-v1@3x-c6b52c3e31b3.webp?as=url`,import.meta.url).href})))()}var r;function i(){return(i=e((()=>{r=``+new URL(`plant-cell-v1@3x-13cfda58f71b.webp?as=url`,import.meta.url).href})))()}var a;function o(){return(o=e((()=>{n(),i(),a={"animal-cell-v1@3x.webp":t,"plant-cell-v1@3x.webp":r}})))()}export{a as n,o as t};
+//# sourceMappingURL=asset-urls-4e19347528d4.js.map

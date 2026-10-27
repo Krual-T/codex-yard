@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`PPC_GROWTH`,n=`ppc-growth-v1`,r={capacity_change_percent:{kind:`number`,defaultValue:15,min:-40,max:30}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-358342ea04f6.js.map

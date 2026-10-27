@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n;function r(){return(r=e((()=>{t={min:-10,max:10,step:.5},n=e=>{let n=Number(e.outputGap),r=Number.isFinite(n)?Math.min(t.max,Math.max(t.min,n)):-2,i=r===0?0:-.5*r;return{outputGap:r,unemploymentGap:i,actualOutput:100+100*r/100,actualUnemployment:5+i}}})))()}export{n,r,t};
+//# sourceMappingURL=model-109cdc0236e6.js.map

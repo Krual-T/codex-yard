@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{numeratorDegree:0,denominatorDegree:1,numeratorLeadingCoefficient:.5,denominatorLeadingCoefficient:.5}},{name:`Maximum supported values`,initialValues:{numeratorDegree:3,denominatorDegree:3,numeratorLeadingCoefficient:5,denominatorLeadingCoefficient:5}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-956ae090e251.js.map

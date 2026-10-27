@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`MonitorSmartphone`,[[`path`,{d:`M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8`,key:`10dyio`}],[`path`,{d:`M10 19v-3.96 3.15`,key:`1irgej`}],[`path`,{d:`M7 19h5`,key:`qswx4l`}],[`rect`,{width:`6`,height:`10`,x:`16`,y:`12`,rx:`2`,key:`1egngj`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-monitor-smartphone-5b5a179d908fd170.js.map

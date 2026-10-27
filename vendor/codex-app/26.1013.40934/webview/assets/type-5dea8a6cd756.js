@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`CLIMATE_DISRUPTION_SPECIES_RANGE_SHIFT`,n=`climate-disruption-species-range-shift-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-5dea8a6cd756.js.map

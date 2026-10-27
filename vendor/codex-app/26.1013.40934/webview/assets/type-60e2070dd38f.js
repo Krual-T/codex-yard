@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`POPULATION_GENETICS_SELECTION_DIFFERENTIAL_REPRODUCTION`,n=`population-genetics-selection-differential-reproduction-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-60e2070dd38f.js.map

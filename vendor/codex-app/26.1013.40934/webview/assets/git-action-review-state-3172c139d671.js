@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t({currentBranch:e,storedThreadBranch:t}){let n=e?.trim()??``,r=t?.trim()??``;return{currentBranchName:n,hasThreadBranchMismatch:n.length>0&&r.length>0&&n!==r,storedThreadBranchName:r}}function n(){return(n=e((()=>{})))()}export{n,t};
+//# sourceMappingURL=git-action-review-state-3172c139d671.js.map

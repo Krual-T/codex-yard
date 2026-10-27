@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOGEOCHEMICAL_WATER_INFILTRATION_AND_GROUNDWATER_RETURN`,n=`biogeochemical-water-infiltration-and-groundwater-return-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-34fa4d2188aa.js.map

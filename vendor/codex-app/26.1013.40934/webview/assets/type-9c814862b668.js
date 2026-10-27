@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`POPULATION_GENETICS_POPULATION_SIZE_AND_DRIFT`,n=`population-genetics-population-size-and-drift-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-9c814862b668.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e,t,n,a=!1){let o=Math.max(e??t??r,n??200);return a||e!=null?o:Math.min(o,i)}function n(e,n){return t(null,e,n)}var r,i;function a(){return(a=e((()=>{r=480,i=720})))()}export{n,a as r,t};
+//# sourceMappingURL=inline-height-de22080375ee.js.map

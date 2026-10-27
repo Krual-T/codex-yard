@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`EUTROPHICATION_DECOMPOSITION_OXYGEN_DEPLETION`,n=`eutrophication-decomposition-oxygen-depletion-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-c97aefcc55e3.js.map

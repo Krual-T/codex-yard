@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`ECOLOGICAL_FOOTPRINT`,n=`ecological-footprint-v1`,r={focus_year:{kind:`integer`,defaultValue:2014,min:1961,max:2014}},i={type:t,version:5,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-e177a5957273.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ALL_OR_NONE_ACTION_POTENTIAL_THRESHOLD`,n=`all-or-none-action-potential-threshold-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ba20d22de16e.js.map

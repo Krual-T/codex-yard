@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`SmartphoneCharging`,[[`rect`,{width:`14`,height:`20`,x:`5`,y:`2`,rx:`2`,ry:`2`,key:`1yt0o3`}],[`path`,{d:`M12.667 8 10 12h4l-2.667 4`,key:`h9lk2d`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-smartphone-charging-7ed521d67f3a140f.js.map

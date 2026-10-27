@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`UtilityPole`,[[`path`,{d:`M12 2v20`,key:`t6zp3m`}],[`path`,{d:`M2 5h20`,key:`1fs1ex`}],[`path`,{d:`M3 3v2`,key:`9imdir`}],[`path`,{d:`M7 3v2`,key:`n0os7`}],[`path`,{d:`M17 3v2`,key:`1l2re6`}],[`path`,{d:`M21 3v2`,key:`1duuac`}],[`path`,{d:`m19 5-7 7-7-7`,key:`133zxf`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=utility-pole-BDmDrV31-7a7aca8c6b06.js.map

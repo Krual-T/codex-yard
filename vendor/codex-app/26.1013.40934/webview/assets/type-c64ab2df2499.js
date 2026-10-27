@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_PULMONARY_AND_SYSTEMIC_CIRCULATION`,n=`animal-pulmonary-and-systemic-circulation-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-c64ab2df2499.js.map

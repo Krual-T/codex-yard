@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{content:`(a+b)^2 = a^2 + 2ab + b^2`},{content:`(a-b)^2 = a^2 - 2ab + b^2`},{content:`(x+y)^2 = x^2 + 2xy + y^2`},{content:`(x-y)^2 = x^2 - 2xy + y^2`}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-d141d07b0bc0.js.map

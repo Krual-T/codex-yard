@@ -1,0 +1,1 @@
+import{n as e,t}from"./table-2-02RNhbk3-e0968bc66388.js";t();export{e as default};

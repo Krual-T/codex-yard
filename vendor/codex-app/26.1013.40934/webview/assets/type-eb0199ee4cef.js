@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`LONG_DIVISION`,n=`long-division-v1`,r={dividend:{kind:`integer`,defaultValue:458,min:1,max:9999},divisor:{kind:`integer`,defaultValue:3,min:1,max:99}},i={type:t,version:1,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-eb0199ee4cef.js.map

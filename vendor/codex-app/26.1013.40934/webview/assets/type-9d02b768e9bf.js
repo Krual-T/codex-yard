@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`PASCALS_LAW_HYDRAULICS`,n=`pascals-law-hydraulics-v2`,r=`p = \\frac{F}{A}`,i={inputForceNewtons:{kind:`number`,defaultValue:100,min:20,max:200},inputAreaSquareCentimeters:{kind:`number`,defaultValue:10,min:5,max:25},outputAreaSquareCentimeters:{kind:`number`,defaultValue:50,min:25,max:100}},a={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-9d02b768e9bf.js.map

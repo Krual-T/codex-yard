@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`order: 8,7,6,5,4,3,2,1`,initialValues:{order:`8,7,6,5,4,3,2,1`}},{name:`order: 1,2,3,4,5,6,7,8`,initialValues:{order:`1,2,3,4,5,6,7,8`}},{name:`order: 4,1,7,3,8,5,2,6`,initialValues:{order:`4,1,7,3,8,5,2,6`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-ec3199eef9e7.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_SPERMATOGENESIS_VERSUS_OOGENESIS`,n=`animal-spermatogenesis-versus-oogenesis-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-486c524c8a25.js.map

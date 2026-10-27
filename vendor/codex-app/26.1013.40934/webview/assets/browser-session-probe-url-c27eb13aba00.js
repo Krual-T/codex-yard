@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e){return new URL(n,e?.trim()||r).toString()}var n,r;function i(){return(i=e((()=>{n=`/codex/desktop-session`,r=`https://chatgpt.com`})))()}export{i as n,t};
+//# sourceMappingURL=browser-session-probe-url-c27eb13aba00.js.map

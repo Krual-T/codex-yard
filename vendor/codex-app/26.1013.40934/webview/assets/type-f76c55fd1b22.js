@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOGEOCHEMICAL_MATTER_CYCLING_VERSUS_ENERGY_FLOW`,n=`biogeochemical-matter-cycling-versus-energy-flow-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-f76c55fd1b22.js.map

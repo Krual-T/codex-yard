@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`FolderClock`,[[`circle`,{cx:`16`,cy:`16`,r:`6`,key:`qoo3c4`}],[`path`,{d:`M7 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2`,key:`1urifu`}],[`path`,{d:`M16 14v2l1 1`,key:`xth2jh`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=folder-clock-C4kW0Cfw-c11235a5d232.js.map

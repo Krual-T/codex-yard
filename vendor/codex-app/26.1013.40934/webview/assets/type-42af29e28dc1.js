@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BACTERIAL_TRANSFORMATION_FREE_DNA_UPTAKE`,n=`bacterial-transformation-free-dna-uptake-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-42af29e28dc1.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{first_number:1,second_number:1}},{name:`Maximum supported values`,initialValues:{first_number:12,second_number:12}},{name:`Longest coprime tracks`,initialValues:{first_number:11,second_number:12}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-f5f1d8d44689.js.map

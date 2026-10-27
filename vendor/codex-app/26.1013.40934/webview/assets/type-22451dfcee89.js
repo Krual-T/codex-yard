@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PYRUVATE_OXIDATION_CARBON_TRANSFER`,n=`pyruvate-oxidation-carbon-transfer-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-22451dfcee89.js.map

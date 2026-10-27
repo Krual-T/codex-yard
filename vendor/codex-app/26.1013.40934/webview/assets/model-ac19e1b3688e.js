@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t={pan:0},n=e=>Math.max(-100,Math.min(100,e)),r=e=>{let r=Number.isFinite(e.pan)?n(e.pan??t.pan):t.pan,i=(100-r)/200,a=(100+r)/200;return{pan:r,left:i,right:a,leftPercent:i*100,rightPercent:a*100,markerPercent:(r+100)/2,isCenter:r===0,isFullLeft:r===-100,isFullRight:r===100,strongerSide:r===0?`center`:r<0?`left`:`right`}}})))()}export{r as n,i as r,t};
+//# sourceMappingURL=model-ac19e1b3688e.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`neighbor_count: 0`,initialValues:{neighbor_count:`0`}},{name:`neighbor_count: 1`,initialValues:{neighbor_count:`1`}},{name:`neighbor_count: 3`,initialValues:{neighbor_count:`3`}},{name:`neighbor_count: 4`,initialValues:{neighbor_count:`4`}},{name:`neighbor_count: 6`,initialValues:{neighbor_count:`6`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-353cd457c4e9.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`LICHEN_FUNGAL_ALGAL_SYMBIOSIS`,n=`lichen-fungal-algal-symbiosis-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ce2c8996ae63.js.map

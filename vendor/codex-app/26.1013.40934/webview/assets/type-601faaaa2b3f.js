@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOGEOCHEMICAL_CARBON_PHOTOSYNTHESIS_RESPIRATION_EXCHANGE`,n=`biogeochemical-carbon-photosynthesis-respiration-exchange-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-601faaaa2b3f.js.map

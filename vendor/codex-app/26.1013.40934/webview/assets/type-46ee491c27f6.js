@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_INTESTINAL_FOLDS_VILLI_AND_MICROVILLI`,n=`animal-intestinal-folds-villi-and-microvilli-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-46ee491c27f6.js.map

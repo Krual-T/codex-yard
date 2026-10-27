@@ -8,7 +8,7 @@ import { chromium } from 'playwright-core';
 import type { Browser, Frame, Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { rendererAssets } from '../src/native/renderer-assets.ts';
-import { rendererRoot } from './copy-renderer.ts';
+import { rendererRoot } from '../lib/app-resources.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
 
 const output = resolve(process.env.AGENTS_PET_EVIDENCE || '.local/mini-evidence');

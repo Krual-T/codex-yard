@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=(e,t)=>{let n={};return Object.entries(t).forEach(([t,r])=>{let i=e[t];if(r.kind===`enum`){n[t]=typeof i==`string`&&r.allowedValues.includes(i)?i:r.defaultValue;return}let a=typeof i==`number`&&Number.isFinite(i)?i:r.defaultValue,o=Math.min(Math.max(a,r.min),r.max);n[t]=r.kind===`integer`?Math.round(o):o}),n}})))()}export{t as n,n as t};
+//# sourceMappingURL=multivariable-values-7824504b85e5.js.map

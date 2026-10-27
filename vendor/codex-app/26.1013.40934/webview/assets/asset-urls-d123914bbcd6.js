@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./asset-urls-7b37d9af42db.js";var r,i,a,o,s,c;function l(){return(l=e((()=>{n(),{amoeba:r,euglena:i,kelp:a,paramecium:o}=t,s=r.slice(0,r.lastIndexOf(`/`)+1),c={"image-icon-amoeba-v1@3x.webp":r,"image-icon-euglena-v1@3x.webp":i,"image-icon-kelp-v1@3x.webp":a,"image-icon-paramecium-v1@3x.webp":o}})))()}export{c as n,s as r,l as t};
+//# sourceMappingURL=asset-urls-d123914bbcd6.js.map

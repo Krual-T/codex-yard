@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PLANT_STRUCTURE_TRANSPORT_AND_REPRODUCTION`,n=`plant-structure-transport-and-reproduction-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-73c45877b1bc.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{temperatureCelsius:10,surfaceAreaPercent:25,airflowMetersPerSecond:0,humidityPercent:0}},{name:`Maximum supported values`,initialValues:{temperatureCelsius:60,surfaceAreaPercent:100,airflowMetersPerSecond:3,humidityPercent:100}},{name:`attraction: weak`,initialValues:{attraction:`weak`}},{name:`attraction: strong`,initialValues:{attraction:`strong`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-fcced5383955.js.map

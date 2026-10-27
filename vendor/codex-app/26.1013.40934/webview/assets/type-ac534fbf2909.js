@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`CELLULAR_RESPIRATION_PATHWAY_OVERVIEW`,n=`cellular-respiration-pathway-overview-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ac534fbf2909.js.map

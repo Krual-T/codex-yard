@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`TENDRIL_THIGMOTROPISM_TOUCH_COILING`,n=`tendril-thigmotropism-touch-coiling-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-581b22ad7267.js.map

@@ -1,0 +1,1 @@
+import{n as e,t}from"./bean-off-N0uXv754-42a1f8f72659.js";e();export{t as default};

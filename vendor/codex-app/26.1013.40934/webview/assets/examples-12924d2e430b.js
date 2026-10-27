@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`event: sum equals 5`,initialValues:{event:`sum equals 5`}},{name:`event: sum at least 10`,initialValues:{event:`sum at least 10`}},{name:`event: matching values`,initialValues:{event:`matching values`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-12924d2e430b.js.map

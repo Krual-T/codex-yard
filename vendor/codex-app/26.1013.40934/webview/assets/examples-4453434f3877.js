@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_example: 2-ethylpent-1-ene`,initialValues:{initial_example:`2-ethylpent-1-ene`}},{name:`initial_example: 4-methylhex-2-yne`,initialValues:{initial_example:`4-methylhex-2-yne`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-4453434f3877.js.map

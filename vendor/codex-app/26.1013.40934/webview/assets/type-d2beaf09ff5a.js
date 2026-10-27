@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SENSORY_VISUAL_RETINA_CORTEX_PATHWAY`,n=`sensory-visual-retina-cortex-pathway-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-d2beaf09ff5a.js.map

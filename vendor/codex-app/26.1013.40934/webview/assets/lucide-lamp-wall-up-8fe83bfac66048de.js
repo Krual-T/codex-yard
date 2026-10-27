@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`LampWallUp`,[[`path`,{d:`M11 4h6l3 7H8l3-7Z`,key:`11x1ee`}],[`path`,{d:`M14 11v5a2 2 0 0 1-2 2H8`,key:`eutp5o`}],[`path`,{d:`M4 15h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H4v-6Z`,key:`1iuthr`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-lamp-wall-up-8fe83bfac66048de.js.map

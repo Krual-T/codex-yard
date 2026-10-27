@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=8,n=6,r=(e,r,i)=>{let a=e.closest(`[data-summary-panel-variant]`);if(a!=null&&i!=null){let o=a.getBoundingClientRect();if(o.left>=(i+t)*r+n){let n=e.getBoundingClientRect();return{align:`start`,alignOffset:o.top-n.top,side:`left`,sideOffset:n.left-o.left+t*r}}}return{align:`end`,side:`bottom`}}})))()}export{i as n,r as t};
+//# sourceMappingURL=summary-panel-menu-placement-7bab1be2eac6.js.map

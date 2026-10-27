@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`substrate_class: ketone`,initialValues:{substrate_class:`ketone`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-4e14c2722eaa.js.map

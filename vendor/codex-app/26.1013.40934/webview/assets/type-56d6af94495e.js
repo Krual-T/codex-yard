@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`GIBBERELLIN_STEM_INTERNODE_ELONGATION`,n=`gibberellin-stem-internode-elongation-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-56d6af94495e.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`WIND_TURBINE`,n=`wind-turbine-v1`,r={rated_power_kw:{kind:`number`,defaultValue:3e3,min:100,max:2e4}},i={type:t,version:3,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-3f4953af8baf.js.map

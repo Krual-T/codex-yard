@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`neutral-beetle-v1@3x-41df42f6bd78.webp?as=url`,import.meta.url).href})))()}var r,i;function a(){return(a=e((()=>{n(),r=t.slice(0,t.lastIndexOf(`/`)+1),i={"neutral-beetle-v1@3x.webp":t}})))()}export{i as n,r,a as t};
+//# sourceMappingURL=asset-urls-3eaf331755be.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{savingRatePercent:20,depreciationRatePercent:4.5,populationGrowthRatePercent:1,technologyGrowthRatePercent:1.5}},{name:`Maximum supported values`,initialValues:{savingRatePercent:50,depreciationRatePercent:10,populationGrowthRatePercent:4,technologyGrowthRatePercent:4}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-5f9b343fdcfd.js.map

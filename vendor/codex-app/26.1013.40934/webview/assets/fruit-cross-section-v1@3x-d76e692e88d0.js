@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`fruit-cross-section-v1@3x-27ac7f052d88.webp`,import.meta.url).href})))()}export{n,t};
+//# sourceMappingURL=fruit-cross-section-v1@3x-d76e692e88d0.js.map

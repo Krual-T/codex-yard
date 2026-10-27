@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`SOLUTION_DILUTION`,n=`solution-dilution-v2`,r=`M_1V_1=M_2V_2`,i={initialConcentrationMolesPerLiter:{kind:`number`,defaultValue:1.5,min:.1,max:3},initialVolumeLiters:{kind:`number`,defaultValue:2,min:.5,max:5},waterAddedLiters:{kind:`number`,defaultValue:3,min:0,max:5}},a={type:t,version:1,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-b20da9986277.js.map

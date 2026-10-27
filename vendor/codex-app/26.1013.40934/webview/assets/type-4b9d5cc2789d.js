@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOGEOCHEMICAL_PHOSPHORUS_ROCK_TO_FOOD_WEB`,n=`biogeochemical-phosphorus-rock-to-food-web-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-4b9d5cc2789d.js.map

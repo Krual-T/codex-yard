@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{durationADays:1,durationBDays:1,durationCDays:1,durationDDays:1,durationEDays:1,durationFDays:1}},{name:`Maximum supported values`,initialValues:{durationADays:10,durationBDays:10,durationCDays:10,durationDDays:10,durationEDays:10,durationFDays:10}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-dd4199aaacdd.js.map

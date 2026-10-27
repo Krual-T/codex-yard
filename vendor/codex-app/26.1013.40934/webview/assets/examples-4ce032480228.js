@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_method: seed-tree`,initialValues:{initial_method:`seed-tree`}},{name:`initial_method: shelterwood`,initialValues:{initial_method:`shelterwood`}},{name:`initial_method: single-tree selection`,initialValues:{initial_method:`single-tree selection`}},{name:`initial_method: group selection`,initialValues:{initial_method:`group selection`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-4ce032480228.js.map

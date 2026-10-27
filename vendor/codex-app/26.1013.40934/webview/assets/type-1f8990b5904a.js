@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PHYLOGENETIC_COMMON_ANCESTOR_TRACING`,n=`phylogenetic-common-ancestor-tracing-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-1f8990b5904a.js.map

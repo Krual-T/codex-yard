@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`HPA_AXIS_CORTISOL_STRESS_RESPONSE`,n=`hpa-axis-cortisol-stress-response-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-2f43bdec8785.js.map

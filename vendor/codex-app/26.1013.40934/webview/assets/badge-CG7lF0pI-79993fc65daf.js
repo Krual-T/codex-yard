@@ -1,0 +1,1 @@
+import{n as e,t}from"./badge-CG7lF0pI-a0be2a3c888b.js";e();export{t as default};

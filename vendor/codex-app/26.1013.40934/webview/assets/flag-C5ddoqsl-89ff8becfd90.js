@@ -1,0 +1,1 @@
+import{n as e,t}from"./flag-C5ddoqsl-aeb46232ff30.js";e();export{t as default};

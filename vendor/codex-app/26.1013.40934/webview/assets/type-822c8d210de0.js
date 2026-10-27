@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`INCOMPLETE_DOMINANCE_PHENOTYPE_RATIOS`,n=`incomplete-dominance-phenotype-ratios-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-822c8d210de0.js.map

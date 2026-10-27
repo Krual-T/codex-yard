@@ -1,0 +1,1 @@
+@layer components{._promptPreview_1nf7m_2{min-width:0;max-width:100%;min-height:0;font-size:var(--text-sm);line-height:var(--leading-relaxed);font-weight:var(--font-weight-normal);display:flex}._promptPreview_1nf7m_2:where([data-codex-window-type=browser] ._promptPreview_1nf7m_2){font-size:var(--text-base);line-height:calc(var(--spacing) * 7);letter-spacing:-.02em}}

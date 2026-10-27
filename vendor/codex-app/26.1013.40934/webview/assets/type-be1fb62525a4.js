@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`INTRACELLULAR_RECEPTOR_HORMONE_BINDING`,n=`intracellular-receptor-hormone-binding-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-be1fb62525a4.js.map

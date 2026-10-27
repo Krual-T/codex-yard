@@ -1,0 +1,1 @@
+import"./app-shared-61271c39e3c5.js";import{n as e,t}from"./details-c772dfb6ec7e.js";e();export{t as SkillDetails};

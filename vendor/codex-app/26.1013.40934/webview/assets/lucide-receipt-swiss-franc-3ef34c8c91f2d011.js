@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`ReceiptSwissFranc`,[[`path`,{d:`M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z`,key:`q3az6g`}],[`path`,{d:`M10 17V7h5`,key:`k7jq18`}],[`path`,{d:`M10 11h4`,key:`1i0mka`}],[`path`,{d:`M8 15h5`,key:`vxg57a`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-receipt-swiss-franc-3ef34c8c91f2d011.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(){let{pathname:e,protocol:t}=new URL(window.location.href);if(t!==`https:`&&t!==`http:`)return null;let n=((typeof document>`u`?void 0:document.documentElement.dataset.routerBasename)??`/`).replace(/\/$/,``);return e.startsWith(`${n}/`)&&/^\/security-settings\/?$/i.test(e.slice(n.length))?e:null}function n(){return new URL(t()??`/settings/security`,window.location.origin)}function r(){return(r=e((()=>{})))()}export{t as n,r,n as t};
+//# sourceMappingURL=return-url-fc251a8ad74f.js.map

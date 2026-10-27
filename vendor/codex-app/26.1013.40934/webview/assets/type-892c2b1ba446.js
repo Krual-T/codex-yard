@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`IONIC_FORMULAS`,n=`ionic-formulas-v2`,r={cation:{kind:`enum`,defaultValue:`aluminum`,allowedValues:[`sodium`,`potassium`,`silver`,`magnesium`,`calcium`,`zinc`,`barium`,`aluminum`,`iron_iii`]},anion:{kind:`enum`,defaultValue:`oxide`,allowedValues:[`chloride`,`fluoride`,`bromide`,`oxide`,`sulfide`,`nitride`,`phosphide`]}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-892c2b1ba446.js.map

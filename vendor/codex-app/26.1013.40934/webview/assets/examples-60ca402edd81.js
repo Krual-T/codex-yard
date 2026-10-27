@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{ksp:1e-18}},{name:`Maximum supported values`,initialValues:{ksp:1e-16}},{name:`dissolution_stoichiometry: MX2`,initialValues:{dissolution_stoichiometry:`MX2`}},{name:`dissolution_stoichiometry: M2X3`,initialValues:{dissolution_stoichiometry:`M2X3`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-60ca402edd81.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`RESPIRATION_FOOD_OXYGEN_ENERGY_WASTE_OVERVIEW`,n=`respiration-food-oxygen-energy-waste-overview-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-806e954231f8.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`FORMAL_CHARGE`,n=`formal-charge-v1`,r={example:{kind:`enum`,defaultValue:`carbon-dioxide-candidates`,allowedValues:[`carbon-dioxide-candidates`,`nitrite-resonance`,`ammonium`]}},i={type:t,version:3,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-23b0e0e9a23b.js.map

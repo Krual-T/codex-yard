@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`adjustment: loss_exit`,initialValues:{adjustment:`loss_exit`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-271c228a34f5.js.map

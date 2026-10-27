@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BIOGEOCHEMICAL_CARBON_BURIAL_AND_GEOLOGICAL_STORAGE`,n=`biogeochemical-carbon-burial-and-geological-storage-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-71205a4ffa8c.js.map

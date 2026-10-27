@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`POPULATION_GENETICS_ALLELE_FREQUENCY_BOOKKEEPING`,n=`population-genetics-allele-frequency-bookkeeping-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-f898c4eb601c.js.map

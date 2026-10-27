@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=60,n=(e,t=9)=>Math.sqrt(Math.max(0,t**2-e**2)),r=(e,t)=>{let r=e*t;return{x:r,y:n(r,e)}},i=(e=9)=>Array.from({length:61},(n,i)=>r(e,i/t)),a=i()})))()}export{o as a,r as i,i as n,n as r,a as t};
+//# sourceMappingURL=production-possibilities-ac07e1edadc7.js.map

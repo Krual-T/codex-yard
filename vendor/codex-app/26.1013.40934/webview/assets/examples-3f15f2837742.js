@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{initialInventory:220,demandRateUnitsPerDay:20,leadTimeDays:2,safetyStock:20}},{name:`Maximum supported values`,initialValues:{initialInventory:300,demandRateUnitsPerDay:40,leadTimeDays:4,safetyStock:60}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-3f15f2837742.js.map

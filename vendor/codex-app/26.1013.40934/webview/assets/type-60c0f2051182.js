@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PASSIVE_VERSUS_ACTIVE_MEMBRANE_TRANSPORT`,n=`passive-versus-active-membrane-transport-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-60c0f2051182.js.map

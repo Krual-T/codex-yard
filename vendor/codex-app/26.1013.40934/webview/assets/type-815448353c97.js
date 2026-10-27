@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ENVELOPED_VERSUS_NON_ENVELOPED_ANIMAL_VIRUSES`,n=`enveloped-versus-non-enveloped-animal-viruses-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-815448353c97.js.map

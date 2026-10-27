@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e,t){return typeof t?.enabled==`boolean`?t.enabled:e?.__default?.enabled??!0}function n(){return(n=e((()=>{})))()}export{t as n,n as t};
+//# sourceMappingURL=is-plan-event-enabled-edb7e7f2c465.js.map

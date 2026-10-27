@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`DNA_REPLICATION_FIVE_PRIME_TO_THREE_PRIME_SYNTHESIS`,n=`dna-replication-five-prime-to-three-prime-synthesis-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-68d8f07ee799.js.map

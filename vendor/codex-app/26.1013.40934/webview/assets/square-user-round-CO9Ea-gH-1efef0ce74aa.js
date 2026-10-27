@@ -1,0 +1,1 @@
+import{n as e,t}from"./square-user-round-CO9Ea-gH-cf07f7bfc7cb.js";t();export{e as default};

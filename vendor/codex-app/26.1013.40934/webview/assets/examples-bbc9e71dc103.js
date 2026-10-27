@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{atomic_number:1}},{name:`Maximum supported values`,initialValues:{atomic_number:118}},{name:`initial_view: atomic_radius`,initialValues:{initial_view:`atomic_radius`}},{name:`initial_view: first_ionization_energy`,initialValues:{initial_view:`first_ionization_energy`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-bbc9e71dc103.js.map

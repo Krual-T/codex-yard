@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_VIRUS_RECEPTOR_BINDING_AND_HOST_RANGE`,n=`animal-virus-receptor-binding-and-host-range-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-c8bee44375f5.js.map

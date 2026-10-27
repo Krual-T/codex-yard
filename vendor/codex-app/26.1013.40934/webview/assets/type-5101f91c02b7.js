@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SENSORY_VESTIBULAR_ROTATION_HAIR_CELL_SIGNALING`,n=`sensory-vestibular-rotation-hair-cell-signaling-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-5101f91c02b7.js.map

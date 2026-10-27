@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=[`low-feedback`,`trh-release`,`tsh-release`,`thyroid-output`,`restored-feedback`],n={min:0,max:t.length-1,step:1,defaultValue:0},r=(e,t,n)=>Math.min(Math.max(e,t),n),i=e=>{let t=e.stepIndex;return{stepIndex:r(Math.round(typeof t==`number`&&Number.isFinite(t)?t:n.defaultValue),n.min,n.max)}},a=e=>{let{stepIndex:n}=i(e);return t[n]}})))()}export{i as a,o as i,n,a as r,t};
+//# sourceMappingURL=model-c0f0300b77cc.js.map

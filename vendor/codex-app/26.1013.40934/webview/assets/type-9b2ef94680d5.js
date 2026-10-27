@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SKIN_WOUND_HEMOSTASIS_SCAB_AND_TISSUE_REPAIR`,n=`skin-wound-hemostasis-scab-and-tissue-repair-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-9b2ef94680d5.js.map

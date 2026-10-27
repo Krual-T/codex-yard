@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=String.raw,n=t`\p{Emoji}(?:\p{EMod}|[\u{E0020}-\u{E007E}]+\u{E007F}|\uFE0F?\u20E3?)`,r=()=>new RegExp(t`\p{RI}{2}|(?![#*\d](?!\uFE0F?\u20E3))${n}(?:\u200D${n})*`,`gu`)})))()}export{i as n,r as t};
+//# sourceMappingURL=emoji-regex-xs-ae6eb0becbe3.js.map

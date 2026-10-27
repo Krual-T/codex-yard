@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{content:`\\theta = \\sin^{-1}(0.5)`},{content:`\\theta = \\cos^{-1}(0.5)`},{content:`\\theta = \\tan^{-1}(1)`},{content:`y = \\arcsin(-0.5)`},{content:`x = arccos(0.5)`},{content:`\\arcsin(1/2)`},{content:`\\theta = \\arctan(1+1)`}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-d6c7fd3cb6f0.js.map

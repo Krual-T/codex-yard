@@ -1,0 +1,1 @@
+import{n as e,t}from"./lucide-scan-text-550b400a7be823d7.js";e();export{t as default};

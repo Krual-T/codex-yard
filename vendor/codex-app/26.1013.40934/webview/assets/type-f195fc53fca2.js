@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`POPULATION_ECOLOGY_LIFE_HISTORY_TRADEOFFS`,n=`population-ecology-life-history-tradeoffs-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-f195fc53fca2.js.map

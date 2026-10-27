@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{sound_level_dba:82,exposure_duration_minutes:0}},{name:`Maximum supported values`,initialValues:{sound_level_dba:100,exposure_duration_minutes:960}},{name:`88 dBA equal-dose example`,initialValues:{sound_level_dba:88,exposure_duration_minutes:240}},{name:`Intermediate sound level`,initialValues:{sound_level_dba:89.5,exposure_duration_minutes:180}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-36e0b9558640.js.map

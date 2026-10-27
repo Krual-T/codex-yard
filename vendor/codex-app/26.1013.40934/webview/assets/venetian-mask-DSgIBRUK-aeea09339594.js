@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`VenetianMask`,[[`path`,{d:`M2 12a5 5 0 0 0 5 5 8 8 0 0 1 5 2 8 8 0 0 1 5-2 5 5 0 0 0 5-5V7h-5a8 8 0 0 0-5 2 8 8 0 0 0-5-2H2Z`,key:`1g6z3j`}],[`path`,{d:`M6 11c1.5 0 3 .5 3 2-2 0-3 0-3-2Z`,key:`c2lwnf`}],[`path`,{d:`M18 11c-1.5 0-3 .5-3 2 2 0 3 0 3-2Z`,key:`njd9zo`}]])})))()}export{r as n,i as t};
+//# sourceMappingURL=venetian-mask-DSgIBRUK-aeea09339594.js.map

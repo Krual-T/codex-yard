@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MICROSCOPY_SCALE_BAR_CELL_MEASUREMENT`,n=`microscopy-scale-bar-cell-measurement-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-e95d6b1ca1f3.js.map

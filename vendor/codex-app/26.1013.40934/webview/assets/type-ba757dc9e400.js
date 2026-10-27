@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`BACTERIAL_CELL_SHAPES_AND_ARRANGEMENTS`,n=`bacterial-cell-shapes-and-arrangements-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ba757dc9e400.js.map

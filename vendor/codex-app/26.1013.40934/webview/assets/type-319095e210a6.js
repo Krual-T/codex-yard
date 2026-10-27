@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`CARBON_BUDGET_EMISSION_REDUCTION_AND_SINK_RESTORATION`,n=`carbon-budget-emission-reduction-and-sink-restoration-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-319095e210a6.js.map

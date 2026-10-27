@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`EPIDERMAL_MELANOCYTE_MELANIN_UV_PROTECTION`,n=`epidermal-melanocyte-melanin-uv-protection-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-6d75a72828bb.js.map

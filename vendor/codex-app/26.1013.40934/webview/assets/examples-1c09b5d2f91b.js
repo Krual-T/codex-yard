@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{production_wheat:5,trade_rate:.4}},{name:`Maximum supported values`,initialValues:{production_wheat:9,trade_rate:1.8}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-1c09b5d2f91b.js.map

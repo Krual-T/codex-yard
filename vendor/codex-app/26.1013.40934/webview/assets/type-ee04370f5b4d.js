@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`NUCLEUS_AND_RIBOSOME_FUNCTIONS`,n=`nucleus-and-ribosome-functions-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-ee04370f5b4d.js.map

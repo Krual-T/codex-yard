@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`HABITAT_FRAGMENTATION_POPULATION_ISOLATION`,n=`habitat-fragmentation-population-isolation-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-5a5c7e69e977.js.map

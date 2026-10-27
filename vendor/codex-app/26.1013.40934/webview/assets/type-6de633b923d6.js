@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_HEMOGLOBIN_OXYGEN_DISSOCIATION_CURVE`,n=`animal-hemoglobin-oxygen-dissociation-curve-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-6de633b923d6.js.map

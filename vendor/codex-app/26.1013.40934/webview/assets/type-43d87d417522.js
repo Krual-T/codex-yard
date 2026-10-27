@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`LIFE_PLANT_ANIMAL_FUNGAL_CELL_STRUCTURES`,n=`life-plant-animal-fungal-cell-structures-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-43d87d417522.js.map

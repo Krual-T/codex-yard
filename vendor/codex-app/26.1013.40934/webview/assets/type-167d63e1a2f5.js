@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`HISTONE_ACETYLATION_CHROMATIN_OPENING`,n=`histone-acetylation-chromatin-opening-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-167d63e1a2f5.js.map

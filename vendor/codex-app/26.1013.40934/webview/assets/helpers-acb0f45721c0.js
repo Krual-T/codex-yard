@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e){return typeof e==`string`}function n(e){return typeof e==`number`}function r(e){return typeof e==`function`}function i(e){return e!=null}function a(e){return Object.prototype.toString.call(e).slice(8,-1).toLowerCase()===`object`}function o(){return(o=e((()=>{})))()}export{a,n as i,o as n,t as o,r,i as t};
+//# sourceMappingURL=helpers-acb0f45721c0.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`compound: CO2`,initialValues:{compound:`CO2`}},{name:`compound: NaCl`,initialValues:{compound:`NaCl`}},{name:`compound: Ca(OH)2`,initialValues:{compound:`Ca(OH)2`}},{name:`compound: Al2(SO4)3`,initialValues:{compound:`Al2(SO4)3`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-320eef3c680f.js.map

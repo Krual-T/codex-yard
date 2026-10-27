@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_molecular_class: alkane`,initialValues:{initial_molecular_class:`alkane`}},{name:`initial_molecular_class: ketone`,initialValues:{initial_molecular_class:`ketone`}},{name:`initial_molecular_class: carboxylic acid`,initialValues:{initial_molecular_class:`carboxylic acid`}},{name:`initial_molecular_class: nitrile`,initialValues:{initial_molecular_class:`nitrile`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-b0b243877626.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`EPIDERMAL_CORNEOCYTES_LIPID_WATER_BARRIER`,n=`epidermal-corneocytes-lipid-water-barrier-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-4a91b425b9ac.js.map

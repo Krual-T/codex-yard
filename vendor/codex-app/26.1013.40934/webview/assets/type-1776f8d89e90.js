@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SUSTAINABLE_FISHERIES_HARVEST_POPULATION_RECOVERY`,n=`sustainable-fisheries-harvest-population-recovery-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-1776f8d89e90.js.map

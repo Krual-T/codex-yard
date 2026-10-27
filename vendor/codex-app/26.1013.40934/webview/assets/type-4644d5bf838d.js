@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`AROMATICITY_AND_HUCKELS_RULE`,n=`aromaticity-and-huckels-rule-v1`,r={initial_example:{kind:`enum`,defaultValue:`benzene`,allowedValues:[`benzene`,`cyclobutadiene`,`cyclooctatetraene`,`cyclopentadienyl-anion`,`cyclopropenyl-cation`]}},i={type:t,version:1,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-4644d5bf838d.js.map

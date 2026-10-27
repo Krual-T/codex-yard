@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a,o,s,c;function l(){return(l=e((()=>{t={min:1.2,max:4.4,step:.2,defaultValue:2.4},n=5,r=5,i=2,a=.6,o=(e,t,n)=>Math.min(Math.max(e,t),n),s=e=>({externalBenefit:Number.isFinite(e.externalBenefit)?o(e.externalBenefit??t.defaultValue,t.min,t.max):t.defaultValue}),c=e=>{let t=s(e),o=n+t.externalBenefit/(2*a);return{...t,marketQuantity:n,socialQuantity:o,marketPrice:r,socialPrice:i+a*o}}})))()}export{s as i,c as n,l as r,t};
+//# sourceMappingURL=model-99225b8da6ab.js.map

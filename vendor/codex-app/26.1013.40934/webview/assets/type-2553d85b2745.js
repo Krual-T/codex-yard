@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`EPITHELIAL_NONVASCULAR_CONNECTIVE_TISSUE_BLOOD_SUPPLY`,n=`epithelial-nonvascular-connective-tissue-blood-supply-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-2553d85b2745.js.map

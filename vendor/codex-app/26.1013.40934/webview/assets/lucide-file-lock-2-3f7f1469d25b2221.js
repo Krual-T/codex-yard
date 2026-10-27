@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`FileLock2`,[[`path`,{d:`M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v1`,key:`jmtmu2`}],[`path`,{d:`M14 2v4a2 2 0 0 0 2 2h4`,key:`tnqrlb`}],[`rect`,{width:`8`,height:`5`,x:`2`,y:`13`,rx:`1`,key:`10y5wo`}],[`path`,{d:`M8 13v-2a2 2 0 1 0-4 0v2`,key:`1pdxzg`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-file-lock-2-3f7f1469d25b2221.js.map

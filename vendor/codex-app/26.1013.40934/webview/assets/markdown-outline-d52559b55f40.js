@@ -1,0 +1,3 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e){let t=[],n=null;for(let[r]of e.matchAll(/[^\r\n]+/g)){let e=/^ {0,3}(`{3,}|~{3,})(.*)$/.exec(r);if(n!=null){e!=null&&e[1][0]===n[0]&&e[1].length>=n.length&&e[2].trim()===``&&(n=null);continue}if(e!=null){n=e[1];continue}let i=/^ {0,3}(#{1,6})[\t ]+(.+?)\s*$/.exec(r);if(i==null)continue;let a=i[2].replace(/[\t ]+#+[\t ]*$/,``).trim();if(a&&t.push(`${`  `.repeat(i[1].length-1)}${a.slice(0,160)}`),t.length===8)break}return t.length?t.join(`
+`):null}function n(){return(n=e((()=>{})))()}export{n,t};
+//# sourceMappingURL=markdown-outline-d52559b55f40.js.map

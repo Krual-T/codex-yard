@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`RECOMBINANT_DNA_PLASMID_WORKFLOW`,n=`recombinant-dna-plasmid-workflow-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-eb58d40a2be5.js.map

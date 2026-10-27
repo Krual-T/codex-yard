@@ -1,0 +1,1 @@
+import{n as e,t}from"./lucide-bed-1e8a7dc81b79e9b8.js";e();export{t as default};

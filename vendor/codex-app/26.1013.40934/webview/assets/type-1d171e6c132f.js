@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ECOSYSTEM_SERVICE_WETLAND_WATER_FILTRATION`,n=`ecosystem-service-wetland-water-filtration-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-1d171e6c132f.js.map

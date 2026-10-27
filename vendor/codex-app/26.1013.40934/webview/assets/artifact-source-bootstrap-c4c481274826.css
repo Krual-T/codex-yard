@@ -1,0 +1,1 @@
+.popcorn-inspector-panel-scroll{scrollbar-width:thin;scrollbar-gutter:stable}.popcorn-inspector-panel-content{opacity:1;transition:opacity .2s ease-out,transform .2s ease-out;transform:translate(0)}@starting-style{.popcorn-inspector-panel-content{opacity:0;transform:translate(8px)}}@media (prefers-reduced-motion:reduce){.popcorn-inspector-panel-content{transition:none}}

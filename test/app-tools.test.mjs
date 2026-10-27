@@ -9,7 +9,6 @@ import { createAppTools, defaultAppToolsAdapter } from '../lib/app-tools.ts';
 import { fixtureAdapterPath } from './native-fixture.ts';
 
 const officialAdapterPath = process.env.AGENTS_APP_TOOLS_ADAPTER || defaultAppToolsAdapter;
-const officialIntegration = { skip: process.env.AGENTS_TEST_OFFICIAL_ADAPTER !== '1' && 'Run npm run test:app-tools with Codex App installed' };
 
 const tools = [{ namespace: 'codex_app', name: 'fixture_echo', description: 'Return a disposable test value.',
   inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } }];
@@ -73,7 +72,7 @@ async function pipe(t, app) {
 
 async function adapter(t, app) {
   const config = app.config['mcp_servers.codex_app'];
-  // Run the installed official adapter with only the two host variables supplied by this module.
+  // Run the vendored official adapter with only the two host variables supplied by this module.
   const child = spawn(config.command, config.args, { cwd: config.cwd, env: config.env, stdio: ['pipe', 'pipe', 'pipe'] });
   let stderr = '';
   child.stderr.setEncoding('utf8');
@@ -109,7 +108,7 @@ async function adapter(t, app) {
   };
 }
 
-test('the installed official MCP adapter initializes, lists only host tools, and preserves call metadata and results', officialIntegration, async t => {
+test('the vendored official MCP adapter initializes, lists only host tools, and preserves call metadata and results', async t => {
   const calls = [];
   const app = await fixture(t, params => {
     calls.push(params);
@@ -270,7 +269,7 @@ test('an unavailable official adapter fails explicitly before starting a host', 
   });
 });
 
-test('the official adapter reconnects to a stable pipe after host replacement without losing caller files', officialIntegration, async t => {
+test('the official adapter reconnects to a stable pipe after host replacement without losing caller files', async t => {
   const directory = await mkdtemp('/tmp/aw-restart-');
   t.after(() => rm(directory, { recursive: true, force: true }));
   const socketPath = join(directory, 'tools.sock');

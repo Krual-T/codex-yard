@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`STEM_CELL_ASYMMETRIC_DIVISION_AND_SELF_RENEWAL`,n=`stem-cell-asymmetric-division-and-self-renewal-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-689b3aa08e59.js.map

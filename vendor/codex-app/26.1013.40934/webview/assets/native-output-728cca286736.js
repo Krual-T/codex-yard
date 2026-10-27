@@ -1,0 +1,1 @@
+import"./app-shared-61271c39e3c5.js";import{n as e,t}from"./native-output-ce59ccc7d60c.js";t();export{e as loadNativePageArtifact};

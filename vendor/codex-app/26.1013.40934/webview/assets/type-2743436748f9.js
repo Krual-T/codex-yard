@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`COMPLEMENT_OPSONIZATION_PHAGOCYTE_RECOGNITION`,n=`complement-opsonization-phagocyte-recognition-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-2743436748f9.js.map

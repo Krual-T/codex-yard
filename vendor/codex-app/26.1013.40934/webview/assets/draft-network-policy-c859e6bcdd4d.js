@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";function t(e){return e?.networkEnabled===!0?e.networkPreset===`all`?{type:`unrestricted`}:{type:`restricted`,presets:e.networkPreset===`none`?[]:[`package_managers`],egress_rules:(e.networkDomains??[]).map(e=>({host:e}))}:{type:`disabled`}}function n(){return(n=e((()=>{})))()}export{n,t};
+//# sourceMappingURL=draft-network-policy-c859e6bcdd4d.js.map

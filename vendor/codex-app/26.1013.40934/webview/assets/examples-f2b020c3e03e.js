@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{sample_mass_g:.25,combustion_energy_kj_per_g:15,calorimeter_heat_capacity_kj_per_k:8}},{name:`Maximum supported values`,initialValues:{sample_mass_g:2,combustion_energy_kj_per_g:35,calorimeter_heat_capacity_kj_per_k:25}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-f2b020c3e03e.js.map

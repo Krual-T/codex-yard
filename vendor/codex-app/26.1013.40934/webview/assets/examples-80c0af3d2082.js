@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`input0: true`,initialValues:{input0:!0}},{name:`input1: false`,initialValues:{input1:!1}},{name:`input2: true`,initialValues:{input2:!0}},{name:`input3: false`,initialValues:{input3:!1}},{name:`select1: true`,initialValues:{select1:!0}},{name:`select0: false`,initialValues:{select0:!1}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-80c0af3d2082.js.map

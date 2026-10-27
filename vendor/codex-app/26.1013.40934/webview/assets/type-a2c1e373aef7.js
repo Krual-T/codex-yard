@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`PLANT_ANATOMY`,n=`plant-anatomy-v3`,r={initial_organ:{kind:`enum`,defaultValue:`root`,allowedValues:[`root`,`stem`,`leaf`]},initial_transport_tissue:{kind:`enum`,defaultValue:`xylem`,allowedValues:[`xylem`,`phloem`]}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-a2c1e373aef7.js.map

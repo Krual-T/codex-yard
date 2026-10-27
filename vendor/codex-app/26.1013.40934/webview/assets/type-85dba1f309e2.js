@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`SKIN_SUPERFICIAL_REGENERATION_VERSUS_DEEP_SCAR`,n=`skin-superficial-regeneration-versus-deep-scar-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-85dba1f309e2.js.map

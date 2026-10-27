@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=``+new URL(`folded-protein-subunit-a-v1@3x-af323f31ba5d.webp?as=url`,import.meta.url).href})))()}var r;function i(){return(i=e((()=>{r=``+new URL(`folded-protein-subunit-b-v1@3x-2ac6472b55bb.webp?as=url`,import.meta.url).href})))()}var a,o;function s(){return(s=e((()=>{n(),i(),a=t.slice(0,t.lastIndexOf(`/`)+1),o={"folded-protein-subunit-a-v1@3x.webp":t,"folded-protein-subunit-b-v1@3x.webp":r}})))()}export{o as n,a as r,s as t};
+//# sourceMappingURL=asset-urls-f7c45900d922.js.map

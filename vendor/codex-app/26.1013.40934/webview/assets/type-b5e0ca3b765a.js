@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i;function a(){return(a=e((()=>{t=`ISOTOPE_ATOMIC_MASS`,n=`isotope-atomic-mass-v2`,r={element:{kind:`enum`,defaultValue:`chlorine`,allowedValues:[`boron`,`carbon`,`neon`,`magnesium`,`sulfur`,`chlorine`,`copper`]}},i={type:t,version:2,thumbnailAssetKey:n,parameters:r}})))()}export{i as n,a as t};
+//# sourceMappingURL=type-b5e0ca3b765a.js.map

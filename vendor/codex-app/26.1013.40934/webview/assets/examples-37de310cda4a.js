@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{content:`e^{i\\theta} = \\cos(\\theta) + i\\sin(\\theta)`},{content:`\\cos x + i\\sin x = e^{ix}`},{content:`e^{-ix} = \\cos(x) - i\\sin(x)`},{content:`e^{i\\pi} = -1`},{content:`\\exp(i\\theta)=\\cos\\theta+i\\sin\\theta`},{content:`e^{j\\pi}+1=0`}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-37de310cda4a.js.map

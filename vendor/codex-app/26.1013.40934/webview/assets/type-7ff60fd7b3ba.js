@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`FAHRENHEIT_CELSIUS_SCALE`,n=`fahrenheit-celsius-scale-v1`,r=`F = \\frac{9}{5}C + 32`,i={celsius:{kind:`number`,defaultValue:0,min:-40,max:120}},a={type:t,version:1,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-7ff60fd7b3ba.js.map

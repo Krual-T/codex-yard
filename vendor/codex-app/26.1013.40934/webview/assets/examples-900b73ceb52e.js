@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`behaviorEffect: less_likely`,initialValues:{behaviorEffect:`less_likely`}},{name:`stimulusChange: removed`,initialValues:{stimulusChange:`removed`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-900b73ceb52e.js.map

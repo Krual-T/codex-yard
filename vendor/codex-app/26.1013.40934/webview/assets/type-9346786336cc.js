@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`MATTER_AND_ENERGY_IN_WHOLE_ORGANISMS`,n=`matter-and-energy-in-whole-organisms-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-9346786336cc.js.map

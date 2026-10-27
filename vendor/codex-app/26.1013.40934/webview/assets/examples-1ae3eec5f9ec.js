@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initialReaction: 2 HCl -> H2 + Cl2`,initialValues:{initialReaction:`2 HCl -> H2 + Cl2`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-1ae3eec5f9ec.js.map

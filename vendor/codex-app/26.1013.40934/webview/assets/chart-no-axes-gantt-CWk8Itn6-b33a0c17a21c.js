@@ -1,0 +1,1 @@
+import{n as e,t}from"./chart-no-axes-gantt-CWk8Itn6-1c866b6e6e4b.js";e();export{t as default};

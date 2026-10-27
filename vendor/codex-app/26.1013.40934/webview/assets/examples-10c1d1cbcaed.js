@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`initial_profile: developed profile without E`,initialValues:{initial_profile:`developed profile without E`}},{name:`initial_profile: young profile`,initialValues:{initial_profile:`young profile`}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-10c1d1cbcaed.js.map

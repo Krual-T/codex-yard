@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`CYTOKININ_CELL_DIVISION_AND_BUD_GROWTH`,n=`cytokinin-cell-division-and-bud-growth-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-abce2ea9e6f8.js.map

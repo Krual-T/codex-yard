@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`WITHDRAWAL_REFLEX_SENSORY_MOTOR_RESPONSE`,n=`withdrawal-reflex-sensory-motor-response-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-e55422374e65.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`CHEMICAL_SYNAPSE_NEUROTRANSMITTER_RELEASE`,n=`chemical-synapse-neurotransmitter-release-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-6d9e9c0bd954.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`DNA_REPLICATION_LEADING_LAGGING_STRAND_COMPARISON`,n=`dna-replication-leading-lagging-strand-comparison-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-a47564d8ff56.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`HUMAN_LAND_USE_BIODIVERSITY_LOSS`,n=`human-land-use-biodiversity-loss-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-3c23925a2cff.js.map

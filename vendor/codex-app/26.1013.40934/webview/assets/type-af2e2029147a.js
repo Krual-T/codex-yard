@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a,o;function s(){return(s=e((()=>{t=`PERIOD_FREQUENCY_RELATION`,n=`period-frequency-relation-v1`,r=`f = \\frac{1}{T}`,i=[`T = \\frac{1}{f}`,`T = 1 / f`,`1/t=f`,`1/f=t`,`t=2pi/omega`,`2pi/omega=t`,`tau=60/nz`,`60/nz=tau`],a={period:{kind:`number`,defaultValue:2,min:.01,max:1e3}},o={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,canonicalFormulaAliases:i,parameters:a}})))()}export{o as n,s as t};
+//# sourceMappingURL=type-af2e2029147a.js.map

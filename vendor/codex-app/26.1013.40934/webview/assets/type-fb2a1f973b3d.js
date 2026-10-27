@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ATP_ADP_PHOSPHATE_STRUCTURE`,n=`atp-adp-phosphate-structure-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-fb2a1f973b3d.js.map

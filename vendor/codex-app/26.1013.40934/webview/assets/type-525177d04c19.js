@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ORGANISM_SEED_RESERVES_TO_FIRST_LEAVES`,n=`organism-seed-reserves-to-first-leaves-v1`,r={type:t,version:2,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-525177d04c19.js.map

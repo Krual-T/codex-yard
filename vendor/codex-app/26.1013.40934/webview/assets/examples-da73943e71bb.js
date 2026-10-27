@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t;function n(){return(n=e((()=>{t=[{name:`Minimum supported values`,initialValues:{degrees_of_freedom:1,observed_value:0}},{name:`Maximum supported values`,initialValues:{degrees_of_freedom:20,observed_value:30}},{name:`Same statistic with two degrees of freedom`,initialValues:{degrees_of_freedom:2,observed_value:10}},{name:`Same statistic with twenty degrees of freedom`,initialValues:{degrees_of_freedom:20,observed_value:10}}]})))()}n();export{t as default};
+//# sourceMappingURL=examples-da73943e71bb.js.map

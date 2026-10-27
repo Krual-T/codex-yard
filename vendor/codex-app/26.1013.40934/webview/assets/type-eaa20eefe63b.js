@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`PLANT_PHOTOTROPISM_DIRECTIONAL_GROWTH`,n=`plant-phototropism-directional-growth-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-eaa20eefe63b.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r,i,a;function o(){return(o=e((()=>{t=`FILLING_RATES`,n=`filling-rates-v2`,r=`r_{\\mathrm{net}}=r_{\\mathrm{in}}-r_{\\mathrm{out}}`,i={inflowRateLitersPerMinute:{kind:`number`,defaultValue:6,min:0,max:8},outflowRateLitersPerMinute:{kind:`number`,defaultValue:2,min:0,max:8}},a={type:t,version:2,thumbnailAssetKey:n,canonicalFormula:r,parameters:i}})))()}export{a as n,o as t};
+//# sourceMappingURL=type-33d5b92afbca.js.map

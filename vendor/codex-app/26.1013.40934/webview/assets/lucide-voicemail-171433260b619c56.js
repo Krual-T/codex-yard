@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Voicemail`,[[`circle`,{cx:`6`,cy:`12`,r:`4`,key:`1ehtga`}],[`circle`,{cx:`18`,cy:`12`,r:`4`,key:`4vafl8`}],[`line`,{x1:`6`,x2:`18`,y1:`16`,y2:`16`,key:`pmt8us`}]])})))()}export{i as n,r as t};
+//# sourceMappingURL=lucide-voicemail-171433260b619c56.js.map

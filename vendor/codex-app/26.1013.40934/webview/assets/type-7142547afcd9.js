@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`ANIMAL_MOLLUSK_MANTLE_FOOT_VISCERAL_MASS`,n=`animal-mollusk-mantle-foot-visceral-mass-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-7142547afcd9.js.map

@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,r as n}from"./chunk-Y2CYZVJY-24cce454fd91.js";function r(e,t){e.accDescr&&t.setAccDescription?.(e.accDescr),e.accTitle&&t.setAccTitle?.(e.accTitle),e.title&&t.setDiagramTitle?.(e.title)}function i(){return(i=e((()=>{n(),t(r,`populateCommonDb`)})))()}export{r as n,i as t};
+//# sourceMappingURL=chunk-JWPE2WC7-dd581fb60828.js.map

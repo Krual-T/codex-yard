@@ -1,0 +1,2 @@
+import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";var t,n,r;function i(){return(i=e((()=>{t=`LIFE_ENDOSYMBIOTIC_ORIGIN_OF_MITOCHONDRIA`,n=`life-endosymbiotic-origin-of-mitochondria-v1`,r={type:t,version:1,thumbnailAssetKey:n}})))()}export{r as n,i as t};
+//# sourceMappingURL=type-245e5281b392.js.map
