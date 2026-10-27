@@ -85,6 +85,7 @@ export function withVisualFeedback(html: string): string {
     // The desktop document defaults to 'none' and has no web manifest policy.
     .replace(/(<meta http-equiv="Content-Security-Policy" content=")/, '$1manifest-src &#39;self&#39;; ')
     .replace('</head>', `
+<link rel="icon" type="image/png" sizes="192x192" href="${brandAssets.icon192}">
 <link rel="icon" type="image/svg+xml" sizes="any" href="${brandAssets.icon}">
 <link rel="apple-touch-icon" sizes="180x180" href="${brandAssets.apple}">
 <link rel="manifest" href="/site.webmanifest">

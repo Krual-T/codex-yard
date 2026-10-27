@@ -125,7 +125,7 @@ try {
   assert.ok(breathing.length >= 2 && new Set(breathing.map(f => f.transform)).size >= 2, 'Logo must move across time');
   assert.equal(await page.locator('.startup-loader__logo, #root > [role="presentation"] ._Root_4m2sz_11').count(), 0);
   const icons = await page.locator('link[rel="icon"], link[rel="apple-touch-icon"]').evaluateAll(elements => elements.map(e => (e as HTMLLinkElement).href));
-  assert.equal(icons.length, 2);
+  assert.equal(icons.length, 3);
   for (const href of icons) {
     const image = await page.request.get(href);
     assert.equal(image.status(), 200);
@@ -141,7 +141,7 @@ try {
     const image = new Image(); image.src = src; await image.decode();
     return { width: image.naturalWidth, height: image.naturalHeight };
   })), icons);
-  assert.deepEqual(results.iconSizes, [{ width: 64, height: 64 }, { width: 180, height: 180 }]);
+  assert.deepEqual(results.iconSizes, [{ width: 192, height: 192 }, { width: 64, height: 64 }, { width: 180, height: 180 }]);
   results.icons = icons;
   const cdp = await page.context().newCDPSession(page);
   const manifest = await cdp.send('Page.getAppManifest');

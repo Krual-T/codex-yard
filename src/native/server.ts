@@ -254,7 +254,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         return;
       }
       if (path === '/favicon.ico') {
-        response.writeHead(302, { Location: brandAssets.icon });
+        response.writeHead(302, { Location: brandAssets.icon192 });
         response.end();
         return;
       }

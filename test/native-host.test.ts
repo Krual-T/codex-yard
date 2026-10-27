@@ -571,6 +571,7 @@ test('web branding resolves from both native routes and the default favicon requ
   for (const path of ['/', '/local/test-thread']) {
     const html = await (await fetch(h.app.url + path)).text();
     assert.match(html, /<title>Codex Yard<\/title>/);
+    assert.ok(html.includes(`rel="icon" type="image/png" sizes="192x192" href="${brandAssets.icon192}"`));
     assert.ok(html.includes(`rel="icon" type="image/svg+xml" sizes="any" href="${brandAssets.icon}"`));
     assert.ok(html.includes(`rel="apple-touch-icon" sizes="180x180" href="${brandAssets.apple}"`));
     assert.match(html, /rel="manifest" href="\/site.webmanifest"/);
@@ -593,8 +594,8 @@ test('web branding resolves from both native routes and the default favicon requ
     } else assert.match(bytes.toString(), /<title>Codex Yard<\/title>/);
   }
   const favicon = await fetch(h.app.url + '/favicon.ico');
-  assert.equal(favicon.url, h.app.url + brandAssets.icon);
-  assert.equal(favicon.headers.get('content-type'), 'image/svg+xml');
+  assert.equal(favicon.url, h.app.url + brandAssets.icon192);
+  assert.equal(favicon.headers.get('content-type'), 'image/png');
   const apple = Buffer.from(await (await fetch(h.app.url + brandAssets.apple)).arrayBuffer());
   assert.equal(apple.readUInt32BE(16), 180);
   assert.equal(apple.readUInt32BE(20), 180);
