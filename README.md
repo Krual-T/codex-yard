@@ -24,12 +24,13 @@ The next product direction is a task dashboard: clarify and assign work, see whi
 
 | Component | Version | Role |
 | --- | --- | --- |
-| Codex CLI / fresh daemon | `0.164.0` | Verified without a desktop installation: automatic backend startup, web interface, and a real model reply |
-| Existing Codex daemon | `0.163.0` | Previously validated with local and SSH conversations, files, terminals, and browser integration |
+| Codex CLI and its app-server backend | `0.164.0` | Both used this version in fresh-deployment validation without a desktop App: automatic backend startup, web interface, and a real model reply |
 | Codex App interface | `26.1013.40934` | Fixed UI reference and resource snapshot tracked in Git |
 | Node.js | `>=24.5` | Tested with `24.16.0`; server platform currently validated on Linux x64 |
 
-The CLI on your PATH and an already-running daemon can have different versions. `codex app-server daemon version` reports both; the workspace's `/api/status` reports `appServerVersion` and `rendererVersion`. Other combinations require validation before being listed as supported.
+The daemon is Codex's app-server running as a persistent background process, managed through the CLI. An existing installation can retain a separately managed Codex executable for that backend, so the CLI on your PATH, the managed package, and the running backend can have different versions. `codex app-server daemon version` reports `cliVersion`, `managedCodexVersion`, and `appServerVersion`; the workspace's `/api/status` reports the connected backend's `appServerVersion` and the UI's `rendererVersion`.
+
+Historical compatibility: an existing app-server backend at `0.163.0` was previously validated with local and SSH conversations, files, terminals, and browser integration. This records earlier coverage; the fresh-deployment version is `0.164.0` as listed above. Other versions require validation before being listed as supported.
 
 ## Run from source
 
@@ -51,7 +52,7 @@ npm start
 
 `npm start` builds this project's host, reads the checked-in resources, then asks Codex CLI to start or reuse its daemon. Closing the web server leaves that shared daemon running. The resource snapshot occupies about **531 MiB** in the checkout and uses ordinary Git files, so Git LFS and a separate App resource download are unnecessary.
 
-The interface and tool adapter change only when their Git snapshot is updated; local Codex App updates do not replace them. CLI and daemon compatibility are tracked separately. Package installation and model requests still need their normal network access.
+The interface and tool adapter change only when their Git snapshot is updated; local Codex App updates do not replace them. Codex backend compatibility is validated separately from the UI snapshot. Package installation and model requests still need their normal network access.
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765). To customize the server, copy `.env.example` to `.env`. `AGENTS_CODEX_BIN` selects a CLI executable; `AGENTS_CODEX_SOCKET` connects directly to an existing backend and skips automatic daemon startup. `AGENTS_APP_TOOLS_ADAPTER` overrides the vendored adapter if needed. Use a short private `AGENTS_DATA_DIR` when necessary: the complete Unix socket path must fit within 107 bytes.
 

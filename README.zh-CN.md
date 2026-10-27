@@ -20,12 +20,13 @@
 
 | 组件 | 版本 | 用途与验证范围 |
 | --- | --- | --- |
-| Codex CLI / 全新 daemon | `0.164.0` | 已在屏蔽桌面 App 安装的环境验证：自动启动后端、网页加载与真实模型回复 |
-| 已有 Codex daemon | `0.163.0` | 此前已验证本机和 SSH 对话、文件、终端与浏览器接入 |
+| Codex CLI 及其 app-server 后端 | `0.164.0` | 全新部署验收中两者均为此版本；无需桌面 App，已通过自动启动后端、网页加载与真实模型回复 |
 | Codex App 界面 | `26.1013.40934` | 对标复刻基准，也是 Git 跟踪的固定资源版本 |
 | Node.js | `>=24.5` | 使用 `24.16.0` 验证；当前已验证的服务端平台为 Linux x64 |
 
-机器上安装的 CLI 和正在运行的 daemon 可能版本不同。`codex app-server daemon version` 可同时查看两者；工作台的 `/api/status` 返回执行后端的 `appServerVersion` 与界面资源的 `rendererVersion`。其他组合需要验证后再标记为支持。
+daemon 是 Codex app-server 常驻后台的运行形式，由 CLI 管理。已有环境可能为后端保留单独托管的 Codex 可执行文件，因此 PATH 上的 CLI、托管包和正在运行的后端可能版本不同。`codex app-server daemon version` 分别返回 `cliVersion`、`managedCodexVersion` 和 `appServerVersion`；工作台的 `/api/status` 返回所连接后端的 `appServerVersion` 与界面资源的 `rendererVersion`。
+
+历史兼容记录：此前使用已有的 `0.163.0` app-server 后端验证过本机和 SSH 对话、文件、终端与浏览器接入。此处保留当时的验收范围；全新部署的验证版本是上表的 `0.164.0`。其他版本需要验证后再标记为支持。
 
 ## 运行
 
@@ -47,7 +48,7 @@ npm start
 
 `npm start` 构建自有宿主、读取仓库内资源后，调用 Codex CLI 启动或复用 daemon；退出网页服务会保留共享 daemon。资源快照在检出目录中约占 **531 MiB**，以普通 Git 文件保存，无需 Git LFS 或单独下载 App 资源。
 
-界面与工具适配器随 Git 提交固定，桌面 App 更新不会替换它们；CLI 和 daemon 的兼容性另外验证。安装 npm 依赖与调用模型仍需要相应网络连接。
+界面与工具适配器随 Git 提交固定，桌面 App 更新不会替换它们；Codex 后端的兼容性与界面快照分开验证。安装 npm 依赖与调用模型仍需要相应网络连接。
 
 打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。将 `.env.example` 复制为 `.env` 后可设置端口、数据目录、工作目录和连接地址。`AGENTS_CODEX_BIN` 指定 CLI 可执行文件；`AGENTS_CODEX_SOCKET` 直接连接已有后端并跳过自动启动；`AGENTS_APP_TOOLS_ADAPTER` 可覆盖仓库内的工具适配器路径。Unix socket 的完整路径上限为 107 字节，隔离工作树宜设置较短的私有数据目录。
 
