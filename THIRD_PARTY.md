@@ -2,11 +2,11 @@
 
 ## Codex App resources
 
-The current interface depends on Codex App **26.1013.40934**. `scripts/copy-renderer.ts` reads a user-supplied local `app.asar` and extracts its `webview/` directory into ignored `.local/renderer-26.1013.40934/`.
+The current interface is based on Codex App **26.1013.40934**. `scripts/copy-renderer.ts` downloads that version's official package from `persistent.oaistatic.com`, extracts its web resources and official Node tool adapter, and keeps them in ignored `.local/` directories. A desktop app installation is not required. The package's desktop executable, system installation scripts, and system integration are not installed or executed.
 
-The repository does not contain that archive, compiled interface, fonts, logos, sprites, downloaded configuration responses, or the official App Tools adapter. The user supplies the adapter from their own installation. The project's MIT license covers the source in this repository and does not grant rights to those external components.
+The repository does not redistribute that archive, compiled interface, fonts, logos, sprites, downloaded configuration responses, or the official App Tools adapter. Downloads come directly from OpenAI's distribution service and remain subject to [OpenAI's applicable terms](https://openai.com/policies/service-terms/). The project's MIT license covers the source in this repository and does not grant rights to those external components.
 
-Changes to Codex App's private module exports or host contracts can require updates to the version boundary in `src/native/renderer-assets.ts` and the corresponding host code. Compatibility with other renderer versions is not assumed.
+Changes to Codex App's private module exports or host contracts can require updates to the version boundary in `src/native/renderer-assets.ts` and the corresponding host code. Compatibility with other renderer versions is not assumed. The CLI/daemon versions and the separate UI reference version are documented in README.md.
 
 ## Package dependencies
 

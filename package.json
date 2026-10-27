@@ -15,7 +15,7 @@
     "thread:title": "node scripts/set-thread-title.ts",
     "prestart": "npm run build",
     "start": "node --env-file-if-exists=.env --env-file-if-exists=.local/chrome.env --use-env-proxy src/native/server.ts",
-    "copy:renderer": "node scripts/copy-renderer.ts",
+    "copy:renderer": "node --env-file-if-exists=.env --use-env-proxy scripts/copy-renderer.ts",
     "pretest": "npm run build:host",
     "test": "node --test test/*.test.mjs test/*.test.ts",
     "test:app-tools": "AGENTS_TEST_OFFICIAL_ADAPTER=1 node --test test/app-tools.test.mjs",
@@ -33,6 +33,7 @@
     "@electron/asar": "4.2.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
+    "tar": "7.5.22",
     "ws": "8.21.3"
   },
   "devDependencies": {

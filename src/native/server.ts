@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { execFile } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { gzip } from 'node:zlib';
@@ -49,6 +50,9 @@ const mime: Record<string, string> = {
   '.wasm': 'application/wasm', '.json': 'application/json', '.mp3': 'audio/mpeg',
 };
 const compress = promisify(gzip);
+function serverVersion(connection: CodexConnection) {
+  return connection.server?.userAgent.match(/^[^/]+\/(\S+)/)?.[1] ?? null;
+}
 function acceptsGzip(value = '') {
   return value.split(',').some(encoding => {
     const [name, ...parameters] = encoding.trim().split(';');
@@ -270,6 +274,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       if (path === '/api/status') {
         response.writeHead(200, { 'Content-Type': mime['.json'] });
         response.end(JSON.stringify({ connected: control.connected, rendererVersion, workspace, clients: clients.size,
+          appServerVersion: serverVersion(control),
           executionMode: 'shared-daemon',
           hosts: [{ hostId: 'local', transport: 'websocket' }, ...catalog.hosts.map(host => ({ hostId: host.hostId, transport: 'ssh-websocket' }))],
           pendingRequests: chromeClients.pendingRequests + httpRequests.size + control.pending.size + [...fileConnections.values(), ...[...clients.values()].flatMap(connections => [...connections.values()])].reduce((sum, connection) => sum + connection.pending.size, 0),
@@ -356,7 +361,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     send(client, { type: 'codex-app-server-connection-changed', hostId, transport: 'websocket', isSnapshot,
       state: connection.connected ? 'connected' : 'disconnected', error: connection.lastError });
     if (connection.connected) {
-      const version = connection.server?.userAgent?.match(/(?:codex-tui|Codex Desktop)\/([^ ]+)/)?.[1];
+      const version = serverVersion(connection);
       send(client, { type: 'codex-app-server-initialized', hostId, transport: 'websocket', isSnapshot, appServerVersion: version, installedCodexVersion: version });
     }
   }
@@ -593,7 +598,16 @@ export async function createNativeWorkbench(options: Options = {}) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const app = await createNativeWorkbench();
-  console.log(JSON.stringify({ url: app.url, rendererVersion, mode: 'native renderer; real local Codex backend' }));
+  let socketPath = process.env.AGENTS_CODEX_SOCKET;
+  if (!socketPath) {
+    console.error('Starting or reusing the Codex CLI daemon…');
+    const { stdout } = await promisify(execFile)(process.env.AGENTS_CODEX_BIN || 'codex', ['app-server', 'daemon', 'start'],
+      { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 });
+    const daemon = JSON.parse(stdout) as { socketPath?: string };
+    if (!daemon.socketPath) throw new Error('Codex CLI did not return a daemon socket. Check the supported CLI versions in README.md.');
+    socketPath = daemon.socketPath;
+  }
+  const app = await createNativeWorkbench({ socketPath });
+  console.log(JSON.stringify({ url: app.url, rendererVersion, mode: 'Codex CLI daemon' }));
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => { void app.close().then(() => process.exit(0)); });
 }
