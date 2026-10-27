@@ -372,6 +372,75 @@ test('two pages share a daemon thread, keep its configuration, observe events an
   assert.equal(h.fake.calls('turn/start').length, 1);
 });
 
+test('a resumed desktop title tool reaches the existing handler without replacing the loaded thread', async t => {
+  const h = await fixture(t), client = await h.connect();
+  const thread = fixtureThread('desktop-thread', h.root, { name: 'Old title' });
+  h.fake.threads.set(thread.id, thread);
+  h.fake.loaded.add(thread.id);
+  await client.rpc(1, 'thread/resume', { threadId: thread.id, excludeTurns: true });
+  assert.equal(h.fake.calls('thread/resume')[0].params.config, undefined);
+  h.fake.send({ id: 'legacy-title', method: 'item/tool/call', params: {
+    threadId: thread.id, turnId: 'existing-turn', callId: 'title-call',
+    namespace: 'codex_app', tool: 'set_thread_title', arguments: { title: 'Updated title' },
+  } });
+  const reply = await h.fake.waitFor(message => message.id === 'legacy-title' && message.result);
+  assert.deepEqual(reply.result, { success: true, contentItems: [{ type: 'inputText',
+    text: JSON.stringify({ threadId: thread.id, title: 'Updated title' }) }] });
+  assert.equal(h.fake.threads.get(thread.id)!.name, 'Updated title');
+  assert.equal(h.fake.calls('thread/name/set').length, 1);
+  assert.equal(client.messages.some(message => message.request?.id === 'legacy-title'), false);
+  for (const method of ['thread/start', 'thread/fork', 'turn/start', 'config/batchWrite']) assert.equal(h.fake.calls(method).length, 0);
+});
+
+test('legacy title calls keep current-thread authorization and preserve write failures', async t => {
+  const h = await fixture(t), client = await h.connect();
+  const thread = fixtureThread('desktop-thread', h.root, { name: 'Original title' });
+  h.fake.threads.set(thread.id, thread);
+  await client.rpc(1, 'thread/resume', { threadId: thread.id, excludeTurns: true });
+  for (const [id, args] of [['wrong-target', { threadId: 'another-thread', title: 'Denied' }],
+    ['write-error', { title: 'Rejected' }]] as const) {
+    h.fake.handlers.set('thread/name/set', () => { throw new Error('Title write rejected'); });
+    h.fake.send({ id, method: 'item/tool/call', params: { threadId: thread.id, turnId: 'existing-turn', callId: id,
+      namespace: 'codex_app', tool: 'set_thread_title', arguments: args } });
+    const reply = record((await h.fake.waitFor(message => message.id === id && message.result)).result);
+    assert.equal(reply.success, false);
+    const contents = reply.contentItems as { text: string }[];
+    const failure = JSON.parse(contents[0]!.text);
+    assert.match(failure.error, id === 'wrong-target' ? /只能修改当前对话/ : /Title write rejected/);
+    assert.equal(failure.uncertain, false);
+  }
+  assert.equal(h.fake.calls('thread/name/set').length, 1);
+  assert.equal(h.fake.threads.get(thread.id)!.name, 'Original title');
+
+  h.fake.send({ id: 'other-tool', method: 'item/tool/call', params: { threadId: thread.id,
+    namespace: 'another-plugin', tool: 'set_thread_title', arguments: { title: 'Unrelated' } } });
+  assert.equal((await client.until(message => message.request?.id === 'other-tool')).hostId, 'local');
+  assert.equal(h.fake.calls('thread/name/set').length, 1);
+});
+
+test('multiple pages and replayed legacy title requests share one write', async t => {
+  const h = await fixture(t), first = await h.connect(), second = await h.connect();
+  const thread = fixtureThread('desktop-thread', h.root);
+  h.fake.threads.set(thread.id, thread);
+  await first.rpc(1, 'thread/resume', { threadId: thread.id });
+  await second.rpc(1, 'thread/resume', { threadId: thread.id });
+  const request = { id: 'shared-title', method: 'item/tool/call', params: {
+    threadId: thread.id, turnId: 'existing-turn', callId: 'title-call',
+    namespace: 'codex_app', tool: 'set_thread_title', arguments: { title: 'Shared title' },
+  } };
+  h.fake.broadcast(request);
+  await h.fake.waitFor(() => h.fake.messages.filter(message => message.id === request.id && message.result).length === 2);
+  assert.equal(h.fake.calls('thread/name/set').length, 1);
+  // Replayed delivery returns the original result even after a later title edit.
+  h.fake.threads.get(thread.id)!.name = 'Later title';
+  h.fake.send({ ...request, id: 'replayed-title' });
+  const replay = await h.fake.waitFor(message => message.id === 'replayed-title' && message.result);
+  assert.equal(record(replay.result).success, true);
+  assert.equal(h.fake.threads.get(thread.id)!.name, 'Later title');
+  assert.equal(h.fake.calls('thread/name/set').length, 1);
+  assert.equal(first.messages.concat(second.messages).some(message => message.request?.method === 'item/tool/call'), false);
+});
+
 test('native side-chat forks retain the official temporary contract and accept their context boundary', async t => {
   const h = await fixture(t), client = await h.connect();
   h.fake.handlers.set('thread/fork', params => ({ thread: fixtureThread('side-chat', h.root, { ephemeral: params.ephemeral === true }) }));
