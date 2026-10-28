@@ -10,6 +10,8 @@ export function adaptMigratedRendererModule(path: string, content: Buffer): Buff
       && path !== '/assets/app-shared-61271c39e3c5.js'
       && path !== '/assets/user-message-58a6f09045c4.js'
       && path !== '/assets/user-message-attachments-9d0c60d2f476.js'
+      && path !== '/assets/general-settings-8997e171b11a.js'
+      && path !== '/assets/appearance-settings-deb0b7565185.js'
       && path !== '/assets/settings-page-25f8fd08b293.js') return content;
   let source = content.toString('utf8');
   let prefix: string;
@@ -53,7 +55,7 @@ export function adaptMigratedRendererModule(path: string, content: Buffer): Buff
       'function C(e){', 'n[57]=Q,n[58]=$):$=n[58],$}',
       'function C(e){return(0,D.jsx)(__yardMessageContent??=__yardCreateMessageContent(E,{useIsPrinting:()=>ee(x),useTextContentMeasurement:r,registerThreadFindTarget:re,CodeBlockPreviewContext:ne,Button:t,FormattedMessage:a,ChevronDown:te,classNames:m}),e)}');
   } else if (path === '/assets/app-primary-f5ea123a0407.js') {
-    prefix = `import{createHomeComposerLayoutComponent as __yardCreateHomeComposerLayout,createComposerDraftScopeComponent as __yardCreateDraftScope,createComposerSubmitControls as __yardCreateSubmitControls}from"${rendererComponentsPath}";let __yardHomeComposerLayout,__yardDraftScope,__yardSubmitControls;\n`;
+    prefix = `import{createHomeComposerLayoutComponent as __yardCreateHomeComposerLayout,createComposerDraftScopeComponent as __yardCreateDraftScope,createComposerSubmitControls as __yardCreateSubmitControls,createComposerQueueEditControls as __yardCreateQueueEdit}from"${rendererComponentsPath}";let __yardHomeComposerLayout,__yardDraftScope,__yardSubmitControls,__yardQueueEdit;\n`;
     source = replacePinnedFunction(path, source,
       'function RBt(e){', 't[17]=T,t[18]=O,t[19]=k):k=t[19],k}',
       'function RBt(e){return(0,K9.jsx)(__yardHomeComposerLayout??=__yardCreateHomeComposerLayout(G9,{useSidebarOpen:()=>Y(ape),useSidebarWidth:()=>Y(xLe),useMediaQuery:$l,sidebarBreakpoint:tMe,useLocation:Sf,useIsWorkMode:()=>Rv()===$h,useVoiceRequest:()=>Y(nle),matchMissionControl:e=>hc(`/mission-control`,e),isTemporaryChat:te,useFeatureFlag:bS,ModelPickerScope:bV,ScopeProvider:Jf,KeyboardShortcuts:cRt,LegacyLayout:MBt,ModeToggleWrapper:yj,WorkHomePage:GBt,StandardLayout:BBt,prepareTaskSuggestionDestination:zBt}),e)}');
@@ -72,6 +74,9 @@ export function adaptMigratedRendererModule(path: string, content: Buffer): Buff
       'function cut(e){let t=(0,MX.c)(31),',
       't[29]===_?D=t[30]:(D=()=>_(),t[29]=_,t[30]=D),D}',
       'function cut(e){return(__yardSubmitControls??=__yardCreateSubmitControls(NX,{useComposerScope:()=>lr(iD),useComposerController:gm,useShortcut:qD,useStableEvent:wf,isShortcut:LS,getEnterBehavior:s=>sa(s.get,va.composerEnterBehavior),isMultilineDocument:Txe}))(e)}');
+    source = replacePinnedFunction(path, source,
+      'function alt(e){let t=(0,clt.c)(51),', 't[49]=E,t[50]=N):N=t[50],N}',
+      'function alt(e){return(__yardQueueEdit??=__yardCreateQueueEdit(ult,{useScope:()=>lr(iD),useController:gm,usePastedTextAttachments:()=>Y(Cw),clearAttachments:_Ne,closeHistory:ad,updatePrompt:T_,setComposerField:Ab,setSharedThreadAttachments:(s,a)=>s.set(gT,a),generatedPastedPaths:w_e,normalizeFiles:IT,normalizePastedText:Bse,deduplicateComments:c=>(0,llt.default)(c,mNe),clearMcpContext:Ub,queuedMcpContext:(s,m)=>xfe(m,s.get(ak)),restoreSubmittedMcpContext:bae,getDraft:s=>s.get(Ny),restoreDraft:Xb,getPresentationSuggestion:s=>s.get(Qb),setPresentationSuggestion:Pb,captureChanges:(s,a)=>ut(s,a).changes,applyChanges:DLe,runUndoable:ire,formatUndoLabel:Se,setEditHistoryStatus:Wte,trackEditHistory:Dpe,clearEditHistory:kRe,cleanupDraftAttachments:gNe,cleanupQueuedAttachments:B_,recordSend:vze,maxPastedTextCharacters:wu,editUndoExpiryMs:dlt}))(e)}');
   } else if (path === '/assets/app-shared-61271c39e3c5.js') {
     prefix = `import{createCodeBlockFrameComponent as __yardCreateCodeFrame}from"${rendererComponentsPath}";let __yardCodeFrame;\n`;
     source = replacePinnedFunction(path, source,
@@ -102,6 +107,35 @@ export function adaptMigratedRendererModule(path: string, content: Buffer): Buff
       'function fn(e){let t=(0,xn.c)(110),',
       't[101]=E,t[102]=T,t[103]=w,t[104]=me,t[105]=I,t[106]=F,t[107]=Ve,t[108]=Be,t[109]=We):We=t[109],We}',
       'function fn(e){return(0,$.jsx)(__yardUserMessageImage??=__yardCreateUserMessageImage(Q,{useScope:()=>d(tt),useIntl:g,useImageClient:_e,useConversationHostId:e=>i(Ke,e),useDisableImageOverlay:()=>_(_t),useReducedMotion:C,useResolvedImage:Re,useImageOverlayEnabled:e=>ut(`2983946247`,e).get(`image_overlay_enabled`,false),isAssetPointer:Ae,getLocalImagePath:U,resolveLocalImage:Ne,getDurableIdentity:(e,t,n,r)=>{let i=e.value.routeKind===`local-thread`&&e.value.conversationId===t?e.get(He):null;return r==null&&i!=null?Ee(i,n):void 0},openImageEditor:Ue,openAnimatedOverlay:qe,recordImagePreview:ke,parseChatGptConversationId:je,getImageContextMenu:kt,ImageContextMenu:be,ImageDialog:gt,ImageOverlay:Sn,LoadingIcon:ue,AssetIcon:c,editAsset:r,FormattedMessage:l}),e)}');
+  } else if (path === '/assets/general-settings-8997e171b11a.js') {
+    prefix = `import{createGeneralSettingsComponents as __yardCreateGeneralSettings,createAppearancePreferencesComponent as __yardCreateAppearancePreferences,createThemeVariantsComponent as __yardCreateThemeVariants,createThemeFormComponent as __yardCreateThemeForm,createAppearanceControlComponents as __yardCreateAppearanceControls}from"${rendererComponentsPath}";let __yardGeneralSettings,__yardAppearancePreferences,__yardThemeVariants,__yardThemeForm,__yardAppearanceControls;\n`;
+    source = replacePinnedFunction(path, source,
+      'function Js(){', 'e[5]=n,e[6]=a),a}',
+      'function Js(){return(0,$.jsx)(__yardGeneralSettings??=__yardCreateGeneralSettings(Lc,{Page:dr,PageTitle:lr,ToysBoundary:Mn,Toys:zo,Group:U,Rows:rt,FormattedMessage:M,composerGroupTitle:W.composerGroupTitle,notificationsTitle:W.notifications,appName:Pt,getWindowsShell:()=>_.windowsShell,useAnySettingsAccess:()=>L(Qr),useLocalAccess:()=>L(Vr),useLocalOrWorkLocalAccess:()=>L(mr),useHostId:()=>L(Dr),useFeatureFlag:Yn,useImportFeatureFlag:()=>Yn(zi),useImportDismissed:()=>L(kn),rows:{AccessSettings:To,FullAccessSettings:vo,ProjectlessWorkspace:Ts,DefaultOpenTarget:lc,AgentEnvironment:pc,TerminalShell:fc,Language:gc,MenuBar:cc,CloseConfirmation:ls,AdditionalPreference:Mo,WindowsStartup:sc,BottomPanelControl:Cc,TerminalLocation:wc,PreventSleep:Fc,AutoArchive:is,ChatHistoryCompression:js,ServiceTier:Hs,AmbientSuggestions:Ko,ImportSettings:hs,OpenSourceLicenses:Qs,Plugins:Xi,DesktopBeta:$s,InAppUpdates:ec,MessagePredictions:aa,EducationalTips:$i,LiteralText:ac,ContextUsage:Oc,EnterBehavior:Pc,FollowUpBehavior:Dc,PopoutWindow:ic,Notifications:Ki}}).GeneralSettings,{})}');
+    source = replacePinnedFunction(path, source,
+      'function tc(e){', 'n[28]=C,n[29]=m,n[30]=w):w=n[30],w}',
+      'function tc(e){return(0,$.jsx)(__yardAppearancePreferences??=__yardCreateAppearancePreferences(Lc,{Group:U,Rows:rt,FormattedMessage:M,Row:V,Toggle:Le,Button:t,ExpandedIcon:ee,CollapsedIcon:s,ResetAdvanced:Xo,Mode:yc,ThemeVariants:Qa,UiFontSize:jc,ConditionalTextSetting:la,CodeFontSize:Mc,ReducedMotion:Ec,ConditionalDisplaySettings:ua,DiffMarkers:Tc,PointerCursors:bc,DockIcon:xc,FontSmoothing:Nc,useLocalAccess:()=>L(Vr)}),e)}');
+    source = replacePinnedFunction(path, source,
+      'function Qa(e){', 't[3]=n,t[4]=s,t[5]=l,t[6]=u):u=t[6],u}',
+      'function Qa(e){return(0,X.jsx)(__yardThemeVariants??=__yardCreateThemeVariants(po,{useCurrentVariant:()=>Kr(Pr()),useBackdropSupport:$r,ThemeVariantSettings:$a}),e)}');
+    source = replacePinnedFunction(path, source,
+      'function $a(e){', 'theme:E,value:E.contrast,onChange:e=>{T({contrast:e})}}),label:p})]})}',
+      'function $a(e){return(0,X.jsx)(__yardThemeForm??=__yardCreateThemeForm(po,{useThemeSettings:hn,useIntl:I,useToastGetter:()=>{let s=N(R);return()=>s.get(qe)},copyToClipboard:at,messages:Y,FormattedMessage:M,FormSection:eo,Row:V,Toggle:Le,Tooltip:dt,Button:t,ImportIcon:Ne,CopyIcon:Ce,ImportDialog:to,CodeThemePicker:no,AccentPicker:La,ColorPicker:Da,FontPicker:Ka,ContrastSlider:co}),e)}');
+    const appearanceControls = '__yardAppearanceControls??=__yardCreateAppearanceControls(Lc,{useIntl:I,useThemeMode:()=>F(Ke.theme),useSaveThemeMode:()=>{let s=N(R);return v=>D(s,Ke.theme,v,{optimistic:false})},useFontSize:k=>F(k===`ui`?Ke.sansFontSize:Ke.codeFontSize),useSaveFontSize:()=>{let s=N(R);return(k,v)=>D(s,k===`ui`?Ke.sansFontSize:Ke.codeFontSize,v)},isValidFontSize:(k,v)=>(k===`ui`?Ke.sansFontSize:Ke.codeFontSize).schema.safeParse(v).success,fontSizeLimits:{ui:nt.sans,code:nt.code},messages:Y,FormattedMessage:M,Row:V,Input:ir,Tooltip:dt,SystemLightPreview:wa,SystemDarkPreview:Sa,LightPreview:ba,DarkPreview:va,classNames:tt})';
+    source = replacePinnedFunction(path, source,
+      'function yc(){', 'e[8]=o,e[9]=s,e[10]=c):c=e[10],c}',
+      `function yc(){return(0,$.jsx)((${appearanceControls}).Mode,{})}`);
+    source = replacePinnedFunction(path, source,
+      'function jc(){', 'description:`Unit label for sans font size setting`}),e[18]=n,e[19]=h);let g;e[20]===h?g=e[21]:(g=(0,$.jsx)(`span`,{className:`text-sm text-secondary`,children:h}),e[20]=h,e[21]=g);let _;return e[22]!==g||e[23]!==m?(_=(0,$.jsx)(V,{label:s,description:c,control:(0,$.jsxs)(`div`,{className:`flex items-center gap-2`,children:[m,g]})}),e[22]=g,e[23]=m,e[24]=_):_=e[24],_}',
+      `function jc(){return(0,$.jsx)((${appearanceControls}).UiFontSize,{})}`);
+    source = replacePinnedFunction(path, source,
+      'function Mc(){', 'description:`Unit label for code font size setting`}),e[18]=n,e[19]=h);let g;e[20]===h?g=e[21]:(g=(0,$.jsx)(`span`,{className:`text-sm text-secondary`,children:h}),e[20]=h,e[21]=g);let _;return e[22]!==g||e[23]!==m?(_=(0,$.jsx)(V,{label:s,description:c,control:(0,$.jsxs)(`div`,{className:`flex items-center gap-2`,children:[m,g]})}),e[22]=g,e[23]=m,e[24]=_):_=e[24],_}',
+      `function Mc(){return(0,$.jsx)((${appearanceControls}).CodeFontSize,{})}`);
+  } else if (path === '/assets/appearance-settings-deb0b7565185.js') {
+    prefix = `import{createAppearanceSettingsComponent as __yardCreateAppearanceSettings}from"${rendererComponentsPath}";let __yardAppearanceSettings;\n`;
+    source = replacePinnedFunction(path, source,
+      'function f(){', 'e[1]=r,e[2]=i,e[3]=s):s=e[3],s}',
+      'function f(){return(0,h.jsx)(__yardAppearanceSettings??=__yardCreateAppearanceSettings(m,{OutletContext:c,PageTitle:a,Page:o,AppearancePreferences:u}),{})}');
   } else {
     prefix = `import{createSettingsPageComponent as __yardCreateSettingsPage}from"${rendererComponentsPath}";let __yardSettingsPage;\n`;
     source = replacePinnedFunction(path, source,

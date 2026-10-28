@@ -49,6 +49,9 @@ try {
   browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? join(homedir(), '.cache/ms-playwright/chromium-1228/chrome-linux64/chrome'),
     headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  const profiler = await page.context().newCDPSession(page);
+  await profiler.send('Profiler.enable');
+  await profiler.send('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/local/' + threadId), { waitUntil: 'commit' });
   await page.getByText(editText, { exact: true }).waitFor({ timeout: 60000 });
@@ -73,6 +76,13 @@ try {
   assert.equal(fake.calls('thread/queue/delete').length, 2);
   assert.equal(fake.calls('thread/queue/add').length, 1);
   assert.equal(fake.calls('turn/start').length, 0);
+  const coverage = await profiler.send('Profiler.takePreciseCoverage');
+  const authored = coverage.result.filter(script => script.url.endsWith('/renderer-components.js'));
+  const queueHook = authored.flatMap(script => script.functions)
+    .filter(fn => fn.functionName === 'useComposerQueueEditControls');
+  assert.ok(queueHook.some(fn => fn.ranges.some(range => range.count > 0)), 'The real composer must execute the authored queue hook');
+  report.authoredQueueHookCalls = queueHook.flatMap(fn => fn.ranges).reduce((total, range) => total + range.count, 0);
+  await profiler.send('Profiler.stopPreciseCoverage');
   await page.reload({ waitUntil: 'commit' });
   await page.getByRole('group', { name: new RegExp(changed) }).waitFor({ timeout: 60000 });
   await capture('after-refresh');

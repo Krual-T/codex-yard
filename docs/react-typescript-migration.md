@@ -18,9 +18,13 @@ the upstream App's original TSX source is not available.
 | Main composer view | `src/renderer/composer/main-composer.tsx`, `composer-types.ts` | `app-initial`'s `y_d`; original editor engine, motion/presentation contexts, surface parts and voice components; authored editor/accessory/footer composition |
 | Controller lifecycle | `src/renderer/composer/composer-controller.ts` | `BSd` / `wEe`; original controller creation, document schema, context and preferences; authored pending input/IME/selection transfer, subscriptions and owned-controller cleanup |
 | Draft scope and submit shortcuts | `src/renderer/composer/composer-draft-scope.tsx`, `composer-submit-controls.ts` | Only `Mpt`'s draft/provider/root composition and `cut`; original draft atoms, scope/key, serialization, shortcut service and submit/queue callbacks. The rest of `Mpt`, `hpt`, `p9e` and queue UI remain subsequent boundaries |
+| Queue editing orchestration | `src/renderer/composer/composer-queue-edit.ts`, `composer-queue-types.ts` | `alt` and its local `olt/slt` logic; original controller, scoped atoms, queue actions, attachment services, undo history and transport. Authored edit races, draft/attachment restoration, delete/undo/redo and send-now routing; queue presentation remains upstream |
 | User message and body | `src/renderer/messages/user-message.tsx` | `user-message`'s `Rt` and `yt`; original scope, editing draft atom, Markdown, editor, clipboard and primitives; authored message/actions/selection and edit/copy orchestration |
 | File and image attachments | `src/renderer/messages/user-message-attachments.tsx`, `user-message-image.tsx` | `gn`, `pn`, `fn`; original filesystem/image services, context menu, dialog/overlay/editor and thread identity; authored routing, asynchronous loading, controlled navigation and focus restoration |
 | Settings root | `src/renderer/settings/settings-page.tsx`, `settings-types.ts` | `settings-page`'s `_i`; original configuration scope, visibility/host/router hooks, sidebar, shell, section content and dialog; authored navigation guard, search targets and route/host composition |
+| General section composition | `src/renderer/settings/sections/general.tsx` | `Js` and its `Ys/Xs/Zs` arrangements; original access/host/feature gates, Windows service and individual preference rows |
+| Appearance composition and theme form | `src/renderer/settings/sections/appearance.tsx`, `theme-variants.tsx`, `theme-form.tsx` | Route `f`, preferences `tc`, variant dispatch `Qa` and form `$a`; original theme hook `hn`, configuration atoms, clipboard/toasts and lower pickers/dialog/slider. Authored advanced/separate-mode state, theme import/export and color/font patches |
+| Appearance mode and font sizes | `src/renderer/settings/sections/appearance-controls.tsx` | `yc/kc/Ac/jc/Mc`; original configuration writers/schema, font limits, artwork, input and tooltip primitives; authored radio and font-input interaction |
 
 The timestamp entry is shared by local and remote sidebar rows, pending worktree
 rows, hover cards and other lazy pages. The same defaults, message identifiers,
@@ -43,7 +47,7 @@ hidden controls' accessibility handling.
 | `src/renderer/components.ts` | Explicit exports of component factories |
 | `src/native/renderer-migration.ts` | Explicit pinned, uniquely matched function seams |
 | `src/native/server.ts`, `src/native/visualizations.ts`, `scripts/build-native.ts` | Resource delivery, cache namespace and authored component build |
-| `test/renderer-*.test.ts`, `scripts/verify-renderer-migration.ts` | Boundary checks and isolated page verification |
+| `test/renderer-*.test.ts`, `scripts/verify-renderer-migration.ts`, `scripts/verify-renderer-settings.ts`, `scripts/verify-queue.ts` | Boundary checks and isolated page verification |
 
 Development areas have separate source branches; shared integration is owned by
 the migration manager. Badge callers require PR metadata. The Web host currently
@@ -100,12 +104,21 @@ The shared time contract also covers a non-sidebar `<time>` consumer with
 `relative`/`elapsed` options, clock changes and English/French formatting. This
 contract check does not claim that every lazy page has been exercised.
 
+For focused settings acceptance, run `npm run test:renderer-settings:ui` after
+building, under the same UI lock. `AGENTS_SETTINGS_EVIDENCE` selects its private
+output directory. It checks actual authored General/Appearance fibers, native
+mode labels, theme copy/import validation and cancellation, separate variants,
+font input normalization and saved mode/font-size restoration after reload.
+`npm run test:queue` exercises the actual queue edit/delete/requeue/reload path
+and uses V8 coverage to confirm that the authored queue hook executes. These
+scripts use disposable protocol peers; they do not perform real model inference.
+
 ## Later batches
 
 The full Web frontend is still being restored. Remaining work includes route and
 shell components, project/thread state and groups, turn and remaining message parents,
-the rest of Markdown, the remaining main-composer application controls and queue, menus,
-settings sections, file/terminal/diff/Chrome/output wrappers, Mini and conditional
+the rest of Markdown, the remaining main-composer application controls and queue presentation, menus,
+remaining settings rows/controls and sections, file/terminal/diff/Chrome/output wrappers, Mini and conditional
 product pages. Third-party libraries and protocol/host services may remain
 dependencies; application UI in the same bundles is not implicitly exempt.
 Each boundary must be used by the actual page and preserve its existing behavior
