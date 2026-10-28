@@ -126,6 +126,13 @@ function forkPermissions(options: ObjectValue): ObjectValue {
   return result;
 }
 
+function forkConfiguration(parent: SideChatParent): ObjectValue {
+  const config = { ...(parent.forkConfig ?? {}) };
+  if (parent.effort === null) delete config.model_reasoning_effort;
+  else config.model_reasoning_effort = parent.effort;
+  return config;
+}
+
 function validateParent(parent: SideChatParent, hostId: string, threadId: string): void {
   if (!record(parent) || !nonempty(parent.hostId) || !nonempty(parent.threadId)
     || parent.hostId !== hostId || parent.threadId !== threadId || !nonempty(parent.connectionGeneration)
@@ -161,8 +168,7 @@ function validateOperation(value: SideChatOperation | null): SideChatOperation {
   }
   const developer = [op.parent.developerOverride?.value ?? op.configuredInstructions, instructions]
     .filter(part => typeof part === 'string' && part.length > 0).join('\n\n');
-  const expectedConfig = { ...(op.parent.forkConfig ?? {}),
-    ...(op.parent.effort === null ? {} : { model_reasoning_effort: op.parent.effort }) };
+  const expectedConfig = forkConfiguration(op.parent);
   const expectedPermissions = forkPermissions(op.parent.submitOptions);
   const expectedItems = [
     { type: 'message', role: 'developer', content: [{ type: 'input_text', text: developer }] },
@@ -412,7 +418,7 @@ export function createSideChatHost(deps: SideChatDependencies) {
     const forkParams: ObjectValue = { threadId: parent.threadId, cwd: parent.cwd, runtimeWorkspaceRoots: parent.workspaceRoots,
       model: parent.model, modelProvider: parent.modelProvider, serviceTier: parent.serviceTier, ephemeral: true,
       excludeTurns: true, threadSource: 'user', developerInstructions: developer,
-      config: { ...(parent.forkConfig ?? {}), ...(parent.effort === null ? {} : { model_reasoning_effort: parent.effort }) },
+      config: forkConfiguration(parent),
       ...forkPermissions(parent.submitOptions) };
     const boundaryItems = [
       { type: 'message', role: 'developer', content: [{ type: 'input_text', text: developer }] },

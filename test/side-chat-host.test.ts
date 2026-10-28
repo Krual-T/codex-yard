@@ -196,6 +196,16 @@ test('freezes parent approval and permission options in fork and verifies their 
   assert.equal(missingApproval.calls.length, 0);
 });
 
+test('a null parent effort omits an inherited config override instead of sending null', async () => {
+  const f = fixture();
+  f.setParent({ effort: null, forkConfig: { model_reasoning_effort: null, 'fixture.extra': { retained: true } } });
+  const op = await f.host.prepare({ hostId: 'local', threadId: 'parent' });
+  assert.deepEqual(op.forkParams.config, { 'fixture.extra': { retained: true } });
+  const result = await f.host.start(op.operationId);
+  assert.equal(result.inject.status, 'received');
+  assert.deepEqual((f.calls.find(call => call.method === 'thread/fork')!.params.config), { 'fixture.extra': { retained: true } });
+});
+
 test('serial claims prevent duplicate fork and close a late child on its original host without injecting', async () => {
   const f = fixture(), gate = deferred<unknown>(), started = deferred<void>();
   f.setParent({ hostId: 'ssh', threadId: 'remote-parent', connectionGeneration: 'ssh-1' });
