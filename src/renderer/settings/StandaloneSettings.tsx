@@ -9,6 +9,7 @@ import { GeneralSection } from './GeneralSection.tsx';
 import { GitSection } from './GitSection.tsx';
 import { ModelSection } from './ModelSection.tsx';
 import { Preferences, preferenceKeys } from './preferences.ts';
+import { WorktreesSection } from './WorktreesSection.tsx';
 import { hostPath, readSettingsRoute, sectionPath } from './routing.ts';
 import type { SettingsRoute } from './routing.ts';
 import './standalone-settings.css';
@@ -57,6 +58,7 @@ const searchLabels: Record<string, string[]> = {
   models: ['Model', 'Reasoning effort'],
   'git-settings': ['Branch prefix', 'Always force push', 'Create draft pull requests', 'Pull request merge method', 'Disable Git-based diffs',
     'Review delivery', 'Commit instructions', 'Pull request instructions', 'Pull request watch instructions', 'Auto-merge when ready'],
+  worktrees: ['Worktree root', 'Always fetch upstream before creating worktrees', 'Automatically delete old worktrees', 'Auto-delete limit'],
 };
 
 export function StandaloneSettings({ client, hostId, initialSection, location, onNavigate, onClose, registerNavigationGuard }: SettingsIntegrationProps) {
@@ -109,6 +111,7 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
   };
 
   useEffect(() => preferences.start(), [preferences]);
+  useEffect(() => { preferences.setPlatform(platform); }, [preferences, platform]);
   useEffect(() => {
     registerNavigationGuard?.({ requestLeave });
     return () => registerNavigationGuard?.(null);
@@ -222,6 +225,8 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
           section === 'appearance' ? <AppearanceSection key={editorRevision} preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} onDirtyChange={setOtherDirty} /> :
             section === 'models' ? <ModelSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
               section === 'git-settings' ? <GitSection preferences={preferences} snapshot={snapshot} suspended={confirmLeave} /> :
+                section === 'worktrees' ? <WorktreesSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
+                  preferences={preferences} snapshot={snapshot} onDirtyChange={setOtherDirty} /> :
               isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
                 section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving} /> :
                   section === 'connections' ? <ConnectionsSection client={client} onSavingChange={setOtherSaving} /> :

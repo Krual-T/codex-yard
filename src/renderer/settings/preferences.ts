@@ -43,6 +43,10 @@ export interface PreferenceValues {
   'git-pr-instructions': string;
   'git-pr-watch-auto-merge': boolean;
   'git-pr-watch-instructions': string;
+  'git-worktree-root': string;
+  'worktree-upstream-refresh-mode': 'never' | 'best-effort';
+  'worktree-auto-cleanup-enabled': boolean;
+  'worktree-keep-count': number;
   'reduced-motion-preference': 'system' | 'on' | 'off';
   'dock-icon-preference': 'app-default' | 'codex-system' | 'space-system';
   'ambient-suggestions-enabled': boolean;
@@ -109,6 +113,10 @@ export const preferenceDefinitions: Definitions = {
   'git-pr-instructions': { source: 'global', defaultValue: '', valid: string },
   'git-pr-watch-auto-merge': { source: 'global', defaultValue: false, valid: bool },
   'git-pr-watch-instructions': { source: 'global', defaultValue: '', valid: string },
+  'git-worktree-root': { source: 'global', defaultValue: '', valid: string },
+  'worktree-upstream-refresh-mode': { source: 'global', defaultValue: 'never', valid: oneOf('never', 'best-effort') },
+  'worktree-auto-cleanup-enabled': { source: 'global', defaultValue: true, valid: bool },
+  'worktree-keep-count': { source: 'global', defaultValue: 15, valid: numberIn(1, Number.MAX_SAFE_INTEGER) },
   'reduced-motion-preference': { source: 'global', defaultValue: 'system', valid: oneOf('system', 'on', 'off') },
   'dock-icon-preference': { source: 'global', defaultValue: 'app-default', valid: oneOf('app-default', 'codex-system', 'space-system') },
   'ambient-suggestions-enabled': { source: 'global', defaultValue: true, valid: bool },
@@ -145,9 +153,11 @@ export class Preferences {
   private pendingRefresh = new Set<PreferenceKey>();
   private lifecycle = 0;
   private disposed = false;
+  private platform = 'unknown';
   private unsubscribe: (() => void) | null = null;
   private readonly client: WorkbenchClient;
   constructor(client: WorkbenchClient) { this.client = client; }
+  setPlatform(platform: string): void { this.platform = platform; }
   getSnapshot = (): PreferenceSnapshot => this.snapshot;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
   private update<K extends PreferenceKey>(key: K, patch: Partial<PreferenceEntry<PreferenceValues[K]>>): void {
@@ -241,7 +251,18 @@ export class Preferences {
     const source = preferenceDefinitions[key].source;
     const endpoint = source === 'setting' ? 'set-setting' : source === 'global' ? 'set-global-state' : 'set-persisted-atom';
     const getEndpoint = source === 'setting' ? 'get-setting' : source === 'global' ? 'get-global-state' : 'get-persisted-atom';
-    const sent = clone(this.snapshot[key].value);
+    let sent = clone(this.snapshot[key].value);
+    if (key === 'git-worktree-root' && typeof sent === 'string') {
+      const path = sent.trim();
+      const windows = this.platform === 'windows' || this.platform === 'win32';
+      const absolute = windows ? /^(?:[a-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/i.test(path) : path.startsWith('/');
+      if (path && (this.platform === 'unknown' || !absolute || path.includes('\0'))) {
+        this.update(key, { error: 'Enter an absolute path for this host, or leave it blank.' });
+        return false;
+      }
+      if (path !== sent) { this.update(key, { value: path }); sent = path; }
+      if (same(sent, this.snapshot[key].saved)) { this.update(key, { error: null }); return true; }
+    }
     this.revisions.set(key, (this.revisions.get(key) ?? 0) + 1);
     this.update(key, { saving: true, error: null });
     try {

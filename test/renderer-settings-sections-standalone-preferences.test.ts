@@ -119,6 +119,24 @@ test('saving a Git preference uses global state and leaves other drafts untouche
   assert.equal(prefs.dirty, true);
 });
 
+test('local worktree roots are validated and normalized before a global-state write', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  prefs.setPlatform('linux');
+  await prefs.load();
+  prefs.edit('git-worktree-root', 'relative/path');
+  assert.equal(await prefs.saveOne('git-worktree-root'), false);
+  assert.match(prefs.getSnapshot()['git-worktree-root'].error ?? '', /absolute path/);
+  assert.equal(client.calls.some(call => call.endpoint === 'set-global-state'), false);
+  prefs.edit('git-worktree-root', ' /tmp/worktrees ');
+  assert.equal(await prefs.saveOne('git-worktree-root'), true);
+  assert.equal(client.globals['git-worktree-root'], '/tmp/worktrees');
+  assert.equal(prefs.getSnapshot()['git-worktree-root'].value, '/tmp/worktrees');
+  prefs.setPlatform('windows');
+  prefs.edit('git-worktree-root', 'C:\\worktrees');
+  assert.equal(await prefs.saveOne('git-worktree-root'), true);
+  assert.equal(client.globals['git-worktree-root'], 'C:\\worktrees');
+});
+
 test('failed or unverifiable writes retain edits and never replay automatically', async () => {
   const client = new FakeClient(), prefs = new Preferences(client);
   await prefs.load();
