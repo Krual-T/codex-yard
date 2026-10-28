@@ -1,7 +1,7 @@
 .yard-settings { --yard-border: #d8dde1; --yard-muted: #606a70; --yard-focus: #1769b0; display: flex; min-height: 100%; color: #20262a; background: #fff; font: 14px/1.45 system-ui, sans-serif; }
 .yard-settings * { box-sizing: border-box; }
 .yard-settings button, .yard-settings select, .yard-settings input, .yard-settings textarea { font: inherit; }
-.yard-settings button, .yard-settings select, .yard-settings input[type="text"], .yard-settings input[type="number"], .yard-settings textarea { border: 1px solid var(--yard-border); border-radius: 5px; background: #fff; color: inherit; padding: 6px 9px; }
+.yard-settings button, .yard-settings select, .yard-settings input[type="text"], .yard-settings input[type="search"], .yard-settings input[type="number"], .yard-settings textarea { border: 1px solid var(--yard-border); border-radius: 5px; background: #fff; color: inherit; padding: 6px 9px; }
 .yard-settings button { cursor: pointer; }
 .yard-settings button:disabled, .yard-settings input:disabled, .yard-settings select:disabled { cursor: not-allowed; opacity: .55; }
 .yard-settings :focus-visible { outline: 2px solid var(--yard-focus); outline-offset: 2px; }
@@ -10,6 +10,11 @@
 .yard-settings-nav-header { padding: 0 4px 18px; }
 .yard-host-label { display: grid; gap: 5px; padding: 0 4px; font-size: 12px; color: var(--yard-muted); }
 .yard-host-label select { width: 100%; color: #20262a; }
+.yard-settings-search { display: grid; gap: 5px; padding: 14px 4px 0; font-size: 12px; color: var(--yard-muted); }
+.yard-settings-search input { width: 100%; }
+.yard-search-results { margin: 10px 0; }
+.yard-search-results button { display: grid; width: 100%; gap: 2px; text-align: left; background: transparent; border-color: transparent; }
+.yard-search-results small, .yard-search-results p { color: var(--yard-muted); font-size: 12px; }
 .yard-nav-group { margin-top: 20px; }
 .yard-settings .yard-nav-group h2 { margin: 0 8px 5px; color: var(--yard-muted); font-size: 12px; font-weight: 600; }
 .yard-mobile-section { display: none; }

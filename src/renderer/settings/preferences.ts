@@ -122,6 +122,7 @@ export class Preferences {
   private snapshot = initialSnapshot();
   private listeners = new Set<() => void>();
   private revisions = new Map<PreferenceKey, number>();
+  private pendingRefresh = new Set<PreferenceKey>();
   private lifecycle = 0;
   private disposed = false;
   private unsubscribe: (() => void) | null = null;
@@ -138,9 +139,17 @@ export class Preferences {
     this.disposed = false;
     const lifecycle = ++this.lifecycle;
     this.unsubscribe = this.client.subscribe(event => {
-      const keys = Array.isArray(event.keys) ? event.keys : [event.key];
-      if (event.type === 'global-state-updated' || event.type === 'persisted-atom-updated' || event.type === 'settings-updated') {
-        for (const key of keys) if (typeof key === 'string' && key in preferenceDefinitions && !this.snapshot[key as PreferenceKey].saving) void this.reload(key as PreferenceKey);
+      const source = event.type === 'global-state-updated' ? 'global' : event.type === 'persisted-atoms-changed' ? 'atom' :
+        event.type === 'settings-changed' ? 'setting' : null;
+      if (source) {
+        const keys = Array.isArray(event.keys) ? event.keys : typeof event.key === 'string' ? [event.key] :
+          preferenceKeys.filter(key => preferenceDefinitions[key].source === source);
+        for (const key of keys) if (typeof key === 'string' && key in preferenceDefinitions &&
+          preferenceDefinitions[key as PreferenceKey].source === source) {
+          const preferenceKey = key as PreferenceKey;
+          if (this.snapshot[preferenceKey].saving) this.pendingRefresh.add(preferenceKey);
+          else void this.reload(preferenceKey);
+        }
       }
     });
     void this.load();
@@ -219,8 +228,10 @@ export class Preferences {
       const current = this.snapshot[key].value;
       this.update(key, { saved: clone(actual), value: current, saving: false,
         error: same(actual, sent) ? null : 'The value changed while saving. Review and save again.' });
+      if (this.pendingRefresh.delete(key) && same(actual, sent)) void this.reload(key);
       return same(actual, sent);
     } catch (error) {
+      this.pendingRefresh.delete(key);
       this.update(key, { saving: false, error: `Could not confirm save: ${errorText(error)}. Your edit is preserved.` });
       return false;
     }

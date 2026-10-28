@@ -11,6 +11,7 @@ class FakeClient implements WorkbenchClient {
   listeners = new Set<(event: WorkbenchEvent) => void>();
   fail = '';
   pauseWrite: (() => Promise<void>) | null = null;
+  pauseRead: ((key: string) => Promise<void>) | null = null;
   rpc<T>(): Promise<T> { throw new Error('RPC is not used for UI preferences'); }
   subscribe(listener: (event: WorkbenchEvent) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
@@ -19,7 +20,11 @@ class FakeClient implements WorkbenchClient {
     const key = String(params?.key);
     if (endpoint === 'get-settings') return { values: { ...this.settings } } as T;
     const target = endpoint.endsWith('setting') ? this.settings : endpoint.endsWith('global-state') ? this.globals : this.atoms;
-    if (endpoint.startsWith('get-')) return { value: target[key] } as T;
+    if (endpoint.startsWith('get-')) {
+      const value = target[key];
+      await this.pauseRead?.(key);
+      return { value } as T;
+    }
     if (endpoint.startsWith('set-')) {
       await this.pauseWrite?.();
       target[key] = params?.value;
@@ -48,6 +53,53 @@ test('preferences read existing sources and write each key to its owning store',
   assert.ok(client.calls.some(call => call.endpoint === 'set-setting' && call.params?.key === 'composerPlainTextMode'));
   assert.ok(client.calls.some(call => call.endpoint === 'set-global-state' && call.params?.key === 'reduced-motion-preference'));
   assert.ok(client.calls.some(call => call.endpoint === 'set-persisted-atom' && call.params?.key === 'show-context-window-usage'));
+});
+
+test('host and cross-tab notifications refresh the correct store while keeping drafts', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  const stop = prefs.start();
+  await prefs.load();
+  prefs.edit('appearanceTheme', 'light');
+  client.settings.appearanceTheme = 'system';
+  client.atoms['show-context-window-usage'] = false;
+  client.globals['reduced-motion-preference'] = 'on';
+  for (const event of [{ type: 'settings-changed', keys: ['appearanceTheme'] },
+    { type: 'persisted-atoms-changed' }, { type: 'global-state-updated', keys: ['reduced-motion-preference'] }]) {
+    for (const listener of client.listeners) listener(event);
+  }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(prefs.getSnapshot().appearanceTheme.saved, 'system');
+  assert.equal(prefs.getSnapshot().appearanceTheme.value, 'light');
+  assert.equal(prefs.getSnapshot()['show-context-window-usage'].value, false);
+  assert.equal(prefs.getSnapshot()['reduced-motion-preference'].value, 'on');
+  stop();
+});
+
+test('an update during save is reread after the acknowledgement', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  const stop = prefs.start();
+  await prefs.load();
+  let release: () => void = () => {};
+  let captured: () => void = () => {};
+  const waiting = new Promise<void>(resolve => { captured = resolve; });
+  client.pauseRead = async key => {
+    if (key !== 'appearanceTheme') return;
+    client.pauseRead = null;
+    captured();
+    await new Promise<void>(resolve => { release = resolve; });
+  };
+  prefs.edit('appearanceTheme', 'light');
+  const saving = prefs.save();
+  await waiting;
+  client.settings.appearanceTheme = 'system';
+  for (const listener of client.listeners) listener({ type: 'settings-changed', keys: ['appearanceTheme'] });
+  release();
+  assert.equal(await saving, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(prefs.getSnapshot().appearanceTheme.saved, 'system');
+  assert.equal(prefs.getSnapshot().appearanceTheme.value, 'system');
+  assert.equal(prefs.dirty, false);
+  stop();
 });
 
 test('failed or unverifiable writes retain edits and never replay automatically', async () => {

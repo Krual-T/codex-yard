@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { NumberPreference, Row, Select, Toggle, entryState } from './PreferenceControls.tsx';
 import type { PreferenceProps } from './PreferenceControls.tsx';
 import { codeThemes, defaultThemes, exportTheme, importTheme, preferenceDefinitions } from './preferences.ts';
 import type { ChromeTheme, PreferenceKey, ThemeVariant } from './preferences.ts';
 
-function ThemeEditor({ variant, ...props }: PreferenceProps & { variant: ThemeVariant; backdropSupported: boolean }) {
+function ThemeEditor({ variant, onDirtyChange, ...props }: PreferenceProps & { variant: ThemeVariant; backdropSupported: boolean; onDirtyChange: (dirty: boolean) => void }) {
   const themeKey = variant === 'light' ? 'appearanceLightChromeTheme' : 'appearanceDarkChromeTheme';
   const codeKey = variant === 'light' ? 'appearanceLightCodeThemeId' : 'appearanceDarkCodeThemeId';
   const entry = props.snapshot[themeKey];
@@ -13,6 +13,7 @@ function ThemeEditor({ variant, ...props }: PreferenceProps & { variant: ThemeVa
   const [dialog, setDialog] = useState<'import' | 'export' | null>(null);
   const [text, setText] = useState('');
   const [error, setError] = useState('');
+  useEffect(() => { onDirtyChange(dialog === 'import' && text.trim().length > 0); }, [dialog, text, onDirtyChange]);
   const disabled = entryState(entry).disabled;
   const update = (patch: Partial<ChromeTheme>) => props.preferences.edit(themeKey, { ...theme, ...patch });
   const font = (key: 'ui' | 'content' | 'code', value: string) => {
@@ -81,7 +82,7 @@ const appearanceKeys: PreferenceKey[] = ['appearanceTheme', 'appearanceLightChro
   'appearanceLightCodeThemeId', 'appearanceDarkCodeThemeId', 'appearanceDiffMarkerStyle', 'sansFontSize', 'codeFontSize',
   'useFontSmoothing', 'usePointerCursors', 'reduced-motion-preference', 'dock-icon-preference'];
 
-export function AppearanceSection(props: PreferenceProps & { platform: string; backdropSupported: boolean }) {
+export function AppearanceSection(props: PreferenceProps & { platform: string; backdropSupported: boolean; onDirtyChange: (dirty: boolean) => void }) {
   const [variant, setVariant] = useState<ThemeVariant>('light');
   const reset = () => { for (const key of appearanceKeys) props.preferences.edit(key, preferenceDefinitions[key].defaultValue); };
   return <>
