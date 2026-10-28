@@ -385,7 +385,9 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   await page.getByRole('button', { name: 'Save file' }).click();
   await page.getByRole('alert').filter({ hasText: 'File changed on disk' }).waitFor();
   assert.equal(await editorValue(editor), 'unsaved edit');
-  assert.deepEqual(await page.evaluate(() => { const { operationId: _id, ...write } = (window as any).fixture.state.writes[1]; return write; }), {
+  assert.equal(await page.evaluate(() => (window as any).fixture.state.writes[1].guardOperationId),
+    await page.evaluate(() => (window as any).fixture.state.writes[0].operationId));
+  assert.deepEqual(await page.evaluate(() => { const { operationId: _id, guardOperationId: _guard, ...write } = (window as any).fixture.state.writes[1]; return write; }), {
     hostId: 'local', cwd: project, path: join(project, 'notes.txt'), expectedContents: original, contents: 'unsaved edit',
   });
   assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.kind === 'rpc' && call.method === 'fs/writeFile').length), 0);
