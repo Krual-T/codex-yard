@@ -21,14 +21,14 @@ import { createThreadProjectInventory } from './thread-project-inventory.ts';
 import type { ThreadProjectOperation } from './thread-projects.ts';
 import { configurationRequest, httpFailure } from './http-fetch.ts';
 import type { HttpWireRequest } from './http-fetch.ts';
-import { loadConfigurationSnapshot } from './configuration-snapshot.ts';
-import { loadHostCatalog, publicHost } from './hosts.ts';
+import { loadHostCatalog } from './hosts.ts';
 import type { HostCatalog } from './hosts.ts';
 import { createSshProxyStream } from './ssh.ts';
 import type { HostPaths } from './ssh.ts';
 import { createQueuedSendLocks } from './queued-send-locks.ts';
 import { createPreferenceWrites } from './preference-writes.ts';
 import { createStateMutations } from './state-mutations.ts';
+import { createRemoteConnectionPreferences } from './remote-connection-preferences.ts';
 import { createProjectCatalogWrites } from './project-catalog-writes.ts';
 import { readToolHistory } from './tool-history.ts';
 import { createConversationWrites } from './conversation-writes.ts';
@@ -88,9 +88,6 @@ export async function createNativeWorkbench(options: Options = {}) {
   const sandboxScript = await readFile(join(projectRoot, '.local', 'visualization-sandbox.js'), 'utf8');
   const sandboxHtml = '<!doctype html><html><head><meta charset="utf-8"><title>Visualization</title></head><body><script>' +
     sandboxScript.replaceAll('</script', '<\\/script') + '</script></body></html>';
-  const configurationSnapshot = await loadConfigurationSnapshot(join(dataDir, 'configuration-snapshot'), rendererVersion);
-  const snapshotBody = configurationSnapshot ? Buffer.from(JSON.stringify(configurationSnapshot)) : null;
-  const compressedSnapshot = snapshotBody ? await compress(snapshotBody, { level: 1 }) : null;
   const html = await readFile(join(projectRoot, 'public', 'index.html'), 'utf8');
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   await chmod(dataDir, 0o700);
@@ -161,11 +158,9 @@ export async function createNativeWorkbench(options: Options = {}) {
   const petOverlay = createPetOverlay(globals, settings, persist, broadcast, stateMutations);
   const writePreference = createPreferenceWrites(settings, globals, persist, broadcast, key => petOverlay.settingChanged(key), stateMutations);
   const petAssets = createPetAssets(codexHome);
-  function remoteProfiles() {
-    const preferences = record(globals['remote-connection-auto-connect-by-host-id']);
-    return catalog.hosts.map(host => ({ ...publicHost(host), autoConnect: preferences[host.hostId] === true }));
-  }
-  function sharedObject(key: string) {
+  const remotePreferences = createRemoteConnectionPreferences(catalog.hosts, globals, stateMutations, persist, broadcast);
+  const remoteProfiles = remotePreferences.read;
+  async function sharedObject(key: string) {
     if (key === 'host_config') return { id: 'local', kind: 'local' };
     if (key === 'remote_ssh_connections') return remoteProfiles();
     if (key === 'remote_wsl_connections' || key === 'remote_control_connections') return [];
@@ -273,15 +268,6 @@ export async function createNativeWorkbench(options: Options = {}) {
         response.end();
         return;
       }
-      if (path === '/api/configuration/bootstrap') {
-        if (!snapshotBody) { response.writeHead(404); response.end(); return; }
-        const useGzip = acceptsGzip(request.headers['accept-encoding']);
-        response.setHeader('Vary', 'Accept-Encoding');
-        if (useGzip) response.setHeader('Content-Encoding', 'gzip');
-        response.writeHead(200, { 'Content-Type': mime['.json'] });
-        response.end(request.method === 'HEAD' ? undefined : useGzip ? compressedSnapshot : snapshotBody);
-        return;
-      }
       if (path === '/api/status') {
         response.writeHead(200, { 'Content-Type': mime['.json'] });
         response.end(JSON.stringify({ connected: control.connected, rendererVersion, workspace, clients: clients.size,
@@ -289,7 +275,6 @@ export async function createNativeWorkbench(options: Options = {}) {
           executionMode: 'shared-daemon',
           hosts: [{ hostId: 'local', transport: 'websocket' }, ...catalog.hosts.map(host => ({ hostId: host.hostId, transport: 'ssh-websocket' }))],
           pendingRequests: chromeClients.pendingRequests + httpRequests.size + control.pending.size + [...fileConnections.values(), ...[...clients.values()].flatMap(connections => [...connections.values()])].reduce((sum, connection) => sum + connection.pending.size, 0),
-          configurationSnapshot: configurationSnapshot ? { capturedAt: configurationSnapshot.capturedAt, bytes: Buffer.byteLength(configurationSnapshot.data) } : null,
           unsupported: [...unsupported], error: control.lastError })); return;
       }
       // Native route names are extensionless. Preserve the original asset tree.
@@ -454,7 +439,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     validHost(hostId);
     if (message.type === 'ready') {
       for (const key of ['host_config', 'remote_ssh_connections', 'remote_wsl_connections', 'remote_control_connections']) {
-        send(client, { type: 'shared-object-updated', key, value: sharedObject(key) });
+        send(client, { type: 'shared-object-updated', key, value: await sharedObject(key) });
       }
       await connectedFor(client, connections, 'local');
       // Initialization RPCs can connect before React subscribes to host events.
@@ -463,7 +448,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       return;
     }
     if (message.type === 'shared-object-subscribe') {
-      send(client, { type: 'shared-object-updated', key: message.key, value: sharedObject(String(message.key)) });
+      send(client, { type: 'shared-object-updated', key: message.key, value: await sharedObject(String(message.key)) });
       return;
     }
     if (message.type === 'mcp-response' && message.response) {
@@ -555,16 +540,10 @@ export async function createNativeWorkbench(options: Options = {}) {
     switch (endpoint) {
       case 'chrome-browser': return browsers.get(client)!.request(params as unknown as ChromeRequest);
       case 'chrome-connections': return chromeClients.connections(params as unknown as ConnectionRequest);
-      case 'refresh-remote-connections': return { remoteConnections: remoteProfiles() };
+      case 'refresh-remote-connections': return { remoteConnections: await remoteProfiles() };
       case 'set-remote-connection-auto-connect': {
         if (!sshHosts.has(hostId) || typeof params.autoConnect !== 'boolean') throw new Error('需要 SSH 主机和连接状态');
-        await stateMutations.run(async () => {
-          const key = 'remote-connection-auto-connect-by-host-id', existed = Object.hasOwn(globals, key), previous = globals[key];
-          globals[key] = { ...record(previous), [hostId]: params.autoConnect };
-          try { await persist(); }
-          catch (error) { if (existed) globals[key] = previous; else delete globals[key]; throw error; }
-        });
-        broadcast({ type: 'shared-object-updated', key: 'remote_ssh_connections', value: remoteProfiles() });
+        await remotePreferences.setAutoConnect(hostId, params.autoConnect);
         if (params.autoConnect) await connectedFor(client, connections, hostId);
         else {
           const connection = connections.get(hostId);
@@ -575,7 +554,7 @@ export async function createNativeWorkbench(options: Options = {}) {
             send(client, { type: 'codex-app-server-connection-changed', hostId, transport: 'websocket', state: 'disconnected' });
           }
         }
-        return { remoteConnections: remoteProfiles(), state: params.autoConnect ? 'connected' : 'disconnected', error: null };
+        return { remoteConnections: await remoteProfiles(), state: params.autoConnect ? 'connected' : 'disconnected', error: null };
       }
       case 'set-remote-wsl-connections-enabled': return { remoteWslConnections: [] };
       case 'set-remote-control-connections-enabled': return { remoteControlConnections: [] };

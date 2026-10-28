@@ -240,27 +240,28 @@ test('native Mini messages reach both Web pages and persist the original pet set
   assert.equal(status.unsupported.some((method: string) => /avatar|pet/.test(method)), false);
 });
 
-test('the local bootstrap serves the exact downloaded evaluations with their capture profile and no upstream call', async t => {
+test('owned startup ignores retired configuration captures and preserves their original data', async t => {
   let requests = 0;
-  const data = JSON.stringify({ has_updates: true, feature_gates: { gate: { value: true } }, dynamic_configs: {}, layer_configs: {} });
-  const user = { appVersion: '26.1013.40934', custom: { auth_status: 'logged_out' }, customIDs: { stableID: 'captured-browser' } };
-  const capturedAt = '2026-10-26T08:22:03.255Z';
+  const data = 'retired and malformed JSON', metadata = { rendererVersion: 'old-reference', custom: { retain: true } };
   const h = await fixture(t, async () => { requests++; throw Error('Upstream should not be called'); },
-    { data, metadata: { rendererVersion: user.appVersion, capturedAt, client: { user } } });
+    { data, metadata });
   const response = await fetch(h.app.url + '/api/configuration/bootstrap');
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get('cache-control'), 'no-store');
-  assert.equal(response.headers.get('content-encoding'), 'gzip');
-  assert.deepEqual(await response.json(), { rendererVersion: user.appVersion, capturedAt, user, data });
+  assert.equal(response.status, 404);
   assert.equal(requests, 0);
   const status = await (await fetch(h.app.url + '/api/status')).json();
-  assert.deepEqual(status.configurationSnapshot, { capturedAt, bytes: Buffer.byteLength(data) });
+  assert.equal(Object.hasOwn(status, 'configurationSnapshot'), false);
+  assert.equal(await readFile(join(h.root, 'data/configuration-snapshot/initialize.json'), 'utf8'), data);
+  assert.deepEqual(JSON.parse(await readFile(join(h.root, 'data/configuration-snapshot/metadata.json'), 'utf8')), metadata);
+  const page = await h.connect();
+  assert.equal((await page.rpc(1, 'thread/list')).result.data.length, 0);
 });
 
-test('an installation without a local snapshot leaves normal configuration initialization available', async t => {
+test('owned startup without a configuration capture uses the normal CLI connection', async t => {
   const h = await fixture(t);
   assert.equal((await fetch(h.app.url + '/api/configuration/bootstrap')).status, 404);
-  assert.equal((await (await fetch(h.app.url + '/api/status')).json()).configurationSnapshot, null);
+  assert.equal(Object.hasOwn(await (await fetch(h.app.url + '/api/status')).json(), 'configurationSnapshot'), false);
+  const page = await h.connect();
+  assert.equal((await page.rpc(1, 'thread/list')).result.data.length, 0);
 });
 
 async function projectRequest(client: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>['connect']>>, id: string, operation: string, value?: unknown) {
