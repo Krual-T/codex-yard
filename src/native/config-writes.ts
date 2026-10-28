@@ -14,6 +14,7 @@ export interface ConfigWriteRecord {
   hostKey: string;
   target: string;
   binding: string;
+  scope?: 'global';
   state: ConfigWriteState;
 }
 
@@ -25,14 +26,22 @@ export interface ConfigWriteStatus extends ConfigWriteRecord {
 export interface ConfigWriteConnection {
   readonly connected: boolean;
   readonly socket: unknown;
+  readonly server?: { codexHome?: string } | null;
   requestWithCursor(method: string, params?: unknown, options?: RequestOptions): Promise<RpcResult<unknown>>;
 }
 
-interface ConfigWriteInput {
+export interface ConfigWriteInput {
   hostId: string;
   method: ConfigWriteMethod;
   params: Record<string, unknown>;
   connection: ConfigWriteConnection;
+}
+
+export interface ConfigWriteTarget {
+  hostKey: string;
+  target: string;
+  binding: string;
+  scope?: 'global';
 }
 
 interface ConfigWritesOptions {
@@ -40,7 +49,7 @@ interface ConfigWritesOptions {
   persist(): Promise<unknown>;
   mutations: StateMutations;
   /** The host verifies the physical host, actual file and the path used by the daemon. */
-  resolveTarget(input: ConfigWriteInput): Promise<{ hostKey: string; target: string; binding: string }>;
+  resolveTarget(input: ConfigWriteInput): Promise<ConfigWriteTarget>;
 }
 
 export type ConfigWriteCompletion =
@@ -84,9 +93,11 @@ export function createConfigWrites(options: ConfigWritesOptions) {
     if (!Array.isArray(raw)) throw new Error('Configuration write records cannot be read; writes are blocked.');
     const ids = new Set<string>(), targets = new Set<string>(), bindings = new Set<string>();
     const activeHosts = new Set<string>(), aliasedHosts = new Set<string>();
+    let activeCount = 0, globalActive = false;
     for (const value of raw) {
       if (!record(value) || !validId(value.operationId) || !validId(value.hostId) || !validId(value.hostKey)
-        || !validId(value.target) || !validId(value.binding) || !states.has(value.state as ConfigWriteState)) {
+        || !validId(value.target) || !validId(value.binding) || !states.has(value.state as ConfigWriteState)
+        || value.scope !== undefined && value.scope !== 'global') {
         throw new Error('Configuration write records cannot be read; writes are blocked.');
       }
       let target: string, binding: string;
@@ -95,6 +106,9 @@ export function createConfigWrites(options: ConfigWritesOptions) {
       if (target !== value.target || binding !== value.binding || ids.has(value.operationId)) throw new Error('Configuration write records are ambiguous; writes are blocked.');
       ids.add(value.operationId);
       if (value.state === 'pending' || value.state === 'unknown') {
+        if (globalActive || value.scope === 'global' && activeCount > 0) throw new Error('Configuration write records are ambiguous; writes are blocked.');
+        activeCount++;
+        if (value.scope === 'global') globalActive = true;
         const key = JSON.stringify([value.hostKey, target]);
         const bindingKey = JSON.stringify([value.hostKey, binding]);
         if (targets.has(key) || bindings.has(bindingKey) || aliasedHosts.has(value.hostKey as string)
@@ -121,6 +135,7 @@ export function createConfigWrites(options: ConfigWritesOptions) {
   function project(value: ConfigWriteRecord): ConfigWriteStatus {
     const terminal = observed.get(value.operationId);
     return { operationId: value.operationId, hostId: value.hostId, hostKey: value.hostKey, target: value.target, binding: value.binding,
+      ...(value.scope ? { scope: value.scope } : {}),
       state: value.state === 'pending' && !live.has(value.operationId) ? 'unknown' : value.state,
       ...(terminal ? { observedTerminal: terminal, storageError: true as const } : {}) };
   }
@@ -166,15 +181,16 @@ export function createConfigWrites(options: ConfigWritesOptions) {
     if (!connection.connected || !originalSocket) throw new Error('The original configuration connection is unavailable.');
     const params = structuredClone(input.params);
     const resolved = await options.resolveTarget({ hostId, method, params: structuredClone(params), connection });
-    if (!resolved || !validId(resolved.hostKey)) throw new Error('The actual configuration host is unavailable.');
+    if (!resolved || !validId(resolved.hostKey) || resolved.scope !== undefined && resolved.scope !== 'global') throw new Error('The actual configuration host is unavailable.');
     if (!connection.connected || connection.socket !== originalSocket) throw new Error('The original configuration connection changed before the write.');
     const hostKey = resolved.hostKey, target = normalizedTarget(resolved.target), binding = normalizedTarget(resolved.binding);
     const prepared = await options.mutations.run(async () => {
       const current = records();
-      const existing = current.find(value => active(value) && value.hostKey === hostKey &&
-        (value.target === target || value.binding === binding || value.binding !== value.target || binding !== target));
+      const existing = current.find(value => active(value) && (value.scope === 'global' || resolved.scope === 'global' || value.hostKey === hostKey &&
+        (value.target === target || value.binding === binding || value.binding !== value.target || binding !== target)));
       if (existing) return { outcome: 'blocked' as const, operation: project(existing) };
-      const operation: ConfigWriteRecord = { operationId: randomUUID(), hostId, hostKey, target, binding, state: 'pending' };
+      const operation: ConfigWriteRecord = { operationId: randomUUID(), hostId, hostKey, target, binding,
+        ...(resolved.scope ? { scope: resolved.scope } : {}), state: 'pending' };
       await save([...current, operation]);
       live.add(operation.operationId);
       return { outcome: 'started' as const, operation };
