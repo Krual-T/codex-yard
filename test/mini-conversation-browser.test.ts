@@ -122,6 +122,27 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
       } finally { await context.close(); }
     });
 
+    await t.test('navigation lease freezes input synchronously until released', async () => {
+      const { context, page, errors } = await open();
+      try {
+        const mini = page.locator('.yard-mini-conversation'), input = mini.locator('textarea').first();
+        await input.fill('before freeze');
+        await page.waitForFunction(async () => (window as any).miniFixture.miniDurable('before freeze'));
+        await page.waitForFunction(async () => (window as any).miniFixture.canDrain());
+        await input.focus();
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.freeze()), true);
+        assert.equal(await mini.evaluate(element => (element as HTMLElement).inert), true);
+        await page.keyboard.insertText(' changed while frozen');
+        assert.equal(await input.inputValue(), 'before freeze');
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', 'thread-b')), false);
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.flush()), true);
+        await page.evaluate(() => (window as any).miniFixture.releaseBarrier());
+        await input.fill('editable again');
+        await page.waitForFunction(async () => (window as any).miniFixture.miniDurable('editable again'));
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+
     await t.test('message edit retains its original host, thread, turn and item', async () => {
       const { context, page, errors } = await open();
       try {

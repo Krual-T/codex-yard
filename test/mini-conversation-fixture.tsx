@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { StandaloneMini } from '../src/renderer/mini/index.tsx';
 import { MiniConversation, miniDraftIdentity } from '../src/renderer/mini/MiniConversation.tsx';
-import type { MiniConversationController, MiniConversationTarget } from '../src/renderer/mini/MiniConversation.tsx';
+import type { MiniConversationController, MiniConversationLease, MiniConversationTarget } from '../src/renderer/mini/MiniConversation.tsx';
 import { StandaloneComposer } from '../src/renderer/composer/StandaloneComposer.tsx';
 import { readComposerDraft } from '../src/renderer/composer/composer-draft-store.ts';
 import type { ComposerDraftController, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
@@ -31,6 +31,7 @@ const thread = (hostId: string, id: string) => threads[threadKey(hostId, id)] ??
 let connected = true, unknownNext = false, holdNext = false, rejectTarget = false, resolveHeld: (() => void) | undefined;
 let controller: MiniConversationController | null = null, mainController: ComposerDraftController | null = null;
 let miniSnapshot: ComposerDraftSnapshot | null = null;
+let barrierLease: MiniConversationLease | null = null;
 let mainRelease: (() => void) | undefined;
 const client: WorkbenchClient & { connected: boolean } = {
   get connected() { return connected; },
@@ -173,6 +174,9 @@ const fixture = {
     if (!lease) return false;
     try { return await lease.flush(); } finally { lease.release(); }
   },
+  freeze() { barrierLease = controller?.freeze() ?? null; return !!barrierLease; },
+  async flush() { return barrierLease?.flush() ?? false; },
+  releaseBarrier() { barrierLease?.release(); barrierLease = null; },
   hide() { emit({ type: 'workbench-pet-state', state: { isOpen: false, visibility: 'always-visible', position: null } }); },
   show() { emit({ type: 'workbench-pet-state', state: { isOpen: true, visibility: 'always-visible', position: null } }); },
   setFailure(value: boolean) { failWrites = value; },
