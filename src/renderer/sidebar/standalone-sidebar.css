@@ -36,6 +36,12 @@
 .yard-owned-sidebar-thread[aria-current=page] { background: color-mix(in srgb, var(--yard-fg, #ececec) 9%, transparent); }
 .yard-owned-sidebar-thread-title { flex: 1; }
 .yard-owned-sidebar-thread-status { display: inline-flex; flex: none; color: var(--yard-muted, #969696); }
+.yard-owned-sidebar-thread-status > .lucide-loader-circle { animation: workbench-thread-spin 1s linear infinite; }
+@keyframes workbench-thread-spin { to { transform: rotate(360deg); } }
+:root[data-reduced-motion=true] .yard-owned-sidebar-thread-status > .lucide-loader-circle { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-reduced-motion=false]) .yard-owned-sidebar-thread-status > .lucide-loader-circle { animation: none; }
+}
 .yard-owned-sidebar-recents { margin-top: 8px; }
 .yard-owned-sidebar-message { margin: 0; padding: 8px 6px; color: var(--yard-muted, #969696); font-size: 12px; overflow-wrap: anywhere; }
 .yard-owned-sidebar-message button { margin-left: 4px; padding: 3px; color: var(--yard-accent, #99b8ff); }
