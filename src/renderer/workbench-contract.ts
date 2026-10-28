@@ -66,7 +66,14 @@ export interface SubmitOptions {
   mode?: 'default' | 'plan';
 }
 export type SubmitAction = { type: 'send' } | { type: 'queue' } | { type: 'steer'; turnId: string };
-export interface MessageEditOrigin { turnId: string; itemId: string; format: string; hints: unknown[] }
+export interface MessageEditOrigin {
+  hostId: string;
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  format?: string;
+  hints?: unknown[];
+}
 export interface StandaloneComposerProps {
   client: WorkbenchClient;
   context: ComposerContext;
@@ -75,7 +82,7 @@ export interface StandaloneComposerProps {
   onInterrupt(): Promise<void>;
   /** App resumes the selected thread before starting an authoritative queue item. */
   onStartQueued?(queuedSubmissionId: string): Promise<void>;
-  /** Optional explicit edit/reference prefill, consumed once per id. */
+  /** Explicit contextual reference prefill, consumed once per id; never a message edit. */
   prefill?: { id: string; draft: ComposerDraft } | null;
   /** Called only after this prefill has been durably merged into its draft. */
   onPrefillConsumed?(id: string): void;

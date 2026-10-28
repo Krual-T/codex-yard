@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v3，2026-10-28，尚未完成实现验收。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v4，2026-10-28，尚未完成实现验收。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -33,11 +33,11 @@ CLI0.164和隔离桌面CLI0.163.0-alpha.10.2的脚本provider实测都表明：�
 
 草稿属于浏览器状态，身份为host、必填稳定clientThreadId/draftId、placement和旧draftKey；cwd是上下文，不能把同cwd的两个新草稿合并。兼容native-atoms中composer-prompt-drafts-v2/v1、composer-retained-documents-v1、client-thread-bindings-v1及draft-thread-identities-v1，保留document marks/attrs、ordered input、text_elements、hints、图片fileId/detail和浏览器引用上下文。无法转换的旧内容保留原值并显示恢复选项，不以空串覆盖。成功回执只清除所提交版本，失败及更晚编辑保留。
 
-输入回调的action必填，判别联合区分send/queue/steer，steer必带目标turnId；保留granular审批、permissions profile、reviewer等协议值。编辑回调返回Promise并必带原turnId/itemId/format/hints。固定原页面min实现要求默认仅最后一条user消息可编辑、拒绝活动tail；以thread/revert(beforeTurnId)移除源turn及以后内容，再turn/start(turnTrigger:edit_user_message)重启；旧非分页协议才回退rollback。App保留完整原始输入，改变文本时仅替换对应text并清除已失效text_elements，不把编辑当末尾追加或无依据分叉。队列权威来源为thread/queue/*，queue/start前由App恢复订阅。活动发送锁键为(hostId,threadId)，sent回执键为(hostId,threadId,messageId)，保留会话级互斥；未知start结果按queue和clientUserMessageId关联历史核对，无法证明时保持未知，不自动重试或假定条目仍在。临时UI草稿不形成第二份持久业务队列。
+输入回调的action必填，判别联合区分send/queue/steer，steer必带目标turnId；保留granular审批、permissions profile、reviewer等协议值。编辑使用原消息行内编辑，回调返回Promise并固定hostId/threadId/turnId/itemId，format/hints保持原始可缺省语义，保留完整有序输入；引用prefill不承担编辑身份。默认仅最后一条user消息可编辑、拒绝活动tail；回退前将编辑内容、目标和clientUserMessageId保存在既有native-atoms中明确versioned恢复记录，未知字段保留。单一提交控制链将thread/revert(beforeTurnId)和turn/start(turnTrigger:edit_user_message)放在同一Yard会话写入区间，和普通发送/queue/start串行。回退已确认但启动失败时保留恢复入口，重试只启动、不再回退；结果未知先读历史按clientUserMessageId核对，未能证明时要求用户核对，不自动重发。外部客户端不受Yard锁约束，回退前重读完整历史和活动状态核对，daemon没有原子compare-and-revert时保留并发限制，不伪称跨客户端原子。修改文本只变更可证明安全的text及引用range，不丢失格式/上下文。队列权威来源为thread/queue/*，queue/start前App恢复订阅；host/thread活动互斥、host/thread/message已发回执及CLI queue id用于结果核对，无法证明时保持未知，不自动重试或假定条目仍在。临时UI恢复记录不形成第二份业务队列。
 
 消息组件接收 CLI ThreadSummary/turn/items，负责逐类型展示、正文/附件/复制/编辑/代码和工具活动。未知 item 以可展开的明确类型与数据展示，不悄悄丢弃。Markdown parser、高亮、数学、Mermaid 等采用按真实功能需要引入的包管理依赖；应用特有链接、文件路径、复制、外部资源和展示策略留在自有 TSX。
 
-设置通过get/set-setting、get/set-global-state、get/set-persisted-atom和CLI config/read/batchWrite访问原来源。UI偏好是全局host设置，CLI配置是执行host作用域；界面不接触token/env。浏览器仅得到需要的非敏感session字段及user层version/filePath，写入带expectedVersion，冲突保留编辑。实际CLI0.164及桌面0.163-alpha均只提供可写的base user层，不支持旧profile/profiles配置；当前模型与effort按该层真实file/version写顶层键，不依据旧config.profile发明目标。其他后端若有多个user层，必须按真实目标身份选择，不能拿合成多层fixture当本机能力。
+设置通过get/set-setting、get/set-global-state、get/set-persisted-atom和CLI config/read/batchWrite访问原来源。后两个atom端点由浏览器WorkbenchClient处理，复用updatedAtom和旧native-atoms key；同源Web Lock覆盖整个读取/更新/写入，写失败拒绝，成功后本页事件及跨页storage事件更新消费者。原生localStorage草稿写入也是同一事务边界，不能跨页整对象覆盖。UI偏好是全局host设置，CLI配置是执行host作用域；界面不接触token/env。config/read(includeLayers:true)取得实际user层file/version，缺可信版本不写，冲突保留编辑。实际CLI0.164及桌面0.163-alpha只提供可写base user层，不支持旧profile/profiles配置；当前模型与effort按该层真实file/version写顶层键，不发明目标。其他后端多层按真实身份选择，不以合成fixture当本机能力。
 
 共用native-state.json的项目、偏好、pet与SSH自动连接变更共享一个串行提交区间，包含读取旧值、修改内存、捕获快照、原子写入和失败回滚。不能只串行文件写入，否则会保存其他尚未提交的内存值。成功持久化后才广播；较晚编辑不被旧回执覆盖。原设置保存须连接真实消费者：composerEnterBehavior、followUpQueueMode、主题字体、终端位置等，不能只证明值写入。平台原先不支持的操作保留准确错误/空态，不能用“不支持”代替已有Web功能。
 
@@ -67,4 +67,4 @@ host工具read_thread在真实server接线中使用turnLimit/cursor分页历史�
 
 删除快照前，逐条清理 app-resources、静态路由、MCP adapter、mini/pet 资产、字体/图标、CSS、动态导入、构建脚本、验证脚本、测试和分发说明。第三方资产通过包管理或项目自有资源替代，保留适用 notices。最终从不含整个 vendor/codex-app 的干净来源安装/构建/启动/完整测试，检查 bundle metafile、部署目录和浏览器网络，真实 CLI 只读验证与隔离 synthetic peer 验证分别记录；需要真实推理时交 Leader 裁定授权。
 
-本设计描述目标行为，目前尚未证明新入口可运行。CLI 0.164.0、现有 daemon 0.163.0 与历史 UI 参考 26.1013.40934 分开记录；正式 8765、个人数据/模型/配置、共享 daemon 和 App 保持现有运行状态。
+自有入口的隔离synthetic peer整页已证明启动、历史、首次发送、delta/summary完成/刷新、真实组件加载及三档内容边界；主题配色可读性与后续功能仍需补齐。设计v3独立审阅仍为需修改，v4尚未裁决。CLI 0.164.0、现有 daemon 0.163.0 与历史 UI 参考 26.1013.40934 分开记录；正式8765、个人数据/模型/配置、共享daemon和App保持现有状态。
