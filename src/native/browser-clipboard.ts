@@ -6,6 +6,31 @@ export interface ClipboardImage { bytes: Uint8Array; mimeType: string }
 type UploadFiles = (files: File[], directory: boolean) => Promise<{ fsPath: string }[]>;
 type ReportFailure = (error: Error) => void;
 
+/** Write to the access computer's clipboard, including plain HTTP browsers. */
+export async function writeClipboardText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(text); return; }
+    catch { /* Some browsers deny the async API but allow a user-triggered copy. */ }
+  }
+  const focused = document.activeElement;
+  const selection = document.getSelection();
+  const ranges = selection ? Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange()) : [];
+  const field = document.createElement('textarea');
+  field.value = text;
+  field.readOnly = true;
+  field.style.cssText = 'position:fixed;inset:0;opacity:0;pointer-events:none';
+  document.body.append(field);
+  try {
+    field.select();
+    if (!document.execCommand('copy')) throw new Error('复制失败，请选择内容手动复制。');
+  } finally {
+    field.remove();
+    if (focused instanceof HTMLElement) focused.focus({ preventScroll: true });
+    selection?.removeAllRanges();
+    for (const range of ranges) selection?.addRange(range);
+  }
+}
+
 const extensions: Record<string, string> = {
   'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
   'image/avif': 'avif', 'image/bmp': 'bmp', 'image/tiff': 'tiff',

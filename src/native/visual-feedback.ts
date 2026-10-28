@@ -64,6 +64,18 @@ ${sidebarWordmark}::after {
     --sidebar-row-menu-width: auto;
     --sidebar-row-menu-overflow: visible;
   }
+  /* Desktop alternates the indicator and new-chat action in one grid cell.
+     Touch devices keep both visible, so give each its own space. */
+  #app-shell-sidebar [class~="group/folder-row"] .grid:has(> div.col-start-1.row-start-1) {
+    display: flex;
+    width: auto;
+    max-width: none;
+    gap: 4px;
+  }
+  #app-shell-sidebar [class~="group/folder-row"] .grid > div.col-start-1.row-start-1 {
+    visibility: visible;
+    flex-shrink: 0;
+  }
 }
 @media (prefers-reduced-motion: no-preference) {
   :root:not([data-reduced-motion="true"]) :is(${startupLogo}) {
