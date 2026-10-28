@@ -96,6 +96,198 @@ async function assertDifferentRenderers(context: BrowserContext) {
   await internals.close();
 }
 
+async function failFirstAcceptanceRead(page: Page) {
+  await mount(page, owner);
+  await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('original draft');
+  await addAndAttach(page, owner);
+  const before = await page.evaluate(() => window.browserConsumption.snapshot());
+  assert.ok(before);
+  await page.evaluate(() => window.browserConsumption.holdNextCommit());
+  await page.getByLabel('浏览器引用批注').fill('committed browser comment');
+  await page.getByRole('button', { name: '保存批注' }).click();
+  await page.waitForFunction(() => window.browserConsumption.commitBlocked());
+  const recovery = page.locator('section[role="status"]').filter({ hasText: '批注和新草稿版本已保存' });
+  await recovery.waitFor();
+  const after = JSON.parse(await recovery.locator('pre').innerText()) as NonNullable<typeof before>;
+  assert.notEqual(after.revision, before.revision);
+  assert.deepEqual(await page.evaluate(() => window.browserConsumption.snapshot()), before);
+  const persisted = await page.evaluate(target => window.browserConsumption.versions(target), owner);
+  assert.deepEqual(persisted.versions.find(version => version.revision === after.revision)?.draft, after.draft);
+  await page.evaluate(() => {
+    const scope = window as unknown as { injectedReadFailures: number; injectedReadStack: string };
+    const original = IDBObjectStore.prototype.get;
+    scope.injectedReadFailures = 0;
+    scope.injectedReadStack = '';
+    IDBObjectStore.prototype.get = function(key) {
+      if (this.name === 'atoms' && key === 'native-atoms') {
+        IDBObjectStore.prototype.get = original;
+        const error = new Error('fixture transient read failure');
+        scope.injectedReadFailures += 1; scope.injectedReadStack = error.stack ?? '';
+        throw error;
+      }
+      return original.call(this, key);
+    };
+    window.browserConsumption.releaseCommit();
+  });
+  await page.waitForFunction(() => (window as unknown as { injectedReadFailures: number }).injectedReadFailures === 1);
+  const stack = await page.evaluate(() => (window as unknown as { injectedReadStack: string }).injectedReadStack);
+  assert.match(stack, /acceptCommittedVersion/);
+  await page.waitForFunction(() => [...document.querySelectorAll('button')]
+    .some(button => button.textContent === '核对已保存的草稿版本' && !button.disabled));
+  assert.deepEqual(await page.evaluate(() => window.browserConsumption.snapshot()), before);
+  assert.equal(await page.evaluate(() => window.browserConsumption.canLeave()), false);
+  return { before, after, recovery };
+}
+
+test('a transient first acceptance read can be retried from the original before to the committed after', {
+  skip: !existsSync('/usr/bin/google-chrome'), timeout: 90_000,
+}, async () => withBrowser(async (context, origin) => {
+  const page = await context.newPage(); await page.goto(origin + '/first');
+  const { before, after, recovery } = await failFirstAcceptanceRead(page);
+  assert.deepEqual(await page.evaluate(target => window.browserConsumption.versions(target), owner).then(view =>
+    view.versions.find(version => version.revision === after.revision)?.draft), after.draft);
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+    writeText: async (value: string) => { (window as unknown as { copied: string }).copied = value; },
+  } }));
+  await recovery.getByRole('button', { name: '复制已保存版本' }).click();
+  assert.deepEqual(JSON.parse(await page.evaluate(() => (window as unknown as { copied: string }).copied)), after);
+  const downloadPromise = page.waitForEvent('download');
+  await recovery.getByRole('button', { name: '另存已保存快照' }).click();
+  const download = await downloadPromise;
+  assert.deepEqual(JSON.parse(await readFile((await download.path())!, 'utf8')), after);
+  assert.deepEqual(await page.evaluate(() => window.browserConsumption.snapshot()), before);
+  await recovery.getByRole('button', { name: '核对已保存的草稿版本' }).click();
+  await page.waitForFunction(() => ![...document.querySelectorAll('section[role="status"]')]
+    .some(element => element.textContent?.includes('批注和新草稿版本已保存'))
+    || [...document.querySelectorAll('[role="alert"]')].some(element => element.textContent?.includes('当前草稿未能确认此活动版本')));
+  assert.equal(await recovery.count(), 0, 'The original before/after pair must allow a retry after a transient read error');
+  assert.deepEqual(await page.evaluate(() => window.browserConsumption.snapshot()), after);
+  assert.notEqual(before.revision, after.revision);
+  assert.equal(await page.evaluate(() => window.browserConsumption.canLeave()), true);
+}));
+
+test('retry cannot replace a newer local draft after the first acceptance read fails', {
+  skip: !existsSync('/usr/bin/google-chrome'), timeout: 90_000,
+}, async () => withBrowser(async (context, origin) => {
+  const page = await context.newPage(); await page.goto(origin + '/first');
+  const { before, after, recovery } = await failFirstAcceptanceRead(page);
+  await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('newer local draft');
+  await page.getByRole('button', { name: '保存为独立草稿' }).click();
+  await page.waitForFunction(async target => {
+    const snapshot = window.browserConsumption.snapshot();
+    return snapshot?.draft.text === 'newer local draft' && (await window.browserConsumption.versions(target)).versions
+      .some(version => version.revision === snapshot.revision && version.draft.text === snapshot.draft.text);
+  }, owner);
+  const current = await page.evaluate(() => window.browserConsumption.snapshot());
+  assert.ok(current); assert.notEqual(current.revision, before.revision); assert.notEqual(current.revision, after.revision);
+  const savedRoots = await roots(page);
+  await recovery.getByRole('button', { name: '核对已保存的草稿版本' }).click();
+  await page.getByText('当前草稿未能确认此活动版本', { exact: false }).waitFor();
+  assert.deepEqual(await page.evaluate(() => window.browserConsumption.snapshot()), current);
+  assert.deepEqual(JSON.parse(await recovery.locator('pre').innerText()), after);
+  assert.deepEqual(await roots(page), savedRoots);
+  assert.equal(await page.evaluate(() => window.browserConsumption.canLeave()), false);
+}));
+
+test('retry and discard preserve unsaved newer input after the first acceptance read fails', {
+  skip: !existsSync('/usr/bin/google-chrome'), timeout: 90_000,
+}, async () => withBrowser(async (context, origin) => {
+  const page = await context.newPage(); await page.goto(origin + '/first');
+  const { after, recovery } = await failFirstAcceptanceRead(page);
+  await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('unsaved newer input');
+  const unsaved = await page.evaluate(() => window.browserConsumption.snapshot());
+  assert.equal(unsaved?.draft.text, 'unsaved newer input');
+  const savedRoots = await roots(page);
+  await recovery.getByRole('button', { name: '核对已保存的草稿版本' }).click();
+  await page.getByText('当前草稿未能确认此活动版本', { exact: false }).waitFor();
+  assert.deepEqual(await page.evaluate(() => window.browserConsumption.snapshot()), unsaved);
+  assert.deepEqual(JSON.parse(await recovery.locator('pre').innerText()), after);
+  assert.equal(await page.evaluate(() => window.browserConsumption.canLeave()), false);
+  await recovery.getByRole('button', { name: '放弃此待接收快照' }).click();
+  assert.deepEqual(await page.evaluate(() => window.browserConsumption.snapshot()), unsaved);
+  assert.deepEqual(await roots(page), savedRoots);
+  await page.getByRole('button', { name: '保存为独立草稿' }).click();
+  await page.waitForFunction(async target => (await window.browserConsumption.versions(target)).versions
+    .some(version => version.draft.text === 'unsaved newer input'), owner);
+}));
+
+test('an owner switch while retry waits cannot apply the previous owner receipt', {
+  skip: !existsSync('/usr/bin/google-chrome'), timeout: 90_000,
+}, async () => withBrowser(async (context, origin) => {
+  const page = await context.newPage(); await page.goto(origin + '/first');
+  const { after, recovery } = await failFirstAcceptanceRead(page);
+  const locker = await context.newPage(); await locker.goto(origin + '/writer'); await mount(locker, other);
+  await assertDifferentRenderers(context);
+  await locker.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('different owner draft');
+  await locker.waitForFunction(async target => {
+    const snapshot = window.browserConsumption.snapshot();
+    return snapshot?.draft.text === 'different owner draft' && (await window.browserConsumption.versions(target)).versions
+      .some(version => version.revision === snapshot.revision && version.draft.text === snapshot.draft.text);
+  }, other);
+  const expectedOther = await locker.evaluate(() => window.browserConsumption.snapshot());
+  assert.ok(expectedOther);
+  await locker.evaluate(async () => {
+    const scope = window as unknown as { lockReady: boolean; unlock(): void };
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('codex-yard.ui-atoms.v1', 1);
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    const tx = db.transaction('atoms', 'readwrite'), store = tx.objectStore('atoms'); let held = true;
+    scope.unlock = () => { held = false; };
+    tx.oncomplete = () => db.close();
+    const keep = () => { if (held) { const request = store.get('native-atoms');
+      request.onsuccess = () => { scope.lockReady = true; keep(); }; } };
+    keep();
+  });
+  await locker.waitForFunction(() => (window as unknown as { lockReady: boolean }).lockReady);
+  await recovery.getByRole('button', { name: '核对已保存的草稿版本' }).click();
+  await page.waitForFunction(() => [...document.querySelectorAll('button')]
+    .some(button => button.textContent === '核对已保存的草稿版本' && button.disabled));
+  await page.evaluate(target => window.browserConsumption.mount(target), other);
+  await page.waitForFunction(target => JSON.stringify(window.browserConsumption.snapshot()?.owner) === JSON.stringify(target), other);
+  await locker.evaluate(() => (window as unknown as { unlock(): void }).unlock());
+  await page.waitForFunction(async target => {
+    const snapshot = window.browserConsumption.snapshot();
+    return JSON.stringify(snapshot?.owner) === JSON.stringify(target) && (await window.browserConsumption.versions(target)).versions
+      .some(version => version.revision === snapshot?.revision);
+  }, other);
+  const elsewhere = page.locator('section[role="status"]').filter({ hasText: '其他草稿有已保存但尚未接收的版本' });
+  await elsewhere.waitFor();
+  await elsewhere.getByRole('button', { name: '放弃此待接收快照' }).waitFor({ state: 'visible' });
+  await page.waitForFunction(() => [...document.querySelectorAll('button')]
+    .some(button => button.textContent === '放弃此待接收快照' && !button.disabled));
+  const current = await page.evaluate(() => window.browserConsumption.snapshot());
+  assert.ok(current); assert.deepEqual(current.owner, other); assert.notEqual(current.revision, after.revision);
+  assert.deepEqual(current, expectedOther);
+  assert.deepEqual(JSON.parse(await elsewhere.locator('pre').innerText()), after);
+  assert.equal(await page.evaluate(() => window.browserConsumption.canLeave()), false);
+  const savedRoots = await roots(page);
+  await elsewhere.getByRole('button', { name: '放弃此待接收快照' }).click();
+  assert.deepEqual(await page.evaluate(() => window.browserConsumption.snapshot()), current);
+  assert.deepEqual(await roots(page), savedRoots);
+}));
+
+test('retry cannot restore a committed version replaced by another renderer', {
+  skip: !existsSync('/usr/bin/google-chrome'), timeout: 90_000,
+}, async () => withBrowser(async (context, origin) => {
+  const page = await context.newPage(); await page.goto(origin + '/first');
+  const { before, after, recovery } = await failFirstAcceptanceRead(page);
+  const writer = await context.newPage(); await writer.goto(origin + '/writer');
+  await assertDifferentRenderers(context);
+  await writer.evaluate(snapshot => window.browserConsumption.replaceVersion(snapshot, 'replacement-after-read-failure', 'other renderer edit'), after);
+  await page.waitForFunction(async ({ target, revision }) => !(await window.browserConsumption.versions(target)).versions
+    .some(version => version.revision === revision), { target: owner, revision: after.revision });
+  const savedRoots = await roots(page);
+  await recovery.getByRole('button', { name: '核对已保存的草稿版本' }).click();
+  await page.getByText('当前草稿未能确认此活动版本', { exact: false }).waitFor();
+  assert.deepEqual(await page.evaluate(() => window.browserConsumption.snapshot()), before);
+  assert.deepEqual(JSON.parse(await recovery.locator('pre').innerText()), after);
+  assert.deepEqual(await roots(page), savedRoots);
+  assert.equal(await page.evaluate(() => window.browserConsumption.canLeave()), false);
+  assert.ok((await page.evaluate(target => window.browserConsumption.versions(target), owner)).versions
+    .some(version => version.revision === 'replacement-after-read-failure' && version.draft.text === 'other renderer edit'));
+}));
+
 test('recovery checks durable activity even when the controller still displays the removed version', {
   skip: !existsSync('/usr/bin/google-chrome'), timeout: 90_000,
 }, async () => withBrowser(async (context, origin) => {

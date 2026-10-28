@@ -47,7 +47,7 @@ function displayValue(value: unknown): string {
 }
 
 interface PendingEdit { owner: BrowserOwner; reference: BrowserReference; base: Record<string, unknown>; text: string }
-interface PendingProjection { owner: BrowserOwner; snapshot: ComposerDraftSnapshot }
+interface PendingProjection { owner: BrowserOwner; before: ComposerDraftSnapshot; snapshot: ComposerDraftSnapshot }
 interface BrowserDraftAction { operation: ComposerDraftExternalOperation; finish(success: boolean): void }
 type DraftWork<T> = (before: ComposerDraftSnapshot, isCurrent: () => boolean) => Promise<{ after: ComposerDraftSnapshot; value: T }>;
 interface BrowserEdits {
@@ -57,8 +57,8 @@ interface BrowserEdits {
   discard(key: string): void;
   begin(owner: BrowserOwner, resolving?: boolean): () => void;
   busy(owner: BrowserOwner): boolean;
-  hold(owner: BrowserOwner, snapshot: ComposerDraftSnapshot): void;
-  release(owner: BrowserOwner, snapshot: ComposerDraftSnapshot): boolean;
+  hold(value: PendingProjection): void;
+  release(value: PendingProjection): boolean;
   projection(owner: BrowserOwner): PendingProjection | undefined;
   barrier(): Promise<void>;
 }
@@ -202,17 +202,18 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
     } catch (failure) { finish(); throw failure; }
   }, [ownerKey, edits.begin]);
   const transact = React.useCallback(async <T,>(operation: ComposerDraftExternalOperation, work: DraftWork<T>, onCommitted?: () => void): Promise<T> => {
-    let committed: ComposerDraftSnapshot | undefined;
+    let committed: PendingProjection | undefined;
     try {
       const receipt = await operation.transaction(async (before, isCurrent) => {
+        const original = structuredClone(before);
         const result = await work(before, () => active.current && isCurrent());
-        committed = structuredClone(result.after);
-        edits.hold(owner, committed);
+        committed = { owner: structuredClone(owner), before: original, snapshot: structuredClone(result.after) };
+        edits.hold(committed);
         onCommitted?.();
         return result;
       });
-      if (committed && receipt.accepted && active.current && sameBrowserValue(receipt.after, committed)
-        && edits.release(owner, committed)) return receipt.value;
+      if (committed && receipt.accepted && active.current && sameBrowserValue(receipt.before, committed.before)
+        && sameBrowserValue(receipt.after, committed.snapshot) && edits.release(committed)) return receipt.value;
       throw new Error('草稿未能接收已保存版本。');
     } catch (failure) {
       if (committed) throw new Error('批注和新草稿版本已保存，请在草稿版本中核对并选择；当前编辑已保留。');
@@ -315,7 +316,7 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
     let finish: (() => void) | undefined;
     try {
       finish = edits.begin(value.owner, true);
-      if (!edits.release(value.owner, value.snapshot)) throw new Error('待接收快照已变化，请重新核对。');
+      if (!edits.release(value)) throw new Error('待接收快照已变化，请重新核对。');
       setError('');
     } catch (failure) { setError((failure as Error).message); }
     finally { finish?.(); }
@@ -351,9 +352,9 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
             const finish = edits.begin(owner, true);
             try {
               const current = edits.projection(owner), committed = committedRef.current;
-              if (!active.current || !committed || !current || !sameBrowserValue(current.snapshot, projection.snapshot)
-                || !await committed(projection.snapshot, projection.snapshot) || !active.current
-                || !edits.release(owner, projection.snapshot)) {
+              if (!active.current || !committed || !current || !sameBrowserValue(current, projection)
+                || !await committed(projection.before, projection.snapshot) || !active.current
+                || !edits.release(projection)) {
                 throw new Error('当前草稿未能确认此活动版本，请核对、复制或明确放弃待接收快照。');
               }
               setError('');
@@ -450,15 +451,15 @@ export function StandaloneBrowser(props: StandaloneBrowserProps) {
     };
   }, [changed]);
   const busy = React.useCallback((owner: BrowserOwner) => inFlight.current.has(browserOwnerKey(owner)), []);
-  const hold = React.useCallback((owner: BrowserOwner, snapshot: ComposerDraftSnapshot) => {
-    const key = browserOwnerKey(owner);
+  const hold = React.useCallback((value: PendingProjection) => {
+    const key = browserOwnerKey(value.owner);
     if (projections.current[key]) throw new Error('此草稿已有待接收快照。');
-    projections.current = { ...projections.current, [key]: { owner: structuredClone(owner), snapshot: structuredClone(snapshot) } };
+    projections.current = { ...projections.current, [key]: structuredClone(value) };
     changed();
   }, [changed]);
-  const release = React.useCallback((owner: BrowserOwner, snapshot: ComposerDraftSnapshot) => {
-    const key = browserOwnerKey(owner);
-    if (!sameBrowserValue(projections.current[key]?.snapshot, snapshot)) return false;
+  const release = React.useCallback((value: PendingProjection) => {
+    const key = browserOwnerKey(value.owner);
+    if (!sameBrowserValue(projections.current[key], value)) return false;
     const next = { ...projections.current }; delete next[key]; projections.current = next; changed();
     return true;
   }, [changed]);
