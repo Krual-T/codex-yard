@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v15，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v16，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -68,6 +68,16 @@ composer-drafts.v3是同一UI atom根中的事务记录，首次导入精确旧v
 终态保存失败时，宿主保留实际观察，并用该原操作的内存Ed25519私钥签发最小回执；pending记录只存公钥。页面在既有配置恢复atom中保存原ID/host/method/terminal/signature，宿主重启后验签并只补存原终态，不发配置RPC。原无公钥记录继续unknown，缺少有效回执不推定成功。明确拒绝只投影版本冲突、配置无效、只读层三个已知安全类别；原始配置、token和错误data不进入恢复记录。页面草稿、原提交与较新编辑分别保存在同一既有记录中，控制器在section卸载后仍处理原结果，并提供跨页核对与复制出口。
 
 host工具read_thread在真实server接线中使用turnLimit/cursor分页历史，按includeOutputs投影，默认最新10轮、每轮最新60项、不含输出，按maxOutputCharsPerItem（默认4000）截断输出并返回可继续读取较早turn/items的游标；不能把外层参数检查或mock handler测试当作真实实现。取消沿MCP适配器到host请求，断线不重放写入。
+
+## 当前父级接线合同（v16）
+
+主导航在首次等待前同步取得原消息编辑租约和原composer owner租约，并置输入区域inert；排空后核对设置离页、文件恢复、浏览器未提交编辑和未接收快照，在路由提交前再次flush两项租约，直到新路由layout commit才释放。失败或取消释放并留在原页。租约保护本页输入与已登记外部操作；不会锁住其他renderer的合法后续编辑，也不额外保存所有历史版本。
+
+浏览器选择、保存、附加和删除先取得原owner外部句柄，根atom事务共用既有composer版本更新。父级用实际home/thread binding核对browser owner；composer删除借用同一句柄，完整after在投影接收前保留，根事务已提交时返回handled，不再进行第二次删除。接收失败保留完整快照及复制、另存、核对与明确放弃出口，阻止静默离页；已持久版本不会被旧投影二次写回。跨页删除watcher也经同一外部操作队列和根事务，只处理精确删除标记。发送确认仍从不可变intent记录实际完整引用后按精确revision清理。
+
+documentPlainTextMode是本次提交的捕获值，随现有SendIntent持久；send、queue、steer与显式retry使用同一值序列化原document，不读取之后改变的偏好。旧intent省略此字段时保留旧文档自身的兼容规则，不伪造历史选择。
+
+设置config/read、skills/list通过宿主持有的原连接读取，RPC前捕获socket、代次和home/CODEX_HOME，返回前再次核对，在顶层yardConfigSource投影原来源；configuration-write提交携带原baseline的source，宿主只使用匹配的原socket和路径，不把新SSH登录环境代替旧来源。页面关闭不结束该原连接；真实断线换代后旧source明确未发送并要求重读。status/retry-persistence继续按原operation/回执本地恢复。五编辑器独立未提交稿及明确未发送页面恢复仍在D的后续来源实现，不能据本宿主接线声称已闭合。文件写的原迟到终态观察在原socket存活时保留，真实断开仍保持unknown；共享文件/config预留不因超时五分钟自动解除。
 
 ## 兼容、并发和断线
 
