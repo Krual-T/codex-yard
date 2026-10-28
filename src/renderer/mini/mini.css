@@ -1,0 +1,67 @@
+.yard-mini {
+  position: fixed;
+  z-index: 45;
+  pointer-events: none;
+  color: var(--color-text, #202123);
+  font: 13px/1.4 system-ui, sans-serif;
+}
+.yard-mini * { box-sizing: border-box; }
+.yard-mini button, .yard-mini input { font: inherit; }
+.yard-mini button { cursor: pointer; }
+.yard-mini button:disabled { cursor: default; opacity: .55; }
+.yard-mini button:focus-visible, .yard-mini input:focus-visible { outline: 2px solid #3478d4; outline-offset: 2px; }
+.yard-mini-content {
+  position: absolute;
+  right: 16px;
+  bottom: 48px;
+  width: min(330px, calc(100% - 32px));
+  max-height: calc(100% - 64px);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.yard-mini-pet-area { position: relative; align-self: end; display: flex; flex-direction: column; align-items: center; margin-right: 24px; pointer-events: auto; }
+.yard-mini-mascot { display: block; width: min(var(--yard-pet-width), 60vw); aspect-ratio: 192 / 208; padding: 0; border: 0; background: transparent; touch-action: none; cursor: grab; }
+.yard-mini-mascot:active { cursor: grabbing; }
+.yard-mini-sprite, .yard-mini-missing { display: block; width: 100%; height: 100%; aspect-ratio: 192 / 208; background-repeat: no-repeat; image-rendering: pixelated; }
+.yard-mini-missing { display: grid; place-items: center; overflow-wrap: anywhere; padding: 8px; border: 1px dashed #999; border-radius: 8px; background: var(--color-bg-primary, #fff); color: #666; }
+.yard-mini-controls { display: flex; gap: 4px; padding: 3px; border: 1px solid #0002; border-radius: 8px; background: var(--color-bg-primary, #fff); box-shadow: 0 3px 12px #0002; }
+.yard-mini-controls button, .yard-mini-picker-heading button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 5px; color: inherit; background: transparent; }
+.yard-mini-controls button:hover, .yard-mini-picker-heading button:hover, .yard-mini-menu button:hover { background: #8882; }
+.yard-mini-menu, .yard-mini-picker, .yard-mini-composer, .yard-mini-activity, .yard-mini-error {
+  background: var(--color-bg-primary, #fff);
+  border: 1px solid #0002;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px #0002;
+  pointer-events: auto;
+}
+.yard-mini-menu { position: absolute; right: 0; bottom: 38px; z-index: 2; width: 170px; padding: 4px; }
+.yard-mini-menu button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 6px 8px; border: 0; border-radius: 4px; background: transparent; color: inherit; text-align: left; }
+.yard-mini-activities { display: grid; gap: 6px; overflow: auto; max-height: 220px; flex-shrink: 1; pointer-events: auto; }
+.yard-mini-activity-link { display: flex; align-items: flex-start; gap: 9px; width: 100%; padding: 9px 11px; border: 0; background: transparent; color: inherit; text-align: left; }
+.yard-mini-activity-link > span:last-child { display: grid; min-width: 0; }
+.yard-mini-activity-link strong, .yard-mini-activity-link small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.yard-mini-activity-link small { color: #6c6c6c; }
+.yard-mini-status { width: 8px; height: 8px; flex: 0 0 8px; margin-top: 5px; border-radius: 50%; background: #888; }
+.yard-mini-status-running { background: #4279d4; }
+.yard-mini-status-waiting { background: #d68a22; }
+.yard-mini-status-review { background: #3b9664; }
+.yard-mini-status-failed { background: #c94b48; }
+.yard-mini-approval { padding: 0 11px 10px 28px; overflow-wrap: anywhere; }
+.yard-mini-approval p { margin: 4px 0 8px; white-space: pre-wrap; }
+.yard-mini-approval-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.yard-mini-approval-actions button, .yard-mini-error button, .yard-mini-refresh { padding: 5px 8px; border: 1px solid #0003; border-radius: 5px; background: transparent; color: inherit; }
+.yard-mini-approval small { display: block; margin-top: 6px; }
+.yard-mini-composer { overflow: auto; min-height: 0; max-height: 280px; }
+.yard-mini-picker { overflow: auto; min-height: 0; max-height: 280px; padding: 10px; }
+.yard-mini-picker-heading { display: flex; align-items: center; justify-content: space-between; }
+.yard-mini-options { display: grid; grid-template-columns: repeat(auto-fill, minmax(65px, 1fr)); gap: 4px; }
+.yard-mini-option { min-width: 0; display: grid; justify-items: center; gap: 2px; padding: 4px; border: 1px solid transparent; border-radius: 5px; color: inherit; background: transparent; overflow-wrap: anywhere; }
+.yard-mini-option[aria-pressed=true] { border-color: #3478d4; }
+.yard-mini-option-image { display: block; width: 42px; aspect-ratio: 192 / 208; }
+.yard-mini-size { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.yard-mini-size input { min-width: 0; flex: 1; }
+.yard-mini-error { padding: 10px; overflow-wrap: anywhere; }
+.yard-mini-error > div { display: flex; gap: 6px; margin-top: 7px; }
+@media (max-width: 440px) { .yard-mini-content { bottom: 16px; } .yard-mini-pet-area { margin-right: 8px; } }
