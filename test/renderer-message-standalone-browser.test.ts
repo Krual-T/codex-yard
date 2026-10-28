@@ -183,7 +183,7 @@ test('standalone messages render CLI items and retain interactions while streami
     await opaque.getByRole('button', { name: 'Edit message' }).waitFor();
     const edits = await page.evaluate(() => window.standaloneHarness.calls.edits) as { draft: { input: Record<string, unknown>[]; images: { fileId?: string; src: string }[]; skills: unknown[]; hints: unknown[] }; origin: unknown }[];
     assert.equal(edits.length, 2);
-    assert.deepEqual(edits[1]?.origin, { turnId: 'turn-two', itemId: 'opaque', format: 'markdown', hints: ['search'] });
+    assert.deepEqual(edits[1]?.origin, { hostId: 'ssh-test', threadId: 'thread', turnId: 'turn-two', itemId: 'opaque', format: 'markdown', hints: ['search'] });
     assert.deepEqual(edits[1]?.draft.input, [
       { type: 'text', text: '中Before', text_elements: [{ byteRange: { start: 3, end: 9 }, placeholder: 'Before', context: { browser: 'element' } }] },
       { type: 'image', fileId: 'opaque-file', detail: 'high' }, { type: 'text', text: 'After edited', text_elements: [] },
@@ -358,7 +358,7 @@ test('standalone messages render CLI items and retain interactions while streami
     await user.getByRole('button', { name: 'Send', exact: true }).click();
     await user.getByRole('button', { name: 'Edit message' }).waitFor();
     const lastEdit = (await page.evaluate(() => window.standaloneHarness.calls.edits)).at(-1) as { origin: unknown; draft: { input: unknown[] } };
-    assert.deepEqual(lastEdit.origin, { turnId: 'turn-one', itemId: 'user', format: 'plain', hints: [] });
+    assert.deepEqual(lastEdit.origin, { hostId: 'ssh-test', threadId: 'thread', turnId: 'turn-one', itemId: 'user' });
     assert.deepEqual(lastEdit.draft.input, [{ type: 'text', text: 'Updated plain message', text_elements: [] },
       { type: 'localImage', path: 'good.gif' }, { type: 'localImage', path: 'retry.gif' }]);
     await user.getByRole('button', { name: 'Open good.gif' }).click();

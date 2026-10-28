@@ -81,7 +81,7 @@ export function ToolItem({ item, client, hostId, threadId, cwd, onOpenFile, onOp
       const kind = asString(asRecord(change.kind).type);
       return <section className="yard-file-change" key={`${path}-${index}`}><div className="yard-file-change-heading">
         {path ? <FileLink {...fileProps} path={path} /> : <span>Unknown file</span>}
-        {kind && <span>{kind}</span>}</div><DataBlock label="Diff" value={change.diff} />
+        {kind && <span data-kind={kind}>{kind}</span>}</div><DataBlock label="Diff" value={change.diff} />
         {asString(asRecord(change.kind).move_path) && <div>Moved to: {asString(asRecord(change.kind).move_path)}</div>}
       </section>;
     })}
