@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-university-422aaa7008e49408.js";function r(){return(r=e((()=>{t()})))()}r();export{n as default};
-//# sourceMappingURL=lucide-school-2-581ef70ef851524a.js.map

@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`SwissFranc`,[[`path`,{d:`M10 21V3h8`,key:`br2l0g`}],[`path`,{d:`M6 16h9`,key:`2py0wn`}],[`path`,{d:`M10 9.5h7`,key:`13dmhz`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-swiss-franc-5eb79b05c41ba17d.js.map

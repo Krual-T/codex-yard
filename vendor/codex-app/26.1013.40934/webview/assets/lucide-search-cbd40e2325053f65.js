@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Search`,[[`circle`,{cx:`11`,cy:`11`,r:`8`,key:`4ej97u`}],[`path`,{d:`m21 21-4.3-4.3`,key:`1qie3q`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-search-cbd40e2325053f65.js.map

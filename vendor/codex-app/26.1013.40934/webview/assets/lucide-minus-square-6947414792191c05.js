@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-square-minus-1bbad848e4ca7768.js";function r(){return(r=e((()=>{t()})))()}r();export{n as default};
-//# sourceMappingURL=lucide-minus-square-6947414792191c05.js.map

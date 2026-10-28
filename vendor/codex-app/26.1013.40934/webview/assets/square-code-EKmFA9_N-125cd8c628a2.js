@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`SquareCode`,[[`path`,{d:`M10 9.5 8 12l2 2.5`,key:`3mjy60`}],[`path`,{d:`m14 9.5 2 2.5-2 2.5`,key:`1bir2l`}],[`rect`,{width:`18`,height:`18`,x:`3`,y:`3`,rx:`2`,key:`afitv7`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=square-code-EKmFA9_N-125cd8c628a2.js.map

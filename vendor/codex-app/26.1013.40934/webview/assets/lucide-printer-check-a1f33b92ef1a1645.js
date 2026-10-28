@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`PrinterCheck`,[[`path`,{d:`M13.5 22H7a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v.5`,key:`qeb09x`}],[`path`,{d:`m16 19 2 2 4-4`,key:`1b14m6`}],[`path`,{d:`M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v2`,key:`1md90i`}],[`path`,{d:`M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6`,key:`1itne7`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-printer-check-a1f33b92ef1a1645.js.map

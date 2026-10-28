@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`SquareTerminal`,[[`path`,{d:`m7 11 2-2-2-2`,key:`1lz0vl`}],[`path`,{d:`M11 13h4`,key:`1p7l4v`}],[`rect`,{width:`18`,height:`18`,x:`3`,y:`3`,rx:`2`,ry:`2`,key:`1m3agn`}]])})))()}export{r as n,i as t};
-//# sourceMappingURL=square-terminal-ichmftix-628a216c1d59.js.map

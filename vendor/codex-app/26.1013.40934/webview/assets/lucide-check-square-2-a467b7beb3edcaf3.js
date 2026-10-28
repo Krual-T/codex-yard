@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-square-check-48b86b56daa3590a.js";function r(){return(r=e((()=>{t()})))()}r();export{n as default};
-//# sourceMappingURL=lucide-check-square-2-a467b7beb3edcaf3.js.map

@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Snowflake`,[[`line`,{x1:`2`,x2:`22`,y1:`12`,y2:`12`,key:`1dnqot`}],[`line`,{x1:`12`,x2:`12`,y1:`2`,y2:`22`,key:`7eqyqh`}],[`path`,{d:`m20 16-4-4 4-4`,key:`rquw4f`}],[`path`,{d:`m4 8 4 4-4 4`,key:`12s3z9`}],[`path`,{d:`m16 4-4 4-4-4`,key:`1tumq1`}],[`path`,{d:`m8 20 4-4 4 4`,key:`9p200w`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-snowflake-32d6e17a516e29f9.js.map

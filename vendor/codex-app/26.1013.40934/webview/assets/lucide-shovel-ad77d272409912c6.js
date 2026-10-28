@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Shovel`,[[`path`,{d:`M2 22v-5l5-5 5 5-5 5z`,key:`1fh25c`}],[`path`,{d:`M9.5 14.5 16 8`,key:`1smz5x`}],[`path`,{d:`m17 2 5 5-.5.5a3.53 3.53 0 0 1-5 0s0 0 0 0a3.53 3.53 0 0 1 0-5L17 2`,key:`1q8uv5`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-shovel-ad77d272409912c6.js.map

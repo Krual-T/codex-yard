@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`BotMessageSquare`,[[`path`,{d:`M12 6V2H8`,key:`1155em`}],[`path`,{d:`m8 18-4 4V8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2Z`,key:`w2lp3e`}],[`path`,{d:`M2 12h2`,key:`1t8f8n`}],[`path`,{d:`M9 11v2`,key:`1ueba0`}],[`path`,{d:`M15 11v2`,key:`i11awn`}],[`path`,{d:`M20 12h2`,key:`1q8mjw`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-bot-message-square-be2c5a1e7b05ff3f.js.map

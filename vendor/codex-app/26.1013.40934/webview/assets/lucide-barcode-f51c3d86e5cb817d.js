@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Barcode`,[[`path`,{d:`M3 5v14`,key:`1nt18q`}],[`path`,{d:`M8 5v14`,key:`1ybrkv`}],[`path`,{d:`M12 5v14`,key:`s699le`}],[`path`,{d:`M17 5v14`,key:`ycjyhj`}],[`path`,{d:`M21 5v14`,key:`nzette`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-barcode-f51c3d86e5cb817d.js.map

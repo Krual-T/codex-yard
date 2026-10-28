@@ -1,1 +1,0 @@
-import"./app-shared-61271c39e3c5.js";import{n as e,t}from"./create-menu-981e88b5bd8a.js";e();export{t as SpaceCreateMenu};

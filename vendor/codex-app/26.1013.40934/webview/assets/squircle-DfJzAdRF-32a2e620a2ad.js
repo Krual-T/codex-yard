@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`Squircle`,[[`path`,{d:`M12 3c7.2 0 9 1.8 9 9s-1.8 9-9 9-9-1.8-9-9 1.8-9 9-9`,key:`garfkc`}]])})))()}export{r as n,i as t};
-//# sourceMappingURL=squircle-DfJzAdRF-32a2e620a2ad.js.map

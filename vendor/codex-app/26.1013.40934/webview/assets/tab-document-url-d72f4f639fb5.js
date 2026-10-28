@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{nht as t,nst as n}from"./app-shared-61271c39e3c5.js";function r(e){return t(e).replace(/#.*/,``)}function i(){return(i=e((()=>{n()})))()}export{i as n,r as t};
-//# sourceMappingURL=tab-document-url-d72f4f639fb5.js.map

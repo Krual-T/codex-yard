@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`LifeBuoy`,[[`circle`,{cx:`12`,cy:`12`,r:`10`,key:`1mglay`}],[`path`,{d:`m4.93 4.93 4.24 4.24`,key:`1ymg45`}],[`path`,{d:`m14.83 9.17 4.24-4.24`,key:`1cb5xl`}],[`path`,{d:`m14.83 14.83 4.24 4.24`,key:`q42g0n`}],[`path`,{d:`m9.17 14.83-4.24 4.24`,key:`bqpfvv`}],[`circle`,{cx:`12`,cy:`12`,r:`4`,key:`4exip2`}]])})))()}export{r as n,i as t};
-//# sourceMappingURL=life-buoy-DPYxjY7E-350b119655a5.js.map

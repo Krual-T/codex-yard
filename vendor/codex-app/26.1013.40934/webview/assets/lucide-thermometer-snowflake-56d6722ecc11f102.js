@@ -1,1 +1,0 @@
-import{n as e,t}from"./lucide-thermometer-snowflake-98c2a5cea0b487ad.js";e();export{t as default};

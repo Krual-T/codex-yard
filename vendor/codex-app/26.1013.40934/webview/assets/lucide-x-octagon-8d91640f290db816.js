@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-octagon-x-cd2fd09081d84ad2.js";function r(){return(r=e((()=>{t()})))()}r();export{n as default};
-//# sourceMappingURL=lucide-x-octagon-8d91640f290db816.js.map

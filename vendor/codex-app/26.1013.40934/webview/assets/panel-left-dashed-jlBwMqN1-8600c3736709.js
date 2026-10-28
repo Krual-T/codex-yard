@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`PanelLeftDashed`,[[`rect`,{width:`18`,height:`18`,x:`3`,y:`3`,rx:`2`,key:`afitv7`}],[`path`,{d:`M9 14v1`,key:`askpd8`}],[`path`,{d:`M9 19v2`,key:`16tejx`}],[`path`,{d:`M9 3v2`,key:`1noubl`}],[`path`,{d:`M9 9v1`,key:`19ebxg`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=panel-left-dashed-jlBwMqN1-8600c3736709.js.map

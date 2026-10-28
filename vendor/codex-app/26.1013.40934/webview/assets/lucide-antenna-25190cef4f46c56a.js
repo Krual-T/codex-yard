@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Antenna`,[[`path`,{d:`M2 12 7 2`,key:`117k30`}],[`path`,{d:`m7 12 5-10`,key:`1tvx22`}],[`path`,{d:`m12 12 5-10`,key:`ev1o1a`}],[`path`,{d:`m17 12 5-10`,key:`1e4ti3`}],[`path`,{d:`M4.5 7h15`,key:`vlsxkz`}],[`path`,{d:`M12 16v6`,key:`c8a4gj`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-antenna-25190cef4f46c56a.js.map

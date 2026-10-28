@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Drum`,[[`path`,{d:`m2 2 8 8`,key:`1v6059`}],[`path`,{d:`m22 2-8 8`,key:`173r8a`}],[`ellipse`,{cx:`12`,cy:`9`,rx:`10`,ry:`5`,key:`liohsx`}],[`path`,{d:`M7 13.4v7.9`,key:`1yi6u9`}],[`path`,{d:`M12 14v8`,key:`1tn2tj`}],[`path`,{d:`M17 13.4v7.9`,key:`eqz2v3`}],[`path`,{d:`M2 9v8a10 5 0 0 0 20 0V9`,key:`1750ul`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-drum-a6d9fc960d2c15d7.js.map

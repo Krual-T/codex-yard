@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`Presentation`,[[`path`,{d:`M2 3h20`,key:`91anmk`}],[`path`,{d:`M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3`,key:`2k9sn8`}],[`path`,{d:`m7 21 5-5 5 5`,key:`bip4we`}]])})))()}export{r as n,i as t};
-//# sourceMappingURL=presentation-BrXeA86e-20cac9bff96f.js.map

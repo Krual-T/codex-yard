@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{Jq as t,TJ as n,cD as r,lD as i,xq as a}from"./app-shared-61271c39e3c5.js";var o;function s(){return(s=e((()=>{n(),r(),o={canvas:a,document:t,presentation:i.presentation[16],spreadsheet:i.spreadsheet[16]}})))()}export{o as n,s as t};
-//# sourceMappingURL=icons-a5ca132c6bed.js.map

@@ -1,1 +1,0 @@
-import{Gat as e,Jat as t,Kat as n,Wat as r,qat as i}from"./app-shared-61271c39e3c5.js";n();export{r as appHost,e as appServices,i as setAppHost,t as setAppServices};

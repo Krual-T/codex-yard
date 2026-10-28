@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{Dwn as t,Ewn as n,cwn as r,own as i,oxn as a,sxn as o}from"./app-initial-a68277f60b93.js";import{n as s,t as c}from"./resource-preview-9a4057a5a0bc.js";function l(e,t,n){r(e,u,{id:crypto.randomUUID(),props:t,title:n,target:`right`,revealAndFocus:!0}),o(e,`right`)}var u;function d(){return(d=e((()=>{i(),n(),a(),s(),u=t(`mcp-resource`,c,{dropDestinations:[`left`,`right`,`bottom`],isAvailable:()=>!0,open:l})})))()}d();export{l as openMcpResourcePreview};
-//# sourceMappingURL=resource-preview-tab-5ad1834be638.js.map

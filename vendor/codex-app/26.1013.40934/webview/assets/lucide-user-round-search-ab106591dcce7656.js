@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`UserRoundSearch`,[[`circle`,{cx:`10`,cy:`8`,r:`5`,key:`o932ke`}],[`path`,{d:`M2 21a8 8 0 0 1 10.434-7.62`,key:`1yezr2`}],[`circle`,{cx:`18`,cy:`18`,r:`3`,key:`1xkwt0`}],[`path`,{d:`m22 22-1.9-1.9`,key:`1e5ubv`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-user-round-search-ab106591dcce7656.js.map

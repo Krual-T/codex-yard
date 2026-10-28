@@ -1,1 +1,0 @@
-import"./app-shared-61271c39e3c5.js";import{r as e,t}from"./profile-page-3cf13d66921f.js";e();export{t as ProfilePage};

@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{Cot as t,Gat as n,Kat as r,Nat as i,Pat as a,Sot as o,Xxt as s,jxt as c}from"./app-shared-61271c39e3c5.js";var l;function u(){return(u=e((()=>{c(),r(),t(),a(),l=s(o,()=>({queryFn:async()=>{let e=n.libraryFiles;if(e==null)throw Error(`Library files are unavailable`);return e.listOutputFiles()},queryKey:[`projectless-output-files`],refetchOnWindowFocus:!1,retry:!1,staleTime:i.FIVE_SECONDS}))})))()}export{l as n,u as t};
-//# sourceMappingURL=output-files-query-5263772ef769.js.map

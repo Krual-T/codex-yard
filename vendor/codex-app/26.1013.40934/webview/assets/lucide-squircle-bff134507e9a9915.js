@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Squircle`,[[`path`,{d:`M12 3c7.2 0 9 1.8 9 9s-1.8 9-9 9-9-1.8-9-9 1.8-9 9-9`,key:`garfkc`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-squircle-bff134507e9a9915.js.map

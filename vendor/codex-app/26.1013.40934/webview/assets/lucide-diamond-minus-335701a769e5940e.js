@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`DiamondMinus`,[[`path`,{d:`M2.7 10.3a2.41 2.41 0 0 0 0 3.41l7.59 7.59a2.41 2.41 0 0 0 3.41 0l7.59-7.59a2.41 2.41 0 0 0 0-3.41L13.7 2.71a2.41 2.41 0 0 0-3.41 0z`,key:`1ey20j`}],[`path`,{d:`M8 12h8`,key:`1wcyev`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-diamond-minus-335701a769e5940e.js.map

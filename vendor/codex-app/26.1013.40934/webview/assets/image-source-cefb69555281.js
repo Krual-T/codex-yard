@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{CPt as t,SLt as n,mIt as r,uLt as i}from"./app-shared-61271c39e3c5.js";function a(e){return e.show_url===!1?null:(e.is_proxied_image?e.content_url:e.url)??null}var o;function s(){return(s=e((()=>{t(),o=i({attribution:n().trim().min(1).nullish().catch(null),content_url:n().nullish(),is_proxied_image:r().optional().catch(!1),show_url:r().optional().catch(!0),url:n().trim().min(1).nullish().catch(null)})})))()}export{o as n,s as r,a as t};
-//# sourceMappingURL=image-source-cefb69555281.js.map

@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Microwave`,[[`rect`,{width:`20`,height:`15`,x:`2`,y:`4`,rx:`2`,key:`2no95f`}],[`rect`,{width:`8`,height:`7`,x:`6`,y:`8`,rx:`1`,key:`zh9wx`}],[`path`,{d:`M18 8v7`,key:`o5zi4n`}],[`path`,{d:`M6 19v2`,key:`1loha6`}],[`path`,{d:`M18 19v2`,key:`1dawf0`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-microwave-2ad646ec6c0145e0.js.map

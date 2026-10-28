@@ -1,1 +1,0 @@
-import{bc as e,gc as t}from"./app-primary-f5ea123a0407.js";t();export{e as loadWorkspaceDiscoveryOpener};

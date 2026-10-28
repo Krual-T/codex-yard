@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./square-power-CcednqZD-cae62e319a00.js";function r(){return(r=e((()=>{n()})))()}r();export{t as default};
-//# sourceMappingURL=power-square-ip8gOLni-aaa666f5a29a.js.map

@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`SmartphoneNfc`,[[`rect`,{width:`7`,height:`12`,x:`2`,y:`6`,rx:`1`,key:`5nje8w`}],[`path`,{d:`M13 8.32a7.43 7.43 0 0 1 0 7.36`,key:`1g306n`}],[`path`,{d:`M16.46 6.21a11.76 11.76 0 0 1 0 11.58`,key:`uqvjvo`}],[`path`,{d:`M19.91 4.1a15.91 15.91 0 0 1 .01 15.8`,key:`ujntz3`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=smartphone-nfc-Dw6_1Yh8-30b567eeb101.js.map

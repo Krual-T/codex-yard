@@ -1,1 +1,0 @@
-import{n as e,t}from"./lucide-tickets-plane-80e6b127b50ccadd.js";e();export{t as default};

@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`MailCheck`,[[`path`,{d:`M22 13V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v12c0 1.1.9 2 2 2h8`,key:`12jkf8`}],[`path`,{d:`m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7`,key:`1ocrg3`}],[`path`,{d:`m16 19 2 2 4-4`,key:`1b14m6`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-mail-check-33b6ace9332422b8.js.map

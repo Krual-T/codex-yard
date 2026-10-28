@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`GitCompare`,[[`circle`,{cx:`18`,cy:`18`,r:`3`,key:`1xkwt0`}],[`circle`,{cx:`6`,cy:`6`,r:`3`,key:`1lh9wr`}],[`path`,{d:`M13 6h3a2 2 0 0 1 2 2v7`,key:`1yeb86`}],[`path`,{d:`M11 18H8a2 2 0 0 1-2-2V9`,key:`19pyzm`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-git-compare-9fbf12186ee1ba89.js.map

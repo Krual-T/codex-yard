@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`CameraOff`,[[`line`,{x1:`2`,x2:`22`,y1:`2`,y2:`22`,key:`a6p6uj`}],[`path`,{d:`M7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16`,key:`qmtpty`}],[`path`,{d:`M9.5 4h5L17 7h3a2 2 0 0 1 2 2v7.5`,key:`1ufyfc`}],[`path`,{d:`M14.121 15.121A3 3 0 1 1 9.88 10.88`,key:`11zox6`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-camera-off-36b5dfd77a8e6311.js.map

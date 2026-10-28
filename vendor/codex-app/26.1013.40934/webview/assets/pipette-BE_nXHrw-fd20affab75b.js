@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`Pipette`,[[`path`,{d:`m2 22 1-1h3l9-9`,key:`1sre89`}],[`path`,{d:`M3 21v-3l9-9`,key:`hpe2y6`}],[`path`,{d:`m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3l.4.4Z`,key:`196du1`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=pipette-BE_nXHrw-fd20affab75b.js.map

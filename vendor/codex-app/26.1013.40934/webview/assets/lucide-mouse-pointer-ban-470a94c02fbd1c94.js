@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`MousePointerBan`,[[`path`,{d:`M2.034 2.681a.498.498 0 0 1 .647-.647l9 3.5a.5.5 0 0 1-.033.944L8.204 7.545a1 1 0 0 0-.66.66l-1.066 3.443a.5.5 0 0 1-.944.033z`,key:`11pp1i`}],[`circle`,{cx:`16`,cy:`16`,r:`6`,key:`qoo3c4`}],[`path`,{d:`m11.8 11.8 8.4 8.4`,key:`oogvdj`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-mouse-pointer-ban-470a94c02fbd1c94.js.map

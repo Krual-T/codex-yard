@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`PaintRoller`,[[`rect`,{width:`16`,height:`6`,x:`2`,y:`2`,rx:`2`,key:`jcyz7m`}],[`path`,{d:`M10 16v-2a2 2 0 0 1 2-2h8a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2`,key:`1b9h7c`}],[`rect`,{width:`4`,height:`6`,x:`8`,y:`16`,rx:`1`,key:`d6e7yl`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-paint-roller-928919e1c63e91c4.js.map

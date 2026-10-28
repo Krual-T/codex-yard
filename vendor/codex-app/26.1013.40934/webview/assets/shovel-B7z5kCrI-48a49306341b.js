@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`Shovel`,[[`path`,{d:`M2 22v-5l5-5 5 5-5 5z`,key:`1fh25c`}],[`path`,{d:`M9.5 14.5 16 8`,key:`1smz5x`}],[`path`,{d:`m17 2 5 5-.5.5a3.53 3.53 0 0 1-5 0s0 0 0 0a3.53 3.53 0 0 1 0-5L17 2`,key:`1q8uv5`}]])})))()}export{r as n,i as t};
-//# sourceMappingURL=shovel-B7z5kCrI-48a49306341b.js.map

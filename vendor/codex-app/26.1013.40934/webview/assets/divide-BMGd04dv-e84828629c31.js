@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`Divide`,[[`circle`,{cx:`12`,cy:`6`,r:`1`,key:`1bh7o1`}],[`line`,{x1:`5`,x2:`19`,y1:`12`,y2:`12`,key:`13b5wn`}],[`circle`,{cx:`12`,cy:`18`,r:`1`,key:`lqb9t5`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=divide-BMGd04dv-e84828629c31.js.map

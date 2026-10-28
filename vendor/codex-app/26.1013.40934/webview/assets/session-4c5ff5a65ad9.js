@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{BMr as t,Bmt as n,GMr as r,KMr as i,XMr as a,qmt as o}from"./app-initial-a68277f60b93.js";function s(e,n,a){return e.get(i).status===`allowed`&&e.get(t)===n&&e.get(r)===a&&e.get(o)}function c(){return(c=e((()=>{a(),n()})))()}export{s as n,c as t};
-//# sourceMappingURL=session-4c5ff5a65ad9.js.map

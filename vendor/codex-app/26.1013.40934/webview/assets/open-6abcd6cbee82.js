@@ -1,1 +1,0 @@
-import{M2 as e,N2 as t}from"./app-initial-a68277f60b93.js";t();export{e as createAndOpenPage};

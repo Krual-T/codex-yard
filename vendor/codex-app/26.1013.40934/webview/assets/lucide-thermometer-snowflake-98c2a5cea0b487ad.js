@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`ThermometerSnowflake`,[[`path`,{d:`M2 12h10`,key:`19562f`}],[`path`,{d:`M9 4v16`,key:`81ygyz`}],[`path`,{d:`m3 9 3 3-3 3`,key:`1sas0l`}],[`path`,{d:`M12 6 9 9 6 6`,key:`pfrgxu`}],[`path`,{d:`m6 18 3-3 1.5 1.5`,key:`1e277p`}],[`path`,{d:`M20 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z`,key:`iof6y5`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-thermometer-snowflake-98c2a5cea0b487ad.js.map

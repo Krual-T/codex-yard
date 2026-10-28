@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./hand-helping-HFSgovzo-330dd6841b1c.js";function r(){return(r=e((()=>{n()})))()}r();export{t as default};
-//# sourceMappingURL=helping-hand--RUvA9jE-def5d0c01363.js.map

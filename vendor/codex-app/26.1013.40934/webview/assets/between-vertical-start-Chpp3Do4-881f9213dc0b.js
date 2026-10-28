@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`BetweenVerticalStart`,[[`rect`,{width:`7`,height:`13`,x:`3`,y:`8`,rx:`1`,key:`1fjrkv`}],[`path`,{d:`m15 2-3 3-3-3`,key:`1uh6eb`}],[`rect`,{width:`7`,height:`13`,x:`14`,y:`8`,rx:`1`,key:`w3fjg8`}]])})))()}export{r as n,i as t};
-//# sourceMappingURL=between-vertical-start-Chpp3Do4-881f9213dc0b.js.map

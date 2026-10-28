@@ -1,1 +1,0 @@
-import{n as e,t}from"./lucide-chart-pie-182b43bc9c19a651.js";e();export{t as default};

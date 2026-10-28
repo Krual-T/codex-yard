@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`LoaderPinwheel`,[[`path`,{d:`M22 12a1 1 0 0 1-10 0 1 1 0 0 0-10 0`,key:`1lzz15`}],[`path`,{d:`M7 20.7a1 1 0 1 1 5-8.7 1 1 0 1 0 5-8.6`,key:`1gnrpi`}],[`path`,{d:`M7 3.3a1 1 0 1 1 5 8.6 1 1 0 1 0 5 8.6`,key:`u9yy5q`}],[`circle`,{cx:`12`,cy:`12`,r:`10`,key:`1mglay`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-loader-pinwheel-6b15bcf28a642428.js.map

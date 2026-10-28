@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`FlagOff`,[[`path`,{d:`M8 2c3 0 5 2 8 2s4-1 4-1v11`,key:`9rwyz9`}],[`path`,{d:`M4 22V4`,key:`1plyxx`}],[`path`,{d:`M4 15s1-1 4-1 5 2 8 2`,key:`1myooe`}],[`line`,{x1:`2`,x2:`22`,y1:`2`,y2:`22`,key:`a6p6uj`}]])})))()}export{r as n,i as t};
-//# sourceMappingURL=flag-off-WH33Ufu5-578c52e7da44.js.map

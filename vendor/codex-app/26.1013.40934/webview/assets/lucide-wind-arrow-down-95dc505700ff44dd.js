@@ -1,1 +1,0 @@
-import{n as e,t}from"./lucide-wind-arrow-down-1c9eeb17292fc113.js";e();export{t as default};

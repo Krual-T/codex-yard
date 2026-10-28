@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`CookingPot`,[[`path`,{d:`M2 12h20`,key:`9i4pu4`}],[`path`,{d:`M20 12v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8`,key:`u0tga0`}],[`path`,{d:`m4 8 16-4`,key:`16g0ng`}],[`path`,{d:`m8.86 6.78-.45-1.81a2 2 0 0 1 1.45-2.43l1.94-.48a2 2 0 0 1 2.43 1.46l.45 1.8`,key:`12cejc`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-cooking-pot-e55ca0fb40095913.js.map

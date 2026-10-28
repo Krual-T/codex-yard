@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Umbrella`,[[`path`,{d:`M22 12a10.06 10.06 1 0 0-20 0Z`,key:`1teyop`}],[`path`,{d:`M12 12v8a2 2 0 0 0 4 0`,key:`ulpmoc`}],[`path`,{d:`M12 2v1`,key:`11qlp1`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-umbrella-fa188f2470caf389.js.map

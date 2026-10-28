@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`BellMinus`,[[`path`,{d:`M18.4 12c.8 3.8 2.6 5 2.6 5H3s3-2 3-9c0-3.3 2.7-6 6-6 1.8 0 3.4.8 4.5 2`,key:`eck70s`}],[`path`,{d:`M10.3 21a1.94 1.94 0 0 0 3.4 0`,key:`qgo35s`}],[`path`,{d:`M15 8h6`,key:`8ybuxh`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=bell-minus-SOIr-nZ5-1f1674c67b32.js.map

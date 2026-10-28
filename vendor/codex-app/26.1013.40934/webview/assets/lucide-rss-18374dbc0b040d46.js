@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Rss`,[[`path`,{d:`M4 11a9 9 0 0 1 9 9`,key:`pv89mb`}],[`path`,{d:`M4 4a16 16 0 0 1 16 16`,key:`k0647b`}],[`circle`,{cx:`5`,cy:`19`,r:`1`,key:`bfqh0e`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-rss-18374dbc0b040d46.js.map

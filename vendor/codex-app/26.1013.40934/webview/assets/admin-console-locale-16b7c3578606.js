@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{Grt as t}from"./app-shared-61271c39e3c5.js";function n(){return(n=e((()=>{t()})))()}export{n as t};
-//# sourceMappingURL=admin-console-locale-16b7c3578606.js.map

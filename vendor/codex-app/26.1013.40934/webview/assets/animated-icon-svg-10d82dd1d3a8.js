@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{i as t,r as n}from"./index.es-793dfc8227d9.js";function r(e){return t(e).View}function i(){return(i=e((()=>{n()})))()}i();export{r as SvgLottie};
-//# sourceMappingURL=animated-icon-svg-10d82dd1d3a8.js.map

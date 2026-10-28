@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`TramFront`,[[`rect`,{width:`16`,height:`16`,x:`4`,y:`3`,rx:`2`,key:`1wxw4b`}],[`path`,{d:`M4 11h16`,key:`mpoxn0`}],[`path`,{d:`M12 3v8`,key:`1h2ygw`}],[`path`,{d:`m8 19-2 3`,key:`13i0xs`}],[`path`,{d:`m18 22-2-3`,key:`1p0ohu`}],[`path`,{d:`M8 15h.01`,key:`a7atzg`}],[`path`,{d:`M16 15h.01`,key:`rnfrdf`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-tram-front-abd5d51b0981c599.js.map

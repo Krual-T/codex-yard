@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`ArrowBigDown`,[[`path`,{d:`M15 6v6h4l-7 7-7-7h4V6h6z`,key:`1thax2`}]])})))()}export{r as n,i as t};
-//# sourceMappingURL=arrow-big-down-BG8PSSyx-90363401373a.js.map

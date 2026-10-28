@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./earth-CY2dI2ZW-f2b55c524ac9.js";function r(){return(r=e((()=>{n()})))()}r();export{t as default};
-//# sourceMappingURL=globe-2-E6J0z4bT-b2a1c7e68721.js.map

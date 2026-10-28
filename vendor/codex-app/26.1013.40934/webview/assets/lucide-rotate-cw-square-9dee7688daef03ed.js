@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`RotateCwSquare`,[[`path`,{d:`M12 5H6a2 2 0 0 0-2 2v3`,key:`l96uqu`}],[`path`,{d:`m9 8 3-3-3-3`,key:`1gzgc3`}],[`path`,{d:`M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2`,key:`1w2k5h`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-rotate-cw-square-9dee7688daef03ed.js.map

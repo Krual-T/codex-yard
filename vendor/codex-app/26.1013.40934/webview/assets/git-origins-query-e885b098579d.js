@@ -1,1 +1,0 @@
-import{F_n as e,I_n as t}from"./app-initial-a68277f60b93.js";t();export{e as gitOriginsQuery$};

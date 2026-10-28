@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`ReceiptIndianRupee`,[[`path`,{d:`M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z`,key:`q3az6g`}],[`path`,{d:`M8 7h8`,key:`i86dvs`}],[`path`,{d:`M12 17.5 8 15h1a4 4 0 0 0 0-8`,key:`grpkl4`}],[`path`,{d:`M8 11h8`,key:`vwpz6n`}]])})))()}export{r as n,i as t};
-//# sourceMappingURL=receipt-indian-rupee-C49AolMQ-26efba11d00c.js.map

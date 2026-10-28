@@ -1,1 +1,0 @@
-import"./app-shared-61271c39e3c5.js";import{n as e,r as t,t as n}from"./open-viewer-9294a92cbe18.js";e();export{n as FlashcardsDialog,t as openFlashcardsViewer};

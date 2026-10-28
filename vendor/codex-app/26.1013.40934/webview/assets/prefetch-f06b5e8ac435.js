@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{CPr as t,Dhn as n,Far as r,Fsn as i,Smt as a,Sor as o,Thn as s,dcn as c,fcn as l,gsn as u,wPr as d,xar as f,xmt as p}from"./app-initial-a68277f60b93.js";async function m(e){if(!e.get(d,`2648108507`)||!e.get(r))return;let t=e.get(o),s=t==null?void 0:e.get(l)[t]?.[0]?.pageId;s==null?await a(e):e.get(n)&&e.query.getOptions(i,s).enabled&&await e.query.getOrFetch(i,s)}function h(){return(h=e((()=>{p(),t(),f(),s(),c(),u()})))()}h();export{m as prefetchSpaceLanding};
-//# sourceMappingURL=prefetch-f06b5e8ac435.js.map

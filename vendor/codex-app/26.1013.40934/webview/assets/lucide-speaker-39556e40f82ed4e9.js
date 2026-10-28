@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Speaker`,[[`rect`,{width:`16`,height:`20`,x:`4`,y:`2`,rx:`2`,key:`1nb95v`}],[`path`,{d:`M12 6h.01`,key:`1vi96p`}],[`circle`,{cx:`12`,cy:`14`,r:`4`,key:`1jruaj`}],[`path`,{d:`M12 14h.01`,key:`1etili`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-speaker-39556e40f82ed4e9.js.map

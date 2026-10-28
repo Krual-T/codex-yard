@@ -1,1 +1,0 @@
-import{Cet as e,Eet as t,Set as n,Tet as r,wet as i,xet as a}from"./app-initial-a68277f60b93.js";i();export{a as clearMcpAppDraftAttachments,n as getMcpAppNewThreadDestination,e as getMcpAppSubmit,r as updateMcpAppDraftPrompt,t as waitForMcpAppDraftSubmit};

@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{FKt as t,fKt as n}from"./app-initial-a68277f60b93.js";function r(e){let t=new URL(n);return t.searchParams.set(`account_id`,e),t.href}function i(){return(i=e((()=>{t()})))()}export{i as n,r as t};
-//# sourceMappingURL=workspace-billing-url-e50790c8751b.js.map

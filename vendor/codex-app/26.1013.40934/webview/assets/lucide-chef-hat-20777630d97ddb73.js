@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`ChefHat`,[[`path`,{d:`M17 21a1 1 0 0 0 1-1v-5.35c0-.457.316-.844.727-1.041a4 4 0 0 0-2.134-7.589 5 5 0 0 0-9.186 0 4 4 0 0 0-2.134 7.588c.411.198.727.585.727 1.041V20a1 1 0 0 0 1 1Z`,key:`1qvrer`}],[`path`,{d:`M6 17h12`,key:`1jwigz`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-chef-hat-20777630d97ddb73.js.map

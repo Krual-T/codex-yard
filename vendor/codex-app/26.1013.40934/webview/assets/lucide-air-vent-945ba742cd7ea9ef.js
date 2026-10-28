@@ -1,1 +1,0 @@
-import{n as e,t}from"./lucide-air-vent-1c2781825e95c896.js";e();export{t as default};

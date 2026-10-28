@@ -1,1 +1,0 @@
-import{n as e,t}from"./lucide-pizza-2c319dde217191af.js";e();export{t as default};

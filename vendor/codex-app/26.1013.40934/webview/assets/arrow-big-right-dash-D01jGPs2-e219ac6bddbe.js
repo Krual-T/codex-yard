@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`ArrowBigRightDash`,[[`path`,{d:`M5 9v6`,key:`158jrl`}],[`path`,{d:`M9 9h3V5l7 7-7 7v-4H9V9z`,key:`1sg2xn`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=arrow-big-right-dash-D01jGPs2-e219ac6bddbe.js.map

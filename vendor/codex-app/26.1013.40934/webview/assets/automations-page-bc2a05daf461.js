@@ -1,1 +1,0 @@
-import"./app-shared-61271c39e3c5.js";import{n as e,t}from"./automations-page-cf5a9694ba8a.js";e();export{t as AutomationsLayoutPage};

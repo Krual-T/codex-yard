@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`AlignVerticalDistributeStart`,[[`rect`,{width:`14`,height:`6`,x:`5`,y:`14`,rx:`2`,key:`jmoj9s`}],[`rect`,{width:`10`,height:`6`,x:`7`,y:`4`,rx:`2`,key:`aza5on`}],[`path`,{d:`M2 14h20`,key:`myj16y`}],[`path`,{d:`M2 4h20`,key:`mda7wb`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=align-vertical-distribute-start-CgKFcs5t-78a7f4f8fc32.js.map

@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`TreePine`,[[`path`,{d:`m17 14 3 3.3a1 1 0 0 1-.7 1.7H4.7a1 1 0 0 1-.7-1.7L7 14h-.3a1 1 0 0 1-.7-1.7L9 9h-.2A1 1 0 0 1 8 7.3L12 3l4 4.3a1 1 0 0 1-.8 1.7H15l3 3.3a1 1 0 0 1-.7 1.7H17Z`,key:`cpyugq`}],[`path`,{d:`M12 22v-3`,key:`kmzjlo`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-tree-pine-fd7ff08e0226fdce.js.map

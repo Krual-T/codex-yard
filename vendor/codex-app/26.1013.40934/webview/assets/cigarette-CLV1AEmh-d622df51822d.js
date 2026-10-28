@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./createLucideIcon-BrIFp4GW-1aa51b4a943a.js";var r;function i(){return(i=e((()=>{t(),r=n(`Cigarette`,[[`path`,{d:`M17 12H3a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1h14`,key:`1mb5g1`}],[`path`,{d:`M18 8c0-2.5-2-2.5-2-5`,key:`1il607`}],[`path`,{d:`M21 16a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1`,key:`1yl5r7`}],[`path`,{d:`M22 8c0-2.5-2-2.5-2-5`,key:`1gah44`}],[`path`,{d:`M7 12v4`,key:`jqww69`}]])})))()}export{r as n,i as t};
-//# sourceMappingURL=cigarette-CLV1AEmh-d622df51822d.js.map

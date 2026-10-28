@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`PillBottle`,[[`path`,{d:`M18 11h-4a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h4`,key:`17ldeb`}],[`path`,{d:`M6 7v13a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7`,key:`nc37y6`}],[`rect`,{width:`16`,height:`5`,x:`4`,y:`2`,rx:`1`,key:`3jeezo`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-pill-bottle-339a23e5f3fcc728.js.map

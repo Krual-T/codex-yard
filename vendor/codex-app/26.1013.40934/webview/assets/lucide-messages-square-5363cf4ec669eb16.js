@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`MessagesSquare`,[[`path`,{d:`M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z`,key:`p1xzt8`}],[`path`,{d:`M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1`,key:`1cx29u`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-messages-square-5363cf4ec669eb16.js.map

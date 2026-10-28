@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`SquareChevronLeft`,[[`rect`,{width:`18`,height:`18`,x:`3`,y:`3`,rx:`2`,key:`afitv7`}],[`path`,{d:`m14 16-4-4 4-4`,key:`ojs7w8`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-square-chevron-left-c60efb5e73d6e5c9.js.map

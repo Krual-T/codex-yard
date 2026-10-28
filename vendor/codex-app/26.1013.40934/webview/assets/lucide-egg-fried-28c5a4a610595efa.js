@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`EggFried`,[[`circle`,{cx:`11.5`,cy:`12.5`,r:`3.5`,key:`1cl1mi`}],[`path`,{d:`M3 8c0-3.5 2.5-6 6.5-6 5 0 4.83 3 7.5 5s5 2 5 6c0 4.5-2.5 6.5-7 6.5-2.5 0-2.5 2.5-6 2.5s-7-2-7-5.5c0-3 1.5-3 1.5-5C3.5 10 3 9 3 8Z`,key:`165ef9`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-egg-fried-28c5a4a610595efa.js.map

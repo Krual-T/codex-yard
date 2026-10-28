@@ -1,2 +1,0 @@
-import{n as e}from"./rolldown-runtime-2d059c5e81f4.js";import{n as t,t as n}from"./lucide-createLucideIcon-3a42768e149b00b7.js";var r;function i(){return(i=e((()=>{t(),r=n(`Play`,[[`polygon`,{points:`6 3 20 12 6 21 6 3`,key:`1oa8hb`}]])})))()}export{i as n,r as t};
-//# sourceMappingURL=lucide-play-9ffa0a745eda049d.js.map

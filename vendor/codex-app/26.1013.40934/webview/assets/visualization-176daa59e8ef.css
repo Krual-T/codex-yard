@@ -1,1 +1,0 @@
-@layer components{._narrowPlot_5xybo_1{width:100%;display:block}._widePlot_5xybo_6{width:100%;display:none}._pairGrid_5xybo_11{grid-template-columns:minmax(0,1fr);align-items:center;column-gap:.5rem;min-width:0;display:grid}@container (width>=28rem){._narrowPlot_5xybo_1{display:none}._widePlot_5xybo_6{display:block}._pairGrid_5xybo_11{grid-template-columns:auto minmax(0,1fr)}}}
