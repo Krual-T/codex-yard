@@ -1,4 +1,5 @@
 import type { ComposerContext, ComposerDocument, ComposerDraft, ComposerImage } from '../workbench-contract.ts';
+import { applyTextEdits, textEdits } from '../messages/message-edit.ts';
 import { isOrdinaryRichText, readRichDocument, richDocumentSkills, serializePlainDocument, serializeRichDocument } from './rich-document.ts';
 
 export interface DraftImage extends ComposerImage { previewSrc: string }
@@ -363,6 +364,49 @@ export function updateDraftText(draft: Draft, text: string): Draft {
   if (input && !input.some(item => item.type === 'text') && text) input.unshift({ type: 'text', text, text_elements: [] });
   return { ...draft, text, ...(input ? { input } : {}), ...(draft.document ? { document: documentFromText(text) } : {}) };
 }
+
+export type StructuredDraftEdit = { draft: Draft; error?: never } | { draft?: never; error: string };
+
+export function isStructuredAppInput(entry: Record<string, unknown>): boolean {
+  return Array.isArray(entry.text_elements) && entry.text_elements.some(element => record(element)
+    && typeof element.placeholder === 'string' && element.placeholder.startsWith('codex-untrusted-app-input:'));
+}
+
+/** This is a projection of the existing draft, not another editable draft store. */
+export function canEditStructuredDraft(draft: Draft): boolean {
+  if (draft.blocked || draft.document || draft.hints?.length || !draft.input
+    || draft.input.some(entry => entry.type === 'text' && typeof entry.text !== 'string')) return false;
+  const edits = textEdits(draft);
+  return edits.length > 0 && edits.map(item => item.text).join('\n') === draft.text;
+}
+
+/** Update one original protocol text item without flattening the surrounding ordered input. */
+export function editStructuredDraftText(draft: Draft, index: number, expectedText: string, text: string): StructuredDraftEdit {
+  if (!canEditStructuredDraft(draft) || !draft.input) {
+    return { error: 'This draft contains context that cannot be edited as separate text segments.' };
+  }
+  const edits = textEdits(draft);
+  const entry = draft.input[index];
+  if (!entry || entry.type !== 'text' || entry.text !== expectedText) {
+    return { error: 'This input segment changed. Review the current draft before editing.' };
+  }
+  if (expectedText === text) return { draft };
+  if (isStructuredAppInput(entry)) {
+    return { error: 'This app input contains retained context and cannot be edited here.' };
+  }
+  if (Array.isArray(entry.text_elements) && entry.text_elements.some(element => !record(element)
+    || Object.keys(element).some(key => key !== 'byteRange' && key !== 'placeholder')
+    || !record(element.byteRange) || Object.keys(element.byteRange).some(key => key !== 'start' && key !== 'end')
+    || element.placeholder !== null && typeof element.placeholder !== 'string')) {
+    return { error: 'This input contains unrecognized reference metadata. The original content was retained.' };
+  }
+  try {
+    const result = applyTextEdits(draft, edits.map(item => item.index === index ? { ...item, text } : item), '');
+    return result.draft ? { draft: normalizeDraft(result.draft) } : { error: result.error };
+  } catch {
+    return { error: 'This input could not be copied without losing its original content.' };
+  }
+}
 export function mergePrefill(current: Draft, incoming: ComposerDraft): Draft {
   const next = normalizeDraft(incoming);
   if (!hasContent(current) && !current.pendingDrafts?.length && !current.blocked) return next;
@@ -429,6 +473,26 @@ export function draftToInput(draft: ComposerDraft, hostId: string, options?: Dra
         return typeof start !== 'number' || typeof end !== 'number' || !Number.isSafeInteger(start) || !Number.isSafeInteger(end)
           || start < 0 || end < start || end > bytes.length || !boundary(start) || !boundary(end);
       })) throw new Error('消息引用的 UTF-8 范围无效，已保留原始消息。');
+      if (isStructuredAppInput(item)) {
+        const element = item.text_elements[0];
+        const range = record(element) && record(element.byteRange) ? element.byteRange : null;
+        const placeholder = record(element) && typeof element.placeholder === 'string' ? element.placeholder : '';
+        let context: unknown;
+        try { context = JSON.parse(placeholder.slice('codex-untrusted-app-input:'.length)); } catch { context = null; }
+        const fields = ['version', 'sender', 'message', 'modelContextAttachments', 'reviewedMessageAttachments', 'promptContextWithoutReviewedMessages'];
+        const sender = record(context) ? context.sender : undefined;
+        const validSender = sender === undefined || record(sender)
+          && Object.keys(sender).every(key => ['accountUserId', 'email', 'name', 'profilePictureUrl'].includes(key))
+          && typeof sender.accountUserId === 'string' && typeof sender.email === 'string' && typeof sender.name === 'string'
+          && (sender.profilePictureUrl === null || typeof sender.profilePictureUrl === 'string');
+        if (item.text_elements.length !== 1 || range?.start !== 0 || range.end !== bytes.length || !record(context)
+          || context.version !== 1 || Object.keys(context).some(key => !fields.includes(key))
+          || !validSender || context.message !== undefined || typeof context.promptContextWithoutReviewedMessages !== 'string'
+          || context.modelContextAttachments !== undefined && (!Array.isArray(context.modelContextAttachments) || context.modelContextAttachments.length > 0)
+          || context.reviewedMessageAttachments !== undefined && (!Array.isArray(context.reviewedMessageAttachments) || context.reviewedMessageAttachments.length > 0)) {
+          throw new Error('此 app 输入的完整上下文尚未确认，已保留原始消息，未发送。');
+        }
+      }
     }
   }
   const original = input.slice(), matched = new Set<number>();

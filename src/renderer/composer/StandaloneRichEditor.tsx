@@ -1,20 +1,71 @@
-import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
+import { Fragment as ReactFragment, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import { Bold, Code2, Italic, Link as LinkIcon } from 'lucide-react';
 import { toggleMark } from 'prosemirror-commands';
 import { Fragment, Slice } from 'prosemirror-model';
 import { EditorState } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
+import type { ClipboardEvent } from 'react';
 import type { ComposerDocument } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
 import { composerSchema, readRichDocument } from './rich-document.ts';
 import { insertRichCompletion, richCompletionContext, richEditorPlugins, syncRichSelection } from './rich-editor-actions.ts';
 import type { RichCompletionContext, RichCompletionQuery } from './rich-editor-actions.ts';
 import type { Completion } from './standalone-completions.tsx';
+import { isStructuredAppInput } from './standalone-draft.ts';
+import type { Draft } from './standalone-draft.ts';
 
 export interface RichEditorHandle {
   focus(): void;
   insertCompletion(context: RichCompletionContext, query: RichCompletionQuery, item: Completion, cwd: string): boolean;
 }
+export interface StructuredInputEditorHandle { focus(): void }
+export interface StructuredInputEditorProps {
+  draft: Draft;
+  onEdit(index: number, expectedText: string, text: string): void;
+  onKeyDown(event: KeyboardEvent): boolean;
+  onCompositionChange?(composing: boolean): void;
+  onPaste?(event: ClipboardEvent<HTMLTextAreaElement>): void;
+  readOnly?: boolean;
+  ariaLabel?: string;
+}
+
+/** Each control corresponds to one original text item; non-text items remain in the draft. */
+export const StandaloneStructuredInputEditor = forwardRef<StructuredInputEditorHandle, StructuredInputEditorProps>(
+  function StandaloneStructuredInputEditor(props, ref) {
+    const { t, locale } = useI18n('zh-CN');
+    const controls = useRef(new Map<number, HTMLTextAreaElement>());
+    const latest = useRef(props);
+    const composition = useRef(0);
+    latest.current = props;
+    useImperativeHandle(ref, () => ({ focus: () => {
+      const values = Array.from(controls.current.values());
+      (values.find(control => !control.readOnly) ?? values[0])?.focus();
+    } }), []);
+    useEffect(() => () => {
+      if (composition.current) { composition.current = 0; latest.current.onCompositionChange?.(false); }
+    }, []);
+    const entries = (props.draft.input ?? []).flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
+      ? [{ entry, index, text: entry.text }] : []);
+    return <>{entries.map(({ entry, index, text }, position) => <ReactFragment key={index}>
+      {isStructuredAppInput(entry) ? <div role="status">{t('Read only')}: This app input contains retained context.</div> : null}
+      <textarea
+        ref={element => { if (element) controls.current.set(index, element); else controls.current.delete(index); }}
+        aria-label={(props.ariaLabel ?? t('Work with Codex')) + (entries.length > 1 ? ' ' + new Intl.NumberFormat(locale).format(position + 1) : '')}
+        placeholder={t('Message')} value={text} readOnly={props.readOnly || isStructuredAppInput(entry)}
+        onChange={event => props.onEdit(index, text, event.currentTarget.value)}
+        onKeyDown={event => { if (!event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) props.onKeyDown(event.nativeEvent); }}
+        onPaste={props.onPaste}
+        onCompositionStart={() => { composition.current++; props.onCompositionChange?.(true); }}
+        onCompositionEnd={() => {
+          const active = composition.current;
+          requestAnimationFrame(() => {
+            if (active && composition.current === active) { composition.current = 0; latest.current.onCompositionChange?.(false); }
+          });
+        }} />
+    </ReactFragment>)}</>;
+  },
+);
+
 interface RichEditorProps {
   document: ComposerDocument;
   currentDocument(): ComposerDocument | undefined;
@@ -45,7 +96,7 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
     if (!tags.has(element.localName) || !Array.from(element.attributes).every(attribute => attributes.has(attribute.name))) return false;
     const mention = element.getAttribute('data-mention');
     if (mention !== null && !allowMentions) return false;
-    if (mention !== null && (element.localName !== 'span' || mention !== 'file' && mention !== 'skill')) return false;
+    if (mention !== null && (element.localName !== 'span' || mention !== 'file' && mention !== 'skill' && mention !== 'rich-link')) return false;
     const systemHint = element.getAttribute('data-system-hint-type');
     const hintLabel = element.getAttribute('data-system-hint-label');
     if (systemHint === null && hintLabel !== null) return false;
@@ -56,12 +107,16 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
     ] }] })) return false;
     if (!element.hasAttribute('data-composer-attrs')) return mention === null;
     const spec = mention === 'file' ? composerSchema.nodes.atMention?.spec : mention === 'skill' ? composerSchema.nodes.skillMention?.spec
+      : mention === 'rich-link' ? composerSchema.nodes.richLink?.spec
       : element.localName === 'pre' ? composerSchema.nodes.code_block?.spec : element.localName === 'a' ? composerSchema.marks.link?.spec : null;
     if (!spec) return false;
     try {
       const value: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
       return !!value && typeof value === 'object' && !Array.isArray(value)
-        && Object.keys(value).every(key => Object.hasOwn(spec.attrs ?? {}, key));
+        && Object.keys(value).every(key => Object.hasOwn(spec.attrs ?? {}, key))
+        && (mention !== 'rich-link' || !!readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [
+          { type: 'richLink', attrs: value as Record<string, unknown> },
+        ] }] }));
     } catch { return false; }
   });
 }

@@ -46,6 +46,14 @@ export const composerSchema = new Schema({
       selectable: true, parseDOM: [{ tag: 'span[data-mention="skill"]', getAttrs: dom => copiedAttrs(dom as HTMLElement, ['name', 'path', 'description']) }],
       toDOM: node => ['span', { class: 'standalone-composer__mention', 'data-mention': 'skill', 'data-composer-attrs': JSON.stringify(node.attrs) },
         node.attrs.displayName || node.attrs.name] },
+    richLink: { attrs: { displayText: string, href: string, sourceAppId: string,
+      isLoading: { default: false, validate: 'boolean' }, loadingDisplayText: optionalString,
+      literalMarkdownSource: optionalString, literalMarkdownOccurrenceId: { default: null, validate: 'number|null' },
+      markdownSourceStart: { default: null, validate: 'number|null' }, markdownSourceEnd: { default: null, validate: 'number|null' } },
+      inline: true, group: 'inline', atom: true, selectable: false,
+      parseDOM: [{ tag: 'span[data-mention="rich-link"]', getAttrs: dom => copiedAttrs(dom as HTMLElement, ['displayText', 'href', 'sourceAppId']) }],
+      toDOM: node => ['span', { class: 'standalone-composer__mention', 'data-mention': 'rich-link', 'data-composer-attrs': JSON.stringify(node.attrs) },
+        node.attrs.displayText] },
     chatGptSystemHint: { attrs: { label: string, systemHint: string }, inline: true, group: 'inline', atom: true, selectable: false,
       parseDOM: [{ tag: 'span[data-system-hint-type][data-system-hint-label]', getAttrs: dom => {
         const element = dom as HTMLElement;
@@ -98,6 +106,7 @@ const serializer = new MarkdownSerializer({
   atMention: (state, node) => state.write('[' + state.esc(node.attrs.label) + '](' + markdownDestination(node.attrs.path) + ')'),
   skillMention: (state, node) => state.write('[' + state.esc(node.attrs.promptLinkLabel || '$' + node.attrs.name) + ']('
     + markdownDestination(node.attrs.path) + ')'),
+  richLink: (state, node) => state.write('[' + state.esc(node.attrs.displayText) + '](' + markdownDestination(node.attrs.href) + ')'),
   chatGptSystemHint: (state, node) => state.write('[' + state.esc(node.attrs.label) + '](chatgpt-system-hint://' + node.attrs.systemHint + ')'),
 }, { ...defaultMarkdownSerializer.marks, link: {
   ...defaultLink,
@@ -126,6 +135,9 @@ function validJSON(node: ComposerDocument): boolean {
   if (node.type === 'ordered_list' && node.attrs?.startingNumber !== undefined
     && (!Number.isInteger(node.attrs.startingNumber) || (node.attrs.startingNumber as number) < 1)) return false;
   if (node.type === 'skillMention' && (!node.attrs?.path || !node.attrs?.name)) return false;
+  if (node.type === 'richLink' && (node.attrs?.isLoading === true || node.attrs?.loadingDisplayText != null
+    || node.attrs?.literalMarkdownSource != null || node.attrs?.literalMarkdownOccurrenceId != null
+    || node.attrs?.markdownSourceStart != null || node.attrs?.markdownSourceEnd != null)) return false;
   if (node.type === 'chatGptSystemHint' && (typeof node.attrs?.label !== 'string' || !node.attrs.label
     || typeof node.attrs.systemHint !== 'string' || !systemHints.has(node.attrs.systemHint))) return false;
   if (node.marks?.some(mark => {
@@ -208,6 +220,7 @@ export function serializePlainDocument(document: ProseMirrorNode, preserveTextLi
       if (child.type.name === 'hard_break') output += '\n';
       else if (child.type.name === 'atMention') output += plainLink(child.attrs.label, child.attrs.path);
       else if (child.type.name === 'skillMention') output += plainLink(child.attrs.promptLinkLabel || '$' + child.attrs.name, child.attrs.path);
+      else if (child.type.name === 'richLink') output += plainLink(child.attrs.displayText, child.attrs.href);
       else if (child.type.name === 'chatGptSystemHint') output += plainLink(child.attrs.label, 'chatgpt-system-hint://' + child.attrs.systemHint);
     });
     flush();
