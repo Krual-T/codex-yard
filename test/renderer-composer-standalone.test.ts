@@ -200,6 +200,7 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.evaluate(() => { (window as any).fixture.state.lock = true; });
     await page.getByRole('button', { name: '立即发送待发送消息' }).first().click();
     await page.getByText('changed queue', { exact: true }).waitFor({ state: 'detached' });
+    await page.waitForFunction(() => (window as any).fixture.state.calls.some((call: any) => call.endpoint === 'queued-follow-up-send-lock-release' && call.params.sent === true));
     const release = await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.endpoint === 'queued-follow-up-send-lock-release').at(-1));
     assert.equal(release.params.sent, true);
     assert.equal(release.params.hostId, 'local');
