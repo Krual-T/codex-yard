@@ -25,7 +25,7 @@ export interface StandaloneVisualizationProps {
   hostId: string;
   threadId: string;
   path: string;
-  onPrefill(draft: ComposerDraft): void;
+  onPrefill(draft: ComposerDraft): void | Promise<void>;
   /** The caller must recheck this owner and the signal before submitting. */
   onFollowUp?(request: VisualizationFollowUp, signal: AbortSignal): Promise<void>;
   onClose(): void;
@@ -250,7 +250,7 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
                 ...(decision.title !== undefined ? { title: decision.title } : {}), ...(decision.context !== undefined ? { context: decision.context } : {}) })
               : { text: decision.prompt, images: [], files: [] };
             if (decision.action === 'draft') {
-              propsRef.current.onPrefill(draft);
+              await propsRef.current.onPrefill(draft);
               throw new Error('Follow-up was not sent; adding it to the draft was requested');
             }
             const send = propsRef.current.onFollowUp;
@@ -494,10 +494,18 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
         }
       } catch (reason) { if (epochRef.current === epoch) { setSavingAnnotation(false); setError(reason instanceof Error ? reason.message : 'Could not save visualization changes'); } return; }
       if (epochRef.current !== epoch || propsRef.current.client !== client || propsRef.current.hostId !== hostId || propsRef.current.threadId !== threadId || propsRef.current.path !== path) return;
-      setSavingAnnotation(false);
-      propsRef.current.onPrefill(visualizationDraft(prompt,
-        { type: 'visualization', hostId, threadId, path: sourceRef.current?.path ?? path, title: 'Visualization changes', context }));
-    } else propsRef.current.onPrefill({ text: `Visualization: ${sourceRef.current?.path ?? path}\nSelection: ${excerpt}\nFeedback: ${comment.trim()}`, images: [], files: [] });
+      try {
+        await propsRef.current.onPrefill(visualizationDraft(prompt,
+          { type: 'visualization', hostId, threadId, path: sourceRef.current?.path ?? path, title: 'Visualization changes', context }));
+      } catch (reason) { if (epochRef.current === epoch) setError(reason instanceof Error ? reason.message : 'Could not add feedback to the draft'); return; }
+      finally { if (epochRef.current === epoch) setSavingAnnotation(false); }
+    } else {
+      setSavingAnnotation(true);
+      try { await propsRef.current.onPrefill({ text: `Visualization: ${sourceRef.current?.path ?? path}\nSelection: ${excerpt}\nFeedback: ${comment.trim()}`, images: [], files: [] }); }
+      catch (reason) { if (epochRef.current === epoch) setError(reason instanceof Error ? reason.message : 'Could not add feedback to the draft'); return; }
+      finally { if (epochRef.current === epoch) setSavingAnnotation(false); }
+    }
+    if (epochRef.current !== epoch) return;
     changesRef.current = []; setChanges([]); selectionRef.current = null; setSelection(null);
     portRef.current?.postMessage({ type: 'annotate', enabled: false, changes: [] });
     setExcerpt(null); setComment('');

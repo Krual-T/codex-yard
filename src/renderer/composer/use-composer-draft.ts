@@ -14,7 +14,9 @@ export interface ComposerDraftController {
   /** Wait for queued draft writes; this alone does not freeze or drain input. */
   flush(owner: ComposerDraftOwner): Promise<boolean>;
   /** Freeze this owner before a parent changes or unmounts it. */
-  freeze(owner: ComposerDraftOwner): ComposerDraftLease | null;
+  freeze(owner: ComposerDraftOwner, borrowed?: ComposerDraftLease): ComposerDraftLease | null;
+  /** Use the same projection guard for parent recovery and the local submit path. */
+  clearSubmittedVersion(revision: string, guard?: (atoms: Readonly<Record<string, unknown>>) => boolean): Promise<void>;
   /** Adopt an independently committed active version only if this projection still matches. */
   acceptCommittedVersion(before: ComposerDraftSnapshot, after: ComposerDraftSnapshot): Promise<boolean>;
   /** Register before the first await of an external owner-bound draft operation. */
@@ -65,6 +67,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   const savingConflict = useRef(false);
   const external = useRef<{ phase: 'draining' | 'working' } | null>(null);
   const operationUpdate = useRef<((owner: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft, prefillId?: string) => Promise<boolean>) | null>(null);
+  const clearVersion = useRef<ComposerDraftController['clearSubmittedVersion'] | null>(null);
   const generation = useRef(0);
   const ready = useRef<Promise<ComposerDraftVersions> | null>(null);
   const initializing = useRef(true);
@@ -174,8 +177,9 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
           if (revision === current.current.revision && saved === lastWrite.current) return true;
         }
       },
-      freeze(expected) {
-        if (active.current !== result || !sameOwner(owner, expected) || frozen.current) return null;
+      freeze(expected, borrowed) {
+        if (active.current !== result || !sameOwner(owner, expected)) return null;
+        if (frozen.current) return borrowed === frozen.current ? borrowed : null;
         if (initializing.current) { setStorageError(value => value || '草稿正在恢复，请稍后再切换。'); return null; }
         if (!freezeGuard?.current?.(false)) return null;
         const pending = [...operations.current], failureCount = failedOperations.current;
@@ -220,6 +224,10 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
         let success = false;
         try { success = await updateFromOperation(expected, update); return success; }
         finally { pendingProjection.current--; finish(success); }
+      },
+      async clearSubmittedVersion(revision, guard) {
+        if (active.current !== result || !clearVersion.current) throw new Error('原输入区已改变，已发送版本尚未清理。');
+        await clearVersion.current(revision, guard);
       },
       async acceptCommittedVersion(before, after) {
         const reject = () => {
@@ -453,12 +461,12 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       return false;
     });
   }, [controller, enqueue, owner]);
-  const clear = useCallback(async (revision: string): Promise<void> => {
+  const clear = useCallback(async (revision: string, guard?: (atoms: Readonly<Record<string, unknown>>) => boolean): Promise<void> => {
     if (preserveProjection.current && current.current.revision === revision) {
       throw new Error('当前草稿冲突尚未处理。');
     }
-    await clearComposerDraftRevision(owner, revision, () => active.current === controller
-      && !(preserveProjection.current && current.current.revision === revision));
+    await clearComposerDraftRevision(owner, revision, atoms => active.current === controller
+      && !(preserveProjection.current && current.current.revision === revision) && (!guard || guard(atoms)));
     const view = await readComposerDraftVersions(owner);
     if (active.current !== controller) return;
     setVersions(view.versions);
@@ -468,6 +476,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       dirty.current = false; preserveProjection.current = false; setUnresolved(false); setSaving(false); publish(controller, next);
     }
   }, [controller, owner, publish]);
+  clearVersion.current = clear;
   const selectVersion = useCallback(async (revision: string): Promise<void> => {
     if (preserveProjection.current) return;
     const finish = beginOperation();

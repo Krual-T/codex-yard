@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v16，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v17，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -70,6 +70,10 @@ composer-drafts.v3是同一UI atom根中的事务记录，首次导入精确旧v
 host工具read_thread在真实server接线中使用turnLimit/cursor分页历史，按includeOutputs投影，默认最新10轮、每轮最新60项、不含输出，按maxOutputCharsPerItem（默认4000）截断输出并返回可继续读取较早turn/items的游标；不能把外层参数检查或mock handler测试当作真实实现。取消沿MCP适配器到host请求，断线不重放写入。
 
 ## 当前父级接线合同（v16）
+
+v17修订：文件与可视化预填必须在来源回调的首await前登记原composer外部operation，等待applyPrefill持久回执后才关闭或清除来源；输入区尚未挂载、已冻结或只读时明确拒绝，来源继续保留，不借未受导航保护的内存队列接受输入。浏览器未接收回执保留完整before/after，显式恢复始终重放原两端的条件接收；历史删除标记先与当前完整引用求交集，再登记operation，组合输入结束后重试真正待处理项。
+
+原发送确认后，父级finish和恢复onFinish使用现有controller的clearSubmittedVersion，沿同一root事务核对当前controller/owner、原confirmed intent及实际home/thread绑定；仍显示未解决投影时保持confirmed“清理待处理”，不降为未确认发送。输入区已安全卸载时可以按原owner/revision清理。目标选择器取得的原lease由父导航借用，flush覆盖全部原输入来源，直到目标host/cwd和输入上下文实际layout commit后才解除；导航失败明确返回控件错误。
 
 主导航在首次等待前同步取得原消息编辑租约和原composer owner租约，并置输入区域inert；排空后核对设置离页、文件恢复、浏览器未提交编辑和未接收快照，在路由提交前再次flush两项租约，直到新路由layout commit才释放。失败或取消释放并留在原页。租约保护本页输入与已登记外部操作；不会锁住其他renderer的合法后续编辑，也不额外保存所有历史版本。
 

@@ -49,7 +49,7 @@ export interface WorkspacePanelsProps {
   onClose(): void;
   /** Selected tab in the current scope, or null when none is selected. */
   onActiveKindChange?(kind: 'file' | 'diff' | 'terminal' | null): void;
-  onReference?(draft: ComposerDraft): void;
+  onReference?(draft: ComposerDraft): void | Promise<void>;
   /** Includes drafts and pending or uncertain saves in every retained scope. */
   onDirtyChange?(dirty: boolean): void;
   /** Parent navigation should freeze edits and await this barrier after a dirty confirmation. */
@@ -97,6 +97,17 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
   const [closing, setClosing] = useState(false);
   const closingRef = useRef(false);
   const [panelError, setPanelError] = useState<string>();
+  const [addingReference, setAddingReference] = useState(false);
+  const referencePending = useRef(false);
+  const acceptReference = (draft: ComposerDraft) => {
+    if (!onReference || referencePending.current) return;
+    referencePending.current = true; setAddingReference(true); setPanelError(undefined);
+    void (async () => {
+      try { await onReference(draft); }
+      catch (cause) { setPanelError(cause instanceof Error ? cause.message : String(cause)); }
+      finally { referencePending.current = false; setAddingReference(false); }
+    })();
+  };
   const [diffs, setDiffs] = useState<DiffTab[]>([]);
   const tabsRef = useRef<FileTab[]>([]);
   const recoveryQueues = useRef(new Map<string, Promise<void>>());
@@ -652,7 +663,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
         </div>)}
         {diffs.map(tab => <div className="yard-diff-container" key={tab.key} hidden={tab.key !== activeDiff?.key}>
           <DiffViewer diff={tab.diff} path={tab.path ? resolveFilePath(tab.cwd, tab.path) : undefined} markerStyle={appearance.diffMarkerStyle}
-            onOpenFile={tab.key === activeDiff?.key ? openFile : undefined} onReference={tab.key === activeDiff?.key ? onReference : undefined} />
+            onOpenFile={tab.key === activeDiff?.key ? openFile : undefined} onReference={tab.key === activeDiff?.key && onReference ? acceptReference : undefined} />
         </div>)}
         {active ? <>
           <div className="yard-file-toolbar">
@@ -662,7 +673,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
             <button type="button" className="yard-panel-icon" title={t('Reload file')} aria-label={t('Reload file')} disabled={active.saving || active.loading || unresolved(active.recovery) || active.storageError} onClick={() => reload(active)}><RotateCw /></button>
             <button type="button" className="yard-panel-icon" title={t('Download file')} aria-label={t('Download file')} onClick={() => void download(active)}><Download /></button>
             {onReference ? <button type="button" className="yard-panel-icon" title={t('Add file to conversation')} aria-label={t('Add file to conversation')}
-              onClick={() => onReference({ text: '', images: [], files: [{ path: active.path, name: fileName(active.path) }] })}><Plus /></button> : null}
+              disabled={addingReference} onClick={() => acceptReference({ text: '', images: [], files: [{ path: active.path, name: fileName(active.path) }] })}><Plus /></button> : null}
           </div>
           {active.error ? <div className="yard-file-error" role="alert">{localizeError(t, active.error)}</div> : null}
           {active.storageError ? <div className="yard-file-check"><button type="button" onClick={() => void retryRecovery(active.key)}>{t('Review recovery')}</button></div> : null}

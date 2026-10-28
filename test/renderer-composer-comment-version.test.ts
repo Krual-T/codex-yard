@@ -236,6 +236,35 @@ test('composer consumes only an exact, live committed reference version', {
       } finally { await context.close(); }
     });
 
+    await t.test('parent cleanup uses the same unresolved projection guard before the local submit resolves', async () => {
+      const context = await browser.newContext();
+      try {
+        const page = await pageFor(context); await seed(page);
+        await page.evaluate(() => {
+          const f = (window as any).fixture;
+          f.render({ onSubmit: async (_draft: unknown, _options: unknown, _action: unknown, description: any) => {
+            f.submitting = true; await new Promise<void>(resolve => { f.confirmSubmit = resolve; });
+            try { await f.state.controller.clearSubmittedVersion(description.revision); f.parentCleared = true; }
+            catch (cause) { f.parentCleanupError = String(cause); throw cause; }
+          } });
+        });
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.waitForFunction(() => (window as any).fixture.submitting);
+        const before = await page.evaluate(async () => {
+          const f = (window as any).fixture, c = f.state.controller, before = c.snapshot();
+          const after = await f.commit(before, (draft: any) => ({ ...draft, references: [] }));
+          await f.clear(before.owner, after.revision);
+          if (await c.acceptCommittedVersion(before, after)) throw new Error('Missing durable version was accepted');
+          f.confirmSubmit(); return before;
+        });
+        await page.waitForFunction(() => Boolean((window as any).fixture.parentCleanupError));
+        assert.equal(await page.evaluate(() => (window as any).fixture.parentCleared), undefined);
+        const versions = await page.evaluate(async (owner: any) => (window as any).fixture.versions(owner), before.owner);
+        assert(versions.retained.some((version: any) => version.revision === before.revision));
+        assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot()), before);
+      } finally { await context.close(); }
+    });
+
     await t.test('queued submission cleanup rechecks a projection made unresolved while waiting', async () => {
       const context = await browser.newContext();
       try {

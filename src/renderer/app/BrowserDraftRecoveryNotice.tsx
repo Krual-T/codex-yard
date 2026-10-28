@@ -2,11 +2,11 @@ import { useState } from 'react';
 import type { ComposerDraftSnapshot } from '../composer/composer-draft-store.ts';
 
 /** The complete result of a committed browser transaction whose projection was not accepted. */
-export function BrowserDraftRecoveryNotice({ snapshot, onAccept, onDiscard }: {
-  snapshot: ComposerDraftSnapshot; onAccept(): Promise<boolean>; onDiscard(): void;
+export function BrowserDraftRecoveryNotice({ before, snapshot, onAccept, onDiscard }: {
+  before: ComposerDraftSnapshot; snapshot: ComposerDraftSnapshot; onAccept(): Promise<boolean>; onDiscard(): void;
 }) {
   const [error, setError] = useState('');
-  const value = JSON.stringify(snapshot, null, 2);
+  const value = JSON.stringify({ before, after: snapshot }, null, 2);
   return <section role="status" className="yard-error" aria-label="Browser draft recovery">
     <strong>浏览器引用已保存，当前输入尚未接收这个版本</strong>
     <p>{snapshot.owner.hostId} / {snapshot.owner.threadId ?? '新会话'} / {snapshot.owner.draftId}</p>

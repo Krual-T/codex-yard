@@ -109,7 +109,6 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const list = useThreadList(client, { hostId: current.hostId, archived, search, refreshKey: refresh });
   const threads = list.rows;
   const listRef = useRef(list); listRef.current = list;
-  const [prefills, setPrefills] = useState<Record<string, { id: string; draft: ComposerDraft }[]>>({});
   const approvals = useMemo(() => new ApprovalRequestsController(client), [client]);
   const requests = useSyncExternalStore(approvals.subscribe, approvals.getSnapshot);
   useEffect(() => () => approvals.dispose(), [approvals]);
@@ -147,12 +146,18 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const receiveMessageEditController = useCallback((controller: MessageEditNavigationController | null) => { messageEditController.current = controller; }, []);
   const navigationLease = useRef<MessageEditNavigationLease | null>(null);
   const composerNavigationLease = useRef<ComposerDraftLease | null>(null);
+  const targetChange = useRef<{ controller: ComposerDraftController; owner: ComposerDraftSnapshot['owner']; lease: ComposerDraftLease;
+    target: { hostId: string; cwd: string }; committed(): void } | null>(null);
   const navigationLocked = useRef(false);
   useLayoutEffect(() => {
+    const pending = targetChange.current;
+    if (pending && (current.hostId !== pending.target.hostId || current.threadId !== null || current.section
+      || cwd !== pending.target.cwd || composerController.current?.snapshot()?.owner.hostId !== pending.target.hostId)) return;
     // Keep the original editor frozen until the new route actually commits.
     navigationLease.current?.release(); navigationLease.current = null;
     composerNavigationLease.current?.release(); composerNavigationLease.current = null; navigationLocked.current = false;
-  }, [navigationCommit]);
+    if (pending) { targetChange.current = null; setLeaving(false); pending.committed(); }
+  }, [navigationCommit, current.hostId, current.threadId, current.section, cwd]);
   const editStore = useMemo(() => new MessageEditRecoveryStore(client, undefined, { hostChecksRebasedSourceBeforeRevert: true }), [client]);
   const sendStore = useMemo(() => new SendRecoveryStore(client), [client]);
   const [sendState, setSendState] = useState<SendRecoverySnapshot | null>(null);
@@ -168,16 +173,16 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [browserSyncRetry, setBrowserSyncRetry] = useState(0);
   const browserRecoveryBarrier = useRef<(() => Promise<void>) | null>(null);
   const receiveBrowserRecoveryBarrier = useCallback((barrier: (() => Promise<void>) | null) => { browserRecoveryBarrier.current = barrier; }, []);
-  const browserProjections = useRef<Record<string, ComposerDraftSnapshot>>({});
-  const [browserProjectionState, setBrowserProjectionState] = useState<Record<string, ComposerDraftSnapshot>>({});
-  const retainBrowserProjection = useCallback((snapshot: ComposerDraftSnapshot) => {
-    const key = JSON.stringify([snapshot.owner, snapshot.revision]);
-    browserProjections.current = { ...browserProjections.current, [key]: structuredClone(snapshot) };
+  const browserProjections = useRef<Record<string, { before: ComposerDraftSnapshot; after: ComposerDraftSnapshot }>>({});
+  const [browserProjectionState, setBrowserProjectionState] = useState(browserProjections.current);
+  const retainBrowserProjection = useCallback((before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => {
+    const key = JSON.stringify([after.owner, after.revision]);
+    browserProjections.current = { ...browserProjections.current, [key]: structuredClone({ before, after }) };
     setBrowserProjectionState(browserProjections.current);
   }, []);
   const releaseBrowserProjection = useCallback((snapshot: ComposerDraftSnapshot) => {
     const key = JSON.stringify([snapshot.owner, snapshot.revision]);
-    if (JSON.stringify(browserProjections.current[key]) !== JSON.stringify(snapshot)) return;
+    if (JSON.stringify(browserProjections.current[key]?.after) !== JSON.stringify(snapshot)) return;
     const next = { ...browserProjections.current }; delete next[key];
     browserProjections.current = next; setBrowserProjectionState(next);
   }, []);
@@ -269,14 +274,15 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const controller = createRouteNavigation(() => {
       const next = route();
       if (next.section && !routeRef.current.section) setSettingsSourceEpoch(value => value + 1);
-      navigationGeneration.current++; setLeaving(false); setCurrent(next); setNavigationCommit(value => value + 1); setError(''); setMenu(false);
+      navigationGeneration.current++; setLeaving(Boolean(targetChange.current)); setCurrent(next); setNavigationCommit(value => value + 1); setError(''); setMenu(false);
     }, async () => {
       navigationLocked.current = true;
       let accepted = false;
       try {
         navigationLease.current = messageEditController.current?.freeze() ?? null;
         const composer = composerController.current, snapshot = composer?.snapshot();
-        composerNavigationLease.current = snapshot ? composer!.freeze(snapshot.owner) : null;
+        const borrowed = targetChange.current?.controller === composer ? targetChange.current.lease : undefined;
+        composerNavigationLease.current = snapshot ? composer!.freeze(snapshot.owner, borrowed) : null;
         if (composer && (!snapshot || !composerNavigationLease.current)) return false;
         // Apply native inert before the first await so input cannot change while
         // the message, composer and file transactions are being drained.
@@ -459,10 +465,28 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   }, [current.hostId, current.threadId, current.readOnly, thread?.id, thread?.cwd, thread?.name, loading, conversation.error, workspace]);
 
   const finishSend = async (intent: SendIntent) => {
-    await acknowledgeSubmittedBrowserReferences(intent, composerController.current, (await sendStore.read()).bindings);
-    await clearComposerDraftRevision(intent.owner, intent.revision);
-    await sendStore.dismiss(intent.id, intent);
-    await reloadSends();
+    try {
+      await acknowledgeSubmittedBrowserReferences(intent, composerController.current, (await sendStore.read()).bindings);
+      const controller = composerController.current, snapshot = controller?.snapshot();
+      const sameDraft = snapshot?.owner.hostId === intent.owner.hostId && snapshot.owner.draftId === intent.owner.draftId;
+      const confirmed = (atoms: Readonly<Record<string, unknown>>) => {
+        const recovery = record(atoms[sendsAtom]), stored = record(recovery.requests)[intent.id];
+        return JSON.stringify(stored) === JSON.stringify(intent) && intent.stage === 'confirmed';
+      };
+      if (controller && snapshot && sameDraft) await controller.clearSubmittedVersion(intent.revision, atoms => {
+        const active = controller.snapshot()?.owner, bindings = record(record(atoms[sendsAtom]).bindings);
+        return composerController.current === controller && confirmed(atoms) && JSON.stringify(active) === JSON.stringify(snapshot.owner)
+          && (active?.threadId === intent.owner.threadId || intent.owner.threadId === null && active?.threadId === intent.threadId
+            && !!intent.threadId && bindings[sendThreadKey(intent.owner.hostId, intent.threadId)] === intent.owner.draftId);
+      });
+      else await clearComposerDraftRevision(intent.owner, intent.revision, atoms => {
+        const active = composerController.current?.snapshot()?.owner;
+        return confirmed(atoms) && !(active?.hostId === intent.owner.hostId && active.draftId === intent.owner.draftId);
+      });
+      await sendStore.dismiss(intent.id, intent);
+    } catch (cause) {
+      throw new Error('消息已发送，原稿清理待处理：' + (cause instanceof Error ? cause.message : String(cause)));
+    } finally { await reloadSends(); }
   };
   const submit = async (draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, origin?: MessageEditOrigin,
     description?: ComposerSubmissionDescription, retry?: SendIntent,
@@ -643,10 +667,14 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   useEffect(() => {
     if (!composerSnapshot || browserOwnerKey(browserDraftOwner(composerSnapshot.owner, sendBindings.current)) !== browserOwnerKey(browserOwner)) return;
     setBrowserSyncError('');
-    return watchBrowserDraftDeletions(browserOwner, async () => {
+    return watchBrowserDraftDeletions(browserOwner, () => {
+      const snapshot = composerController.current?.snapshot();
+      return snapshot && browserOwnerKey(browserDraftOwner(snapshot.owner, sendBindings.current)) === browserOwnerKey(browserOwner) ? snapshot : null;
+    }, async () => {
       const operation = beginBrowserDraftOperation(browserOwner);
-      if (!operation) throw new Error('原草稿尚未就绪，请重查浏览器引用。');
+      if (!operation) return false;
       await syncBrowserDraftDeletions(browserOwner, operation, retainBrowserProjection, releaseBrowserProjection);
+      return true;
     }, cause => setBrowserSyncError(String(cause)));
   }, [browserOwner.hostId, browserOwner.threadId, browserOwner.draftId, composerSnapshot?.revision, browserSyncRetry, beginBrowserDraftOperation, retainBrowserProjection, releaseBrowserProjection]);
   useEffect(() => {
@@ -671,12 +699,21 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   };
   const openFile = (path: string, line?: number, column?: number, fileCwd = panelCwd) =>
     showPanel({ kind: 'file', path: resolveFilePath(fileCwd, path), line, column });
-  const addReference = (draft: ComposerDraft) => {
-    if (current.readOnly) { setError('归档会话为只读，请先恢复会话。'); return; }
-    setPrefills(previous => ({ ...previous, [panelScope]: [...previous[panelScope] ?? [], { id: crypto.randomUUID(), draft }] })); setPanelOpen(false);
+  const addReference = async (draft: ComposerDraft) => {
+    const controller = composerController.current, snapshot = controller?.snapshot();
+    if (!controller || !snapshot || navigationLocked.current || routeRef.current.readOnly
+      || snapshot.owner.hostId !== routeRef.current.hostId || snapshot.owner.threadId !== routeRef.current.threadId)
+      throw new Error('原输入区尚未就绪，引用未加入，请保留来源后重试。');
+    const operation = controller.beginExternalOperation(snapshot.owner);
+    if (!operation) throw new Error('原输入区正在处理其他输入，引用未加入，请重试。');
+    let accepted = false;
+    try {
+      accepted = await operation.applyPrefill({ id: crypto.randomUUID(), draft: structuredClone(draft) });
+      if (!accepted) throw new Error('引用尚未保存，来源内容已保留。');
+      if (controller === composerController.current) setPanelOpen(false);
+    } finally { operation.finish(accepted); }
   };
   const turnDiff = [...thread?.turns ?? []].reverse().map(turn => record(turn).diff).find(value => typeof value === 'string') as string | undefined;
-  const prefill = prefills[panelScope]?.[0] ?? null;
   const addProject = () => {
     const path = prompt('Project directory'); if (!path) return;
     const name = path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
@@ -749,8 +786,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       </header>
       {error && <div role="alert" className="yard-error">{error}<button onClick={() => { setError(''); setRefresh(value => value + 1); }}>Retry</button><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
       {browserSyncError && <div role="alert" className="yard-error">{browserSyncError}<button onClick={() => setBrowserSyncRetry(value => value + 1)}>Retry browser reference sync</button></div>}
-      {Object.entries(browserProjectionState).map(([key, snapshot]) => <BrowserDraftRecoveryNotice key={key} snapshot={snapshot}
-        onAccept={() => acceptBrowserCommittedVersion(snapshot, snapshot)} onDiscard={() => releaseBrowserProjection(snapshot)} />)}
+      {Object.entries(browserProjectionState).map(([key, receipt]) => <BrowserDraftRecoveryNotice key={key} before={receipt.before} snapshot={receipt.after}
+        onAccept={() => acceptBrowserCommittedVersion(receipt.before, receipt.after)} onDiscard={() => releaseBrowserProjection(receipt.after)} />)}
       {Object.values(sendState?.requests ?? {}).map(intent => <SendRecoveryNotice key={intent.id} intent={intent}
         canRetry={!submitting && !loading && canRetryAction(intent) && !current.readOnly && current.hostId === intent.owner.hostId && current.threadId === intent.threadId
           && (intent.threadId !== null || newDraftId === intent.owner.draftId)}
@@ -799,12 +836,20 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           {!sendState || current.threadId && (loading || !initialOptions) && !(composerIsCurrent || current.readOnly && thread) ? current.readOnly ? null : <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
           onRemoveReference={(owner, reference, operation) => removeBrowserDraftReference(browserDraftOwner(owner, sendBindings.current), reference,
             operation, retainBrowserProjection, releaseBrowserProjection)}
-          onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} initialOptions={initialOptions ?? undefined} hosts={hosts} onTargetChange={async target => {
-          if (await navigate('/' + (target.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(target.hostId)))) {
+          onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} initialOptions={initialOptions ?? undefined} hosts={hosts} onTargetChange={async (target, lease) => {
+          const controller = composerController.current, snapshot = controller?.snapshot();
+          if (!controller || !snapshot || targetChange.current) throw new Error('原输入区不能切换目标。');
+          let committed!: () => void;
+          const completion = new Promise<void>(resolve => { committed = resolve; });
+          const pending = { controller, owner: snapshot.owner, lease, target, committed };
+          targetChange.current = pending;
+          try {
+            if (!await navigate('/' + (target.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(target.hostId)))) throw new Error('目标切换未完成，原草稿已保留。');
             rememberNewDraftLocation(target.hostId, homeDraftIdentity(target.hostId), target.cwd); setCwd(target.cwd); setSelectedProject(null);
-          }
-        }} onPrefillConsumed={id => setPrefills(previous => ({ ...previous, [panelScope]: (previous[panelScope] ?? []).filter(item => item.id !== id) }))} activeTurnId={thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null} busy={busy}
-          onSubmit={(draft, options, action, description) => submit(draft, options, action, undefined, description)} onInterrupt={interrupt} prefill={prefill} onStartQueued={async queuedSubmissionId => {
+            await completion;
+          } finally { if (targetChange.current === pending) { targetChange.current = null; setLeaving(false); } }
+        }} activeTurnId={thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null} busy={busy}
+          onSubmit={(draft, options, action, description) => submit(draft, options, action, undefined, description)} onInterrupt={interrupt} onStartQueued={async queuedSubmissionId => {
           if (!current.threadId || current.readOnly || inFlight.current || isThreadBusy(threadRef.current)) throw new Error('当前会话暂时无法启动队列。');
           const identity = { hostId: current.hostId, threadId: current.threadId }, generation = navigationGeneration.current;
           inFlight.current = true; setSubmitting(true);

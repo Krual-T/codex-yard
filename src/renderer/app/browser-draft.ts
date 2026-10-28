@@ -22,7 +22,7 @@ function browserReference(reference: ComposerReference, owner: BrowserOwner): Br
   return reference as BrowserReference;
 }
 export async function removeBrowserDraftReference(owner: BrowserOwner, reference: ComposerReference,
-  operation: ComposerDraftExternalOperation, retain: (snapshot: ComposerDraftSnapshot) => void,
+  operation: ComposerDraftExternalOperation, retain: (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => void,
   accepted: (snapshot: ComposerDraftSnapshot) => void): Promise<'handled' | void> {
   if (reference.kind !== 'browser') return;
   const original = browserReference(reference, owner);
@@ -32,7 +32,7 @@ export async function removeBrowserDraftReference(owner: BrowserOwner, reference
     const receipt = await operation.transaction(async (before, isCurrent) => {
       const after = await removeBrowserReferenceFromDraft(owner, original, before, isCurrent);
       // Retain the complete durable result before the controller attempts adoption.
-      committed = structuredClone(after); retain(committed);
+      committed = structuredClone(after); retain(before, committed);
       return { after, value: undefined };
     });
     if (receipt.accepted) accepted(receipt.after);
@@ -44,12 +44,12 @@ export async function removeBrowserDraftReference(owner: BrowserOwner, reference
 }
 
 export async function syncBrowserDraftDeletions(owner: BrowserOwner, operation: ComposerDraftExternalOperation,
-  retain: (snapshot: ComposerDraftSnapshot) => void, accepted: (snapshot: ComposerDraftSnapshot) => void) {
+  retain: (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => void, accepted: (snapshot: ComposerDraftSnapshot) => void) {
   let success = false;
   try {
     const receipt = await operation.transaction(async (before, isCurrent) => {
       const after = await pruneBrowserDraftDeletions(owner, before, isCurrent);
-      retain(after);
+      retain(before, after);
       return { after, value: undefined };
     });
     if (receipt.accepted) { accepted(receipt.after); success = true; }
@@ -58,8 +58,8 @@ export async function syncBrowserDraftDeletions(owner: BrowserOwner, operation: 
 
 /** Watch only the active draft; this does not register pages or acknowledge sends. */
 export function watchBrowserDraftDeletions(owner: BrowserOwner,
-  apply: () => Promise<void>, onError: (error: unknown) => void) {
-  let active = true, pending = false, running = false;
+  currentDraft: () => ComposerDraftSnapshot | null, apply: () => Promise<boolean>, onError: (error: unknown) => void) {
+  let active = true, pending = false, running = false, retryAfterInput = false;
   const refresh = () => {
     if (!active) return;
     pending = true;
@@ -70,14 +70,22 @@ export function watchBrowserDraftDeletions(owner: BrowserOwner,
         pending = false;
         const { deleted } = await readBrowserCommentsSnapshot(owner);
         if (!active) return;
-        if (deleted.length) await apply();
+        const draft = currentDraft();
+        if (draft && (draft.draft.references ?? []).some(reference => deleted.some(marker => same(reference, marker)))) {
+          retryAfterInput = !await apply();
+        } else retryAfterInput = false;
       }
     })().catch(error => { if (active) onError(error); })
       .finally(() => { running = false; if (active && pending) refresh(); });
   };
   const unsubscribe = subscribeBrowserComments(refresh);
+  const inputReady = () => { if (retryAfterInput) queueMicrotask(refresh); };
+  if (typeof window !== 'undefined') { window.addEventListener('compositionend', inputReady); window.addEventListener('input', inputReady); }
   refresh();
-  return () => { active = false; unsubscribe(); };
+  return () => {
+    active = false; unsubscribe();
+    if (typeof window !== 'undefined') { window.removeEventListener('compositionend', inputReady); window.removeEventListener('input', inputReady); }
+  };
 }
 
 /** Record the confirmed immutable version before clearing it and dismissing its recovery intent. */

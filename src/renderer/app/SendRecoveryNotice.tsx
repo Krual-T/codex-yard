@@ -24,7 +24,7 @@ export function SendRecoveryNotice({ intent, canRetry, onOpen, onCheck, onRetry,
   };
   const retryable = ['prepared', 'ready', 'failed'].includes(intent.stage);
   return <section className="yard-send-recovery" aria-label="Message send recovery">
-    <p role="status">{intent.stage === 'confirmed' ? '原提交版本已提交；较新的草稿将保留。'
+    <p role="status">{intent.stage === 'confirmed' ? '消息已发送；原提交版本的草稿清理待处理，较新的草稿将保留。'
       : retryable ? '消息尚未发送成功，原提交版本已保留。'
         : '发送结果尚未确认。原提交版本已保留，不会自动重发。'}</p>
     <details><summary>原提交内容 · {intent.owner.hostId}</summary><pre>{intent.draft.text}</pre>

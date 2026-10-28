@@ -1,4 +1,4 @@
-import { readBrowserAtom, updateBrowserAtom } from '../storage/ui-atoms.ts';
+import { readBrowserAtom, updateBrowserAtoms } from '../storage/ui-atoms.ts';
 import type { ComposerContext, ComposerDraft } from '../workbench-contract.ts';
 import { activatePending, createId, draftKey, emptyDraft, isPristine, isStoredDraft, legacyBlockedMessage,
   legacyDraftCandidates, loadDraft, parseStoredDraft } from './standalone-draft.ts';
@@ -103,8 +103,12 @@ function importArchive(): Repository {
   }
   return { version: 1, archive, claims: {}, initialized: {}, entries: {} };
 }
-async function mutate(update: (store: Repository) => Repository): Promise<Repository> {
-  const result = await updateBrowserAtom(composerDraftAtomKey, previous => update(previous === undefined ? importArchive() : repository(previous)));
+async function mutate(update: (store: Repository, atoms: Readonly<Record<string, unknown>>) => Repository): Promise<Repository> {
+  const result = await updateBrowserAtoms(atoms => {
+    const previous = atoms[composerDraftAtomKey];
+    const value = update(previous === undefined ? importArchive() : repository(previous), atoms);
+    return { value, updates: { [composerDraftAtomKey]: value } };
+  });
   return repository(result);
 }
 function entryFor(store: Repository, owner: ComposerDraftOwner): Entry {
@@ -302,10 +306,10 @@ export async function readComposerDraftVersions(owner: ComposerDraftOwner): Prom
 }
 
 /** Remove only the confirmed version; newer branches and pending drafts remain recoverable. */
-export async function clearComposerDraftRevision(owner: ComposerDraftOwner, revision: string, guard?: () => boolean): Promise<boolean> {
+export async function clearComposerDraftRevision(owner: ComposerDraftOwner, revision: string, guard?: (atoms: Readonly<Record<string, unknown>>) => boolean): Promise<boolean> {
   let cleared = false;
-  await mutate(current => {
-    if (guard && !guard()) throw new Error('当前草稿冲突尚未处理。');
+  await mutate((current, atoms) => {
+    if (guard && !guard(atoms)) throw new Error('当前草稿冲突尚未处理。');
     const entry = entryFor(current, owner);
     const matches = (value: Version) => sameOwner(entry, value.owner, owner) && value.revision === revision;
     const target = entry.versions.find(matches), retained = entry.retained.filter(value => !matches(value));
