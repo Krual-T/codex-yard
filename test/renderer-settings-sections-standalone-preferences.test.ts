@@ -267,11 +267,13 @@ test('two editors use raw existence and keep drafts when conditional writes conf
 test('reapplying a theme keeps external untouched and unknown fields', async () => {
   const client = new FakeClient();
   client.settings.appearanceLightChromeTheme = { ...structuredClone(defaultThemes.light),
-    extension: { old: true }, fonts: { ...defaultThemes.light.fonts, future: 'original' } };
+    extension: { old: true }, fonts: { ...defaultThemes.light.fonts, future: 'original' },
+    ...JSON.parse('{"__proto__":{"keep":"original"}}') };
   const first = new Preferences(client), second = new Preferences(client);
   await Promise.all([first.load(), second.load()]);
   const original = first.getSnapshot().appearanceLightChromeTheme.value!;
   first.edit('appearanceLightChromeTheme', { ...original, surface: '#eeeeee', extension: { old: true, added: 1 },
+    ...JSON.parse('{"__proto__":{"keep":"changed"}}'),
     fonts: { ...original.fonts, future: 'new', another: 'kept' } });
   second.edit('appearanceLightChromeTheme', { ...second.getSnapshot().appearanceLightChromeTheme.value!, accent: '#123456' });
   assert.equal(await first.save(), true);
@@ -283,6 +285,7 @@ test('reapplying a theme keeps external untouched and unknown fields', async () 
   assert.equal(result.accent, '#123456'); assert.equal(result.surface, '#eeeeee');
   assert.deepEqual(result.extension, { old: true, added: 1 });
   assert.equal(result.fonts.future, 'new'); assert.equal(result.fonts.another, 'kept');
+  assert.deepEqual(Object.getOwnPropertyDescriptor(result, '__proto__')?.value, { keep: 'changed' });
 });
 
 test('a missing existence response cannot be used as a write baseline', async () => {
@@ -304,6 +307,8 @@ test('missing atom service is visible and cannot fall back to another store', as
   assert.equal(prefs.getSnapshot()['show-context-window-usage'].available, false);
   assert.match(prefs.getSnapshot()['show-context-window-usage'].error ?? '', /offline/);
   prefs.edit('show-context-window-usage', false);
+  prefs.discard();
+  assert.match(prefs.getSnapshot()['show-context-window-usage'].error ?? '', /offline/);
   await prefs.save();
   assert.equal(client.calls.some(call => call.endpoint.startsWith('set-')), false);
 });

@@ -148,6 +148,8 @@ export interface PreferenceEntry<T> {
 export type PreferenceSnapshot = { [K in PreferenceKey]: PreferenceEntry<PreferenceValues[K]> };
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const clone = <T>(value: T): T => structuredClone(value);
+const put = (target: Record<string, unknown>, key: string, value: unknown) =>
+  Object.defineProperty(target, key, { value, enumerable: true, configurable: true, writable: true });
 function same(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
@@ -166,9 +168,9 @@ function mergeThemeDraft(base: unknown, current: unknown, draft: unknown): unkno
   for (const key of new Set([...Object.keys(base), ...Object.keys(current), ...Object.keys(draft)])) {
     const inBase = Object.hasOwn(base, key), inDraft = Object.hasOwn(draft, key), inCurrent = Object.hasOwn(current, key);
     if (inBase === inDraft && (!inBase || same(base[key], draft[key]))) {
-      if (inCurrent) result[key] = clone(current[key]);
+      if (inCurrent) put(result, key, clone(current[key]));
     } else if (inDraft) {
-      result[key] = inBase && inCurrent ? mergeThemeDraft(base[key], current[key], draft[key]) : clone(draft[key]);
+      put(result, key, inBase && inCurrent ? mergeThemeDraft(base[key], current[key], draft[key]) : clone(draft[key]));
     }
   }
   return result;
@@ -177,7 +179,7 @@ export function mergeImportedTheme(current: ChromeTheme, imported: ChromeTheme):
   const merge = (left: unknown, right: unknown): unknown => {
     if (!record(left) || !record(right)) return clone(right);
     const result: Record<string, unknown> = clone(left);
-    for (const [key, value] of Object.entries(right)) result[key] = key in left ? merge(left[key], value) : clone(value);
+    for (const [key, value] of Object.entries(right)) put(result, key, Object.hasOwn(left, key) ? merge(left[key], value) : clone(value));
     return result;
   };
   const result = merge(current, imported) as ChromeTheme;
@@ -297,8 +299,11 @@ export class Preferences {
       editRevision: entry.editRevision + 1, error: null });
   }
   discard(): void {
-    for (const key of preferenceKeys) if (!this.snapshot[key].saving) this.update(key,
-      { value: clone(this.snapshot[key].saved), editBase: null, conflict: false, error: null });
+    for (const key of preferenceKeys) {
+      const entry = this.snapshot[key];
+      if (!entry.saving && entry.editBase) this.update(key,
+        { value: clone(entry.saved), editBase: null, conflict: false, error: entry.available ? null : entry.error });
+    }
   }
   resolveConflict(key: PreferenceKey, choice: 'current' | 'draft'): void {
     const entry = this.snapshot[key];
