@@ -4,6 +4,7 @@ import { projectsForHost } from './projects.ts';
 import type { Project, ProjectState } from './projects.ts';
 
 const stateKey = '__yardSettingsOrigin';
+export const settingsOriginParameter = 'yardSettingsOrigin';
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value)
   ? value as Record<string, unknown> : {};
 export interface SettingsOrigin {
@@ -14,10 +15,11 @@ export interface SettingsOrigin {
 export interface SettingsContext { projectRoots: SettingsProjectRoots | null; sessionCwd: SettingsSessionCwd | null }
 export const emptySettingsContext: SettingsContext = { projectRoots: null, sessionCwd: null };
 
-export function readSettingsOrigin(state: unknown): SettingsOrigin | null {
-  const value = record(record(state)[stateKey]), source = record(value.source);
+function originValue(input: unknown): SettingsOrigin | null {
+  const value = record(input), source = record(value.source);
   if (typeof value.hostId !== 'string' || !value.hostId || typeof value.returnTo !== 'string'
-    || !value.returnTo.startsWith('/') || value.returnTo.startsWith('//')) return null;
+    || !value.returnTo.startsWith('/') || value.returnTo.startsWith('//') || /[\\\u0000-\u001f\u007f]/.test(value.returnTo)) return null;
+  if (new URL(value.returnTo, 'https://yard.invalid').origin !== 'https://yard.invalid') return null;
   if (source.kind === 'thread' && typeof source.threadId === 'string' && source.threadId) {
     return { hostId: value.hostId, returnTo: value.returnTo, source: { kind: 'thread', threadId: source.threadId } };
   }
@@ -27,6 +29,24 @@ export function readSettingsOrigin(state: unknown): SettingsOrigin | null {
   return source.kind === 'none' ? { hostId: value.hostId, returnTo: value.returnTo, source: { kind: 'none' } } : null;
 }
 
+/** Read old history entries only to import their identity into the URL. */
+export function readSettingsOrigin(state: unknown): SettingsOrigin | null { return originValue(record(state)[stateKey]); }
+
+export function readSettingsOriginURL(search: string): SettingsOrigin | null {
+  const value = new URLSearchParams(search).get(settingsOriginParameter);
+  try { return value ? originValue(JSON.parse(value)) : null; } catch { return null; }
+}
+
+export function settingsOriginURL(path: string, origin: SettingsOrigin | null): string {
+  const url = new URL(path, 'https://yard.invalid');
+  if (url.origin !== 'https://yard.invalid') throw new Error('Settings navigation must stay on this Yard origin.');
+  if (origin) {
+    if (!originValue(origin)) throw new Error('The settings source or return route is invalid.');
+    url.searchParams.set(settingsOriginParameter, JSON.stringify(origin));
+  }
+  return url.pathname + url.search + url.hash;
+}
+
 export function captureSettingsOrigin(route: { hostId: string; threadId: string | null; pathname: string; search: string; hash: string },
   project: Project | null): SettingsOrigin {
   return { hostId: route.hostId, returnTo: route.pathname + route.search + route.hash,
@@ -34,15 +54,11 @@ export function captureSettingsOrigin(route: { hostId: string; threadId: string 
       : project?.hostId === route.hostId ? { kind: 'project', projectId: project.id } : { kind: 'none' } };
 }
 
-export function settingsNavigationState(state: unknown, origin: SettingsOrigin | null): unknown {
-  return origin ? { ...record(state), [stateKey]: origin } : state;
-}
-
-/** History stores identities. Paths are resolved from the selected host's authority. */
+/** URLs store identities. Paths are resolved from the selected host's authority. */
 export async function resolveSettingsOrigin(origin: SettingsOrigin | null, hostId: string, state: ProjectState | null,
   readThread: (hostId: string, threadId: string) => Promise<unknown>): Promise<SettingsContext> {
   if (!origin || origin.source.kind === 'none') return emptySettingsContext;
-  if (origin.hostId !== hostId) throw new Error('The settings source belongs to another host. Return to its conversation or project to restore this scope.');
+  if (origin.hostId !== hostId) return emptySettingsContext;
   if (!state) throw new Error('The settings source project catalog has not loaded.');
   const projects = projectsForHost(state, hostId);
   if (origin.source.kind === 'project') {

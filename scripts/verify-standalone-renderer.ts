@@ -164,6 +164,13 @@ try {
     throw new Error('The owned App client was not mounted.');
   });
   await installClientProbe(page);
+  const turnsBeforeReconnect = fake.calls('turn/start').length;
+  fake.disconnect();
+  await page.getByRole('button', { name: 'Reconnect host', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.yard-connection')?.getAttribute('data-state') === 'connected');
+  await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).waitFor();
+  assert.equal(fake.calls('turn/start').length, turnsBeforeReconnect);
+  checks.push('daemon connection loss exposes an explicit read-only reconnect action and restores the actual host without replaying input');
   const retainedComposer = page.getByRole('textbox', { name: 'Work with Codex', exact: true });
   await retainedComposer.evaluate(element => { element.setAttribute('data-retained-archive-owner', 'original'); });
   await holdUiWrites(page);
@@ -177,6 +184,14 @@ try {
     assert.equal(await retainedComposer.evaluate(element => element.closest('[inert]') !== null), true);
     assert.equal(fake.calls('turn/start').length, 0);
   } finally { await page.evaluate(() => (window as any).releaseUiWriteBarrier()); }
+  const coldArchived = await context.newPage();
+  await coldArchived.goto(app.url + '/local/owned-conversation');
+  await coldArchived.getByRole('button', { name: 'Restore conversation', exact: true }).waitFor();
+  assert.equal(new URL(coldArchived.url()).searchParams.get('archived'), '1');
+  await coldArchived.reload();
+  await coldArchived.getByRole('button', { name: 'Restore conversation', exact: true }).waitFor();
+  assert.equal(await coldArchived.getByRole('textbox', { name: 'Work with Codex', exact: true }).evaluate(element => element.closest('[inert]') !== null), true);
+  await coldArchived.close();
   await page.getByRole('button', { name: 'Restore conversation', exact: true }).click();
   await retainedComposer.fill('');
   checks.push('external archive revokes input while retaining the exact composer DOM and a draft blocked before its IndexedDB commit; restore does not start a turn');
@@ -316,7 +331,7 @@ try {
   assert.equal(page.url(), editLocation, 'Navigation must wait for the actual pending UI transaction.');
   assert.equal(await heldEditor.isDisabled(), true);
   await page.evaluate(() => (window as any).releaseUiWriteBarrier());
-  await page.waitForURL('**/settings/general');
+  await page.waitForURL(url => url.pathname === '/settings/general');
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await page.waitForURL('**/local/owned-conversation');
   await heldEditor.waitFor(); assert.equal(await heldEditor.inputValue(), 'UNSENT_EDIT_BEFORE_NAVIGATION');
@@ -686,17 +701,40 @@ try {
   const expectedSettingsSource = { hostId: sourceBeforeSettings.searchParams.get('hostId') ?? 'local',
     returnTo: sourceBeforeSettings.pathname + sourceBeforeSettings.search + sourceBeforeSettings.hash,
     source: { kind: 'thread', threadId: decodeURIComponent(sourceBeforeSettings.pathname.split('/')[2]!) } };
-  assert.deepEqual(await page.evaluate(() => history.state.__yardState.__yardSettingsOrigin), expectedSettingsSource);
+  assert.deepEqual(JSON.parse(new URL(page.url()).searchParams.get('yardSettingsOrigin')!), expectedSettingsSource);
   const sourceReads = fake.calls('thread/read').length;
   await page.reload(); await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
-  await page.waitForFunction(() => history.state.__yardState.__yardSettingsOrigin?.source?.kind === 'thread');
-  assert.deepEqual(await page.evaluate(() => history.state.__yardState.__yardSettingsOrigin), expectedSettingsSource);
+  assert.deepEqual(JSON.parse(new URL(page.url()).searchParams.get('yardSettingsOrigin')!), expectedSettingsSource);
+  const copiedSettings = await context.newPage();
+  await copiedSettings.goto(page.url()); await copiedSettings.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  assert.deepEqual(JSON.parse(new URL(copiedSettings.url()).searchParams.get('yardSettingsOrigin')!), expectedSettingsSource);
+  await copiedSettings.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await copiedSettings.waitForURL(sourceBeforeSettings.href); await copiedSettings.close();
+  await page.getByRole('button', { name: 'Hooks', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Working directory', exact: true }).waitFor();
+  const changedScope = join(temporary, 'changed-settings-scope'); await mkdir(changedScope);
+  const otherSettingsWriter = await context.newPage(); await otherSettingsWriter.goto(app.url);
+  await otherSettingsWriter.locator('[data-owned-renderer]').waitFor();
+  await installClientProbe(otherSettingsWriter);
+  await otherSettingsWriter.evaluate(async ({ threadId, projectId, path }) => {
+    const client = (window as any).acceptanceClient;
+    const { value } = await client.host('get-global-state', { key: 'local-projects' });
+    const projects = { ...value };
+    const slot = Object.keys(projects).find(key => projects[key].id === projectId)!;
+    projects[slot] = { ...projects[slot], rootPaths: [path] };
+    await client.host('set-global-state', { key: 'local-projects', value: projects });
+    await client.host('thread-project-assignment-set', { hostId: 'local', threadId, projectless: false,
+      assignment: { projectKind: 'local', projectId } });
+  }, { threadId: expectedSettingsSource.source.threadId, projectId: temporary, path: changedScope });
+  await page.waitForFunction(path => [...document.querySelectorAll('.yard-muted')].some(node => node.textContent === 'Scope: ' + path), changedScope);
+  await otherSettingsWriter.close();
+  await page.getByRole('button', { name: 'General', exact: true }).click();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await page.waitForURL(sourceBeforeSettings.href);
   assert(fake.calls('thread/read').slice(sourceReads).some(call => record(call.params).threadId === expectedSettingsSource.source.threadId));
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
-  checks.push('settings retain their exact history source and return route through full reload and resolve source metadata again');
+  checks.push('settings keep exact source and return route in copied URLs/reload and resolve changed project membership from a second actual page');
   await page.getByRole('combobox', { name: 'Language', exact: true }).selectOption('zh-CN');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.waitForFunction(() => document.documentElement.lang === 'zh-CN');

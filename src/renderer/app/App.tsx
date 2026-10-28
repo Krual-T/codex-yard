@@ -28,7 +28,7 @@ import { WorkspacePanels } from '../panels/WorkspacePanels.tsx';
 import type { WorkspacePanelAppearance, WorkspacePanelRequest } from '../panels/WorkspacePanels.tsx';
 import { resolveFilePath } from '../files/file-service.ts';
 import { createRouteNavigation } from './route-navigation.ts';
-import { captureSettingsOrigin, emptySettingsContext, readSettingsOrigin, resolveSettingsOrigin, settingsNavigationState } from './settings-origin.ts';
+import { captureSettingsOrigin, emptySettingsContext, readSettingsOrigin, readSettingsOriginURL, resolveSettingsOrigin, settingsOriginParameter, settingsOriginURL } from './settings-origin.ts';
 import type { SettingsContext, SettingsOrigin } from './settings-origin.ts';
 import { SendRecoveryStore, sendsAtom, sendThreadKey } from './send-recovery.ts';
 import type { SendIntent, SendRecoverySnapshot } from './send-recovery.ts';
@@ -42,6 +42,7 @@ import { homeDraftIdentity, selectHomeDraftIdentity } from './home-draft-identit
 import { I18nProvider, resolveLocale } from '../i18n/index.tsx';
 import { themeFontFamily } from './theme-fonts.ts';
 import { readSettingsRoute } from '../settings/routing.ts';
+import { readThreadArchived } from './thread-archive.ts';
 import './app.css';
 
 type ThreadRow = ThreadSummary & { preview?: string; updatedAt?: number; createdAt?: number };
@@ -84,8 +85,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [workspace, setWorkspace] = useState('');
   const [projectState, setProjectState] = useState<ProjectState | null>(null);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const settingsOrigin = useMemo(() => readSettingsOrigin(current.state), [current.state]);
-  const settingsSourceKey = current.section ? JSON.stringify([current.hostId, settingsOrigin]) : null;
+  const settingsOrigin = useMemo(() => new URLSearchParams(current.search).has(settingsOriginParameter)
+    ? readSettingsOriginURL(current.search) : readSettingsOrigin(current.state), [current.search, current.state]);
+  const [settingsSourceEpoch, setSettingsSourceEpoch] = useState(0);
+  const settingsSourceKey = current.section ? JSON.stringify([current.hostId, settingsOrigin, settingsSourceEpoch]) : null;
   const [settingsSource, setSettingsSource] = useState<{
     key: string | null; state: 'loading' | 'error' | 'ready'; error?: string; context: SettingsContext;
   }>({ key: null, state: 'ready', context: emptySettingsContext });
@@ -185,8 +188,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     navigationGeneration.current++;
     const previous = routeRef.current;
     if (!options?.delta && new URL(path, location.href).pathname.split('/')[1] === 'settings') {
-      const origin = previous.section ? readSettingsOrigin(previous.state) : captureSettingsOrigin(previous, selectedProjectRef.current);
-      options = { ...options, state: settingsNavigationState(options?.state, origin) };
+      const origin = previous.section ? readSettingsOriginURL(previous.search) ?? readSettingsOrigin(previous.state)
+        : captureSettingsOrigin(previous, selectedProjectRef.current);
+      if (!new URL(path, location.href).searchParams.has(settingsOriginParameter)) path = settingsOriginURL(path, origin);
     }
     return navigation.current?.navigate(path, options) ?? Promise.resolve(false);
   }, []);
@@ -223,6 +227,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   useEffect(() => {
     const controller = createRouteNavigation(() => {
       const next = route();
+      if (next.section && !routeRef.current.section) setSettingsSourceEpoch(value => value + 1);
       navigationGeneration.current++; setLeaving(false); setCurrent(next); setNavigationCommit(value => value + 1); setError(''); setMenu(false);
     }, async () => {
       navigationLocked.current = true;
@@ -246,13 +251,18 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     });
     navigation.current = controller;
     const unsubscribe = client.subscribe(event => {
-      if (event.type === 'connection-state') { setStatus(String(event.state)); if (event.state !== 'connected') setRequests([]); }
+      if (event.type === 'connection-state') {
+        setStatus(String(event.state)); setSettingsSourceEpoch(value => value + 1);
+        if (event.state !== 'connected') setRequests([]);
+      }
       if (event.type === 'page-resumed') {
+        setSettingsSourceEpoch(value => value + 1);
         setRefresh(value => value + 1);
         void reloadProjects().catch(cause => setError(String(cause)));
         void reloadPreferences().catch(cause => setError(String(cause)));
       }
       if (event.type === 'codex-app-server-connection-changed' && event.hostId === routeRef.current.hostId) {
+        setSettingsSourceEpoch(value => value + 1);
         setStatus(String(event.state)); if (event.state === 'connected') setRefresh(value => value + 1);
       }
       if (event.type === 'codex-app-server-connection-changed' && event.state !== 'connected') setRequests(previous => previous.filter(request => request.hostId !== event.hostId));
@@ -286,7 +296,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       }
       if (event.type === 'settings-changed' || event.type === 'global-state-updated') void reloadPreferences().catch(cause => setError(String(cause)));
       if (event.type === 'thread-project-memberships-updated' || event.type === 'global-state-updated'
-        && Array.isArray(event.keys) && event.keys.some(key => ['local-projects', 'remote-projects', 'thread-project-assignments', 'projectless-thread-ids'].includes(String(key)))) {
+        && (!Array.isArray(event.keys) || !event.keys.length || event.keys.some(key => ['local-projects', 'remote-projects', 'thread-project-assignments', 'projectless-thread-ids'].includes(String(key))))) {
+        setSettingsSourceEpoch(value => value + 1);
         void reloadProjects().catch(cause => setError(String(cause)));
       }
     });
@@ -302,6 +313,23 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     window.addEventListener('languagechange', preferences);
     return () => { unsubscribe(); controller.dispose(); if (navigation.current === controller) navigation.current = null; media.removeEventListener('change', preferences); reduced.removeEventListener('change', preferences); window.removeEventListener('languagechange', preferences); };
   }, [client, reloadPreferences, reloadProjects]);
+  useLayoutEffect(() => {
+    if (!current.section || !settingsOrigin || new URLSearchParams(current.search).has(settingsOriginParameter)) return;
+    const path = settingsOriginURL(current.pathname + current.search + current.hash, settingsOrigin);
+    if (navigation.current?.replaceCurrentURL(path)) setCurrent(previous => ({ ...previous, search: new URL(path, location.href).search }));
+  }, [current.section, current.pathname, current.search, current.hash, settingsOrigin, navigationCommit]);
+  useLayoutEffect(() => {
+    const readOnly = conversation.archived;
+    if (!current.threadId || readOnly === null) return;
+    const url = new URL(current.pathname + current.search + current.hash, location.href);
+    if (readOnly) url.searchParams.set('archived', '1'); else url.searchParams.delete('archived');
+    if (current.readOnly === readOnly && current.search === url.search) return;
+    if (navigation.current?.replaceCurrentURL(url.pathname + url.search + url.hash)) {
+      navigationGeneration.current++;
+      setCurrent(previous => ({ ...previous, readOnly, search: url.search }));
+    } else if (current.readOnly !== readOnly) setCurrent(previous => ({ ...previous, readOnly }));
+    setTabs(previous => previous.map(tab => tab.hostId === current.hostId && tab.id === current.threadId ? { ...tab, readOnly } : tab));
+  }, [current.hostId, current.threadId, current.pathname, current.search, current.hash, current.readOnly, conversation.archived, navigationCommit]);
   useEffect(() => {
     if (!settingsSourceKey) return;
     let active = true;
@@ -309,6 +337,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     setSettingsSource({ key: settingsSourceKey, state: 'loading', context: emptySettingsContext });
     void (async () => {
       const needsCatalog = origin && origin.source.kind !== 'none' && origin.hostId === hostId;
+      if (new URLSearchParams(routeRef.current.search).has(settingsOriginParameter) && !origin) throw new Error('The settings source link is invalid. Its scope has not been guessed.');
       const catalog = needsCatalog ? await client.host<ProjectState>('thread-project-state') : null;
       const context = await resolveSettingsOrigin(origin, hostId, catalog,
         (hostId, threadId) => client.rpc('thread/read', { threadId, includeTurns: false }, hostId));
@@ -389,15 +418,19 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     let intent: SendIntent | undefined;
     let expectedNavigation = navigationGeneration.current;
     const hostId = current.hostId;
+    const allowFirstTurn = !origin && action.type === 'send';
     const activeCwd = retry?.cwd ?? (thread?.cwd || cwd || workspace);
     const requireCurrent = (threadId: string | null) => {
       if (navigationGeneration.current !== expectedNavigation || routeRef.current.hostId !== hostId || routeRef.current.threadId !== threadId || routeRef.current.readOnly) {
         throw Object.assign(new Error('会话已切换，原输入未发送并已保留。'), { uncertain: false });
       }
-      if (threadId && !sessions.view({ hostId, threadId }).snapshot().canSubmit) throw new Error('当前连接尚未确认可写会话，输入已保留。');
+      const view = threadId ? sessions.view({ hostId, threadId }).snapshot() : null;
+      if (view && !(view.canSubmit || allowFirstTurn && view.canStartFirstTurn)) {
+        throw Object.assign(new Error('当前连接尚未确认可写会话，输入已保留。'), { uncertain: false });
+      }
     };
     try {
-      if (current.threadId) await sessions.ready({ hostId, threadId: current.threadId });
+      if (current.threadId) await sessions.ready({ hostId, threadId: current.threadId }, allowFirstTurn);
       requireCurrent(current.threadId);
       const additionalContext = retry ? retry.additionalContext : (!origin && current.threadId && action.type !== 'queue'
         ? Object.fromEntries((await readVisualizationModelContext(client, hostId, current.threadId)).map(value =>
@@ -577,24 +610,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const openTab = async (tab: typeof tabs[number]) => {
     const generation = navigationGeneration.current;
     try {
-      let readOnly = tab.readOnly;
-      if (readOnly === undefined) {
-        // Older saved tabs have no archive fact. Read the selected host's whole
-        // archived inventory instead of borrowing the current sidebar filter.
-        let cursor: string | null = null;
-        const seen = new Set<string>();
-        do {
-          const page: { data: { id: string }[]; nextCursor?: string | null } = await client.rpc('thread/list',
-            { archived: true, limit: 100, cursor, sortKey: 'updated_at' }, tab.hostId);
-          if (navigationGeneration.current !== generation) return;
-          if (page.data.some(row => row.id === tab.id)) { readOnly = true; break; }
-          cursor = page.nextCursor ?? null;
-          if (cursor && seen.has(cursor)) throw new Error('归档列表分页游标重复，未猜测会话状态。');
-          if (cursor) seen.add(cursor);
-        } while (cursor);
-        readOnly ??= false;
-        setTabs(previous => previous.map(value => value.id === tab.id && value.hostId === tab.hostId ? { ...value, readOnly } : value));
-      }
+      const readOnly = await readThreadArchived(client, { hostId: tab.hostId, threadId: tab.id });
+      if (navigationGeneration.current !== generation) return;
+      setTabs(previous => previous.map(value => value.id === tab.id && value.hostId === tab.hostId ? { ...value, readOnly } : value));
       if (navigationGeneration.current === generation) await openThread(tab.id, tab.hostId, readOnly);
     } catch (cause) { setError(String(cause)); }
   };
@@ -612,6 +630,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         <div className="yard-tab-strip" role="tablist" aria-label="Workspace tabs">{tabs.map(tab => <div className="yard-tab" key={tab.hostId + ':' + tab.id}><button role="tab" aria-selected={tab.id === current.threadId && tab.hostId === current.hostId} onClick={() => { void openTab(tab); }}>{tab.title}</button><button aria-label={'Close ' + tab.title} onClick={() => setTabs(previous => previous.filter(item => item !== tab))}>×</button></div>)}</div>
         <select aria-label="Execution host" value={current.hostId} onChange={event => navigate('/?hostId=' + encodeURIComponent(event.target.value))}>{hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.displayName}</option>)}</select>
         <span className="yard-connection" title={status} data-state={status}>●</span>
+        {status === 'disconnected' && <button onClick={() => {
+          const hostId = current.hostId;
+          void client.rpc('thread/list', { limit: 1 }, hostId).catch(cause => setError(String(cause)));
+        }}>Reconnect host</button>}
         <button aria-label="Workspace files" aria-pressed={panelOpen && panelKind === 'workspace'} onClick={() => showPanel()}>Files</button>
         <button aria-label="Open terminal" onClick={() => showPanel({ kind: 'terminal' })}>Terminal</button>
         <button aria-label="Open Chrome panel" disabled={!sendState} aria-pressed={panelOpen && panelKind === 'browser'} onClick={() => showBrowser()}>Chrome</button>
@@ -645,7 +667,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         registerNavigationGuard={registerNavigationGuard} onClose={() => navigate(settingsOrigin?.returnTo ?? '/')} /></InstructionEditorTheme.Provider> : <>
         {current.threadId && <header className="yard-conversation-header"><strong>{thread?.name || threads.find(item => item.id === current.threadId)?.name || 'Conversation'}</strong><span>{thread?.cwd}</span><button aria-label="Conversation menu" onClick={() => setMenu(value => !value)}>•••</button>{menu && <div className="yard-menu" role="menu">{['rename', 'fork', 'copy', 'archive'].map(name => <button role="menuitem" key={name} onClick={() => { void action(name); }}>{name === 'copy' ? 'Copy conversation link' : name[0]!.toUpperCase() + name.slice(1)}</button>)}</div>}</header>}
         <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')} inert={leaving}>
-          {streamGap && <p role="status" className="yard-stream-gap">任务正在运行。此页面未收到完整的活动内容；完成后将重新读取完整记录。</p>}
+          {streamGap && <p role="status" className="yard-stream-gap">此页面未收到连续的活动内容，正在核对会话记录。{isThreadBusy(thread) && '任务正在运行；完成后将重新读取完整记录。'}</p>}
           {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} thread={thread} editRecovery={editState?.recovery ?? null} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
             editRebase={messageEditRebaseMarker(editState)} onPrepareEditRebase={(origin, version) => editStore.prepareRebase(origin, version)}
             onCommitEditRebase={async candidate => {

@@ -44,6 +44,15 @@ export function createRouteNavigation(changed: () => void, requestLeave: () => P
   };
   window.addEventListener('popstate', pop);
   return {
+    /** Update facts about this same page without leaving or draining its editor. */
+    replaceCurrentURL(path: string): boolean {
+      if (pending || disposed || moving) return false;
+      const target = new URL(path, committed.url), previous = new URL(committed.url);
+      if (target.origin !== previous.origin || target.pathname !== previous.pathname) return false;
+      history.replaceState(committed.state, '', target.href);
+      committed = { url: location.href, state: history.state };
+      return true;
+    },
     async navigate(path: string, options: NavigationOptions = {}): Promise<boolean> {
       if (pending || disposed) return false;
       pending = true;

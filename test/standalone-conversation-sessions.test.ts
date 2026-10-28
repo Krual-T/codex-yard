@@ -15,6 +15,8 @@ function fixture() {
   let heldResume: Promise<void> | undefined;
   let heldHistory: Promise<void> | undefined;
   let history: TurnSummary[] = [];
+  let metadata: ThreadSummary | undefined;
+  let archived = false;
   const subscriptionObservers: { method: string; receive: NonNullable<RequestOptions['onLateTerminal']> }[] = [];
   const client: WorkbenchClient = {
     async rpc<T>(method: string, params: Record<string, unknown> = {}, hostId = 'local', options?: Pick<RequestOptions, 'onLateTerminal'>): Promise<T> {
@@ -25,7 +27,8 @@ function fixture() {
         if (resumeFailure) throw resumeFailure;
         return { thread: thread(String(params.threadId)), model: hostId + '-model' } as T;
       }
-      if (method === 'thread/read') return { thread: thread(String(params.threadId)) } as T;
+      if (method === 'thread/read') return { thread: metadata ?? thread(String(params.threadId)) } as T;
+      if (method === 'thread/list') return { data: archived ? [thread('same')] : [], nextCursor: null } as T;
       if (method === 'thread/turns/list') { await heldHistory; return { data: history.map(turn => ({ ...turn, itemsView: 'full' })), nextCursor: null } as T; }
       if (method === 'thread/unsubscribe') { if (unsubscribeFailure) throw unsubscribeFailure; return {} as T; }
       throw new Error('Unexpected RPC: ' + method);
@@ -38,6 +41,8 @@ function fixture() {
     rejectUnsubscribe(error: Error | undefined) { unsubscribeFailure = error; },
     holdHistory(promise: Promise<void> | undefined) { heldHistory = promise; },
     history(turns: TurnSummary[]) { history = turns; },
+    metadata(value: ThreadSummary) { metadata = value; },
+    archived(value: boolean) { archived = value; },
     late(index: number, receipt: LateRpcTerminal) { return subscriptionObservers[index]!.receive(receipt); } };
 }
 
@@ -92,11 +97,52 @@ test('only a persisted creation receipt permits the specific empty-history metad
   await assert.rejects(sessions.ready(scope), /尚未形成首轮历史/);
   assert.equal(sessions.view(scope).snapshot().thread?.id, 'same');
   assert.equal(sessions.view(scope).snapshot().options?.model, 'original-empty-model');
+  assert.equal(sessions.view(scope).snapshot().canSubmit, false);
+  assert.equal(sessions.view(scope).snapshot().canStartFirstTurn, true);
+  await sessions.ready(scope, true);
+  assert.equal(h.calls.some(call => call.method === 'turn/start'), false, 'Readiness never replays an input');
   assert.equal(h.calls.some(call => call.method === 'thread/turns/list'), false);
   const unknown = { ...scope, threadId: 'unknown' }, releaseUnknown = sessions.acquire(unknown, false);
   await assert.rejects(sessions.ready(unknown), /list_turns is not supported/);
   assert.equal(sessions.view(unknown).snapshot().thread, null);
   release(); releaseUnknown(); await setImmediate(); sessions.dispose();
+});
+
+test('explicit first-turn permission is revoked by disconnect, archive and an accepted turn without claiming subscription', async () => {
+  const h = fixture(); h.rejectResume(new Error('no rollout found for thread same'));
+  const sessions = new ConversationSessions(h.client, async () => ({ thread: h.thread('same'), settings: { model: 'original' } }));
+  const release = sessions.acquire(scope, false); await sessions.ready(scope, true);
+  h.emit({ type: 'connection-state', state: 'disconnected' });
+  assert.equal(sessions.view(scope).snapshot().canStartFirstTurn, false);
+  await assert.rejects(sessions.ready(scope, true), /连接已断开/);
+  h.emit({ type: 'connection-state', state: 'connected' }); await sessions.ready(scope, true);
+  h.emit({ type: 'mcp-notification', hostId: scope.hostId, method: 'thread/archived', params: { threadId: scope.threadId } });
+  assert.equal(sessions.view(scope).snapshot().canStartFirstTurn, false);
+  await assert.rejects(sessions.ready(scope, true));
+  h.emit({ type: 'mcp-notification', hostId: scope.hostId, method: 'thread/unarchived', params: { threadId: scope.threadId } });
+  await sessions.ready(scope, true);
+  sessions.started(scope, { id: 'accepted', status: 'inProgress', items: [] });
+  assert.equal(sessions.view(scope).snapshot().canStartFirstTurn, false);
+  assert.equal(sessions.view(scope).snapshot().canSubmit, false);
+  assert.equal(sessions.view(scope).snapshot().streamGap, true);
+  await assert.rejects(sessions.ready(scope, true), /no rollout/);
+  h.rejectResume(undefined); await sessions.ready(scope);
+  assert.equal(sessions.view(scope).snapshot().canSubmit, true);
+  release(); await setImmediate(); sessions.dispose();
+});
+
+test('empty first-turn fallback requires the original matching creation, inactive metadata and a definite resume failure', async () => {
+  for (const kind of ['wrong-creation', 'active', 'wrong-metadata', 'unknown-resume'] as const) {
+    const h = fixture(); h.rejectResume(Object.assign(new Error('no rollout found for thread same'), { uncertain: kind === 'unknown-resume' }));
+    if (kind === 'active') h.metadata({ ...h.thread('same'), status: { type: 'active', activeFlags: [] } });
+    if (kind === 'wrong-metadata') h.metadata(h.thread('other'));
+    const sessions = new ConversationSessions(h.client, async () => ({ thread: h.thread(kind === 'wrong-creation' ? 'other' : 'same'), settings: {} }));
+    const release = sessions.acquire(scope, false);
+    await assert.rejects(sessions.ready(scope, true));
+    assert.equal(sessions.view(scope).snapshot().canStartFirstTurn, false, kind);
+    assert.equal(h.calls.some(call => call.method === 'turn/start'), false);
+    release(); await setImmediate(); sessions.dispose();
+  }
 });
 
 test('leaving during a resume drains the original subscription without publishing the late snapshot', async () => {
@@ -251,4 +297,53 @@ test('rollback preserves the mounted conversation identity while history is reva
   assert.equal(sessions.view(scope).snapshot().loading, false);
   assert.equal(sessions.view(scope).snapshot().historyComplete, false);
   await sessions.refresh(scope); release(); await setImmediate(); sessions.dispose();
+});
+
+test('a read-only owner cannot preserve observation proof across loss of the last writable owner', async () => {
+  const h = fixture(), sessions = new ConversationSessions(h.client, async () => undefined);
+  const primary = sessions.acquire(scope, false), readOnly = sessions.acquire(scope, true);
+  await sessions.ready(scope);
+  h.emit({ type: 'mcp-notification', hostId: scope.hostId, method: 'turn/started', params: { threadId: scope.threadId,
+    turn: { id: 'turn', status: 'inProgress', items: [] } } });
+  h.emit({ type: 'mcp-notification', hostId: scope.hostId, method: 'item/started', params: { threadId: scope.threadId, turnId: 'turn',
+    item: { id: 'message', type: 'agentMessage', text: 'A' } } });
+  primary();
+  assert.equal(sessions.view(scope).snapshot().streamGap, true);
+  await sessions.refresh(scope);
+  h.history([{ id: 'turn', status: 'inProgress', items: [{ id: 'message', type: 'agentMessage', text: 'AB' }] }]);
+  const returning = sessions.acquire(scope, false); await sessions.ready(scope);
+  h.emit({ type: 'mcp-notification', hostId: scope.hostId, method: 'item/agentMessage/delta', params: { threadId: scope.threadId,
+    turnId: 'turn', itemId: 'message', delta: 'C' } });
+  assert.equal(sessions.view(scope).snapshot().streamGap, true);
+  assert.equal(sessions.view(scope).snapshot().thread?.turns[0]?.items[0]?.text, 'ABC');
+  returning(); readOnly(); await setImmediate(); sessions.dispose();
+});
+
+test('notifications received between thread creation and the first owner require a fresh history projection', async () => {
+  const h = fixture(), sessions = new ConversationSessions(h.client, async () => undefined);
+  h.emit({ type: 'thread-created', hostId: scope.hostId, result: { thread: h.thread(scope.threadId), model: 'created' } });
+  h.emit({ type: 'mcp-notification', hostId: scope.hostId, method: 'turn/started', params: { threadId: scope.threadId,
+    turn: { id: 'other-page', status: 'inProgress', items: [] } } });
+  h.history([{ id: 'other-page', status: 'inProgress', items: [{ id: 'reply', type: 'agentMessage', text: 'Existing stream' }] }]);
+  const release = sessions.acquire(scope, false); await sessions.ready(scope);
+  assert.equal(sessions.view(scope).snapshot().thread?.turns[0]?.items[0]?.text, 'Existing stream');
+  assert.equal(sessions.view(scope).snapshot().streamGap, true);
+  assert.equal(h.calls.filter(call => call.method === 'thread/turns/list').length, 1);
+  release(); await setImmediate(); sessions.dispose();
+});
+
+test('cold entry and reconnect verify the real archive directory before granting a writable subscription', async () => {
+  const h = fixture(); h.archived(true);
+  const sessions = new ConversationSessions(h.client, async () => undefined), release = sessions.acquire(scope, false);
+  await assert.rejects(sessions.ready(scope), /writable subscription/);
+  assert.equal(sessions.view(scope).snapshot().archived, true);
+  assert.equal(h.calls.some(call => call.method === 'thread/resume'), false);
+  assert.equal(sessions.view(scope).snapshot().thread?.id, scope.threadId);
+  h.archived(false);
+  h.emit({ type: 'connection-state', state: 'disconnected' });
+  assert.equal(sessions.view(scope).snapshot().archived, null);
+  h.emit({ type: 'connection-state', state: 'connected' }); await sessions.ready(scope);
+  assert.equal(sessions.view(scope).snapshot().archived, false);
+  assert.equal(sessions.view(scope).snapshot().canSubmit, true);
+  release(); await setImmediate(); sessions.dispose();
 });

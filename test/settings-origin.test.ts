@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { captureSettingsOrigin, readSettingsOrigin, resolveSettingsOrigin, settingsNavigationState } from '../src/renderer/app/settings-origin.ts';
+import { captureSettingsOrigin, readSettingsOrigin, readSettingsOriginURL, resolveSettingsOrigin, settingsOriginURL } from '../src/renderer/app/settings-origin.ts';
+import { hostPath, readSettingsRoute, sectionPath } from '../src/renderer/settings/routing.ts';
 import type { SettingsOrigin } from '../src/renderer/app/settings-origin.ts';
 import type { ProjectState } from '../src/renderer/app/projects.ts';
 
@@ -15,11 +16,11 @@ const origin: SettingsOrigin = { hostId: 'remote-ssh-one', returnTo: '/local/sam
 
 test('settings history preserves exact source and return route before a conversation has loaded', async () => {
   const captured = captureSettingsOrigin({ hostId: origin.hostId, threadId: 'same', pathname: '/local/same', search: '?hostId=remote-ssh-one', hash: '#message' }, null);
-  const first = settingsNavigationState({ search: 'hooks' }, captured);
+  const first = { search: 'hooks', __yardSettingsOrigin: captured };
   const reloaded = JSON.parse(JSON.stringify(first));
   assert.deepEqual(readSettingsOrigin(reloaded), origin);
   assert.equal((reloaded as { search: string }).search, 'hooks');
-  assert.deepEqual(readSettingsOrigin(settingsNavigationState({ nested: true }, readSettingsOrigin(reloaded))), origin);
+  assert.deepEqual(readSettingsOriginURL(new URL(settingsOriginURL('/settings/general', readSettingsOrigin(reloaded)), 'https://yard.invalid').search), origin);
   const projects = state();
   projects.memberships.push({ hostId: origin.hostId, threadId: 'same', assignment: { projectKind: 'remote', projectId: 'remote', hostId: origin.hostId }, projectless: false });
   const calls: unknown[] = [];
@@ -33,13 +34,30 @@ test('settings history preserves exact source and return route before a conversa
 test('settings sources do not borrow same-ID hosts or infer project membership from cwd', async () => {
   let calls = 0;
   const read = async () => { calls++; return { thread: { id: 'same', cwd: '/same' } }; };
-  await assert.rejects(resolveSettingsOrigin(origin, 'local', state(), read), /another host/);
+  assert.deepEqual(await resolveSettingsOrigin(origin, 'local', state(), read), { projectRoots: null, sessionCwd: null });
   assert.equal(calls, 0);
   const resolved = await resolveSettingsOrigin(origin, origin.hostId, state(), read);
   assert.deepEqual(resolved, { projectRoots: null, sessionCwd: { hostId: origin.hostId, path: '/same' } });
   const unresolved = state(); unresolved.unresolved.assignments.same = { projectKind: 'remote', projectId: 'remote' };
   await assert.rejects(resolveSettingsOrigin(origin, origin.hostId, unresolved, read), /unresolved/);
   await assert.rejects(resolveSettingsOrigin(origin, origin.hostId, null, read), /not loaded/);
+});
+
+test('copied settings URLs preserve identities and return routes through section and host navigation', async () => {
+  const url = new URL(settingsOriginURL('/settings/hooks?tab=all', origin), 'https://yard.invalid');
+  assert.deepEqual(readSettingsOriginURL(url.search), origin);
+  const route = readSettingsRoute({ pathname: url.pathname, search: url.search, hash: '', state: null }, 'local');
+  const section = new URL(sectionPath('skills-settings', route), url);
+  assert.deepEqual(readSettingsOriginURL(section.search), origin);
+  const foreign = new URL(hostPath('other-host', route), url);
+  const fromURL = readSettingsOriginURL(foreign.search);
+  assert.deepEqual(fromURL, origin);
+  assert.deepEqual(await resolveSettingsOrigin(fromURL, 'other-host', null, async () => { throw new Error('Wrong host source must not read'); }),
+    { projectRoots: null, sessionCwd: null });
+  assert.equal(fromURL?.returnTo, '/local/same?hostId=remote-ssh-one#message');
+  assert.equal(readSettingsOriginURL('?yardSettingsOrigin=invalid'), null);
+  assert.throws(() => settingsOriginURL('/settings/general', { ...origin, returnTo: '/\\external.example' }), /invalid/);
+  assert.throws(() => settingsOriginURL('//external.example/settings', origin), /origin/);
 });
 
 test('home settings use the selected project identity and resolve its current roots after reload', async () => {
@@ -51,6 +69,6 @@ test('home settings use the selected project identity and resolve its current ro
   projects.catalog.local = {};
   await assert.rejects(resolveSettingsOrigin(captured, 'local', projects, async () => null), /unavailable/);
   assert.equal(readSettingsOrigin({}), null);
-  assert.equal(readSettingsOrigin(settingsNavigationState(null, { ...origin, returnTo: '//external.example' })), null);
+  assert.equal(readSettingsOrigin({ __yardSettingsOrigin: { ...origin, returnTo: '//external.example' } }), null);
   assert.deepEqual(await resolveSettingsOrigin(null, 'local', null, async () => null), { projectRoots: null, sessionCwd: null });
 });
