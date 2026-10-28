@@ -3,11 +3,11 @@ import { access, chmod, lstat, mkdir, mkdtemp, rm, stat } from 'node:fs/promises
 import { createConnection, createServer } from 'node:net';
 import type { Socket } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { errorMessage, isRecord } from './codex-protocol.ts';
 import type { RpcId } from './codex-protocol.ts';
-import { bundledAppToolsAdapter } from './app-resources.ts';
 
-export const defaultAppToolsAdapter = bundledAppToolsAdapter;
+export const defaultAppToolsAdapter = fileURLToPath(new URL('./owned-tools-adapter.ts', import.meta.url));
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const MAX_PENDING_CALLS = 128;
 
@@ -22,7 +22,7 @@ export interface AppToolDescriptor {
 }
 export interface AppToolCall {
   callerSource: 'codex' | 'chatgpt'; hostId?: 'local' | null;
-  threadId: string; turnId: string; callId: string; namespace: string; tool: string; arguments: unknown;
+  threadId: string; turnId: string | null; callId: string | null; namespace: string; tool: string; arguments: unknown;
 }
 export type AppToolHandler = (params: AppToolCall, context: { signal: AbortSignal }) => unknown | Promise<unknown>;
 export interface AppToolsOptions {
@@ -33,7 +33,9 @@ type ToolReply = { result: unknown } | { error: { code: number; message: string 
 function isCall(value: unknown): value is AppToolCall {
   return isRecord(value) && (value.callerSource === 'codex' || value.callerSource === 'chatgpt') &&
     (value.hostId == null || value.hostId === 'local') &&
-    ['threadId', 'turnId', 'callId', 'namespace', 'tool'].every(key => typeof value[key] === 'string' && value[key].trim()) &&
+    ['threadId', 'namespace', 'tool'].every(key => typeof value[key] === 'string' && value[key].trim()) &&
+    ['turnId', 'callId'].every(key => Object.hasOwn(value, key) &&
+      (value[key] === null || (typeof value[key] === 'string' && value[key].trim()))) &&
     Object.hasOwn(value, 'arguments');
 }
 function missingFile(cause: unknown): null {
@@ -41,14 +43,14 @@ function missingFile(cause: unknown): null {
   return null;
 }
 
-/** Hosts the native pipe consumed by the installed official Codex App Tools MCP adapter. */
+/** Hosts the private pipe consumed by the Codex App Tools MCP adapter. */
 export async function createAppTools({ tools, callTool, adapterPath = process.env.AGENTS_APP_TOOLS_ADAPTER || defaultAppToolsAdapter, socketPath: requestedSocketPath }: AppToolsOptions) {
   adapterPath = resolve(adapterPath);
   try {
     await access(adapterPath, constants.R_OK);
     if (!(await stat(adapterPath)).isFile()) throw new Error('不是文件');
   } catch (cause) {
-    throw new Error(`无法读取官方 Codex App Tools 适配器：${adapterPath}。`, { cause });
+    throw new Error(`无法读取 Codex App Tools 适配器：${adapterPath}。`, { cause });
   }
   if (!Array.isArray(tools) || typeof callTool !== 'function') throw new TypeError('需要工具目录和 callTool 处理函数。');
 

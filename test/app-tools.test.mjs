@@ -5,10 +5,11 @@ import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { createAppTools, defaultAppToolsAdapter } from '../lib/app-tools.ts';
-import { fixtureAdapterPath } from './native-fixture.ts';
 
-const officialAdapterPath = process.env.AGENTS_APP_TOOLS_ADAPTER || defaultAppToolsAdapter;
+const ownedAdapterPath = defaultAppToolsAdapter;
+const fixtureAdapterPath = fileURLToPath(import.meta.url);
 
 const tools = [{ namespace: 'codex_app', name: 'fixture_echo', description: 'Return a disposable test value.',
   inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } }];
@@ -72,9 +73,10 @@ async function pipe(t, app) {
 
 async function adapter(t, app) {
   const config = app.config['mcp_servers.codex_app'];
-  // Run the vendored official adapter with only the two host variables supplied by this module.
+  // Run the owned adapter with only the two host variables supplied by this module.
   const child = spawn(config.command, config.args, { cwd: config.cwd, env: config.env, stdio: ['pipe', 'pipe', 'pipe'] });
   let stderr = '';
+  child.stdin.on('error', () => {});
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', data => { stderr = (stderr + data).slice(-8_000); });
   const exited = once(child, 'exit');
@@ -98,23 +100,26 @@ async function adapter(t, app) {
   let nextId = 0;
   return {
     ...log,
+    exited,
     get stderr() { return stderr; },
     async request(method, params) {
       const id = ++nextId;
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
       return log.waitFor(message => message.id === id);
     },
-    notify(method) { child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method }) + '\n'); },
+    notify(method, params) { child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, ...(params === undefined ? {} : { params }) }) + '\n'); },
+    send(message) { child.stdin.write(JSON.stringify(message) + '\n'); },
+    sendRaw(data) { child.stdin.write(data); },
   };
 }
 
-test('the vendored official MCP adapter initializes, lists only host tools, and preserves call metadata and results', async t => {
+test('the owned MCP adapter initializes, lists host tools, and preserves call metadata and results', async t => {
   const calls = [];
   const app = await fixture(t, params => {
     calls.push(params);
     if (params.arguments.text === 'throw') throw new Error('Fixture tool refused');
     return { ...output(params.arguments.text), success: params.arguments.text !== 'failure' };
-  }, officialAdapterPath);
+  }, ownedAdapterPath);
   const config = app.config['mcp_servers.codex_app'];
   assert.equal(config.command, process.execPath);
   assert.deepEqual(config.args, [app.adapterPath]);
@@ -128,7 +133,7 @@ test('the vendored official MCP adapter initializes, lists only host tools, and 
   const mcp = await adapter(t, app);
   const initialized = await mcp.request('initialize', { protocolVersion: '2024-11-05', capabilities: {},
     clientInfo: { name: 'disposable-app-tools-test', version: '1' } });
-  assert.equal(initialized.result.serverInfo.name, 'codex-app-tools');
+  assert.equal(initialized.result.serverInfo.name, 'codex-yard-tools');
   assert.deepEqual(initialized.result.capabilities.tools, {});
   mcp.notify('notifications/initialized');
   const listed = await mcp.request('tools/list', {});
@@ -150,6 +155,131 @@ test('the vendored official MCP adapter initializes, lists only host tools, and 
   assert.match(missingMetadata.error.message, /thread metadata/);
   assert.equal(calls.length, 3, 'unattributed calls never reach the host handler');
   assert.equal(mcp.stderr, '');
+});
+
+test('MCP attribution preserves CLI metadata, represents missing IDs, and rejects conflicts', async t => {
+  const calls = [];
+  const app = await fixture(t, params => { calls.push(params); return output('ok'); }, ownedAdapterPath);
+  const mcp = await adapter(t, app);
+  assert.ok((await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } })).result);
+  mcp.notify('notifications/initialized');
+  const args = { name: 'fixture_echo', arguments: { text: 'probe' } };
+  const turn = { thread_id: 'child-thread', turn_id: 'active-turn', session_id: 'different-root-session' };
+  assert.ok((await mcp.request('tools/call', { ...args, _meta: { threadId: 'child-thread',
+    'x-codex-turn-metadata': turn, callId: 'model-call' } })).result);
+  assert.deepEqual(calls[0], { callerSource: 'codex', hostId: 'local', threadId: 'child-thread', turnId: 'active-turn',
+    callId: 'model-call', namespace: 'codex_app', tool: 'fixture_echo', arguments: { text: 'probe' } });
+  assert.ok((await mcp.request('tools/call', { ...args, _meta: { 'x-codex-turn-metadata': JSON.stringify(turn),
+    'openai/toolCallId': 'legacy-call' } })).result);
+  assert.equal(calls[1].callId, 'legacy-call');
+  assert.ok((await mcp.request('tools/call', { ...args, _meta: { threadId: 'direct-thread' } })).result);
+  assert.equal(calls[2].threadId, 'direct-thread');
+  assert.equal(calls[2].turnId, null);
+  assert.equal(calls[2].callId, null);
+  const invalid = [
+    undefined,
+    { turnId: 'active-turn', callId: 'model-call', 'x-codex-turn-metadata': { session_id: 'root' } },
+    { threadId: 'other-thread', 'x-codex-turn-metadata': turn, callId: 'model-call' },
+    { turnId: 'other-turn', 'x-codex-turn-metadata': turn, callId: 'model-call' },
+    { 'x-codex-turn-metadata': turn, callId: 'one', 'openai/toolCallId': 'two' },
+    { 'x-codex-turn-metadata': '{', callId: 'model-call' },
+    { 'x-codex-turn-metadata': turn, callId: ' ' },
+  ];
+  for (const metadata of invalid) {
+    const response = await mcp.request('tools/call', { ...args, _meta: metadata });
+    assert.equal(response.error.code, -32602);
+  }
+  assert.equal(calls.length, 3, 'calls without a thread or with conflicting metadata do not reach the host');
+});
+
+test('MCP cancellation reaches the host and ignores a late result after request ID reuse', async t => {
+  const started = new EventEmitter();
+  const tasks = new Map();
+  const app = await fixture(t, (params, { signal }) => new Promise(resolve => {
+    tasks.set(params.callId, { resolve, signal });
+    started.emit('call');
+  }), ownedAdapterPath);
+  const mcp = await adapter(t, app);
+  assert.ok((await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } })).result);
+  mcp.notify('notifications/initialized');
+  const request = callId => ({ jsonrpc: '2.0', id: 900, method: 'tools/call', params: { name: 'fixture_echo',
+    arguments: { text: 'probe' }, _meta: { threadId: 'thread', turnId: 'turn', callId } } });
+  let next = once(started, 'call');
+  mcp.send(request('old'));
+  await next;
+  const aborted = once(tasks.get('old').signal, 'abort');
+  mcp.notify('notifications/cancelled', { requestId: 900, reason: 'fixture' });
+  await aborted;
+  next = once(started, 'call');
+  mcp.send(request('new'));
+  await next;
+  tasks.get('old').resolve(output('old'));
+  assert.ok((await mcp.request('ping', {})).result);
+  assert.equal(mcp.messages.some(message => message.id === 900), false);
+  tasks.get('new').resolve(output('new'));
+  assert.deepEqual((await mcp.waitFor(message => message.id === 900)).result, { content: [{ type: 'text', text: 'new' }], isError: false });
+  assert.equal(mcp.messages.filter(message => message.id === 900).length, 1);
+});
+
+test('MCP returns JSON-RPC errors for malformed and unsupported requests', async t => {
+  const app = await fixture(t, undefined, ownedAdapterPath);
+  const mcp = await adapter(t, app);
+  mcp.sendRaw('{\n');
+  assert.equal((await mcp.waitFor(message => message.id === null)).error.code, -32700);
+  assert.equal((await mcp.request('tools/list', {})).error.code, -32002);
+  const initialized = await mcp.request('initialize', { protocolVersion: 'unknown', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } });
+  assert.equal(initialized.result.protocolVersion, '2025-06-18');
+  mcp.notify('notifications/initialized');
+  assert.deepEqual((await mcp.request('ping', {})).result, {});
+  assert.equal((await mcp.request('missing/method', {})).error.code, -32601);
+  assert.equal((await mcp.request('tools/call', { name: 'fixture_echo', arguments: [] })).error.code, -32602);
+  assert.equal((await mcp.request('tools/call', { name: 'unknown', _meta: { threadId: 'thread', turnId: 'turn', callId: 'call' } })).error.code, -32602);
+});
+
+test('MCP stdio accepts fragmented UTF-8 and closes on an oversized frame', async t => {
+  const app = await fixture(t, undefined, ownedAdapterPath);
+  const mcp = await adapter(t, app);
+  assert.ok((await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } })).result);
+  mcp.notify('notifications/initialized');
+  const request = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 'split-mcp', method: 'tools/call', params: {
+    name: 'fixture_echo', arguments: { text: '中文' }, _meta: { threadId: 'thread', turnId: 'turn', callId: 'call' },
+  } }) + '\n');
+  const split = request.indexOf(Buffer.from('中文')) + 2;
+  mcp.sendRaw(request.subarray(0, split));
+  mcp.sendRaw(request.subarray(split));
+  assert.deepEqual((await mcp.waitFor(message => message.id === 'split-mcp')).result.content, [{ type: 'text', text: '中文' }]);
+  mcp.sendRaw(Buffer.alloc(8 * 1024 * 1024 + 1, 0x20));
+  assert.equal((await mcp.waitFor(message => message.id === null)).error.code, -32600);
+  await mcp.exited;
+});
+
+test('the owned adapter routes the real host catalog with caller-scoped title writes', async t => {
+  const { appToolCatalog, createHostToolHandler } = await import('../lib/host-tools.ts');
+  const reads = [];
+  const writes = [];
+  const callTool = createHostToolHandler({
+    connection: { async request(method, params, options) { writes.push({ method, params, options }); return {}; } },
+    knownThread: async threadId => { reads.push(threadId); },
+    listProjects: async () => ({ projects: ['fixture'] }),
+    listThreads: async () => ({}),
+    readThread: async () => ({}),
+  });
+  const app = await createAppTools({ tools: appToolCatalog, callTool, adapterPath: ownedAdapterPath });
+  t.after(() => app.close());
+  const mcp = await adapter(t, app);
+  assert.ok((await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } })).result);
+  mcp.notify('notifications/initialized');
+  assert.deepEqual((await mcp.request('tools/list', {})).result.tools.map(tool => tool.name), appToolCatalog.map(tool => tool.name));
+  const meta = { threadId: 'caller-thread', turnId: 'caller-turn', callId: 'caller-call' };
+  const renamed = await mcp.request('tools/call', { name: 'set_thread_title', arguments: { title: 'Fixture title' }, _meta: meta });
+  assert.equal(renamed.result.isError, false);
+  assert.deepEqual(JSON.parse(renamed.result.content[0].text), { threadId: 'caller-thread', title: 'Fixture title' });
+  assert.deepEqual(writes, [{ method: 'thread/name/set', params: { threadId: 'caller-thread', name: 'Fixture title' }, options: { mutating: true } }]);
+  const rejected = await mcp.request('tools/call', { name: 'set_thread_title',
+    arguments: { title: 'Other title', threadId: 'other-thread' }, _meta: { threadId: 'caller-thread' } });
+  assert.equal(rejected.result.isError, true);
+  assert.equal(writes.length, 1);
+  assert.deepEqual(reads, ['caller-thread', 'caller-thread']);
 });
 
 test('native pipe requests survive split headers, split UTF-8 payloads, and combined frames', async t => {
@@ -235,7 +365,7 @@ test('malformed requests return protocol errors and oversized frames close only 
   assert.equal((await client.reply(2)).error.code, -32602);
   for (const [index, patch] of [
     { callerSource: 'external' }, { hostId: 'remote' }, { threadId: '' },
-    { turnId: ' ' }, { callId: null }, { namespace: 'other' },
+    { turnId: ' ' }, { callId: undefined }, { namespace: 'other' },
   ].entries()) {
     const id = 10 + index;
     client.send({ ...call(id), params: { ...call(id).params, ...patch } });
@@ -260,32 +390,45 @@ test('oversized handler output closes the affected pipe and leaves the host avai
   assert.deepEqual((await healthy.reply('healthy')).result, { tools });
 });
 
-test('an unavailable official adapter fails explicitly before starting a host', async () => {
-  const adapterPath = '/usr/lib/chatgpt/resources/plugins/openai-bundled/plugins/codex-app-tools/missing-adapter.mjs';
+test('an unavailable adapter fails explicitly before starting a host', async () => {
+  const adapterPath = '/nonexistent-codex-yard-adapter.mjs';
   await assert.rejects(createAppTools({ tools, callTool: () => output('unused'), adapterPath }), cause => {
     assert.ok(cause.message.includes(adapterPath));
-    assert.match(cause.message, /官方.*适配器/);
+    assert.match(cause.message, /适配器/);
     return true;
   });
 });
 
-test('the official adapter reconnects to a stable pipe after host replacement without losing caller files', async t => {
+test('the owned adapter reconnects to a stable pipe after host replacement without losing caller files', async t => {
   const directory = await mkdtemp('/tmp/aw-restart-');
   t.after(() => rm(directory, { recursive: true, force: true }));
   const socketPath = join(directory, 'tools.sock');
   const callerFile = join(directory, 'keep.txt');
   await writeFile(callerFile, 'Caller-owned data.');
-  const first = await createAppTools({ tools, callTool: () => output('before restart'), socketPath, adapterPath: officialAdapterPath });
+  const started = new EventEmitter();
+  let activeSignal;
+  const first = await createAppTools({ tools, callTool: (params, { signal }) => {
+    if (params.arguments.text !== 'wait') return output('before restart');
+    activeSignal = signal;
+    started.emit('call');
+    return new Promise(() => {});
+  }, socketPath, adapterPath: ownedAdapterPath });
   t.after(() => first.close());
   const mcp = await adapter(t, first);
   const initialized = await mcp.request('initialize', { protocolVersion: '2024-11-05', capabilities: {},
     clientInfo: { name: 'disposable-reconnect-test', version: '1' } });
   assert.ok(initialized.result);
   mcp.notify('notifications/initialized');
-  const args = { name: 'fixture_echo', arguments: { text: 'unused' }, _meta: { threadId: 'disposable-thread', turnId: 'disposable-turn' } };
+  const args = { name: 'fixture_echo', arguments: { text: 'unused' }, _meta: { threadId: 'disposable-thread', turnId: 'disposable-turn', callId: 'disposable-call' } };
   assert.deepEqual((await mcp.request('tools/call', args)).result.content, [{ type: 'text', text: 'before restart' }]);
-  await assert.rejects(createAppTools({ tools, callTool: () => output('do not take over'), socketPath, adapterPath: officialAdapterPath }), /运行中的实例/);
+  await assert.rejects(createAppTools({ tools, callTool: () => output('do not take over'), socketPath, adapterPath: ownedAdapterPath }), /运行中的实例/);
+  const waiting = once(started, 'call');
+  mcp.send({ jsonrpc: '2.0', id: 900, method: 'tools/call', params: { ...args, arguments: { text: 'wait' } } });
+  await waiting;
+  const aborted = once(activeSignal, 'abort');
   await first.close();
+  await aborted;
+  assert.equal((await mcp.waitFor(message => message.id === 900)).error.code, -32000);
   assert.ok((await mcp.request('tools/list', {})).error, 'a missing host reports a real connection failure');
   const second = await createAppTools({ tools, callTool: () => output('after restart'), socketPath, adapterPath: first.adapterPath });
   t.after(() => second.close());
