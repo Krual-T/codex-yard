@@ -208,8 +208,6 @@ test('R1 confirmation and removal preserve shared R2 and an explicitly selected 
   await recovery.getByRole('button', { name: '复制已保存版本' }).click();
   assert.deepEqual(JSON.parse(await first.evaluate(() => (window as unknown as { copied: string }).copied)), displayed);
   assert.equal(await first.evaluate(() => window.browserConsumption.canLeave()), false);
-  await first.getByText('选择草稿版本').click();
-  await first.getByRole('button', { name: 'Page A', exact: true }).click();
   await first.waitForFunction(() => window.browserConsumption.snapshot()?.draft.references?.[0]?.text.includes('shared R2'));
   await recovery.getByRole('button', { name: '核对已保存的草稿版本' }).click();
   await first.waitForFunction(() => !window.browserConsumption.dirty());
@@ -235,10 +233,30 @@ test('R1 confirmation and removal preserve shared R2 and an explicitly selected 
   assert.deepEqual(state.consumed, [original]);
   assert.deepEqual(state.deleted, []);
   const beforeRemoval = (await second.evaluate(() => window.browserConsumption.snapshot()))!.revision;
+  const beforeCalls = await second.evaluate(() => window.browserConsumption.deletionCalls());
+  const previousAtom = JSON.stringify(await second.evaluate(() => window.browserConsumption.atom('codex-yard.composer-drafts.v3')));
+  await second.evaluate(() => {
+    const scope = window as unknown as { draftWrites: string[]; originalPut: typeof IDBObjectStore.prototype.put };
+    scope.draftWrites = []; scope.originalPut = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function(value, key) {
+      const atom = value?.atoms?.['codex-yard.composer-drafts.v3'];
+      if (atom) scope.draftWrites.push(JSON.stringify(atom));
+      return scope.originalPut.call(this, value, key);
+    };
+  });
   await second.getByRole('button', { name: '移除引用', exact: true }).click();
   await second.waitForFunction(() => window.browserConsumption.snapshot()?.draft.references?.length === 0);
+  assert.equal(await second.evaluate(() => window.browserConsumption.settle()), true);
   const afterRemoval = (await second.evaluate(() => window.browserConsumption.snapshot()))!;
   assert.notEqual(afterRemoval.revision, beforeRemoval);
+  assert.equal(await second.evaluate(() => window.browserConsumption.deletionCalls()), beforeCalls + 1);
+  assert.equal(await second.evaluate(() => window.browserConsumption.deletionReceipt()), null);
+  const writes = await second.evaluate(() => {
+    const scope = window as unknown as { draftWrites: string[]; originalPut: typeof IDBObjectStore.prototype.put };
+    IDBObjectStore.prototype.put = scope.originalPut;
+    return scope.draftWrites;
+  });
+  assert.equal(new Set(writes.filter(value => value !== previousAtom)).size, 1, 'Handled removal commits one draft version');
   const branches = await second.evaluate(target => window.browserConsumption.versions(target), owner);
   assert.equal(branches.versions.filter(version => version.draft.text === 'Page B').length, 1);
   assert.equal(branches.versions.find(version => version.draft.text === 'Page B')?.revision, afterRemoval.revision);

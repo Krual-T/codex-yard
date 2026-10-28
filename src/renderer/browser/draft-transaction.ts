@@ -31,10 +31,17 @@ export function updateBrowserDraftVersion(atoms: Readonly<Record<string, unknown
   snapshot: ComposerDraftSnapshot, change: (draft: ComposerDraft) => ComposerDraft): { repository: unknown; snapshot: ComposerDraftSnapshot } {
   const source = snapshot.owner;
   if (!snapshot.revision || source.hostId !== owner.hostId || source.draftId !== owner.draftId) throw new Error('草稿身份已改变，请重新核对。');
-  if (source.threadId !== owner.threadId) {
+  if (source.threadId === null) {
+    if (owner.threadId !== null) throw new Error('草稿与浏览器引用的会话关联无法核实。');
+  } else {
     const sends = atoms['codex-yard.send-recovery.v1'];
-    if (owner.threadId !== null || source.threadId === null || !record(sends) || !record(sends.bindings)
-      || sends.bindings[JSON.stringify([source.hostId, source.threadId])] !== source.draftId) {
+    if (sends !== undefined && (!record(sends) || !record(sends.bindings))) {
+      throw new Error('草稿与浏览器引用的会话关联无法核实。');
+    }
+    const binding = record(sends) && record(sends.bindings) ? sends.bindings[JSON.stringify([source.hostId, source.threadId])] : undefined;
+    if (binding !== undefined && typeof binding !== 'string') throw new Error('草稿与浏览器引用的会话关联无法核实。');
+    const expectedThread = binding === source.draftId ? null : source.threadId;
+    if (owner.threadId !== expectedThread) {
       throw new Error('草稿与浏览器引用的会话关联无法核实。');
     }
   }

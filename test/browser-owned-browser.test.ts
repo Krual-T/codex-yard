@@ -31,6 +31,11 @@ interface Harness {
   commentStore(): Promise<{ legacyRaw: string | null; entries: Record<string, unknown> }>;
   dirty(): boolean;
   canLeave(): Promise<boolean>;
+  beginLease(): boolean;
+  leaseState(): 'none' | 'pending' | 'success' | 'failure';
+  releaseLease(): void;
+  operationCounts(): { starts: number; outcomes: boolean[] };
+  draftReady(): Promise<boolean>;
 }
 declare global { interface Window { browserHarness: Harness } }
 
@@ -43,7 +48,7 @@ test('owned React Chrome uses the broker and preserves qualified references acro
   const calls: { name: string; args: Record<string, unknown> }[] = [];
   const pages = [{ id: 1, url: 'https://fixture.invalid/one', selected: true }, { id: 2, url: 'https://fixture.invalid/two', selected: false }];
   let jpeg = '', delaySelection = false, selectedPending = false, releaseSelection: (() => void) | undefined;
-  let failText = false;
+  let failText = false, failSelection = false;
   const selected = { kind: 'element', frameUrl: 'https://fixture.invalid/frame', framePath: ['frame-1'], title: 'Selected button',
     immediateText: 'Submit', role: 'button', name: 'Send', selector: '#send', elementPath: 'main > #send', nearbyText: 'Form',
     rect: { x: 2, y: 3, width: 60, height: 30 }, elementMetadata: { tag: 'button', colors: 'red', extra: 'kept' } };
@@ -54,6 +59,7 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     if (name === 'take_screenshot') return { content: [{ type: 'image', mimeType: 'image/jpeg', data: jpeg }] };
     if (name === 'evaluate_script' && args.args) {
       if (delaySelection) { selectedPending = true; await new Promise<void>(resolve => { releaseSelection = resolve; }); selectedPending = false; }
+      if (failSelection) throw new Error('synthetic selection failed');
       return { content: [{ type: 'text', text: '```json\n' + JSON.stringify(selected) + '\n```' }] };
     }
     if (name === 'evaluate_script') {
@@ -163,6 +169,7 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     assert.ok(await page.evaluate(() => Object.hasOwn(JSON.parse(localStorage.getItem('workbench.browser-comments.v1')!), 'fixture')));
     await page.evaluate(value => window.browserHarness.mount(value), identity);
     await page.waitForFunction(() => window.browserHarness.identity()?.hostId === 'local');
+    await page.waitForFunction(() => window.browserHarness.draftReady());
     await page.evaluate(() => window.browserHarness.adopt('fixture'));
     await page.getByLabel('浏览器引用批注').waitFor();
     assert.equal(await page.getByLabel('浏览器引用批注').inputValue(), 'User edited legacy');
@@ -191,9 +198,12 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     });
     await page.getByRole('button', { name: '保存批注' }).click();
     await page.waitForFunction(() => window.browserHarness.references()[0]?.text.includes('Unsaved edit'));
+    await page.waitForFunction(() => !window.browserHarness.dirty());
     await page.getByRole('button', { name: '添加到草稿' }).click();
+    await page.waitForFunction(() => !window.browserHarness.dirty() && window.browserHarness.draft().references?.length === 1);
     await page.getByRole('button', { name: '引用所选元素' }).click();
-    await page.waitForFunction(() => window.browserHarness.references().length === 2);
+    await page.waitForFunction(() => !window.browserHarness.dirty() && window.browserHarness.references().length === 2
+      && window.browserHarness.draft().references?.length === 2);
     await page.evaluate(() => window.browserHarness.setText('Explain this page'));
     await page.waitForFunction(() => window.browserHarness.draft().references?.length === 2);
     const beforeEdit = await page.evaluate(() => window.browserHarness.references());
@@ -247,6 +257,39 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     assert.deepEqual(stored['new-conversation'], [{ home: true }]);
     assert.deepEqual(stored['panel-new-conversation'], [{ panel: true }]);
     assert.ok(Object.values(stored).some(value => Array.isArray(value) && value.some(item => item?.unknown === 'preserve')));
+
+    delaySelection = true;
+    const successCounts = await page.evaluate(() => window.browserHarness.operationCounts());
+    await page.getByRole('button', { name: '引用所选元素' }).click();
+    for (let i = 0; i < 100 && !selectedPending; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(selectedPending, true);
+    assert.equal(await page.evaluate(() => window.browserHarness.beginLease()), true);
+    assert.equal(await page.evaluate(async () => { await Promise.resolve(); return window.browserHarness.leaseState(); }), 'pending');
+    releaseSelection!(); delaySelection = false;
+    await page.waitForFunction(() => window.browserHarness.leaseState() === 'success');
+    const successEnd = await page.evaluate(() => window.browserHarness.operationCounts());
+    assert.equal(successEnd.starts, successCounts.starts + 1);
+    assert.deepEqual(successEnd.outcomes.slice(successCounts.outcomes.length), [true]);
+    assert.equal((await page.evaluate(() => window.browserHarness.draft().references)).length, 2);
+    await page.evaluate(() => window.browserHarness.releaseLease());
+    await page.getByRole('button', { name: '删除引用' }).nth(1).click();
+    await page.waitForFunction(() => window.browserHarness.references().length === 1 && window.browserHarness.draft().references.length === 1);
+
+    delaySelection = true; failSelection = true;
+    const failureCounts = await page.evaluate(() => window.browserHarness.operationCounts());
+    await page.getByRole('button', { name: '引用所选元素' }).click();
+    for (let i = 0; i < 100 && !selectedPending; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(selectedPending, true);
+    assert.equal(await page.evaluate(() => window.browserHarness.beginLease()), true);
+    assert.equal(await page.evaluate(async () => { await Promise.resolve(); return window.browserHarness.leaseState(); }), 'pending');
+    releaseSelection!(); delaySelection = false;
+    await page.waitForFunction(() => window.browserHarness.leaseState() === 'failure');
+    const failureEnd = await page.evaluate(() => window.browserHarness.operationCounts());
+    assert.equal(failureEnd.starts, failureCounts.starts + 1);
+    assert.deepEqual(failureEnd.outcomes.slice(failureCounts.outcomes.length), [false]);
+    failSelection = false;
+    await page.evaluate(() => window.browserHarness.releaseLease());
+    assert.equal((await page.evaluate(() => window.browserHarness.readReferences())).length, 1);
 
     delaySelection = true;
     await page.getByRole('button', { name: '引用所选元素' }).click();
@@ -306,12 +349,14 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     const panel = { ...home, draftId: 'panel-draft' };
     await page.evaluate(value => window.browserHarness.mount(value), home);
     await page.waitForFunction(() => window.browserHarness.identity()?.draftId === 'home-draft');
+    await page.waitForFunction(() => window.browserHarness.draftReady());
     await page.getByRole('button', { name: '引用所选元素' }).waitFor();
     await page.waitForFunction(() => !(document.querySelector('button[title^="在真实 Chrome 标签"]') as HTMLButtonElement)?.disabled);
     await page.getByRole('button', { name: '引用所选元素' }).click();
     await page.waitForFunction(() => window.browserHarness.references().length === 1);
     await page.evaluate(value => window.browserHarness.mount(value), panel);
     await page.waitForFunction(() => window.browserHarness.identity()?.draftId === 'panel-draft' && window.browserHarness.references().length === 0);
+    await page.waitForFunction(() => window.browserHarness.draftReady());
     await page.waitForFunction(() => !(document.querySelector('button[title^="在真实 Chrome 标签"]') as HTMLButtonElement)?.disabled);
     await page.getByRole('button', { name: '引用所选元素' }).click();
     await page.waitForFunction(() => window.browserHarness.references().length === 1);

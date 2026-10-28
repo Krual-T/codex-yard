@@ -4,6 +4,7 @@ import type { BrowserTarget, ChromePanelState } from '../../browser-reuse/protoc
 import { createChromeSurface } from '../../browser-reuse/webview.tsx';
 import type { ComposerDraft, WorkbenchClient } from '../workbench-contract.ts';
 import type { ComposerDraftSnapshot } from '../composer/composer-draft-store.ts';
+import type { ComposerDraftExternalOperation } from '../composer/use-composer-draft.ts';
 import { addBrowserCommentToDraft, attachBrowserComment, browserOwnerKey, browserReferences, changeBrowserComment, claimLegacyBrowserComment,
   claimProvenLegacyBrowserComments, listLegacyBrowserComments, readBrowserCommentArchive, readBrowserCommentsSnapshot, removeBrowserReferenceFromDraft,
   subscribeBrowserComments } from './comments.ts';
@@ -26,8 +27,8 @@ export interface StandaloneBrowserProps {
   draft: ComposerDraft;
   onDirtyChange?(dirty: boolean): void;
   onRecoveryBarrier?(barrier: (() => Promise<void>) | null): void;
-  /** Flush the active composer and return its exact durable owner and revision. */
-  getDraftSnapshot?(owner: BrowserOwner): Promise<ComposerDraftSnapshot>;
+  /** Synchronously bind this browser owner to its active composer's registered operation. */
+  beginDraftOperation?(owner: BrowserOwner): ComposerDraftExternalOperation | null;
   /** Adopt or verify an already committed version against the active controller and durable versions. */
   onDraftVersionCommitted?(before: ComposerDraftSnapshot, after: ComposerDraftSnapshot): Promise<boolean>;
   /** Return an owner only when the existing atoms prove the complete legacy identity. */
@@ -47,6 +48,8 @@ function displayValue(value: unknown): string {
 
 interface PendingEdit { owner: BrowserOwner; reference: BrowserReference; base: Record<string, unknown>; text: string }
 interface PendingProjection { owner: BrowserOwner; snapshot: ComposerDraftSnapshot }
+interface BrowserDraftAction { operation: ComposerDraftExternalOperation; finish(success: boolean): void }
+type DraftWork<T> = (before: ComposerDraftSnapshot, isCurrent: () => boolean) => Promise<{ after: ComposerDraftSnapshot; value: T }>;
 interface BrowserEdits {
   edits: Record<string, PendingEdit>;
   projections: Record<string, PendingProjection>;
@@ -72,9 +75,25 @@ function CopyButton({ value, label }: { value: string; label: string }) {
   }}>{label}</button>{error ? <span role="alert">{error}</span> : null}</>;
 }
 
-function CommentEditor({ owner, reference, saved, consumed, attached, getSnapshot, isCurrent, accept, edits }: { owner: BrowserOwner; reference: BrowserReference;
-  saved?: BrowserReference; consumed: boolean; attached: boolean; getSnapshot(): Promise<ComposerDraftSnapshot>; isCurrent(): boolean;
-  accept(before: ComposerDraftSnapshot, after: ComposerDraftSnapshot): Promise<void>; edits: BrowserEdits }) {
+function SaveSnapshotButton({ snapshot }: { snapshot: ComposerDraftSnapshot }) {
+  const [error, setError] = React.useState('');
+  return <><button type="button" onClick={() => {
+    let url: string | undefined, anchor: HTMLAnchorElement | undefined;
+    try {
+      const contents = JSON.stringify(snapshot, null, 2);
+      url = URL.createObjectURL(new Blob([contents], { type: 'application/json' }));
+      anchor = document.createElement('a');
+      anchor.href = url; anchor.download = 'browser-draft-snapshot.json'; anchor.hidden = true;
+      document.body.appendChild(anchor); anchor.click();
+      setError('');
+    } catch { setError('另存失败，请复制已显示的快照。'); }
+    finally { anchor?.remove(); if (url) { const savedUrl = url; setTimeout(() => URL.revokeObjectURL(savedUrl), 1_000); } }
+  }}>另存已保存快照</button>{error ? <span role="alert">{error}</span> : null}</>;
+}
+
+function CommentEditor({ owner, reference, saved, consumed, attached, beginAction, transact, edits }: { owner: BrowserOwner; reference: BrowserReference;
+  saved?: BrowserReference; consumed: boolean; attached: boolean; beginAction(): BrowserDraftAction;
+  transact<T>(operation: ComposerDraftExternalOperation, work: DraftWork<T>, onCommitted?: () => void): Promise<T>; edits: BrowserEdits }) {
   const key = editKey(owner, reference), pending = edits.edits[key];
   const base = pending?.base ?? reference.original, text = pending?.text ?? commentText(reference.original);
   const [busy, setBusy] = React.useState(false);
@@ -82,30 +101,45 @@ function CommentEditor({ owner, reference, saved, consumed, attached, getSnapsho
   const [error, setError] = React.useState('');
   const update = async (value: string | null) => {
     if (busyRef.current) return;
-    let finish: () => void;
-    try { finish = edits.begin(owner); } catch (failure) { setError((failure as Error).message); return; }
+    let action: BrowserDraftAction;
+    try { action = beginAction(); } catch (failure) { setError((failure as Error).message); return; }
     busyRef.current = true;
     setBusy(true); setError('');
+    let success = false;
     try {
-      const before = await getSnapshot();
-      const after = value === null && attached
-        ? await removeBrowserReferenceFromDraft(owner, reference, before, isCurrent)
-        : await changeBrowserComment(owner, base, value, before, isCurrent);
-      if (value !== null) edits.discard(key);
-      await accept(before, after);
+      await transact(action.operation, async (before, isCurrent) => ({
+        after: value === null && attached
+          ? await removeBrowserReferenceFromDraft(owner, reference, before, isCurrent)
+          : await changeBrowserComment(owner, base, value, before, isCurrent), value: undefined,
+      }), () => { if (value !== null) edits.discard(key); });
+      success = true;
     }
     catch (failure) { setError((failure as Error).message); }
-    finally { busyRef.current = false; finish(); setBusy(false); }
+    finally {
+      busyRef.current = false;
+      try { action.finish(success); } catch (failure) { setError((failure as Error).message); }
+      finally { setBusy(false); }
+    }
   };
   const add = async () => {
     if (busyRef.current) return;
-    let finish: () => void;
-    try { finish = edits.begin(owner); } catch (failure) { setError((failure as Error).message); return; }
+    let action: BrowserDraftAction;
+    try { action = beginAction(); } catch (failure) { setError((failure as Error).message); return; }
     busyRef.current = true;
     setBusy(true); setError('');
-    try { const before = await getSnapshot(); await accept(before, await attachBrowserComment(owner, reference, before, isCurrent)); }
+    let success = false;
+    try {
+      await transact(action.operation, async (before, isCurrent) => ({
+        after: await attachBrowserComment(owner, reference, before, isCurrent), value: undefined,
+      }));
+      success = true;
+    }
     catch (failure) { setError((failure as Error).message); }
-    finally { busyRef.current = false; finish(); setBusy(false); }
+    finally {
+      busyRef.current = false;
+      try { action.finish(success); } catch (failure) { setError((failure as Error).message); }
+      finally { setBusy(false); }
+    }
   };
   const pendingConflict = !!pending && !sameBrowserValue(base, reference.original);
   const contextValue = pendingConflict ? base.localBrowserContext : reference.context.localBrowserContext;
@@ -132,12 +166,12 @@ function CommentEditor({ owner, reference, saved, consumed, attached, getSnapsho
 }
 
 function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNavigation, navigationRequest, onNavigationConsumed,
-  getDraftSnapshot, onDraftVersionCommitted, resolveLegacyOwner, onClose, edits }: {
+  beginDraftOperation, onDraftVersionCommitted, resolveLegacyOwner, onClose, edits }: {
   client: WorkbenchClient; owner: BrowserOwner; browserTabId: string; visible: boolean; allowNavigation: boolean;
   draft: ComposerDraft;
   edits: BrowserEdits;
   onClose(): void;
-  getDraftSnapshot: StandaloneBrowserProps['getDraftSnapshot']; resolveLegacyOwner: StandaloneBrowserProps['resolveLegacyOwner'];
+  beginDraftOperation: StandaloneBrowserProps['beginDraftOperation']; resolveLegacyOwner: StandaloneBrowserProps['resolveLegacyOwner'];
   onDraftVersionCommitted: StandaloneBrowserProps['onDraftVersionCommitted'];
   navigationRequest: StandaloneBrowserProps['navigationRequest']; onNavigationConsumed: StandaloneBrowserProps['onNavigationConsumed'];
 }) {
@@ -154,24 +188,36 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
   const [legacyError, setLegacyError] = React.useState('');
   const [archive, setArchive] = React.useState<string | null>(null);
   const active = React.useRef(false);
-  const snapshotRef = React.useRef(getDraftSnapshot);
+  const beginRef = React.useRef(beginDraftOperation);
   const committedRef = React.useRef(onDraftVersionCommitted);
-  React.useLayoutEffect(() => { snapshotRef.current = getDraftSnapshot;
-    committedRef.current = onDraftVersionCommitted; }, [getDraftSnapshot, onDraftVersionCommitted]);
-  const getSnapshot = React.useCallback(async () => {
-    if (edits.projection(owner)) throw new Error('请选择已保存的草稿版本后，再修改浏览器引用。');
-    if (!active.current || !snapshotRef.current || !committedRef.current) throw new Error('草稿版本尚未就绪，浏览器引用未更改。');
-    const snapshot = await snapshotRef.current(owner);
-    if (!active.current) throw new Error('草稿已切换，浏览器引用未更改。');
-    return snapshot;
-  }, [ownerKey, edits.projection]);
-  const accept = React.useCallback(async (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => {
-    if (before.revision === after.revision) return;
-    edits.hold(owner, after);
+  React.useLayoutEffect(() => { beginRef.current = beginDraftOperation;
+    committedRef.current = onDraftVersionCommitted; }, [beginDraftOperation, onDraftVersionCommitted]);
+  const beginAction = React.useCallback((): BrowserDraftAction => {
+    const finish = edits.begin(owner);
     try {
-      if (active.current && await committedRef.current?.(before, after) && active.current && edits.release(owner, after)) return;
-    } catch { /* The transaction already committed. */ }
-    throw new Error('批注和新草稿版本已保存，请在草稿版本中核对并选择；当前编辑已保留。');
+      if (!active.current || !beginRef.current || !committedRef.current) throw new Error('草稿版本尚未就绪，浏览器引用未更改。');
+      const operation = beginRef.current(owner);
+      if (!operation) throw new Error('草稿当前无法接收浏览器操作，请先处理输入或草稿冲突。');
+      return { operation, finish(success) { try { operation.finish(success); } finally { finish(); } } };
+    } catch (failure) { finish(); throw failure; }
+  }, [ownerKey, edits.begin]);
+  const transact = React.useCallback(async <T,>(operation: ComposerDraftExternalOperation, work: DraftWork<T>, onCommitted?: () => void): Promise<T> => {
+    let committed: ComposerDraftSnapshot | undefined;
+    try {
+      const receipt = await operation.transaction(async (before, isCurrent) => {
+        const result = await work(before, () => active.current && isCurrent());
+        committed = structuredClone(result.after);
+        edits.hold(owner, committed);
+        onCommitted?.();
+        return result;
+      });
+      if (committed && receipt.accepted && active.current && sameBrowserValue(receipt.after, committed)
+        && edits.release(owner, committed)) return receipt.value;
+      throw new Error('草稿未能接收已保存版本。');
+    } catch (failure) {
+      if (committed) throw new Error('批注和新草稿版本已保存，请在草稿版本中核对并选择；当前编辑已保留。');
+      throw failure;
+    }
   }, [ownerKey, edits.hold, edits.release]);
   React.useEffect(() => bridge.subscribe(target, setState), [bridge, target]);
   React.useEffect(() => { setAddress(state?.frame?.url ?? ''); }, [state?.frame?.url]);
@@ -227,18 +273,21 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
     return () => { live = false; unsubscribe(); };
   }, [bridge, target, ownerKey, visible, resolveLegacyOwner]);
   const quote = React.useCallback(async (_target: BrowserTarget, pageId: number) => {
-    const finish = edits.begin(owner);
+    const action = beginAction();
+    let success = false;
     try {
-    const version = bridge.selectionVersion(target);
-    const anchor = await bridge.selectedElement(target, pageId);
-    const isCurrent = () => active.current && bridge.selectionIsCurrent(target, pageId, version);
-    if (!isCurrent()) throw new Error('浏览器面板已切换，请重新引用');
-    const before = await getSnapshot();
-    const result = await addBrowserCommentToDraft(owner, anchor, before, isCurrent);
-    await accept(before, result.snapshot);
-    return anchor.title;
-    } finally { finish(); }
-  }, [bridge, target, ownerKey, getSnapshot, accept, edits.begin]);
+      const version = bridge.selectionVersion(target);
+      const anchor = await bridge.selectedElement(target, pageId);
+      if (!active.current || !bridge.selectionIsCurrent(target, pageId, version)) throw new Error('浏览器面板已切换，请重新引用');
+      await transact(action.operation, async (before, isCurrent) => {
+        const result = await addBrowserCommentToDraft(owner, anchor, before,
+          () => isCurrent() && bridge.selectionIsCurrent(target, pageId, version));
+        return { after: result.snapshot, value: result.reference };
+      });
+      success = true;
+      return anchor.title;
+    } finally { action.finish(success); }
+  }, [bridge, target, ownerKey, beginAction, transact]);
   const command = (type: string, url?: string) => {
     setError('');
     void bridge.request({ ...target, operation: 'command', command: { type, ...(url === undefined ? {} : { url }) } })
@@ -296,6 +345,7 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
       {projection ? <section role="status"><strong>批注和新草稿版本已保存，请在草稿版本中核对并选择。</strong>
         <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(projection.snapshot)}</pre>
         <CopyButton value={displayValue(projection.snapshot)} label="复制已保存版本" />
+        <SaveSnapshotButton snapshot={projection.snapshot} />
         <button disabled={edits.busy(owner)} onClick={() => {
           void (async () => {
             const finish = edits.begin(owner, true);
@@ -317,6 +367,7 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
         <strong>其他草稿有已保存但尚未接收的版本</strong><p>{value.owner.hostId} / {value.owner.threadId ?? '新会话'} / {value.owner.draftId}</p>
         <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(value.snapshot)}</pre>
         <CopyButton value={displayValue(value.snapshot)} label="复制已保存版本" />
+        <SaveSnapshotButton snapshot={value.snapshot} />
         <button disabled={edits.busy(value.owner)} onClick={() => discardProjection(value)}>放弃此待接收快照</button>
         <span>放弃不会更改已保存的草稿或批注。</span>
       </section>)}
@@ -332,8 +383,8 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
           <details><summary>核对草稿和已保存引用</summary><p>草稿版本</p><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(raw)}</pre>
             <p>已保存版本</p><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(saved)}</pre></details></li> :
         <CommentEditor key={reference.id} owner={owner} reference={reference} saved={saved}
-          consumed={consumed.some(value => sameBrowserValue(value, reference))} attached={attached} getSnapshot={getSnapshot} accept={accept}
-          isCurrent={() => active.current} edits={edits} />)}</ul> : null}
+          consumed={consumed.some(value => sameBrowserValue(value, reference))} attached={attached} beginAction={beginAction} transact={transact}
+          edits={edits} />)}</ul> : null}
       {comments.length > references.length ? <details><summary>无法识别或冲突的已保存批注</summary>
         <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(comments)}</pre></details> : null}
       {legacy.length ? <details><summary>待认领的旧浏览器批注</summary>
@@ -429,6 +480,6 @@ export function StandaloneBrowser(props: StandaloneBrowserProps) {
   const key = JSON.stringify([browserOwnerKey(owner), props.browserTabId]);
   return <BrowserPanel key={key} client={props.client} owner={owner} browserTabId={props.browserTabId} draft={props.draft} visible={props.visible}
     allowNavigation={props.allowNavigation} navigationRequest={props.navigationRequest} onNavigationConsumed={props.onNavigationConsumed}
-    getDraftSnapshot={props.getDraftSnapshot} onDraftVersionCommitted={props.onDraftVersionCommitted}
+    beginDraftOperation={props.beginDraftOperation} onDraftVersionCommitted={props.onDraftVersionCommitted}
     resolveLegacyOwner={props.resolveLegacyOwner} onClose={props.onClose} edits={edits} />;
 }

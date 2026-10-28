@@ -7,7 +7,8 @@ import { readBrowserAtom } from '../src/renderer/storage/ui-atoms.ts';
 import { acknowledgeSubmittedBrowserReferences } from '../src/renderer/app/browser-draft.ts';
 import { SendRecoveryStore } from '../src/renderer/app/send-recovery.ts';
 import { StandaloneComposer } from '../src/renderer/composer/StandaloneComposer.tsx';
-import type { ComposerDraftController, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
+import type { ComposerDraftController, ComposerDraftLease, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
+import { readComposerDraftVersions } from '../src/renderer/composer/composer-draft-store.ts';
 import type { BrowserOwner, BrowserReference } from '../src/renderer/browser/index.tsx';
 import type { ComposerDraft, WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 
@@ -26,11 +27,19 @@ interface Harness {
   commentStore(): Promise<{ legacyRaw: string | null; entries: Record<string, unknown> }>;
   dirty(): boolean;
   canLeave(): Promise<boolean>;
+  beginLease(): boolean;
+  leaseState(): 'none' | 'pending' | 'success' | 'failure';
+  releaseLease(): void;
+  operationCounts(): { starts: number; outcomes: boolean[] };
+  draftReady(): Promise<boolean>;
 }
 declare global { interface Window { browserHarness: Harness } }
 
 const pageSession = crypto.randomUUID();
 let browserDirty = false, recoveryBarrier: (() => Promise<void>) | null = null;
+let lease: ComposerDraftLease | null = null, leaseState: 'none' | 'pending' | 'success' | 'failure' = 'none';
+let operationStarts = 0;
+const operationOutcomes: boolean[] = [];
 const client: WorkbenchClient = {
   async reply() { throw new Error('Unexpected server response'); },
   async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
@@ -109,22 +118,42 @@ function App() {
       async commentStore() { return await readBrowserAtom('codex-yard.browser-comments.v1') as { legacyRaw: string | null; entries: Record<string, unknown> }; },
       dirty() { return browserDirty; },
       async canLeave() { try { await recoveryBarrier?.(); return true; } catch { return false; } },
+      beginLease() {
+        const current = controller.current, snapshot = current?.snapshot();
+        if (!current || !snapshot || lease) return false;
+        lease = current.freeze(snapshot.owner);
+        if (!lease) return false;
+        const captured = lease;
+        leaseState = 'pending';
+        void captured.flush().then(value => { if (lease === captured) leaseState = value ? 'success' : 'failure'; },
+          () => { if (lease === captured) leaseState = 'failure'; });
+        return true;
+      },
+      leaseState: () => leaseState,
+      releaseLease() { lease?.release(); lease = null; leaseState = 'none'; },
+      operationCounts: () => ({ starts: operationStarts, outcomes: [...operationOutcomes] }),
+      async draftReady() {
+        const current = controller.current, snapshot = current?.snapshot(), target = active.current;
+        if (!current || !snapshot || !target || browserOwnerKey(snapshot.owner) !== browserOwnerKey(target)) return false;
+        return (await readComposerDraftVersions(snapshot.owner)).versions.some(version => version.revision === snapshot.revision);
+      },
     };
   });
-  const getSnapshot = async (owner: BrowserOwner) => {
+  const beginDraftOperation = (owner: BrowserOwner) => {
     const current = controller.current, before = current?.snapshot();
-    const matches = () => active.current && browserOwnerKey(active.current) === browserOwnerKey(owner);
-    if (!current || !before || !matches() || !await current.flush(before.owner)) throw new Error('Fixture owner changed');
-    const ready = current.snapshot();
-    if (!ready || controller.current !== current || !matches()) throw new Error('Fixture owner changed');
-    return ready;
+    if (!current || !before || !active.current || browserOwnerKey(active.current) !== browserOwnerKey(owner)
+      || browserOwnerKey(before.owner) !== browserOwnerKey(owner)) return null;
+    const operation = current.beginExternalOperation(before.owner);
+    if (!operation) return null;
+    operationStarts += 1;
+    return { ...operation, finish(success: boolean) { operationOutcomes.push(success); operation.finish(success); } };
   };
   return identity ? <>
     <div style={{ display: 'none' }}><StandaloneComposer client={client} context={{ ...identity, cwd: '/fixture' }} busy={false}
       onDraftController={receiveController} onDraftChange={setDraftSnapshot}
       onSubmit={async () => { throw new Error('Fixture does not perform inference'); }} onInterrupt={async () => {}} /></div>
     <StandaloneBrowser client={client} {...identity} draft={draft} visible={shown} allowNavigation
-      onClose={() => setIdentity(null)} getDraftSnapshot={getSnapshot}
+      onClose={() => setIdentity(null)} beginDraftOperation={beginDraftOperation}
       onDirtyChange={value => { browserDirty = value; }} onRecoveryBarrier={value => { recoveryBarrier = value; }}
       onDraftVersionCommitted={async (before, after) => {
         return await controller.current?.acceptCommittedVersion(before, after) ?? false;

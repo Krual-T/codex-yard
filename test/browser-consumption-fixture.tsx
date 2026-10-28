@@ -6,11 +6,12 @@ import { attachBrowserComment, browserCommentsAtomKey, browserOwnerKey, changeBr
   pruneBrowserDraftDeletions, readBrowserCommentsSnapshot, removeBrowserReferenceFromDraft } from '../src/renderer/browser/comments.ts';
 import { addBrowserComment } from './browser-comment-fixture.ts';
 import type { BrowserOwner, BrowserReference } from '../src/renderer/browser/comments.ts';
+import { sameBrowserValue } from '../src/renderer/browser/draft-transaction.ts';
 import { acknowledgeSubmittedBrowserReferences, browserDraftOwner } from '../src/renderer/app/browser-draft.ts';
 import { SendRecoveryStore } from '../src/renderer/app/send-recovery.ts';
 import type { SendIntent } from '../src/renderer/app/send-recovery.ts';
 import { StandaloneComposer } from '../src/renderer/composer/StandaloneComposer.tsx';
-import type { ComposerDraftController, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
+import type { ComposerDraftController, ComposerDraftExternalOperation, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
 import { bindComposerDraftToThread, clearComposerDraftRevision, composerDraftAtomKey, readComposerDraftVersions,
   retainComposerDraftVersion, writeComposerDraftVersion } from '../src/renderer/composer/composer-draft-store.ts';
 import { draftToInput, normalizeDraft } from '../src/renderer/composer/standalone-draft.ts';
@@ -43,6 +44,7 @@ export interface Fixture {
   snapshotBlocked(): boolean;
   releaseSnapshot(): void;
   rejectNextCommit(): void;
+  rejectNextBegin(): void;
   holdNextCommit(): void;
   commitBlocked(): boolean;
   releaseCommit(): void;
@@ -54,6 +56,10 @@ export interface Fixture {
   setLegacyEvidence(key: string, owner: BrowserOwner): Promise<void>;
   input(): Record<string, unknown>[];
   injectReference(reference: { id: string; text: string; kind?: string }): Promise<boolean>;
+  deletionReceipt(): ComposerDraftSnapshot | null;
+  deletionCalls(): number;
+  settle(): Promise<boolean>;
+  setBinding(hostId: string, threadId: string, draftId: string): Promise<void>;
 }
 declare global { interface Window { browserConsumption: Fixture } }
 
@@ -75,8 +81,10 @@ const client: WorkbenchClient = {
 const recovery = new SendRecoveryStore(client);
 let attemptCount = 0;
 let snapshotGate: Promise<void> | undefined, releaseGate: (() => void) | undefined, snapshotBlocked = false;
-let rejectCommit = false, dirty = false, closeCount = 0, recoveryBarrier: (() => Promise<void>) | null = null;
+let rejectCommit = false, rejectBegin = false, dirty = false, closeCount = 0, recoveryBarrier: (() => Promise<void>) | null = null;
 let commitGate: Promise<void> | undefined, releaseCommitGate: (() => void) | undefined, commitBlocked = false;
+let deletionReceipt: ComposerDraftSnapshot | null = null, deletionCalls = 0;
+const watcherReceipts = new Map<string, ComposerDraftSnapshot>();
 const anchor = { kind: 'element' as const, pageUrl: 'https://fixture.invalid/page', framePath: [], title: 'Fixture element',
   immediateText: 'Example', role: 'button', name: 'Example', selector: '#fixture', elementPath: '#fixture', nearbyText: 'Example',
   rect: { x: 1, y: 2, width: 20, height: 10 }, elementMetadata: { tag: 'button', future: 'kept' } };
@@ -171,6 +179,7 @@ function App() {
       snapshotBlocked: () => snapshotBlocked,
       releaseSnapshot() { releaseGate?.(); snapshotGate = undefined; releaseGate = undefined; },
       rejectNextCommit() { rejectCommit = true; },
+      rejectNextBegin() { rejectBegin = true; },
       holdNextCommit() { commitBlocked = false; commitGate = new Promise(resolve => { releaseCommitGate = resolve; }); },
       commitBlocked: () => commitBlocked,
       releaseCommit() { releaseCommitGate?.(); releaseCommitGate = undefined; },
@@ -194,24 +203,54 @@ function App() {
         if (!current || !value) throw new Error('Fixture draft missing');
         return current.update(value.owner, draft => ({ ...draft, references: [...(draft.references ?? []), reference] }));
       },
+      deletionReceipt: () => deletionReceipt,
+      deletionCalls: () => deletionCalls,
+      async settle() {
+        const current = controller.current, value = current?.snapshot();
+        if (!current || !value) return false;
+        const lease = current.freeze(value.owner);
+        if (!lease) return false;
+        try { return await lease.flush(); } finally { lease.release(); }
+      },
+      async setBinding(hostId, threadId, draftId) {
+        await updateBrowserAtom('codex-yard.send-recovery.v1', previous => {
+          const state = previous ?? { requests: {}, bindings: {}, creations: {} };
+          if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('Fixture recovery state is invalid');
+          const value = state as Record<string, unknown>, bindings = value.bindings;
+          if (!bindings || typeof bindings !== 'object' || Array.isArray(bindings)) throw new Error('Fixture bindings are invalid');
+          return { ...value, bindings: { ...bindings, [JSON.stringify([hostId, threadId])]: draftId } };
+        });
+      },
     };
   });
   const browserOwner = browserDraftOwner(owner, bindings);
-  const getDraftSnapshot = React.useCallback(async (value: BrowserOwner) => {
-    if (snapshotGate) { snapshotBlocked = true; await snapshotGate; }
+  const acceptCommitted = React.useCallback(async (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => {
+    return await controller.current?.acceptCommittedVersion(before, after) ?? false;
+  }, []);
+  const beginDraftOperation = React.useCallback((value: BrowserOwner): ComposerDraftExternalOperation | null => {
+    if (rejectBegin) { rejectBegin = false; return null; }
     const current = controller.current, initial = current?.snapshot();
     const matches = () => JSON.stringify(browserDraftOwner(ownerRef.current, bindings)) === JSON.stringify(value);
-    if (!current || !initial || !matches() || !await current.flush(initial.owner)) throw new Error('Fixture owner changed');
-    const ready = current.snapshot();
-    if (!ready || current !== controller.current || !matches()) throw new Error('Fixture owner changed');
-    return ready;
+    if (!current || !initial || !matches() || watcherReceipts.has(browserOwnerKey(value))
+      || JSON.stringify(browserDraftOwner(initial.owner, bindings)) !== JSON.stringify(value)) return null;
+    const operation = current.beginExternalOperation(initial.owner);
+    if (!operation) return null;
+    return {
+      async transaction<T>(work: (before: ComposerDraftSnapshot, isCurrent: () => boolean) => Promise<{ after: ComposerDraftSnapshot; value: T }>) {
+        if (snapshotGate) { snapshotBlocked = true; await snapshotGate; }
+        const result = await operation.transaction(async (before, isCurrent) => {
+          const response = await work(before, () => current === controller.current && matches() && isCurrent());
+          const gate = commitGate;
+          if (gate) { commitGate = undefined; commitBlocked = true; await gate; }
+          return response;
+        });
+        if (rejectCommit) { rejectCommit = false; return { ...result, accepted: false }; }
+        return result;
+      },
+      applyPrefill: prefill => operation.applyPrefill(prefill),
+      finish: success => operation.finish(success),
+    };
   }, [bindings]);
-  const acceptCommitted = React.useCallback(async (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => {
-    const current = controller.current, gate = commitGate;
-    if (gate) { commitGate = undefined; commitBlocked = true; await gate; }
-    if (rejectCommit) { rejectCommit = false; return false; }
-    return await current?.acceptCommittedVersion(before, after) ?? false;
-  }, []);
   const receiveController = React.useCallback((value: ComposerDraftController | null) => {
     controller.current = value; setControllerReady(value !== null);
   }, []);
@@ -226,9 +265,23 @@ function App() {
       void (async () => {
         while (live && pending) {
           pending = false;
-          const before = await getDraftSnapshot(browserOwner);
-          const after = await pruneBrowserDraftDeletions(browserOwner, before, () => live);
-          if (live && before.revision !== after.revision) await acceptCommitted(before, after);
+          const current = controller.current, initial = current?.snapshot();
+          if (!current || !initial || watcherReceipts.has(browserOwnerKey(browserOwner))
+            || JSON.stringify(browserDraftOwner(initial.owner, bindings)) !== browserKey) continue;
+          const observed = await readBrowserCommentsSnapshot(browserOwner);
+          if (!live || current !== controller.current || !observed.deleted.some(deleted =>
+            (current.snapshot()?.draft.references ?? []).some(reference => sameBrowserValue(reference, deleted)))) continue;
+          const operation = current.beginExternalOperation(initial.owner);
+          if (!operation) continue;
+          let success = false;
+          try {
+            const receipt = await operation.transaction(async (before, isCurrent) => {
+              const after = await pruneBrowserDraftDeletions(browserOwner, before, () => live && current === controller.current && isCurrent());
+              if (after.revision !== before.revision) watcherReceipts.set(browserOwnerKey(browserOwner), structuredClone(after));
+              return { after, value: undefined };
+            });
+            if (receipt.accepted) { watcherReceipts.delete(browserOwnerKey(browserOwner)); success = true; }
+          } finally { operation.finish(success); }
         }
       })().catch(() => {}).finally(() => { running = false; if (live && pending) refresh(); });
     };
@@ -237,25 +290,28 @@ function App() {
     });
     refresh();
     return () => { live = false; unsubscribe(); };
-  }, [browserKey, controllerReady, getDraftSnapshot, acceptCommitted, snapshot?.revision]);
+  }, [browserKey, bindings, controllerReady, snapshot?.revision]);
   const onDirtyChange = React.useCallback((value: boolean) => { dirty = value; }, []);
   const onRecoveryBarrier = React.useCallback((value: (() => Promise<void>) | null) => { recoveryBarrier = value; }, []);
   const empty = { text: '', images: [], files: [], references: [] };
   return <>
     <StandaloneComposer client={client} context={{ ...owner, cwd: '/fixture' }} busy={false}
       onDraftController={receiveController} onDraftChange={setSnapshot}
-      onRemoveReference={async (draftOwner, reference) => {
+      onRemoveReference={async (draftOwner, reference, operation) => {
         if (reference.kind !== 'browser') return;
-        const target = browserDraftOwner(draftOwner, bindings), current = controller.current;
-        if (!current) throw new Error('Fixture controller missing');
-        const before = await getDraftSnapshot(target);
-        const after = await removeBrowserReferenceFromDraft(target, reference as BrowserReference, before);
-        await current.acceptCommittedVersion(before, after);
+        const target = browserDraftOwner(draftOwner, bindings);
+        deletionCalls += 1;
+        const receipt = await operation.transaction(async (before, isCurrent) => {
+          const after = await removeBrowserReferenceFromDraft(target, reference as BrowserReference, before, isCurrent);
+          deletionReceipt = structuredClone(after);
+          return { after, value: undefined };
+        });
+        if (receipt.accepted) deletionReceipt = null;
         return 'handled';
       }}
       onSubmit={async () => { throw new Error('Fixture does not perform inference'); }} onInterrupt={async () => {}} />
     <StandaloneBrowser client={client} {...browserOwner} browserTabId="fixture" draft={snapshot?.draft ?? empty}
-      visible={browserVisible} allowNavigation={false} onClose={() => { closeCount += 1; }} getDraftSnapshot={getDraftSnapshot}
+      visible={browserVisible} allowNavigation={false} onClose={() => { closeCount += 1; }} beginDraftOperation={beginDraftOperation}
       onDirtyChange={onDirtyChange} onRecoveryBarrier={onRecoveryBarrier}
       onDraftVersionCommitted={acceptCommitted} resolveLegacyOwner={resolveLegacyOwner} />
   </>;
