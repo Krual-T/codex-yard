@@ -396,6 +396,7 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
       return value;
     },
     disconnect() { client?.terminate(); },
+    disconnectAll() { for (const socket of webSockets.clients) socket.terminate(); },
     async close() {
       const closed = once(webSockets, 'close');
       for (const socket of webSockets.clients) socket.terminate();

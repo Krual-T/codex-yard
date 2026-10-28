@@ -198,7 +198,7 @@ try {
   });
   await installClientProbe(page);
   const turnsBeforeReconnect = fake.calls('turn/start').length;
-  fake.disconnect();
+  fake.disconnectAll();
   await page.getByRole('button', { name: 'Reconnect host', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.yard-connection')?.getAttribute('data-state') === 'connected');
   await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).waitFor();
@@ -210,7 +210,8 @@ try {
   const remoteDraft = remotePage.getByRole('textbox', { name: 'Work with Codex', exact: true });
   await remoteDraft.fill('KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
   await installClientProbe(remotePage);
-  remoteAvailable = false; remoteFake.disconnect();
+  await remotePage.waitForFunction(() => document.querySelector('.yard-connection')?.getAttribute('title') === 'Browser: connected; Host: connected');
+  remoteAvailable = false; remoteFake.disconnectAll();
   await remotePage.getByRole('button', { name: 'Reconnect host', exact: true }).waitFor();
   await remotePage.evaluate(async () => {
     const client = (window as any).acceptanceClient; client.suspend(); await client.resume();
@@ -595,7 +596,7 @@ try {
   await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value === 'NEWER_ORDINARY_B');
   assert.equal(fake.calls('turn/start').length, ordinaryCalls);
   await recovery.getByRole('button', { name: 'Check send result', exact: true }).click();
-  await recovery.getByText('原提交版本已提交；较新的草稿将保留。', { exact: true }).waitFor();
+  await recovery.getByText('消息已发送；原提交版本的草稿清理待处理，较新的草稿将保留。', { exact: true }).waitFor();
   assert.equal(await input.inputValue(), 'NEWER_ORDINARY_B');
   await recovery.getByRole('button', { name: 'Keep newer draft and close', exact: true }).click();
   await recovery.waitFor({ state: 'hidden' });
@@ -863,6 +864,11 @@ try {
   console.log(JSON.stringify({ checks, errors }));
 } catch (error) {
   await writeFile(join(artifacts, 'failure.json'), JSON.stringify({ error: String(error), checks, errors, requests,
+    pages: await Promise.all(context.pages().map(async target => ({ url: target.url(), state: await target.evaluate(() => ({
+      connection: document.querySelector('.yard-connection')?.outerHTML,
+      alerts: [...document.querySelectorAll('[role="alert"]')].map(node => node.textContent),
+    })).catch(failure => String(failure)) }))),
+    remoteProtocol: remoteFake.messages.map(message => ({ method: message.method, params: message.params })),
     atoms: await page.evaluate(() => localStorage.getItem('native-atoms')).catch(() => null),
     sendRecovery: await page.evaluate(async () => (window as any).acceptanceClient?.host('get-persisted-atom', { key: 'codex-yard.send-recovery.v1' })).catch(error => String(error)),
     protocol: fake.messages.map(message => ({ method: message.method, params: message.params })) }, null, 2));
