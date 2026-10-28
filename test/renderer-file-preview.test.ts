@@ -77,6 +77,7 @@ test('file preview uses the live draft and retains editor history, wrap and navi
     await page.getByRole('button', { name: 'Other' }).click();
     await page.getByRole('textbox', { name: 'File: /work/docs/other.txt' }).waitFor();
     assert.equal(await page.evaluate(() => (window as any).fixture.view().state.selection.main.from), 'other file\n'.length);
+    assert.equal(await page.locator('.yard-markdown-preview').count(), 0);
     await page.getByRole('tab', { name: 'readme.md' }).click();
     await page.getByRole('heading', { name: 'Original' }).waitFor();
     await page.keyboard.press('Control+f');

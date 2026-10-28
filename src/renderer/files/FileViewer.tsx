@@ -90,7 +90,7 @@ export function FileViewer({ content, ...props }: Props) {
     <div className="yard-file-source" hidden={preview}>
       <CodeEditor {...props} wrap={wrap} visible={props.visible && !preview} />
     </div>
-    {preview ? <div className="yard-markdown-preview">
+    {preview && props.visible ? <div className="yard-markdown-preview">
       <StandaloneMarkdown text={props.text} client={props.client} hostId={props.hostId} threadId={props.threadId}
         cwd={directory} onOpenFileAt={props.onOpenFile ? location => props.onOpenFile?.(location.path, location.line, location.column) : undefined} />
     </div> : null}
