@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
@@ -64,9 +66,13 @@ test('locale changes update composer controls without replacing the draft or ric
     const submission = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
     assert.equal(submission.options.sandboxMode, 'read-only');
     assert.match(submission.draft.text, /draft stays/);
-    await page.screenshot({ path: '/home/Shaokun.Tang/Projects/LifeKernel/projects/agents-workbench/.local/workspaces/chat-mD5SDx/standalone-a-composer-locale-light.png' });
+    const artifacts = process.env.YARD_TEST_ARTIFACTS;
+    if (artifacts) {
+      await mkdir(artifacts, { recursive: true });
+      await page.screenshot({ path: join(artifacts, 'standalone-a-composer-locale-light.png') });
+    }
     await page.evaluate(() => { document.documentElement.style.cssText = '--yard-fg:#f3f3f3;--yard-bg:#161616;--yard-surface:#252525;--yard-border:#777;--yard-muted:#ccc;--yard-accent:#8eb8ff'; document.body.style.background = '#161616'; document.body.style.color = '#f3f3f3'; });
-    await page.screenshot({ path: '/home/Shaokun.Tang/Projects/LifeKernel/projects/agents-workbench/.local/workspaces/chat-mD5SDx/standalone-a-composer-locale-dark.png' });
+    if (artifacts) await page.screenshot({ path: join(artifacts, 'standalone-a-composer-locale-dark.png') });
   } finally { await browser.close(); }
 });
 
