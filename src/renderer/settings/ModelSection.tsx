@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useSyncExternalStore } from 'react';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { Row } from './PreferenceControls.tsx';
-import { ModelSettings } from './model-settings.ts';
+import { ModelSettings, resolveConfiguredModel } from './model-settings.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
 
 export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: {
@@ -14,7 +14,7 @@ export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: 
   useEffect(() => { void modelSettings.load(); return () => modelSettings.dispose(); }, [modelSettings]);
   useLayoutEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
   useLayoutEffect(() => { onSavingChange(state.saving); }, [state.saving, onSavingChange]);
-  const selected = state.models.find(model => model.model === state.model);
+  const selected = resolveConfiguredModel(state.models, state.model);
   const efforts = Array.isArray(selected?.supportedReasoningEfforts) ? selected.supportedReasoningEfforts : [];
   return <>
     <div className="yard-section-heading"><h2>{t('Models')}</h2><button type="button" disabled={dirty || state.loading || state.saving} onClick={() => { void modelSettings.load(); }}>{t('Refresh')}</button></div>
@@ -27,6 +27,7 @@ export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: 
       <div className="yard-actions"><button type="button" disabled={state.saving} onClick={() => modelSettings.resolveConflict(field, 'current')}>{t('Use current value')}</button>
         <button type="button" disabled={state.saving} onClick={() => modelSettings.resolveConflict(field, 'draft')}>{t('Keep my change')}</button></div>
     </div>)}
+    {!state.loading && !state.model && !selected && <p className="yard-setting-error" role="alert">{t('The default model is unavailable or ambiguous. Refresh the model list before changing reasoning effort.')}</p>}
     {state.loading ? <p>{t('Loading models...')}</p> : <div className="yard-setting-group">
       <Row label="Model"><select aria-label={t('Model')} value={state.model ?? ''} disabled={state.saving || state.models.length === 0}
         onChange={event => modelSettings.setModel(event.target.value)}>

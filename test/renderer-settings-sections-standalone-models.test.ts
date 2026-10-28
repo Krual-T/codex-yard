@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
-import { ModelSettings } from '../src/renderer/settings/model-settings.ts';
+import { ModelSettings, resolveConfiguredModel } from '../src/renderer/settings/model-settings.ts';
 
 class FakeClient implements WorkbenchClient {
   config: { model: string | null; model_reasoning_effort: string | null; profile: string | null } = { model: 'alpha', model_reasoning_effort: 'high', profile: null };
@@ -12,6 +12,7 @@ class FakeClient implements WorkbenchClient {
   reject = false;
   conflictOnWrite = false;
   overridden = false;
+  defaults = ['alpha'];
   async reply(): Promise<void> { throw new Error('Unexpected approval'); }
   subscribe(_listener: (event: WorkbenchEvent) => void) { return () => {}; }
   async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
@@ -25,9 +26,9 @@ class FakeClient implements WorkbenchClient {
   async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
     this.calls.push({ method, params, hostId });
     if (method === 'config/read') return { config: { ...this.config }, layers: this.layers ?? [this.currentLayer()] } as T;
-    if (method === 'model/list') return { data: params?.cursor ? [{ id: 'b-id', model: 'beta', displayName: 'Beta', isDefault: false,
+    if (method === 'model/list') return { data: params?.cursor ? [{ id: 'b-id', model: 'beta', displayName: 'Beta', isDefault: this.defaults.includes('beta'),
       defaultReasoningEffort: 'low', supportedReasoningEfforts: [{ reasoningEffort: 'low' }] }] :
-      [{ id: 'a-id', model: 'alpha', displayName: 'Alpha', isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }],
+      [{ id: 'a-id', model: 'alpha', displayName: 'Alpha', isDefault: this.defaults.includes('alpha'), supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }],
     nextCursor: params?.cursor ? null : 'page2' } as T;
     if (method === 'config/batchWrite') {
       if (this.reject) throw new Error('offline');
@@ -44,6 +45,32 @@ class FakeClient implements WorkbenchClient {
     throw new Error('unsupported');
   }
 }
+
+test('nullable configured model uses the unique default for effort without writing a model', async () => {
+  const client = new FakeClient(); client.config.model = null; client.config.model_reasoning_effort = null;
+  const settings = new ModelSettings(client, 'local'); await settings.load();
+  assert.equal(resolveConfiguredModel(settings.getSnapshot().models, null)?.model, 'alpha');
+  settings.setEffort('high');
+  assert.equal(settings.getSnapshot().savedModel, null);
+  assert.equal(settings.getSnapshot().model, null);
+  assert.equal(await settings.save(), true);
+  assert.deepEqual(client.calls.find(call => call.method === 'config/batchWrite')?.params?.edits,
+    [{ keyPath: 'model_reasoning_effort', value: 'high', mergeStrategy: 'upsert' }]);
+  assert.equal(client.config.model, null);
+});
+
+test('missing or ambiguous defaults cannot validate a reasoning effort', async () => {
+  for (const defaults of [[], ['alpha', 'beta']]) {
+    const client = new FakeClient(); client.config.model = null; client.config.model_reasoning_effort = null; client.defaults = defaults;
+    const settings = new ModelSettings(client, 'local'); await settings.load();
+    assert.equal(resolveConfiguredModel(settings.getSnapshot().models, null), null);
+    settings.setEffort('high');
+    assert.match(settings.getSnapshot().error ?? '', /unavailable or ambiguous/);
+    assert.equal(settings.getSnapshot().effort, null);
+    assert.equal(await settings.save(), false);
+    assert.equal(client.calls.some(call => call.method === 'config/batchWrite'), false);
+  }
+});
 
 test('model settings paginate and write the selected host default user file with its version', async () => {
   const client = new FakeClient(), settings = new ModelSettings(client, 'ssh:fixture');

@@ -23,6 +23,13 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 const same = (a: string | null, b: string | null) => a === b;
 const asValue = (value: unknown): string | null => typeof value === 'string' && value ? value : null;
 
+/** Resolve the effective model without changing the nullable configured value. */
+export function resolveConfiguredModel(models: readonly ModelOption[], configuredModel: string | null): ModelOption | null {
+  if (configuredModel !== null) return models.find(item => item.model === configuredModel) ?? null;
+  const defaults = models.filter(item => item.isDefault === true);
+  return defaults.length === 1 ? defaults[0]! : null;
+}
+
 export class ModelSettings {
   private readonly client: WorkbenchClient;
   private readonly hostId: string;
@@ -114,8 +121,13 @@ export class ModelSettings {
   }
   setEffort(effort: string) {
     if (this.snapshot.loading || this.snapshot.saving) return;
-    const selected = this.snapshot.models.find(item => item.model === this.snapshot.model);
-    if (!selected?.supportedReasoningEfforts?.some(item => item.reasoningEffort === effort)) return;
+    const selected = resolveConfiguredModel(this.snapshot.models, this.snapshot.model);
+    if (!selected) {
+      this.update({ error: 'The default model is unavailable or ambiguous. Refresh the model list before changing reasoning effort.' }); return;
+    }
+    if (!selected.supportedReasoningEfforts.some(item => item.reasoningEffort === effort)) {
+      this.update({ error: 'The selected model does not support this reasoning effort. Review your selection before saving.' }); return;
+    }
     if (!this.dirty && effort !== this.snapshot.savedEffort) this.draftTarget = this.target;
     const conflicts = effort === this.snapshot.savedEffort ? this.snapshot.conflicts.filter(field => field !== 'effort') : this.snapshot.conflicts;
     if (this.snapshot.model === this.snapshot.savedModel && effort === this.snapshot.savedEffort) this.draftTarget = null;
@@ -141,7 +153,7 @@ export class ModelSettings {
     if ((!model && model !== savedModel) || (!effort && effort !== savedEffort)) {
       this.update({ error: 'This configuration cannot be written safely with the current host contract.' }); return false;
     }
-    const selected = this.snapshot.models.find(item => item.model === model);
+    const selected = resolveConfiguredModel(this.snapshot.models, model);
     if (effort !== savedEffort && (!selected || !selected.supportedReasoningEfforts.some(item => item.reasoningEffort === effort))) {
       this.update({ error: 'The selected model does not support this reasoning effort. Review your selection before saving.' }); return false;
     }
