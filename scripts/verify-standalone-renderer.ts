@@ -272,7 +272,9 @@ try {
     && document.querySelector<HTMLButtonElement>('button[aria-label="Reload file"]')?.disabled === false);
   assert.equal(await readFile(notesPath, 'utf8'), '\ufeffone\r\ntwo\nthree edited');
   await page.getByRole('button', { name: 'Open turn changes', exact: true }).click();
-  await page.getByLabel('Diff', { exact: true }).getByText('+two', { exact: true }).waitFor();
+  const addedLine = page.getByLabel('Diff', { exact: true }).locator('.yard-diff-line.is-add');
+  await addedLine.getByText('two', { exact: true }).waitFor();
+  assert.equal(await addedLine.getByRole('img', { name: 'Added line', exact: true }).count(), 1);
   await page.getByRole('button', { name: 'Open terminal', exact: true }).click();
   await page.locator('.xterm-rows').getByText('APP_TERMINAL_READY').waitFor();
   await page.locator('.xterm-helper-textarea').focus(); await page.keyboard.type('app-input');
