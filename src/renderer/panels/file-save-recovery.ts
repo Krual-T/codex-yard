@@ -10,6 +10,10 @@ export interface FileSaveRecovery {
   saved: string;
   draft: string;
   revision: number;
+  query?: { cwd: string; path: string };
+  terminalOutcome?: 'saved' | 'conflict' | 'failed';
+  targetMatch?: 'same' | 'different' | 'unknown';
+  guardOperationId?: string;
 }
 
 const phases = new Set<RecoveryPhase>(['pending', 'unknown', 'saved', 'conflict', 'failed']);
@@ -20,7 +24,12 @@ function recovery(value: unknown): FileSaveRecovery | undefined {
   const item = value as Partial<FileSaveRecovery>;
   if (typeof item.id !== 'string' || typeof item.checkId !== 'string' || typeof item.submitted !== 'boolean'
     || !phases.has(item.phase as RecoveryPhase) || typeof item.contents !== 'string'
-    || typeof item.saved !== 'string' || typeof item.draft !== 'string' || !Number.isSafeInteger(item.revision) || item.revision! < 0) {
+    || typeof item.saved !== 'string' || typeof item.draft !== 'string' || !Number.isSafeInteger(item.revision) || item.revision! < 0
+    || item.query !== undefined && (!item.query || typeof item.query.cwd !== 'string' || !item.query.cwd.startsWith('/')
+      || typeof item.query.path !== 'string' || !item.query.path.startsWith('/'))
+    || item.terminalOutcome !== undefined && !['saved', 'conflict', 'failed'].includes(item.terminalOutcome)
+    || item.targetMatch !== undefined && !['same', 'different', 'unknown'].includes(item.targetMatch)
+    || item.guardOperationId !== undefined && typeof item.guardOperationId !== 'string') {
     throw new Error('The saved file recovery record is invalid.');
   }
   return item as FileSaveRecovery;
@@ -54,20 +63,23 @@ export async function claimFileRecovery(key: string, previous: FileSaveRecovery 
   });
 }
 
-export async function updateFileRecovery(key: string, id: string, update: (current: FileSaveRecovery) => FileSaveRecovery) {
+export async function updateFileRecovery(key: string, id: string, update: (current: FileSaveRecovery) => FileSaveRecovery,
+  confirmed?: FileSaveRecovery) {
   const result = await updateBrowserAtom(keyFor(key), value => {
-    const current = recovery(value);
+    const current = recovery(value) ?? (confirmed?.id === id && confirmed.phase !== 'pending' && confirmed.phase !== 'unknown' ? confirmed : undefined);
     if (!current || current.id !== id) throw new Error('File recovery changed in another page. Keep or copy this edit before reopening.');
     return update(current);
   });
   return recovery(result)!;
 }
 
-export async function reconcileFileRecovery(key: string, expected: FileSaveRecovery | undefined, draft: string, revision: number) {
+export async function reconcileFileRecovery(key: string, expected: FileSaveRecovery | undefined, draft: string, revision: number,
+  restore?: FileSaveRecovery) {
   const result = await updateBrowserAtom(keyFor(key), value => {
     const current = recovery(value);
     if (!sameFileRecovery(current, expected)) throw new Error('File recovery changed in another page. Keep or copy this edit before closing.');
-    return current ? { ...current, draft, revision } : value;
+    const source = current ?? (restore && restore.phase !== 'pending' && restore.phase !== 'unknown' ? restore : undefined);
+    return source ? { ...source, draft, revision } : value;
   });
   return recovery(result);
 }

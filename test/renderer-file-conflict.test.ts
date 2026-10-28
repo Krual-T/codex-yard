@@ -25,7 +25,7 @@ test('known file save conflicts block another write across refresh until explici
         if (sessionStorage.getItem('mode') === 'late') throw new Error('fixture lost the original receipt');
         return {outcome:'conflict'};
       }
-      if (endpoint === 'workspace-file-save-status') return {outcome:'conflict'};
+      if (endpoint === 'workspace-file-save-status') return {outcome:'conflict',targetMatch:'same'};
       throw new Error('Unexpected host call: ' + endpoint);
     }, subscribe() { return () => {}; } };
     const props = {client, scopeId:'scope', hostId:'host', cwd:'/work',

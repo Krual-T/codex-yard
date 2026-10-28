@@ -194,7 +194,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
             state.saveStatus = state.writeOutcome === 'unknown-applied' ? 'saved' : 'unknown';
             return window.fixtureSave(params, state.writeOutcome);
           }
-          if (endpoint === 'workspace-file-save-status') return {outcome:state.saveStatus};
+          if (endpoint === 'workspace-file-save-status') return {outcome:state.saveStatus,targetMatch:'same'};
           const id = 'host-' + ++sequence;
           const result = await send({type:'fetch', requestId:id, url:'vscode://codex/' + endpoint, body:JSON.stringify(params)}, id);
           if (endpoint === 'workspace-files' && params.operation === 'read' && params.path === state.delayedPath) {

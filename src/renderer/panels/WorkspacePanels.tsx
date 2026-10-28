@@ -70,7 +70,8 @@ interface TerminalTab { key: string; scopeId: string; hostId: string; cwd: strin
 interface DiffTab { key: string; scopeId: string; hostId: string; cwd: string; path?: string; diff?: string }
 
 const unresolved = (recovery?: FileSaveRecovery) => recovery?.phase === 'pending' || recovery?.phase === 'unknown';
-const isDirty = (tab: FileTab) => tab.content?.kind === 'text' && (tab.draft !== tab.saved || unresolved(tab.recovery) || !!tab.storageError);
+const retainRecovery = (recovery?: FileSaveRecovery) => unresolved(recovery) || recovery?.phase === 'conflict';
+const isDirty = (tab: FileTab) => tab.content?.kind === 'text' && (tab.draft !== tab.saved || retainRecovery(tab.recovery) || !!tab.storageError);
 
 export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appearance, request, onRequestConsumed, onClose, onReference, onDirtyChange, onRecoveryBarrier }: WorkspacePanelsProps) {
   const t = usePanelText();
@@ -120,7 +121,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
   }, []);
   const storeRecovery = useCallback((key: string, id: string, update: (current: FileSaveRecovery) => FileSaveRecovery) =>
     queueRecovery(key, async () => {
-      const stored = await updateFileRecovery(key, id, update);
+      const stored = await updateFileRecovery(key, id, update, confirmedRecoveries.current.get(key));
       confirmedRecoveries.current.set(key, stored);
       return stored;
     }), [queueRecovery]);
@@ -231,8 +232,8 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     if (!tab || tab.saving || closingRef.current) return;
     const localOnly = !!tab.storageError || recoveryFailures.current.has(key);
     if ((isDirty(tab) || localOnly) && !window.confirm(t(localOnly
-      ? 'Close {name} on this page? Local edits may be lost; stored recovery records will not be changed.' : unresolved(tab.recovery)
-      ? 'Close {name}? The unknown save and retained edits will remain available.'
+      ? 'Close {name} on this page? Local edits may be lost; stored recovery records will not be changed.' : retainRecovery(tab.recovery)
+      ? 'Close {name}? The save recovery and retained edits will remain available.'
       : 'Discard unsaved changes to {name}?', {name: fileName(tab.path)}))) return;
     if (!freeze()) return;
     try {
@@ -240,7 +241,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
       const current = tabsRef.current.find(item => item.key === key);
       if (!current || current.loadId !== tab.loadId || current.revision !== tab.revision) throw new Error('File changed while closing; review the latest edit.');
       if (!localOnly && recoveryFailures.current.has(key)) throw recoveryFailures.current.get(key);
-      if (!localOnly && current.recovery && !unresolved(current.recovery)) {
+      if (!localOnly && current.recovery && !retainRecovery(current.recovery)) {
         const confirmed = confirmedRecoveries.current.get(key);
         if (!sameFileRecovery(confirmed, current.recovery)) throw new Error('File recovery changed while closing.');
         await discardFileRecovery(key, confirmed!);
@@ -291,7 +292,9 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     if (closingRef.current || !current || current.loading || current.saving || unresolved(current.recovery) || current.recovery?.phase === 'conflict' || current.storageError || current.content?.kind !== 'text' || !isDirty(current)) return;
     const { saved: expectedContents, draft: contents, loadId } = current;
     const id = crypto.randomUUID();
+    const guardOperationId = current.recovery?.guardOperationId;
     const recovery: FileSaveRecovery = { ...current.recovery, id, checkId: id, submitted: true, phase: 'pending', contents,
+      query: undefined, terminalOutcome: undefined, targetMatch: undefined,
       saved: expectedContents, draft: contents, revision: current.revision };
     updateTabs(previous => previous.map(item => item.key === tab.key ? { ...item, saving: true, recovery, error: undefined } : item));
     try { await queueRecovery(tab.key, async () => { await claimFileRecovery(tab.key, current.recovery, recovery); confirmedRecoveries.current.set(tab.key, recovery); }); }
@@ -302,29 +305,34 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
       return;
     }
     try {
-      const result = await client.host<{ outcome: 'saved' | 'conflict' | 'blocked'; operationId?: string }>('workspace-file-save', {
+      const result = await client.host<{ outcome: 'saved' | 'conflict' | 'blocked'; operationId?: string; query?: { cwd: string; path: string } }>('workspace-file-save', {
         hostId: current.hostId, cwd: current.cwd, path: current.path, expectedContents, contents, operationId: id,
+        ...(guardOperationId ? { guardOperationId } : {}),
       });
       if (!result || !['saved', 'conflict', 'blocked'].includes(result.outcome)
-        || result.outcome === 'blocked' && typeof result.operationId !== 'string') throw new Error('Invalid save response');
+        || result.outcome === 'blocked' && (typeof result.operationId !== 'string' || typeof result.query?.cwd !== 'string'
+          || !result.query.cwd.startsWith('/') || typeof result.query.path !== 'string' || !result.query.path.startsWith('/'))) throw new Error('Invalid save response');
       const phase: RecoveryPhase = result.outcome === 'blocked' ? 'unknown' : result.outcome;
-      const stored = await storeRecovery(tab.key, id, value => ({ ...value, phase,
-        ...(result.outcome === 'saved' ? { saved: contents } : {}),
-        ...(result.outcome === 'blocked' ? { checkId: result.operationId!, submitted: false } : {}) }));
+      const stored = await storeRecovery(tab.key, id, value => value.phase === 'conflict' ? value : ({ ...value, phase,
+        ...(result.outcome === 'saved' ? { saved: contents, terminalOutcome: 'saved' as const, targetMatch: 'same' as const, guardOperationId: id } : {}),
+        ...(result.outcome === 'conflict' ? { terminalOutcome: 'conflict' as const } : {}),
+        ...(result.outcome === 'blocked' ? { checkId: result.operationId!, submitted: false, query: result.query! } : {}) }));
+      const accepted = result.outcome === 'saved' && stored.phase === 'saved';
       updateTabs(previous => previous.map(item => item.key !== tab.key || item.loadId !== loadId || item.recovery?.id !== id ? item : {
         ...item, saving: false, recovery: { ...stored, draft: item.draft, revision: item.revision },
-        saved: result.outcome === 'saved' ? contents : item.saved,
-        content: result.outcome === 'saved' ? { kind: 'text', text: contents } : item.content,
-        error: result.outcome === 'blocked' ? 'Another save for this file has an unknown result. Check its original operation before saving.'
-          : result.outcome === 'conflict' ? 'File changed on disk. Keep or copy your changes before reloading.' : undefined,
+        saved: accepted ? contents : item.saved,
+        content: accepted ? { kind: 'text', text: contents } : item.content,
+        error: stored.phase === 'conflict' ? 'File changed on disk. Keep or copy your changes before reloading.'
+          : result.outcome === 'blocked' ? 'Another save for this file has an unknown result. Check its original operation before saving.' : undefined,
       }));
     } catch (error) {
       const knownFailure = typeof error === 'object' && error !== null && 'uncertain' in error && error.uncertain === false;
       try {
-        const stored = await storeRecovery(tab.key, id, value => ({ ...value, phase: knownFailure ? 'failed' : 'unknown' }));
+        const stored = await storeRecovery(tab.key, id, value => value.phase === 'conflict' ? value : ({ ...value, phase: knownFailure ? 'failed' : 'unknown' }));
         updateTabs(previous => previous.map(item => item.key !== tab.key || item.loadId !== loadId || item.recovery?.id !== id ? item : {
           ...item, saving: false, recovery: { ...stored, draft: item.draft, revision: item.revision },
-          error: knownFailure ? errorMessage(error) : `Save result is unknown: ${errorMessage(error)}. Check the original operation before saving again.`,
+          error: stored.phase === 'conflict' ? 'File changed on disk. Keep or copy your changes before reloading.'
+            : knownFailure ? errorMessage(error) : `Save result is unknown: ${errorMessage(error)}. Check the original operation before saving again.`,
         }));
       } catch (storageError) {
         updateTabs(previous => previous.map(item => item.key !== tab.key || item.loadId !== loadId || item.recovery?.id !== id ? item : {
@@ -341,8 +349,9 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     let updatingRecovery = false;
     updateTabs(previous => previous.map(item => item.key === tab.key ? { ...item, saving: true } : item));
     try {
-      const status = await client.host<{ outcome: 'pending' | 'unknown' | 'missing' | 'saved' | 'conflict' | 'failed' }>('workspace-file-save-status', {
+      const status = await client.host<{ outcome: 'pending' | 'unknown' | 'missing' | 'saved' | 'conflict' | 'failed'; targetMatch?: 'same' | 'different' | 'unknown' }>('workspace-file-save-status', {
         hostId: current.hostId, cwd: current.cwd, path: current.path, operationId: recovery.checkId,
+        ...(recovery.query ? { queryCwd: recovery.query.cwd, queryPath: recovery.query.path } : {}),
       });
       if (!status || !['saved', 'conflict', 'failed'].includes(status.outcome)) {
         updateTabs(previous => previous.map(item => item.key !== tab.key || item.loadId !== loadId || item.recovery?.id !== recovery.id ? item : {
@@ -350,19 +359,25 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
         }));
         return;
       }
-      const result = await readWorkspaceFile(client, current.hostId, current.path);
-      if (result.kind !== 'text') throw new Error('File is no longer text');
-      const saved = recovery.submitted && status.outcome === 'saved' && result.text === recovery.contents;
-      const unchanged = result.text === recovery.saved;
-      const phase: RecoveryPhase = saved ? 'saved' : unchanged && status.outcome === 'failed' ? 'failed' : 'conflict';
+      const terminalOutcome = status.outcome as 'saved' | 'conflict' | 'failed';
+      const targetMatch = status.targetMatch === 'same' || status.targetMatch === 'different' ? status.targetMatch : 'unknown';
+      let saved = false, phase: RecoveryPhase = 'conflict';
+      if (terminalOutcome !== 'conflict' && targetMatch === 'same') {
+        const result = await readWorkspaceFile(client, current.hostId, current.path);
+        if (result.kind !== 'text') throw new Error('File is no longer text');
+        saved = recovery.submitted && terminalOutcome === 'saved' && result.text === recovery.contents;
+        phase = saved ? 'saved' : result.text === recovery.saved && terminalOutcome === 'failed' ? 'failed' : 'conflict';
+      }
       updatingRecovery = true;
-      const stored = await storeRecovery(tab.key, recovery.id, value => ({ ...value, phase,
-        saved: saved ? recovery.contents : value.saved }));
+      const stored = await storeRecovery(tab.key, recovery.id, value => value.phase === 'conflict' ? value : ({ ...value, phase,
+        terminalOutcome, targetMatch, saved: saved ? recovery.contents : value.saved,
+        ...(phase === 'saved' || phase === 'failed' ? { guardOperationId: recovery.checkId } : {}) }));
+      const accepted = saved && stored.phase === 'saved';
       updateTabs(previous => previous.map(item => item.key !== tab.key || item.loadId !== loadId || item.recovery?.id !== recovery.id ? item : {
         ...item, saving: false, recovery: { ...stored, draft: item.draft, revision: item.revision },
-        saved: saved ? recovery.contents : item.saved,
-        content: saved ? { kind: 'text', text: recovery.contents } : item.content,
-        error: phase === 'conflict' ? 'File changed on disk. Keep or copy your changes before reloading.' : undefined,
+        saved: accepted ? recovery.contents : item.saved,
+        content: accepted ? { kind: 'text', text: recovery.contents } : item.content,
+        error: stored.phase === 'conflict' ? 'File changed on disk. Keep or copy your changes before reloading.' : undefined,
       }));
     } catch (error) {
       updateTabs(previous => previous.map(item => item.key !== tab.key || item.loadId !== loadId || item.recovery?.id !== recovery.id ? item : {
@@ -395,20 +410,29 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
       const current = tabsRef.current.find(item => item.key === key);
       if (!current || current.loadId !== tab.loadId || current.revision !== tab.revision) throw new Error('File changed while checking recovery.');
       const stored = await readFileRecovery(key);
+      const hadConfirmation = confirmedRecoveries.current.has(key);
       const confirmed = confirmedRecoveries.current.get(key);
-      if (!sameFileRecovery(stored, confirmed) || stored && current.recovery?.id !== stored.id
-        || current.recovery && !stored || stored && current.revision < stored.revision) {
+      const acceptStored = !hadConfirmation && current.revision === 0;
+      const restore = hadConfirmation && !stored && confirmed && !unresolved(confirmed)
+        && current.recovery?.id === confirmed.id && current.revision >= confirmed.revision ? confirmed : undefined;
+      if (!acceptStored && (hadConfirmation && !sameFileRecovery(stored, confirmed) && !restore
+        || stored && current.recovery?.id !== stored.id || current.recovery && !stored && !restore
+        || stored && current.revision < stored.revision)) {
         throw new Error('Another page owns a different recovery. Keep or copy these edits; closing this tab will leave that record untouched.');
       }
-      const reconciled = stored ? await reconcileFileRecovery(key, stored, current.draft, current.revision) : undefined;
+      const reconciled = await reconcileFileRecovery(key, stored, acceptStored && stored ? stored.draft : current.draft,
+        acceptStored && stored ? stored.revision : current.revision, restore);
       confirmedRecoveries.current.set(key, reconciled);
       recoveryFailures.current.delete(key);
+      const recoveredLoadId = acceptStored && reconciled ? ++sequence.current : undefined;
       updateTabs(previous => previous.map(item => item.key !== key || item.loadId !== tab.loadId ? item : {
         ...item, recovery: reconciled, storageError: false,
+        ...(acceptStored && reconciled ? { loadId: recoveredLoadId!, draft: reconciled.draft, saved: reconciled.saved, revision: reconciled.revision,
+          content: { kind: 'text' as const, text: reconciled.saved } } : {}),
         error: unresolved(reconciled) ? 'Save result is unknown. Check the original operation before saving again.'
           : reconciled?.phase === 'conflict' ? 'File changed on disk. Keep or copy your changes before reloading.'
           : disk?.kind !== 'text' ? 'Could not reread this file. Keep or copy your edits.'
-            : disk.text !== item.saved ? 'File changed on disk. Reload or copy your changes before saving.' : undefined,
+            : disk.text !== (acceptStored && reconciled ? reconciled.saved : item.saved) ? 'File changed on disk. Reload or copy your changes before saving.' : undefined,
       }));
     } catch (error) {
       updateTabs(previous => previous.map(item => item.key !== key || item.loadId !== tab.loadId ? item : {
@@ -429,8 +453,9 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     if (closingRef.current || tabsRef.current.some(tab => tab.saving)) return;
     const localOnly = onlyThisPage || tabsRef.current.some(tab => tab.storageError || recoveryFailures.current.has(tab.key));
     if ((tabsRef.current.some(isDirty) || localOnly) && !window.confirm(t(localOnly
-      ? 'Close this panel on this page? Local edits may be lost; stored recovery records will not be changed.' : tabsRef.current.some(tab => unresolved(tab.recovery))
-      ? 'Close the panel? Other unsaved edits will be discarded. Unknown saves and their retained edits will remain available.' : 'Discard unsaved file changes?'))) return;
+      ? onlyThisPage ? 'Close this panel on this page? A terminal may still be running. Copy unsaved local edits first; stored recovery records will not be changed.'
+        : 'Close this panel on this page? Local edits may be lost; stored recovery records will not be changed.' : tabsRef.current.some(tab => retainRecovery(tab.recovery))
+      ? 'Close the panel? Other unsaved edits will be discarded. Save recoveries and their retained edits will remain available.' : 'Discard unsaved file changes?'))) return;
     const original = tabsRef.current.map(({ key, loadId, revision }) => ({ key, loadId, revision }));
     setPanelError(undefined);
     if (!freeze()) return;
@@ -440,18 +465,21 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
         tabsRef.current.some(tab => tab.key === expected.key && tab.loadId === expected.loadId && tab.revision === expected.revision));
       if (!unchanged()) throw new Error('Files changed while closing; review the latest edits.');
       if (!localOnly && recoveryFailures.current.size) throw recoveryFailures.current.values().next().value;
-      const results = await Promise.all([...terminalHandles.current.values()].map(handle => handle.close()));
-      if (results.some(closed => !closed)) { setPanelError('A terminal could not be closed. File recovery records were retained.'); return; }
+      if (!onlyThisPage) {
+        const results = await Promise.all([...terminalHandles.current.values()].map(handle => handle.close()));
+        if (results.some(closed => !closed)) { setPanelError('A terminal could not be closed. File recovery records were retained.'); return; }
+      }
       while (recoveryQueues.current.size) await Promise.all(recoveryQueues.current.values());
       if (!unchanged()) throw new Error('Files changed while closing; review the latest edits.');
       if (!localOnly) {
-        const records = tabsRef.current.filter(tab => tab.recovery && !unresolved(tab.recovery)).map(tab => {
+        const records = tabsRef.current.filter(tab => tab.recovery && !retainRecovery(tab.recovery)).map(tab => {
           const expected = confirmedRecoveries.current.get(tab.key);
           if (!sameFileRecovery(expected, tab.recovery)) throw new Error('File recovery changed while closing.');
           return { key: tab.key, expected: expected! };
         });
         await discardFileRecoveries(records);
       }
+      if (onlyThisPage) for (const handle of terminalHandles.current.values()) handle.detach();
       recoveryFailures.current.clear();
       confirmedRecoveries.current.clear();
       updateTabs(() => []);

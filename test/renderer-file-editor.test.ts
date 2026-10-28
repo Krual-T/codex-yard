@@ -42,7 +42,7 @@ test('CodeMirror editor keeps file bytes, history and language isolated across s
           if (state.mode === 'unknown-applied') throw new Error('synthetic disconnect after write');
           return {outcome:'saved'};
         }
-        if (endpoint === 'workspace-file-save-status') return {outcome:'saved'};
+        if (endpoint === 'workspace-file-save-status') return {outcome:'saved',targetMatch:'same'};
         throw new Error('Unsupported synthetic endpoint: ' + endpoint);
       }, subscribe() { return () => {}; }};
       let props = {client, scopeId:'thread-a',hostId:'test-host',cwd:'/workspace',
@@ -116,7 +116,9 @@ test('CodeMirror editor keeps file bytes, history and language isolated across s
     await page.getByRole('button', { name:'Save file' }).click();
     await page.waitForFunction(() => (window as any).panelFixture.state.writes.length === 2
       && !document.querySelector('[role="tab"][aria-selected="true"] [aria-label="Unsaved changes"]'));
-    assert.deepEqual(await page.evaluate(() => { const { operationId: _id, ...write } = (window as any).panelFixture.state.writes[1]; return write; }), {
+    assert.equal(await page.evaluate(() => (window as any).panelFixture.state.writes[1].guardOperationId),
+      await page.evaluate(() => (window as any).panelFixture.state.writes[0].operationId));
+    assert.deepEqual(await page.evaluate(() => { const { operationId: _id, guardOperationId: _guard, ...write } = (window as any).panelFixture.state.writes[1]; return write; }), {
       hostId:'test-host', cwd:'/workspace', path:'/workspace/a.ts', expectedContents:edited, contents:'\ufeff// draft\r\n' + edited.slice(1),
     });
 
