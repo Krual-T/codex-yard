@@ -112,6 +112,37 @@ test('model context exposes only valid, host-scoped model content and never priv
   assert.doesNotMatch(JSON.stringify(result), /private|remote/);
 });
 
+test('model context restores legacy path slots while excluding conflicting and private data', async () => {
+  const { client, atoms } = fixture();
+  const identity = { ...local, path: 'C:\\Charts\\One.html' };
+  const key = visualizationAtomKey('visualization-state-v3', identity);
+  const interactionKey = visualizationAtomKey('visualization-interaction-state-v1', identity);
+  atoms[key] = {
+    'old-path-key': { ...identity, state: { modelContent: { selected: 4 }, privateContent: 'private-widget', future: true }, future: 'preserved' },
+    unknown: { future: 'preserved' },
+    'other-host': { ...identity, hostId: 'remote', state: { modelContent: 'remote-secret' } },
+  };
+  atoms[interactionKey] = {
+    'old-interaction-key': { ...identity, state: { modelContent: { edits: [3] }, privateContent: 'private-interaction' }, future: true },
+  };
+  const before = structuredClone(atoms);
+  assert.deepEqual((await readVisualizationState(client, identity))?.modelContent, { selected: 4 });
+  assert.deepEqual(await readVisualizationModelContext(client, identity.hostId, identity.threadId), [
+    { path: identity.path, field: 'state', modelContent: { selected: 4 } },
+    { path: identity.path, field: 'interaction', modelContent: { edits: [3] } },
+  ]);
+  assert.deepEqual(atoms, before);
+
+  const map = atoms[key] as Record<string, unknown>;
+  map[visualizationPathKey(identity.path)] = { ...identity, path: '\\\\wsl$\\Ubuntu\\mnt\\c\\Charts\\One.html', state: { modelContent: 'conflicting' } };
+  await assert.rejects(readVisualizationState(client, identity), /Conflicting/);
+  const conflicted = structuredClone(atoms);
+  const context = await readVisualizationModelContext(client, identity.hostId, identity.threadId);
+  assert.deepEqual(context, [{ path: identity.path, field: 'interaction', modelContent: { edits: [3] } }]);
+  assert.doesNotMatch(JSON.stringify(context), /private|remote|conflicting/);
+  assert.deepEqual(atoms, conflicted);
+});
+
 test('atomic record updates preserve a concurrent path and reject conflicting or malformed replacements', async () => {
   const f = fixture();
   const key = visualizationAtomKey('visualization-state-v3', local);

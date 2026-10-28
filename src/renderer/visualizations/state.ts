@@ -99,7 +99,10 @@ export async function readVisualizationModelContext(client: WorkbenchClient, hos
   for (const kind of ['visualization-state-v3', 'visualization-interaction-state-v1'] as const) {
     const map = await readMap(client, visualizationAtomKey(kind, identity));
     for (const [key, entry] of Object.entries(map).slice(-100).sort(([a], [b]) => a.localeCompare(b))) {
-      if (!isRecord(entry) || entry.hostId !== hostId || entry.threadId !== threadId || typeof entry.path !== 'string' || !entry.path || visualizationPathKey(entry.path) !== key) continue;
+      if (!isRecord(entry) || entry.hostId !== hostId || entry.threadId !== threadId || typeof entry.path !== 'string' || !entry.path) continue;
+      try {
+        if (slot(map, { hostId, threadId, path: entry.path }) !== key) continue;
+      } catch { continue; }
       let state: RecordValue;
       try { state = kind === 'visualization-state-v3' ? normalizeWidgetState(entry.state) : validateInteractionState(entry.state); } catch { continue; }
       const item: VisualizationModelContext = { path: entry.path, field: kind === 'visualization-state-v3' ? 'state' : 'interaction', modelContent: state.modelContent };
