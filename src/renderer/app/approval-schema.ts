@@ -126,7 +126,11 @@ export function parseApprovalForm(value: unknown): FormParse {
 
 export function initialApprovalValues(form: ApprovalForm): ApprovalFormValues {
   return Object.fromEntries(form.fields.flatMap((field): [string, string | string[]][] => {
-    if (field.default === undefined) return [];
+    if (field.default === undefined) {
+      if (field.required && field.kind === 'string') return [[field.key, '']];
+      if (field.required && field.kind === 'multi') return [[field.key, []]];
+      return [];
+    }
     return [[field.key, Array.isArray(field.default) ? [...field.default] : String(field.default)]];
   }));
 }

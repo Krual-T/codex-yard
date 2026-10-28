@@ -13,7 +13,7 @@ test('MCP form validates typed fields, constraints and exact selected values', (
     unused: { type: 'string' },
   } });
   assert.ok(parsed.form);
-  assert.deepEqual(initialApprovalValues(parsed.form), { confirmed: 'false', ratio: '0' });
+  assert.deepEqual(initialApprovalValues(parsed.form), { name: '', confirmed: 'false', labels: [], ratio: '0' });
   const missing = validateApprovalForm(parsed.form, initialApprovalValues(parsed.form));
   assert.deepEqual(Object.keys(missing.errors ?? {}).sort(), ['age', 'labels', 'name', 'plan']);
   const valid = validateApprovalForm(parsed.form, { name: '  Ada  ', age: '3', confirmed: 'false',
@@ -67,9 +67,20 @@ test('missing strings and arrays remain distinct from explicitly supplied empty 
     optional: { type: 'string' },
   } });
   assert.ok(parsed.form);
-  assert.deepEqual(initialApprovalValues(parsed.form), { empty: '' });
+  assert.deepEqual(initialApprovalValues(parsed.form), { empty: '', items: [] });
   assert.deepEqual(Object.keys(validateApprovalForm(parsed.form, { empty: '' }).errors ?? {}).sort(), ['choice', 'items']);
   const result = validateApprovalForm(parsed.form, { empty: '', choice: '', items: [], optional: '  ' });
   assert.deepEqual({ ...result.content }, { empty: '', choice: '', items: [], optional: '  ' });
   assert.ok(validateApprovalForm(parsed.form, { empty: '', choice: '', items: [], optional: [] }).errors?.optional);
+});
+
+test('required empty strings and arrays are submitted without editing when constraints allow them', () => {
+  const parsed = parseApprovalForm({ type: 'object', required: ['text', 'items'], properties: {
+    text: { type: 'string' }, items: { type: 'array', items: { type: 'string', enum: ['a'] } },
+    optionalText: { type: 'string' }, optionalItems: { type: 'array', items: { type: 'string', enum: ['a'] } },
+  } });
+  assert.ok(parsed.form);
+  const initial = initialApprovalValues(parsed.form);
+  assert.deepEqual(initial, { text: '', items: [] });
+  assert.deepEqual({ ...validateApprovalForm(parsed.form, initial).content }, { text: '', items: [] });
 });

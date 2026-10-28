@@ -9,15 +9,17 @@ declare global {
     approvalHarness: {
       show(method: string, params: Record<string, unknown>, options?: {
         completion?: boolean; wrongHost?: boolean; noInterrupt?: boolean; dismissEmpty?: boolean; completionHost?: string; authCheck?: boolean | 'delayed';
+        unmanaged?: boolean; wrongState?: boolean; validity?: boolean;
       }): void;
       update(params: Record<string, unknown>): void;
       hide(): void;
       reopen(): void;
-      failNext(): void;
+      failNext(kind?: 'known' | 'unknown'): void;
       releaseAuth(): void;
       calls: { ref: { hostId: string; generation: string; id: number }; result?: unknown; interrupt?: unknown; unsupported?: boolean }[];
       searches: { kind: string; params: Record<string, unknown>; hostId?: string }[];
       authChecks: unknown[];
+      validityChecks: unknown[];
     };
   }
 }
@@ -30,7 +32,7 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     "import { createRoot } from 'react-dom/client';",
     "import { ApprovalDialog } from './src/renderer/app/ApprovalDialog.tsx';",
     "const root = createRoot(document.getElementById('root'));",
-    'const calls = [], searches = [], authChecks = [], outcomes = new Map(), inputDrafts = new Map(), formDrafts = new Map();',
+    'const calls = [], searches = [], authChecks = [], validityChecks = [], outcomes = new Map(), inputDrafts = new Map(), formDrafts = new Map();',
     'let next = 0, current, fail = false, releaseAuth;',
     'const client = {',
     "  host: async (kind, params) => { searches.push({kind, params}); return {entries:[{type:'file', name:'readme.md', path:'readme.md'}]}; },",
@@ -40,21 +42,23 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     'function render() {',
     '  const {request, options} = current, ref = request.ref, key = JSON.stringify(ref);',
     '  root.render(React.createElement(ApprovalDialog, { request,',
-    '    outcome:outcomes.get(key), inputDraft:inputDrafts.get(key), formDraft:formDrafts.get(key),',
-    '    onOutcome:(_ref, value) => outcomes.set(key, value),',
-    '    onInputDraftChange:(_ref, value) => inputDrafts.set(key, structuredClone(value)),',
-    '    onFormDraftChange:(_ref, value) => formDrafts.set(key, structuredClone(value)),',
+    "    stateRef:options.unmanaged ? undefined : options.wrongState ? {...ref,generation:'another-generation'} : ref,",
+    "    outcome:options.unmanaged ? undefined : (outcomes.get(key) ?? 'ready'), inputDraft:inputDrafts.get(key), formDraft:formDrafts.get(key),",
+    '    onOutcome:options.unmanaged ? undefined : (_ref, value) => outcomes.set(key, value),',
+    '    onInputDraftChange:options.unmanaged ? undefined : (_ref, value) => inputDrafts.set(key, structuredClone(value)),',
+    '    onFormDraftChange:options.unmanaged ? undefined : (_ref, value) => formDrafts.set(key, structuredClone(value)),',
+    '    onCheckRequestValidity:options.validity === undefined ? undefined : async ref => { validityChecks.push(structuredClone(ref)); return options.validity; },',
     "    completionContext:options.completion ? {client, hostId:options.completionHost ?? 'ssh-test',threadId:'thread-a',cwd:'/source-work'} : undefined,",
     "    inputDismissMode:options.dismissEmpty ? 'reply-empty' : 'interrupt',",
     "    onCheckConnectorAuthorization:options.authCheck ? async value => { authChecks.push(structuredClone(value)); if (options.authCheck === 'delayed') return await new Promise(resolve => {releaseAuth=resolve;}); return true; } : undefined,",
     '    onRespond:async result => { calls.push({ref,result:structuredClone(result)});',
-    "      if (fail) { fail=false; throw Object.assign(Error('Synthetic reply failure'), {uncertain:true}); } root.render(null); },",
+    "      if (fail) { const kind=fail; fail=false; throw Object.assign(Error('Synthetic reply failure'), {uncertain:kind !== 'known'}); } root.render(null); },",
     '    onUnsupported:async () => { calls.push({ref,unsupported:true}); root.render(null); },',
     '    onInputEscape:options.noInterrupt ? undefined : async origin => { calls.push({ref,interrupt:structuredClone(origin)});',
-    "      if (fail) { fail=false; throw Object.assign(Error('Synthetic interrupt failure'), {uncertain:true}); } root.render(null); }",
+    "      if (fail) { const kind=fail; fail=false; throw Object.assign(Error('Synthetic interrupt failure'), {uncertain:kind !== 'known'}); } root.render(null); }",
     '  }));',
     '}',
-    'window.approvalHarness = { calls, searches, authChecks, failNext() {fail=true;}, releaseAuth() {releaseAuth(true);}, hide() {root.render(null);}, reopen() {render();},',
+    "window.approvalHarness = { calls, searches, authChecks, validityChecks, failNext(kind='unknown') {fail=kind;}, releaseAuth() {releaseAuth(true);}, hide() {root.render(null);}, reopen() {render();},",
     '  update(params) {current.request.params={...current.request.params,...params}; render();},',
     '  show(method, params, options={}) { const id=++next, ref={hostId:"ssh-test",generation:"generation-"+id,id};',
     "    current={request:{ref,hostId:options.wrongHost?'wrong-host':ref.hostId,id,method,params:{threadId:'thread-a',turnId:'turn-a',...params}},options}; render(); } };",
@@ -70,6 +74,7 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     const dialog = page.getByRole('dialog');
     const show = (method: string, params: Record<string, unknown>, options?: {
       completion?: boolean; wrongHost?: boolean; noInterrupt?: boolean; dismissEmpty?: boolean; completionHost?: string; authCheck?: boolean | 'delayed';
+      unmanaged?: boolean; wrongState?: boolean; validity?: boolean;
     }) =>
       page.evaluate(([m, p, o]) => window.approvalHarness.show(m, p, o), [method, params, options] as const);
     const calls = () => page.evaluate(() => window.approvalHarness.calls);
@@ -90,6 +95,36 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     assert.equal(await dialog.getByRole('button', { name:'Continue' }).isDisabled(), true);
     assert.equal((await calls()).length, 1);
     assert.deepEqual((await calls())[0]?.result, { action:'accept', content:{}, _meta:null });
+
+    await show('item/fileChange/requestApproval', {}, {unmanaged:true});
+    await dialog.getByText(/Approval state is unavailable/).waitFor();
+    assert.equal(await dialog.getByRole('button', {name:'Approve', exact:true}).isDisabled(), true);
+    await hide(); await reopen();
+    assert.equal(await dialog.getByRole('button', {name:'Approve', exact:true}).isDisabled(), true);
+    await show('item/fileChange/requestApproval', {}, {wrongState:true});
+    await dialog.getByText(/Approval state is unavailable/).waitFor();
+    assert.equal(await dialog.getByRole('button', {name:'Approve', exact:true}).isDisabled(), true);
+
+    await show('item/tool/requestUserInput', {questions:[{id:'q',question:'Keep this draft',options:null}]}, {validity:true});
+    await dialog.getByLabel('Keep this draft').fill('preserved');
+    await page.evaluate(() => window.approvalHarness.failNext('known'));
+    await dialog.getByRole('button', {name:'Submit'}).click();
+    await dialog.getByText(/original request is still pending/).waitFor();
+    assert.equal(await dialog.getByLabel('Keep this draft').inputValue(), 'preserved');
+    assert.equal(await dialog.getByRole('button', {name:'Submit'}).isDisabled(), false);
+    const checks = await page.evaluate(() => window.approvalHarness.validityChecks);
+    assert.deepEqual(checks.at(-1), (await calls()).at(-1)?.ref);
+    await hide(); await reopen();
+    assert.equal(await dialog.getByLabel('Keep this draft').inputValue(), 'preserved');
+    await dialog.getByRole('button', {name:'Submit'}).click();
+    assert.deepEqual((await calls()).at(-1)?.result, {answers:{q:{answers:['preserved']}}});
+
+    await show('item/fileChange/requestApproval', {}, {validity:false});
+    await page.evaluate(() => window.approvalHarness.failNext('known'));
+    await dialog.getByRole('button', {name:'Approve',exact:true}).click();
+    await dialog.getByText(/Response could not be confirmed/).waitFor();
+    await hide(); await reopen();
+    assert.equal(await dialog.getByRole('button', {name:'Approve',exact:true}).isDisabled(), true);
 
     await show('mcpServer/elicitation/request', { mode:'url', elicitationId:'e2', url:'http://example.test/', message:'Not HTTPS' });
     await dialog.getByText('This URL request cannot be opened safely.').waitFor();
@@ -159,6 +194,10 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
       await dialog.getByRole('button', { name:'Submit' }).click();
       assert.deepEqual((await calls()).at(-1)?.result, {action:'accept',content:{choice:'',empty:'',optional:'  ',age:4},_meta:null});
     }
+    await show('mcpServer/elicitation/request', {mode:'form',requestedSchema:{type:'object',required:['text','choices'],properties:{
+      text:{type:'string'},choices:{type:'array',items:{type:'string',enum:['a']}}}}});
+    await dialog.getByRole('button', {name:'Submit'}).click();
+    assert.deepEqual((await calls()).at(-1)?.result, {action:'accept',content:{text:'',choices:[]},_meta:null});
     await page.evaluate(() => window.approvalHarness.show('mcpServer/elicitation/request', {mode:'form', requestedSchema:JSON.parse(
       '{"type":"object","required":["constructor","__proto__"],"properties":{"constructor":{"type":"string"},"__proto__":{"type":"string"}}}')}));
     await dialog.getByLabel('constructor (required)').fill('first');
@@ -188,6 +227,21 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     assert.doesNotMatch(await dialog.innerText(), /plan_token/);
     await dialog.getByRole('button', {name:'Approve'}).click();
     assert.deepEqual((await calls()).at(-1)?.result, {action:'accept',content:{},_meta:null});
+    const deceptiveSummary = JSON.stringify({approval_version:1,binding_name:'app',deployment_id:'d',operation:'delete',
+      primary_key_column:'id',primary_key_value:'7',project_id:'p',table_name:'records\u202Eadmin',values:{id:7}})
+      .replace(/[\u007f-\uffff]/g, character => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'));
+    await show('mcpServer/elicitation/request', {mode:'form',serverName:'codex_apps',requestedSchema:{type:'object',properties:{}},
+      _meta:{...baseMeta,tool_params:{confirmation_summary:deceptiveSummary,plan_token:'fixture'}}});
+    const renderedTarget = await dialog.innerText();
+    assert.match(renderedTarget, /records\\u202Eadmin/);
+    assert.doesNotMatch(renderedTarget, /\u202E/);
+    await dialog.getByRole('button', {name:'Decline'}).click();
+
+    await show('mcpServer/elicitation/request', {mode:'form',requestedSchema:{type:'object',properties:{}},
+      _meta:{codex_approval_kind:'mcp_tool_call',connector_id:'mail',tool_params:{to:'test'},persist:['session','always'],riskLevel:'high'}});
+    await dialog.getByText('Elevated risk').waitFor();
+    await dialog.getByRole('button', {name:'Approve for session'}).click();
+    assert.deepEqual((await calls()).at(-1)?.result, {action:'accept',content:{},_meta:{persist:'session'}});
 
     await show('mcpServer/elicitation/request', {mode:'form',message:'Confirm change',
       requestedSchema:{type:'object',required:['approved'],properties:{approved:{type:'boolean',title:'Approved'}}},

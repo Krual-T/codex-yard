@@ -4,7 +4,8 @@ import { useCompletions } from '../composer/standalone-completions.tsx';
 import type { Completion } from '../composer/standalone-completions.tsx';
 import { initialApprovalValues, validateApprovalForm } from './approval-schema.ts';
 import type { ApprovalField, ApprovalFormValues } from './approval-schema.ts';
-import { classifyElicitation } from './approval-elicitation.ts';
+import { classifyElicitation, displayApprovalParameters } from './approval-elicitation.ts';
+import type { ApprovalPersistence } from './approval-elicitation.ts';
 
 export interface ServerRequest {
   hostId: string; id: string | number; method: string; params: Record<string, unknown>;
@@ -16,7 +17,7 @@ interface Question {
   options?: { label: string; description?: string }[] | null;
 }
 type DecisionChoice = { label: string; decision: unknown; detail?: string };
-export type ApprovalOutcome = 'sending' | 'sent' | 'unknown';
+export type ApprovalOutcome = 'ready' | 'sending' | 'sent' | 'unknown';
 export type ApprovalInputDraft = Record<string, { selected: string | null; other: string }>;
 export interface ApprovalInputOrigin { ref: ServerRequestRef; hostId: string; threadId: string; turnId: string }
 export interface ApprovalCompletionContext { client: WorkbenchClient; hostId: string; threadId: string; cwd: string }
@@ -31,12 +32,16 @@ export interface ApprovalDialogProps {
   onInputEscape?(origin: ApprovalInputOrigin): Promise<void>;
   /** Only for the original onboarding/auto-resolution request cases. */
   inputDismissMode?: 'interrupt' | 'reply-empty';
+  /** Identity of the parent-owned outcome and both draft snapshots. */
+  stateRef?: ServerRequestRef;
   outcome?: ApprovalOutcome;
   onOutcome?(ref: ServerRequestRef, outcome: ApprovalOutcome): void;
   inputDraft?: ApprovalInputDraft;
   onInputDraftChange?(ref: ServerRequestRef, draft: ApprovalInputDraft): void;
   formDraft?: ApprovalFormValues;
   onFormDraftChange?(ref: ServerRequestRef, draft: ApprovalFormValues): void;
+  /** Return true only while this exact original request is still pending at its original host. */
+  onCheckRequestValidity?(ref: ServerRequestRef): Promise<boolean>;
   completionContext?: ApprovalCompletionContext;
   /** Resolve true only after the original host confirms that the connector is accessible. */
   onCheckConnectorAuthorization?(request: ApprovalConnectorAuthorization): Promise<boolean>;
@@ -234,8 +239,8 @@ export function ApprovalDialog(props: ApprovalDialogProps) {
   return <ApprovalDialogContent key={JSON.stringify([props.request.ref.hostId, props.request.ref.generation, props.request.ref.id])} {...props} />;
 }
 
-function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscape, inputDismissMode = 'interrupt', outcome, onOutcome,
-  inputDraft, onInputDraftChange, formDraft, onFormDraftChange, completionContext, onCheckConnectorAuthorization }: ApprovalDialogProps) {
+function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscape, inputDismissMode = 'interrupt', stateRef, outcome, onOutcome,
+  inputDraft, onInputDraftChange, formDraft, onFormDraftChange, onCheckRequestValidity, completionContext, onCheckConnectorAuthorization }: ApprovalDialogProps) {
   const dialog = useRef<HTMLElement>(null);
   const inFlight = useRef(false);
   const checkingAuth = useRef(false);
@@ -268,7 +273,10 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
     ? { ref: request.ref, hostId: request.ref.hostId, threadId, turnId } : null;
   const completion = source && completionContext?.hostId === source.hostId && completionContext.threadId === source.threadId
     && completionContext.cwd ? completionContext : undefined;
-  const locked = busy || Boolean(outcome || localOutcome) || !sourceValid;
+  // A parent-owned ready state makes remounts safe even after an uncertain reply.
+  const managed = stateRef?.hostId === request.ref.hostId && stateRef.generation === request.ref.generation
+    && stateRef.id === request.ref.id && outcome !== undefined && Boolean(onOutcome && onInputDraftChange && onFormDraftChange);
+  const locked = busy || !managed || outcome !== 'ready' || Boolean(localOutcome && localOutcome !== 'ready') || !sourceValid;
   const lockedRef = useRef(locked);
   lockedRef.current = locked;
   const authorizationKey = view?.kind === 'url' ? JSON.stringify([request.ref.hostId, request.ref.generation, request.ref.id, threadId,
@@ -277,6 +285,7 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   authorizationKeyRef.current = authorizationKey;
   let warning = '';
   if (!sourceValid) warning = 'This request has inconsistent host or request identity.';
+  else if (!managed) warning = 'Approval state is unavailable. Open this request in a connected conversation to respond.';
   else if (input && !questions) warning = 'This input request cannot be represented safely.';
   else if (permissions && !grant) warning = 'These requested permissions cannot be represented safely.';
   else if (command && decisions?.unsupported) warning = 'Some approval decisions cannot be represented safely.';
@@ -299,24 +308,35 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   }, [blocking]);
 
   const send = async (action: () => Promise<void>) => {
-    if (inFlight.current || locked) return;
+    if (inFlight.current || lockedRef.current || !onOutcome) return;
     inFlight.current = true; setBusy(true); setError('');
-    onOutcome?.(request.ref, 'sending');
     try {
+      onOutcome(request.ref, 'sending');
       await action();
       setLocalOutcome('sent');
-      onOutcome?.(request.ref, 'sent');
+      onOutcome(request.ref, 'sent');
     }
     catch (cause) {
-      setError((cause instanceof Error ? cause.message : String(cause)) + ' Response could not be confirmed; check the original conversation before responding again.');
-      setLocalOutcome('unknown');
-      onOutcome?.(request.ref, 'unknown');
+      let stillPending = false;
+      if (record(cause) && cause.uncertain === false && onCheckRequestValidity) {
+        try { stillPending = await onCheckRequestValidity(request.ref); } catch { /* An unverified request stays locked. */ }
+      }
+      if (stillPending && mounted.current) {
+        onOutcome(request.ref, 'ready');
+        setLocalOutcome('ready');
+        inFlight.current = false;
+        setError((cause instanceof Error ? cause.message : String(cause)) + ' The original request is still pending; you can retry.');
+      } else {
+        setLocalOutcome('unknown');
+        onOutcome(request.ref, 'unknown');
+        setError((cause instanceof Error ? cause.message : String(cause)) + ' Response could not be confirmed; check the original conversation before responding again.');
+      }
     }
-    finally { setBusy(false); }
+    finally { if (mounted.current) setBusy(false); }
   };
   const respond = (result: unknown) => { void send(() => onRespond(result)); };
-  const elicitationResponse = (action: 'accept' | 'decline' | 'cancel', content: unknown = null) =>
-    ({ action, content, _meta: null });
+  const elicitationResponse = (action: 'accept' | 'decline' | 'cancel', content: unknown = null, persist?: ApprovalPersistence) =>
+    ({ action, content, _meta: action === 'accept' && persist ? { persist } : null });
   const checkConnectorAuthorization = async () => {
     if (view?.kind !== 'url' || !view.connectorId || view.consent || !threadId || !onCheckConnectorAuthorization
       || checkingAuth.current || locked) return;
@@ -418,8 +438,9 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
           <p>This connection consent requires the host authorization flow.</p></>}
         {!view.consent && !onCheckConnectorAuthorization && <p>Connection verification is unavailable in this view.</p>}</>}
       {view?.kind === 'tool' && <><p>Connector: {view.connector}{view.tool && <> · Tool: {view.tool}</>}</p>
+        {view.riskLevel === 'high' && <p role="status">Elevated risk</p>}
         {view.executionBound && <p>Review this specific database change before approving.</p>}
-        <pre>{JSON.stringify(view.parameters, null, 2)}</pre></>}
+        <pre>{displayApprovalParameters(view.parameters)}</pre></>}
       {form && <form id={formId} noValidate onSubmit={(event) => { event.preventDefault(); submitForm(); }}>
         {view?.kind === 'form' && view.confirmation && <div>
           {view.confirmation.title && <h3>{view.confirmation.title}</h3>}
@@ -457,8 +478,8 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
     {!input && !elicitation && <pre>{JSON.stringify(request.params, null, 2)}</pre>}
     {warning && <p role="alert">{warning}</p>}
     {error && <p role="alert">{error}</p>}
-    {(outcome ?? localOutcome) === 'unknown' && !error && <p role="alert">Response could not be confirmed; check the original conversation before responding again.</p>}
-    {(outcome ?? localOutcome) === 'sent' && <p role="status">Response sent; waiting for the request to resolve.</p>}
+    {(localOutcome ?? outcome) === 'unknown' && !error && <p role="alert">Response could not be confirmed; check the original conversation before responding again.</p>}
+    {(localOutcome ?? outcome) === 'sent' && <p role="status">Response sent; waiting for the request to resolve.</p>}
     {command && decisions && <fieldset style={{ minWidth: 0 }}><legend>Available decisions</legend>
       {decisions.choices.map((choice, index) => <div key={index} style={{ margin: '8px 0' }}>
         <button type="button" style={{ maxWidth: '100%', overflowWrap: 'anywhere', whiteSpace: 'normal', textAlign: 'left' }}
@@ -470,6 +491,8 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
         <button type="button" disabled={locked} onClick={cancel}>Cancel</button>
         {form && <button type="submit" form={formId} disabled={locked}>{view?.kind === 'form' && view.confirmation?.confirmLabel || 'Submit'}</button>}
         {view?.kind === 'tool' && <button type="button" disabled={locked} onClick={() => respond(elicitationResponse('accept', {}))}>Approve</button>}
+        {view?.kind === 'tool' && view.persistence.map(option => <button key={option} type="button" disabled={locked}
+          onClick={() => respond(elicitationResponse('accept', {}, option))}>{option === 'session' ? 'Approve for session' : 'Always approve'}</button>)}
         {view?.kind === 'url' && view.connectorId === undefined && <button type="button" disabled={locked} onClick={() => respond(elicitationResponse('accept', {}))}>Continue</button>}
         {view?.kind === 'url' && view.connectorId !== undefined && !view.consent && onCheckConnectorAuthorization
           && <button type="button" disabled={locked || checking || !threadId} onClick={() => { void checkConnectorAuthorization(); }}>Check connection</button>}</>}

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { classifyElicitation } from '../src/renderer/app/approval-elicitation.ts';
+import { classifyElicitation, displayApprovalParameters } from '../src/renderer/app/approval-elicitation.ts';
 
 const empty = { type: 'object', properties: {} };
 const connector = 'connector_20205bf7d4e99a89d7154bb849718324';
@@ -75,4 +75,38 @@ test('confirmation metadata and connector authentication are checked before acce
     { ...params, _meta: { ...auth, codex_approval_kind: 'browser_auth' } }]) {
     assert.equal(classifyElicitation(request).kind, 'unsupported');
   }
+});
+
+test('special approvals never bypass required schema or security metadata', () => {
+  const meta = { codex_approval_kind: 'mcp_tool_call', connector_id: 'mail', tool_params: {} };
+  const schema = { type: 'object', required: ['approved'], properties: { approved: { type: 'boolean' } } };
+  for (const params of [
+    { mode: 'form', requestedSchema: schema, _meta: meta },
+    { mode: 'form', requestedSchema: empty, _meta: { ...meta, 'openai/confirmation': { field: 'approved' } } },
+    { mode: 'form', requestedSchema: empty, _meta: { ...meta, 'openai/elicitation': { requestedSchema: schema } } },
+    { mode: 'form', requestedSchema: empty, _meta: { ...meta, security_requirement: true } },
+    { mode: 'form', serverName: 'browser', requestedSchema: schema, _meta: { origin: 'https://example.test', persist: 'always' } },
+    { mode: 'form', serverName: 'browser', requestedSchema: empty,
+      _meta: { origin: 'https://example.test', persist: 'always', 'openai/confirmation': { field: 'approved' } } },
+  ]) assert.equal(classifyElicitation(params).kind, 'unsupported');
+});
+
+test('tool persistence and risk follow declared metadata; bound database changes remain one-time', () => {
+  const meta = { codex_approval_kind: 'mcp_tool_call', connector_id: 'mail', tool_params: {}, persist: ['session', 'always'], riskLevel: 'high' };
+  const view = classifyElicitation({ mode: 'form', requestedSchema: empty, _meta: meta });
+  assert.equal(view.kind, 'tool');
+  if (view.kind === 'tool') { assert.deepEqual(view.persistence, ['session', 'always']); assert.equal(view.riskLevel, 'high'); }
+  for (const persist of ['forever', [], ['session', 'session']])
+    assert.equal(classifyElicitation({ mode: 'form', requestedSchema: empty, _meta: { ...meta, persist } }).kind, 'unsupported');
+  const bound = classifyElicitation({ ...database(deletion), _meta: { ...database(deletion)._meta, persist: 'always' } });
+  assert.equal(bound.kind, 'tool');
+  if (bound.kind === 'tool') { assert.deepEqual(bound.persistence, []); assert.equal(bound.riskLevel, 'high'); }
+});
+
+test('approval details show invisible characters in field names and values', () => {
+  const rendered = displayApprovalParameters({ ['key\u200B']: 'orders\u202Eadmin\u00A0x\u{E0001}', text: '\\u202E' });
+  assert.match(rendered, /key\\u200B/);
+  assert.match(rendered, /orders\\u202Eadmin\\u00A0x\\u\{E0001\}/);
+  assert.match(rendered, /\\\\u202E/);
+  assert.doesNotMatch(rendered, /[\u200B\u202E\u00A0\u{E0001}]/u);
 });
