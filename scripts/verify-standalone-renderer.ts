@@ -190,7 +190,9 @@ try {
   assert.equal(new URL(coldArchived.url()).searchParams.get('archived'), '1');
   await coldArchived.reload();
   await coldArchived.getByRole('button', { name: 'Restore conversation', exact: true }).waitFor();
-  assert.equal(await coldArchived.getByRole('textbox', { name: 'Work with Codex', exact: true }).evaluate(element => element.closest('[inert]') !== null), true);
+  const coldDraft = coldArchived.getByRole('textbox', { name: 'Work with Codex', exact: true });
+  assert.equal(await coldDraft.evaluate(element => element.closest('[inert]') !== null), true);
+  assert.equal(await coldDraft.inputValue(), 'UNPERSISTED_COMPOSER_BEFORE_EXTERNAL_ARCHIVE');
   await coldArchived.close();
   await page.getByRole('button', { name: 'Restore conversation', exact: true }).click();
   await retainedComposer.fill('');

@@ -556,6 +556,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const panelCwd = thread?.cwd || cwd || workspace;
   const composerOwner = { hostId: current.hostId, threadId: current.threadId,
     draftId: current.threadId ? sendState?.bindings[sendThreadKey(current.hostId, current.threadId)] ?? current.threadId : newDraftId };
+  const composerIsCurrent = composerSnapshot?.owner.hostId === composerOwner.hostId
+    && composerSnapshot.owner.threadId === composerOwner.threadId && composerSnapshot.owner.draftId === composerOwner.draftId;
   const browserOwner = browserDraftOwner(composerOwner, sendState?.bindings ?? {});
   const activeBrowserOwner = useRef(browserOwner); activeBrowserOwner.current = browserOwner;
   const sendBindings = useRef(sendState?.bindings ?? {}); sendBindings.current = sendState?.bindings ?? {};
@@ -687,7 +689,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           {current.threadId && !loading && <StandaloneGoal client={client} hostId={current.hostId} threadId={current.threadId} readOnly={current.readOnly} />}
           {current.readOnly && <p role="status">此会话已归档，原输入已保留。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p>}
           <div inert={current.readOnly}>
-          {!sendState || current.threadId && (loading || !initialOptions) ? current.readOnly ? null : <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
+          {!sendState || current.threadId && (loading || !initialOptions) && !(composerIsCurrent || current.readOnly && thread) ? current.readOnly ? null : <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
           onRemoveReference={(owner, reference) => removeBrowserDraftReference(browserDraftOwner(owner, sendState.bindings), reference)}
           onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} initialOptions={initialOptions ?? undefined} hosts={hosts} onTargetChange={async target => {
           if (await navigate('/' + (target.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(target.hostId)))) {
