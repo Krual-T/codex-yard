@@ -22,7 +22,7 @@ export interface TerminalPanelProps {
   fontFamily?: string;
   ref?: Ref<TerminalPanelHandle>;
 }
-export interface TerminalPanelHandle { close(): Promise<boolean>; detach(): void; activate(): void }
+export interface TerminalPanelHandle { close(): Promise<boolean>; detach(): void; activate(): void; isActive(): boolean }
 
 export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visible = true, theme = 'dark', fontSize = 13, lineHeight = 20, fontFamily, ref }: TerminalPanelProps) {
   const t = usePanelText();
@@ -32,12 +32,14 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
   const closeRef = useRef<() => Promise<boolean>>(async () => true);
   const detachRef = useRef<() => void>(() => {});
   const activateRef = useRef<() => void>(() => {});
+  const isActiveRef = useRef<() => boolean>(() => false);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const [attempt, setAttempt] = useState(0);
   const [status, setStatus] = useState('Starting terminal...');
   const [canRestart, setCanRestart] = useState(false);
-  useImperativeHandle(ref, () => ({ close: () => closeRef.current(), detach: () => detachRef.current(), activate: () => activateRef.current() }), []);
+  useImperativeHandle(ref, () => ({ close: () => closeRef.current(), detach: () => detachRef.current(),
+    activate: () => activateRef.current(), isActive: () => isActiveRef.current() }), []);
 
   useEffect(() => {
     if (!element.current) return;
@@ -49,6 +51,7 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
     terminal.loadAddon(fit);
     terminal.open(element.current);
     let active = true, attached = false, ownsSession = true, stopped = false, restartable = false, restarting = false;
+    isActiveRef.current = () => active && !stopped;
     detachRef.current = () => { ownsSession = false; stopped = true; attached = false; terminal.options.disableStdin = true; };
     let writeQueue: Promise<void> = Promise.resolve();
     let lastSize = '';
@@ -159,6 +162,7 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
       closeRef.current = async () => true;
       detachRef.current = () => {};
       activateRef.current = () => {};
+      isActiveRef.current = () => false;
       terminalRef.current = null;
       if (ownsSession) void call('close', [id]).catch(() => {});
       terminal.dispose();

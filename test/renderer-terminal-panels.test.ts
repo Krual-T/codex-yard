@@ -238,6 +238,13 @@ test('terminal panels use the page-owned host session and never replay input aft
   await page.waitForFunction(() => (window as any).fixture.state.consumed.includes('focus-first'));
   assert.equal(await terminalTabs.first().getAttribute('aria-selected'), 'true');
   assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 6);
+  await terminalTabs.last().click();
+  await page.evaluate(() => (window as any).fixture.failCurrent());
+  await page.getByRole('button', { name: 'New terminal' }).waitFor();
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'focus-live',kind:'terminal',reuse:true}}));
+  await page.waitForFunction(() => (window as any).fixture.state.consumed.includes('focus-live'));
+  assert.equal(await terminalTabs.first().getAttribute('aria-selected'), 'true');
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 6, 'An active shell takes precedence over restarting a stopped tab');
   const terminalTabContainers = page.locator('.yard-panel-tab').filter({ has: page.getByRole('tab', { name: 'Terminal' }) });
   await terminalTabContainers.last().getByRole('button', { name: 'Close terminal' }).click();
   await page.waitForFunction(() => document.querySelectorAll('.yard-panel-tab [role="tab"]').length === 2);

@@ -237,7 +237,10 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     if (request.kind === 'file') openFile(request.path, request.line, request.column);
     else if (request.kind === 'terminal') {
       const candidates = request.reuse ? terminals.filter(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd) : [];
-      const existing = candidates.find(tab => tab.key === selectedRef.current) ?? candidates.at(-1);
+      const selectedTerminal = candidates.find(tab => tab.key === selectedRef.current);
+      const isActive = (tab: TerminalTab) => terminalHandles.current.get(tab.key)?.isActive() === true;
+      const existing = selectedTerminal && isActive(selectedTerminal) ? selectedTerminal
+        : [...candidates].reverse().find(isActive) ?? selectedTerminal ?? candidates.at(-1);
       const key = existing?.key ?? JSON.stringify(['terminal', scopeId, hostId, cwd, request.id]);
       if (!existing) setTerminals(previous => [...previous, { key, scopeId, hostId, cwd, threadId }]);
       select(key);
