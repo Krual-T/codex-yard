@@ -1,58 +1,99 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { runInNewContext } from 'node:vm';
+import { openClientBrowser } from '../src/native/client-browser.ts';
+import { BrowserWorkbenchClient, WorkbenchError } from '../src/renderer/app/client.ts';
+import type { WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 
-test('equal RPC ids on separate hosts retain separate pending results after the browser connection is lost', async () => {
-  const received: any[] = [], sockets: BrowserSocket[] = [];
-  class BrowserSocket extends EventTarget {
+interface SentMessage {
+  type: string;
+  hostId?: string;
+  request?: { id: string; method: string; params: Record<string, unknown> };
+}
+
+test('the owned client isolates host requests and never replays them after disconnect', async t => {
+  const sockets: FakeSocket[] = [], events: WorkbenchEvent[] = [];
+  class FakeSocket {
     static OPEN = 1;
-    sent: any[] = [];
-    constructor() { super(); sockets.push(this); }
-    send(value: string) { this.sent.push(JSON.parse(value)); }
-    message(value: unknown) { this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) })); }
+    readyState = 0;
+    sent: SentMessage[] = [];
+    onopen: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor(_url: string) { sockets.push(this); }
+    open() { this.readyState = FakeSocket.OPEN; this.onopen?.(); }
+    send(value: string) { this.sent.push(JSON.parse(value) as SentMessage); }
+    message(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
+    close() {
+      if (this.readyState === 3) return;
+      this.readyState = 3;
+      this.onclose?.();
+    }
   }
-  const window: any = { postMessage: (message: unknown) => received.push(message), addEventListener() {} };
-  runInNewContext(await readFile(new URL('../.local/native-host.js', import.meta.url), 'utf8'), {
-    window, WebSocket: BrowserSocket, location: { origin: 'http://workbench.test', href: 'http://workbench.test/' },
-    setTimeout() {}, matchMedia: () => ({ matches: false }), performance: { timeOrigin: 0 },
+  const originalSocket = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
+  Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeSocket });
+  const client = new BrowserWorkbenchClient('ws://fixture.invalid/native-host');
+  client.subscribe(event => events.push(event));
+  t.after(() => {
+    client.close();
+    if (originalSocket) Object.defineProperty(globalThis, 'WebSocket', originalSocket);
+    else Reflect.deleteProperty(globalThis, 'WebSocket');
   });
-  const socket = sockets[0]!;
-  socket.dispatchEvent(new Event('open'));
-  const remote = 'remote-ssh-discovered:work';
-  await Promise.all(['local', remote].map(hostId => window.electronBridge.sendMessageFromView({
-    type: 'mcp-request', hostId, request: { id: 1, method: 'turn/start', params: { threadId: 'shared-id' } },
-  })));
-  socket.message({ type: 'mcp-response', hostId: 'local', message: { id: 1, result: {} } });
-  socket.message({ type: 'codex-app-server-connection-changed', hostId: remote, state: 'connected', transport: 'websocket' });
-  socket.dispatchEvent(new Event('close'));
-  const failures = received.filter(message => message.type === 'mcp-response' && message.message.error);
-  assert.equal(failures.length, 1);
-  assert.equal(failures[0].hostId, remote);
-  assert.equal(failures[0].message.id, 1);
-  assert.equal(failures[0].message.error.data.uncertain, true);
-  assert.equal(socket.sent.length, 2);
-  assert.ok(received.some(message => message.type === 'codex-app-server-connection-changed' && message.hostId === remote && message.state === 'disconnected'));
+
+  const opening = client.connect();
+  const first = sockets[0]!;
+  first.open();
+  await opening;
+  const local = client.rpc('turn/start', { threadId: 'same-thread' }, 'local');
+  const remote = client.rpc('turn/start', { threadId: 'same-thread' }, 'remote-ssh:fixture');
+  const read = client.rpc('thread/read', { threadId: 'same-thread' }, 'remote-ssh:fixture');
+  const failedWrite = remote.catch(error => error);
+  const failedRead = read.catch(error => error);
+  await Promise.resolve();
+  const requests = first.sent.filter(message => message.type === 'mcp-request');
+  assert.deepEqual(requests.map(message => [message.hostId, message.request?.method]), [
+    ['local', 'turn/start'], ['remote-ssh:fixture', 'turn/start'], ['remote-ssh:fixture', 'thread/read'],
+  ]);
+  assert.equal(new Set(requests.map(message => message.request?.id)).size, 3);
+  first.message({ type: 'mcp-response', hostId: 'local', message: { id: requests[0]!.request!.id, result: { host: 'local' } } });
+  assert.deepEqual(await local, { host: 'local' });
+  first.close();
+  const writeError = await failedWrite, readError = await failedRead;
+  assert.ok(writeError instanceof WorkbenchError && writeError.uncertain);
+  assert.ok(readError instanceof WorkbenchError && !readError.uncertain);
+  assert.ok(events.some(event => event.type === 'connection-state' && event.state === 'disconnected'));
+
+  const reconnecting = client.connect();
+  const second = sockets[1]!;
+  second.open();
+  await reconnecting;
+  assert.deepEqual(second.sent, [{ type: 'ready' }]);
+  const retriedRead = client.rpc('thread/read', { threadId: 'same-thread' }, 'remote-ssh:fixture');
+  await Promise.resolve();
+  const retried = second.sent[1]!;
+  assert.equal(retried.request?.method, 'thread/read');
+  second.message({ type: 'mcp-response', hostId: 'remote-ssh:fixture', message: { id: retried.request!.id, result: { host: 'remote' } } });
+  assert.deepEqual(await retriedRead, { host: 'remote' });
+  assert.equal(second.sent.filter(message => message.request?.method === 'turn/start').length, 0);
 });
 
-test('renderer browser links open on the visiting client before a socket or server round trip', async () => {
-  const calls: unknown[][] = [], sent: unknown[] = [];
-  class BrowserSocket extends EventTarget { send(value: unknown) { sent.push(value); } }
-  const window: any = { open: (...args: unknown[]) => calls.push(args), addEventListener() {} };
-  runInNewContext(await readFile(new URL('../.local/native-host.js', import.meta.url), 'utf8'), {
-    window, WebSocket: BrowserSocket, URL, location: { origin: 'http://workbench.test', href: 'http://workbench.test/' },
-    setTimeout() {}, matchMedia: () => ({ matches: false }), performance: { timeOrigin: 0 },
+test('the retained client browser helper opens safe links synchronously on the visiting client', t => {
+  const calls: unknown[][] = [];
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { open: (...args: unknown[]) => calls.push(args) } });
+  t.after(() => {
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
   });
-  // Leave the socket unopened: a real click must preserve user activation.
-  await window.electronBridge.sendMessageFromView({ type: 'open-in-browser', hostId: 'remote-ssh:test', url: 'https://example.com/path?q=1' });
-  await window.electronBridge.sendMessageFromView({ type: 'open-url', url: 'http://localhost:3000/' });
+  assert.equal(openClientBrowser({ type: 'open-in-browser', url: 'https://example.com/path?q=1' }), true);
+  assert.equal(openClientBrowser({ type: 'open-url', url: 'http://localhost:3000/' }), true);
   assert.deepEqual(calls, [
     ['https://example.com/path?q=1', '_blank', 'noopener,noreferrer'],
     ['http://localhost:3000/', '_blank', 'noopener,noreferrer'],
   ]);
-  for (const url of ['javascript:alert(1)', 'file:///etc/passwd', 'data:text/html,hi', 'https://user:secret@example.com']) {
-    await assert.rejects(window.electronBridge.sendMessageFromView({ type: 'open-in-browser', url }));
+  for (const url of ['javascript:alert(1)', 'file:///etc/passwd', 'data:text/html,hi', 'https://user:secret@example.com', 'not a url']) {
+    assert.throws(() => openClientBrowser({ type: 'open-in-browser', url }));
   }
+  assert.equal(openClientBrowser({ type: 'unrelated' }), false);
   assert.equal(calls.length, 2);
-  assert.equal(sent.length, 0);
 });
