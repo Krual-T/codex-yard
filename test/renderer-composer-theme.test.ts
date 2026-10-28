@@ -39,7 +39,8 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
     await page.goto('http://localhost/');
     await page.addStyleTag({ content: `
       :root { --yard-bg:#101419; --yard-surface:#20262c; --yard-fg:#f0f5f2; --yard-muted:#a9b3ba;
-        --yard-border:#53616c; --yard-accent:#9dbbff; --yard-font-ui:Arial; --yard-font-content:Georgia; --yard-font-code:"Courier New"; }
+        --yard-border:#53616c; --yard-accent:#9dbbff; --yard-ui-font:Arial; --yard-content-font:Georgia; --yard-code-font:"Courier New";
+        --yard-font-size:17px; --yard-code-size:19px; }
       body { background:var(--yard-bg); margin:16px; }
     ` });
     await page.addStyleTag({ content: bundle.outputFiles.find(file => file.path.endsWith('.css'))!.text });
@@ -61,8 +62,9 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
         const style = (selector: string) => getComputedStyle(document.querySelector(selector)!);
         return {
           container: style('.standalone-composer__editor').backgroundColor,
-          rich: style('.ProseMirror').color, richFont: style('.ProseMirror').fontFamily,
-          codeFont: style('.ProseMirror code').fontFamily,
+          rich: style('.ProseMirror').color, richFont: style('.ProseMirror').fontFamily, richSize: style('.ProseMirror').fontSize,
+          codeFont: style('.ProseMirror code').fontFamily, codeSize: style('.ProseMirror code').fontSize,
+          uiFont: style('.standalone-composer select').fontFamily,
           linkInput: style('.standalone-composer__rich-toolbar input').color,
           linkInputBackground: style('.standalone-composer__rich-toolbar input').backgroundColor,
           controls: style('.standalone-composer select').color,
@@ -80,6 +82,9 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
       assert.equal(appearance.submitBackground, rgb(foreground));
       assert.match(appearance.richFont, /Georgia/);
       assert.match(appearance.codeFont, /Courier New/);
+      assert.match(appearance.uiFont, /Arial/);
+      assert.equal(appearance.richSize, '17px');
+      assert.equal(appearance.codeSize, '19px');
       if (process.env.YARD_COMPOSER_THEME_ARTIFACT_DIR) {
         await page.screenshot({ path: join(process.env.YARD_COMPOSER_THEME_ARTIFACT_DIR, `standalone-a-composer-${theme}-800.png`) });
       }
@@ -87,8 +92,6 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
     }
     await page.evaluate(() => {
       const style = document.documentElement.style;
-      style.setProperty('--yard-font-content', 'initial');
-      style.setProperty('--yard-font-code', 'initial');
       style.setProperty('--yard-content-font', 'Times New Roman');
       style.setProperty('--yard-code-font', 'Consolas');
     });

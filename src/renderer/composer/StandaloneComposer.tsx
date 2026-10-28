@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent } from 'react';
 import type { ComposerDraft, StandaloneComposerProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
-import { activatePending, createId, documentFromText, draftKey, draftToInput, hasContent, loadDraft, mergePrefill, readDraft, richEditIssue, textEditIssue, updateDraftText, updateRichDraft, writeDraft } from './standalone-draft.ts';
+import { activatePending, createId, documentFromText, draftKey, draftToInput, hasContent, loadDraft, mergePrefill, normalizeDraft, readDraft, richEditIssue, textEditIssue, updateDraftText, updateRichDraft, writeDraft } from './standalone-draft.ts';
 import type { Draft } from './standalone-draft.ts';
 import { importAttachments } from './standalone-files.ts';
 import { useCompletions } from './standalone-completions.tsx';
@@ -21,6 +21,23 @@ import './standalone-composer.css';
 
 export { draftToInput } from './standalone-draft.ts';
 export type { DraftSkill } from './standalone-draft.ts';
+export interface ComposerDraftOwner {
+  hostId: string;
+  threadId: string | null;
+  draftId: string;
+}
+export interface ComposerDraftSnapshot {
+  owner: ComposerDraftOwner;
+  draft: ComposerDraft;
+  revision: string;
+}
+export interface ComposerDraftController {
+  /** Returns null once this owner's controller has been replaced or unmounted. */
+  snapshot(): ComposerDraftSnapshot | null;
+  /** Returns false for a stale owner; throws if the update cannot be persisted. */
+  update(owner: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft): boolean;
+}
+export type ComposerReference = NonNullable<ComposerDraft['references']>[number];
 export type StandaloneComposerRuntimeProps = StandaloneComposerProps & {
   /** The app's authoritative active turn, used as the steer precondition. */
   activeTurnId?: string | null;
@@ -28,6 +45,9 @@ export type StandaloneComposerRuntimeProps = StandaloneComposerProps & {
   hosts?: ComposerHost[];
   onTargetChange?: (target: ComposerTarget) => void | Promise<void>;
   onPrefillConsumed?: (id: string) => void;
+  onDraftController?: (controller: ComposerDraftController | null) => void;
+  onDraftChange?: (snapshot: ComposerDraftSnapshot) => void;
+  onRemoveReference?: (owner: ComposerDraftOwner, reference: ComposerReference) => Promise<void>;
 };
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -41,11 +61,14 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
   }}><summary>{name}</summary>{preview == null ? '正在读取…' : <pre>{preview}</pre>}</details>;
 }
 
-function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed }: StandaloneComposerRuntimeProps) {
+function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
   const key = draftKey(context);
   const [initial] = useState(() => loadDraft(context));
   const current = useRef(initial);
-  const [draft, setDraft] = useState<Draft>(initial.draft);
+  const [initialPersistedRevision] = useState(() => readDraft(key)?.revision ?? null);
+  const persistedRevision = useRef(initialPersistedRevision);
+  const [stored, setStored] = useState(initial);
+  const draft = stored.draft;
   const [overrides, setOverrides] = useState<Partial<SubmitOptions>>({});
   const [appliedOptions, setAppliedOptions] = useState<{ changes: Partial<SubmitOptions>; baseline: SubmitOptions } | null>(null);
   const options = { ...initialOptions, ...overrides };
@@ -59,7 +82,12 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const [richContext, setRichContext] = useState<RichCompletionContext | null>(null);
   const enterSetting = useEnterSetting(client);
   const followUpSetting = useFollowUpSetting(client);
-  const mounted = useRef(true);
+  const mounted = useRef(false);
+  const activeController = useRef<ComposerDraftController | null>(null);
+  const draftChangeCallback = useRef(onDraftChange);
+  draftChangeCallback.current = onDraftChange;
+  const pendingReferences = useRef(new Map<string, ComposerDraftController>());
+  const [removing, setRemoving] = useState<{ controller: ComposerDraftController; ids: Set<string> } | null>(null);
   const submitInFlight = useRef(false);
   const interruptInFlight = useRef(false);
   const uploadInFlight = useRef(false);
@@ -75,7 +103,6 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     richActive ? richContext?.cursor ?? 0 : cursor, busy, richActive ? 'rich:' + richContext?.blockStart : 'plain');
   const onRichContext = useCallback((next: RichCompletionContext | null) => setRichContext(previous =>
     previous?.text === next?.text && previous?.cursor === next?.cursor && previous?.blockStart === next?.blockStart ? previous : next), []);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
     if (!appliedOptions) return;
     const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
@@ -103,14 +130,84 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   }, [appliedOptions, initialOptions, overrides]);
 
   const changeDraft = useCallback((update: (draft: Draft) => Draft, prefillId?: string) => {
-    const previous = mounted.current ? current.current : readDraft(key) ?? current.current;
+    if (!mounted.current) return false;
+    const previous = current.current;
     const next = { revision: createId(), draft: update(previous.draft),
       prefills: prefillId ? [...previous.prefills, prefillId] : previous.prefills };
     current.current = next;
     const saved = writeDraft(key, next);
-    if (mounted.current) { setDraft(next.draft); setStorageError(!saved); }
+    if (saved) persistedRevision.current = next.revision;
+    setStored(next); setStorageError(!saved);
     return saved;
   }, [key]);
+
+  const owner = useMemo<ComposerDraftOwner>(() => ({ hostId: context.hostId, threadId: context.threadId, draftId: context.draftId }),
+    [context.hostId, context.threadId, context.draftId]);
+  const controller = useMemo<ComposerDraftController>(() => {
+    const result: ComposerDraftController = {
+      snapshot() {
+        if (activeController.current !== result) return null;
+        return structuredClone({ owner, draft: current.current.draft, revision: current.current.revision });
+      },
+      update(expected, update) {
+        if (activeController.current !== result || expected.hostId !== owner.hostId
+          || expected.threadId !== owner.threadId || expected.draftId !== owner.draftId) return false;
+        const previous = current.current;
+        const persisted = readDraft(key);
+        if ((persisted?.revision ?? null) !== persistedRevision.current) {
+          throw new Error('草稿已在其他页面修改，当前内容已保留。');
+        }
+        const updated = update(structuredClone(previous.draft));
+        if (activeController.current !== result || current.current !== previous) return false;
+        const nextDraft = normalizeDraft({ ...previous.draft, ...updated });
+        if (JSON.stringify(nextDraft) === JSON.stringify(previous.draft) && persisted?.revision === previous.revision) return true;
+        const next = { ...previous, revision: createId(), draft: nextDraft };
+        if (!writeDraft(key, next)) {
+          setStorageError(true);
+          throw new Error('草稿未能保存到浏览器，当前内容已保留。');
+        }
+        persistedRevision.current = next.revision;
+        current.current = next;
+        setStored(next); setStorageError(false);
+        return true;
+      },
+    };
+    return result;
+  }, [key, owner]);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    activeController.current = controller;
+    return () => { if (activeController.current === controller) activeController.current = null; mounted.current = false; };
+  }, [controller]);
+  useLayoutEffect(() => {
+    onDraftController?.(controller);
+    return () => onDraftController?.(null);
+  }, [controller, onDraftController]);
+  useLayoutEffect(() => {
+    const snapshot = controller.snapshot();
+    if (snapshot) draftChangeCallback.current?.(snapshot);
+  }, [controller, stored]);
+
+  const removeReference = async (reference: ComposerReference) => {
+    if (pendingReferences.current.get(reference.id) === controller) return;
+    pendingReferences.current.set(reference.id, controller);
+    setRemoving(previous => ({ controller, ids: new Set([...(previous?.controller === controller ? previous.ids : []), reference.id]) }));
+    setError('');
+    try {
+      await onRemoveReference?.(structuredClone(owner), structuredClone(reference));
+      controller.update(owner, value => ({ ...value, references: (value.references ?? []).filter(item =>
+        item.id !== reference.id || JSON.stringify(item) !== JSON.stringify(reference)) }));
+    } catch (reason) {
+      if (activeController.current === controller) setError('移除引用失败，草稿已保留：' + message(reason));
+    } finally {
+      if (pendingReferences.current.get(reference.id) === controller) pendingReferences.current.delete(reference.id);
+      if (activeController.current === controller) setRemoving(previous => {
+        if (previous?.controller !== controller) return previous;
+        const ids = new Set(previous.ids); ids.delete(reference.id);
+        return ids.size ? { controller, ids } : null;
+      });
+    }
+  };
   useEffect(() => {
     if (!prefill) return;
     if (current.current.prefills.includes(prefill.id)) {
@@ -128,9 +225,10 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     try {
       for (const file of files) {
         const added = await importAttachments(client, context.hostId, [file]);
+        if (activeController.current !== controller) return;
         changeDraft(previous => ({ ...previous, images: [...previous.images, ...added.images], files: [...previous.files, ...added.files] }));
       }
-    } catch (reason) { if (mounted.current) setError('附件上传失败：' + message(reason)); }
+    } catch (reason) { if (activeController.current === controller) setError('附件上传失败：' + message(reason)); }
     finally { uploadInFlight.current = false; if (mounted.current) setUploading(false); }
   };
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -166,6 +264,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     try {
       const submitted: ComposerDraft = captured.draft;
       await onSubmit(submitted, options, action);
+      if (activeController.current !== controller) return;
       if (mounted.current && action.type === 'send' && Object.keys(overrides).length) {
         setAppliedOptions({ changes: { ...overrides }, baseline: { ...initialOptions } });
       }
@@ -178,7 +277,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       }
       if (mounted.current) requestAnimationFrame(() => { if (richEditor.current) richEditor.current.focus(); else editor.current?.focus(); });
     } catch (reason) {
-      if (mounted.current) {
+      if (activeController.current === controller) {
         if (busy && context.threadId) setQueueVersion(value => value + 1);
         setError('发送未确认，草稿已保留。请检查会话后再重试：' + message(reason));
       }
@@ -243,7 +342,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     if (interruptInFlight.current) return;
     interruptInFlight.current = true; setInterrupting(true); setError('');
     try { await onInterrupt(); }
-    catch (reason) { setError('停止失败：' + message(reason)); }
+    catch (reason) { if (activeController.current === controller) setError('停止失败：' + message(reason)); }
     finally { interruptInFlight.current = false; if (mounted.current) setInterrupting(false); }
   };
   return <div className="standalone-composer">
@@ -260,7 +359,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           <button type="button" title="移除文件" aria-label={'移除文件 ' + file.name} disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, files: value.files.filter(item => item.path !== file.path) }))}>×</button>
         </div>)}
         {draft.references.map(reference => <div className="standalone-composer__reference" key={reference.id}>
-          <span>{reference.text}</span><button type="button" title="移除引用" aria-label="移除引用" disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, references: value.references.filter(item => item.id !== reference.id) }))}>×</button>
+          <span>{reference.text}</span><button type="button" title="移除引用" aria-label="移除引用" disabled={!!editIssue || structuredInput || removing?.controller === controller && removing.ids.has(reference.id)} onClick={() => void removeReference(reference)}>×</button>
         </div>)}
         {draft.skills.map(skill => <div className="standalone-composer__reference" key={skill.path}>
           <span>技能：{skill.name}</span><button type="button" title="移除技能" aria-label={'移除技能 ' + skill.name} disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, skills: value.skills.filter(item => item.path !== skill.path) }))}>×</button>

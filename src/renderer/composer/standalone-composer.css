@@ -1,12 +1,12 @@
-.standalone-composer { color: var(--yard-fg, #222); font: var(--yard-font-size, 13px) var(--yard-font-ui, var(--yard-ui-font, system-ui, sans-serif)); min-width: 0; }
+.standalone-composer { color: var(--yard-fg, #222); font: var(--yard-font-size, 13px) var(--yard-ui-font, system-ui, sans-serif); min-width: 0; }
 .standalone-composer__editor { border: 1px solid var(--yard-border, #c9c9c9); border-radius: 8px; background: var(--yard-surface, var(--yard-bg, #fff)); }
-.standalone-composer textarea { box-sizing: border-box; width: 100%; resize: vertical; color: inherit; background: transparent; font: inherit; font-family: var(--yard-font-content, var(--yard-content-font, var(--yard-font-ui, var(--yard-ui-font, system-ui, sans-serif)))); }
+.standalone-composer textarea { box-sizing: border-box; width: 100%; resize: vertical; color: inherit; background: transparent; font: inherit; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
 .standalone-composer textarea::placeholder { color: var(--yard-muted, #666); opacity: 1; }
 .standalone-composer__editor > textarea { display: block; min-height: 84px; max-height: 320px; border: 0; padding: 12px; outline: none; }
-.standalone-composer__rich .ProseMirror { box-sizing: border-box; min-height: 84px; max-height: 320px; overflow: auto; padding: 12px; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--yard-font-content, var(--yard-content-font, var(--yard-font-ui, var(--yard-ui-font, system-ui, sans-serif)))); }
+.standalone-composer__rich .ProseMirror { box-sizing: border-box; min-height: 84px; max-height: 320px; overflow: auto; padding: 12px; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
 .standalone-composer__rich .ProseMirror p { margin: 0; }
 .standalone-composer__rich .ProseMirror pre { overflow-x: auto; }
-.standalone-composer pre, .standalone-composer code { font-family: var(--yard-font-code, var(--yard-code-font, monospace)); }
+.standalone-composer pre, .standalone-composer code { font-family: var(--yard-code-font, monospace); font-size: var(--yard-code-size, var(--yard-font-size, 13px)); }
 .standalone-composer a { color: var(--yard-accent, #3159b5); }
 .standalone-composer__rich-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; padding: 4px 8px 0; }
 .standalone-composer__rich-toolbar form { display: flex; align-items: center; min-width: 0; }
