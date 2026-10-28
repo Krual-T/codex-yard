@@ -45,9 +45,13 @@ export function useWorkbenchShortcuts(client: WorkbenchClient, actions: Shortcut
     let timer: ReturnType<typeof setTimeout> | undefined;
     let held: 'control' | 'meta' | 'alt' | null = null;
     let layout: ReadonlyMap<string, string> | null = null, active = true;
-    const keyboard = (navigator as Navigator & { keyboard?: EventTarget & { getLayoutMap?(): Promise<ReadonlyMap<string, string>> } }).keyboard;
+    const keyboard = (navigator as Navigator & { keyboard?: {
+      getLayoutMap?(): Promise<ReadonlyMap<string, string>>;
+      addEventListener?(type: string, listener: () => void): void;
+      removeEventListener?(type: string, listener: () => void): void;
+    } }).keyboard;
     const readLayout = () => { void keyboard?.getLayoutMap?.().then(value => { if (active) layout = value; }).catch(() => {}); };
-    readLayout(); keyboard?.addEventListener('layoutchange', readLayout);
+    readLayout(); keyboard?.addEventListener?.('layoutchange', readLayout);
     const clear = () => { clearTimeout(timer); timer = undefined; held = null; setHints(null); setSidebarHintKeys([]); };
     const blocked = () => current.current.blocked() || [...document.querySelectorAll('[role="dialog"], [role="menu"]')]
       .some(element => element.getClientRects().length > 0 && !element.closest('[hidden], [inert]'));
@@ -96,7 +100,7 @@ export function useWorkbenchShortcuts(client: WorkbenchClient, actions: Shortcut
     window.addEventListener('keydown', terminalCapture, true);
     document.addEventListener('visibilitychange', visibility);
     return () => {
-      active = false; clearTimeout(timer); keyboard?.removeEventListener('layoutchange', readLayout);
+      active = false; clearTimeout(timer); keyboard?.removeEventListener?.('layoutchange', readLayout);
       window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', clear);
       window.removeEventListener('keydown', terminalCapture, true);
       document.removeEventListener('visibilitychange', visibility);
