@@ -82,9 +82,13 @@ function filename(value: unknown) {
 export const fileEndpoints = new Set(['workspace-directory-entries', 'remote-workspace-directory-entries', 'read-file', 'read-file-metadata', 'read-file-binary', 'paths-exist', 'workspace-files', 'workspace-file-save', 'workspace-file-save-status', 'ensure-directory', 'visualization-read']);
 export const fileMethods = new Set(['fs/readFile', 'fs/readDirectory', 'fs/getMetadata', 'fs/createDirectory', 'fs/writeFile']);
 
-type SaveState = 'pending' | 'unknown' | 'saved' | 'conflict' | 'failed';
-interface SaveReceipt { id: string; hostId: string; target: string; state: SaveState; requestRoot?: string; requestTarget?: string }
-const saveStates = new Set<SaveState>(['pending', 'unknown', 'saved', 'conflict', 'failed']);
+type SaveState = 'pending' | 'unknown' | 'saved' | 'conflict' | 'failed' | 'blocked';
+interface SaveQuery { cwd: string; path: string }
+interface SaveReceipt {
+  id: string; hostId: string; target: string; state: SaveState; requestRoot?: string; requestTarget?: string;
+  blockedBy?: { operationId: string; query: SaveQuery }; error?: string;
+}
+const saveStates = new Set<SaveState>(['pending', 'unknown', 'saved', 'conflict', 'failed', 'blocked']);
 
 export function createFiles(options: { dataDir: string; workspace: string; hosts: Map<string, SshHost>; request: FileRequest; remoteCommand?: RemoteFileCommand }) {
   const controllers = new Set<AbortController>();
@@ -109,24 +113,28 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
       }
       const result = action(receipts);
       if (result.next) {
-        await mkdir(options.dataDir, { recursive: true, mode: 0o700 });
-        const temporary = join(options.dataDir, `workspace-file-saves.${randomBytes(12).toString('hex')}.tmp`);
-        const file = await open(temporary, 'wx', 0o600);
-        try { await file.writeFile(JSON.stringify(result.next)); await file.sync(); } finally { await file.close(); }
-        await rename(temporary, join(options.dataDir, 'workspace-file-saves.json'));
-        const directory = await open(options.dataDir, 'r');
-        try { await directory.sync(); } finally { await directory.close(); }
-        receipts = result.next;
+        try {
+          await mkdir(options.dataDir, { recursive: true, mode: 0o700 });
+          const temporary = join(options.dataDir, `workspace-file-saves.${randomBytes(12).toString('hex')}.tmp`);
+          const file = await open(temporary, 'wx', 0o600);
+          try { await file.writeFile(JSON.stringify(result.next)); await file.sync(); } finally { await file.close(); }
+          await rename(temporary, join(options.dataDir, 'workspace-file-saves.json'));
+          const directory = await open(options.dataDir, 'r');
+          try { await directory.sync(); } finally { await directory.close(); }
+          receipts = result.next;
+        } catch (error) {
+          throw Object.assign(new Error('文件保存记录无法更新，结果未知；已阻止后续写入。'), { uncertain: true, cause: error });
+        }
       }
       return result.value;
     });
     receiptQueue = run.then(() => {}, () => {});
     return run;
   }
-  async function receiptState(id: string, state: SaveState) {
+  async function receiptState(id: string, state: SaveState, error?: string) {
     await journal(current => {
       if (!current.some(item => item.id === id && item.state === 'pending')) throw new Error('文件保存记录已改变；已阻止后续写入。');
-      return { value: undefined, next: current.map(item => item.id === id ? { ...item, state } : item) };
+      return { value: undefined, next: current.map(item => item.id === id ? { ...item, state, ...(error === undefined ? {} : { error }) } : item) };
     });
   }
   function host(value: unknown) {
@@ -213,33 +221,51 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     const guardMatches = (current: SaveReceipt[]) => guardId === undefined || current.some(item => item.id === guardId
       && item.hostId === hostId && item.target === realTarget && (item.state === 'saved' || item.state === 'failed'));
     const blockedResult = (item: SaveReceipt) => {
-      if (item.requestRoot !== undefined || item.requestTarget !== undefined) {
-        if (typeof item.requestRoot !== 'string' || !posix.isAbsolute(item.requestRoot)
-          || typeof item.requestTarget !== 'string' || !posix.isAbsolute(item.requestTarget)
-          || !within(item.requestRoot, item.requestTarget) || item.requestRoot === item.requestTarget) throw new Error('原文件保存查询路径无法确认。');
-      }
-      return { outcome: 'blocked' as const, operationId: item.id,
-        query: { cwd: item.requestRoot ?? root, path: item.requestTarget ?? target } };
+      if (item.state !== 'blocked' && (item.requestRoot !== undefined || item.requestTarget !== undefined)
+        && (typeof item.requestRoot !== 'string' || typeof item.requestTarget !== 'string')) throw new Error('原文件保存查询路径无法确认。');
+      const operationId = item.state === 'blocked' ? item.blockedBy?.operationId : item.id;
+      const query = item.state === 'blocked' ? item.blockedBy?.query
+        : { cwd: item.requestRoot ?? root, path: item.requestTarget ?? target };
+      if (typeof operationId !== 'string' || !operationId || typeof query?.cwd !== 'string' || !posix.isAbsolute(query.cwd)
+        || typeof query.path !== 'string' || !posix.isAbsolute(query.path) || !within(query.cwd, query.path)
+        || query.cwd === query.path || item.state === 'blocked' && operationId === item.id) throw new Error('原文件保存查询路径无法确认。');
+      return { outcome: 'blocked' as const, operationId, query };
     };
-    const existing = await journal(current => ({ value: { guardMatches: guardMatches(current), prior: current.find(item => item.hostId === hostId && item.target === realTarget
-      && (item.state === 'pending' || item.state === 'unknown')) } }));
-    if (!existing.guardMatches) return { outcome: 'conflict' as const };
-    if (existing.prior) return blockedResult(existing.prior);
+    type Decision = ReturnType<typeof blockedResult> | { outcome: 'conflict' } | { outcome: 'failed'; operationId: string; error: string };
+    const decide = (current: SaveReceipt[], reserve: boolean): { value: Decision | undefined; next?: SaveReceipt[] } => {
+      const duplicate = current.find(item => item.id === id);
+      if (duplicate) {
+        if (duplicate.hostId !== hostId || duplicate.target !== realTarget) throw new Error('文件保存操作标识已用于其他文件。');
+        if (duplicate.state === 'conflict') return { value: { outcome: 'conflict' } };
+        if (duplicate.state === 'failed') return { value: { outcome: 'failed', operationId: id,
+          error: typeof duplicate.error === 'string' ? duplicate.error : '文件保存失败。' } };
+        return { value: blockedResult(duplicate) };
+      }
+      const receipt = { id, hostId, target: realTarget, requestRoot: root, requestTarget: target };
+      if (!guardMatches(current)) return { value: { outcome: 'conflict' }, next: [...current, { ...receipt, state: 'conflict' }] };
+      const prior = current.find(item => item.hostId === hostId && item.target === realTarget && (item.state === 'pending' || item.state === 'unknown'));
+      if (prior) {
+        const blocked = blockedResult(prior);
+        return { value: blocked, next: [...current, { ...receipt, state: 'blocked', blockedBy: { operationId: blocked.operationId, query: blocked.query } }] };
+      }
+      return reserve ? { value: undefined, next: [...current, { ...receipt, state: 'pending' }] } : { value: undefined };
+    };
+    const existing = await journal(current => decide(current, false));
+    if (existing) return existing;
     const result = (fileWrites.get(key) ?? Promise.resolve()).then(async () => {
       if (closed) throw new Error('文件服务已关闭，未保存。');
-      const blocked = await journal<{ conflict?: true; prior?: SaveReceipt } | undefined>(current => {
-        if (!guardMatches(current)) return { value: { conflict: true as const } };
-        const duplicate = current.find(item => item.id === id);
-        if (duplicate && (duplicate.hostId !== hostId || duplicate.target !== realTarget)) throw new Error('文件保存操作标识已用于其他文件。');
-        const prior = duplicate ?? current.find(item => item.hostId === hostId && item.target === realTarget && (item.state === 'pending' || item.state === 'unknown'));
-        return prior ? { value: { prior } } : { value: undefined, next: [...current, {
-          id, hostId, target: realTarget, requestRoot: root, requestTarget: target, state: 'pending',
-        }] };
-      });
-      if (blocked?.conflict) return { outcome: 'conflict' as const };
-      if (blocked?.prior) return blockedResult(blocked.prior);
+      const blocked = await journal(current => decide(current, true));
+      if (blocked) return blocked;
       liveSaves.add(id);
       let issued = false, returned = false, finalized = false;
+      const recordConflict = async () => {
+        try { await receiptState(id, 'conflict'); }
+        catch (error) {
+          finalized = true;
+          throw Object.assign(new Error('文件冲突记录无法更新，请保留编辑并核对原操作。'), { uncertain: true, cause: error });
+        }
+        finalized = true;
+      };
       let releaseLate!: () => void;
       const afterInitial = new Promise<void>(resolve => { releaseLate = resolve; });
       const onLateTerminal = async (terminal: LateRpcTerminal) => {
@@ -256,7 +282,8 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
           if (closed) return { value: undefined };
           const item = current.find(value => value.id === id && value.hostId === hostId && value.target === realTarget);
           if (!item || item.state !== 'unknown') return { value: undefined };
-          return { value: undefined, next: current.map(value => value === item ? { ...value, state } : value) };
+          return { value: undefined, next: current.map(value => value === item ? { ...value, state,
+            ...(terminal.outcome === 'error' ? { error: terminal.error.message } : {}) } : value) };
         });
       };
       try {
@@ -264,14 +291,14 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
           daemonMetadata(hostId, root), daemonMetadata(hostId, target), canonical(hostId, root), canonical(hostId, target),
         ]);
         if (!directory.isDirectory || !before.isFile || before.isSymlink) throw new Error('只能保存当前工作目录内已存在的普通文件，符号链接不写入。');
-        if (currentRoot !== realRoot || currentTarget !== realTarget) { await receiptState(id, 'conflict'); finalized = true; return { outcome: 'conflict' as const }; }
+        if (currentRoot !== realRoot || currentTarget !== realTarget) { await recordConflict(); return { outcome: 'conflict' as const }; }
         const currentBytes = await bytes(hostId, realTarget, previewLimit);
         // Compare original bytes, including BOM and mixed line endings, before
         // the existing daemon write. External writers are not an atomic CAS.
-        if (!currentBytes.equals(originalBytes)) { await receiptState(id, 'conflict'); finalized = true; return { outcome: 'conflict' as const }; }
+        if (!currentBytes.equals(originalBytes)) { await recordConflict(); return { outcome: 'conflict' as const }; }
         const latest = await daemonMetadata(hostId, target);
         if (!latest.isFile || latest.isSymlink || latest.modifiedAtMs !== before.modifiedAtMs
-          || latest.createdAtMs !== before.createdAtMs || await canonical(hostId, target) !== realTarget) { await receiptState(id, 'conflict'); finalized = true; return { outcome: 'conflict' as const }; }
+          || latest.createdAtMs !== before.createdAtMs || await canonical(hostId, target) !== realTarget) { await recordConflict(); return { outcome: 'conflict' as const }; }
         issued = true;
         await options.request(hostId, 'fs/writeFile', { path: realTarget, dataBase64: nextBytes.toString('base64') }, true, onLateTerminal);
         returned = true;
@@ -279,7 +306,7 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
           if (await canonical(hostId, target) !== realTarget || (await daemonMetadata(hostId, target)).isSymlink
             || !(await bytes(hostId, realTarget, previewLimit)).equals(nextBytes)) throw new Error('保存后文件内容或路径已改变。');
         } catch (error) {
-          await receiptState(id, 'conflict'); finalized = true;
+          await recordConflict();
           throw Object.assign(new Error('文件保存结果待核对，勿重复写入：' + (error instanceof Error ? error.message : String(error))), { uncertain: true });
         }
         await receiptState(id, 'saved'); finalized = true;
@@ -287,9 +314,11 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
       } catch (error) {
         if (!finalized) {
           const definitelyFailed = !issued || !returned && typeof error === 'object' && error !== null && 'uncertain' in error && error.uncertain === false;
-          try { await receiptState(id, definitelyFailed ? 'failed' : 'unknown'); }
+          const message = error instanceof Error ? error.message : String(error);
+          try { await receiptState(id, definitelyFailed ? 'failed' : 'unknown', definitelyFailed ? message : undefined); }
           catch { throw Object.assign(new Error('文件保存记录无法更新，结果未知；已阻止后续写入。'), { uncertain: true }); }
           if (!definitelyFailed) throw Object.assign(new Error('文件保存结果未知；已阻止后续写入：' + (error instanceof Error ? error.message : String(error))), { uncertain: true, cause: error });
+          return { outcome: 'failed' as const, operationId: id, error: message };
         }
         throw error;
       } finally { liveSaves.delete(id); releaseLate(); }
@@ -322,6 +351,16 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
         && (!hasQuery || receipt.requestRoot === undefined && receipt.requestTarget === undefined)) }));
     }
     if (!recorded) return { outcome: 'missing' as const, targetMatch: 'unknown' as const };
+    if (recorded.state === 'blocked') {
+      const blocked = recorded.blockedBy;
+      if (typeof blocked?.operationId !== 'string' || !blocked.operationId || blocked.operationId === recorded.id
+        || typeof blocked.query?.cwd !== 'string' || !posix.isAbsolute(blocked.query.cwd)
+        || typeof blocked.query.path !== 'string' || !posix.isAbsolute(blocked.query.path)
+        || !within(blocked.query.cwd, blocked.query.path) || blocked.query.cwd === blocked.query.path) {
+        return { outcome: 'unknown' as const, targetMatch: 'unknown' as const };
+      }
+      return { outcome: 'blocked' as const, operationId: blocked.operationId, query: blocked.query };
+    }
     const targetMatch = !realRoot || !realTarget ? 'unknown' as const
       : within(realRoot, realTarget) && realRoot !== realTarget && realTarget === recorded.target ? 'same' as const : 'different' as const;
     return { outcome: recorded.state === 'pending' && !liveSaves.has(recorded.id) ? 'unknown' as const : recorded.state, targetMatch };
