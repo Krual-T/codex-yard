@@ -44,6 +44,8 @@ export interface StandaloneComposerProps {
   busy: boolean;
   onSubmit(draft: ComposerDraft, options: SubmitOptions): Promise<void>;
   onInterrupt(): Promise<void>;
+  /** App resumes the selected thread before starting an authoritative queue item. */
+  onStartQueued?(queuedSubmissionId: string): Promise<void>;
   /** Optional explicit edit/reference prefill, consumed once per id. */
   prefill?: { id: string; draft: ComposerDraft } | null;
 }
