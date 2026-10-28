@@ -80,8 +80,8 @@ try {
   const authored = coverage.result.filter(script => script.url.endsWith('/renderer-components.js'));
   const queueHook = authored.flatMap(script => script.functions)
     .filter(fn => fn.functionName === 'useComposerQueueEditControls');
-  assert.ok(queueHook.some(fn => fn.ranges.some(range => range.count > 0)), 'The real composer must execute the authored queue hook');
-  report.authoredQueueHookCalls = queueHook.flatMap(fn => fn.ranges).reduce((total, range) => total + range.count, 0);
+  assert.ok(queueHook.some(fn => (fn.ranges[0]?.count ?? 0) > 0), 'The real composer must execute the authored queue hook');
+  report.authoredQueueHookCoverage = queueHook.map(fn => ({ functionName: fn.functionName, entryCount: fn.ranges[0]?.count ?? 0 }));
   await profiler.send('Profiler.stopPreciseCoverage');
   await page.reload({ waitUntil: 'commit' });
   await page.getByRole('group', { name: new RegExp(changed) }).waitFor({ timeout: 60000 });
