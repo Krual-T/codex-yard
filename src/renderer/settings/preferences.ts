@@ -47,6 +47,8 @@ export interface PreferenceValues {
   'worktree-upstream-refresh-mode': 'never' | 'best-effort';
   'worktree-auto-cleanup-enabled': boolean;
   'worktree-keep-count': number;
+  'external-browser-link-shortcut': 'unassigned' | 'primary' | 'alt' | 'primary-shift';
+  'primary-number-shortcut-target': 'sidebar' | 'tabs';
   'reduced-motion-preference': 'system' | 'on' | 'off';
   'dock-icon-preference': 'app-default' | 'codex-system' | 'space-system';
   'ambient-suggestions-enabled': boolean;
@@ -117,6 +119,8 @@ export const preferenceDefinitions: Definitions = {
   'worktree-upstream-refresh-mode': { source: 'global', defaultValue: 'never', valid: oneOf('never', 'best-effort') },
   'worktree-auto-cleanup-enabled': { source: 'global', defaultValue: true, valid: bool },
   'worktree-keep-count': { source: 'global', defaultValue: 15, valid: numberIn(1, Number.MAX_SAFE_INTEGER) },
+  'external-browser-link-shortcut': { source: 'setting', defaultValue: 'primary', valid: oneOf('unassigned', 'primary', 'alt', 'primary-shift') },
+  'primary-number-shortcut-target': { source: 'atom', defaultValue: 'tabs', valid: oneOf('sidebar', 'tabs') },
   'reduced-motion-preference': { source: 'global', defaultValue: 'system', valid: oneOf('system', 'on', 'off') },
   'dock-icon-preference': { source: 'global', defaultValue: 'app-default', valid: oneOf('app-default', 'codex-system', 'space-system') },
   'ambient-suggestions-enabled': { source: 'global', defaultValue: true, valid: bool },

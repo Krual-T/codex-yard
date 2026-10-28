@@ -137,6 +137,23 @@ test('local worktree roots are validated and normalized before a global-state wr
   assert.equal(client.globals['git-worktree-root'], 'C:\\worktrees');
 });
 
+test('keyboard targets use the existing atom and application setting separately', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  client.atoms['primary-number-shortcut-target'] = 'sidebar';
+  client.settings['external-browser-link-shortcut'] = 'alt';
+  await prefs.load();
+  assert.equal(prefs.getSnapshot()['primary-number-shortcut-target'].value, 'sidebar');
+  assert.equal(prefs.getSnapshot()['external-browser-link-shortcut'].value, 'alt');
+  prefs.edit('primary-number-shortcut-target', 'tabs');
+  prefs.edit('external-browser-link-shortcut', 'primary-shift');
+  assert.equal(await prefs.save(), true);
+  assert.equal(client.atoms['primary-number-shortcut-target'], 'tabs');
+  assert.equal(client.settings['external-browser-link-shortcut'], 'primary-shift');
+  assert.deepEqual(client.atoms.unrelated, { keep: true });
+  assert.ok(client.calls.some(call => call.endpoint === 'set-persisted-atom' && call.params?.key === 'primary-number-shortcut-target'));
+  assert.ok(client.calls.some(call => call.endpoint === 'set-setting' && call.params?.key === 'external-browser-link-shortcut'));
+});
+
 test('failed or unverifiable writes retain edits and never replay automatically', async () => {
   const client = new FakeClient(), prefs = new Preferences(client);
   await prefs.load();

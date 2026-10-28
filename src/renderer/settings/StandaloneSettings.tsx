@@ -7,6 +7,7 @@ import type { CatalogKind } from './catalog.ts';
 import { ConnectionsSection } from './ConnectionsSection.tsx';
 import { GeneralSection } from './GeneralSection.tsx';
 import { GitSection } from './GitSection.tsx';
+import { KeyboardSection } from './KeyboardSection.tsx';
 import { ModelSection } from './ModelSection.tsx';
 import { Preferences, preferenceKeys } from './preferences.ts';
 import { WorktreesSection } from './WorktreesSection.tsx';
@@ -59,6 +60,7 @@ const searchLabels: Record<string, string[]> = {
   'git-settings': ['Branch prefix', 'Always force push', 'Create draft pull requests', 'Pull request merge method', 'Disable Git-based diffs',
     'Review delivery', 'Commit instructions', 'Pull request instructions', 'Pull request watch instructions', 'Auto-merge when ready'],
   worktrees: ['Worktree root', 'Always fetch upstream before creating worktrees', 'Automatically delete old worktrees', 'Auto-delete limit'],
+  'keyboard-shortcuts': ['Number shortcuts', 'Open web link in default browser'],
 };
 
 export function StandaloneSettings({ client, hostId, initialSection, location, onNavigate, onClose, registerNavigationGuard }: SettingsIntegrationProps) {
@@ -227,6 +229,7 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
               section === 'git-settings' ? <GitSection preferences={preferences} snapshot={snapshot} suspended={confirmLeave} /> :
                 section === 'worktrees' ? <WorktreesSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
                   preferences={preferences} snapshot={snapshot} onDirtyChange={setOtherDirty} /> :
+                  section === 'keyboard-shortcuts' ? <KeyboardSection client={client} preferences={preferences} snapshot={snapshot} platform={platform} /> :
               isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
                 section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving} /> :
                   section === 'connections' ? <ConnectionsSection client={client} onSavingChange={setOtherSaving} /> :
