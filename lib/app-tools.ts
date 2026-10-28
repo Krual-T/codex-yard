@@ -12,8 +12,9 @@ const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const MAX_PENDING_CALLS = 128;
 
 export interface ToolArgumentSchema {
-  type: 'string' | 'integer' | 'boolean'; description?: string; default?: boolean;
+  type: 'string' | 'integer' | 'boolean' | 'array'; description?: string; default?: boolean;
   minLength?: number; maxLength?: number; minimum?: number; maximum?: number; enum?: readonly string[];
+  items?: ToolArgumentSchema; minItems?: number; maxItems?: number;
 }
 export interface AppToolDescriptor {
   namespace: string; name: string; description: string;

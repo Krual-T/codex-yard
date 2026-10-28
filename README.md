@@ -61,6 +61,8 @@ The original interface contacts external configuration and event services. Norma
 
 ## Development
 
+For conversation tools shared with Codex App, [register the independent `codex_yard` MCP](docs/conversation-tools.md). It provides seven conversation operations and remains available when the Yard web server closes. Yard does not replace the native App's `codex_app` tool configuration.
+
 ```bash
 npm ci
 npm run typecheck

@@ -57,6 +57,8 @@ npm start
 
 ## 开发验证
 
+要在 Codex App 和 Yard 共用对话工具，按[共享对话工具配置](docs/conversation-tools.md)注册独立的 `codex_yard` MCP。它提供 7 项对话操作，关闭 Yard 网页服务后仍然可用；Yard 保留原生 App 对 `codex_app` 的配置归属。
+
 ```bash
 npm ci
 npm run typecheck

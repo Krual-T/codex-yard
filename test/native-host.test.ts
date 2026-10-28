@@ -12,6 +12,7 @@ import { createNativeWorkbench } from '../src/native/server.ts';
 import { record, updatedAtom } from '../src/native/protocol.ts';
 import { createThreadProjects } from '../src/native/thread-projects.ts';
 import { BrowserHttpFetch } from '../src/native/browser-http-fetch.ts';
+import { CodexConnection } from '../lib/codex.ts';
 import { rendererAssets } from '../src/native/renderer-assets.ts';
 import { brandAssets } from '../src/native/visual-feedback.ts';
 import type { HostCatalog } from '../src/native/hosts.ts';
@@ -396,6 +397,32 @@ test('a resumed desktop title tool reaches the existing handler without replacin
   for (const method of ['thread/start', 'thread/fork', 'turn/start', 'config/batchWrite']) assert.equal(h.fake.calls(method).length, 0);
 });
 
+test('App and Yard can start, fork and rejoin in both orders without replacing MCP configuration', async t => {
+  const h = await fixture(t), yard = await h.connect();
+  const app = new CodexConnection(h.fake.socketPath);
+  await app.connect();
+  t.after(() => app.close());
+  const nativeConfig = { 'mcp_servers.codex_app.command': 'native-owned', 'mcp_servers.codex_app.enabled': true };
+  const native = await app.request('thread/start', { cwd: h.root, config: nativeConfig });
+  h.fake.loaded.delete(native.thread.id);
+  await yard.rpc(1, 'thread/resume', { threadId: native.thread.id });
+  assert.deepEqual(h.fake.calls('thread/resume').at(-1)!.params, { threadId: native.thread.id });
+
+  const custom = { 'mcp_servers.codex_yard.enabled': true, model_reasoning_effort: 'medium' };
+  const own = await yard.rpc(2, 'thread/start', { cwd: h.root, config: custom });
+  assert.deepEqual(h.fake.calls('thread/start').at(-1)!.params.config, custom);
+  const joined = await app.request('thread/resume', { threadId: own.result.thread.id });
+  assert.equal(joined.thread.id, own.result.thread.id);
+  await yard.rpc(3, 'thread/fork', { threadId: own.result.thread.id, config: custom });
+  assert.deepEqual(h.fake.calls('thread/fork').at(-1)!.params.config, custom);
+  await Promise.all([
+    yard.rpc(4, 'thread/resume', { threadId: native.thread.id }),
+    app.request('thread/resume', { threadId: native.thread.id }),
+  ]);
+  for (const call of h.fake.calls('thread/resume')) assert.equal(call.params.config, undefined);
+  assert.equal(h.fake.calls('turn/interrupt').length, 0);
+});
+
 test('legacy title calls keep current-thread authorization and preserve write failures', async t => {
   const h = await fixture(t), client = await h.connect();
   const thread = fixtureThread('desktop-thread', h.root, { name: 'Original title' });
@@ -455,7 +482,7 @@ test('native side-chat forks retain the official temporary contract and accept t
   assert.equal(h.fake.calls('thread/fork')[0].params.ephemeral, true);
   assert.equal(h.fake.calls('thread/fork')[0].params.excludeTurns, true);
   assert.equal(h.fake.calls('thread/fork')[0].params.developerInstructions, instructions);
-  assert.ok(h.fake.calls('thread/fork')[0].params.config, 'Local forks still receive this host’s tool socket configuration');
+  assert.equal(h.fake.calls('thread/fork')[0].params.config, undefined, 'Forks use the shared MCP registration');
   const items = [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Side conversation starts here.' }] }];
   assert.ok((await client.rpc(2, 'thread/inject_items', { threadId: 'side-chat', items })).result);
   assert.deepEqual(h.fake.calls('thread/inject_items')[0].params, { threadId: 'side-chat', items });
@@ -836,7 +863,7 @@ test('native prewarming, notifications and approval answers use the real RPC bri
   assert.ok(started.result.thread.id);
   assert.equal(h.fake.calls('thread/start').length, 1);
   const params = h.fake.calls('thread/start')[0].params;
-  assert.ok(record(record(record(params.config)['mcp_servers.codex_app']).env).CODEX_APP_TOOLS_PIPE_PATH);
+  assert.equal(params.config, undefined);
   assert.doesNotMatch(JSON.stringify(started), /CODEX_APP_TOOLS_PIPE_PATH/);
   h.fake.send({ method: 'item/agentMessage/delta', params: { threadId: started.result.thread.id, delta: 'streamed' } });
   assert.equal((await client.until(message => message.method === 'item/agentMessage/delta')).params.delta, 'streamed');

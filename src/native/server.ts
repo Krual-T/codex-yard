@@ -474,13 +474,8 @@ export async function createNativeWorkbench(options: Options = {}) {
         const { thread } = await connection.request('thread/read', { threadId: params.threadId, includeTurns: true });
         if (thread.turns?.length || thread.status?.type !== 'idle') throw new Error('对话已有内容，保留当前数据');
       }
-      if (hostId === 'local' && (method === 'thread/start' || method === 'thread/fork')) {
-        params.config = { ...record(params.config), ...hostTools.config };
-      }
-      if (hostId === 'local' && method === 'thread/resume') {
-        const loaded = await connection.request('thread/loaded/list', {});
-        if (!loaded.data.some(id => id === params.threadId)) params.config = { ...record(params.config), ...hostTools.config };
-      }
+      // Conversation tools come from the user's codex_yard MCP registration.
+      // The desktop App owns codex_app; joining its thread must preserve it.
       let result = await connection.request(method, params, { mutating: writeMethods.has(method) });
       if (method === 'thread/start' && record(record(result).thread).id) createdThreads.add(hostId + ':' + String(record(record(result).thread).id));
       if (method === 'thread/delete') createdThreads.delete(hostId + ':' + String(params.threadId));
