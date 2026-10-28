@@ -12,17 +12,12 @@ export interface VisualizationReferenceContext {
   title?: string;
   context?: unknown;
 }
-export interface VisualizationComposerDraft extends ComposerDraft {
-  referenceContext?: VisualizationReferenceContext;
-  originalUserInput?: string;
-}
-
 export interface StandaloneVisualizationProps {
   client: WorkbenchClient;
   hostId: string;
   threadId: string;
   path: string;
-  onPrefill(draft: VisualizationComposerDraft): void;
+  onPrefill(draft: ComposerDraft): void;
   onClose(): void;
   theme?: 'light' | 'dark';
   themeVariables?: Record<string, string>;
@@ -46,6 +41,16 @@ function preserveAlpha(old: ControlValue, color: string): string {
   if (/^#[\da-f]{4}$/i.test(value)) return `${color}${value[4]}${value[4]}`;
   if (/^#[\da-f]{8}$/i.test(value)) return `${color}${value.slice(7)}`;
   return color;
+}
+function visualizationDraft(prompt: string, referenceContext: VisualizationReferenceContext): ComposerDraft {
+  const reference = {
+    id: crypto.randomUUID(),
+    text: `Visualization: ${referenceContext.title ?? filename(referenceContext.path)}`,
+    kind: 'visualization',
+    context: { ...referenceContext },
+    original: { originalUserInput: prompt, referenceContext },
+  };
+  return { text: prompt, images: [], files: [], references: [reference] };
 }
 
 function download(blob: Blob, name: string) {
@@ -141,13 +146,10 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
             if (serialized === undefined || serialized.length > 32_768) throw new Error('Invalid follow-up context');
             context = JSON.parse(serialized) as unknown;
           }
-          const draft: VisualizationComposerDraft = { text: input.prompt, images: [], files: [] };
           if (input.title !== undefined || input.context !== undefined) {
-            draft.originalUserInput = input.prompt;
-            draft.referenceContext = { type: 'visualization', hostId, threadId, path: sourceRef.current?.path ?? path,
-              ...(typeof input.title === 'string' ? { title: input.title.trim() } : {}), ...(input.context !== undefined ? { context } : {}) };
-          }
-          propsRef.current.onPrefill(draft);
+            propsRef.current.onPrefill(visualizationDraft(input.prompt, { type: 'visualization', hostId, threadId, path: sourceRef.current?.path ?? path,
+              ...(typeof input.title === 'string' ? { title: input.title.trim() } : {}), ...(input.context !== undefined ? { context } : {}) }));
+          } else propsRef.current.onPrefill({ text: input.prompt, images: [], files: [] });
         } else if (message.method === 'display-mode') {
           if (input.mode !== 'inline' && input.mode !== 'fullscreen') throw new Error('Invalid display mode');
           setExpanded(input.mode === 'fullscreen');
@@ -340,8 +342,8 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
       } catch (reason) { if (epochRef.current === epoch) { setSavingAnnotation(false); setError(reason instanceof Error ? reason.message : 'Could not save visualization changes'); } return; }
       if (epochRef.current !== epoch || propsRef.current.client !== client || propsRef.current.hostId !== hostId || propsRef.current.threadId !== threadId || propsRef.current.path !== path) return;
       setSavingAnnotation(false);
-      propsRef.current.onPrefill({ text: prompt, images: [], files: [], originalUserInput: prompt,
-        referenceContext: { type: 'visualization', hostId, threadId, path: sourceRef.current?.path ?? path, title: 'Visualization changes', context } });
+      propsRef.current.onPrefill(visualizationDraft(prompt,
+        { type: 'visualization', hostId, threadId, path: sourceRef.current?.path ?? path, title: 'Visualization changes', context }));
     } else propsRef.current.onPrefill({ text: `Visualization: ${sourceRef.current?.path ?? path}\nSelection: ${excerpt}\nFeedback: ${comment.trim()}`, images: [], files: [] });
     changesRef.current = []; setChanges([]); selectionRef.current = null; setSelection(null);
     portRef.current?.postMessage({ type: 'annotate', enabled: false, changes: [] });

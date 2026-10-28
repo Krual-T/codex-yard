@@ -11,7 +11,8 @@ import { chromium } from 'playwright-core';
 import { visualizationSandboxPolicy } from '../src/native/visualizations.ts';
 
 interface Harness {
-  drafts: { text: string; referenceContext?: { title?: string; context?: unknown }; originalUserInput?: string }[];
+  drafts: { text: string; images: unknown[]; files: unknown[]; references?: { id: string; text: string; kind: string;
+    context: { title?: string; context?: unknown }; original: { originalUserInput: string; referenceContext: { title?: string; context?: unknown } } }[] }[];
   requests: string[];
   configure(html: string, atoms: Record<string, unknown>): void;
   atoms(): Record<string, unknown>;
@@ -95,7 +96,20 @@ test('structured React visualization persists and previews controls in an isolat
     assert.deepEqual(security, { generic: true, invalid: true, parent: true });
     await locator.locator('#follow').click();
     await page.waitForFunction(() => window.structuredHarness.drafts.length === 1);
-    assert.deepEqual(await page.evaluate(() => window.structuredHarness.drafts[0]), { text: 'Explain this', images: [], files: [], originalUserInput: 'Explain this', referenceContext: { type: 'visualization', hostId: 'local', threadId: 'thread', path: '/chart.html', title: 'Chart details', context: { series: ['a', 'b'], count: 2 } } });
+    const followUp = await page.evaluate(() => window.structuredHarness.drafts[0]);
+    assert.equal(followUp.text, 'Explain this');
+    assert.deepEqual(followUp.images, []);
+    assert.deepEqual(followUp.files, []);
+    assert.equal(followUp.references?.length, 1);
+    const followReference = followUp.references![0];
+    assert.match(followReference.id, /^[\da-f-]{36}$/i);
+    assert.equal(followReference.text, 'Visualization: Chart details');
+    assert.equal(followReference.kind, 'visualization');
+    const followContext = { type: 'visualization', hostId: 'local', threadId: 'thread', path: '/chart.html', title: 'Chart details', context: { series: ['a', 'b'], count: 2 } };
+    assert.deepEqual(followReference.context, followContext);
+    assert.deepEqual(followReference.original, { originalUserInput: 'Explain this', referenceContext: followContext });
+    assert.equal('originalUserInput' in followUp, false);
+    assert.equal('referenceContext' in followUp, false);
     await page.evaluate(() => window.structuredHarness.theme());
     await frame.waitForFunction(() => document.documentElement.lang === 'fr-FR' && getComputedStyle(document.documentElement).getPropertyValue('--viz-accent').trim() === '#aabbcc' &&
       (window as unknown as { openai: { visualizationStyleVariables: Record<string, string>; locale: string } }).openai.visualizationStyleVariables['--viz-accent'] === '#aabbcc' &&
@@ -131,10 +145,12 @@ test('structured React visualization persists and previews controls in an isolat
     await page.waitForFunction(() => window.structuredHarness.drafts.length === 2);
     const draft = await page.evaluate(() => window.structuredHarness.drafts[1]);
     assert.equal(draft.text, 'Make the chart larger');
-    assert.equal(draft.originalUserInput, draft.text);
-    assert.equal(draft.referenceContext?.title, 'Visualization changes');
-    assert.match(JSON.stringify(draft.referenceContext?.context), /amount-ref/);
-    assert.match(JSON.stringify(draft.referenceContext?.context), /"variant":"base"/);
+    const reference = draft.references?.[0];
+    assert.equal(reference?.original.originalUserInput, draft.text);
+    assert.equal(reference?.context.title, 'Visualization changes');
+    assert.deepEqual(reference?.original.referenceContext, reference?.context);
+    assert.match(JSON.stringify(reference?.context.context), /amount-ref/);
+    assert.match(JSON.stringify(reference?.context.context), /"variant":"base"/);
     await frame.waitForFunction(() => (window as unknown as { values: { amount: number } }).values.amount === 2);
     const persistedInteraction = await page.evaluate(() => window.structuredHarness.atoms()['visualization-interaction-state-v1:["local","thread"]']);
     assert.match(JSON.stringify(persistedInteraction), /amount-ref/);

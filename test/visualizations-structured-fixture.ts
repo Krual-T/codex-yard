@@ -1,11 +1,11 @@
 import { createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
-import { StandaloneVisualization, type StandaloneVisualizationProps, type VisualizationComposerDraft } from '../src/renderer/visualizations/index.tsx';
-import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
+import { StandaloneVisualization, type StandaloneVisualizationProps } from '../src/renderer/visualizations/index.tsx';
+import type { ComposerDraft, WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 
 const root = createRoot(document.getElementById('root')!);
-const drafts: VisualizationComposerDraft[] = [];
+const drafts: ComposerDraft[] = [];
 const requests: string[] = [];
 let html = '';
 let failWrites = false;

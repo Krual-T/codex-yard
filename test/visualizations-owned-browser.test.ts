@@ -152,7 +152,13 @@ test('owned React visualization uses a scoped opaque frame and cleans up its por
     ]);
     await frameLocator.locator('#follow').click();
     await page.waitForFunction(() => (document.getElementById('composer') as HTMLTextAreaElement).value === 'Explain the synthetic chart');
-    assert.deepEqual(await page.evaluate(() => window.visualizationHarness.drafts[0]), { text: 'Explain the synthetic chart', images: [], files: [] });
+    const draft = await page.evaluate(() => window.visualizationHarness.drafts[0]) as { text: string; images: unknown[]; files: unknown[]; references: { id: string; text: string; kind: string; context: unknown; original: unknown }[] };
+    assert.deepEqual({ text: draft.text, images: draft.images, files: draft.files }, { text: 'Explain the synthetic chart', images: [], files: [] });
+    assert.equal(draft.references.length, 1);
+    assert.match(draft.references[0].id, /^[\da-f-]{36}$/i);
+    const referenceContext = { type: 'visualization', hostId: 'ssh-host', threadId: 'thread-a', path: '/chart.html', title: 'Explain' };
+    assert.deepEqual({ ...draft.references[0], id: 'reference' }, { id: 'reference', text: 'Visualization: Explain', kind: 'visualization', context: referenceContext,
+      original: { originalUserInput: 'Explain the synthetic chart', referenceContext } });
     await page.evaluate(() => window.visualizationHarness.suspendHostChange());
     await page.waitForFunction(() => window.visualizationHarness.suspensions > 0);
     await frameLocator.locator('#follow').click();
