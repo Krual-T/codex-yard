@@ -1,0 +1,49 @@
+.yard-owned-sidebar {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 10px;
+  color: var(--yard-fg, #ececec);
+  background: var(--yard-sidebar, var(--yard-bg, #202020));
+  border-right: 1px solid var(--yard-border, #343434);
+  font: var(--yard-font-size, 14px)/1.4 var(--yard-ui-font, system-ui, sans-serif);
+}
+.yard-owned-sidebar * { box-sizing: border-box; }
+.yard-owned-sidebar button, .yard-owned-sidebar input { font: inherit; color: inherit; }
+.yard-owned-sidebar button { border: 0; border-radius: 6px; background: transparent; cursor: default; }
+:root[data-pointer-cursors=true] .yard-owned-sidebar button { cursor: pointer; }
+.yard-owned-sidebar button:hover { background: color-mix(in srgb, var(--yard-fg, #ececec) 8%, transparent); }
+.yard-owned-sidebar button:focus-visible, .yard-owned-sidebar input:focus-visible { outline: 2px solid var(--yard-accent, #99b8ff); outline-offset: 2px; }
+.yard-owned-sidebar button:disabled { opacity: .5; cursor: default; }
+.yard-owned-sidebar svg { width: 16px; height: 16px; flex: none; }
+.yard-owned-sidebar-brand { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px; font-size: 17px; font-weight: 600; }
+.yard-owned-sidebar-brand img { width: 25px; height: 25px; }
+.yard-owned-sidebar-brand span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.yard-owned-sidebar-icon { display: grid; place-items: center; width: 34px; height: 34px; flex: none; padding: 0; }
+.yard-owned-sidebar-command { display: flex; align-items: center; gap: 9px; min-height: 34px; width: 100%; padding: 6px 9px; text-align: left; }
+.yard-owned-sidebar input { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--yard-border, #343434); border-radius: 6px; background: var(--yard-panel, var(--yard-surface, #272727)); }
+.yard-owned-sidebar-heading { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding-left: 6px; color: var(--yard-muted, #969696); font-size: 12px; }
+.yard-owned-sidebar-section-toggle { display: flex; align-items: center; gap: 5px; flex: 1; min-height: 34px; padding: 4px 0; color: inherit; text-align: left; }
+.yard-owned-sidebar-section-toggle svg { width: 14px; height: 14px; }
+.yard-owned-sidebar-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; touch-action: pan-y; }
+.yard-owned-sidebar-project-heading { display: flex; align-items: center; }
+.yard-owned-sidebar-project-toggle { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; min-height: 34px; padding: 6px; text-align: left; }
+.yard-owned-sidebar-project-toggle span, .yard-owned-sidebar-thread-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.yard-owned-sidebar-thread { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; min-height: 34px; padding: 6px 8px 6px 27px; text-align: left; }
+.yard-owned-sidebar-thread[aria-current=page] { background: color-mix(in srgb, var(--yard-fg, #ececec) 9%, transparent); }
+.yard-owned-sidebar-thread-title { flex: 1; }
+.yard-owned-sidebar-thread-status { display: inline-flex; flex: none; color: var(--yard-muted, #969696); }
+.yard-owned-sidebar-recents { margin-top: 8px; }
+.yard-owned-sidebar-message { margin: 0; padding: 8px 6px; color: var(--yard-muted, #969696); font-size: 12px; overflow-wrap: anywhere; }
+.yard-owned-sidebar-message button { margin-left: 4px; padding: 3px; color: var(--yard-accent, #99b8ff); }
+.yard-owned-sidebar-error { padding: 8px 6px; overflow-wrap: anywhere; }
+.yard-owned-sidebar-error button { margin-left: 4px; padding: 3px 6px; color: var(--yard-accent, #99b8ff); }
+.yard-owned-sidebar-footer { display: flex; flex-direction: column; align-items: stretch; }
+@media (max-width: 600px) {
+  .yard-owned-sidebar { position: absolute; inset: 0 auto 0 0; z-index: 40; width: min(260px, 86vw); box-shadow: 10px 0 35px #0005; }
+  .yard-owned-sidebar-icon { width: 40px; height: 40px; }
+  .yard-owned-sidebar-command, .yard-owned-sidebar-section-toggle, .yard-owned-sidebar-project-toggle, .yard-owned-sidebar-thread,
+  .yard-owned-sidebar input, .yard-owned-sidebar-message button, .yard-owned-sidebar-error button { min-height: 40px; }
+}
