@@ -101,7 +101,7 @@ try {
   await page.goto(app.url + '/local/owned-conversation');
   await page.locator('[data-owned-renderer="true"]').waitFor();
   await page.getByText('Owned React and TypeScript conversation.', { exact: false }).waitFor();
-  await page.getByRole('textbox', { name: '和 Codex 一起工作', exact: true }).waitFor();
+  await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).waitFor();
   await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--yard-bg').trim() === '#152535');
   const actualFonts = await page.evaluate(() => ({ ui: getComputedStyle(document.documentElement).fontFamily,
     content: getComputedStyle(document.querySelector('.yard-conversation')!).fontFamily,
@@ -255,22 +255,22 @@ try {
   checks.push('two actual pages preserve concurrent native-atoms records, malformed atoms and quota failures');
 
   await page.setViewportSize({ width: 1360, height: 900 });
-  const goalRegion = page.getByRole('region', { name: '会话目标', exact: true });
+  const goalRegion = page.getByRole('region', { name: 'Conversation goal', exact: true });
   const goalWritesBefore = fake.calls('thread/goal/set').length;
-  await goalRegion.getByRole('button', { name: '新建目标', exact: true }).click();
-  await goalRegion.getByLabel('目标内容', { exact: true }).fill('OWNED_GOAL **bold**\n\n- preserve list');
-  await goalRegion.getByRole('button', { name: '富文本编辑', exact: true }).click();
+  await goalRegion.getByRole('button', { name: 'New goal', exact: true }).click();
+  await goalRegion.getByLabel('Goal content', { exact: true }).fill('OWNED_GOAL **bold**\n\n- preserve list');
+  await goalRegion.getByRole('button', { name: 'Rich text editing', exact: true }).click();
   await goalRegion.locator('.ProseMirror strong').getByText('bold', { exact: true }).waitFor();
-  await goalRegion.getByRole('button', { name: '创建暂停目标', exact: true }).click();
-  await goalRegion.getByText('已暂停', { exact: true }).waitFor();
+  await goalRegion.getByRole('button', { name: 'Create paused goal', exact: true }).click();
+  await goalRegion.getByText('Paused', { exact: true }).waitFor();
   assert.equal(fake.calls('thread/goal/set').length, goalWritesBefore + 1);
   assert.equal(fake.calls('thread/goal/set').at(-1)!.params.status, 'paused');
   assert.equal(fake.calls('thread/goal/set').at(-1)!.params.origin, 'user');
   await page.reload();
   await goalRegion.getByText('OWNED_GOAL **bold**\n\n- preserve list', { exact: true }).waitFor();
-  await goalRegion.getByRole('button', { name: '清除目标', exact: true }).click();
-  await goalRegion.getByRole('button', { name: '确认清除', exact: true }).click();
-  await goalRegion.getByRole('button', { name: '新建目标', exact: true }).waitFor();
+  await goalRegion.getByRole('button', { name: 'Clear goal', exact: true }).click();
+  await goalRegion.getByRole('button', { name: 'Confirm clear', exact: true }).click();
+  await goalRegion.getByRole('button', { name: 'New goal', exact: true }).waitFor();
   checks.push('actual App mounts owned goal controls and rich objective; explicit paused create, reload and clear use the original thread protocol without starting a turn');
 
   if (!await page.getByRole('button', { name: 'Settings', exact: true }).isVisible()) await sidebarButton.click();
@@ -366,18 +366,18 @@ try {
   // A rejected first turn outlives the home composer. Keep B while explicitly
   // retrying immutable A, including the real CLI's unreadable empty phase.
   await page.getByRole('button', { name: 'New chat in Second project', exact: true }).click();
-  const input = page.getByRole('textbox', { name: '和 Codex 一起工作', exact: true });
+  const input = page.getByRole('textbox', { name: 'Work with Codex', exact: true });
   const creationCount = fake.calls('thread/start').length;
   fake.handlers.set('turn/start', () => { throw new Error('SYNTHETIC_FIRST_SEND_REJECTED'); });
   await input.fill('ORIGINAL_FIRST_SEND_A');
-  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   const recovery = page.getByRole('region', { name: 'Message send recovery', exact: true });
   await recovery.getByText('SYNTHETIC_FIRST_SEND_REJECTED', { exact: true }).waitFor();
   await input.fill('NEWER_FIRST_SEND_B');
-  await page.getByText('正在保存草稿…', { exact: true }).waitFor({ state: 'hidden' });
+  await page.getByText('Saving draft...', { exact: true }).waitFor({ state: 'hidden' });
   const failedThreadId = new URL(page.url()).pathname.split('/').at(-1)!;
   await page.reload();
-  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'NEWER_FIRST_SEND_B');
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value === 'NEWER_FIRST_SEND_B');
   fake.handlers.delete('turn/start');
   await recovery.getByRole('button', { name: 'Retry original send', exact: true }).click();
   await recovery.waitFor({ state: 'hidden' });
@@ -390,13 +390,13 @@ try {
   fake.broadcast({ method: 'turn/completed', params: { threadId: failedThreadId, turn: retried.turns[0] } });
   const sendsAfterRetry = fake.calls('turn/start').length;
   await page.reload();
-  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'NEWER_FIRST_SEND_B');
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value === 'NEWER_FIRST_SEND_B');
   assert.equal(fake.calls('turn/start').length, sendsAfterRetry);
   checks.push('rejected first send survives route unmount and empty-history reload; explicit retry sends exact A once and preserves newer B');
 
   await page.getByRole('button', { name: 'New chat in Second project', exact: true }).click();
   await input.fill('OWNED_NEW_THREAD_MESSAGE');
-  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   const started = await fake.waitFor(message => message.method === 'turn/start' && JSON.stringify(message.params.input).includes('OWNED_NEW_THREAD_MESSAGE'), 15_000);
   const id = String(started.params.threadId);
   assert(fake.loaded.has(id));
@@ -431,14 +431,14 @@ try {
   const beforeHomeReturn = fake.calls('turn/start').length;
   await page.goto(app.url + '/');
   await input.fill('FRESH_HOME_UNSENT_AFTER_CREATION');
-  await page.getByText('正在保存草稿…', { exact: true }).waitFor({ state: 'hidden' });
+  await page.getByText('Saving draft...', { exact: true }).waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: 'Created ' + id, exact: true }).click();
   await page.waitForURL('**/local/' + id);
   await input.waitFor(); assert.equal(await input.inputValue(), '', 'A fresh home must not alias the thread that consumed its old identity.');
   await page.goto(app.url + '/');
-  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'FRESH_HOME_UNSENT_AFTER_CREATION');
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value === 'FRESH_HOME_UNSENT_AFTER_CREATION');
   await page.reload();
-  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'FRESH_HOME_UNSENT_AFTER_CREATION');
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value === 'FRESH_HOME_UNSENT_AFTER_CREATION');
   assert.equal(fake.calls('turn/start').length, beforeHomeReturn);
   await page.getByRole('button', { name: 'Created ' + id, exact: true }).click();
   await page.waitForURL('**/local/' + id); await input.waitFor(); assert.equal(await input.inputValue(), '');
@@ -456,16 +456,16 @@ try {
     };
   });
   await input.fill('UNKNOWN_ORDINARY_A');
-  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   await recovery.getByText('SYNTHETIC_LOST_SEND_RECEIPT', { exact: true }).waitFor();
   await input.fill('NEWER_ORDINARY_B');
-  await page.getByText('正在保存草稿…', { exact: true }).waitFor({ state: 'hidden' });
+  await page.getByText('Saving draft...', { exact: true }).waitFor({ state: 'hidden' });
   const ordinaryCalls = fake.calls('turn/start').length;
   const accepted = fake.threads.get(id)!.turns.at(-1)!;
   accepted.status = 'completed'; fake.threads.get(id)!.status = { type: 'idle' };
   fake.broadcast({ method: 'turn/completed', params: { threadId: id, turn: accepted } });
   await page.reload();
-  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'NEWER_ORDINARY_B');
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value === 'NEWER_ORDINARY_B');
   assert.equal(fake.calls('turn/start').length, ordinaryCalls);
   await recovery.getByRole('button', { name: 'Check send result', exact: true }).click();
   await recovery.getByText('原提交版本已提交；较新的草稿将保留。', { exact: true }).waitFor();
@@ -474,14 +474,14 @@ try {
   await recovery.waitFor({ state: 'hidden' });
   assert.equal(await input.inputValue(), 'NEWER_ORDINARY_B');
   await page.reload();
-  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'NEWER_ORDINARY_B');
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value === 'NEWER_ORDINARY_B');
   assert.equal(fake.calls('turn/start').length, ordinaryCalls);
   assert.equal(fake.calls('turn/start').at(-1)!.params.clientUserMessageId, record(accepted.items[0]).clientId);
   checks.push('ordinary send unknown receipt persists exact clientId; read-only check confirms A and preserves newer B through reload without replay');
   await input.fill('ACTIVE_TURN_FOR_QUEUE_AND_STEER');
-  await page.getByRole('button', { name: '发送', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === '');
-  await page.getByRole('button', { name: '停止', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value === '');
+  await page.getByRole('button', { name: 'Stop', exact: true }).waitFor();
   const activeForFollowup = fake.threads.get(id)!.turns.at(-1)!;
   fake.handlers.set('turn/steer', params => {
     assert.equal(params.expectedTurnId, activeForFollowup.id);
@@ -503,14 +503,14 @@ try {
       };
     }, method);
     await input.fill(action.toUpperCase() + '_SUBMITTED_A');
-    await page.getByRole('button', { name: action === 'queue' ? '排队' : '发送到当前任务', exact: true }).click();
+    await page.getByRole('button', { name: action === 'queue' ? 'Queue message' : 'Send to current task', exact: true }).click();
     await recovery.getByText('SYNTHETIC_LOST_FOLLOWUP_RECEIPT', { exact: true }).waitFor();
     const submitted = fake.calls(method).at(-1)!;
     assert.equal(fake.calls(method).length, originalCalls + 1);
     await input.fill(action.toUpperCase() + '_NEWER_B');
-    await page.getByText('正在保存草稿…', { exact: true }).waitFor({ state: 'hidden' });
+    await page.getByText('Saving draft...', { exact: true }).waitFor({ state: 'hidden' });
     await page.reload(); await installClientProbe(page);
-    await page.waitForFunction(expected => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === expected, action.toUpperCase() + '_NEWER_B');
+    await page.waitForFunction(expected => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value === expected, action.toUpperCase() + '_NEWER_B');
     assert.equal(fake.calls(method).length, originalCalls + 1, 'Reload must not replay an uncertain follow-up.');
     const state = await page.evaluate(async () => (window as any).acceptanceClient.host('get-persisted-atom', { key: 'codex-yard.send-recovery.v1' }));
     const original = Object.values(record(record(state).value).requests as Record<string, any>).find(value => value.clientUserMessageId === submitted.params.clientUserMessageId);
@@ -524,13 +524,13 @@ try {
     assert.equal(fake.calls(method).length, originalCalls + 1);
     if (action === 'queue') {
       // Use the actual queue consumer to delete the confirmed pending item.
-      const deleteButton = page.getByRole('button', { name: '删除待发送消息', exact: true });
+      const deleteButton = page.getByRole('button', { name: 'Delete queued message', exact: true });
       await deleteButton.click(); await deleteButton.waitFor({ state: 'hidden' });
     }
   }
   activeForFollowup.status = 'completed'; fake.threads.get(id)!.status = { type: 'idle' };
   fake.broadcast({ method: 'turn/completed', params: { threadId: id, turn: activeForFollowup } });
-  await page.getByRole('button', { name: '停止', exact: true }).waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: 'Stop', exact: true }).waitFor({ state: 'hidden' });
   checks.push('queue and steer persist immutable request/action and original turn, survive reload without replay and confirm exact peer clientId while retaining newer B');
   await installClientProbe(page);
   fake.handlers.set('thread/name/set', params => {
@@ -568,7 +568,7 @@ try {
   await page.getByRole('button', { name: 'Add to draft', exact: true }).click();
   await page.locator('.standalone-composer__reference').filter({ hasText: 'Visualization changes' }).waitFor();
   await input.fill('WIDGET_CONTEXT_SEND');
-  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   const widgetSend = await fake.waitFor(message => message.method === 'turn/start' && JSON.stringify(message.params.input).includes('WIDGET_CONTEXT_SEND'));
   const widgetContextEntries = Object.values(record(widgetSend.params.additionalContext)).map(record);
   assert(widgetContextEntries.length >= 2);
@@ -630,7 +630,7 @@ try {
   assert.equal(quotedElement.targetImmediateText, 'Owned Chrome element');
   assert.match(String(quotedElement.targetSelector), /#chosen/);
   await page.screenshot({ path: join(artifacts, 'owned-chrome-reference.png'), fullPage: true });
-  await browserChip.getByRole('button', { name: '移除引用', exact: true }).click();
+  await browserChip.getByRole('button', { name: 'Remove reference', exact: true }).click();
   await browserChip.waitFor({ state: 'hidden' });
   const comments = await page.evaluate(async () => (window as any).acceptanceClient.host('get-persisted-atom', { key: 'codex-yard.browser-comments.v1' }));
   assert.equal(Object.values(comments.value.entries).flat().length, 0, 'Removing an actual composer reference must await its authoritative comment deletion.');

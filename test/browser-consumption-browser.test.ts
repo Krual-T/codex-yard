@@ -143,10 +143,12 @@ test('confirmed browser references consume only the submitted version across pag
     await second.evaluate(id => window.browserConsumption.finish(id), beforeDelete.id);
     assert.equal((await second.evaluate(value => window.browserConsumption.comments(value), changedOwner)).comments.length, 0);
     const blocked = await second.evaluate(async ({ owner, revision }) => {
-      try { await window.browserConsumption.validateVersion(owner, revision); return ''; }
+      try { await window.browserConsumption.reserveVersion(owner, revision); return ''; }
       catch (error) { return (error as Error).message; }
     }, { owner: changedOwner, revision: newerC });
     assert.match(blocked, /浏览器引用已在其他页面删除/);
+    assert.deepEqual((await second.evaluate(() => window.browserConsumption.recovery())).requests, {},
+      'The actual prepare transaction rejects a stale deleted reference without reserving a send');
     await second.evaluate(() => window.browserConsumption.showBrowser(false));
     await mount(second, changedOwner);
     await second.getByText('选择草稿版本').click();

@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 import { StandaloneBrowser } from '../src/renderer/browser/index.tsx';
-import { addBrowserComment, assertBrowserDraftReferencesNotDeleted, browserCommentsAtomKey, browserOwnerKey,
+import { addBrowserComment, browserCommentsAtomKey, browserOwnerKey,
   readBrowserCommentsSnapshot } from '../src/renderer/browser/comments.ts';
 import type { BrowserOwner, BrowserReference } from '../src/renderer/browser/comments.ts';
 import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference,
@@ -29,7 +29,7 @@ export interface Fixture {
   acknowledge(intent: SendIntent): Promise<void>;
   recovery(): ReturnType<SendRecoveryStore['read']>;
   versions(owner: BrowserOwner): ReturnType<typeof readComposerDraftVersions>;
-  validateVersion(owner: BrowserOwner, revision: string): Promise<void>;
+  reserveVersion(owner: BrowserOwner, revision: string): Promise<SendIntent>;
   atom(key: string): Promise<unknown>;
   preserveUnknown(): Promise<void>;
   attempts(): number;
@@ -111,10 +111,10 @@ function App() {
       async acknowledge(intent) { await acknowledgeSubmittedBrowserReferences(intent, null, {}); },
       recovery: () => recovery.read(),
       versions: readComposerDraftVersions,
-      async validateVersion(value, revision) {
+      async reserveVersion(value, revision) {
         const versions = await readComposerDraftVersions(value), version = versions.versions.find(item => item.revision === revision);
         if (!version) throw new Error('Fixture version missing');
-        assertBrowserDraftReferencesNotDeleted(await readBrowserAtom(browserCommentsAtomKey), value, version.draft);
+        return recovery.prepare({ owner: value, revision }, '/fixture', version.draft, {}, {});
       },
       atom: readBrowserAtom,
       async preserveUnknown() {

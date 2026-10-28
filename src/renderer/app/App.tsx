@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import type { ThreadResponse, ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { ComposerDraft, MessageEditOrigin, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
 import { StandaloneComposer, bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from '../composer/StandaloneComposer.tsx';
-import type { ComposerDraftController, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
+import type { ComposerDraftController, ComposerDraftSnapshot, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
 import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
 import type { MessageEditNavigationController, MessageEditNavigationLease, MessageEditRecovery } from '../messages/use-message-editing.ts';
 import { StandaloneGoal } from '../composer/StandaloneGoal.tsx';
@@ -33,7 +33,8 @@ import type { SendIntent, SendRecoverySnapshot } from './send-recovery.ts';
 import { SendRecoveryNotice } from './SendRecoveryNotice.tsx';
 import { StandaloneBrowser } from '../browser/index.tsx';
 import { browserOwnerKey } from '../browser/comments.ts';
-import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference } from './browser-draft.ts';
+import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference, watchBrowserDraftDeletions } from './browser-draft.ts';
+import type { BrowserOwner } from '../browser/comments.ts';
 import { StandaloneVisualization, readVisualizationModelContext } from '../visualizations/index.tsx';
 import { homeDraftIdentity, selectHomeDraftIdentity } from './home-draft-identity.ts';
 import { I18nProvider, resolveLocale } from '../i18n/index.tsx';
@@ -127,6 +128,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const sendStore = useMemo(() => new SendRecoveryStore(client), [client]);
   const [sendState, setSendState] = useState<SendRecoverySnapshot | null>(null);
   const composerController = useRef<ComposerDraftController | null>(null);
+  const [composerSnapshot, setComposerSnapshot] = useState<ComposerDraftSnapshot | null>(null);
+  const [browserSyncError, setBrowserSyncError] = useState('');
+  const [browserSyncRetry, setBrowserSyncRetry] = useState(0);
+  const receiveComposerSnapshot = useCallback((value: ComposerDraftSnapshot) => setComposerSnapshot(value), []);
   const receiveComposerController = useCallback((controller: ComposerDraftController | null) => { composerController.current = controller; }, []);
   const sendReadGeneration = useRef(0);
   const reloadSends = useCallback(async () => {
@@ -574,6 +579,21 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     draftId: current.threadId ? sendState?.bindings[sendThreadKey(current.hostId, current.threadId)] ?? current.threadId : newDraftId };
   const browserOwner = browserDraftOwner(composerOwner, sendState?.bindings ?? {});
   const activeBrowserOwner = useRef(browserOwner); activeBrowserOwner.current = browserOwner;
+  const sendBindings = useRef(sendState?.bindings ?? {}); sendBindings.current = sendState?.bindings ?? {};
+  const updateBrowserDraft = useCallback(async (owner: BrowserOwner, update: (draft: ComposerDraft) => ComposerDraft) => {
+    const controller = composerController.current, snapshot = controller?.snapshot();
+    const matches = () => controller === composerController.current && !routeRef.current.readOnly && !navigationLocked.current
+      && browserOwnerKey(owner) === browserOwnerKey(activeBrowserOwner.current);
+    if (!controller || !snapshot || !matches() || !await controller.flush(snapshot.owner)) throw new Error('草稿已切换或尚未保存，浏览器批注已保留。');
+    const ready = controller.snapshot();
+    if (!ready || !matches() || browserOwnerKey(browserDraftOwner(ready.owner, sendBindings.current)) !== browserOwnerKey(owner)) throw new Error('草稿已切换，浏览器批注已保留。');
+    if (!await controller.update(ready.owner, update)) throw new Error('草稿已切换，浏览器批注已保留。');
+  }, []);
+  useEffect(() => {
+    if (!composerSnapshot || browserOwnerKey(browserDraftOwner(composerSnapshot.owner, sendBindings.current)) !== browserOwnerKey(browserOwner)) return;
+    setBrowserSyncError('');
+    return watchBrowserDraftDeletions(browserOwner, update => updateBrowserDraft(browserOwner, update), cause => setBrowserSyncError(String(cause)));
+  }, [browserOwner.hostId, browserOwner.threadId, browserOwner.draftId, composerSnapshot?.revision, browserSyncRetry, updateBrowserDraft]);
   const showBrowser = (source?: { hostId: string; threadId: string; url?: string }) => {
     if (source && (source.hostId !== current.hostId || source.threadId !== current.threadId)) {
       setError('浏览器链接所属会话已改变，请返回原会话。'); return;
@@ -653,6 +673,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         {turnDiff !== undefined && <button aria-label="Open turn changes" onClick={() => showPanel({ kind: 'diff', diff: turnDiff })}>Changes</button>}
       </header>
       {error && <div role="alert" className="yard-error">{error}<button onClick={() => { setError(''); setRefresh(value => value + 1); }}>Retry</button><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
+      {browserSyncError && <div role="alert" className="yard-error">{browserSyncError}<button onClick={() => setBrowserSyncRetry(value => value + 1)}>Retry browser reference sync</button></div>}
       {Object.values(sendState?.requests ?? {}).map(intent => <SendRecoveryNotice key={intent.id} intent={intent}
         canRetry={!submitting && !loading && canRetryAction(intent) && !current.readOnly && current.hostId === intent.owner.hostId && current.threadId === intent.threadId
           && (intent.threadId !== null || newDraftId === intent.owner.draftId)}
@@ -690,7 +711,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           {current.threadId && !loading && <StandaloneGoal client={client} hostId={current.hostId} threadId={current.threadId} readOnly={current.readOnly} />}
           {current.readOnly ? <p role="status">此会话已归档。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p> : !sendState || current.threadId && (loading || !initialOptions) ? <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
           onRemoveReference={(owner, reference) => removeBrowserDraftReference(browserDraftOwner(owner, sendState.bindings), reference)}
-          onDraftController={receiveComposerController} initialOptions={initialOptions ?? undefined} hosts={hosts} onTargetChange={async target => {
+          onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} initialOptions={initialOptions ?? undefined} hosts={hosts} onTargetChange={async target => {
           if (await navigate('/' + (target.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(target.hostId)))) {
             rememberNewDraftLocation(target.hostId, homeDraftIdentity(target.hostId), target.cwd); setCwd(target.cwd); setSelectedProject(null);
           }
@@ -709,14 +730,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           onRecoveryBarrier={receivePanelRecoveryBarrier}
           onClose={() => setPanelOpen(false)} onReference={addReference} onDirtyChange={dirty => { panelsDirty.current = dirty; }} />}</div>
         {browserMounted && <StandaloneBrowser client={client} {...browserOwner} browserTabId="primary"
-          draft={composerController.current?.snapshot()?.draft ?? { text: '', images: [], files: [] }}
+          draft={composerSnapshot && browserOwnerKey(browserDraftOwner(composerSnapshot.owner, sendState?.bindings ?? {})) === browserOwnerKey(browserOwner)
+            ? composerSnapshot.draft : { text: '', images: [], files: [] }}
           visible={panelOpen && !settings && panelKind === 'browser'} allowNavigation
           navigationRequest={browserNavigation} onNavigationConsumed={id => setBrowserNavigation(previous => previous?.id === id ? null : previous)}
-          onDraftChange={async (owner, update) => {
-            const controller = composerController.current, snapshot = controller?.snapshot();
-            if (!controller || !snapshot || current.readOnly || navigationLocked.current || browserOwnerKey(owner) !== browserOwnerKey(activeBrowserOwner.current)) throw new Error('草稿已切换，浏览器批注已保留。');
-            if (!await controller.update(snapshot.owner, update)) throw new Error('草稿已切换，浏览器批注已保留。');
-          }} onClose={() => setPanelOpen(false)} />}
+          onDraftChange={updateBrowserDraft} onClose={() => setPanelOpen(false)} />}
         {panelOpen && !settings && panelKind === 'visualization' && visualization?.hostId === current.hostId && visualization.threadId === current.threadId
           && <StandaloneVisualization client={client} {...visualization} theme={previewAppearance.theme} themeVariables={previewAppearance.variables}
             locale={previewAppearance.locale} onPrefill={addReference} onClose={() => setPanelOpen(false)} />}

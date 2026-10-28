@@ -1,6 +1,8 @@
 import type { ComposerDraft, SubmissionCollaborationMode, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import type { ThreadSummary } from '../../../lib/codex-protocol.ts';
-import { readBrowserAtom, updateBrowserAtom } from '../storage/ui-atoms.ts';
+import { readBrowserAtom, updateBrowserAtoms } from '../storage/ui-atoms.ts';
+import { assertBrowserDraftReferencesNotDeleted, browserCommentsAtomKey, ensureBrowserCommentStore } from '../browser/comments.ts';
+import { browserDraftOwner } from './browser-draft.ts';
 
 export const sendsAtom = 'codex-yard.send-recovery.v1';
 export interface SendOwner { hostId: string; threadId: string | null; draftId: string }
@@ -31,8 +33,11 @@ export interface SendIntent extends SendVersion {
 }
 interface CreationReceipt { owner: SendOwner; thread: ThreadSummary; settings: SubmitOptions }
 export interface SendRecoverySnapshot { requests: Record<string, SendIntent>; bindings: Record<string, string>; creations: Record<string, CreationReceipt> }
-interface Storage { read(): Promise<unknown>; update(change: (value: unknown) => unknown): Promise<unknown> }
-const browserStorage: Storage = { read: () => readBrowserAtom(sendsAtom), update: change => updateBrowserAtom(sendsAtom, change) };
+interface Storage { read(): Promise<unknown>; update(change: (value: unknown, atoms?: Record<string, unknown>) => unknown): Promise<unknown> }
+const browserStorage: Storage = { read: () => readBrowserAtom(sendsAtom), update: change => updateBrowserAtoms(atoms => {
+  const value = change(atoms[sendsAtom], atoms);
+  return { value, updates: { [sendsAtom]: value } };
+}) };
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const stages: SendStage[] = ['prepared', 'creating', 'ready', 'sending', 'unknown', 'failed', 'confirmed'];
 export const sendOwnerKey = (owner: Pick<SendOwner, 'hostId' | 'draftId'>) => JSON.stringify([owner.hostId, owner.draftId]);
@@ -85,9 +90,9 @@ export class SendRecoveryStore {
     this.storage = storage;
   }
   async read() { return snapshot(await this.storage.read()); }
-  private async change(update: (value: SendRecoverySnapshot) => void): Promise<SendRecoverySnapshot> {
+  private async change(update: (value: SendRecoverySnapshot, atoms?: Record<string, unknown>) => void): Promise<SendRecoverySnapshot> {
     let result!: SendRecoverySnapshot;
-    await this.storage.update(value => { result = snapshot(value); update(result); return result; });
+    await this.storage.update((value, atoms) => { result = snapshot(value); update(result, atoms); return result; });
     return result;
   }
   async prepare(version: SendVersion, cwd: string, draft: ComposerDraft, options: SubmitOptions, overrides: Partial<SubmitOptions>, projectId?: string,
@@ -96,7 +101,13 @@ export class SendRecoveryStore {
       threadId: version.owner.threadId, cwd, draft: structuredClone(draft), options: structuredClone(options), action: structuredClone(action),
       overrides: structuredClone(overrides), stage: 'prepared', ...(projectId ? { projectId } : {}),
       additionalContext: structuredClone(additionalContext ?? {}) };
-    await this.change(state => {
+    const hasBrowserReferences = (draft.references ?? []).some(reference => reference.kind === 'browser');
+    if (hasBrowserReferences) await ensureBrowserCommentStore();
+    await this.change((state, atoms) => {
+      if (hasBrowserReferences) {
+        if (!atoms) throw new Error('无法在发送事务中核对浏览器引用，原草稿已保留。');
+        assertBrowserDraftReferencesNotDeleted(atoms[browserCommentsAtomKey], browserDraftOwner(version.owner, state.bindings), draft);
+      }
       if (Object.values(state.requests).some(value => sendOwnerKey(value.owner) === sendOwnerKey(version.owner))) {
         throw new Error('此草稿还有待核对的发送结果，请先处理恢复记录。');
       }
