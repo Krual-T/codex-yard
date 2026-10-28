@@ -54,6 +54,14 @@ export function AgentSection({ client, hostId, onDirtyChange, onSavingChange }: 
     {state.error && <p className="yard-setting-error" role="alert">{state.error} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void agent.load(); }}>Reload</button></p>}
     {state.writeError && <p className="yard-setting-error" role="alert">{state.writeError}</p>}
     {state.warning && <p role="status">{state.warning}</p>}
+    {state.conflicts.map(field => {
+      const labels = field === 'approval' ? approvalLabels : sandboxLabels;
+      return <div key={field} className="yard-setting-error" role="alert">
+        <p>{field === 'approval' ? 'Approval policy' : 'Sandbox mode'} changed elsewhere. Current: {labels[state.saved[field]] || state.saved[field]}; yours: {labels[state.values[field]] || state.values[field]}.</p>
+        <div className="yard-actions"><button type="button" disabled={state.saving} onClick={() => agent.resolveConflict(field, 'current')}>Use current value</button>
+          <button type="button" disabled={state.saving} onClick={() => agent.resolveConflict(field, 'draft')}>Keep my change</button></div>
+      </div>;
+    })}
     {state.loading ? <p>Loading agent settings...</p> : <div className="yard-setting-group">
       <Row label="Approval policy" description="Choose when Codex asks for approval.">
         <select aria-label="Approval policy" value={state.values.approval} disabled={state.saving || !state.approvals.length} onChange={event => agent.edit('approval', event.target.value)}>
@@ -70,7 +78,7 @@ export function AgentSection({ client, hostId, onDirtyChange, onSavingChange }: 
     </div>}
     {dirty && <div className="yard-inline-save"><span>Unsaved agent settings</span><div className="yard-actions">
       <button type="button" disabled={state.saving} onClick={() => agent.discard()}>Discard</button>
-      <button type="button" disabled={state.saving || Boolean(state.writeError)} onClick={() => { void agent.save(); }}>{state.saving ? 'Saving...' : 'Save'}</button>
+      <button type="button" disabled={state.saving || Boolean(state.writeError) || state.conflicts.length > 0} onClick={() => { void agent.save(); }}>{state.saving ? 'Saving...' : 'Save'}</button>
     </div></div>}
     <p className="yard-muted">Project-specific settings, network access, web search and response detail cannot be changed from this connection.</p>
     <ExperimentalFeatures client={client} hostId={hostId} />

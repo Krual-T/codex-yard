@@ -12,10 +12,12 @@ export interface ModelOption {
 }
 interface Config { model?: string | null; model_reasoning_effort?: string | null; profile?: string | null }
 interface ConfigRead { config: Config; layers?: unknown }
+export type ModelField = 'model' | 'effort';
 export interface ModelSettingsSnapshot {
   loading: boolean; saving: boolean; error: string | null; warning: string | null; writeError: string | null;
   models: ModelOption[]; profile: string | null;
   model: string | null; effort: string | null; savedModel: string | null; savedEffort: string | null;
+  conflicts: ModelField[];
 }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const same = (a: string | null, b: string | null) => a === b;
@@ -27,8 +29,9 @@ export class ModelSettings {
   private listeners = new Set<() => void>();
   private generation = 0;
   private target: ConfigTarget | null = null;
+  private draftTarget: ConfigTarget | null = null;
   private snapshot: ModelSettingsSnapshot = { loading: true, saving: false, error: null, warning: null, writeError: null, models: [],
-    profile: null, model: null, effort: null, savedModel: null, savedEffort: null };
+    profile: null, model: null, effort: null, savedModel: null, savedEffort: null, conflicts: [] };
   constructor(client: WorkbenchClient, hostId: string) { this.client = client; this.hostId = hostId; }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -69,6 +72,7 @@ export class ModelSettings {
     }
   }
   async load(): Promise<void> {
+    if (this.snapshot.saving) return;
     const generation = ++this.generation;
     this.update({ loading: true, error: null });
     try {
@@ -80,28 +84,55 @@ export class ModelSettings {
         this.update({ loading: false, error: 'The active profile changed. Discard your edits and reload before continuing.' });
         return;
       }
-      const model = asValue(config.model), effort = asValue(config.model_reasoning_effort);
+      if (this.dirty && this.draftTarget && target.target &&
+        (this.draftTarget.file !== target.target.file || this.draftTarget.profile !== target.target.profile)) {
+        this.update({ loading: false, error: 'The target configuration changed. Discard your edits before changing targets.' }); return;
+      }
+      const currentModel = asValue(config.model), currentEffort = asValue(config.model_reasoning_effort);
+      const previous = this.snapshot, conflicts: ModelField[] = [];
+      const modelDirty = previous.model !== previous.savedModel && previous.model !== currentModel;
+      const effortDirty = previous.effort !== previous.savedEffort && previous.effort !== currentEffort;
+      const model = modelDirty ? previous.model : currentModel, effort = effortDirty ? previous.effort : currentEffort;
+      if (modelDirty && (currentModel !== previous.savedModel || previous.conflicts.includes('model'))) conflicts.push('model');
+      if (effortDirty && (currentEffort !== previous.savedEffort || previous.conflicts.includes('effort'))) conflicts.push('effort');
       this.target = target.target;
-      this.update({ loading: false, models, profile: asValue(config.profile), savedModel: model, savedEffort: effort, writeError: target.error,
-        model: this.dirty ? this.snapshot.model : model, effort: this.dirty ? this.snapshot.effort : effort });
+      if (modelDirty || effortDirty) this.draftTarget ??= target.target;
+      else this.draftTarget = null;
+      this.update({ loading: false, models, profile: asValue(config.profile), savedModel: currentModel, savedEffort: currentEffort,
+        writeError: target.error, model, effort, conflicts,
+        error: conflicts.length ? 'Some settings changed elsewhere. Review each conflict before saving.' : null });
     } catch (error) { if (generation === this.generation) this.update({ loading: false, error: message(error) }); }
   }
   setModel(model: string) {
+    if (this.snapshot.loading || this.snapshot.saving) return;
     const selected = this.snapshot.models.find(item => item.model === model);
     if (!selected) return;
-    const efforts = Array.isArray(selected.supportedReasoningEfforts) ? selected.supportedReasoningEfforts : [];
-    const defaultEffort = efforts.find(item => item.reasoningEffort === selected.defaultReasoningEffort)?.reasoningEffort;
-    const effort = efforts.some(item => item.reasoningEffort === this.snapshot.effort) ? this.snapshot.effort :
-      defaultEffort ?? efforts[0]?.reasoningEffort ?? null;
-    this.update({ model, effort, error: null, warning: null });
+    if (!this.dirty && model !== this.snapshot.savedModel) this.draftTarget = this.target;
+    const conflicts = model === this.snapshot.savedModel ? this.snapshot.conflicts.filter(field => field !== 'model') : this.snapshot.conflicts;
+    if (model === this.snapshot.savedModel && this.snapshot.effort === this.snapshot.savedEffort) this.draftTarget = null;
+    this.update({ model, conflicts, error: conflicts.length ? this.snapshot.error : null, warning: null });
   }
   setEffort(effort: string) {
+    if (this.snapshot.loading || this.snapshot.saving) return;
     const selected = this.snapshot.models.find(item => item.model === this.snapshot.model);
-    if (selected?.supportedReasoningEfforts?.some(item => item.reasoningEffort === effort)) this.update({ effort, error: null, warning: null });
+    if (!selected?.supportedReasoningEfforts?.some(item => item.reasoningEffort === effort)) return;
+    if (!this.dirty && effort !== this.snapshot.savedEffort) this.draftTarget = this.target;
+    const conflicts = effort === this.snapshot.savedEffort ? this.snapshot.conflicts.filter(field => field !== 'effort') : this.snapshot.conflicts;
+    if (this.snapshot.model === this.snapshot.savedModel && effort === this.snapshot.savedEffort) this.draftTarget = null;
+    this.update({ effort, conflicts, error: conflicts.length ? this.snapshot.error : null, warning: null });
   }
-  discard() { this.update({ model: this.snapshot.savedModel, effort: this.snapshot.savedEffort, error: null, warning: null }); }
+  resolveConflict(field: ModelField, choice: 'current' | 'draft') {
+    if (this.snapshot.saving || !this.snapshot.conflicts.includes(field)) return;
+    const model = choice === 'current' && field === 'model' ? this.snapshot.savedModel : this.snapshot.model;
+    const effort = choice === 'current' && field === 'effort' ? this.snapshot.savedEffort : this.snapshot.effort;
+    const conflicts = this.snapshot.conflicts.filter(item => item !== field);
+    if (model === this.snapshot.savedModel && effort === this.snapshot.savedEffort) this.draftTarget = null;
+    this.update({ model, effort, conflicts, error: conflicts.length ? this.snapshot.error : null });
+  }
+  discard() { this.draftTarget = null; this.update({ model: this.snapshot.savedModel, effort: this.snapshot.savedEffort, conflicts: [], error: null, warning: null }); }
   async save(): Promise<boolean> {
-    if (!this.dirty || this.snapshot.saving) return false;
+    if (!this.dirty || this.snapshot.saving || this.snapshot.loading) return false;
+    if (this.snapshot.conflicts.length) { this.update({ error: 'Review each conflicting setting before saving.' }); return false; }
     const { model, effort, savedModel, savedEffort, profile } = this.snapshot;
     const target = this.target;
     if (!target) {
@@ -109,6 +140,10 @@ export class ModelSettings {
     }
     if ((!model && model !== savedModel) || (!effort && effort !== savedEffort)) {
       this.update({ error: 'This configuration cannot be written safely with the current host contract.' }); return false;
+    }
+    const selected = this.snapshot.models.find(item => item.model === model);
+    if (effort !== savedEffort && (!selected || !selected.supportedReasoningEfforts.some(item => item.reasoningEffort === effort))) {
+      this.update({ error: 'The selected model does not support this reasoning effort. Review your selection before saving.' }); return false;
     }
     this.update({ saving: true, error: null, warning: null });
     try {
@@ -136,10 +171,16 @@ export class ModelSettings {
       const after = await this.readConfig();
       const afterTarget = await this.targetFor(after);
       const actualModel = asValue(after.config.model), actualEffort = asValue(after.config.model_reasoning_effort);
-      const matches = actualModel === model && actualEffort === effort && asValue(after.config.profile) === profile &&
+      const matches = (model === savedModel || actualModel === model) && (effort === savedEffort || actualEffort === effort) && asValue(after.config.profile) === profile &&
         afterTarget.target?.file === target.file;
       this.target = afterTarget.target;
+      const conflicts: ModelField[] = [];
+      if (!matches && model !== savedModel && model !== actualModel) conflicts.push('model');
+      if (!matches && effort !== savedEffort && effort !== actualEffort) conflicts.push('effort');
+      if (matches) this.draftTarget = null;
       this.update({ saving: false, savedModel: actualModel, savedEffort: actualEffort, writeError: afterTarget.error,
+        model: matches || model === savedModel ? actualModel : model,
+        effort: matches || effort === savedEffort ? actualEffort : effort, conflicts,
         warning: result.status === 'okOverridden' ? result.overriddenMetadata?.message || 'A higher-priority configuration overrides this change.' : null,
         error: matches ? null : 'The saved configuration differs from your edit. Review the effective values.' });
       return matches;

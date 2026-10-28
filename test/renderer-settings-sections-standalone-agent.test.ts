@@ -93,3 +93,63 @@ test('unverifiable requirements do not permit new agent choices', async () => {
   assert.equal(agent.dirty, false);
   assert.match(agent.getSnapshot().error ?? '', /Invalid configuration requirements/);
 });
+
+test('agent reload retains only an edited approval and adopts a concurrent sandbox restriction', async () => {
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local');
+  client.config.approval_policy = 'never'; client.config.sandbox_mode = 'workspace-write';
+  await agent.load(); agent.edit('approval', 'on-request');
+  client.config.sandbox_mode = 'read-only'; client.version = 'external-version';
+  assert.equal(await agent.save(), false);
+  await agent.load();
+  assert.deepEqual(agent.getSnapshot().values, { approval: 'on-request', sandbox: 'read-only' });
+  assert.deepEqual(agent.getSnapshot().conflicts, []);
+  assert.equal(await agent.save(), true);
+  const write = client.calls.find(call => call.method === 'config/batchWrite');
+  assert.deepEqual(write?.params?.edits, [{ keyPath: 'approval_policy', value: 'on-request', mergeStrategy: 'upsert' }]);
+  assert.equal(write?.params?.expectedVersion, 'external-version');
+  assert.equal(client.config.sandbox_mode, 'read-only');
+});
+
+test('agent same-field conflict requires an explicit choice even after repeated reloads', async () => {
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local');
+  await agent.load(); agent.edit('approval', 'never');
+  client.config.approval_policy = 'untrusted'; client.version = 'external-version';
+  await agent.load();
+  assert.deepEqual(agent.getSnapshot().conflicts, ['approval']);
+  assert.equal(await agent.save(), false);
+  await agent.load();
+  assert.deepEqual(agent.getSnapshot().conflicts, ['approval']);
+  agent.resolveConflict('approval', 'draft');
+  assert.equal(await agent.save(), true);
+  const write = client.calls.find(call => call.method === 'config/batchWrite');
+  assert.deepEqual(write?.params?.edits, [{ keyPath: 'approval_policy', value: 'never', mergeStrategy: 'upsert' }]);
+});
+
+test('a concurrent sandbox edit cannot be overwritten without review', async () => {
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local');
+  await agent.load(); agent.edit('sandbox', 'workspace-write');
+  client.config.sandbox_mode = 'danger-full-access'; client.version = 'v2';
+  await agent.load();
+  assert.deepEqual(agent.getSnapshot().conflicts, ['sandbox']);
+  assert.equal(await agent.save(), false);
+  agent.resolveConflict('sandbox', 'draft');
+  client.config.sandbox_mode = 'read-only'; client.version = 'v3';
+  assert.equal(await agent.save(), false);
+  await agent.load();
+  assert.deepEqual(agent.getSnapshot().conflicts, ['sandbox']);
+  agent.resolveConflict('sandbox', 'current');
+  assert.equal(agent.dirty, false);
+  assert.equal(client.calls.some(call => call.method === 'config/batchWrite'), false);
+});
+
+test('agent profile changes cannot redirect a pending sandbox edit', async () => {
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local');
+  await agent.load(); agent.edit('sandbox', 'workspace-write');
+  client.config.profile = 'other'; client.version = 'external-version';
+  assert.equal(await agent.save(), false);
+  await agent.load();
+  assert.equal(agent.getSnapshot().values.sandbox, 'workspace-write');
+  assert.equal(agent.getSnapshot().profile, null);
+  assert.match(agent.getSnapshot().error ?? '', /profile changed/);
+  assert.equal(client.calls.some(call => call.method === 'config/batchWrite'), false);
+});

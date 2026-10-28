@@ -20,6 +20,11 @@ export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: 
     {state.error && <p className="yard-setting-error" role="alert">{state.error} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void modelSettings.load(); }}>Reload</button></p>}
     {state.writeError && <p className="yard-setting-error" role="alert">{state.writeError} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void modelSettings.load(); }}>Reload</button></p>}
     {state.warning && <p role="status">{state.warning}</p>}
+    {state.conflicts.map(field => <div key={field} className="yard-setting-error" role="alert">
+      <p>{field === 'model' ? 'Model' : 'Reasoning effort'} changed elsewhere. Current: {(field === 'model' ? state.savedModel : state.savedEffort) ?? 'Default'}; yours: {(field === 'model' ? state.model : state.effort) ?? 'Default'}.</p>
+      <div className="yard-actions"><button type="button" disabled={state.saving} onClick={() => modelSettings.resolveConflict(field, 'current')}>Use current value</button>
+        <button type="button" disabled={state.saving} onClick={() => modelSettings.resolveConflict(field, 'draft')}>Keep my change</button></div>
+    </div>)}
     {state.loading ? <p>Loading models...</p> : <div className="yard-setting-group">
       <Row label="Model"><select aria-label="Model" value={state.model ?? ''} disabled={state.saving || state.models.length === 0}
         onChange={event => modelSettings.setModel(event.target.value)}>
@@ -36,7 +41,7 @@ export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: 
     </div>}
     {dirty && <div className="yard-inline-save"><span>Unsaved model settings</span><div className="yard-actions">
       <button type="button" disabled={state.saving} onClick={() => modelSettings.discard()}>Discard</button>
-      <button type="button" disabled={state.saving || Boolean(state.writeError)} onClick={() => { void modelSettings.save(); }}>{state.saving ? 'Saving...' : 'Save'}</button>
+      <button type="button" disabled={state.saving || Boolean(state.writeError) || state.conflicts.length > 0} onClick={() => { void modelSettings.save(); }}>{state.saving ? 'Saving...' : 'Save'}</button>
     </div></div>}
   </>;
 }

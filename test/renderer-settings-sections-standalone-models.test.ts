@@ -4,7 +4,7 @@ import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-
 import { ModelSettings } from '../src/renderer/settings/model-settings.ts';
 
 class FakeClient implements WorkbenchClient {
-  config: { model: string; model_reasoning_effort: string; profile: string | null } = { model: 'alpha', model_reasoning_effort: 'high', profile: null };
+  config: { model: string | null; model_reasoning_effort: string | null; profile: string | null } = { model: 'alpha', model_reasoning_effort: 'high', profile: null };
   calls: { method: string; params?: Record<string, unknown>; hostId?: string }[] = [];
   home = '/fixture/codex';
   version = 'version-one';
@@ -52,7 +52,8 @@ test('model settings paginate and write the selected host default user file with
   assert.deepEqual(client.calls.find(call => call.method === 'codex-home')?.params, { hostId: 'ssh:fixture' });
   assert.deepEqual(client.calls.find(call => call.method === 'config/read')?.params, { includeLayers: true });
   settings.setModel('beta');
-  assert.equal(settings.getSnapshot().effort, 'low');
+  assert.equal(settings.getSnapshot().effort, 'high');
+  settings.setEffort('low');
   assert.equal(await settings.save(), true);
   const write = client.calls.find(call => call.method === 'config/batchWrite');
   assert.deepEqual(write, { method: 'config/batchWrite', hostId: 'ssh:fixture', params: { edits: [
@@ -70,7 +71,7 @@ test('a legacy profile value does not redirect base user model writes', async ()
   const write = client.calls.find(call => call.method === 'config/batchWrite');
   assert.equal(write?.params?.filePath, null);
   assert.equal(write?.params?.expectedVersion, 'version-one');
-  assert.deepEqual((write?.params?.edits as { keyPath: string }[]).map(edit => edit.keyPath), ['model', 'model_reasoning_effort']);
+  assert.deepEqual((write?.params?.edits as { keyPath: string }[]).map(edit => edit.keyPath), ['model']);
 });
 
 test('a synthetic named user layer cannot be treated as the base file', async () => {
@@ -117,7 +118,56 @@ test('failed writes and changed configuration preserve the draft without automat
   await settings.load();
   assert.equal(settings.getSnapshot().savedModel, 'external');
   assert.equal(settings.getSnapshot().model, 'beta');
+  assert.deepEqual(settings.getSnapshot().conflicts, ['model']);
+  assert.equal(await settings.save(), false);
+  await settings.load();
+  assert.deepEqual(settings.getSnapshot().conflicts, ['model']);
+  settings.resolveConflict('model', 'draft');
   assert.equal(await settings.save(), true);
+});
+
+test('model reload adopts an unedited nullable effort and sends only the edited model', async () => {
+  const client = new FakeClient(), settings = new ModelSettings(client, 'local');
+  await settings.load(); settings.setModel('beta');
+  client.config.model_reasoning_effort = null; client.version = 'external-version';
+  assert.equal(await settings.save(), false);
+  await settings.load();
+  assert.equal(settings.getSnapshot().effort, null);
+  assert.deepEqual(settings.getSnapshot().conflicts, []);
+  assert.equal(await settings.save(), true);
+  const write = client.calls.find(call => call.method === 'config/batchWrite');
+  assert.deepEqual(write?.params?.edits, [{ keyPath: 'model', value: 'beta', mergeStrategy: 'upsert' }]);
+  assert.equal(write?.params?.expectedVersion, 'external-version');
+  assert.equal(client.config.model_reasoning_effort, null);
+});
+
+test('model conflict can use the current value without silently writing the old draft', async () => {
+  const client = new FakeClient(), settings = new ModelSettings(client, 'local');
+  await settings.load(); settings.setModel('beta');
+  client.config.model = 'external'; client.version = 'external-version';
+  await settings.load();
+  assert.deepEqual(settings.getSnapshot().conflicts, ['model']);
+  settings.resolveConflict('model', 'current');
+  assert.equal(settings.dirty, false);
+  assert.equal(settings.getSnapshot().model, 'external');
+  assert.equal(await settings.save(), false);
+  assert.equal(client.calls.filter(call => call.method === 'config/batchWrite').length, 0);
+});
+
+test('an effort draft must be supported by the model selected after a concurrent change', async () => {
+  const client = new FakeClient(), settings = new ModelSettings(client, 'local');
+  client.config.model_reasoning_effort = null;
+  await settings.load(); settings.setEffort('high');
+  client.config.model = 'beta'; client.version = 'external-version';
+  await settings.load();
+  assert.equal(settings.getSnapshot().model, 'beta');
+  assert.equal(settings.getSnapshot().effort, 'high');
+  assert.equal(await settings.save(), false);
+  assert.match(settings.getSnapshot().error ?? '', /does not support/);
+  settings.setEffort('low');
+  assert.equal(await settings.save(), true);
+  const write = client.calls.find(call => call.method === 'config/batchWrite');
+  assert.deepEqual(write?.params?.edits, [{ keyPath: 'model_reasoning_effort', value: 'low', mergeStrategy: 'upsert' }]);
 });
 
 test('a version conflict after the preflight preserves input and is not retried', async () => {

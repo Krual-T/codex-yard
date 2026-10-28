@@ -4,7 +4,7 @@ import type { ConfigTarget } from './config-target.ts';
 
 type Approval = 'on-request' | 'never';
 type Sandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
-type Field = 'approval' | 'sandbox';
+export type AgentField = 'approval' | 'sandbox';
 type AgentValues = { approval: string; sandbox: string };
 type RawConfig = { approval_policy?: unknown; sandbox_mode?: unknown; profile?: unknown };
 type ConfigRead = { config: RawConfig; layers?: unknown };
@@ -12,6 +12,7 @@ type RequirementsRead = { requirements: { allowedApprovalPolicies?: unknown; all
 export interface AgentSnapshot {
   loading: boolean; saving: boolean; error: string | null; writeError: string | null; warning: string | null;
   profile: string | null; values: AgentValues; saved: AgentValues;
+  conflicts: AgentField[];
   approvals: Approval[]; sandboxes: Sandbox[];
 }
 const approvals: Approval[] = ['on-request', 'never'];
@@ -28,10 +29,11 @@ export class AgentSettings {
   private readonly listeners = new Set<() => void>();
   private generation = 0;
   private target: ConfigTarget | null = null;
+  private draftTarget: ConfigTarget | null = null;
   private rawApproval: unknown = null;
   private snapshot: AgentSnapshot = { loading: true, saving: false, error: null, writeError: null, warning: null,
     profile: null, values: { approval: 'on-request', sandbox: 'read-only' }, saved: { approval: 'on-request', sandbox: 'read-only' },
-    approvals: [], sandboxes: [] };
+    approvals: [], sandboxes: [], conflicts: [] };
   constructor(client: WorkbenchClient, hostId: string) { this.client = client; this.hostId = hostId; }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -65,6 +67,7 @@ export class AgentSettings {
       sandboxes: sandboxes.filter(value => allowedSandbox == null || allowedSandbox.includes(value)) };
   }
   async load(): Promise<void> {
+    if (this.snapshot.saving) return;
     const generation = ++this.generation;
     this.update({ loading: true, error: null });
     try {
@@ -75,20 +78,52 @@ export class AgentSettings {
       if (this.dirty && profile !== this.snapshot.profile) {
         this.update({ loading: false, error: 'The active profile changed. Discard your edits and reload before continuing.' }); return;
       }
+      if (this.dirty && this.draftTarget && target.target &&
+        (this.draftTarget.file !== target.target.file || this.draftTarget.profile !== target.target.profile)) {
+        this.update({ loading: false, error: 'The target configuration changed. Discard your edits before changing targets.' }); return;
+      }
       const saved = { approval: valueOf(read.config.approval_policy, 'on-request'), sandbox: valueOf(read.config.sandbox_mode, 'read-only') };
+      const previous = this.snapshot;
+      const fields: AgentField[] = ['approval', 'sandbox'];
+      const values = { ...saved };
+      const conflicts: AgentField[] = [];
+      for (const field of fields) {
+        if (previous.values[field] === previous.saved[field]) continue;
+        if (previous.values[field] === saved[field]) continue;
+        values[field] = previous.values[field];
+        const changed = field === 'approval'
+          ? JSON.stringify(read.config.approval_policy) !== JSON.stringify(this.rawApproval)
+          : saved[field] !== previous.saved[field];
+        if (changed || previous.conflicts.includes(field)) conflicts.push(field);
+      }
       this.rawApproval = read.config.approval_policy;
       this.target = target.target;
-      this.update({ loading: false, profile, saved, values: this.dirty ? this.snapshot.values : saved,
+      if (!matches(values, saved)) this.draftTarget ??= target.target;
+      else this.draftTarget = null;
+      this.update({ loading: false, profile, saved, values, conflicts,
+        error: conflicts.length ? 'Some settings changed elsewhere. Review each conflict before saving.' : null,
         writeError: target.error, ...allowed });
     } catch (error) { if (generation === this.generation) this.update({ loading: false, error: message(error), approvals: [], sandboxes: [] }); }
   }
-  edit(field: Field, value: string) {
-    if (this.snapshot.saving || !(field === 'approval' ? this.snapshot.approvals : this.snapshot.sandboxes).includes(value as never)) return;
-    this.update({ values: { ...this.snapshot.values, [field]: value }, error: null, warning: null });
+  edit(field: AgentField, value: string) {
+    if (this.snapshot.saving || this.snapshot.loading || !(field === 'approval' ? this.snapshot.approvals : this.snapshot.sandboxes).includes(value as never)) return;
+    if (!this.dirty && value !== this.snapshot.saved[field]) this.draftTarget = this.target;
+    const values = { ...this.snapshot.values, [field]: value };
+    const conflicts = value === this.snapshot.saved[field] ? this.snapshot.conflicts.filter(item => item !== field) : this.snapshot.conflicts;
+    if (matches(values, this.snapshot.saved)) this.draftTarget = null;
+    this.update({ values, conflicts, error: conflicts.length ? this.snapshot.error : null, warning: null });
   }
-  discard() { this.update({ values: this.snapshot.saved, error: null, warning: null }); }
+  resolveConflict(field: AgentField, choice: 'current' | 'draft') {
+    if (this.snapshot.saving || !this.snapshot.conflicts.includes(field)) return;
+    const values = choice === 'current' ? { ...this.snapshot.values, [field]: this.snapshot.saved[field] } : this.snapshot.values;
+    const conflicts = this.snapshot.conflicts.filter(item => item !== field);
+    if (matches(values, this.snapshot.saved)) this.draftTarget = null;
+    this.update({ values, conflicts, error: conflicts.length ? this.snapshot.error : null });
+  }
+  discard() { this.draftTarget = null; this.update({ values: this.snapshot.saved, conflicts: [], error: null, warning: null }); }
   async save(): Promise<boolean> {
-    if (!this.dirty || this.snapshot.saving) return false;
+    if (!this.dirty || this.snapshot.saving || this.snapshot.loading) return false;
+    if (this.snapshot.conflicts.length) { this.update({ error: 'Review each conflicting setting before saving.' }); return false; }
     const { values, saved, profile } = this.snapshot, target = this.target, rawApproval = this.rawApproval;
     if (!target) { this.update({ error: this.snapshot.writeError || 'Cannot save without a verified configuration version.' }); return false; }
     this.update({ saving: true, error: null, warning: null });
@@ -98,7 +133,7 @@ export class AgentSettings {
       const beforeValues = { approval: valueOf(before.config.approval_policy, 'on-request'), sandbox: valueOf(before.config.sandbox_mode, 'read-only') };
       if (profileName(before.config.profile) !== profile || !matches(beforeValues, saved) ||
         JSON.stringify(before.config.approval_policy) !== JSON.stringify(rawApproval) ||
-        !current.target || current.target.file !== target.file || current.target.version !== target.version) {
+        !current.target || current.target.file !== target.file || current.target.profile !== target.profile || current.target.version !== target.version) {
         this.update({ saving: false, error: 'Configuration changed elsewhere. Reload and review your edits before saving.' }); return false;
       }
       if (values.approval !== saved.approval && !allowed.approvals.includes(values.approval as Approval) ||
@@ -113,10 +148,20 @@ export class AgentSettings {
       if (result?.status !== 'ok' && result?.status !== 'okOverridden') throw new Error('The host did not confirm the write');
       const after = await this.read(), afterTarget = await this.targetFor(after);
       const actual = { approval: valueOf(after.config.approval_policy, 'on-request'), sandbox: valueOf(after.config.sandbox_mode, 'read-only') };
-      const confirmed = matches(actual, values) && profileName(after.config.profile) === profile && afterTarget.target?.file === target.file;
+      const confirmed = (values.approval === saved.approval || actual.approval === values.approval) &&
+        (values.sandbox === saved.sandbox || actual.sandbox === values.sandbox) &&
+        profileName(after.config.profile) === profile && afterTarget.target?.file === target.file;
       this.rawApproval = after.config.approval_policy;
       this.target = afterTarget.target;
+      const nextValues = confirmed ? actual : {
+        approval: values.approval !== saved.approval ? values.approval : actual.approval,
+        sandbox: values.sandbox !== saved.sandbox ? values.sandbox : actual.sandbox,
+      };
+      const conflicts: AgentField[] = confirmed ? [] : (['approval', 'sandbox'] as AgentField[]).filter(field =>
+        values[field] !== saved[field] && values[field] !== actual[field]);
+      if (confirmed) this.draftTarget = null;
       this.update({ saving: false, saved: actual, writeError: afterTarget.error,
+        values: nextValues, conflicts,
         warning: result.status === 'okOverridden' ? result.overriddenMetadata?.message || 'A higher-priority configuration overrides this change.' : null,
         error: confirmed ? null : 'The saved configuration differs from your edit. Review the effective values.' });
       return confirmed;
