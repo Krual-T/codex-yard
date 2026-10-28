@@ -23,7 +23,7 @@ test('owned React Chrome controls an isolated real Chrome through the official M
   const broker = new ClientChromeBroker({ configured: true, label: 'Isolated Chrome' }, 30_000);
   const targetServer = createServer((_request, response) => {
     response.setHeader('Content-Type', 'text/html');
-    response.end('<!doctype html><title>Isolated target</title><style>body{font:24px system-ui;padding:40px}input{font:inherit;padding:12px}</style><h1>Isolated target</h1><input aria-label="Target input">');
+    response.end('<!doctype html><title>Isolated target</title><style>body{font:24px system-ui;padding:40px}input,button{font:inherit;padding:12px}</style><h1>Isolated target</h1><input aria-label="Target input"><button id="chosen" aria-label="Quote target">Inspect this element</button>');
   });
   targetServer.listen(0, '127.0.0.1'); await once(targetServer, 'listening');
   const targetAddress = targetServer.address();
@@ -54,6 +54,7 @@ test('owned React Chrome controls an isolated real Chrome through the official M
     '--user-data-dir=' + profile, targetUrl], { stdio: 'ignore' });
   let ui: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined;
   let targetBrowser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | undefined;
+  let devtoolsBrowser: { disconnect(): Promise<void> } | undefined;
   try {
     let port = '';
     for (let i = 0; i < 200 && !port; i++) {
@@ -98,10 +99,51 @@ test('owned React Chrome controls an isolated real Chrome through the official M
     await target.getByLabel('Target input').waitFor();
     await target.waitForFunction(() => (document.querySelector('input') as HTMLInputElement).value === '真实 Chrome 中文');
     assert.equal(await target.getByLabel('Target input').inputValue(), '真实 Chrome 中文');
+
+    const bundledModule = new URL('../node_modules/chrome-devtools-mcp/build/src/third_party/index.js', import.meta.url).href;
+    const { puppeteer } = await import(bundledModule);
+    const inspectorBrowser = await puppeteer.connect({ browserURL: endpoint });
+    devtoolsBrowser = inspectorBrowser;
+    const inspectedPage = (await inspectorBrowser.pages()).find((item: { url(): string }) => item.url() === targetUrl);
+    assert.ok(inspectedPage);
+    const devtools = await inspectedPage.openDevTools();
+    await devtools.waitForFunction(() => document.readyState === 'complete');
+    await devtools.waitForFunction(async () => {
+      const uiPath = '/bundled/ui/legacy/legacy.js', sdkPath = '/bundled/core/sdk/sdk.js';
+      const UI = await import(uiPath), SDK = await import(sdkPath);
+      return !!UI.Context.Context.instance().flavor(SDK.DOMModel.DOMNode);
+    }, { timeout: 15_000 });
+    const inspectedSession = await inspectedPage.createCDPSession();
+    const { root: documentRoot } = await inspectedSession.send('DOM.getDocument');
+    const { nodeId } = await inspectedSession.send('DOM.querySelector', { nodeId: documentRoot.nodeId, selector: '#chosen' });
+    const { node } = await inspectedSession.send('DOM.describeNode', { nodeId });
+    await devtools.bringToFront();
+    await devtools.keyboard.down('Control'); await devtools.keyboard.down('Shift'); await devtools.keyboard.press('C');
+    await devtools.keyboard.up('Shift'); await devtools.keyboard.up('Control');
+    await inspectedPage.bringToFront();
+    await inspectedPage.click('#chosen');
+    await devtools.waitForFunction(async (expected: number) => {
+      const uiPath = '/bundled/ui/legacy/legacy.js', sdkPath = '/bundled/core/sdk/sdk.js';
+      const UI = await import(uiPath), SDK = await import(sdkPath);
+      return UI.Context.Context.instance().flavor(SDK.DOMModel.DOMNode)?.backendNodeId() === expected;
+    }, { timeout: 5_000 }, node.backendNodeId);
+    if (process.env.YARD_TEST_ARTIFACTS) await devtools.screenshot({ path: join(process.env.YARD_TEST_ARTIFACTS, 'standalone-e-devtools-selected.png') });
+    await page.getByRole('button', { name: '引用所选元素' }).click();
+    await page.waitForFunction(() => window.browserHarness.references().length === 1, undefined, { timeout: 60_000 });
+    const reference = (await page.evaluate(() => window.browserHarness.references()))[0]!;
+    await page.waitForFunction(id => (window.browserHarness.draft().references ?? []).some(item => item.id === id), reference.id);
+    assert.deepEqual((await page.evaluate(() => window.browserHarness.draft().references))?.[0], reference);
+    const element = reference.original.localBrowserContext as Record<string, unknown>;
+    assert.equal(element.pageUrl, targetUrl);
+    assert.equal(element.targetName, 'Quote target');
+    assert.equal(element.targetImmediateText, 'Inspect this element');
+    assert.match(String(element.targetSelector), /#chosen/);
+    assert.equal((reference.original.localBrowserCommentMetadata as Record<string, unknown>).kind, 'element');
     await page.evaluate(() => window.browserHarness.unmount());
   } finally {
     await ui?.close();
     await router?.close(); broker.close();
+    await devtoolsBrowser?.disconnect();
     await targetBrowser?.close();
     if (chrome.exitCode === null && chrome.signalCode === null) {
       chrome.kill();
