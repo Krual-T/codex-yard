@@ -2,30 +2,72 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ThreadSummary } from '../lib/codex-protocol.ts';
 import { applyTextEdits, editSourceSignature, latestEditTarget, textEdits } from '../src/renderer/messages/message-edit.ts';
-import { editableDraft } from '../src/renderer/messages/message-data.ts';
+import { editableDraft, parseUserContent } from '../src/renderer/messages/message-data.ts';
 
 test('only a complete, idle latest user turn can be edited', () => {
+  const history = { order: 'ascending', tailComplete: true } as const;
   const thread: ThreadSummary = { id: 'thread', name: null, cwd: '/work', status: { type: 'idle' }, turns: [
     { id: 'first', status: 'completed', itemsView: 'full', items: [{ id: 'old', type: 'userMessage', content: [] }] },
     { id: 'second', status: 'completed', itemsView: 'full', items: [{ id: 'new', type: 'userMessage', content: [] }] },
     { id: 'third', status: 'completed', itemsView: 'full', items: [{ id: 'tool', type: 'commandExecution' }] },
   ] };
-  assert.deepEqual(latestEditTarget(thread), { turnId: 'second', itemId: 'new', restriction: null });
-  assert.match(latestEditTarget({ ...thread, status: { type: 'active', activeFlags: [] } })!.restriction!, /active turn/);
-  assert.match(latestEditTarget({ ...thread, status: { type: 'notLoaded' } })!.restriction!, /status is unavailable/);
+  assert.deepEqual(latestEditTarget(thread, history), { turnId: 'second', itemId: 'new', restriction: null });
+  assert.match(latestEditTarget(thread)!.restriction!, /unconfirmed/);
+  assert.match(latestEditTarget(thread, { order: 'ascending', tailComplete: false })!.restriction!, /unconfirmed/);
+  assert.match(latestEditTarget({ ...thread, turns: [...thread.turns].reverse() }, { order: 'descending', tailComplete: true })!.restriction!, /unconfirmed/);
+  const reversedDates = thread.turns.map((turn, index) => ({ ...turn, startedAt: 300 - index * 100 }));
+  assert.match(latestEditTarget({ ...thread, turns: reversedDates }, history)!.restriction!, /unconfirmed/);
+  assert.match(latestEditTarget({ ...thread, status: { type: 'active', activeFlags: [] } }, history)!.restriction!, /active turn/);
+  assert.match(latestEditTarget({ ...thread, status: { type: 'notLoaded' } }, history)!.restriction!, /status is unavailable/);
   const turns = thread.turns.map((turn) => ({ ...turn }));
   turns[2]!.itemsView = 'summary';
-  assert.match(latestEditTarget({ ...thread, turns })!.restriction!, /history is incomplete/);
+  assert.match(latestEditTarget({ ...thread, turns }, history)!.restriction!, /history is incomplete/);
   turns[2]!.itemsView = 'notLoaded';
-  assert.match(latestEditTarget({ ...thread, turns })!.restriction!, /history is incomplete/);
+  assert.match(latestEditTarget({ ...thread, turns }, history)!.restriction!, /history is incomplete/);
   delete turns[2]!.itemsView;
-  assert.match(latestEditTarget({ ...thread, turns })!.restriction!, /history is incomplete/);
+  assert.match(latestEditTarget({ ...thread, turns }, history)!.restriction!, /history is incomplete/);
   turns[2]!.itemsView = 'full';
   turns[2]!.status = 'inProgress';
-  assert.match(latestEditTarget({ ...thread, turns })!.restriction!, /active turn/);
+  assert.match(latestEditTarget({ ...thread, turns }, history)!.restriction!, /active turn/);
   turns[2]!.status = 'completed';
   turns[1]!.items = [...turns[1]!.items, { id: 'steer', type: 'userMessage', content: [] }];
-  assert.match(latestEditTarget({ ...thread, turns })!.restriction!, /multiple user messages/);
+  assert.match(latestEditTarget({ ...thread, turns }, history)!.restriction!, /multiple user messages/);
+});
+
+test('serialized file context survives replacing the complete request', () => {
+  const prefix = '# Files mentioned by the user:\n\n## Notes: /work/notes%20draft.md (lines 3-5)\nLibrary file metadata: {"fileId":"f"}\n\n## My request for Codex:\n';
+  const item = { id: 'file', type: 'userMessage', content: [
+    { type: 'text', text: prefix + 'Old request\n', text_elements: [] },
+    { type: 'image', fileId: 'opaque', detail: 'high' },
+    { type: 'mention', name: 'project', path: '/work' },
+  ] };
+  const draft = editableDraft(item)!;
+  assert.deepEqual(draft.files, []);
+  assert.deepEqual(textEdits(draft), [{ index: 0, text: prefix + 'Old request\n' }]);
+  const updated = applyTextEdits(draft, [{ index: 0, text: prefix + 'Replacement' }], '');
+  assert.deepEqual(updated.draft?.input, [{ ...item.content[0], text: prefix + 'Replacement\n' }, ...item.content.slice(1)]);
+  assert.match(applyTextEdits(draft, [{ index: 0, text: 'Replacement' }], '').error!, /message context changed/i);
+  assert.deepEqual(draft.input, item.content);
+  const incomplete = editableDraft({ id: 'bad', type: 'userMessage', content: [
+    { type: 'text', text: '# Files mentioned by the user:\n## Notes: /work/a', text_elements: [] },
+  ] })!;
+  assert.match(applyTextEdits(incomplete, [{ index: 0, text: 'New' }], '').error!, /no recognized request boundary/);
+  const unc = parseUserContent({ id: 'unc', type: 'userMessage', content: [{ type: 'text', text:
+    '# Files pasted by the user:\n## "Notes": \\\\server\\share\\note.txt\n## My request:\nRead it', text_elements: [] }] });
+  assert.deepEqual(unc[0]?.kind === 'text' ? unc[0].context?.files : null, [{ name: 'Notes', path: '\\\\server\\share\\note.txt' }]);
+});
+
+test('independent edits on both sides preserve the same UTF-8 reference', () => {
+  const original = { id: 'ref', type: 'userMessage', content: [{ type: 'text', text: 'a @foo b', text_elements: [
+    { byteRange: { start: 2, end: 6 }, placeholder: '@foo', context: { id: 'browser' } },
+  ] }] };
+  const draft = editableDraft(original)!;
+  const result = applyTextEdits(draft, [{ index: 0, text: '中 @foo B!' }], '');
+  assert.deepEqual(result.draft?.input?.[0]?.text_elements, [
+    { byteRange: { start: 4, end: 8 }, placeholder: '@foo', context: { id: 'browser' } },
+  ]);
+  assert.match(applyTextEdits(draft, [{ index: 0, text: '中 @foo @foo B' }], '').error!, /ambiguous/);
+  assert.deepEqual(draft.input, original.content);
 });
 
 test('edits retain ordered inputs and adjust UTF-8 reference ranges without dropping context', () => {
@@ -71,9 +113,50 @@ test('marked documents are updated only within a provably matching text span', (
     { type: 'text', text: ' world', marks: [{ type: 'link', attrs: { href: 'https://example.test' } }] },
   ] }] });
   assert.deepEqual(draft.document, item.document);
-  assert.match(applyTextEdits(draft, [{ index: 0, text: 'Hi earth' }], '').error!, /formatting boundaries/);
+  const both = applyTextEdits(draft, [{ index: 0, text: 'Hi earth' }], '');
+  assert.deepEqual(both.draft?.document?.content?.[0]?.content, [
+    { type: 'text', text: 'Hi', marks: [{ type: 'bold' }] },
+    { type: 'text', text: ' earth', marks: [{ type: 'link', attrs: { href: 'https://example.test' } }] },
+  ]);
+  assert.match(applyTextEdits(draft, [{ index: 0, text: 'changed' }], '').error!, /formatting boundaries/);
   assert.equal(editableDraft({ ...item, document: { type: 'doc', marks: [42] } }), null);
   assert.equal(editableDraft({ ...item, hints: 'unexpected' }), null);
+});
+
+test('hard_break and independent marked spans survive editing and keep the original draft', () => {
+  const item = { id: 'hard', type: 'userMessage', content: [
+    { type: 'text', text: 'Hello\nworld', text_elements: [] }, { type: 'mention', name: 'project', path: '/work' },
+  ], document: { type: 'doc', content: [{ type: 'paragraph', content: [
+    { type: 'text', text: 'Hello', marks: [{ type: 'bold' }] }, { type: 'hard_break' },
+    { type: 'text', text: 'world', marks: [{ type: 'link', attrs: { href: 'https://example.test' } }] },
+  ] }] } };
+  const draft = editableDraft(item)!;
+  const changed = applyTextEdits(draft, [{ index: 0, text: 'Hella\nworle' }], '');
+  assert.deepEqual(changed.draft?.document, { type: 'doc', content: [{ type: 'paragraph', content: [
+    { type: 'text', text: 'Hella', marks: [{ type: 'bold' }] }, { type: 'hard_break' },
+    { type: 'text', text: 'worle', marks: [{ type: 'link', attrs: { href: 'https://example.test' } }] },
+  ] }] });
+  assert.deepEqual(changed.draft?.input?.[1], item.content[1]);
+  assert.deepEqual(draft.document, item.document);
+  assert.match(applyTextEdits(draft, [{ index: 0, text: 'Hello world' }], '').error!, /formatting boundaries/);
+});
+
+test('recognized mention atoms remain intact while text on either side changes', () => {
+  const item = { id: 'mention', type: 'userMessage', content: [{ type: 'text', text: 'a [file](src/file.ts) b', text_elements: [] }],
+    document: { type: 'doc', content: [{ type: 'paragraph', content: [
+      { type: 'text', text: 'a ', marks: [{ type: 'strong' }] },
+      { type: 'atMention', attrs: { label: 'file', path: 'src/file.ts', fsPath: '/work/src/file.ts' } },
+      { type: 'text', text: ' b' },
+    ] }] } };
+  const draft = editableDraft(item)!;
+  const result = applyTextEdits(draft, [{ index: 0, text: 'A [file](src/file.ts) B' }], '');
+  assert.deepEqual(result.draft?.document?.content?.[0]?.content, [
+    { type: 'text', text: 'A ', marks: [{ type: 'strong' }] },
+    { type: 'atMention', attrs: { label: 'file', path: 'src/file.ts', fsPath: '/work/src/file.ts' } },
+    { type: 'text', text: ' B' },
+  ]);
+  assert.match(applyTextEdits(draft, [{ index: 0, text: 'A [other](src/file.ts) B' }], '').error!, /formatting boundaries/);
+  assert.deepEqual(draft.document, item.document);
 });
 
 test('unknown input and invalid references are retained rather than silently rewritten', () => {

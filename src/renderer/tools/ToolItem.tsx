@@ -4,7 +4,7 @@ import type { ThreadItemSummary } from '../../../lib/codex-protocol.ts';
 import type { StandaloneMessagesProps, WorkbenchClient } from '../workbench-contract.ts';
 import { CopyButton } from '../messages/CopyButton.tsx';
 import { MessageImage } from '../messages/MessageImage.tsx';
-import { asArray, asRecord, asString, displayJson, imageFromGeneration, resolveFileLocation, safeExternalUrl } from '../messages/message-data.ts';
+import { asArray, asRecord, asString, displayJson, imageFromGeneration, resolveToolFileLocation, safeExternalUrl } from '../messages/message-data.ts';
 import type { ImageSource } from '../messages/message-data.ts';
 
 export type ToolItemProps = {
@@ -36,7 +36,7 @@ type FileLinkProps = Pick<ToolItemProps, 'hostId' | 'cwd' | 'onOpenFile' | 'onOp
 function FileLink({ path, hostId, cwd, onOpenFile, onOpenFileAt, children }: FileLinkProps) {
   if (!onOpenFile && !onOpenFileAt) return <span>{children ?? path}</span>;
   return <button type="button" className="yard-file-link" onClick={() => {
-    const location = resolveFileLocation(path, cwd, hostId);
+    const location = resolveToolFileLocation(path, cwd, hostId);
     if (onOpenFileAt) onOpenFileAt(location); else onOpenFile?.(location.path);
   }}>{children ?? path}</button>;
 }

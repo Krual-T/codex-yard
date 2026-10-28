@@ -12,7 +12,7 @@ import rehypeHighlight from 'rehype-highlight';
 import type { StandaloneMessagesProps, WorkbenchClient } from '../workbench-contract.ts';
 import { writeClipboardText } from '../../native/browser-clipboard.ts';
 import { MessageImage } from '../messages/MessageImage.tsx';
-import { resolveFileLocation, resolveFilePath, safeExternalUrl } from '../messages/message-data.ts';
+import { resolveFileLocation, resolveToolFileLocation, safeExternalUrl } from '../messages/message-data.ts';
 import type { ImageSource } from '../messages/message-data.ts';
 import { remarkVisualizations } from './visualization-directives.ts';
 
@@ -120,7 +120,7 @@ export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowB
         try { path = decodeURIComponent(href.slice('yard-visualization:'.length)); } catch { return <span>{children}</span>; }
         if (!path.trim()) return <span>{children}</span>;
         if (!threadId || !onOpenVisualization) return <span>Visualization: {path}</span>;
-        return <button type="button" className="yard-file-link" onClick={() => onOpenVisualization({ hostId, threadId, path: resolveFilePath(path, cwd) })}>{children}</button>;
+        return <button type="button" className="yard-file-link" onClick={() => onOpenVisualization({ hostId, threadId, path: resolveToolFileLocation(path, cwd, hostId).path })}>{children}</button>;
       }
       const external = safeExternalUrl(href);
       if (external) return <a href={external} target={external.startsWith('#') ? undefined : '_blank'}

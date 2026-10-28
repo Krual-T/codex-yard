@@ -69,7 +69,7 @@ test('inline edit recovery retains unsafe text and delegates rollback retries', 
         return Promise.resolve();
       };
       const root = createRoot(document.getElementById('root'));
-      function render() { root.render(visible ? React.createElement(StandaloneMessages, { client, hostId, thread, onEdit,
+      function render() { root.render(visible ? React.createElement(StandaloneMessages, { client, hostId, thread, onEdit, editHistory:{order:'ascending',tailComplete:true},
         editRecovery:saved, onEditDraftChange }) : null); }
       window.recoveryHarness = { calls, saved:() => saved, saveMode(value) { saveMode = value; }, editMode(value) { editMode = value; },
         clearMode(value) { clearMode = value; }, saving() { return !!releaseSave; }, releaseSave() { releaseSave(); releaseSave = undefined; },

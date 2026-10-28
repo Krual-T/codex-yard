@@ -51,9 +51,9 @@ test('standalone messages render CLI items and retain interactions while streami
           return { contentsBase64: gif, mimeType: 'image/gif' };
         } };
       const directive = String.fromCodePoint(0xe200) + 'visualize' + String.fromCodePoint(0xe202)
-        + JSON.stringify({path:'reports/view.html',mode:'wide'}) + String.fromCodePoint(0xe201);
+        + JSON.stringify({path:'/work/reports/view.html',mode:'wide'}) + String.fromCodePoint(0xe201);
       const directiveWithMarkup = String.fromCodePoint(0xe200) + 'visualize' + String.fromCodePoint(0xe202)
-        + JSON.stringify({path:'reports/a*b*.html',mode:'wide'}) + String.fromCodePoint(0xe201);
+        + 'view.html' + String.fromCodePoint(0xe201);
       const invalidDirective = String.fromCodePoint(0xe200) + 'visualize' + String.fromCodePoint(0xe202)
         + JSON.stringify({path:String.fromCharCode(0xd800)}) + String.fromCodePoint(0xe201);
       const markdown = '# Result\\n\\nA [source](src/main.ts#L12C3), [unsafe](javascript:alert(1)) and [spoof](yard-visualization:%2Fnot-real).\\n\\n'
@@ -105,7 +105,7 @@ test('standalone messages render CLI items and retain interactions while streami
       const onOpenBrowser = value => calls.browser.push(value);
       const root = createRoot(document.getElementById('root'));
       const render = () => root.render(React.createElement(React.Fragment, null,
-        React.createElement(StandaloneMessages, { client, hostId, thread, onEdit:editEnabled ? onEdit : undefined, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser }),
+        React.createElement(StandaloneMessages, { client, hostId, thread, editHistory:{order:'ascending',tailComplete:true}, onEdit:editEnabled ? onEdit : undefined, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser }),
         React.createElement('div', {id:'raw'}, React.createElement(StandaloneMarkdown, {client, hostId:'ssh-test', cwd:'/work', allowBasicHtml:true,
           text:'<b>safe</b><script>window.bad = true</script><img src="javascript:alert(1)" onerror="window.bad=true">'})),
         React.createElement('div', {id:'fallback'}, React.createElement(StandaloneMarkdown, {client, hostId:'ssh-test', cwd:'/work', onOpenFile,
@@ -259,7 +259,7 @@ test('standalone messages render CLI items and retain interactions while streami
     await assistant.getByRole('button', { name: 'Open visualization' }).last().click();
     assert.deepEqual(await page.evaluate(() => window.standaloneHarness.calls.visualizations),
       [{ hostId: 'ssh-test', threadId: 'thread', path: '/work/reports/view.html' },
-        { hostId: 'ssh-test', threadId: 'thread', path: '/work/reports/a*b*.html' }]);
+        { hostId: 'ssh-test', threadId: 'thread', path: '/work/view.html' }]);
     await page.evaluate(() => window.standaloneHarness.clipboard('missing'));
     await assistant.getByRole('button', { name: 'Copy message' }).click();
     assert.match((await page.evaluate(() => window.standaloneHarness.calls.copies)).at(-1) ?? '', /^# Result\n\nA \[source\]/);

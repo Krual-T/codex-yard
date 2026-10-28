@@ -65,7 +65,8 @@ export function MessageImage({ source, client, hostId, cwd, onOpen, fullSize = f
   else if (!current.url) content = <span className="yard-image-loading" role="status">Loading image...</span>;
   else {
     const imageElement = <img src={current.url} alt={source.label} loading="lazy"
-      onError={() => setImage({ key, error: 'Image could not be displayed.' })} />;
+      onError={() => setImage({ key, error: source.kind === 'url' && /^https?:\/\//i.test(source.value)
+        ? 'External image could not be displayed; the host may block its address.' : 'Image could not be displayed.' })} />;
     content = onOpen && !fullSize
       ? <button type="button" className="yard-image-button" aria-label={`Open ${source.label}`} onClick={onOpen}>{imageElement}</button>
       : <span className={fullSize ? 'yard-image-full' : 'yard-image-inline'}>{imageElement}</span>;

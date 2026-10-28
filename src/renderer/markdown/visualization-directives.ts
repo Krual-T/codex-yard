@@ -6,6 +6,33 @@ type MarkdownFile = { value: string | Uint8Array };
 const startMarker = '\uE200visualize\uE202';
 const endMarker = '\uE201';
 
+type Visualization = { path: string | null; title?: string; type?: 'inline' | 'live'; mode?: 'wide' };
+
+export function parseVisualization(payload: string): Visualization | null {
+  const json = payload.startsWith('{');
+  let value: unknown = { path: payload };
+  if (json) {
+    try { value = JSON.parse(payload); } catch { return null; }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  if (item.path !== null && typeof item.path !== 'string') return null;
+  if (item.title !== undefined && typeof item.title !== 'string') return null;
+  if (item.type !== undefined && item.type !== 'inline' && item.type !== 'live') return null;
+  if (item.mode !== undefined && item.mode !== 'wide') return null;
+  if (item.wide !== undefined && typeof item.wide !== 'boolean') return null;
+  const path = item.path;
+  if (path === null) return item.type === 'live' ? { path, type: 'live' } : null;
+  const basename = path.replaceAll('\\', '/').split('/').at(-1) ?? '';
+  const absolute = /^(?:\/|[a-z]:[\\/]|\\\\)/i.test(path);
+  if (/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(path) || /["\n\r]/.test(path)
+    || !/^[a-z0-9]+(?:-[a-z0-9]+)*\.html$/.test(basename)
+    || (!absolute && (json || path !== basename))) return null;
+  return { path, ...(typeof item.title === 'string' && !/["\n\r]/.test(item.title) ? { title: item.title } : {}),
+    ...(item.type === 'live' || item.type === 'inline' ? { type: item.type } : {}),
+    ...(item.mode === 'wide' ? { mode: item.mode } : {}) };
+}
+
 function nthIndex(text: string, search: string, index: number): number {
   let found = -1;
   for (let count = 0; count <= index; count++) {
@@ -32,12 +59,10 @@ export function remarkVisualizations() {
       if (start != null && end != null) {
         const expression = /\uE200visualize\uE202([\s\S]*?)\uE201/g;
         for (const match of source.slice(start, end).matchAll(expression)) {
-          let path: unknown;
-          try { path = (JSON.parse(match[1] ?? '') as { path?: unknown } | null)?.path; }
-          catch { continue; }
-          if (typeof path !== 'string' || !path.trim()) continue;
+          const directive = parseVisualization(match[1] ?? '');
+          if (!directive) continue;
           let encodedPath: string;
-          try { encodedPath = encodeURIComponent(path); }
+          try { encodedPath = encodeURIComponent(directive.path ?? ''); }
           catch { continue; }
           const from = start + match.index;
           const to = from + match[0].length;
@@ -56,9 +81,10 @@ export function remarkVisualizations() {
           const replacement: MarkdownNode[] = [];
           if (leftIndex > 0) replacement.push({ ...left, value: left.value.slice(0, leftIndex),
             position: { start: left.position.start, end: { offset: from } } });
-          replacement.push({ type: 'link', url: `yard-visualization:${encodedPath}`,
+          if (directive.type === 'live') replacement.push({ type: 'text', value: `Live visualization unavailable: ${match[0]}` });
+          else replacement.push({ type: 'link', url: `yard-visualization:${encodedPath}`,
             data: { hProperties: { dataYardVisualization: 'directive' } },
-            children: [{ type: 'text', value: 'Open visualization' }] });
+            children: [{ type: 'text', value: directive.title || 'Open visualization' }] });
           const rest = right.value.slice(rightIndex + endMarker.length);
           if (rest) replacement.push({ ...right, value: rest, position: { start: { offset: to }, end: right.position.end } });
           node.children.splice(first, last - first + 1, ...replacement);

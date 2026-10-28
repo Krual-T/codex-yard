@@ -1,12 +1,25 @@
 import type { ThreadItemSummary, ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { ComposerDocument, ComposerDraft } from '../workbench-contract.ts';
-import { asRecord } from './message-data.ts';
+import { asRecord, serializedMessageContext } from './message-data.ts';
 
 export type EditTarget = { turnId: string; itemId: string; restriction: string | null };
 export type TextEdit = { index: number; text: string };
 type EditResult = { draft: ComposerDraft; error?: never } | { draft?: never; error: string };
 
-export function latestEditTarget(thread: ThreadSummary): EditTarget | null {
+export type MessageEditHistory = { order: 'ascending' | 'descending'; tailComplete: boolean };
+
+function hasReverseTimestamps(thread: ThreadSummary): boolean {
+  let previous: number | undefined;
+  for (const turn of thread.turns) {
+    const startedAt = (turn as typeof turn & { startedAt?: unknown }).startedAt;
+    if (typeof startedAt !== 'number' || !Number.isFinite(startedAt)) continue;
+    if (previous !== undefined && startedAt < previous) return true;
+    previous = startedAt;
+  }
+  return false;
+}
+
+export function latestEditTarget(thread: ThreadSummary, history?: MessageEditHistory): EditTarget | null {
   for (let turnIndex = thread.turns.length - 1; turnIndex >= 0; turnIndex--) {
     const turn = thread.turns[turnIndex]!;
     const users = turn.items.filter((item) => item.type === 'userMessage');
@@ -17,6 +30,8 @@ export function latestEditTarget(thread: ThreadSummary): EditTarget | null {
       restriction = 'Wait for the active turn to finish before editing.';
     } else if (thread.status.type !== 'idle') {
       restriction = 'The conversation status is unavailable. Reload it before editing.';
+    } else if (history?.order !== 'ascending' || !history.tailComplete || hasReverseTimestamps(thread)) {
+      restriction = 'The latest conversation history order or tail is unconfirmed. Reload it before editing.';
     } else if (thread.turns.slice(turnIndex).some((entry) => entry.itemsView !== 'full')) {
       restriction = 'The latest conversation history is incomplete. Reload it before editing.';
     } else if (users.length > 1) {
@@ -70,6 +85,7 @@ function adjustTextElements(entry: Record<string, unknown>, before: string, afte
   const oldEnd = encoder.encode(before.slice(0, change.oldEnd)).length;
   const delta = updated.length - original.length;
   const next: Record<string, unknown>[] = [];
+  const moved: { from: number; to: number; newFrom: number; newTo: number }[] = [];
   const boundary = (offset: number) => offset === original.length || (original[offset]! & 0xc0) !== 0x80;
   for (const value of elements) {
     const element = asRecord(value);
@@ -80,9 +96,31 @@ function adjustTextElements(entry: Record<string, unknown>, before: string, afte
       || from < 0 || to < from || to > original.length) return 'This text contains an unrecognized reference range.';
     if (!boundary(from) || !boundary(to)) return 'This text contains an invalid reference range.';
     if (from === to && from === start && start === oldEnd) return 'The edit overlaps a reference. Restore that part of the text to preserve its context.';
-    if (to <= start) next.push(element);
-    else if (from >= oldEnd) next.push({ ...element, byteRange: { ...range, start: from + delta, end: to + delta } });
-    else return 'The edit overlaps a reference. Restore that part of the text to preserve its context.';
+    let newFrom: number;
+    let newTo: number;
+    if (to <= start) { newFrom = from; newTo = to; }
+    else if (from >= oldEnd) { newFrom = from + delta; newTo = to + delta; }
+    else {
+      if (from === to) return 'The edit overlaps a reference. Restore that part of the text to preserve its context.';
+      const anchor = decoder.decode(original.slice(from, to));
+      const oldIndex = before.indexOf(anchor);
+      const newIndex = after.indexOf(anchor);
+      if (oldIndex < 0 || before.indexOf(anchor, oldIndex + 1) >= 0 || newIndex < 0 || after.indexOf(anchor, newIndex + 1) >= 0) {
+        return 'The edit overlaps a reference or its position is ambiguous. Restore that part of the text to preserve its context.';
+      }
+      newFrom = encoder.encode(after.slice(0, newIndex)).length;
+      newTo = newFrom + encoder.encode(anchor).length;
+    }
+    moved.push({ from, to, newFrom, newTo });
+    next.push({ ...element, byteRange: { ...range, start: newFrom, end: newTo } });
+  }
+  moved.sort((a, b) => a.from - b.from || a.to - b.to);
+  for (let index = 1; index < moved.length; index++) {
+    const prior = moved[index - 1]!;
+    const current = moved[index]!;
+    if (prior.to > current.from || prior.newTo > current.newFrom) {
+      return 'The edit makes reference positions ambiguous. Restore that part of the text to preserve its context.';
+    }
   }
   entry.text_elements = next;
   return null;
@@ -90,7 +128,37 @@ function adjustTextElements(entry: Record<string, unknown>, before: string, afte
 
 type TextLeaf = { node: ComposerDocument; start: number; end: number };
 
-function documentText(document: ComposerDocument, separator: string): { text: string; leaves: TextLeaf[] } | null {
+type DocumentChange = { start: number; oldEnd: number; replacement: string };
+
+function documentChanges(before: string, after: string): DocumentChange[] | null {
+  const outer = textChange(before, after);
+  const old = Array.from(before.slice(outer.start, outer.oldEnd));
+  const updated = Array.from(after.slice(outer.start, outer.newEnd));
+  if ((old.length + 1) * (updated.length + 1) > 1_000_000) return null;
+  const width = updated.length + 1;
+  const scores = new Uint32Array((old.length + 1) * width);
+  for (let i = old.length - 1; i >= 0; i--) for (let j = updated.length - 1; j >= 0; j--) {
+    scores[i * width + j] = old[i] === updated[j] ? scores[(i + 1) * width + j + 1]! + 1
+      : Math.max(scores[(i + 1) * width + j]!, scores[i * width + j + 1]!);
+  }
+  const changes: DocumentChange[] = [];
+  let i = 0, j = 0, position = outer.start;
+  let current: DocumentChange | null = null;
+  const finish = () => { if (current) { changes.push(current); current = null; } };
+  while (i < old.length || j < updated.length) {
+    if (i < old.length && j < updated.length && old[i] === updated[j]) {
+      finish(); position += old[i]!.length; i++; j++; continue;
+    }
+    current ??= { start: position, oldEnd: position, replacement: '' };
+    if (i < old.length && (j === updated.length || scores[(i + 1) * width + j]! >= scores[i * width + j + 1]!)) {
+      position += old[i]!.length; current.oldEnd = position; i++;
+    } else { current.replacement += updated[j]!; j++; }
+  }
+  finish();
+  return changes;
+}
+
+function documentText(document: ComposerDocument, separator: string, mentionMode: 'plain' | 'markdown'): { text: string; leaves: TextLeaf[] } | null {
   const leaves: TextLeaf[] = [];
   let text = '';
   const append = (node: ComposerDocument): boolean => {
@@ -100,7 +168,20 @@ function documentText(document: ComposerDocument, separator: string): { text: st
       leaves.push({ node, start, end: text.length });
       return true;
     }
-    if (node.type === 'hardBreak' && node.text === undefined && node.content === undefined) { text += '\n'; return true; }
+    if ((node.type === 'hardBreak' || node.type === 'hard_break') && node.text === undefined && node.content === undefined) { text += '\n'; return true; }
+    if ((node.type === 'atMention' || node.type === 'skillMention') && node.text === undefined && node.content === undefined) {
+      const attrs = node.attrs;
+      const path = attrs?.path;
+      const label = node.type === 'atMention' ? attrs?.label
+        : mentionMode === 'markdown' ? (attrs?.promptLinkLabel || (typeof attrs?.name === 'string' ? `$${attrs.name}` : null))
+          : (attrs?.displayName || attrs?.name);
+      if (typeof label !== 'string' || !label || typeof path !== 'string' || !path) return false;
+      if (mentionMode === 'markdown') {
+        if (/[\\[\]`*_\r\n]/.test(label) || /[\s<>\\()"\x00-\x1f]/.test(path)) return false;
+        text += `[${label}](${path})`;
+      } else text += label;
+      return true;
+    }
     if ((node.type !== 'doc' && node.type !== 'paragraph') || node.text !== undefined) return false;
     const children = node.content ?? [];
     for (let index = 0; index < children.length; index++) {
@@ -114,20 +195,32 @@ function documentText(document: ComposerDocument, separator: string): { text: st
 
 function updateDocument(document: ComposerDocument, before: string, after: string): string | null {
   if (before === after) return null;
-  const projected = [documentText(document, '\n\n'), documentText(document, '\n')]
+  const projected = [documentText(document, '\n\n', 'plain'), documentText(document, '\n', 'plain'),
+    documentText(document, '\n\n', 'markdown'), documentText(document, '\n', 'markdown')]
     .find((candidate) => candidate?.text === before);
   if (!projected) return 'This document has formatting or context that cannot be safely updated here.';
   const change = textChange(before, after);
-  const leaves = projected.leaves.filter((leaf) => change.start >= leaf.start && change.oldEnd <= leaf.end);
-  if (leaves.length !== 1) return 'This edit crosses formatting boundaries. Edit within one formatted span at a time.';
-  const leaf = leaves[0]!;
-  if (Object.keys(leaf.node).some((key) => !['type', 'text', 'marks', 'attrs'].includes(key))) {
-    return 'This document has unrecognized text metadata that cannot be safely updated here.';
+  const single = projected.leaves.filter((leaf) => change.start >= leaf.start && change.oldEnd <= leaf.end);
+  const changes = single.length === 1 ? [{ start: change.start, oldEnd: change.oldEnd, replacement: after.slice(change.start, change.newEnd) }]
+    : documentChanges(before, after);
+  if (!changes) return 'This edit is too large to preserve document formatting safely.';
+  const updates = new Map<TextLeaf, DocumentChange[]>();
+  for (const part of changes) {
+    const leaves = projected.leaves.filter((leaf) => part.start >= leaf.start && part.oldEnd <= leaf.end);
+    if (leaves.length !== 1) return 'This edit crosses formatting boundaries. Edit within one formatted span at a time.';
+    const leaf = leaves[0]!;
+    if (Object.keys(leaf.node).some((key) => !['type', 'text', 'marks', 'attrs'].includes(key))) {
+      return 'This document has unrecognized text metadata that cannot be safely updated here.';
+    }
+    const list = updates.get(leaf) ?? [];
+    list.push(part); updates.set(leaf, list);
   }
-  const next = leaf.node.text!.slice(0, change.start - leaf.start)
-    + after.slice(change.start, change.newEnd) + leaf.node.text!.slice(change.oldEnd - leaf.start);
-  if (!next || next.includes('\n')) return 'This edit cannot preserve the document formatting. Restore the original text.';
-  leaf.node.text = next;
+  for (const [leaf, parts] of updates) {
+    let next = leaf.node.text!;
+    for (const part of parts.reverse()) next = next.slice(0, part.start - leaf.start) + part.replacement + next.slice(part.oldEnd - leaf.start);
+    if (!next || next.includes('\n')) return 'This edit cannot preserve the document formatting. Restore the original text.';
+    leaf.node.text = next;
+  }
   return null;
 }
 
@@ -157,12 +250,20 @@ export function applyTextEdits(original: ComposerDraft, edits: TextEdit[], added
   for (const [index, entry] of expected.entries()) {
     const next = edits[index]!;
     if (entry.text === next.text) continue;
-    const error = adjustTextElements(input[entry.index]!, entry.text, next.text);
+    const originalText = entry.text;
+    const context = serializedMessageContext(originalText);
+    if (context.unresolved) return { error: 'This file context has no recognized request boundary. Its original content has been preserved.' };
+    if (context.prefix && !next.text.startsWith(context.prefix)) {
+      return { error: 'The message context changed. Reopen the editor to preserve its original attachments.' };
+    }
+    const suffix = context.prefix && context.body.endsWith('\n') && !next.text.endsWith('\n') ? '\n' : '';
+    const updatedText = next.text + suffix;
+    const error = adjustTextElements(input[entry.index]!, originalText, updatedText);
     if (error) return { error };
-    input[entry.index]!.text = next.text;
+    input[entry.index]!.text = updatedText;
   }
   if (!expected.length && addedText) input.unshift({ type: 'text', text: addedText, text_elements: [] });
-  const text = textEdits(draft).map((entry) => entry.text).join('\n');
+  const text = input.flatMap((entry) => entry.type === 'text' && typeof entry.text === 'string' ? [entry.text] : []).join('\n');
   if (draft.document) {
     const error = updateDocument(draft.document, draft.text, text);
     if (error) return { error };

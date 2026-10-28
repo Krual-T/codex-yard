@@ -67,7 +67,7 @@
 .yard-code-block { margin: 12px 0; border: 1px solid var(--yard-border, #d7dfdc); border-radius: 6px; overflow: hidden; background: var(--yard-surface, #f5f7f6); }
 .yard-code-toolbar { display: flex; justify-content: space-between; align-items: center; min-height: 36px; padding: 0 8px 0 12px; border-bottom: 1px solid var(--yard-border, #d7dfdc); color: var(--yard-muted, #626c69); font-size: 12px; }
 .yard-code-toolbar > div { display: flex; }
-.yard-code-block pre, .yard-tool pre, .yard-unsupported-input pre, .yard-citation pre { margin: 0; padding: 12px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--yard-code-size, 12px)/1.55 var(--yard-code-font, ui-monospace, monospace); }
+.yard-code-block pre, .yard-tool pre, .yard-unsupported-input pre, .yard-citation pre, .yard-reference pre { margin: 0; padding: 12px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--yard-code-size, 12px)/1.55 var(--yard-code-font, ui-monospace, monospace); }
 .yard-code-block pre { white-space: pre; overflow-wrap: normal; }
 .yard-code-block .hljs-keyword, .yard-code-block .hljs-selector-tag, .yard-code-block .hljs-literal { color: color-mix(in srgb, var(--yard-skill, #924ff7) 65%, var(--yard-fg, #202524)); }
 .yard-code-block .hljs-string, .yard-code-block .hljs-attr { color: color-mix(in srgb, var(--yard-diff-added, #20743e) 65%, var(--yard-fg, #202524)); }
