@@ -33,6 +33,7 @@
 .yard-setting-description, .yard-muted { color: var(--yard-muted); font-size: 13px; }
 .yard-setting-control { flex: 0 1 auto; display: flex; gap: 8px; align-items: center; min-width: 0; }
 .yard-setting-control select, .yard-setting-control input[type="text"] { max-width: 240px; width: 100%; }
+.yard-setting-control textarea { width: min(360px, 100%); min-width: 180px; resize: vertical; }
 .yard-setting-control input[type="number"] { width: 76px; }
 .yard-setting-control input[type="color"] { width: 36px; height: 30px; padding: 1px; border: 1px solid var(--yard-border); border-radius: 4px; background: white; }
 .yard-setting-control input[type="checkbox"] { width: 20px; height: 20px; accent-color: #126d5c; }

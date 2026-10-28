@@ -6,6 +6,7 @@ import { CatalogSection } from './CatalogSection.tsx';
 import type { CatalogKind } from './catalog.ts';
 import { ConnectionsSection } from './ConnectionsSection.tsx';
 import { GeneralSection } from './GeneralSection.tsx';
+import { GitSection } from './GitSection.tsx';
 import { ModelSection } from './ModelSection.tsx';
 import { Preferences, preferenceKeys } from './preferences.ts';
 import { hostPath, readSettingsRoute, sectionPath } from './routing.ts';
@@ -54,6 +55,8 @@ const searchLabels: Record<string, string[]> = {
     'Accent', 'Background', 'Text', 'Added lines', 'Removed lines', 'Skill color', 'Contrast', 'Transparent window', 'Interface font',
     'Content font', 'Code font', 'Code theme', 'Import theme', 'Export theme'],
   models: ['Model', 'Reasoning effort'],
+  'git-settings': ['Branch prefix', 'Always force push', 'Create draft pull requests', 'Pull request merge method', 'Disable Git-based diffs',
+    'Review delivery', 'Commit instructions', 'Pull request instructions', 'Pull request watch instructions', 'Auto-merge when ready'],
 };
 
 export function StandaloneSettings({ client, hostId, initialSection, location, onNavigate, onClose, registerNavigationGuard }: SettingsIntegrationProps) {
@@ -81,11 +84,12 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
   const navigateRef = useRef(onNavigate);
   navigateRef.current = onNavigate;
   const dirty = preferences.dirty || otherDirty;
-  const flags = useRef({ dirty, saving: saving || otherSaving });
-  flags.current = { dirty, saving: saving || otherSaving };
+  const anySaving = saving || otherSaving || preferenceKeys.some(key => snapshot[key].saving);
+  const flags = useRef({ dirty, saving: anySaving });
+  flags.current = { dirty, saving: anySaving };
 
   const requestLeave = useCallback((): Promise<boolean> => {
-    if (flags.current.saving) return Promise.resolve(false);
+    if (flags.current.saving || preferences.saving) return Promise.resolve(false);
     if (!preferences.dirty && !flags.current.dirty) return Promise.resolve(true);
     if (pending.current) return pending.current.promise;
     let resolve: (allowed: boolean) => void = () => {};
@@ -95,6 +99,7 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
     return promise;
   }, [preferences]);
   const finishLeave = (allowed: boolean) => {
+    if (allowed && (flags.current.saving || preferences.saving)) return;
     const current = pending.current;
     if (!current) return;
     pending.current = null;
@@ -135,10 +140,10 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
     return () => { active = false; };
   }, [client]);
   useEffect(() => {
-    const preventUnload = (event: BeforeUnloadEvent) => { if (dirty || saving || otherSaving) { event.preventDefault(); event.returnValue = ''; } };
+    const preventUnload = (event: BeforeUnloadEvent) => { if (dirty || anySaving) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', preventUnload);
     return () => window.removeEventListener('beforeunload', preventUnload);
-  }, [dirty, saving, otherSaving]);
+  }, [dirty, anySaving]);
   useEffect(() => {
     if (!searchTarget || searchTarget.section !== section) return;
     const rows = content.current?.querySelectorAll<HTMLElement>('.yard-setting-row') ?? [];
@@ -216,14 +221,15 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
         {section === 'general-settings' ? <GeneralSection preferences={preferences} snapshot={snapshot} platform={platform} navigate={navigate} /> :
           section === 'appearance' ? <AppearanceSection key={editorRevision} preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} onDirtyChange={setOtherDirty} /> :
             section === 'models' ? <ModelSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+              section === 'git-settings' ? <GitSection preferences={preferences} snapshot={snapshot} suspended={confirmLeave} /> :
               isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
                 section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving} /> :
                   section === 'connections' ? <ConnectionsSection client={client} onSavingChange={setOtherSaving} /> :
             <><h2>{title}</h2><p className="yard-setting-error">This settings section is not yet available in the web host.</p></>}
       </div>
-      {(preferences.dirty || saving) && <div className="yard-save-bar"><span>Unsaved changes</span><div className="yard-actions">
-        <button type="button" disabled={saving} onClick={() => preferences.discard()}>Discard</button>
-        <button type="button" disabled={saving || !preferences.dirty} onClick={() => {
+      {(preferences.dirty || anySaving) && <div className="yard-save-bar"><span>Unsaved changes</span><div className="yard-actions">
+        <button type="button" disabled={anySaving} onClick={() => preferences.discard()}>Discard</button>
+        <button type="button" disabled={anySaving || !preferences.dirty} onClick={() => {
           setSaving(true); void preferences.save().finally(() => setSaving(false));
         }}>{saving ? 'Saving...' : 'Save'}</button>
       </div></div>}
@@ -232,7 +238,7 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
     {confirmLeave && <div className="yard-dialog-backdrop"><div className="yard-dialog" role="dialog" aria-modal="true" aria-labelledby="yard-unsaved-title" onKeyDown={event => { if (event.key === 'Escape') finishLeave(false); }}>
       <h2 id="yard-unsaved-title">Discard unsaved changes?</h2><p>Your edits have not been saved.</p>
       <div className="yard-actions"><button type="button" autoFocus onClick={() => finishLeave(false)}>Keep editing</button>
-        <button type="button" onClick={() => finishLeave(true)}>Discard changes</button></div>
+        <button type="button" disabled={anySaving} onClick={() => finishLeave(true)}>Discard changes</button></div>
     </div></div>}
   </div>;
 }

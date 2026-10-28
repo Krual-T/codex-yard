@@ -102,6 +102,23 @@ test('an update during save is reread after the acknowledgement', async () => {
   stop();
 });
 
+test('saving a Git preference uses global state and leaves other drafts untouched on failure', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  await prefs.load();
+  prefs.edit('git-branch-prefix', 'feature/');
+  prefs.edit('git-commit-instructions', 'Keep the subject short');
+  client.fail = 'set-global-state';
+  assert.equal(await prefs.saveOne('git-branch-prefix'), false);
+  assert.equal(prefs.getSnapshot()['git-branch-prefix'].value, 'feature/');
+  assert.match(prefs.getSnapshot()['git-branch-prefix'].error ?? '', /offline/);
+  client.fail = '';
+  assert.equal(await prefs.saveOne('git-branch-prefix'), true);
+  assert.equal(client.globals['git-branch-prefix'], 'feature/');
+  assert.equal(client.globals['git-commit-instructions'], undefined);
+  assert.equal(prefs.getSnapshot()['git-commit-instructions'].value, 'Keep the subject short');
+  assert.equal(prefs.dirty, true);
+});
+
 test('failed or unverifiable writes retain edits and never replay automatically', async () => {
   const client = new FakeClient(), prefs = new Preferences(client);
   await prefs.load();

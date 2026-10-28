@@ -33,6 +33,16 @@ export interface PreferenceValues {
   preventSleepWhileRunning: boolean;
   autoArchiveAfterDays: number;
   localeOverride: string | null;
+  reviewDelivery: 'inline' | 'detached';
+  'git-branch-prefix': string;
+  'git-always-force-push': boolean;
+  'git-create-pull-request-as-draft': boolean;
+  'git-pull-request-merge-method': 'merge' | 'squash';
+  'git-review-mode': 'full' | 'last-turn-only';
+  'git-commit-instructions': string;
+  'git-pr-instructions': string;
+  'git-pr-watch-auto-merge': boolean;
+  'git-pr-watch-instructions': string;
   'reduced-motion-preference': 'system' | 'on' | 'off';
   'dock-icon-preference': 'app-default' | 'codex-system' | 'space-system';
   'ambient-suggestions-enabled': boolean;
@@ -89,6 +99,16 @@ export const preferenceDefinitions: Definitions = {
   preventSleepWhileRunning: { source: 'setting', defaultValue: false, valid: bool },
   autoArchiveAfterDays: { source: 'setting', defaultValue: 0, valid: numberIn(0, Number.MAX_SAFE_INTEGER) },
   localeOverride: { source: 'setting', defaultValue: null, valid: nullableString },
+  reviewDelivery: { source: 'setting', defaultValue: 'inline', valid: oneOf('inline', 'detached') },
+  'git-branch-prefix': { source: 'global', defaultValue: 'codex/', valid: string },
+  'git-always-force-push': { source: 'global', defaultValue: false, valid: bool },
+  'git-create-pull-request-as-draft': { source: 'global', defaultValue: true, valid: bool },
+  'git-pull-request-merge-method': { source: 'global', defaultValue: 'merge', valid: oneOf('merge', 'squash') },
+  'git-review-mode': { source: 'global', defaultValue: 'full', valid: oneOf('full', 'last-turn-only') },
+  'git-commit-instructions': { source: 'global', defaultValue: '', valid: string },
+  'git-pr-instructions': { source: 'global', defaultValue: '', valid: string },
+  'git-pr-watch-auto-merge': { source: 'global', defaultValue: false, valid: bool },
+  'git-pr-watch-instructions': { source: 'global', defaultValue: '', valid: string },
   'reduced-motion-preference': { source: 'global', defaultValue: 'system', valid: oneOf('system', 'on', 'off') },
   'dock-icon-preference': { source: 'global', defaultValue: 'app-default', valid: oneOf('app-default', 'codex-system', 'space-system') },
   'ambient-suggestions-enabled': { source: 'global', defaultValue: true, valid: bool },
@@ -206,10 +226,16 @@ export class Preferences {
     for (const key of preferenceKeys) this.update(key, { value: clone(this.snapshot[key].saved), error: null });
   }
   get dirty(): boolean { return preferenceKeys.some(key => !same(this.snapshot[key].value, this.snapshot[key].saved)); }
+  get saving(): boolean { return preferenceKeys.some(key => this.snapshot[key].saving); }
   async save(): Promise<boolean> {
     const keys = preferenceKeys.filter(key => this.snapshot[key].available && !this.snapshot[key].saving && !same(this.snapshot[key].value, this.snapshot[key].saved));
     const results = await Promise.all(keys.map(key => this.saveKey(key)));
     return results.every(Boolean);
+  }
+  async saveOne(key: PreferenceKey): Promise<boolean> {
+    const entry = this.snapshot[key];
+    if (!entry.available || entry.saving || same(entry.value, entry.saved)) return false;
+    return this.saveKey(key);
   }
   private async saveKey(key: PreferenceKey): Promise<boolean> {
     const source = preferenceDefinitions[key].source;
