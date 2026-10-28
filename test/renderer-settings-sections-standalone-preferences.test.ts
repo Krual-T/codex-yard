@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import { Preferences, defaultThemes, exportTheme, importTheme, mergeImportedTheme } from '../src/renderer/settings/preferences.ts';
 import { assertPreferenceExpectation } from '../src/native/protocol.ts';
+import { createPreferenceWrites } from '../src/native/preference-writes.ts';
+import { createStateMutations } from '../src/native/state-mutations.ts';
 
 class FakeClient implements WorkbenchClient {
   settings: Record<string, unknown> = { composerPlainTextMode: false, appearanceTheme: 'dark', unknownSetting: { keep: true } };
@@ -262,6 +264,42 @@ test('two editors use raw existence and keep drafts when conditional writes conf
   assert.equal(client.globals['git-branch-prefix'], 'second/');
   assert.deepEqual(client.calls.filter(call => call.endpoint === 'set-global-state').at(-1)?.params?.expected,
     { exists: true, value: 'first/' });
+});
+
+test('two editors serialize conditional setting and global writes through the actual host mutation interval', async () => {
+  const client = new FakeClient(), mutations = createStateMutations();
+  let release: () => void = () => {}, started: () => void = () => {};
+  const entered = new Promise<void>(resolve => { started = resolve; });
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  let firstPersist = true;
+  const write = createPreferenceWrites(client.settings, client.globals, async () => {
+    if (firstPersist) { firstPersist = false; started(); await hold; }
+  }, () => {}, () => {}, mutations);
+  const host = client.host.bind(client);
+  client.host = async <T>(endpoint: string, params?: Record<string, unknown>): Promise<T> => {
+    if (endpoint === 'set-setting' || endpoint === 'set-global-state') {
+      client.calls.push({ endpoint, params });
+      return write(endpoint === 'set-setting' ? 'setting' : 'global', String(params?.key), params?.value, params?.expected) as Promise<T>;
+    }
+    if (endpoint === 'get-settings' || endpoint === 'get-setting' || endpoint === 'get-global-state') {
+      return mutations.run(() => host<T>(endpoint, params));
+    }
+    return host<T>(endpoint, params);
+  };
+  const first = new Preferences(client), second = new Preferences(client);
+  await Promise.all([first.load(), second.load()]);
+  first.edit('appearanceTheme', 'light'); second.edit('appearanceTheme', 'system');
+  const winning = first.saveOne('appearanceTheme'); await entered;
+  const competing = second.saveOne('appearanceTheme'); release();
+  assert.deepEqual(await Promise.all([winning, competing]), [true, false]);
+  assert.equal(client.settings.appearanceTheme, 'light');
+  assert.equal(second.getSnapshot().appearanceTheme.value, 'system');
+  assert.equal(second.getSnapshot().appearanceTheme.conflict, true);
+  first.edit('git-branch-prefix', 'first/'); second.edit('git-branch-prefix', 'second/');
+  assert.deepEqual(await Promise.all([first.saveOne('git-branch-prefix'), second.saveOne('git-branch-prefix')]), [true, false]);
+  assert.equal(client.globals['git-branch-prefix'], 'first/');
+  assert.equal(second.getSnapshot()['git-branch-prefix'].value, 'second/');
+  assert.deepEqual(second.getSnapshot()['git-branch-prefix'].editBase, { exists: false });
 });
 
 test('reapplying a theme keeps external untouched and unknown fields', async () => {
