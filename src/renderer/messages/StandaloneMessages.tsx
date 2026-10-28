@@ -16,7 +16,7 @@ import { useMessageEditing } from './use-message-editing.ts';
 import type { EditingSession, StandaloneMessagesRecoveryProps, StartEdit, UpdateEdit } from './use-message-editing.ts';
 import './standalone-messages.css';
 
-export type { MessageEditRecovery, MessageEditRecoveryVersion, StandaloneMessagesRecoveryProps } from './use-message-editing.ts';
+export type { MessageEditNavigationController, MessageEditNavigationLease, MessageEditRecovery, MessageEditRecoveryVersion, StandaloneMessagesRecoveryProps } from './use-message-editing.ts';
 export type { MessageEditHistory } from './message-edit.ts';
 
 type RenderItemProps = {
@@ -68,7 +68,7 @@ const unavailableEdit: NonNullable<StandaloneMessagesProps['onEdit']> = async ()
 };
 
 function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, onCancel, onSubmitEdit, recoveryNote, renderPart, renderContext }: UserMessageEditorProps) {
-  const { id, draft, signature, edits, addedText, removedAttachments, error, saveError, pending, sent } = editing;
+  const { id, draft, signature, edits, addedText, removedAttachments, error, saveError, pending, sent, navigationFrozen } = editing;
   const composing = useRef(false);
   const currentSignature = useMemo(() => editSourceSignature(item), [item]);
   const changedSource = signature !== currentSignature;
@@ -84,16 +84,16 @@ function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, o
   const textarea = (value: string, onChange: (value: string) => void, label: string, autoFocus: boolean) =>
     <label className="yard-edit-text"><span className="yard-screen-reader">{label}</span>
       <textarea aria-label={label} autoFocus={autoFocus} rows={Math.max(3, Math.min(12, value.split('\n').length + 1))}
-        value={value} disabled={pending || sent || editing.attachmentRecoveryInvalid} onChange={(event) => { onChange(event.target.value); }} />
+        value={value} disabled={pending || sent || navigationFrozen || editing.attachmentRecoveryInvalid} onChange={(event) => { onChange(event.target.value); }} />
       <span className="yard-edit-print-text" aria-hidden="true">{value}</span></label>;
   return <form className="yard-message-edit" onCompositionStart={() => { composing.current = true; }}
     onCompositionEnd={() => { composing.current = false; }} onKeyDown={(event) => {
-    if (event.key === 'Escape' && !event.nativeEvent.isComposing && event.keyCode !== 229 && !composing.current && !pending && !sent) {
+    if (event.key === 'Escape' && !event.nativeEvent.isComposing && event.keyCode !== 229 && !composing.current && !pending && !sent && !navigationFrozen) {
       event.preventDefault(); onCancel();
     }
   }} onSubmit={(event) => {
     event.preventDefault();
-    if (pending || sent || blocked) return;
+    if (pending || sent || navigationFrozen || blocked) return;
     onSubmitEdit(id, onEdit);
   }}>
     {!edits.length && textarea(addedText, (text) => onUpdateEdit(id, (current) => ({ ...current, addedText: text, error: '' })), 'Edit message text', true)}
@@ -109,7 +109,7 @@ function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, o
         return <div className="yard-edit-attachment" key={index}>
           {removed ? <span className="yard-attachment-removed">Image removed</span> : renderPart(index)}
           <button type="button" className="yard-icon-button" title={canRemove ? label : 'Image cannot be safely removed'}
-            aria-label={label} disabled={pending || sent || editing.attachmentRecoveryInvalid || !canRemove} onClick={() => toggleAttachment(attachment)}>
+            aria-label={label} disabled={pending || sent || navigationFrozen || editing.attachmentRecoveryInvalid || !canRemove} onClick={() => toggleAttachment(attachment)}>
             {removed ? <Undo2 size={16} /> : <X size={16} />}</button>
         </div>;
       }
@@ -119,7 +119,7 @@ function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, o
       const value = context?.prefix && row.edit.text.startsWith(context.prefix) ? row.edit.text.slice(context.prefix.length) : row.edit.text;
       return <div key={index}>{context?.prefix && renderContext(context, {
         isRemoved: (fileIndex) => isRemoved({ kind: 'file', inputIndex: index, fileIndex }),
-        toggle: (fileIndex) => toggleAttachment({ kind: 'file', inputIndex: index, fileIndex }), disabled: pending || sent || editing.attachmentRecoveryInvalid,
+        toggle: (fileIndex) => toggleAttachment({ kind: 'file', inputIndex: index, fileIndex }), disabled: pending || sent || navigationFrozen || editing.attachmentRecoveryInvalid,
       })}
         {textarea(value, (text) => onUpdateEdit(id, (current) => ({ ...current, error: '',
         edits: current.edits.map((edit) => edit.index === index ? { ...edit, text: (context?.prefix ?? '') + text } : edit) })),
@@ -129,8 +129,8 @@ function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, o
     {blocked && !sent && <div className="yard-action-error" role="alert">{blocked}</div>}
     {saveError && <div className="yard-action-error" role="alert">{saveError}</div>}
     {error && <div className="yard-action-error" role="alert">{error}</div>}
-    <div className="yard-edit-controls"><button type="button" onClick={onCancel} disabled={pending}>{sent ? 'Clear recovery' : 'Cancel'}</button>
-      {!sent && <button type="submit" disabled={pending || Boolean(blocked)}>{pending ? 'Sending...' : 'Send'}</button>}</div>
+    <div className="yard-edit-controls"><button type="button" onClick={onCancel} disabled={pending || navigationFrozen}>{sent ? 'Clear recovery' : 'Cancel'}</button>
+      {!sent && <button type="submit" disabled={pending || navigationFrozen || Boolean(blocked)}>{pending ? 'Sending...' : 'Send'}</button>}</div>
   </form>;
 }
 
@@ -294,7 +294,7 @@ function searchText(value: unknown): string {
 }
 
 export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser,
-  editRecovery, onEditDraftChange, editHistory }: StandaloneMessagesProps & StandaloneMessagesRecoveryProps & { editHistory?: MessageEditHistory }) {
+  editRecovery, onEditDraftChange, onEditNavigationController, editHistory }: StandaloneMessagesProps & StandaloneMessagesRecoveryProps & { editHistory?: MessageEditHistory }) {
   const [query, setQuery] = useState('');
   const [matchIndex, setMatchIndex] = useState(-1);
   const [following, setFollowing] = useState(true);
@@ -305,7 +305,7 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
   const followRef = useRef(true);
   const threadIdentity = JSON.stringify([hostId, thread?.id]);
   const { editingHere, recoveryAvailable, startEdit, updateEdit, endEdit, submitEdit } = useMessageEditing({
-    hostId, thread, threadIdentity, editRecovery, onEditDraftChange,
+    hostId, thread, threadIdentity, editRecovery, onEditDraftChange, onEditNavigationController,
   });
   const currentThread = useRef(threadIdentity);
   const openImages = useCallback((images: ImageSource[], index: number) => setViewer({ images, index }), []);

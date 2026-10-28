@@ -117,12 +117,14 @@ export class MessageEditRecoveryStore {
       if (old?.stage === 'started') return previous;
       const operation = old && ['revertUnknown', 'startUnknown', 'conflict'].includes(old.stage) ? 'check'
         : old?.stage === 'reverted' ? 'retry-start' : 'submit';
-      const request: EditMessageRequest = operation === 'check' ? { ...old!.request, operation }
-        : { origin: structuredClone(origin), expectedTurnIds: old?.request.expectedTurnIds ?? [...expectedTurnIds],
-          clientUserMessageId: crypto.randomUUID(), turnParams: structuredClone(turnParams), operation };
+      const request: EditMessageRequest = operation === 'check' ? { ...old!.request, operation,
+        ...(old!.stage === 'revertUnknown' || old!.stage === 'startUnknown' ? { unknownPhase: old!.stage } : {}) }
+        : operation === 'retry-start' ? { ...old!.request, operation, unknownPhase: undefined }
+          : { origin: structuredClone(origin), expectedTurnIds: old?.request.expectedTurnIds ?? [...expectedTurnIds],
+            clientUserMessageId: crypto.randomUUID(), turnParams: structuredClone(turnParams), operation };
       const editor = previous.recovery.editor;
       if (!editor) throw new Error('编辑版本尚未保存，未修改会话。');
-      const editorVersion = operation === 'check' ? old!.editorVersion : { sessionId: editor.sessionId, revision: editor.revision };
+      const editorVersion = operation === 'check' || operation === 'retry-start' ? old!.editorVersion : { sessionId: editor.sessionId, revision: editor.revision };
       return { ...previous, submission: { request, operationId, ...(editorVersion ? { editorVersion } : {}),
         stage: operation === 'check' ? old!.stage : operation === 'retry-start' ? 'startUnknown' : 'revertUnknown' } };
     });
@@ -135,15 +137,15 @@ export class MessageEditRecoveryStore {
     if (!['prepared', 'reverted', 'revertUnknown', 'startUnknown', 'started', 'conflict'].includes(response.stage)) {
       throw new Error('编辑结果无法确认，恢复记录已保留；请检查结果，勿重复发送。');
     }
+    // Older hosts may infer success from an unchanged snapshot. A check is read-only
+    // and only a matching clientId can resolve this request as started.
+    const checkedStage = operation === 'check' && response.stage !== 'started' ? pending.stage : response.stage;
     const completed = await this.change(origin, previous => {
       if (previous?.submission?.operationId !== operationId) throw new Error('编辑结果已过期，未覆盖恢复记录。');
-      return { ...previous, submission: { ...previous.submission, stage: response.stage, ...(response.turn ? { turn: response.turn } : {}) } };
+      return { ...previous, submission: { ...previous.submission, stage: checkedStage, ...(checkedStage === 'started' && response.turn ? { turn: response.turn } : {}) } };
     });
-    if (response.stage === 'started') return this.confirmStarted(completed!);
-    if (operation === 'check' && (response.stage === 'prepared' || response.stage === 'reverted')) {
-      throw new Error(response.stage === 'reverted' ? '已核对：原消息已回退，尚未开始新任务。草稿已保留，再次发送只启动新任务。'
-        : '已核对：原消息仍在，未发送编辑。草稿已保留，可再次发送。');
-    }
+    if (checkedStage === 'started') return this.confirmStarted(completed!);
+    if (operation === 'check') throw new Error('原操作结果尚未确认，可能仍会迟到；草稿已保留，未重发。');
     throw new Error(response.error || '编辑结果尚未确认，草稿已保留；再次点击先检查结果。');
   }
 

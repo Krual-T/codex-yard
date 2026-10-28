@@ -38,6 +38,8 @@ test('reload after a known start failure retries only start and keeps the origin
   assert.equal(result.turn?.id, 'new');
   assert.deepEqual(h.calls.map(call => call.operation), ['submit', 'retry-start']);
   assert.deepEqual(h.calls[1]!.expectedTurnIds, ['original', 'tool-followup']);
+  assert.equal(h.calls[1]!.clientUserMessageId, h.calls[0]!.clientUserMessageId);
+  assert.deepEqual(h.calls[1]!.turnParams, h.calls[0]!.turnParams);
   await restored.save(null, origin, version);
   assert.equal(await restored.read(origin.hostId, origin.threadId), null);
 });
@@ -56,14 +58,32 @@ test('a lost browser response checks clientId after reload without replaying a w
   assert.equal(h.calls[0]!.clientUserMessageId, h.calls[1]!.clientUserMessageId);
 });
 
-test('an uncertain rollback is checked first and requires another user action to start', async () => {
-  const h = fixture(value => ({ stage: value.operation === 'submit' ? 'revertUnknown' : value.operation === 'check' ? 'reverted' : 'started' }));
+test('an older host cannot make an uncertain rollback retryable from a snapshot', async () => {
+  const h = fixture(value => ({ stage: value.operation === 'submit' ? 'revertUnknown' : h.calls.length === 2 ? 'reverted' : 'prepared' }));
   await h.store.save(recovery, origin, version);
   await assert.rejects(h.store.submit(origin, ['original'], params), /尚未确认/);
-  await assert.rejects(h.store.submit(origin, [], params), /已核对/);
-  assert.deepEqual(h.calls.map(call => call.operation), ['submit', 'check']);
-  await h.store.submit(origin, [], params);
-  assert.deepEqual(h.calls.map(call => call.operation), ['submit', 'check', 'retry-start']);
+  await assert.rejects(h.store.submit(origin, [], params), /尚未确认/);
+  await assert.rejects(h.store.submit(origin, [], params), /尚未确认/);
+  assert.deepEqual(h.calls.map(call => call.operation), ['submit', 'check', 'check']);
+  assert.equal(h.calls[1]!.unknownPhase, 'revertUnknown');
+  assert.equal(h.calls[2]!.clientUserMessageId, h.calls[0]!.clientUserMessageId);
+  assert.equal((await h.store.read(origin.hostId, origin.threadId))?.submission?.stage, 'revertUnknown');
+});
+
+test('a known rejected start retries the submitted version without clearing newer edits', async () => {
+  const h = fixture(value => value.operation === 'submit' ? { stage: 'reverted', error: 'start rejected' }
+    : { stage: 'started', turn: { id: 'old-start', status: 'completed', items: [] } });
+  await h.store.save(recovery, origin, version);
+  await assert.rejects(h.store.submit(origin, ['original'], params), /start rejected/);
+  const newer = { ...recovery, draft: { ...recovery.draft, text: 'newer' }, editor: { ...recovery.editor!, revision: 2 } };
+  await h.store.save(newer, origin, { ...version, revision: 2 });
+  await assert.rejects(h.store.submit(origin, [], { input: [{ type: 'text', text: 'newer' }] }), /较新草稿未发送/);
+  assert.equal(h.calls[1]!.operation, 'retry-start');
+  assert.equal(h.calls[1]!.clientUserMessageId, h.calls[0]!.clientUserMessageId);
+  assert.deepEqual(h.calls[1]!.turnParams, params);
+  const saved = await h.store.read(origin.hostId, origin.threadId);
+  assert.equal(saved?.recovery.draft.text, 'newer');
+  assert.deepEqual(saved?.submission?.editorVersion, version);
 });
 
 test('storage failure and another page edit both stop before a destructive host call', async () => {

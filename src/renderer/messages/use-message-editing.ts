@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ThreadItemSummary, ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { ComposerDraft, MessageEditOrigin, StandaloneMessagesProps } from '../workbench-contract.ts';
 import { applyTextEdits, editSourceSignature, isRemovedMessageAttachments, textEdits } from './message-edit.ts';
@@ -6,6 +6,17 @@ import { serializedMessageContext } from './message-data.ts';
 import type { RemovedMessageAttachment, TextEdit } from './message-edit.ts';
 
 export type MessageEditRecoveryVersion = { sessionId: string; revision: number };
+
+export interface MessageEditNavigationLease {
+  readonly origin: MessageEditOrigin;
+  readonly version: MessageEditRecoveryVersion;
+  flush(): Promise<void>;
+  release(): void;
+}
+export interface MessageEditNavigationController {
+  /** Freeze the currently mounted editor synchronously before changing routes. */
+  freeze(): MessageEditNavigationLease | null;
+}
 
 export type MessageEditRecovery = {
   draft: ComposerDraft;
@@ -29,6 +40,7 @@ export type StandaloneMessagesRecoveryProps = {
   editRecovery?: MessageEditRecovery | null;
   /** A null value clears only the specified origin and version. */
   onEditDraftChange?: (value: MessageEditRecovery | null, origin: MessageEditOrigin, version: MessageEditRecoveryVersion) => Promise<void>;
+  onEditNavigationController?: (controller: MessageEditNavigationController | null) => void;
 };
 
 export type EditingSession = {
@@ -51,9 +63,10 @@ export type EditingSession = {
   saveError: string;
   pending: boolean;
   sent: boolean;
+  navigationFrozen: boolean;
   revision: number;
 };
-export type StartEdit = Omit<EditingSession, 'id' | 'sessionId' | 'edits' | 'addedText' | 'removedAttachments' | 'attachmentRecoveryInvalid' | 'error' | 'saveError' | 'pending' | 'sent' | 'revision'>;
+export type StartEdit = Omit<EditingSession, 'id' | 'sessionId' | 'edits' | 'addedText' | 'removedAttachments' | 'attachmentRecoveryInvalid' | 'error' | 'saveError' | 'pending' | 'sent' | 'navigationFrozen' | 'revision'>;
 export type UpdateEdit = (id: number, update: (session: EditingSession) => EditingSession) => void;
 
 function recoveryFor(session: EditingSession, draft?: ComposerDraft): MessageEditRecovery {
@@ -75,7 +88,7 @@ const recoveryKey = (origin: MessageEditOrigin) => JSON.stringify([origin.hostId
 const newRecoveryId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
 const recoveryVersion = (session: EditingSession): MessageEditRecoveryVersion => ({ sessionId: session.sessionId, revision: session.revision });
 
-export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery, onEditDraftChange }: StandaloneMessagesRecoveryProps & {
+export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery, onEditDraftChange, onEditNavigationController }: StandaloneMessagesRecoveryProps & {
   hostId: string; thread: ThreadSummary | null; threadIdentity: string;
 }) {
   const [sessions, setSessions] = useState<Map<string, EditingSession>>(() => new Map());
@@ -85,6 +98,11 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
   recoveryCallback.current = onEditDraftChange;
   const recoveryWrites = useRef<Promise<void>>(Promise.resolve());
   const queuedPublishes = useRef(new Map<string, { session: EditingSession }>());
+  const frozenSessions = useRef(new Map<string, symbol>());
+  const activeIdentity = useRef(threadIdentity);
+  const mounted = useRef(false);
+  useLayoutEffect(() => { activeIdentity.current = threadIdentity; }, [threadIdentity]);
+  useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const nextEditId = useRef(0);
   const putSession = useCallback((identity: string, session: EditingSession | null) => {
     const next = new Map(sessionsRef.current);
@@ -129,14 +147,14 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
     if (sessionsRef.current.has(session.identity)) return;
     const id = ++nextEditId.current;
     const next = { ...session, id, sessionId: newRecoveryId(), edits: textEdits(session.draft), addedText: '', removedAttachments: [], attachmentRecoveryInvalid: false,
-      error: '', saveError: '', pending: false, sent: false, revision: 0 };
+      error: '', saveError: '', pending: false, sent: false, navigationFrozen: false, revision: 0 };
     dismissedRecovery.current.delete(next.identity);
     putSession(next.identity, next);
     publishSession(next);
   }, [publishSession, putSession]);
   const updateEdit = useCallback<UpdateEdit>((id, update) => {
     const current = findSession(id);
-    if (!current || current.attachmentRecoveryInvalid) return;
+    if (!current || current.attachmentRecoveryInvalid || frozenSessions.current.has(current.identity)) return;
     const result = update(current);
     const changed = result.edits !== current.edits || result.addedText !== current.addedText || result.removedAttachments !== current.removedAttachments;
     const next = changed ? { ...result, revision: current.revision + 1 } : result;
@@ -145,7 +163,7 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
   }, [findSession, publishSession, putSession]);
   const endEdit = useCallback((id: number, submitted = false) => {
     const current = findSession(id);
-    if (!current || (current.pending && !submitted)) return;
+    if (!current || frozenSessions.current.has(current.identity) || (current.pending && !submitted)) return;
     putSession(current.identity, { ...current, pending: true, sent: submitted || current.sent, error: '', saveError: '' });
     void notifyRecovery(null, current.origin, recoveryVersion(current)).then(() => {
       const latest = findSession(id);
@@ -160,7 +178,7 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
   }, [findSession, notifyRecovery, putSession]);
   const submitEdit = useCallback((id: number, submit: NonNullable<StandaloneMessagesProps['onEdit']>) => {
     const current = findSession(id);
-    if (!current || current.pending || current.sent || current.attachmentRecoveryInvalid) return;
+    if (!current || current.pending || current.sent || current.attachmentRecoveryInvalid || frozenSessions.current.has(current.identity)) return;
     const result = applyTextEdits(current.draft, current.edits, current.addedText, current.removedAttachments);
     const draft = result.draft;
     if (!draft) { putSession(current.identity, { ...current, error: result.error }); return; }
@@ -202,10 +220,60 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
       edits: structuredClone(editor?.edits ?? textEdits(baseDraft)), addedText: editor?.addedText ?? '',
       removedAttachments: attachmentRecoveryInvalid ? [] : structuredClone(editor?.removedAttachments ?? []), attachmentRecoveryInvalid,
       error: '', saveError: '',
-      pending: false, sent: false, revision: hasVersion ? editor!.revision : 0 };
+      pending: false, sent: false, navigationFrozen: false, revision: hasVersion ? editor!.revision : 0 };
     putSession(threadIdentity, session);
     if (!hasVersion && !attachmentRecoveryInvalid) publishSession(session);
   }, [editRecovery, hostId, publishSession, putSession, thread, threadIdentity]);
+  const freeze = useCallback((): MessageEditNavigationLease | null => {
+    if (!mounted.current) throw new Error('The message editor is no longer mounted.');
+    const identity = activeIdentity.current;
+    const session = sessionsRef.current.get(identity);
+    if (!session) return null;
+    if (session.pending) throw new Error('Wait for the current message edit operation before leaving.');
+    if (frozenSessions.current.has(identity)) throw new Error('This message edit is already frozen.');
+    const token = Symbol('message-edit-navigation');
+    const origin = structuredClone(session.origin), version = recoveryVersion(session), sessionId = session.id;
+    const snapshot = recoveryFor(session);
+    frozenSessions.current.set(identity, token);
+    putSession(identity, { ...session, navigationFrozen: true });
+    function currentLease() {
+      const current = sessionsRef.current.get(identity);
+      if (!mounted.current || frozenSessions.current.get(identity) !== token || !current || current.id !== sessionId
+        || current.sessionId !== version.sessionId || current.revision !== version.revision
+        || recoveryKey(current.origin) !== recoveryKey(origin)) throw new Error('The frozen message edit is no longer current.');
+      return current;
+    }
+    return {
+      origin: structuredClone(origin), version: { ...version },
+      async flush() {
+        currentLease();
+        try {
+          if (!recoveryCallback.current) throw new Error('Message edit recovery is unavailable.');
+          await notifyRecovery(snapshot, origin, version);
+          const current = currentLease();
+          if (current.saveError) putSession(identity, { ...current, saveError: '' });
+        } catch (reason) {
+          if (mounted.current && frozenSessions.current.get(identity) === token) {
+            const current = sessionsRef.current.get(identity);
+            if (current?.id === sessionId) putSession(identity, { ...current,
+              saveError: `Could not save the edit recovery: ${errorMessage(reason, 'Unknown error.')}` });
+          }
+          throw reason;
+        }
+      },
+      release() {
+        if (frozenSessions.current.get(identity) !== token) return;
+        frozenSessions.current.delete(identity);
+        const current = sessionsRef.current.get(identity);
+        if (mounted.current && current?.id === sessionId) putSession(identity, { ...current, navigationFrozen: false });
+      },
+    };
+  }, [notifyRecovery, putSession]);
+  const navigationController = useMemo<MessageEditNavigationController>(() => ({ freeze }), [freeze]);
+  useLayoutEffect(() => {
+    onEditNavigationController?.(navigationController);
+    return () => { onEditNavigationController?.(null); };
+  }, [navigationController, onEditNavigationController]);
   const editingHere = sessions.get(threadIdentity) ?? null;
   const recoveryAvailable = Boolean(editingHere && (onEditDraftChange
     || (editRecovery && recoveryKey(editRecovery.origin) === recoveryKey(editingHere.origin))));

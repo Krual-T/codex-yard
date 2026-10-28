@@ -11,6 +11,8 @@ export interface EditMessageRequest {
   clientUserMessageId: string;
   turnParams: ObjectValue;
   operation: 'submit' | 'retry-start' | 'check';
+  /** The phase whose original write may still arrive after a timeout. */
+  unknownPhase?: 'revertUnknown' | 'startUnknown';
 }
 export interface EditMessageResult { stage: EditStage; turn?: TurnSummary; error?: string }
 
@@ -67,7 +69,9 @@ export async function editMessage(connection: Connection, hostId: string, thread
   if (origin.hostId !== hostId || origin.threadId !== threadId || typeof origin.turnId !== 'string' || !origin.turnId
     || typeof origin.itemId !== 'string' || !origin.itemId || !Array.isArray(request.expectedTurnIds)
     || request.expectedTurnIds.some(id => typeof id !== 'string') || typeof request.clientUserMessageId !== 'string' || !request.clientUserMessageId
-    || !['submit', 'retry-start', 'check'].includes(String(request.operation))) throw new Error('编辑目标身份无效，未修改会话。');
+    || !['submit', 'retry-start', 'check'].includes(String(request.operation))
+    || (request.unknownPhase !== undefined && (request.operation !== 'check'
+      || (request.unknownPhase !== 'revertUnknown' && request.unknownPhase !== 'startUnknown')))) throw new Error('编辑目标身份无效，未修改会话。');
   const expected = request.expectedTurnIds as string[], index = expected.indexOf(origin.turnId);
   if (index < 0 || new Set(expected).size !== expected.length) throw new Error('编辑来源历史无效，未修改会话。');
   const input = record(request.turnParams);
@@ -81,9 +85,9 @@ export async function editMessage(connection: Connection, hostId: string, thread
     for (const turn of current.slice(index)) {
       if ((await items(connection, threadId, turn.id)).some(item => item.type === 'userMessage' && item.clientId === request.clientUserMessageId)) return { stage: 'started', turn };
     }
-    if (idle && idsEqual(current, expected)) return { stage: 'prepared' };
-    if (idle && idsEqual(current, prefix)) return { stage: 'reverted' };
-    return { stage: 'conflict', error: '会话记录已改变或仍在运行，请核对记录；编辑内容已保留，未重发。' };
+    // An unchanged snapshot does not cancel or establish the outcome of an earlier write.
+    const stage = request.unknownPhase === 'revertUnknown' || request.unknownPhase === 'startUnknown' ? request.unknownPhase : 'conflict';
+    return { stage, error: '原操作结果尚未确认，可能仍会迟到；编辑内容已保留，未重发。' };
   }
   if (!idle) throw new Error('会话仍在运行或状态未知，编辑已保留，未修改历史。');
   if (request.operation === 'retry-start') {
