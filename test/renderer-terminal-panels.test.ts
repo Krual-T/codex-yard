@@ -101,7 +101,7 @@ test('terminal panels use the page-owned host session and never replay input aft
       const root = createRoot(document.getElementById('root'));
       let locale = 'en-US';
       let props = {client,scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},appearance:{theme:'dark',codeFontSize:13,codeLineHeight:20},
-        request:{id:'one',scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},kind:'terminal'},onRequestConsumed:id=>state.consumed.push(id),
+        request:{id:'one',scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},kind:'terminal',reuse:true},onRequestConsumed:id=>state.consumed.push(id),
         onClose:()=>{state.hidden = true; window.fixture.render({});}};
       window.fixture = { state, disconnect() { socket.close(); }, reconnect: connect,
         failCurrent() { const calls = state.calls.filter(call => call.params.operation === 'create');
@@ -136,6 +136,7 @@ test('terminal panels use the page-owned host session and never replay input aft
   await page.goto(new URL('/index.html', app.url).href);
   await page.getByRole('tab', { name: 'Terminal' }).waitFor();
   await page.locator('.xterm-rows').getByText('READY').waitFor();
+  await page.waitForFunction(() => document.activeElement === document.querySelector('.yard-terminal-container:not([hidden]) .xterm-helper-textarea'));
   const screenshotDir = process.env.AGENTS_PANEL_SCREENSHOTS;
   if (screenshotDir) { await mkdir(screenshotDir, { recursive: true }); await page.screenshot({ path: join(screenshotDir, 'terminal.png') }); }
   assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 1);
@@ -184,6 +185,7 @@ test('terminal panels use the page-owned host session and never replay input aft
   await page.evaluate(() => (window as any).fixture.render({request:{id:'explicit-reconnect',kind:'terminal',reuse:true}}));
   await page.waitForFunction(() => (window as any).fixture.state.events.filter((message: any) => message.type === 'terminal-event' && message.event?.type === 'attached').length === 2);
   await page.locator('.xterm-rows').getByText('READY').waitFor();
+  await page.waitForFunction(() => document.activeElement === document.querySelector('.yard-terminal-container:not([hidden]) .xterm-helper-textarea'));
   assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 2);
   assert.equal(inputs(), 'abc');
   await page.evaluate(() => (window as any).fixture.render({request:{id:'show-reconnected',kind:'terminal',reuse:true}}));
@@ -249,6 +251,27 @@ test('terminal panels use the page-owned host session and never replay input aft
   await terminalTabContainers.last().getByRole('button', { name: 'Close terminal' }).click();
   await page.waitForFunction(() => document.querySelectorAll('.yard-panel-tab [role="tab"]').length === 2);
   await terminalTabContainers.first().getByRole('button', { name: 'Close terminal' }).click();
+  await terminalTabs.first().waitFor({ state: 'detached' });
+
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'focus-owner',kind:'terminal'}}));
+  await page.locator('.xterm-rows').getByText('READY').waitFor();
+  const attachedBeforeDelayedRestart = await page.evaluate(() => (window as any).fixture.state.events
+    .filter((message: any) => message.type === 'terminal-event' && message.event?.type === 'attached').length);
+  await page.evaluate(() => {
+    const fixture = (window as any).fixture;
+    fixture.failCurrent();
+    fixture.state.releaseClose = null;
+    fixture.state.delayClose = true;
+    fixture.render({request:{id:'focus-owner-restart',kind:'terminal',reuse:true}});
+  });
+  await page.waitForFunction(() => Boolean((window as any).fixture.state.releaseClose));
+  const filesToggle = page.getByRole('button', { name: /^(Hide files|Show files)$/ });
+  await filesToggle.focus();
+  await page.evaluate(() => { (window as any).fixture.state.delayClose = false; (window as any).fixture.state.releaseClose(); });
+  await page.waitForFunction(previous => (window as any).fixture.state.events
+    .filter((message: any) => message.type === 'terminal-event' && message.event?.type === 'attached').length === previous + 1, attachedBeforeDelayedRestart);
+  assert.equal(await filesToggle.evaluate(element => document.activeElement === element), true, 'A delayed restart must not steal focus');
+  await page.getByRole('button', { name: 'Close terminal' }).click();
   await terminalTabs.first().waitFor({ state: 'detached' });
 
   await page.evaluate(() => (window as any).fixture.existing('existing-session'));

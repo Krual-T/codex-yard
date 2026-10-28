@@ -246,7 +246,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
       const key = existing?.key ?? JSON.stringify(['terminal', scopeId, hostId, cwd, request.id]);
       if (!existing) setTerminals(previous => [...previous, { key, scopeId, hostId, cwd, threadId }]);
       select(key);
-      if (existing) setTerminalActivation({ key, scope: scopeKey });
+      if (request.reuse) setTerminalActivation({ key, scope: scopeKey });
     } else if (request.kind === 'diff') {
       const key = JSON.stringify(['diff', scopeId, hostId, cwd, request.id]);
       setDiffs(previous => previous.some(tab => tab.key === key) ? previous : [...previous, { key, scopeId, hostId, cwd, path: request.path, diff: request.diff }]);

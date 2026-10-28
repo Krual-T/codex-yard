@@ -33,6 +33,7 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
   const detachRef = useRef<() => void>(() => {});
   const activateRef = useRef<() => void>(() => {});
   const isActiveRef = useRef<() => boolean>(() => false);
+  const restartFocusOrigin = useRef<Element | null>(null);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const [attempt, setAttempt] = useState(0);
@@ -50,6 +51,10 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(element.current);
+    const focusOrigin = restartFocusOrigin.current;
+    restartFocusOrigin.current = null;
+    if (focusOrigin && visibleRef.current && !element.current.closest('[hidden], [inert]') &&
+      (document.activeElement === focusOrigin || document.activeElement === document.body && !focusOrigin.isConnected)) terminal.focus();
     let active = true, attached = false, ownsSession = true, stopped = false, restartable = false, restarting = false;
     isActiveRef.current = () => active && !stopped;
     detachRef.current = () => { ownsSession = false; stopped = true; attached = false; terminal.options.disableStdin = true; };
@@ -88,9 +93,14 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
       if (!stopped) { terminal.focus(); return; }
       if (!restartable || restarting) return;
       restarting = true;
+      const focusOrigin = document.activeElement;
       void closeRef.current().then(closed => {
         if (!closed || !active) return;
-        if (visibleRef.current) { restartable = false; setAttempt(value => value + 1); }
+        if (visibleRef.current) {
+          restartFocusOrigin.current = document.activeElement === focusOrigin ? focusOrigin : null;
+          restartable = false;
+          setAttempt(value => value + 1);
+        }
         else { restartable = true; setCanRestart(true); setStatus('The previous terminal is unavailable. Open a new terminal.'); }
       }).finally(() => { restarting = false; });
     };
