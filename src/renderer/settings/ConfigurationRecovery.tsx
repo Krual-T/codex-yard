@@ -20,7 +20,8 @@ export function ConfigurationRecovery({ client }: { client: WorkbenchClient }) {
     {state.draftRetry.map(editorId => <p key={editorId}>A newer edit is still in this page.{' '}
       <button type="button" disabled={busy !== null} onClick={() => run(editorId, () => operations.retryDraft(editorId))}>Retry saving browser edit</button></p>)}
     {state.localRetry.filter(id => !state.records.some(item => item.operationId === id)).map(id => <p key={id}>The original browser receipt is still in this page.{' '}
-      <button type="button" disabled={busy !== null} onClick={() => run(id, () => operations.retryLocal(id))}>Retry saving browser receipt</button></p>)}
+      <button type="button" disabled={busy !== null} onClick={() => run(id, () => operations.retryLocal(id))}>Retry saving browser receipt</button>{' '}
+      <button type="button" disabled={busy !== null} onClick={() => run(id, () => operations.dismissClosedLocal(id))}>Dismiss receipt for closed operation</button></p>)}
     {state.records.map(item => {
       const unresolved = item.phase === 'pending' || item.phase === 'unknown' || item.phase === 'blocked';
       const target = item.phase === 'blocked' ? item.blocker : item.operation;
@@ -44,10 +45,12 @@ export function ConfigurationRecovery({ client }: { client: WorkbenchClient }) {
           {unresolved && <button type="button" disabled={busy !== null || state.localRetry.includes(item.operationId)} onClick={() => run(item.operationId, () => operations.check(item.operationId))}>Check original operation</button>}
           {(target?.storageError || target?.interrupted || receipt) && unresolved && <button type="button" disabled={busy !== null || state.localRetry.includes(item.operationId)}
             onClick={() => run(item.operationId, () => operations.check(item.operationId, true))}>Retry saving host receipt</button>}
+          {item.phase === 'unknown' && item.hostMissing && item.notSentEvidence && <button type="button" disabled={busy !== null || state.localRetry.includes(item.operationId)}
+            onClick={() => run(item.operationId, () => operations.confirmNotSent(item.operationId))}>Confirm original save was not sent</button>}
           {state.localRetry.includes(item.operationId) && <button type="button" disabled={busy !== null}
             onClick={() => run(item.operationId, () => operations.retryLocal(item.operationId))}>Retry saving browser receipt</button>}
           {!unresolved && !item.operation?.storageError && !state.localRetry.includes(item.operationId) && <button type="button" disabled={busy !== null || state.draftPending > 0}
-            onClick={() => run(item.operationId, () => operations.finish(item.operationId, true))}>Discard saved copy</button>}
+            onClick={() => run(item.operationId, () => operations.finish(item.operationId))}>Close original operation</button>}
         </div>
       </div>;
     })}

@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import { ModelSettings, resolveConfiguredModel } from '../src/renderer/settings/model-settings.ts';
-import { fixtureConfigurationHost, fixtureOperations } from './renderer-settings-sections-config-fixture.ts';
+import { fixtureConfigurationHost, fixtureDraft, fixtureOperations, fixtureSource } from './renderer-settings-sections-config-fixture.ts';
 
 class FakeClient implements WorkbenchClient {
   operations = fixtureOperations(this);
   config: { model: string | null; model_reasoning_effort: string | null; profile: string | null } = { model: 'alpha', model_reasoning_effort: 'high', profile: null };
   calls: { method: string; params?: Record<string, unknown>; hostId?: string }[] = [];
   home = '/fixture/codex';
+  generation = 'generation-a'; sourceAvailable = true;
   version = 'version-one';
   layers: unknown = null;
   reject = false;
@@ -29,7 +30,8 @@ class FakeClient implements WorkbenchClient {
   }
   async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
     this.calls.push({ method, params, hostId });
-    if (method === 'config/read') return { config: { ...this.config }, layers: this.layers ?? [this.currentLayer()] } as T;
+    if (method === 'config/read') return { config: { ...this.config }, layers: this.layers ?? [this.currentLayer()],
+      ...(this.sourceAvailable ? { yardConfigSource: fixtureSource(hostId, this.home, this.generation) } : {}) } as T;
     if (method === 'model/list') return { data: params?.cursor ? [{ id: 'b-id', model: 'beta', displayName: 'Beta', isDefault: this.defaults.includes('beta'),
       defaultReasoningEffort: 'low', supportedReasoningEfforts: [{ reasoningEffort: 'low' }] }] :
       [{ id: 'a-id', model: 'alpha', displayName: 'Alpha', isDefault: this.defaults.includes('alpha'), supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }],
@@ -50,6 +52,22 @@ class FakeClient implements WorkbenchClient {
     throw new Error('unsupported');
   }
 }
+
+test('model source changes and absent sources preserve edits until explicit review', async () => {
+  for (const absent of [false, true]) {
+    const client = new FakeClient(); client.sourceAvailable = !absent;
+    const settings = new ModelSettings(client, 'local', client.operations);
+    await settings.load(); settings.setModel('beta');
+    client.sourceAvailable = true; client.generation = 'generation-b';
+    assert.equal(await settings.save(), false);
+    assert.equal(settings.getSnapshot().model, 'beta');
+    assert.equal(client.calls.some(call => call.method === 'configuration-write'), false);
+    await settings.load(true);
+    assert.equal(await settings.save(), true);
+    assert.deepEqual(client.calls.find(call => call.method === 'configuration-write')?.params?.source,
+      fixtureSource('local', client.home, 'generation-b'));
+  }
+});
 
 test('nullable configured model uses the unique default for effort without writing a model', async () => {
   const client = new FakeClient(); client.config.model = null; client.config.model_reasoning_effort = null;
@@ -81,7 +99,7 @@ test('model settings paginate and write the selected host default user file with
   const client = new FakeClient(), settings = new ModelSettings(client, 'ssh:fixture', client.operations);
   await settings.load();
   assert.deepEqual(settings.getSnapshot().models.map(item => item.model), ['alpha', 'beta']);
-  assert.deepEqual(client.calls.find(call => call.method === 'codex-home')?.params, { hostId: 'ssh:fixture' });
+  assert.equal(client.calls.some(call => call.method === 'codex-home'), false);
   assert.deepEqual(client.calls.find(call => call.method === 'config/read')?.params, { includeLayers: true });
   settings.setModel('beta');
   assert.equal(settings.getSnapshot().effort, 'high');
@@ -168,6 +186,7 @@ test('a newer model edit survives reload without changing an unknown original su
   const original = await client.operations.find('local', 'models');
   assert.deepEqual(original?.params.edits, [{ keyPath: 'model', value: 'beta', mergeStrategy: 'upsert' }]);
   const second = new ModelSettings(client, 'local', client.operations); await second.load();
+  await second.restoreDraft(await fixtureDraft(client.operations, first.editorId));
   assert.equal(second.getSnapshot().model, 'beta');
   assert.equal(second.getSnapshot().effort, 'low');
   assert.equal(await second.save(), false);
@@ -183,13 +202,14 @@ test('a late original model result cannot replace edits in a newer controller', 
   await first.load(); first.setModel('beta');
   const saving = first.save(); await waiting; first.dispose();
   const second = new ModelSettings(client, 'local', client.operations); await second.load();
+  await second.restoreDraft(await fixtureDraft(client.operations, first.editorId));
   second.setEffort('low'); await second.retryDraftPersistence();
   release(); assert.equal(await saving, false);
   assert.equal(second.getSnapshot().model, 'beta'); assert.equal(second.getSnapshot().effort, 'low');
   const record = await client.operations.find('local', 'models');
   assert.equal(record?.phase, 'finished');
   assert.deepEqual(record?.params.edits, [{ keyPath: 'model', value: 'beta', mergeStrategy: 'upsert' }]);
-  assert.ok(record?.workingDrafts?.length);
+  assert.ok(await fixtureDraft(client.operations, second.editorId));
   assert.equal(client.calls.filter(call => call.method === 'config/batchWrite').length, 1);
 });
 

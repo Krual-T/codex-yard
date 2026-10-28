@@ -1,7 +1,9 @@
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { isConfigTarget, userConfigTarget } from './config-target.ts';
 import type { ConfigTarget, ConfigTargetResult } from './config-target.ts';
-import { createSettingsWriteId, latestSettingsDraft, SettingsConfigOperations, settingsConfigOperations } from './config-operations.ts';
+import { createSettingsWriteId, SettingsConfigOperations, settingsConfigOperations } from './config-operations.ts';
+import { configReadSource, sameConfigSource } from './config-source.ts';
+import type { ConfigReadSource } from '../../../lib/config-write-protocol.ts';
 
 export interface ModelOption {
   id: string;
@@ -12,7 +14,7 @@ export interface ModelOption {
   supportedReasoningEfforts: { reasoningEffort: string; description?: string }[];
 }
 interface Config { model?: string | null; model_reasoning_effort?: string | null; profile?: string | null }
-interface ConfigRead { config: Config; layers?: unknown }
+interface ConfigRead { config: Config; layers?: unknown; yardConfigSource?: unknown }
 export type ModelField = 'model' | 'effort';
 export interface ModelSettingsSnapshot {
   loading: boolean; saving: boolean; error: string | null; warning: string | null; writeError: string | null;
@@ -36,14 +38,15 @@ export class ModelSettings {
   private readonly client: WorkbenchClient;
   private readonly hostId: string;
   private readonly operations: SettingsConfigOperations;
-  private restored = false;
-  private readonly editorId = createSettingsWriteId();
+  readonly editorId = createSettingsWriteId();
   private draftWrites: Promise<void> = Promise.resolve();
   private draftWriteCount = 0;
   private listeners = new Set<() => void>();
   private generation = 0;
   private target: ConfigTarget | null = null;
   private draftTarget: ConfigTarget | null = null;
+  private source: ConfigReadSource | null = null;
+  private draftSource: ConfigReadSource | null = null;
   private snapshot: ModelSettingsSnapshot = { loading: true, saving: false, error: null, warning: null, writeError: null, models: [],
     profile: null, model: null, effort: null, savedModel: null, savedEffort: null, conflicts: [], draftStorageError: null, draftSaving: false };
   constructor(client: WorkbenchClient, hostId: string, operations = settingsConfigOperations(client)) {
@@ -57,15 +60,30 @@ export class ModelSettings {
   }
   retryDraftPersistence() {
     const { model, effort, savedModel, savedEffort, profile } = this.snapshot;
-    const draft = { model, effort, savedModel, savedEffort, profile, target: this.draftTarget ?? this.target };
+    const draft = { model, effort, savedModel, savedEffort, profile, target: this.draftTarget ?? this.target, source: this.draftSource };
     this.draftWriteCount++; this.update({ draftSaving: true });
-    this.draftWrites = this.draftWrites.then(() => this.operations.saveDraft(this.hostId, 'models', undefined, this.editorId, draft))
+    const dirty = this.dirty;
+    this.draftWrites = this.draftWrites.then(() => dirty ? this.operations.saveDraft(this.hostId, 'models', undefined, this.editorId, draft)
+      : this.operations.clearEditorDraft(this.hostId, 'models', undefined, this.editorId))
       .then(() => this.update({ draftStorageError: null }), error => this.update({ draftStorageError: message(error) }))
       .finally(() => { if (--this.draftWriteCount === 0) this.update({ draftSaving: false }); });
     return this.draftWrites;
   }
   get dirty() { return !same(this.snapshot.model, this.snapshot.savedModel) || !same(this.snapshot.effort, this.snapshot.savedEffort); }
   dispose() { this.generation++; }
+  async restoreDraft(draft: unknown): Promise<void> {
+    if (this.dirty || this.snapshot.loading || this.snapshot.saving) throw new Error('Finish the current edit before restoring another copy.');
+    if (!draft || typeof draft !== 'object' || Array.isArray(draft)) throw new Error('The saved model edit cannot be read.');
+    const saved = draft as Record<string, unknown>;
+    const nullable = (value: unknown) => value === null || typeof value === 'string';
+    if (!nullable(saved.model) || !nullable(saved.effort) || !nullable(saved.savedModel) || !nullable(saved.savedEffort)
+      || !nullable(saved.profile) || !isConfigTarget(saved.target)) throw new Error('The saved model edit has no verifiable baseline.');
+    this.draftTarget = saved.target;
+    this.draftSource = configReadSource(saved.source, this.hostId);
+    this.update({ model: saved.model as string | null, effort: saved.effort as string | null,
+      savedModel: saved.savedModel as string | null, savedEffort: saved.savedEffort as string | null, profile: saved.profile as string | null });
+    await this.retryDraftPersistence(); await this.load();
+  }
   private async readConfig(): Promise<ConfigRead> {
     const result = await this.client.rpc<ConfigRead>('config/read', { includeLayers: true }, this.hostId);
     if (!result?.config || typeof result.config !== 'object' || ['model', 'model_reasoning_effort', 'profile'].some(key => {
@@ -75,12 +93,9 @@ export class ModelSettings {
     return result;
   }
   private async targetFor(read: ConfigRead): Promise<ConfigTargetResult> {
-    try {
-      const home = await this.client.host<{ codexHome?: unknown }>('codex-home', { hostId: this.hostId });
-      return userConfigTarget(read.layers, home?.codexHome);
-    } catch {
-      return { target: null, error: 'Cannot save: the selected host did not provide its configuration home and version.' };
-    }
+    const source = configReadSource(read.yardConfigSource, this.hostId);
+    return source ? userConfigTarget(read.layers, source.codexHome)
+      : { target: null, error: 'Cannot save without the original configuration connection. Reload and review your edit.' };
   }
   private async readModels(): Promise<ModelOption[]> {
     const models: ModelOption[] = [], cursors = new Set<string>();
@@ -96,30 +111,18 @@ export class ModelSettings {
       cursor = nextCursor; cursors.add(nextCursor);
     }
   }
-  async load(): Promise<void> {
+  async load(reviewSource = false): Promise<void> {
     if (this.snapshot.saving) return;
     const generation = ++this.generation;
     this.update({ loading: true, error: null });
     try {
-      if (!this.restored) {
-        const previous = await this.operations.find(this.hostId, 'models');
-        if (generation !== this.generation) return;
-        const draft = previous && latestSettingsDraft(previous);
-        if (draft && typeof draft === 'object' && !Array.isArray(draft)) {
-          const saved = draft as Record<string, unknown>;
-          const nullable = (value: unknown) => value === null || typeof value === 'string';
-          if (nullable(saved.model) && nullable(saved.effort) && nullable(saved.savedModel) && nullable(saved.savedEffort) && nullable(saved.profile)) {
-            if (!isConfigTarget(saved.target)) throw new Error('The saved model edit has no verifiable configuration target.');
-            this.snapshot = { ...this.snapshot, model: saved.model as string | null, effort: saved.effort as string | null,
-              savedModel: saved.savedModel as string | null, savedEffort: saved.savedEffort as string | null, profile: saved.profile as string | null };
-            this.draftTarget = saved.target;
-          } else throw new Error('The saved model edit cannot be read.');
-        } else if (previous) throw new Error('The saved model edit cannot be read.');
-        this.restored = true;
-      }
       const [read, models] = await Promise.all([this.readConfig(), this.readModels()]);
       const target = await this.targetFor(read);
       if (generation !== this.generation) return;
+      const source = configReadSource(read.yardConfigSource, this.hostId);
+      if (this.dirty && !sameConfigSource(this.draftSource, source) && (!reviewSource || !source)) {
+        this.update({ loading: false, writeError: 'The configuration connection changed or is unavailable. Reload and review your edit.' }); return;
+      }
       const { config } = read;
       if (this.dirty && asValue(config.profile) !== this.snapshot.profile) {
         this.update({ loading: false, error: 'The active profile changed. Discard your edits and reload before continuing.' });
@@ -137,18 +140,21 @@ export class ModelSettings {
       if (modelDirty && (currentModel !== previous.savedModel || previous.conflicts.includes('model'))) conflicts.push('model');
       if (effortDirty && (currentEffort !== previous.savedEffort || previous.conflicts.includes('effort'))) conflicts.push('effort');
       this.target = target.target;
+      this.source = source;
+      if (this.dirty && reviewSource) { this.draftSource = source; this.draftTarget = target.target; }
       if (modelDirty || effortDirty) this.draftTarget ??= target.target;
       else this.draftTarget = null;
       this.update({ loading: false, models, profile: asValue(config.profile), savedModel: currentModel, savedEffort: currentEffort,
         writeError: target.error, model, effort, conflicts,
         error: conflicts.length ? 'Some settings changed elsewhere. Review each conflict before saving.' : null });
+      if (this.dirty) void this.retryDraftPersistence();
     } catch (error) { if (generation === this.generation) this.update({ loading: false, error: message(error) }); }
   }
   setModel(model: string) {
     if (this.snapshot.loading || this.snapshot.saving) return;
     const selected = this.snapshot.models.find(item => item.model === model);
     if (!selected) return;
-    if (!this.dirty && model !== this.snapshot.savedModel) this.draftTarget = this.target;
+    if (!this.dirty && model !== this.snapshot.savedModel) { this.draftTarget = this.target; this.draftSource = this.source; }
     const conflicts = model === this.snapshot.savedModel ? this.snapshot.conflicts.filter(field => field !== 'model') : this.snapshot.conflicts;
     if (model === this.snapshot.savedModel && this.snapshot.effort === this.snapshot.savedEffort) this.draftTarget = null;
     this.update({ model, conflicts, error: conflicts.length ? this.snapshot.error : null, warning: null });
@@ -163,7 +169,7 @@ export class ModelSettings {
     if (!selected.supportedReasoningEfforts.some(item => item.reasoningEffort === effort)) {
       this.update({ error: 'The selected model does not support this reasoning effort. Review your selection before saving.' }); return;
     }
-    if (!this.dirty && effort !== this.snapshot.savedEffort) this.draftTarget = this.target;
+    if (!this.dirty && effort !== this.snapshot.savedEffort) { this.draftTarget = this.target; this.draftSource = this.source; }
     const conflicts = effort === this.snapshot.savedEffort ? this.snapshot.conflicts.filter(field => field !== 'effort') : this.snapshot.conflicts;
     if (this.snapshot.model === this.snapshot.savedModel && effort === this.snapshot.savedEffort) this.draftTarget = null;
     this.update({ effort, conflicts, error: conflicts.length ? this.snapshot.error : null, warning: null });
@@ -184,6 +190,8 @@ export class ModelSettings {
     if (this.snapshot.conflicts.length) { this.update({ error: 'Review each conflicting setting before saving.' }); return false; }
     const { model, effort, savedModel, savedEffort, profile } = this.snapshot;
     const target = this.target;
+    const source = this.draftSource;
+    if (!source) { this.update({ error: 'The original configuration connection is unavailable. Reload and review your edit.' }); return false; }
     if (!target) {
       this.update({ error: this.snapshot.writeError || 'Cannot save without a verified configuration version. Your edit is preserved.' }); return false;
     }
@@ -201,6 +209,9 @@ export class ModelSettings {
       if (this.snapshot.draftStorageError) throw new Error('The newer edit could not be saved in the browser.');
       if (generation !== this.generation) return false;
       const before = await this.readConfig();
+      if (!sameConfigSource(source, configReadSource(before.yardConfigSource, this.hostId))) {
+        this.update({ saving: false, writeError: 'The configuration connection changed. Reload and review your edit.' }); return false;
+      }
       const currentTarget = await this.targetFor(before);
       if (generation !== this.generation) return false;
       const currentModel = asValue(before.config.model), currentEffort = asValue(before.config.model_reasoning_effort), currentProfile = asValue(before.config.profile);
@@ -220,11 +231,12 @@ export class ModelSettings {
       if (effort !== savedEffort && effort !== null) edits.push({ keyPath: 'model_reasoning_effort', value: effort, mergeStrategy: 'upsert' });
       const submitted = await this.operations.submit(this.hostId, 'config/batchWrite', {
         edits, filePath: target.filePath, expectedVersion: target.version, reloadUserConfig: true,
-      }, { section: 'models', draft: { model, effort, savedModel, savedEffort, profile, target } }, () => generation === this.generation);
+      }, { section: 'models', editorId: this.editorId, source, draft: { model, effort, savedModel, savedEffort, profile, target, source } }, () => generation === this.generation);
       if (generation !== this.generation) return false;
       const result = submitted.result as { status: 'ok' | 'okOverridden'; version?: string; overriddenMetadata?: { message?: string } | null };
       if (result?.status !== 'ok' && result?.status !== 'okOverridden') throw new Error('The host did not confirm the write');
       const after = await this.readConfig();
+      if (!sameConfigSource(source, configReadSource(after.yardConfigSource, this.hostId))) throw new Error('The configuration connection changed after the save. Check the original operation.');
       const afterTarget = await this.targetFor(after);
       if (generation !== this.generation) return false;
       const actualModel = asValue(after.config.model), actualEffort = asValue(after.config.model_reasoning_effort);
@@ -234,7 +246,7 @@ export class ModelSettings {
       const conflicts: ModelField[] = [];
       if (!matches && model !== savedModel && model !== actualModel) conflicts.push('model');
       if (!matches && effort !== savedEffort && effort !== actualEffort) conflicts.push('effort');
-      if (matches) await this.operations.finish(submitted.operationId);
+      if (matches) await this.operations.finish(submitted.operationId, { consumeSubmittedDraft: true });
       if (generation !== this.generation) return false;
       if (matches) this.draftTarget = null;
       this.update({ saving: false, savedModel: actualModel, savedEffort: actualEffort, writeError: afterTarget.error,

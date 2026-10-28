@@ -1,11 +1,13 @@
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { isConfigTarget, userConfigTarget } from './config-target.ts';
 import type { ConfigTarget, ConfigTargetResult } from './config-target.ts';
-import { createSettingsWriteId, latestSettingsDraft, SettingsConfigOperations, settingsConfigOperations } from './config-operations.ts';
+import { createSettingsWriteId, SettingsConfigOperations, settingsConfigOperations } from './config-operations.ts';
+import { configReadSource, sameConfigSource } from './config-source.ts';
+import type { ConfigReadSource } from '../../../lib/config-write-protocol.ts';
 
 export interface RemoteWorktreePreferences { root: string; autoCleanup: boolean; keepCount: number }
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
-interface WorktreeConfigRead { config?: { desktop?: unknown; profile?: unknown }; layers?: unknown }
+interface WorktreeConfigRead { config?: { desktop?: unknown; profile?: unknown }; layers?: unknown; yardConfigSource?: unknown }
 interface WorktreeDraft { root: string; autoCleanup: boolean; keepCount: string }
 type WorktreeField = keyof WorktreeDraft;
 export interface RemoteWorktreeSnapshot {
@@ -39,14 +41,15 @@ export class RemoteWorktreeSettings {
   private readonly client: WorkbenchClient;
   private readonly hostId: string;
   private readonly operations: SettingsConfigOperations;
-  private restored = false;
-  private readonly editorId = createSettingsWriteId();
+  readonly editorId = createSettingsWriteId();
   private draftWrites: Promise<void> = Promise.resolve();
   private draftWriteCount = 0;
   private listeners = new Set<() => void>();
   private generation = 0;
   private target: ConfigTarget | null = null;
   private draftTarget: ConfigTarget | null = null;
+  private source: ConfigReadSource | null = null;
+  private draftSource: ConfigReadSource | null = null;
   private snapshot: RemoteWorktreeSnapshot = { loading: true, saving: false, error: null, writeError: null, warning: null,
     saved: null, draft: null, profile: null, draftStorageError: null, draftSaving: false, conflicts: [] };
   constructor(client: WorkbenchClient, hostId: string, operations = settingsConfigOperations(client)) {
@@ -60,49 +63,49 @@ export class RemoteWorktreeSettings {
   }
   retryDraftPersistence() {
     const { draft, saved, profile } = this.snapshot;
-    const copy = structuredClone({ draft, saved, profile, target: this.draftTarget ?? this.target });
+    const copy = structuredClone({ draft, saved, profile, target: this.draftTarget ?? this.target, source: this.draftSource });
     this.draftWriteCount++; this.update({ draftSaving: true });
-    this.draftWrites = this.draftWrites.then(() => this.operations.saveDraft(this.hostId, 'worktrees', undefined, this.editorId, copy))
+    const dirty = this.dirty;
+    this.draftWrites = this.draftWrites.then(() => dirty ? this.operations.saveDraft(this.hostId, 'worktrees', undefined, this.editorId, copy)
+      : this.operations.clearEditorDraft(this.hostId, 'worktrees', undefined, this.editorId))
       .then(() => this.update({ draftStorageError: null }), error => this.update({ draftStorageError: message(error) }))
       .finally(() => { if (--this.draftWriteCount === 0) this.update({ draftSaving: false }); });
     return this.draftWrites;
   }
   get dirty() { return Boolean(this.snapshot.saved && this.snapshot.draft && !same(draftFor(this.snapshot.saved), this.snapshot.draft)); }
   dispose() { this.generation++; }
-  private async read(): Promise<{ value: RemoteWorktreePreferences; profile: string | null; target: ConfigTargetResult }> {
+  async restoreDraft(source: unknown): Promise<void> {
+    if (this.dirty || this.snapshot.loading || this.snapshot.saving) throw new Error('Finish the current edit before restoring another copy.');
+    if (!record(source) || !record(source.draft) || !record(source.saved)
+      || typeof source.draft.root !== 'string' || typeof source.draft.autoCleanup !== 'boolean' || typeof source.draft.keepCount !== 'string'
+      || typeof source.saved.root !== 'string' || typeof source.saved.autoCleanup !== 'boolean' || typeof source.saved.keepCount !== 'number'
+      || !(source.profile === null || typeof source.profile === 'string') || !isConfigTarget(source.target)) {
+      throw new Error('The saved worktree edit has no verifiable baseline.');
+    }
+    this.draftTarget = source.target; this.draftSource = configReadSource(source.source, this.hostId);
+    this.update({ draft: source.draft as unknown as WorktreeDraft, saved: source.saved as unknown as RemoteWorktreePreferences, profile: source.profile });
+    await this.retryDraftPersistence(); await this.load();
+  }
+  private async read(): Promise<{ value: RemoteWorktreePreferences; profile: string | null; target: ConfigTargetResult; source: ConfigReadSource | null }> {
     const result = await this.client.rpc<WorktreeConfigRead>('config/read', { includeLayers: true }, this.hostId);
     const value = readDesktop(result);
     const rawProfile = result.config?.profile;
     if (rawProfile !== undefined && rawProfile !== null && typeof rawProfile !== 'string') throw new Error('The active configuration profile is invalid.');
     const profile = rawProfile || null;
-    try {
-      const home = await this.client.host<{ codexHome?: unknown }>('codex-home', { hostId: this.hostId });
-      return { value, profile, target: userConfigTarget(result.layers, home?.codexHome) };
-    } catch {
-      return { value, profile, target: { target: null, error: 'Cannot save: the selected host did not provide its configuration home and version.' } };
-    }
+    const source = configReadSource(result.yardConfigSource, this.hostId);
+    return { value, profile, source, target: source ? userConfigTarget(result.layers, source.codexHome)
+      : { target: null, error: 'Cannot save without the original configuration connection. Reload and review your edit.' } };
   }
-  async load() {
+  async load(reviewSource = false) {
     if (this.snapshot.saving) return;
     const generation = ++this.generation;
     this.update({ loading: true, error: null });
     try {
-      if (!this.restored) {
-        const previous = await this.operations.find(this.hostId, 'worktrees'), source = previous && latestSettingsDraft(previous);
-        if (generation !== this.generation) return;
-        if (record(source) && record(source.draft) && record(source.saved)
-          && typeof source.draft.root === 'string' && typeof source.draft.autoCleanup === 'boolean' && typeof source.draft.keepCount === 'string'
-          && typeof source.saved.root === 'string' && typeof source.saved.autoCleanup === 'boolean' && typeof source.saved.keepCount === 'number'
-          && (source.profile === null || typeof source.profile === 'string')) {
-          if (!isConfigTarget(source.target)) throw new Error('The saved worktree edit has no verifiable configuration target.');
-          this.snapshot = { ...this.snapshot, draft: source.draft as unknown as WorktreeDraft,
-            saved: source.saved as unknown as RemoteWorktreePreferences, profile: source.profile };
-          this.draftTarget = source.target;
-        } else if (previous) throw new Error('The saved worktree edit cannot be read.');
-        this.restored = true;
-      }
       const read = await this.read();
       if (generation !== this.generation) return;
+      if (this.dirty && !sameConfigSource(this.draftSource, read.source) && (!reviewSource || !read.source)) {
+        this.update({ loading: false, writeError: 'The configuration connection changed or is unavailable. Reload and review your edit.' }); return;
+      }
       if (this.dirty && read.profile !== this.snapshot.profile) {
         this.update({ loading: false, error: 'The active profile changed. Discard your edits and reload before continuing.' }); return;
       }
@@ -120,15 +123,18 @@ export class RemoteWorktreeSettings {
         if (current[field] !== baseline || this.snapshot.conflicts.includes(field)) conflicts.push(field);
       }
       this.target = read.target.target;
+      this.source = read.source;
+      if (this.dirty && reviewSource) { this.draftSource = read.source; this.draftTarget = read.target.target; }
       if (same(draft, current)) this.draftTarget = null; else this.draftTarget ??= read.target.target;
       this.update({ loading: false, saved: read.value, draft, conflicts,
         error: conflicts.length ? 'Some settings changed elsewhere. Review each conflict before saving.' : null,
         profile: read.profile, writeError: read.target.error });
+      if (this.dirty) void this.retryDraftPersistence();
     } catch (error) { if (generation === this.generation) this.update({ loading: false, error: message(error) }); }
   }
   edit(patch: Partial<WorktreeDraft>) {
     if (this.snapshot.draft && !this.snapshot.saving && !this.snapshot.loading) {
-      if (!this.dirty) this.draftTarget = this.target;
+      if (!this.dirty) { this.draftTarget = this.target; this.draftSource = this.source; }
       const draft = { ...this.snapshot.draft, ...patch };
       const saved = this.snapshot.saved && draftFor(this.snapshot.saved);
       const conflicts = this.snapshot.conflicts.filter(field => !saved || draft[field] !== saved[field]);
@@ -151,6 +157,8 @@ export class RemoteWorktreeSettings {
     const { draft, saved, profile } = this.snapshot, target = this.target;
     if (!draft || !saved || !this.dirty || this.snapshot.saving || this.snapshot.loading) return false;
     if (this.snapshot.conflicts.length) { this.update({ error: 'Review each conflicting setting before saving.' }); return false; }
+    const source = this.draftSource;
+    if (!source) { this.update({ error: 'The original configuration connection is unavailable. Reload and review your edit.' }); return false; }
     if (!target) { this.update({ error: this.snapshot.writeError || 'Cannot save without a verified configuration version.' }); return false; }
     const root = draft.root.trim(), count = Number(draft.keepCount);
     const isWindows = /^[a-z]:[\\/]|^\\\\/i.test(target.file);
@@ -166,6 +174,9 @@ export class RemoteWorktreeSettings {
       if (this.snapshot.draftStorageError) throw new Error('The newer edit could not be saved in the browser.');
       if (generation !== this.generation) return false;
       const before = await this.read(), currentTarget = before.target.target;
+      if (!sameConfigSource(source, before.source)) {
+        this.update({ saving: false, writeError: 'The configuration connection changed. Reload and review your edit.' }); return false;
+      }
       if (generation !== this.generation) return false;
       if (before.profile !== profile || !same(before.value, saved) || !currentTarget || currentTarget.file !== target.file ||
         currentTarget.profile !== target.profile || currentTarget.version !== target.version) {
@@ -178,14 +189,15 @@ export class RemoteWorktreeSettings {
       if (!edits.length) { this.update({ saving: false, draft: draftFor(saved) }); return true; }
       const submitted = await this.operations.submit(this.hostId, 'config/batchWrite', {
         edits, filePath: target.filePath, expectedVersion: target.version, reloadUserConfig: true,
-      }, { section: 'worktrees', draft: { draft, saved, profile, target } }, () => generation === this.generation);
+      }, { section: 'worktrees', editorId: this.editorId, source, draft: { draft, saved, profile, target, source } }, () => generation === this.generation);
       if (generation !== this.generation) return false;
       const result = submitted.result as { status: 'ok' | 'okOverridden'; version?: string; overriddenMetadata?: { message?: string } | null };
       if (result?.status !== 'ok' && result?.status !== 'okOverridden') throw new Error('The host did not confirm the write');
       const after = await this.read();
+      if (!sameConfigSource(source, after.source)) throw new Error('The configuration connection changed after the save. Check the original operation.');
       if (generation !== this.generation) return false;
       const matches = same(after.value, intended) && after.profile === profile && after.target.target?.file === target.file;
-      if (matches) await this.operations.finish(submitted.operationId);
+      if (matches) await this.operations.finish(submitted.operationId, { consumeSubmittedDraft: true });
       if (generation !== this.generation) return false;
       this.target = after.target.target;
       if (matches) this.draftTarget = null;

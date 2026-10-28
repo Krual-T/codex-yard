@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 import { SettingsConfigOperations, SettingsWriteError } from '../src/renderer/settings/config-operations.ts';
 import type { SettingsWriteRecord, SettingsWriteStorage, WriteReceipt, WriteStatus, WriteTerminal } from '../src/renderer/settings/config-operations.ts';
+import { fixtureSource } from './renderer-settings-sections-config-fixture.ts';
 
 class Storage implements SettingsWriteStorage {
   value: unknown;
@@ -16,9 +17,9 @@ class Storage implements SettingsWriteStorage {
     return structuredClone(this.value);
   }
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
-  get list() { return (this.value ?? []) as SettingsWriteRecord[]; }
+  get list() { return (Array.isArray(this.value) ? this.value : (this.value as { operations?: SettingsWriteRecord[] } | undefined)?.operations ?? []) as SettingsWriteRecord[]; }
 }
-const origin = { section: 'models' as const, draft: { model: 'beta' } };
+const origin = { section: 'models' as const, source: fixtureSource(), draft: { model: 'beta' } };
 const params = { edits: [{ keyPath: 'model', value: 'beta' }] };
 type Handler = (input: Record<string, unknown>) => Promise<unknown>;
 function fixture(handler: Handler) {
@@ -52,7 +53,7 @@ test('interrupted preparation stays fenced until the original host persists not-
     return { operation: { ...base, state: 'failed', terminal: { kind: 'not-sent' } } };
   });
   const ops = f.make();
-  await assert.rejects(ops.submit('removed-host', 'config/batchWrite', params, origin), /unknown result/);
+  await assert.rejects(ops.submit('removed-host', 'config/batchWrite', params, { ...origin, source: fixtureSource('removed-host') }), /unknown result/);
   assert.equal(f.store.list[0]?.operation?.state, 'preparing');
   await ops.check('operation-1');
   assert.equal(f.store.list[0]?.operation?.interrupted, true);
@@ -76,7 +77,7 @@ test('signed original receipt survives reload and a removed host, and only retri
     assert.deepEqual(input.receipt, signed);
     return { operation: succeeded(signed!) };
   });
-  await assert.rejects(f.make().submit('ssh-removed', 'config/batchWrite', params, origin), /host.*receipt/i);
+  await assert.rejects(f.make().submit('ssh-removed', 'config/batchWrite', params, { ...origin, source: fixtureSource('ssh-removed') }), /host.*receipt/i);
   assert.deepEqual(f.store.list[0]?.recoveryReceipt, signed);
   assert.deepEqual(f.store.list[0]?.result, { status: 'okOverridden' });
   const resumed = f.make(); await resumed.check('operation-1');
@@ -102,7 +103,7 @@ test('browser receipt failure cannot be replaced by later status before explicit
   });
   const ops = f.make();
   await assert.rejects(ops.submit('ssh-removed', 'skills/config/write', { path: '/fixture', enabled: false },
-    { section: 'skills-settings', scope: ['/fixture'], draft: [{ enabled: false }] }), /browser.*receipt/i);
+    { section: 'skills-settings', source: fixtureSource('ssh-removed'), scope: ['/fixture'], draft: [{ enabled: false }] }), /browser.*receipt/i);
   assert.deepEqual(ops.getSnapshot().localRetry, ['operation-1']);
   await assert.rejects(ops.check('operation-1'), /browser receipt/);
   await assert.rejects(ops.check('operation-1', true), /browser receipt/);
@@ -248,7 +249,7 @@ test('late status cannot overwrite a new submission from another page', async ()
   await assert.rejects(first.submit('local', 'config/batchWrite', params, origin), /lost reply/);
   const late = first.check('operation-1'); await waiting;
   await second.check('operation-1');
-  await assert.rejects(second.submit('local', 'config/batchWrite', { edits: ['new'] }, { section: 'models', draft: { model: 'new' } }), /lost reply/);
+  await assert.rejects(second.submit('local', 'config/batchWrite', { edits: ['new'] }, { section: 'models', source: fixtureSource(), draft: { model: 'new' } }), /lost reply/);
   release(); await late;
   assert.equal(f.store.list[0]?.phase, 'finished');
   assert.equal(f.store.list[1]?.operationId, 'operation-2');
@@ -268,8 +269,8 @@ test('late status cannot recreate a closed original after another page starts a 
   const first = f.make(), second = f.make();
   await assert.rejects(first.submit('local', 'config/batchWrite', params, origin), /lost reply/);
   const late = first.check('operation-1'); await waiting;
-  await second.check('operation-1'); await second.finish('operation-1', true);
-  await assert.rejects(second.submit('local', 'config/batchWrite', { edits: ['new'] }, { section: 'models', draft: { model: 'new' } }), /lost reply/);
+  await second.check('operation-1'); await second.finish('operation-1');
+  await assert.rejects(second.submit('local', 'config/batchWrite', { edits: ['new'] }, { section: 'models', source: fixtureSource(), draft: { model: 'new' } }), /lost reply/);
   release(); await assert.rejects(late, /already closed/);
   assert.equal(f.store.list.length, 1);
   assert.equal(f.store.list[0]?.operationId, 'operation-2');

@@ -3,6 +3,7 @@ import type { WorkbenchClient } from '../workbench-contract.ts';
 import { Row } from './PreferenceControls.tsx';
 import { AgentSettings } from './agent-settings.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
+import { SettingsDraftRecovery } from './SettingsDraftRecovery.tsx';
 
 type Feature = { name: string; stage: string; displayName: string | null; description: string | null; enabled: boolean };
 const hiddenFeatures = new Set(['memories', 'multi_agent', 'plugins', 'plugin', 'remote_control', 'chronicle', 'workspace_dependencies', 'default_mode_request_user_input']);
@@ -53,9 +54,11 @@ export function AgentSection({ client, hostId, onDirtyChange, onSavingChange }: 
   const sandboxLabels: Record<string, string> = { 'read-only': t('Read only'), 'workspace-write': t('Workspace write'), 'danger-full-access': t('Full access') };
   return <>
     <div className="yard-section-heading"><h2>{t('Agent')}</h2><button type="button" disabled={dirty || state.loading || state.saving} onClick={() => { void agent.load(); }}>{t('Refresh')}</button></div>
+    <SettingsDraftRecovery client={client} hostId={hostId} section="agent" editorId={agent.editorId}
+      disabled={dirty || state.loading || state.saving || state.draftSaving} onRestore={draft => agent.restoreDraft(draft)} />
     <p className="yard-muted">{t('Defaults for')} {hostId === 'local' ? t('the local host') : hostId}{state.profile ? `, ${t('profile')} ${state.profile}` : ''}. {t('Project and managed configuration may override these values.')}</p>
     {state.error && <p className="yard-setting-error" role="alert">{translateKnown(t, state.error)} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void agent.load(); }}>{t('Reload')}</button></p>}
-    {state.writeError && <p className="yard-setting-error" role="alert">{state.writeError}</p>}
+    {state.writeError && <p className="yard-setting-error" role="alert">{state.writeError} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void agent.load(true); }}>Reload and review</button></p>}
     {state.draftStorageError && <p className="yard-setting-error" role="alert">Could not save the newer edit in this browser: {state.draftStorageError}{' '}
       <button type="button" onClick={() => { void agent.retryDraftPersistence(); }}>Retry saving edit</button></p>}
     {state.warning && <p role="status">{state.warning}</p>}

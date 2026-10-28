@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 import { SettingsConfigOperations, SettingsWriteError } from '../src/renderer/settings/config-operations.ts';
 import type { SettingsWriteRecord, SettingsWriteStorage, WriteStatus } from '../src/renderer/settings/config-operations.ts';
+import { fixtureSource } from './renderer-settings-sections-config-fixture.ts';
 
 class Storage implements SettingsWriteStorage {
   value: unknown;
@@ -16,7 +17,8 @@ class Storage implements SettingsWriteStorage {
     return structuredClone(this.value);
   }
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
-  get list() { return (this.value ?? []) as SettingsWriteRecord[]; }
+  get list() { return (Array.isArray(this.value) ? this.value : (this.value as { operations?: SettingsWriteRecord[] } | undefined)?.operations ?? []) as SettingsWriteRecord[]; }
+  get drafts() { return (this.value as { drafts?: { editorId: string; draft: unknown }[] } | undefined)?.drafts ?? []; }
 }
 function fixture() {
   const store = new Storage(), calls: Record<string, unknown>[] = [], operations = new Map<string, WriteStatus>();
@@ -54,7 +56,7 @@ function fixture() {
   const make = () => new SettingsConfigOperations(client, store, () => `fixture-${++sequence}`);
   return { store, calls, operations, make, behavior(value: typeof behavior) { behavior = value; } };
 }
-const origin = { section: 'models' as const, draft: { model: 'beta' } };
+const origin = { section: 'models' as const, source: fixtureSource(), draft: { model: 'beta' } };
 const params = { edits: [{ keyPath: 'model', value: 'beta' }] };
 
 test('lost reply survives reload and only checks the original ID', async () => {
@@ -75,7 +77,7 @@ test('lost reply survives reload and only checks the original ID', async () => {
 
 test('the submitted parameters and origin are immutable and preserve the original result', async () => {
   const f = fixture(), ops = f.make(), draft = { model: 'beta' }, submitted = { edits: [{ keyPath: 'model', value: 'beta' }] };
-  const saving = ops.submit('local', 'config/batchWrite', submitted, { section: 'models', draft });
+  const saving = ops.submit('local', 'config/batchWrite', submitted, { section: 'models', source: fixtureSource(), draft });
   submitted.edits[0]!.value = 'newer'; draft.model = 'newer';
   const result = await saving;
   assert.deepEqual(f.store.list[0]?.params, params);
@@ -86,7 +88,7 @@ test('the submitted parameters and origin are immutable and preserve the origina
 
 test('host receipt persistence retry does not resend and retains the observed result', async () => {
   const f = fixture(), ops = f.make(); f.behavior('storage-error');
-  await assert.rejects(ops.submit('local', 'skills/config/write', { path: '/fixture', enabled: false }, { section: 'skills-settings', scope: ['/project'], draft: [] }), /host.*receipt/i);
+  await assert.rejects(ops.submit('local', 'skills/config/write', { path: '/fixture', enabled: false }, { section: 'skills-settings', source: fixtureSource(), scope: ['/project'], draft: [] }), /host.*receipt/i);
   assert.equal(f.store.list[0]?.phase, 'unknown');
   assert.deepEqual(f.store.list[0]?.result, { effectiveEnabled: false });
   await assert.rejects(ops.finish('fixture-1'), /not ready/);
@@ -125,17 +127,21 @@ test('storage failure prevents submit, and receipt failure remains retryable loc
   await assert.rejects(ops.submit('local', 'config/batchWrite', params, origin), /browser.*receipt/i);
   assert.equal(f.store.list[0]?.phase, 'pending');
   assert.deepEqual(ops.getSnapshot().localRetry, ['fixture-2']);
-  f.store.value = [];
-  await ops.retryLocal('fixture-2');
-  assert.equal(f.store.list[0]?.phase, 'finished');
-  assert.deepEqual(f.store.list[0]?.result, { status: 'okOverridden', overriddenMetadata: { message: 'policy' } });
+  await assert.rejects(ops.dismissClosedLocal('fixture-2'), /still present/);
+  f.store.value = [{ operationId: 'fixture-3', hostId: 'local', method: 'config/batchWrite',
+    params: { edits: ['newer'] }, origin, phase: 'unknown' }];
+  await assert.rejects(ops.retryLocal('fixture-2'), /already closed/);
+  assert.deepEqual(f.store.list.map(item => item.operationId), ['fixture-3']);
+  await ops.dismissClosedLocal('fixture-2');
+  assert.deepEqual(ops.getSnapshot().localRetry, []);
+  assert.deepEqual(f.store.list.map(item => item.operationId), ['fixture-3']);
   assert.equal(f.calls.length, 1);
 });
 
 test('a suspended source never dispatches and its original scope is retained', async () => {
   const f = fixture(), ops = f.make();
   await assert.rejects(ops.submit('ssh:one', 'skills/config/write', { path: '/project/a', enabled: false },
-    { section: 'skills-settings', scope: ['/project'], draft: [{ id: 'a', enabled: false }] }, () => false), /interrupted/);
+    { section: 'skills-settings', source: fixtureSource('ssh:one'), scope: ['/project'], draft: [{ id: 'a', enabled: false }] }, () => false), /interrupted/);
   assert.equal(f.calls.length, 0);
   assert.equal((await ops.find('ssh:one', 'skills-settings', ['/other'])), null);
   assert.deepEqual((await ops.find('ssh:one', 'skills-settings', ['/project']))?.origin.draft, [{ id: 'a', enabled: false }]);
@@ -149,10 +155,8 @@ test('a failed newer-draft write stays retryable even after the saved copy is re
   assert.deepEqual(ops.getSnapshot().draftRetry, ['editor']);
   f.store.fail = false; f.store.value = [];
   await ops.retryDraft('editor');
-  assert.equal(f.store.list[0]?.operationId, 'fixture-1');
-  assert.equal(f.store.list[0]?.phase, 'unknown');
-  assert.deepEqual(f.store.list[0]?.origin.draft, origin.draft);
-  assert.deepEqual(f.store.list[0]?.workingDrafts?.[0]?.draft, { model: 'newer' });
+  assert.equal(f.store.list.length, 0);
+  assert.deepEqual(f.store.drafts[0]?.draft, { model: 'newer' });
   assert.deepEqual(ops.getSnapshot().draftRetry, []);
   assert.equal(f.calls.filter(call => call.action === 'submit').length, 1);
 });
@@ -163,15 +167,16 @@ test('an in-flight newer draft prevents local receipt closure until its browser 
   let release = () => {}, entered = () => {};
   const gate = new Promise<void>(resolve => { release = resolve; });
   const waiting = new Promise<void>(resolve => { entered = resolve; });
-  const original = f.store.read.bind(f.store);
-  f.store.read = async () => { entered(); await gate; return original(); };
+  const original = f.store.update.bind(f.store);
+  let first = true;
+  f.store.update = async change => { if (first) { first = false; entered(); await gate; } return original(change); };
   const saving = ops.saveDraft('local', 'models', undefined, 'editor', { model: 'newer' });
   await waiting;
   assert.equal(ops.getSnapshot().draftPending, 1);
-  await assert.rejects(ops.finish('fixture-1', true), /not ready/);
+  await assert.rejects(ops.finish('fixture-1'), /not ready/);
   release(); await saving;
   assert.equal(ops.getSnapshot().draftPending, 0);
-  assert.deepEqual(f.store.list[0]?.workingDrafts?.[0]?.draft, { model: 'newer' });
+  assert.deepEqual(f.store.drafts[0]?.draft, { model: 'newer' });
 });
 
 test('an incomplete not-started response does not prove that the original write was unsent', async () => {

@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import { AgentSettings } from '../src/renderer/settings/agent-settings.ts';
-import { fixtureConfigurationHost, fixtureOperations } from './renderer-settings-sections-config-fixture.ts';
+import { fixtureConfigurationHost, fixtureDraft, fixtureOperations, fixtureSource } from './renderer-settings-sections-config-fixture.ts';
 
 class FakeClient implements WorkbenchClient {
   operations = fixtureOperations(this);
   config: { approval_policy: unknown; sandbox_mode: string; profile: string | null } = { approval_policy: 'on-request', sandbox_mode: 'read-only', profile: null };
   requirements: { allowedApprovalPolicies: unknown[] | null; allowedSandboxModes: string[] | null } = { allowedApprovalPolicies: null, allowedSandboxModes: null };
   version = 'v1';
+  generation = 'generation-a'; sourceAvailable = true;
   calls: { method: string; params?: Record<string, unknown>; hostId?: string }[] = [];
   missingVersion = false;
   conflict = false;
@@ -24,7 +25,8 @@ class FakeClient implements WorkbenchClient {
   async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
     this.calls.push({ method, params, hostId });
     if (method === 'config/read') return { config: { ...this.config }, layers: this.missingVersion ? [] :
-      [{ name: { type: 'user', file: '/fixture/codex/config.toml', profile: null }, version: this.version }] } as T;
+      [{ name: { type: 'user', file: '/fixture/codex/config.toml', profile: null }, version: this.version }],
+      ...(this.sourceAvailable ? { yardConfigSource: fixtureSource(hostId, '/fixture/codex', this.generation) } : {}) } as T;
     if (method === 'configRequirements/read') return { requirements: this.requirements } as T;
     if (method === 'config/batchWrite') {
       if (this.reject) throw new Error('offline');
@@ -39,6 +41,20 @@ class FakeClient implements WorkbenchClient {
     throw new Error('Unknown RPC');
   }
 }
+
+test('agent retains the edited policy when its original connection changes or was unavailable', async () => {
+  for (const absent of [false, true]) {
+    const client = new FakeClient(); client.sourceAvailable = !absent;
+    const settings = new AgentSettings(client, 'local', client.operations);
+    await settings.load(); settings.edit('approval', 'never');
+    client.sourceAvailable = true; client.generation = 'generation-b';
+    assert.equal(await settings.save(), false); assert.equal(settings.getSnapshot().values.approval, 'never');
+    assert.equal(client.calls.some(call => call.method === 'configuration-write'), false);
+    await settings.load(true); assert.equal(await settings.save(), true);
+    assert.deepEqual(client.calls.find(call => call.method === 'configuration-write')?.params?.source,
+      fixtureSource('local', '/fixture/codex', 'generation-b'));
+  }
+});
 
 test('agent writes approved user defaults with the selected host and verified version', async () => {
   const client = new FakeClient(), agent = new AgentSettings(client, 'ssh:fixture', client.operations);
@@ -86,6 +102,7 @@ test('agent restores a newer edit separately from an unknown original request', 
   const record = await client.operations.find('local', 'agent');
   assert.deepEqual(record?.params.edits, [{ keyPath: 'sandbox_mode', value: 'workspace-write', mergeStrategy: 'upsert' }]);
   const second = new AgentSettings(client, 'local', client.operations); await second.load();
+  await second.restoreDraft(await fixtureDraft(client.operations, first.editorId));
   assert.deepEqual(second.getSnapshot().values, { approval: 'never', sandbox: 'workspace-write' });
   client.reject = false; assert.equal(await second.save(), false);
   assert.equal(client.calls.filter(call => call.method === 'config/batchWrite').length, 1);

@@ -1,14 +1,16 @@
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { isConfigTarget, userConfigTarget } from './config-target.ts';
 import type { ConfigTarget } from './config-target.ts';
-import { createSettingsWriteId, latestSettingsDraft, SettingsConfigOperations, settingsConfigOperations } from './config-operations.ts';
+import { createSettingsWriteId, SettingsConfigOperations, settingsConfigOperations } from './config-operations.ts';
+import { configReadSource, sameConfigSource } from './config-source.ts';
+import type { ConfigReadSource } from '../../../lib/config-write-protocol.ts';
 
 type Approval = 'on-request' | 'never';
 type Sandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type AgentField = 'approval' | 'sandbox';
 type AgentValues = { approval: string; sandbox: string };
 type RawConfig = { approval_policy?: unknown; sandbox_mode?: unknown; profile?: unknown };
-type ConfigRead = { config: RawConfig; layers?: unknown };
+type ConfigRead = { config: RawConfig; layers?: unknown; yardConfigSource?: unknown };
 type RequirementsRead = { requirements: { allowedApprovalPolicies?: unknown; allowedSandboxModes?: unknown } | null };
 export interface AgentSnapshot {
   loading: boolean; saving: boolean; error: string | null; writeError: string | null; warning: string | null;
@@ -29,14 +31,15 @@ export class AgentSettings {
   private readonly client: WorkbenchClient;
   private readonly hostId: string;
   private readonly operations: SettingsConfigOperations;
-  private restored = false;
-  private readonly editorId = createSettingsWriteId();
+  readonly editorId = createSettingsWriteId();
   private draftWrites: Promise<void> = Promise.resolve();
   private draftWriteCount = 0;
   private readonly listeners = new Set<() => void>();
   private generation = 0;
   private target: ConfigTarget | null = null;
   private draftTarget: ConfigTarget | null = null;
+  private source: ConfigReadSource | null = null;
+  private draftSource: ConfigReadSource | null = null;
   private rawApproval: unknown = null;
   private snapshot: AgentSnapshot = { loading: true, saving: false, error: null, writeError: null, warning: null,
     profile: null, values: { approval: 'on-request', sandbox: 'read-only' }, saved: { approval: 'on-request', sandbox: 'read-only' },
@@ -49,15 +52,30 @@ export class AgentSettings {
   private update(patch: Partial<AgentSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
   retryDraftPersistence() {
     const { values, saved, profile } = this.snapshot;
-    const draft = structuredClone({ values, saved, profile, rawApproval: this.rawApproval, target: this.draftTarget ?? this.target });
+    const draft = structuredClone({ values, saved, profile, rawApproval: this.rawApproval, target: this.draftTarget ?? this.target, source: this.draftSource });
     this.draftWriteCount++; this.update({ draftSaving: true });
-    this.draftWrites = this.draftWrites.then(() => this.operations.saveDraft(this.hostId, 'agent', undefined, this.editorId, draft))
+    const dirty = this.dirty;
+    this.draftWrites = this.draftWrites.then(() => dirty ? this.operations.saveDraft(this.hostId, 'agent', undefined, this.editorId, draft)
+      : this.operations.clearEditorDraft(this.hostId, 'agent', undefined, this.editorId))
       .then(() => this.update({ draftStorageError: null }), error => this.update({ draftStorageError: message(error) }))
       .finally(() => { if (--this.draftWriteCount === 0) this.update({ draftSaving: false }); });
     return this.draftWrites;
   }
   get dirty() { return !matches(this.snapshot.values, this.snapshot.saved); }
   dispose() { this.generation++; }
+  async restoreDraft(draft: unknown): Promise<void> {
+    if (this.dirty || this.snapshot.loading || this.snapshot.saving) throw new Error('Finish the current edit before restoring another copy.');
+    if (!draft || typeof draft !== 'object' || Array.isArray(draft)) throw new Error('The saved agent edit cannot be read.');
+    const value = draft as Record<string, unknown>, values = value.values, saved = value.saved;
+    const valid = (v: unknown): v is AgentValues => !!v && typeof v === 'object' && !Array.isArray(v)
+      && typeof (v as AgentValues).approval === 'string' && typeof (v as AgentValues).sandbox === 'string';
+    if (!valid(values) || !valid(saved) || !(value.profile === null || typeof value.profile === 'string') || !isConfigTarget(value.target)) {
+      throw new Error('The saved agent edit has no verifiable baseline.');
+    }
+    this.rawApproval = value.rawApproval; this.draftTarget = value.target; this.draftSource = configReadSource(value.source, this.hostId);
+    this.update({ values, saved, profile: value.profile });
+    await this.retryDraftPersistence(); await this.load();
+  }
   private async read(): Promise<ConfigRead> {
     const result = await this.client.rpc<ConfigRead>('config/read', { includeLayers: true }, this.hostId);
     if (!result?.config || typeof result.config !== 'object' || Array.isArray(result.config) ||
@@ -66,10 +84,9 @@ export class AgentSettings {
     return result;
   }
   private async targetFor(read: ConfigRead) {
-    try {
-      const home = await this.client.host<{ codexHome?: unknown }>('codex-home', { hostId: this.hostId });
-      return userConfigTarget(read.layers, home?.codexHome);
-    } catch { return { target: null, error: 'Cannot save: the selected host did not provide its configuration home and version.' }; }
+    const source = configReadSource(read.yardConfigSource, this.hostId);
+    return source ? userConfigTarget(read.layers, source.codexHome)
+      : { target: null, error: 'Cannot save without the original configuration connection. Reload and review your edit.' };
   }
   private async requirements(): Promise<{ approvals: Approval[]; sandboxes: Sandbox[] }> {
     const result = await this.client.rpc<RequirementsRead>('configRequirements/read', {}, this.hostId);
@@ -84,30 +101,18 @@ export class AgentSettings {
     return { approvals: approvals.filter(value => allowedApproval == null || allowedApproval.includes(value)),
       sandboxes: sandboxes.filter(value => allowedSandbox == null || allowedSandbox.includes(value)) };
   }
-  async load(): Promise<void> {
+  async load(reviewSource = false): Promise<void> {
     if (this.snapshot.saving) return;
     const generation = ++this.generation;
     this.update({ loading: true, error: null });
     try {
-      if (!this.restored) {
-        const previous = await this.operations.find(this.hostId, 'agent'), draft = previous && latestSettingsDraft(previous);
-        if (generation !== this.generation) return;
-        if (draft && typeof draft === 'object' && !Array.isArray(draft)) {
-          const value = draft as Record<string, unknown>, values = value.values, saved = value.saved;
-          const valid = (v: unknown): v is AgentValues => !!v && typeof v === 'object' && !Array.isArray(v)
-            && typeof (v as AgentValues).approval === 'string' && typeof (v as AgentValues).sandbox === 'string';
-          if (valid(values) && valid(saved) && (value.profile === null || typeof value.profile === 'string')) {
-            if (!isConfigTarget(value.target)) throw new Error('The saved agent edit has no verifiable configuration target.');
-            this.snapshot = { ...this.snapshot, values, saved, profile: value.profile };
-            this.rawApproval = value.rawApproval;
-            this.draftTarget = value.target;
-          } else throw new Error('The saved agent edit cannot be read.');
-        } else if (previous) throw new Error('The saved agent edit cannot be read.');
-        this.restored = true;
-      }
       const [read, allowed] = await Promise.all([this.read(), this.requirements()]);
       const target = await this.targetFor(read);
       if (generation !== this.generation) return;
+      const source = configReadSource(read.yardConfigSource, this.hostId);
+      if (this.dirty && !sameConfigSource(this.draftSource, source) && (!reviewSource || !source)) {
+        this.update({ loading: false, writeError: 'The configuration connection changed or is unavailable. Reload and review your edit.' }); return;
+      }
       const profile = profileName(read.config.profile);
       if (this.dirty && profile !== this.snapshot.profile) {
         this.update({ loading: false, error: 'The active profile changed. Discard your edits and reload before continuing.' }); return;
@@ -132,16 +137,19 @@ export class AgentSettings {
       }
       this.rawApproval = read.config.approval_policy;
       this.target = target.target;
+      this.source = source;
+      if (this.dirty && reviewSource) { this.draftSource = source; this.draftTarget = target.target; }
       if (!matches(values, saved)) this.draftTarget ??= target.target;
       else this.draftTarget = null;
       this.update({ loading: false, profile, saved, values, conflicts,
         error: conflicts.length ? 'Some settings changed elsewhere. Review each conflict before saving.' : null,
         writeError: target.error, ...allowed });
+      if (this.dirty) void this.retryDraftPersistence();
     } catch (error) { if (generation === this.generation) this.update({ loading: false, error: message(error), approvals: [], sandboxes: [] }); }
   }
   edit(field: AgentField, value: string) {
     if (this.snapshot.saving || this.snapshot.loading || !(field === 'approval' ? this.snapshot.approvals : this.snapshot.sandboxes).includes(value as never)) return;
-    if (!this.dirty && value !== this.snapshot.saved[field]) this.draftTarget = this.target;
+    if (!this.dirty && value !== this.snapshot.saved[field]) { this.draftTarget = this.target; this.draftSource = this.source; }
     const values = { ...this.snapshot.values, [field]: value };
     const conflicts = value === this.snapshot.saved[field] ? this.snapshot.conflicts.filter(item => item !== field) : this.snapshot.conflicts;
     if (matches(values, this.snapshot.saved)) this.draftTarget = null;
@@ -161,6 +169,8 @@ export class AgentSettings {
     if (!this.dirty || this.snapshot.saving || this.snapshot.loading) return false;
     if (this.snapshot.conflicts.length) { this.update({ error: 'Review each conflicting setting before saving.' }); return false; }
     const { values, saved, profile } = this.snapshot, target = this.target, rawApproval = this.rawApproval;
+    const source = this.draftSource;
+    if (!source) { this.update({ error: 'The original configuration connection is unavailable. Reload and review your edit.' }); return false; }
     if (!target) { this.update({ error: this.snapshot.writeError || 'Cannot save without a verified configuration version.' }); return false; }
     const generation = ++this.generation;
     this.update({ saving: true, error: null, warning: null });
@@ -169,6 +179,9 @@ export class AgentSettings {
       if (this.snapshot.draftStorageError) throw new Error('The newer edit could not be saved in the browser.');
       if (generation !== this.generation) return false;
       const [before, allowed] = await Promise.all([this.read(), this.requirements()]);
+      if (!sameConfigSource(source, configReadSource(before.yardConfigSource, this.hostId))) {
+        this.update({ saving: false, writeError: 'The configuration connection changed. Reload and review your edit.' }); return false;
+      }
       const current = await this.targetFor(before);
       if (generation !== this.generation) return false;
       const beforeValues = { approval: valueOf(before.config.approval_policy, 'on-request'), sandbox: valueOf(before.config.sandbox_mode, 'read-only') };
@@ -186,11 +199,12 @@ export class AgentSettings {
       if (values.sandbox !== saved.sandbox) edits.push({ keyPath: 'sandbox_mode', value: values.sandbox, mergeStrategy: 'upsert' });
       const submitted = await this.operations.submit(this.hostId, 'config/batchWrite',
         { edits, filePath: target.filePath, expectedVersion: target.version, reloadUserConfig: true },
-        { section: 'agent', draft: { values, saved, profile, rawApproval, target } }, () => generation === this.generation);
+        { section: 'agent', editorId: this.editorId, source, draft: { values, saved, profile, rawApproval, target, source } }, () => generation === this.generation);
       if (generation !== this.generation) return false;
       const result = submitted.result as { status: 'ok' | 'okOverridden'; overriddenMetadata?: { message?: string } | null };
       if (result?.status !== 'ok' && result?.status !== 'okOverridden') throw new Error('The host did not confirm the write');
       const after = await this.read(), afterTarget = await this.targetFor(after);
+      if (!sameConfigSource(source, configReadSource(after.yardConfigSource, this.hostId))) throw new Error('The configuration connection changed after the save. Check the original operation.');
       if (generation !== this.generation) return false;
       const actual = { approval: valueOf(after.config.approval_policy, 'on-request'), sandbox: valueOf(after.config.sandbox_mode, 'read-only') };
       const confirmed = (values.approval === saved.approval || actual.approval === values.approval) &&
@@ -204,7 +218,7 @@ export class AgentSettings {
       };
       const conflicts: AgentField[] = confirmed ? [] : (['approval', 'sandbox'] as AgentField[]).filter(field =>
         values[field] !== saved[field] && values[field] !== actual[field]);
-      if (confirmed) await this.operations.finish(submitted.operationId);
+      if (confirmed) await this.operations.finish(submitted.operationId, { consumeSubmittedDraft: true });
       if (generation !== this.generation) return false;
       if (confirmed) this.draftTarget = null;
       this.update({ saving: false, saved: actual, writeError: afterTarget.error,

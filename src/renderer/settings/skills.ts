@@ -1,13 +1,15 @@
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { validScopePath } from './scope.ts';
-import { createSettingsWriteId, latestSettingsDraft, SettingsConfigOperations, SettingsWriteError, settingsConfigOperations } from './config-operations.ts';
+import { createSettingsWriteId, SettingsConfigOperations, SettingsWriteError, settingsConfigOperations } from './config-operations.ts';
 import type { WriteStatus } from './config-operations.ts';
+import { configReadSource, sameConfigSource } from './config-source.ts';
+import type { ConfigReadSource } from '../../../lib/config-write-protocol.ts';
 
 export interface SkillEntry {
   id: string; name: string; displayName: string; description: string; path: string;
   scope: string; pluginId: string | null; enabled: boolean;
 }
-interface SkillRead { skills: SkillEntry[]; warnings: string[] }
+interface SkillRead { skills: SkillEntry[]; warnings: string[]; source: ConfigReadSource | null }
 export interface SkillDraft { id: string; enabled: boolean }
 export interface SkillSnapshot {
   loading: boolean; saving: boolean; skills: SkillEntry[]; warnings: string[]; drafts: SkillDraft[];
@@ -35,7 +37,7 @@ function parseSkill(value: unknown): SkillEntry {
 
 async function readSkills(client: WorkbenchClient, hostId: string, cwds: readonly string[]): Promise<SkillRead> {
   if (!cwds.length || !cwds.every(validScopePath)) throw new Error('Select a project or session with a working directory.');
-  const result = await client.rpc<{ data: unknown }>('skills/list', { cwds, forceReload: true }, hostId);
+  const result = await client.rpc<{ data: unknown; yardConfigSource?: unknown }>('skills/list', { cwds, forceReload: true }, hostId);
   if (!Array.isArray(result?.data)) throw new Error('Invalid skills response');
   const unique = new Map<string, SkillEntry>(), warnings: string[] = [];
   for (const group of result.data) {
@@ -50,7 +52,7 @@ async function readSkills(client: WorkbenchClient, hostId: string, cwds: readonl
       warnings.push(`${error.path}: ${error.message}`);
     }
   }
-  return { skills: [...unique.values()], warnings };
+  return { skills: [...unique.values()], warnings, source: configReadSource(result.yardConfigSource, hostId) };
 }
 
 export class SkillSettings {
@@ -58,16 +60,16 @@ export class SkillSettings {
   private readonly hostId: string;
   private readonly cwds: readonly string[];
   private readonly operations: SettingsConfigOperations;
-  private restored = false;
   private originalId: string | null = null;
   private resolvedOriginalId: string | null = null;
   private originalBlocker: WriteStatus | null = null;
-  private readonly editorId = createSettingsWriteId();
+  readonly editorId = createSettingsWriteId();
   private draftWrites: Promise<void> = Promise.resolve();
   private draftWriteCount = 0;
   private readonly listeners = new Set<() => void>();
   private snapshot: SkillSnapshot = { loading: true, saving: false, skills: [], warnings: [], drafts: [], latest: null, needsRefresh: false, writeUncertain: false, error: null, draftStorageError: null, draftSaving: false };
   private latestRead: SkillRead | null = null;
+  private source: ConfigReadSource | null = null;
   private generation = 0;
   private invalidated = false;
   private writeInFlight = false;
@@ -78,14 +80,27 @@ export class SkillSettings {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<SkillSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
   retryDraftPersistence() {
-    const draft = structuredClone({ drafts: this.snapshot.drafts });
+    const draft = structuredClone({ drafts: this.snapshot.drafts, skills: this.snapshot.skills, source: this.source });
     this.draftWriteCount++; this.update({ draftSaving: true });
-    this.draftWrites = this.draftWrites.then(() => this.operations.saveDraft(this.hostId, 'skills-settings', this.cwds, this.editorId, draft))
+    const dirty = this.dirty;
+    this.draftWrites = this.draftWrites.then(() => dirty ? this.operations.saveDraft(this.hostId, 'skills-settings', this.cwds, this.editorId, draft)
+      : this.operations.clearEditorDraft(this.hostId, 'skills-settings', this.cwds, this.editorId))
       .then(() => this.update({ draftStorageError: null }), error => this.update({ draftStorageError: errorText(error) }))
       .finally(() => { if (--this.draftWriteCount === 0) this.update({ draftSaving: false }); });
     return this.draftWrites;
   }
   get dirty() { return this.snapshot.drafts.length > 0; }
+  async restoreDraft(value: unknown): Promise<void> {
+    if (this.dirty || this.snapshot.loading || this.snapshot.saving) throw new Error('Finish the current edit before restoring another copy.');
+    if (!record(value) || !Array.isArray(value.drafts) || !value.drafts.every((item: unknown) =>
+      record(item) && typeof item.id === 'string' && typeof item.enabled === 'boolean')) throw new Error('The saved skill edits cannot be read.');
+    const skills = Array.isArray(value.skills) && value.skills.every((item: unknown) => record(item) && typeof item.id === 'string'
+      && typeof item.name === 'string' && typeof item.path === 'string' && typeof item.enabled === 'boolean' && typeof item.scope === 'string')
+      ? value.skills as SkillEntry[] : this.snapshot.skills;
+    this.source = configReadSource(value.source, this.hostId);
+    this.update({ drafts: value.drafts as SkillDraft[], skills, needsRefresh: true });
+    await this.retryDraftPersistence(); await this.load();
+  }
   dispose() {
     this.generation++; this.invalidated = false;
     if (this.snapshot.saving) this.update({ saving: false, loading: false, needsRefresh: true,
@@ -104,7 +119,7 @@ export class SkillSettings {
     }
   }
   private changed(read: SkillRead): boolean {
-    return this.snapshot.drafts.some(draft => {
+    return !sameConfigSource(this.source, read.source) || this.snapshot.drafts.some(draft => {
       const previous = this.snapshot.skills.find(skill => skill.id === draft.id), current = read.skills.find(skill => skill.id === draft.id);
       return !previous || !current || !canEditSkill(current, read.skills) || previous.enabled !== current.enabled
         || previous.scope !== current.scope || previous.pluginId !== current.pluginId;
@@ -128,18 +143,11 @@ export class SkillSettings {
           || !blocker && await this.operations.originalFinished(this.hostId, this.originalId, 'skills/config/write');
         if (generation !== this.generation) return;
       }
-      const savedDraft = previous && latestSettingsDraft(previous);
-      if (!this.restored && previous && record(savedDraft) && Array.isArray(savedDraft.drafts)) {
-        const drafts = savedDraft.drafts;
-        if (drafts.every((item: unknown) => record(item) && typeof item.id === 'string' && typeof item.enabled === 'boolean')) {
-          this.snapshot = { ...this.snapshot, drafts: drafts as SkillDraft[], needsRefresh: true, writeUncertain: unresolved };
-        } else throw new Error('The saved skill edits cannot be read.');
-      } else if (!this.restored && previous) {
-        throw new Error('The saved skill edits cannot be read.');
+      if (unresolved && previous?.operationId === this.originalId) {
+        this.snapshot = { ...this.snapshot, writeUncertain: true, needsRefresh: true };
       } else if (this.snapshot.writeUncertain && resolved) {
         this.snapshot = { ...this.snapshot, writeUncertain: false, needsRefresh: true };
       }
-      this.restored = true;
       const read = await readSkills(this.client, this.hostId, this.cwds);
       if (generation !== this.generation) return;
       if (this.dirty && (this.snapshot.latest || this.snapshot.needsRefresh || this.changed(read))) {
@@ -147,7 +155,7 @@ export class SkillSettings {
         this.update({ loading: false, skills: this.snapshot.skills.length ? this.snapshot.skills : read.skills, latest: read.skills, warnings: read.warnings,
           error: 'Skill settings changed or the last save could not be confirmed. Review the current state before saving.' });
       } else {
-        this.latestRead = null;
+        this.latestRead = null; this.source = read.source;
         this.update({ loading: false, skills: read.skills, warnings: read.warnings, latest: null, needsRefresh: this.snapshot.writeUncertain });
       }
     } catch (error) { if (generation === this.generation) this.update({ loading: false, error: `Could not load skills: ${errorText(error)}` }); }
@@ -165,6 +173,7 @@ export class SkillSettings {
   discard() {
     if (this.snapshot.saving || this.snapshot.writeUncertain) return;
     const latest = this.latestRead, refresh = this.snapshot.needsRefresh && !latest;
+    if (latest) this.source = latest.source;
     this.latestRead = null;
     this.update({ drafts: [], skills: latest?.skills ?? this.snapshot.skills, warnings: latest?.warnings ?? this.snapshot.warnings,
       latest: null, needsRefresh: refresh || this.snapshot.writeUncertain, error: null });
@@ -174,6 +183,7 @@ export class SkillSettings {
   useLatest() {
     const latest = this.latestRead;
     if (!latest || this.snapshot.writeUncertain) return;
+    if (!latest.source) { this.update({ error: 'The configuration connection is unavailable. Refresh and review your edits.' }); return; }
     if (this.snapshot.drafts.some(draft => {
       const skill = latest.skills.find(item => item.id === draft.id);
       return !skill || !canEditSkill(skill, latest.skills);
@@ -181,12 +191,14 @@ export class SkillSettings {
       this.update({ error: 'An edited skill is missing or has an ambiguous selector. Discard edits and refresh before continuing.' }); return;
     }
     const drafts = this.snapshot.drafts.filter(draft => latest.skills.find(skill => skill.id === draft.id)?.enabled !== draft.enabled);
-    this.latestRead = null;
+    this.source = latest.source; this.latestRead = null;
     this.update({ skills: latest.skills, warnings: latest.warnings, drafts, latest: null, needsRefresh: false, error: null });
     void this.retryDraftPersistence();
   }
   async save(): Promise<boolean> {
     if (!this.dirty || this.snapshot.saving || this.snapshot.loading || this.snapshot.latest || this.snapshot.needsRefresh || this.snapshot.writeUncertain) return false;
+    const source = this.source;
+    if (!source) { this.update({ error: 'The original configuration connection is unavailable. Refresh and review your edits.' }); return false; }
     const generation = ++this.generation, drafts = this.snapshot.drafts;
     let writeInFlight = false;
     const completed: string[] = [];
@@ -210,7 +222,7 @@ export class SkillSettings {
         let result: { effectiveEnabled?: unknown };
         try {
           const submitted = await this.operations.submit(this.hostId, 'skills/config/write', { ...selector(skill), enabled: draft.enabled },
-            { section: 'skills-settings', scope: this.cwds, draft: { drafts } }, () => generation === this.generation,
+            { section: 'skills-settings', scope: this.cwds, editorId: this.editorId, source, draft: { drafts, source } }, () => generation === this.generation,
             id => { this.originalId = id; this.resolvedOriginalId = null; this.originalBlocker = null; });
           if (this.originalId === submitted.operationId) this.resolvedOriginalId = submitted.operationId;
           result = submitted.result as { effectiveEnabled?: unknown };
@@ -223,7 +235,7 @@ export class SkillSettings {
       }
       const after = await readSkills(this.client, this.hostId, this.cwds);
       if (generation !== this.generation) return false;
-      if (drafts.some(draft => {
+      if (!sameConfigSource(source, after.source) || drafts.some(draft => {
         const previous = before.skills.find(skill => skill.id === draft.id), current = after.skills.find(skill => skill.id === draft.id);
         return !previous || !current || !canEditSkill(current, after.skills) || current.enabled !== draft.enabled
           || current.scope !== previous.scope || current.pluginId !== previous.pluginId;

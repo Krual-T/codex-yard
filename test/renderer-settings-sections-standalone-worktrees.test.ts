@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 import { readRemoteWorktreePreferences, RemoteWorktreeSettings } from '../src/renderer/settings/worktrees.ts';
-import { fixtureConfigurationHost, fixtureOperations } from './renderer-settings-sections-config-fixture.ts';
+import { fixtureConfigurationHost, fixtureDraft, fixtureOperations, fixtureSource } from './renderer-settings-sections-config-fixture.ts';
 
 test('remote worktrees use the selected host and accept an absent desktop table as defaults', async () => {
   let response: unknown = { config: { desktop: { 'git-worktree-root': '/remote/worktrees', 'worktree-auto-cleanup-enabled': false, 'worktree-keep-count': 7 } } };
@@ -29,6 +29,7 @@ class RemoteClient implements WorkbenchClient {
   operations = fixtureOperations(this);
   desktop: Record<string, unknown> = {};
   version = 'v1';
+  generation = 'generation-a'; sourceAvailable = true;
   layers: unknown = null;
   calls: { method: string; params?: Record<string, unknown>; hostId?: string }[] = [];
   conflict = false;
@@ -44,7 +45,7 @@ class RemoteClient implements WorkbenchClient {
     this.calls.push({ method, params, hostId });
     if (method === 'config/read') return { config: { desktop: { ...this.desktop }, profile: null }, layers: this.layers ?? [
       { name: { type: 'user', file: '/fixture/remote/config.toml', profile: null }, version: this.version },
-    ] } as T;
+    ], ...(this.sourceAvailable ? { yardConfigSource: fixtureSource(hostId, '/fixture/remote', this.generation) } : {}) } as T;
     if (method === 'config/batchWrite') {
       if (this.conflict) this.version = 'external';
       if (params?.expectedVersion !== this.version) throw new Error('Configuration was modified since last read');
@@ -56,6 +57,20 @@ class RemoteClient implements WorkbenchClient {
     throw new Error('Unexpected RPC');
   }
 }
+
+test('worktree source changes and absent sources require review without losing the draft', async () => {
+  for (const absent of [false, true]) {
+    const client = new RemoteClient(); client.sourceAvailable = !absent;
+    const settings = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations);
+    await settings.load(); settings.edit({ root: '/remote/draft' });
+    client.sourceAvailable = true; client.generation = 'generation-b';
+    assert.equal(await settings.save(), false); assert.equal(settings.getSnapshot().draft?.root, '/remote/draft');
+    assert.equal(client.calls.some(call => call.method === 'configuration-write'), false);
+    await settings.load(true); assert.equal(await settings.save(), true);
+    assert.deepEqual(client.calls.find(call => call.method === 'configuration-write')?.params?.source,
+      fixtureSource('ssh:fixture', '/fixture/remote', 'generation-b'));
+  }
+});
 
 test('remote worktree edits write only the selected host desktop keys with a verified version', async () => {
   const client = new RemoteClient(), settings = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations);
@@ -70,7 +85,7 @@ test('remote worktree edits write only the selected host desktop keys with a ver
       { keyPath: 'desktop.worktree-keep-count', value: 4, mergeStrategy: 'replace' },
     ], filePath: null, expectedVersion: 'v1', reloadUserConfig: true,
   } });
-  assert.deepEqual(client.calls.find(call => call.method === 'codex-home')?.params, { hostId: 'ssh:fixture' });
+  assert.equal(client.calls.some(call => call.method === 'codex-home'), false);
   assert.equal(settings.dirty, false);
 });
 
@@ -119,6 +134,7 @@ test('remote worktree recovery retains newer fields without replaying the origin
   const record = await client.operations.find('ssh:fixture', 'worktrees');
   assert.deepEqual(record?.params.edits, [{ keyPath: 'desktop.git-worktree-root', value: '/remote/first', mergeStrategy: 'replace' }]);
   const second = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations); await second.load();
+  await second.restoreDraft(await fixtureDraft(client.operations, first.editorId));
   assert.equal(second.getSnapshot().draft?.root, '/remote/first');
   assert.equal(second.getSnapshot().draft?.keepCount, '4');
   client.conflict = false; assert.equal(await second.save(), false);

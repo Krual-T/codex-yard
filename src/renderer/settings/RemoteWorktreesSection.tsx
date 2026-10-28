@@ -4,6 +4,7 @@ import { useI18n } from '../i18n/index.tsx';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { Row } from './PreferenceControls.tsx';
 import { RemoteWorktreeSettings } from './worktrees.ts';
+import { SettingsDraftRecovery } from './SettingsDraftRecovery.tsx';
 
 export function RemoteWorktreesSection({ client, hostId, onDirtyChange, onSavingChange, upstream }: {
   client: WorkbenchClient; hostId: string; onDirtyChange: (dirty: boolean) => void;
@@ -19,13 +20,15 @@ export function RemoteWorktreesSection({ client, hostId, onDirtyChange, onSaving
   useLayoutEffect(() => { onSavingChange(state.saving || state.draftSaving); }, [state.saving, state.draftSaving, onSavingChange]);
   return <>
     <h2>{t('Worktrees')}</h2>
+    <SettingsDraftRecovery client={client} hostId={hostId} section="worktrees" editorId={settings.editorId}
+      disabled={dirty || state.loading || state.saving || state.draftSaving} onRestore={draft => settings.restoreDraft(draft)} />
     <p className="yard-muted">Worktree preferences for {hostId}.</p>
     <p className="yard-muted">{t('Creating and automatically cleaning up worktrees are not available for this connection.')}</p>
     {state.loading && <p role="status">{t('Loading remote settings...')}</p>}
     {state.error && <p className="yard-setting-error" role="alert">{state.error} <button type="button" className="yard-link" disabled={state.loading || state.saving}
-      onClick={() => { void settings.load(); }}>{t('Reload')}</button></p>}
+      onClick={() => { void settings.load(true); }}>Reload and review</button></p>}
     {state.writeError && <p className="yard-setting-error" role="alert">{state.writeError} <button type="button" className="yard-link" disabled={state.loading || state.saving}
-      onClick={() => { void settings.load(); }}>{t('Reload')}</button></p>}
+      onClick={() => { void settings.load(true); }}>Reload and review</button></p>}
     {state.draftStorageError && <p className="yard-setting-error" role="alert">Could not save the newer edit in this browser: {state.draftStorageError}{' '}
       <button type="button" onClick={() => { void settings.retryDraftPersistence(); }}>Retry saving edit</button></p>}
     {state.warning && <p role="status">{state.warning}</p>}

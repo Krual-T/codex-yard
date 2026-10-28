@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import { canEditHook, HookSettings } from '../src/renderer/settings/hooks.ts';
-import { fixtureConfigurationHost, fixtureOperations } from './renderer-settings-sections-config-fixture.ts';
+import { fixtureConfigurationHost, fixtureDraft, fixtureOperations, fixtureSource } from './renderer-settings-sections-config-fixture.ts';
 
 const trusted = { key: 'event."review"', eventName: 'sessionStart', matcher: null, source: 'user', sourcePath: '/fixture/hooks.json',
   trustStatus: 'trusted', isManaged: false, enabled: true, timeoutSec: 60, handlerType: 'command', command: 'echo fixture', async: false,
@@ -12,6 +12,7 @@ class FakeClient implements WorkbenchClient {
   operations = fixtureOperations(this);
   hooks = [{ ...trusted }, { ...untrusted }];
   version = 'v1'; profile: string | null = null; failRead = false; lost = false; override = false;
+  generation = 'generation-a'; sourceAvailable = true; hostWrites: Record<string, unknown>[] = [];
   late: (() => void) | null = null;
   deferLost = false;
   beforeList?: () => Promise<void>; beforeWrite?: () => Promise<void>;
@@ -19,7 +20,7 @@ class FakeClient implements WorkbenchClient {
   subscribe(_listener: (event: WorkbenchEvent) => void) { return () => {}; }
   async reply(): Promise<void> { throw new Error('Unexpected approval'); }
   async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
-    if (endpoint === 'configuration-write' && params) return await fixtureConfigurationHost(this, params) as T;
+    if (endpoint === 'configuration-write' && params) { this.hostWrites.push(params); return await fixtureConfigurationHost(this, params) as T; }
     assert.equal(endpoint, 'codex-home'); assert.equal(params?.hostId, 'ssh:one'); return { codexHome: '/fixture' } as T;
   }
   async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
@@ -33,7 +34,7 @@ class FakeClient implements WorkbenchClient {
     if (method === 'config/read') return { config: { profile: this.profile }, layers: [
       { name: { type: 'user', file: '/fixture/config.toml', profile: null }, version: this.version },
       ...(this.profile ? [{ name: { type: 'user', file: '/fixture/profile.toml', profile: this.profile }, version: 'profile-version' }] : []),
-    ] } as T;
+    ], ...(this.sourceAvailable ? { yardConfigSource: fixtureSource(hostId, '/fixture', this.generation) } : {}) } as T;
     if (method === 'config/batchWrite') {
       assert.ok(params); this.writes.push({ params, hostId });
       await this.beforeWrite?.();
@@ -55,6 +56,15 @@ class FakeClient implements WorkbenchClient {
   }
 }
 const setup = async () => { const client = new FakeClient(), settings = new HookSettings(client, 'ssh:one', ['/project'], client.operations); await settings.load(); return { client, settings }; };
+
+test('hook source changes preserve the draft and require explicit review', async () => {
+  const { client, settings } = await setup(); settings.edit(trusted.key, false); client.generation = 'generation-b';
+  assert.equal(await settings.save(), false); assert.equal(settings.dirty, true); assert.equal(client.hostWrites.length, 0);
+  settings.useLatest(); assert.equal(await settings.save(), true);
+  assert.deepEqual(client.hostWrites[0]?.source, fixtureSource('ssh:one', '/fixture', 'generation-b'));
+  const absent = await setup(); absent.client.sourceAvailable = false; await absent.settings.load();
+  absent.settings.edit(trusted.key, false); assert.equal(await absent.settings.save(), false); assert.equal(absent.client.hostWrites.length, 0);
+});
 
 test('only trusted editable hooks can change and saves target the verified base user config', async () => {
   const { client, settings } = await setup(); client.profile = 'profile.with.dots';
@@ -110,6 +120,7 @@ test('hook original draft and scope survive a new controller after a lost reply'
   assert.equal(await settings.save(), false);
   const resumed = new HookSettings(client, 'ssh:one', ['/project'], client.operations);
   await resumed.load();
+  await resumed.restoreDraft(await fixtureDraft(client.operations, settings.editorId));
   assert.deepEqual(resumed.getSnapshot().drafts, [{ key: trusted.key, enabled: false }]);
   assert.equal(resumed.getSnapshot().writeUncertain, true);
   resumed.useLatest(); assert.equal(await resumed.save(), false);
@@ -162,9 +173,9 @@ test('a newer hook edit survives controller replacement without changing the ori
   await settings.load(); settings.useLatest();
   settings.edit(trusted.key, true); await settings.retryDraftPersistence();
   const record = await client.operations.find('ssh:one', 'hooks-settings', ['/project']);
-  assert.deepEqual(record?.origin.draft, { drafts: [{ key: trusted.key, enabled: false }] });
-  assert.deepEqual(record?.workingDrafts?.at(-1)?.draft, { drafts: [{ key: trusted.key, enabled: true }] });
+  assert.deepEqual((record?.origin.draft as { drafts: unknown }).drafts, [{ key: trusted.key, enabled: false }]);
   const resumed = new HookSettings(client, 'ssh:one', ['/project'], client.operations); await resumed.load();
+  await resumed.restoreDraft(await fixtureDraft(client.operations, settings.editorId));
   assert.deepEqual(resumed.getSnapshot().drafts, [{ key: trusted.key, enabled: true }]);
   assert.equal(client.writes.length, 1);
 });
@@ -182,7 +193,7 @@ test('a retained hook controller checks its own original ID after the saved copy
     }
     return host<T>(endpoint, params);
   };
-  await client.operations.check(original.operationId); await client.operations.finish(original.operationId, true);
+  await client.operations.check(original.operationId); await client.operations.finish(original.operationId);
   present = false; await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, true);
   present = true; await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, false);
   settings.useLatest(); assert.equal(settings.dirty, false); assert.equal(client.writes.length, 1);
@@ -204,7 +215,7 @@ test('a closed blocked hook request is reconciled using its distinct blocker ide
   };
   settings.edit(trusted.key, false); assert.equal(await settings.save(), false);
   const original = await client.operations.find('ssh:one', 'hooks-settings', ['/project']); assert.ok(original);
-  await client.operations.check(original.operationId); await client.operations.finish(original.operationId, true);
+  await client.operations.check(original.operationId); await client.operations.finish(original.operationId);
   await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, false);
   settings.useLatest(); assert.equal(settings.dirty, true); assert.equal(client.writes.length, 0);
   assert.deepEqual(checked, [['other-host', 'other-id'], ['other-host', 'other-id']]);

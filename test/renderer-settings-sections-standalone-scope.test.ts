@@ -19,9 +19,11 @@ class Client implements WorkbenchClient {
   async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
     this.calls.push({ method, params, hostId });
     if (method === 'hooks/list') return { data: [{ cwd: '/one', hooks: [], warnings: [], errors: [] }] } as T;
-    if (method === 'skills/list') return { data: [{ cwd: '/one', skills: [], errors: [] }] } as T;
+    if (method === 'skills/list') return { data: [{ cwd: '/one', skills: [], errors: [] }],
+      yardConfigSource: { hostId, generation: 'fixture', homeDirectory: '/fixture', codexHome: '/fixture/home' } } as T;
     if (method === 'plugin/list') return { marketplaces: [] } as T;
-    if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user', file: '/fixture/home/config.toml', profile: null }, version: 'v1' }] } as T;
+    if (method === 'config/read') return { config: {}, layers: [{ name: { type: 'user', file: '/fixture/home/config.toml', profile: null }, version: 'v1' }],
+      yardConfigSource: { hostId, generation: 'fixture', homeDirectory: '/fixture', codexHome: '/fixture/home' } } as T;
     throw new Error(`Unexpected ${method}`);
   }
 }

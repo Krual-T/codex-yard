@@ -57,11 +57,11 @@ test('settings waits for host-bound scope and retains pending hook and skill edi
         rpc:async (method, params, hostId) => {
           calls.push({method,params,hostId});
           if (method === 'hooks/list') return {data:[{cwd:params.cwds[0],hooks:[hook],warnings:[],errors:[]}]};
-          if (method === 'skills/list') return {data:[{cwd:params.cwds[0],skills:[skill],errors:[]}]};
+          if (method === 'skills/list') return {data:[{cwd:params.cwds[0],skills:[skill],errors:[]}],yardConfigSource:{hostId,generation:'fixture',homeDirectory:'/fixture',codexHome:'/fixture'}};
           if (method === 'plugin/installed' || method === 'plugin/list') return {marketplaces:[]};
           if (method === 'plugin/read') return {plugin:{marketplaceName:'fixture',summary:{id:'fixture',name:'fixture',installed:true,enabled:true,
             interface:{displayName:'Fixture plugin'}},description:null,skills:[],hooks:[],apps:[],appTemplates:[],mcpServers:[],scheduledTasks:null}};
-          if (method === 'config/read') return {config:{},layers:[{name:{type:'user',file:'/fixture/config.toml',profile:null},version:'v1'}]};
+          if (method === 'config/read') return {config:{},layers:[{name:{type:'user',file:'/fixture/config.toml',profile:null},version:'v1'}],yardConfigSource:{hostId,generation:'fixture',homeDirectory:'/fixture',codexHome:'/fixture'}};
           throw Error('Unexpected RPC: ' + method);
         },
       };

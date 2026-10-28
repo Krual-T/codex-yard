@@ -6,6 +6,7 @@ import type { HookEntry } from './hooks.ts';
 import { scopeKey, validScopePath } from './scope.ts';
 import type { SettingsScope } from './scope.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
+import { SettingsDraftRecovery } from './SettingsDraftRecovery.tsx';
 
 const eventLabel = (hook: HookEntry) => hook.eventName.charAt(0).toUpperCase() + hook.eventName.slice(1);
 const trustLabel = (hook: HookEntry) => hook.isManaged || hook.trustStatus === 'managed' ? 'Managed' : hook.trustStatus === 'untrusted' ? 'Needs review'
@@ -45,6 +46,8 @@ export function HookSection({ client, hostId, projectScope, memory, revision, on
   const locked = state.loading || state.saving || state.writeUncertain || state.latest !== null || scopeChanged;
   return <>
     <div className="yard-section-heading"><h2>{t('Hooks')}</h2><button type="button" disabled={state.loading || state.saving} onClick={() => { void settings.load(); }}>{t('Refresh')}</button></div>
+    <SettingsDraftRecovery client={client} hostId={hostId} section="hooks-settings" scope={scope.paths} editorId={settings.editorId}
+      disabled={settings.dirty || state.loading || state.saving || state.draftSaving || scopeChanged} onRestore={draft => settings.restoreDraft(draft)} />
     <form className="yard-filter" onSubmit={event => { event.preventDefault(); if (!settings.dirty && !state.saving && !scopeChanged) {
       if (cwd && !validScopePath(cwd)) { setScopeError('Enter an absolute working directory.'); return; }
       const paths = cwd ? [cwd] : projectScope.paths;

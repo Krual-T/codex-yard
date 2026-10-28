@@ -2,6 +2,15 @@ import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 import { SettingsConfigOperations } from '../src/renderer/settings/config-operations.ts';
 import type { SettingsWriteStorage } from '../src/renderer/settings/config-operations.ts';
 
+export const fixtureSource = (hostId = 'local', codexHome = '/fixture/codex', generation = 'fixture-generation') =>
+  ({ hostId, generation, homeDirectory: '/fixture', codexHome });
+export async function fixtureDraft(operations: SettingsConfigOperations, editorId: string): Promise<unknown> {
+  await operations.refresh();
+  const draft = operations.getSnapshot().drafts.find(item => item.editorId === editorId);
+  if (!draft) throw new Error('Fixture draft is missing');
+  return draft.draft;
+}
+
 export function fixtureOperations(client: WorkbenchClient): SettingsConfigOperations {
   let value: unknown;
   const listeners = new Set<() => void>();

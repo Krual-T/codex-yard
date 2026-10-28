@@ -5,6 +5,7 @@ import { canEditSkill, SkillSettings } from './skills.ts';
 import { scopeKey, validScopePath } from './scope.ts';
 import type { SettingsScope } from './scope.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
+import { SettingsDraftRecovery } from './SettingsDraftRecovery.tsx';
 
 export interface SkillSectionMemory {
   client: WorkbenchClient; hostId: string; revision: number; cwd: string; scopeError: string | null; query: string;
@@ -48,6 +49,8 @@ export function SkillSection({ client, hostId, projectScope, memory, revision, o
     .some(value => value.toLocaleLowerCase().includes(search)));
   return <>
     <div className="yard-section-heading"><h2>{t('Skills')}</h2><button type="button" disabled={state.loading || state.saving} onClick={() => { void settings.load(); }}>{t('Refresh')}</button></div>
+    <SettingsDraftRecovery client={client} hostId={hostId} section="skills-settings" scope={scope.paths} editorId={settings.editorId}
+      disabled={settings.dirty || state.loading || state.saving || state.draftSaving || scopeChanged} onRestore={draft => settings.restoreDraft(draft)} />
     <form className="yard-filter" onSubmit={event => { event.preventDefault(); if (!settings.dirty && !state.saving && !state.writeUncertain && !scopeChanged) {
       if (cwd && !validScopePath(cwd)) { setScopeError('Enter an absolute working directory.'); return; }
       const paths = cwd ? [cwd] : projectScope.paths;

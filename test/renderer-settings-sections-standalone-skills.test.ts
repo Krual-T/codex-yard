@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import { canEditSkill, SkillSettings } from '../src/renderer/settings/skills.ts';
-import { fixtureConfigurationHost, fixtureOperations } from './renderer-settings-sections-config-fixture.ts';
+import { fixtureConfigurationHost, fixtureDraft, fixtureOperations, fixtureSource } from './renderer-settings-sections-config-fixture.ts';
 
 const local = { name: 'review', description: 'Review changes', path: '/project/.agents/skills/review/SKILL.md', scope: 'repo', enabled: true, pluginId: null };
 const plugin = { name: 'bundle:review', description: 'Plugin review', path: '/plugin/review/SKILL.md', scope: 'user', enabled: true, pluginId: 'bundle' };
@@ -11,12 +11,13 @@ class FakeClient implements WorkbenchClient {
   skills = [{ ...local }, { ...plugin }];
   writes: { params: Record<string, unknown>; hostId?: string }[] = [];
   failRead = false; failWriteAt = 0; lostWriteAt = 0; override = false;
+  generation = 'generation-a'; sourceAvailable = true; hostWrites: Record<string, unknown>[] = [];
   reads = 0; beforeRead?: () => Promise<void>;
   beforeWrite?: () => Promise<void>;
   subscribe(_listener: (event: WorkbenchEvent) => void) { return () => {}; }
   async reply(): Promise<void> { throw new Error('Unexpected approval'); }
   async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
-    if (endpoint === 'configuration-write' && params) return await fixtureConfigurationHost(this, params) as T;
+    if (endpoint === 'configuration-write' && params) { this.hostWrites.push(params); return await fixtureConfigurationHost(this, params) as T; }
     throw new Error('Unexpected host call');
   }
   async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
@@ -25,7 +26,8 @@ class FakeClient implements WorkbenchClient {
       assert.deepEqual(params, { cwds: ['/project'], forceReload: true });
       this.reads++; await this.beforeRead?.();
       if (this.failRead) throw new Error('read failed');
-      return { data: [{ cwd: '/project', skills: this.skills.map(skill => ({ ...skill })), errors: [{ path: '/fixture/bad', message: 'invalid fixture' }] }] } as T;
+      return { data: [{ cwd: '/project', skills: this.skills.map(skill => ({ ...skill })), errors: [{ path: '/fixture/bad', message: 'invalid fixture' }] }],
+        ...(this.sourceAvailable ? { yardConfigSource: fixtureSource(hostId, '/fixture/codex', this.generation) } : {}) } as T;
     }
     if (method === 'skills/config/write') {
       assert.ok(params); this.writes.push({ params, hostId });
@@ -42,6 +44,15 @@ class FakeClient implements WorkbenchClient {
 }
 const setup = async () => { const client = new FakeClient(), settings = new SkillSettings(client, 'ssh:one', ['/project'], client.operations); await settings.load(); return { client, settings }; };
 const id = (name: string, path: string) => JSON.stringify([path, name]);
+
+test('skill source changes preserve the draft and require explicit review', async () => {
+  const { client, settings } = await setup(); settings.edit(id(local.name, local.path), false); client.generation = 'generation-b';
+  assert.equal(await settings.save(), false); assert.equal(settings.dirty, true); assert.equal(client.hostWrites.length, 0);
+  settings.useLatest(); assert.equal(await settings.save(), true);
+  assert.deepEqual(client.hostWrites[0]?.source, fixtureSource('ssh:one', '/fixture/codex', 'generation-b'));
+  const absent = await setup(); absent.client.sourceAvailable = false; await absent.settings.load();
+  absent.settings.edit(id(local.name, local.path), false); assert.equal(await absent.settings.save(), false); assert.equal(absent.client.hostWrites.length, 0);
+});
 
 test('skill writes use original path and namespaced selectors and refresh the authoritative result', async () => {
   const { client, settings } = await setup();
@@ -97,6 +108,7 @@ test('partial skill writes restore the complete draft and never replay the unkno
   client.lostWriteAt = 2;
   assert.equal(await settings.save(), false);
   const resumed = new SkillSettings(client, 'ssh:one', ['/project'], client.operations); await resumed.load();
+  await resumed.restoreDraft(await fixtureDraft(client.operations, settings.editorId));
   assert.deepEqual(resumed.getSnapshot().drafts, [{ id: id(local.name, local.path), enabled: false }, { id: id(plugin.name, plugin.path), enabled: false }]);
   assert.equal(resumed.getSnapshot().writeUncertain, true);
   resumed.useLatest(); assert.equal(await resumed.save(), false); assert.equal(client.writes.length, 2);
@@ -173,9 +185,9 @@ test('a newer skill edit survives controller replacement without changing the or
   await settings.load(); settings.useLatest();
   settings.edit(id(local.name, local.path), true); await settings.retryDraftPersistence();
   const record = await client.operations.find('ssh:one', 'skills-settings', ['/project']);
-  assert.deepEqual(record?.origin.draft, { drafts: [{ id: id(local.name, local.path), enabled: false }] });
-  assert.deepEqual(record?.workingDrafts?.at(-1)?.draft, { drafts: [{ id: id(local.name, local.path), enabled: true }] });
+  assert.deepEqual((record?.origin.draft as { drafts: unknown }).drafts, [{ id: id(local.name, local.path), enabled: false }]);
   const resumed = new SkillSettings(client, 'ssh:one', ['/project'], client.operations); await resumed.load();
+  await resumed.restoreDraft(await fixtureDraft(client.operations, settings.editorId));
   assert.deepEqual(resumed.getSnapshot().drafts, [{ id: id(local.name, local.path), enabled: true }]);
   assert.equal(client.writes.length, 1);
 });
@@ -194,7 +206,7 @@ test('an older skill receipt cannot release a later unknown operation after its 
     }
     return host<T>(endpoint, params);
   };
-  await client.operations.check(original.operationId); await client.operations.finish(original.operationId, true);
+  await client.operations.check(original.operationId); await client.operations.finish(original.operationId);
   const older = await client.operations.find('ssh:one', 'skills-settings', ['/project']); assert.ok(older);
   assert.notEqual(older.operationId, original.operationId); assert.equal(older.phase, 'finished');
   present = false; await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, true);

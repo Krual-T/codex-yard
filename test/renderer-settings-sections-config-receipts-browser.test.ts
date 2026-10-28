@@ -12,7 +12,8 @@ declare global {
     rejectWrite(): void;
     reset(): void;
     requestLeave(): Promise<boolean>;
-    record(): Promise<{ operationId: string; phase: string; workingDrafts?: unknown[] } | null>;
+    record(): Promise<{ operationId: string; phase: string } | null>;
+    drafts(): Promise<{ draft: Record<string, unknown> }[]>;
   }; receiptPanelHarness: { calls: Record<string, unknown>[]; submit(preparing?: boolean): Promise<string> } }
 }
 
@@ -48,14 +49,15 @@ test('real settings editors restore rejected submissions and newer drafts after 
         }
         throw Error('Unexpected host endpoint: ' + method);
       },
-      rpc:async (method, params) => {
+      rpc:async (method, params, hostId) => {
+        const source = {hostId,generation:'fixture',homeDirectory:'/fixture',codexHome:'/fixture'};
         if (method === 'config/read') return {config:{model:'alpha',model_reasoning_effort:'high',approval_policy:'on-request',
-          sandbox_mode:'read-only',profile:null,desktop:{}},layers:[{name:{type:'user',file:'/fixture/config.toml',profile:null},version:'v1'}]};
+          sandbox_mode:'read-only',profile:null,desktop:{}},layers:[{name:{type:'user',file:'/fixture/config.toml',profile:null},version:'v1'}],yardConfigSource:source};
         if (method === 'configRequirements/read') return {requirements:null};
         if (method === 'model/list') return {data:['alpha','beta'].map(name => ({id:name,model:name,displayName:name,
           isDefault:name === 'alpha',supportedReasoningEfforts:[{reasoningEffort:'high'},{reasoningEffort:'low'}]})),nextCursor:null};
         if (method === 'hooks/list') return {data:[{cwd:params.cwds[0],hooks:[hook('first'),hook('second')],warnings:[],errors:[]}]};
-        if (method === 'skills/list') return {data:[{cwd:params.cwds[0],skills:[skill('first'),skill('second')],errors:[]}]};
+        if (method === 'skills/list') return {data:[{cwd:params.cwds[0],skills:[skill('first'),skill('second')],errors:[]}],yardConfigSource:source};
         throw Error('Unexpected RPC: ' + method);
       }};
     let root = createRoot(document.getElementById('root'));
@@ -67,7 +69,8 @@ test('real settings editors restore rejected submissions and newer drafts after 
       reset:() => {root.unmount();root = createRoot(document.getElementById('root'));render();},
       requestLeave:() => guard.requestLeave(),
       record:() => settingsConfigOperations(client).find('ssh-fixture',section,
-        section === 'hooks-settings' || section === 'skills-settings' ? ['/fixture/project'] : undefined)};
+        section === 'hooks-settings' || section === 'skills-settings' ? ['/fixture/project'] : undefined),
+      drafts:async () => {const ops=settingsConfigOperations(client);await ops.refresh();return ops.getSnapshot().drafts;}};
     render();
   ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' } });
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
@@ -105,6 +108,9 @@ test('real settings editors restore rejected submissions and newer drafts after 
       assert.ok(original?.operationId);
       if (section === 'hooks-settings' || section === 'skills-settings') await page.evaluate(() => window.receiptEditorHarness.setScopeStatus('ready'));
       else await page.evaluate(() => window.receiptEditorHarness.setHost('ssh-fixture'));
+      if (section !== 'hooks-settings' && section !== 'skills-settings') {
+        await main.getByRole('region', { name: 'Saved configuration edits' }).getByRole('button', { name: 'Restore this edit' }).last().click();
+      }
       if (section === 'models') {
         await page.waitForFunction(() => (document.querySelector('[aria-label="Model"]') as HTMLSelectElement | null)?.value === 'beta');
         await main.getByRole('combobox', { name: 'Reasoning effort' }).selectOption('low');
@@ -122,8 +128,11 @@ test('real settings editors restore rejected submissions and newer drafts after 
         if (section === 'hooks-settings') await main.getByRole('checkbox', { name: 'SessionStart hook 2' }).uncheck();
         else await main.getByRole('checkbox', { name: 'second (repo, /fixture/second/SKILL.md)' }).uncheck();
       }
-      await page.waitForFunction(async () => !!(await window.receiptEditorHarness.record())?.workingDrafts?.length);
+      await page.waitForFunction(async section => (await window.receiptEditorHarness.drafts()).some(({draft}) =>
+        section === 'models' ? draft.effort === 'low' : section === 'agent' ? (draft.values as {sandbox?: string})?.sandbox === 'workspace-write' :
+        section === 'worktrees' ? (draft.draft as {keepCount?: string})?.keepCount === '4' : Array.isArray(draft.drafts) && draft.drafts.length === 2), section);
       await page.evaluate(() => window.receiptEditorHarness.reset());
+      await main.getByRole('region', { name: 'Saved configuration edits' }).getByRole('button', { name: 'Restore this edit' }).last().click();
       if (section === 'models') {
         await page.waitForFunction(() => (document.querySelector('[aria-label="Model"]') as HTMLSelectElement | null)?.value === 'beta'
           && (document.querySelector('[aria-label="Reasoning effort"]') as HTMLSelectElement | null)?.value === 'low');
@@ -187,7 +196,7 @@ test('recovery panel carries a saved signed receipt across pages without reconne
     let preparingId;
     window.receiptPanelHarness = {calls, submit:async preparing => {
       try {await operations.submit('removed-host','config/batchWrite',{edits:[{keyPath:'model',value:'beta'}],...(preparing ? {preparingFixture:true} : {})},
-        {section:'models',draft:{model:'beta'}},undefined,id => {if (preparing) preparingId = id;});return 'unexpected success';} catch(error) {return error.message;}
+        {section:'models',source:{hostId:'removed-host',generation:'fixture',homeDirectory:'/fixture',codexHome:'/fixture/codex'},draft:{model:'beta'}},undefined,id => {if (preparing) preparingId = id;});return 'unexpected success';} catch(error) {return error.message;}
     }};
     createRoot(document.getElementById('root')).render(<ConfigurationRecovery client={client}/>);
   ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic' });
@@ -216,7 +225,7 @@ test('recovery panel carries a saved signed receipt across pages without reconne
     assert.deepEqual(recovered.map(call => call.action), ['status', 'retry-persistence']);
     assert.equal(recovered[1]?.operationId, original[0]?.operationId);
     assert.equal((recovered[1]?.receipt as { operationId: string }).operationId, original[0]?.operationId);
-    await panel.getByRole('button', { name: 'Discard saved copy' }).click();
+    await panel.getByRole('button', { name: 'Close original operation' }).click();
     await first.waitForFunction(() => !document.querySelector('[aria-label="Configuration save recovery"]'));
     assert.match(await first.evaluate(() => window.receiptPanelHarness.submit(true)), /unknown result/);
     const firstPanel = first.getByRole('region', { name: 'Configuration save recovery' });

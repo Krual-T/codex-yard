@@ -1,27 +1,29 @@
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { readBrowserAtom, subscribeBrowserAtoms, updateBrowserAtom } from '../storage/ui-atoms.ts';
+import type { ConfigReadSource, ConfigWriteMethod, ConfigWriteErrorCategory, ConfigWriteTerminal, ConfigWriteReceipt, ConfigWriteStatus } from '../../../lib/config-write-protocol.ts';
+import { configReadSource } from './config-source.ts';
 
-export type SettingsWriteMethod = 'config/batchWrite' | 'skills/config/write';
+export type SettingsWriteMethod = ConfigWriteMethod;
 export type SettingsWriteSection = 'models' | 'agent' | 'worktrees' | 'hooks-settings' | 'skills-settings';
-export interface SettingsWriteOrigin { section: SettingsWriteSection; scope?: readonly string[]; draft: unknown }
-export type WriteErrorCategory = 'configVersionConflict' | 'configValidationError' | 'configLayerReadonly';
-export type WriteTerminal = { kind: 'ok' | 'okOverridden' } | { kind: 'effectiveEnabled'; value: boolean }
-  | { kind: 'rejected'; code?: number; category?: WriteErrorCategory } | { kind: 'not-sent'; code?: 'OBSERVER_LIMIT' };
-export interface WriteReceipt {
-  operationId: string; hostId: string; method: SettingsWriteMethod; terminal: WriteTerminal; signature: string;
-}
-export interface WriteStatus {
-  operationId: string; hostId: string; method?: SettingsWriteMethod;
-  state: 'preparing' | 'pending' | 'unknown' | 'succeeded' | 'failed'; terminal?: WriteTerminal;
-  observedTerminal?: WriteTerminal; storageError?: true; interrupted?: true; recoveryReceipt?: WriteReceipt;
-}
+export interface SettingsWriteOrigin { section: SettingsWriteSection; scope?: readonly string[]; draft: unknown; source?: ConfigReadSource; editorId?: string; revision?: number }
+export type WriteErrorCategory = ConfigWriteErrorCategory;
+export type WriteTerminal = ConfigWriteTerminal;
+export type WriteReceipt = ConfigWriteReceipt;
+export type WriteStatus = ConfigWriteStatus;
 export interface SettingsWriteRecord {
   operationId: string; hostId: string; method: SettingsWriteMethod; params: Record<string, unknown>;
   origin: SettingsWriteOrigin; phase: 'pending' | 'unknown' | 'finished' | 'not-started' | 'blocked';
   operation?: WriteStatus; blocker?: WriteStatus; result?: unknown; error?: string;
   recoveryReceipt?: WriteReceipt; blockerReceipt?: WriteReceipt;
+  notSentEvidence?: { kind: 'host-observed' | 'client-before-send'; operationId: string; hostId: string; method: SettingsWriteMethod; terminal: WriteTerminal };
+  hostMissing?: true;
   workingDrafts?: { editorId: string; revision: number; draft: unknown }[];
 }
+export interface SettingsDraftRecord {
+  hostId: string; section: SettingsWriteSection; scope?: readonly string[];
+  editorId: string; revision: number; draft: unknown;
+}
+interface SettingsWriteData { version: 2; nextRevision: number; operations: SettingsWriteRecord[]; drafts: SettingsDraftRecord[] }
 export interface SettingsWriteStorage {
   read(): Promise<unknown>;
   update(change: (value: unknown) => unknown): Promise<unknown>;
@@ -50,12 +52,16 @@ export function createSettingsWriteId(): string {
 
 function records(value: unknown): SettingsWriteRecord[] {
   if (value === undefined) return [];
+  if (object(value) && value.version === 2) value = value.operations;
   if (!Array.isArray(value)) throw new Error('Configuration recovery records cannot be read. Writes are blocked.');
   const ids = new Set<string>();
   for (const item of value) {
     if (!object(item) || typeof item.operationId !== 'string' || !item.operationId || ids.has(item.operationId)
       || typeof item.hostId !== 'string' || !item.hostId || !methods.has(String(item.method)) || !object(item.params)
       || !object(item.origin) || !sections.has(String(item.origin.section)) || !Object.hasOwn(item.origin, 'draft')
+      || item.origin.source !== undefined && !configReadSource(item.origin.source, item.hostId as string)
+      || item.origin.editorId !== undefined && (typeof item.origin.editorId !== 'string' || !item.origin.editorId)
+      || item.origin.revision !== undefined && (!Number.isSafeInteger(item.origin.revision) || (item.origin.revision as number) < 1)
       || item.origin.scope !== undefined && (!Array.isArray(item.origin.scope) || item.origin.scope.some((v: unknown) => typeof v !== 'string'))
       || item.workingDrafts !== undefined && (!Array.isArray(item.workingDrafts) || item.workingDrafts.some((entry: unknown) => !object(entry)
         || typeof entry.editorId !== 'string' || !Number.isSafeInteger(entry.revision) || !Object.hasOwn(entry, 'draft')))
@@ -76,6 +82,13 @@ function records(value: unknown): SettingsWriteRecord[] {
       throw new Error('A saved configuration recovery receipt cannot be verified. Writes are blocked.');
     }
     const ownReceipt = item.recoveryReceipt as WriteReceipt | undefined;
+    if (item.notSentEvidence !== undefined && (!object(item.notSentEvidence) || !['host-observed', 'client-before-send'].includes(String(item.notSentEvidence.kind))
+      || item.notSentEvidence.operationId !== item.operationId || item.notSentEvidence.hostId !== item.hostId
+      || item.notSentEvidence.method !== item.method || !terminal(item.notSentEvidence.terminal, item.method as SettingsWriteMethod, 'failed')
+      || (item.notSentEvidence.terminal as WriteTerminal).kind !== 'not-sent')) {
+      throw new Error('The saved not-sent evidence cannot be verified. Writes are blocked.');
+    }
+    if (item.hostMissing !== undefined && item.hostMissing !== true) throw new Error('Configuration recovery records cannot be read. Writes are blocked.');
     if (ownReceipt && operation && completed(operation) && operation.terminal && !sameTerminal(ownReceipt.terminal, operation.terminal)) {
       throw new Error('The saved configuration terminal does not match its receipt. Writes are blocked.');
     }
@@ -90,6 +103,41 @@ function records(value: unknown): SettingsWriteRecord[] {
   }
   return value as SettingsWriteRecord[];
 }
+function data(value: unknown): SettingsWriteData {
+  const operations = records(value);
+  if (value === undefined) return { version: 2, nextRevision: 1, operations, drafts: [] };
+  if (Array.isArray(value)) {
+    const drafts: SettingsDraftRecord[] = [];
+    for (const item of operations) {
+      const scope = item.origin.scope;
+      drafts.push({ hostId: item.hostId, section: item.origin.section, scope,
+        editorId: `legacy:${item.operationId}`, revision: 1, draft: item.origin.draft });
+      for (const copy of item.workingDrafts ?? []) {
+        drafts.push({ hostId: item.hostId, section: item.origin.section, scope,
+          editorId: `legacy:${item.operationId}:${copy.editorId}`, revision: copy.revision, draft: copy.draft });
+      }
+    }
+    return { version: 2, nextRevision: Math.max(0, ...drafts.map(draft => draft.revision)) + 1, operations, drafts };
+  }
+  if (!object(value) || value.version !== 2 || !Array.isArray(value.drafts) || !Number.isSafeInteger(value.nextRevision)
+    || (value.nextRevision as number) < 1) throw new Error('Configuration drafts cannot be read. Writes are blocked.');
+  const keys = new Set<string>();
+  for (const draft of value.drafts) {
+    if (!object(draft) || typeof draft.hostId !== 'string' || !draft.hostId || !sections.has(String(draft.section))
+      || draft.scope !== undefined && (!Array.isArray(draft.scope) || draft.scope.some((v: unknown) => typeof v !== 'string'))
+      || typeof draft.editorId !== 'string' || !draft.editorId || !Number.isSafeInteger(draft.revision) || (draft.revision as number) < 1
+      || !Object.hasOwn(draft, 'draft')) throw new Error('Configuration drafts cannot be read. Writes are blocked.');
+    const key = JSON.stringify([draft.hostId, draft.section, draft.scope ?? [], draft.editorId]);
+    if (keys.has(key)) throw new Error('Configuration drafts contain duplicate editors. Writes are blocked.');
+    keys.add(key);
+  }
+  if ((value.nextRevision as number) <= Math.max(0, ...(value.drafts as SettingsDraftRecord[]).map(draft => draft.revision))) {
+    throw new Error('Configuration draft revisions cannot be read. Writes are blocked.');
+  }
+  return { version: 2, nextRevision: value.nextRevision as number, operations, drafts: value.drafts as SettingsDraftRecord[] };
+}
+const draftKey = (draft: Pick<SettingsDraftRecord, 'hostId' | 'section' | 'scope' | 'editorId'>) =>
+  JSON.stringify([draft.hostId, draft.section, draft.scope ?? [], draft.editorId]);
 function terminal(value: unknown, method: SettingsWriteMethod, state: string): value is WriteTerminal {
   if (!object(value)) return false;
   if (state === 'succeeded') return method === 'config/batchWrite' && (value.kind === 'ok' || value.kind === 'okOverridden')
@@ -156,8 +204,8 @@ export class SettingsWriteError extends Error {
     super(message); this.name = 'SettingsWriteError'; this.uncertain = uncertain; this.operationId = operationId; this.blocker = blocker;
   }
 }
-export interface SettingsWriteSnapshot { records: SettingsWriteRecord[]; loading: boolean; error: string | null; localRetry: string[]; draftRetry: string[]; draftPending: number; inFlight: string[] }
-interface PendingDraft { hostId: string; section: SettingsWriteSection; scope?: readonly string[]; draft: unknown; record: SettingsWriteRecord | null }
+export interface SettingsWriteSnapshot { records: SettingsWriteRecord[]; drafts: SettingsDraftRecord[]; loading: boolean; error: string | null; localRetry: string[]; draftRetry: string[]; draftPending: number; inFlight: string[] }
+interface PendingDraft { hostId: string; section: SettingsWriteSection; scope?: readonly string[]; draft: unknown }
 interface PendingReceipt { patch: Partial<SettingsWriteRecord>; record?: SettingsWriteRecord }
 class ObservationMismatch extends Error {}
 
@@ -166,7 +214,7 @@ export class SettingsConfigOperations {
   private client: WorkbenchClient;
   private storage: SettingsWriteStorage;
   private newId: () => string;
-  private snapshot: SettingsWriteSnapshot = { records: [], loading: true, error: null, localRetry: [], draftRetry: [], draftPending: 0, inFlight: [] };
+  private snapshot: SettingsWriteSnapshot = { records: [], drafts: [], loading: true, error: null, localRetry: [], draftRetry: [], draftPending: 0, inFlight: [] };
   private listeners = new Set<() => void>();
   private localPending = new Map<string, PendingReceipt>();
   private observationWrites = new Map<string, Promise<void>>();
@@ -192,41 +240,31 @@ export class SettingsConfigOperations {
   async refresh(): Promise<void> {
     const sequence = ++this.sequence;
     try {
-      const value = records(await this.storage.read());
-      if (sequence === this.sequence) this.publish({ records: value, loading: false, error: null });
+      const value = data(await this.storage.read());
+      if (sequence === this.sequence) this.publish({ records: value.operations, drafts: value.drafts, loading: false, error: null });
     } catch (error) { if (sequence === this.sequence) this.publish({ loading: false, error: message(error) }); }
   }
   async find(hostId: string, section: SettingsWriteSection, scope?: readonly string[]): Promise<SettingsWriteRecord | null> {
-    const list = records(await this.storage.read());
+    const list = data(await this.storage.read()).operations;
     return [...list].reverse().find(item => item.hostId === hostId && item.origin.section === section
       && JSON.stringify(item.origin.scope ?? []) === JSON.stringify(scope ?? [])) ?? null;
   }
   async saveDraft(hostId: string, section: SettingsWriteSection, scope: readonly string[] | undefined,
     editorId: string, draft: unknown): Promise<void> {
-    let previous = this.localDraftPending.get(editorId)?.record ?? null;
     const copy = structuredClone(draft);
     this.draftPending++; this.publish({});
     try {
-      const found = await this.find(hostId, section, scope);
-      previous = found ?? previous;
-      if (!previous) {
-        if (this.localDraftPending.has(editorId)) throw new Error('The original saved operation is unavailable; the newer edit remains in this page.');
-        return;
-      }
-      const original = previous;
       await this.storage.update(value => {
-        const list = records(value), index = list.findIndex(item => item.operationId === original.operationId);
-        const item = index < 0 ? original : list[index]!;
-        const existing = item.workingDrafts ?? [];
-        const revision = Math.max(0, ...existing.map(entry => entry.revision)) + 1;
-        const next = { ...item, workingDrafts: [...existing.filter(entry => entry.editorId !== editorId), { editorId, revision, draft: copy }] };
-        if (index < 0) list.push(next); else list[index] = next;
-        return list;
+        const current = data(value), key = draftKey({ hostId, section, scope, editorId });
+        if (!Number.isSafeInteger(current.nextRevision + 1)) throw new Error('Configuration draft revisions are exhausted.');
+        current.drafts = [...current.drafts.filter(item => draftKey(item) !== key),
+          { hostId, section, scope, editorId, revision: current.nextRevision++, draft: copy }];
+        return current;
       });
       this.localDraftPending.delete(editorId);
       await this.refresh();
     } catch (error) {
-      this.localDraftPending.set(editorId, { hostId, section, scope, draft: copy, record: previous });
+      this.localDraftPending.set(editorId, { hostId, section, scope, draft: copy });
       this.publish({ error: `The browser could not save a newer configuration edit: ${message(error)}` });
       throw error;
     } finally { this.draftPending--; this.publish({}); }
@@ -236,11 +274,27 @@ export class SettingsConfigOperations {
     if (!pending) throw new Error('The newer browser edit is no longer available.');
     await this.saveDraft(pending.hostId, pending.section, pending.scope, editorId, pending.draft);
   }
-  private async change(id: string, patch: Partial<SettingsWriteRecord>, fallback?: SettingsWriteRecord, restoreMissing = false) {
+  async discardDraft(draft: SettingsDraftRecord): Promise<void> {
     await this.storage.update(value => {
-      const list = records(value), index = list.findIndex(item => item.operationId === id);
-      if (index < 0 && !restoreMissing) throw new ObservationMismatch('The original browser record was already closed. Review the current operations.');
-      const original = index < 0 ? fallback : list[index];
+      const current = data(value), key = draftKey(draft);
+      current.drafts = current.drafts.filter(item => draftKey(item) !== key || item.revision !== draft.revision);
+      return current;
+    });
+    await this.refresh();
+  }
+  async clearEditorDraft(hostId: string, section: SettingsWriteSection, scope: readonly string[] | undefined, editorId: string): Promise<void> {
+    await this.storage.update(value => {
+      const current = data(value), key = draftKey({ hostId, section, scope, editorId });
+      current.drafts = current.drafts.filter(item => draftKey(item) !== key);
+      return current;
+    });
+    this.localDraftPending.delete(editorId); await this.refresh();
+  }
+  private async change(id: string, patch: Partial<SettingsWriteRecord>, fallback?: SettingsWriteRecord) {
+    await this.storage.update(value => {
+      const current = data(value), list = current.operations, index = list.findIndex(item => item.operationId === id);
+      if (index < 0) throw new ObservationMismatch('The original browser record was already closed. Review the current operations.');
+      const original = list[index];
       if (!original || original.operationId !== id) throw new Error('The original local configuration record is missing.');
       if (fallback && (original.hostId !== fallback.hostId || original.method !== fallback.method
         || JSON.stringify(original.params) !== JSON.stringify(fallback.params) || JSON.stringify(original.origin) !== JSON.stringify(fallback.origin))) {
@@ -250,6 +304,9 @@ export class SettingsConfigOperations {
         && (patch.phase === 'unknown' || patch.phase === 'pending' || patch.phase === 'blocked');
       const confirmedTerminal = original.operation && completed(original.operation) ? original.operation.terminal : undefined;
       const incomingTerminal = patch.operation?.terminal ?? patch.operation?.observedTerminal;
+      if (original.notSentEvidence && incomingTerminal && !sameTerminal(original.notSentEvidence.terminal, incomingTerminal)) {
+        throw new ObservationMismatch('The host returned a result that conflicts with the original not-sent evidence.');
+      }
       if (confirmedTerminal && incomingTerminal && !sameTerminal(confirmedTerminal, incomingTerminal)) {
         throw new ObservationMismatch('The host returned conflicting terminal results for the original operation.');
       }
@@ -276,8 +333,8 @@ export class SettingsConfigOperations {
       const next = { ...original, ...safePatch, operationId: original.operationId, hostId: original.hostId,
         method: original.method, params: original.params, origin: original.origin,
         ...(ownReceipt ? { recoveryReceipt: ownReceipt } : {}), ...(blockerReceipt ? { blockerReceipt } : {}) };
-      if (index < 0) list.push(next); else list[index] = next;
-      return list;
+      list[index] = next;
+      return current;
     });
     this.localPending.delete(id); await this.refresh();
   }
@@ -287,7 +344,7 @@ export class SettingsConfigOperations {
       if (this.localPending.has(id) && !retry) {
         throw new SettingsWriteError('Retry saving the browser receipt before checking the host operation.', true, id);
       }
-      try { await this.change(id, patch, fallback, retry); }
+      try { await this.change(id, patch, fallback); }
       catch (error) {
         if (error instanceof ObservationMismatch) {
           this.publish({ error: error.message });
@@ -306,6 +363,19 @@ export class SettingsConfigOperations {
     if (!pending) throw new Error('The original browser receipt is no longer available. Check the host operation.');
     await this.saveObservation(id, pending.patch, pending.record, true);
   }
+  async dismissClosedLocal(id: string): Promise<void> {
+    const pending = this.localPending.get(id);
+    if (!pending || this.observationWrites.has(id)) throw new Error('The original browser receipt is still being saved.');
+    await this.storage.update(value => {
+      const current = data(value);
+      if (current.operations.some(item => item.operationId === id)) {
+        throw new Error('The original operation is still present. Retry saving its browser receipt.');
+      }
+      return current;
+    });
+    if (this.localPending.get(id) === pending) this.localPending.delete(id);
+    await this.refresh();
+  }
   async submit(hostId: string, method: SettingsWriteMethod, params: Record<string, unknown>, origin: SettingsWriteOrigin,
     canDispatch: () => boolean = () => true, onPrepared: (id: string) => void = () => {}): Promise<{ operationId: string; result: unknown }> {
     const operationId = this.newId();
@@ -317,13 +387,20 @@ export class SettingsConfigOperations {
   }
   private async submitPrepared(operationId: string, hostId: string, method: SettingsWriteMethod, params: Record<string, unknown>, origin: SettingsWriteOrigin,
     canDispatch: () => boolean): Promise<{ operationId: string; result: unknown }> {
+    if (!configReadSource(origin.source, hostId)) throw new SettingsWriteError('The original configuration source is unavailable. Reload and review your edit.', false, operationId);
     const entry: SettingsWriteRecord = structuredClone({ operationId, hostId, method, params, origin, phase: 'pending' as const });
     try {
       await this.storage.update(value => {
-        const list = records(value);
+        const current = data(value), list = current.operations;
         if (list.some(active)) throw new Error('An earlier configuration save must be checked before another save.');
         if (list.some(item => item.operationId === operationId)) throw new Error('The configuration operation ID is already in use.');
-        return [...list, entry];
+        if (entry.origin.editorId) {
+          const key = draftKey({ hostId, section: entry.origin.section, scope: entry.origin.scope, editorId: entry.origin.editorId });
+          const draft = current.drafts.find(item => draftKey(item) === key);
+          if (!draft) throw new Error('The original editor draft is not saved in this browser.');
+          entry.origin.revision = draft.revision;
+        }
+        current.operations = [...list, entry]; return current;
       });
       await this.refresh();
     } catch (error) { throw new SettingsWriteError(`Could not save the original operation in the browser: ${message(error)}`, false, operationId); }
@@ -332,8 +409,14 @@ export class SettingsConfigOperations {
       throw new SettingsWriteError('The save was interrupted before it was sent.', false, operationId);
     }
     let response: unknown;
-    try { response = await this.client.host('configuration-write', { hostId, action: 'submit', operationId, method, params: entry.params }); }
+    try { response = await this.client.host('configuration-write', { hostId, action: 'submit', operationId, method, params: entry.params, source: entry.origin.source }); }
     catch (error) {
+      if (error instanceof Error && 'uncertain' in error && error.uncertain === false && 'sendPhase' in error && error.sendPhase === 'before-send') {
+        await this.saveObservation(operationId, { phase: 'not-started', error: message(error), notSentEvidence: {
+          kind: 'client-before-send', operationId, hostId, method, terminal: { kind: 'not-sent' },
+        } }, entry);
+        throw new SettingsWriteError(`The original save was not sent: ${message(error)}`, false, operationId);
+      }
       await this.saveObservation(operationId, { phase: 'unknown', error: `The original save could not be confirmed: ${message(error)}` }, entry);
       throw new SettingsWriteError(`The original save could not be confirmed: ${message(error)}`, true, operationId);
     }
@@ -364,7 +447,11 @@ export class SettingsConfigOperations {
         && (method === 'config/batchWrite' ? result.status === resultTerminal?.kind
           : resultTerminal?.kind === 'effectiveEnabled' && result.effectiveEnabled === resultTerminal.value);
       const phase = completed(operation) && compatibleOutcome && validResult ? 'finished' : 'unknown';
-      await this.saveObservation(operationId, { phase, operation, ...(result !== undefined && validResult && compatibleOutcome ? { result } : {}), ...(detail ? { error: detail } : {}) }, entry);
+      const evidence = outcome === 'not-started' && object(response) && object(response.error) && response.error.uncertain === false
+        && operation.storageError && operation.observedTerminal?.kind === 'not-sent'
+        ? { kind: 'host-observed' as const, operationId, hostId, method, terminal: operation.observedTerminal } : undefined;
+      await this.saveObservation(operationId, { phase, operation, ...(evidence ? { notSentEvidence: evidence } : {}),
+        ...(result !== undefined && validResult && compatibleOutcome ? { result } : {}), ...(detail ? { error: detail } : {}) }, entry);
       if (operation.storageError) throw new SettingsWriteError('The host observed a result but could not save its receipt. Retry saving the host receipt.', true, operationId);
       if (phase === 'finished' && operation.state === 'succeeded') {
         const effectiveResult = result ?? terminalResult(operation);
@@ -381,7 +468,7 @@ export class SettingsConfigOperations {
   }
   async check(id: string, retryPersistence = false): Promise<void> {
     if (this.localPending.has(id)) throw new Error('Retry saving the browser receipt before checking the host operation.');
-    const list = records(await this.storage.read()), entry = list.find(item => item.operationId === id);
+    const list = data(await this.storage.read()).operations, entry = list.find(item => item.operationId === id);
     if (!entry) throw new Error('The original local configuration record is missing.');
     const blocker = entry.phase === 'blocked' ? entry.blocker : undefined;
     const targetId = blocker?.operationId ?? id, targetHost = blocker?.hostId ?? entry.hostId;
@@ -391,7 +478,10 @@ export class SettingsConfigOperations {
       ...(retryPersistence && savedReceipt ? { receipt: savedReceipt } : {}) });
     const operation = object(response) ? status(response.operation, targetId, targetHost, blocker?.method ?? entry.method) : null;
     if (!operation) {
-      await this.saveObservation(id, { error: 'The host has no confirmed original operation. Its result remains unknown.' }, entry); return;
+      const missing = object(response) && response.operation === null;
+      await this.saveObservation(id, { hostMissing: missing ? true : undefined, error: missing && entry.notSentEvidence && !blocker
+        ? 'The host no longer has this operation. The original not-sent evidence remains saved in this browser.'
+        : 'The host has no confirmed original operation. Its result remains unknown.' }, entry); return;
     }
     if (blocker) {
       await this.saveObservation(id, completed(operation) ? { phase: 'not-started', blocker: operation, error: 'The blocked save was not sent. Review the original edit before retrying.' }
@@ -401,17 +491,31 @@ export class SettingsConfigOperations {
     const phase = completed(operation) ? 'finished' : 'unknown';
     const error = writeTerminalMessage(operation.terminal ?? operation.observedTerminal)
       ?? (object(response) && object(response.error) && typeof response.error.message === 'string' ? response.error.message : undefined);
-    await this.saveObservation(id, { phase, operation, error }, entry);
+    await this.saveObservation(id, { phase, operation, error, hostMissing: undefined }, entry);
   }
-  async finish(id: string, discardDrafts = false): Promise<void> {
+  async confirmNotSent(id: string): Promise<void> {
+    if (this.localPending.has(id) || this.observationWrites.has(id)) throw new Error('The original receipt is still being saved.');
     await this.storage.update(value => {
-      const list = records(value), item = list.find(record => record.operationId === id);
+      const current = data(value), index = current.operations.findIndex(item => item.operationId === id), entry = current.operations[index];
+      if (!entry || !entry.hostMissing || !entry.notSentEvidence || entry.phase !== 'unknown' || entry.blocker) {
+        throw new Error('The original not-sent evidence is unavailable. Check the original operation first.');
+      }
+      current.operations[index] = { ...entry, phase: 'not-started', operation: undefined,
+        error: 'The original save was not sent. Review the preserved edit before trying again.' };
+      return current;
+    });
+    await this.refresh();
+  }
+  async finish(id: string, options: { consumeSubmittedDraft?: boolean } = {}): Promise<void> {
+    await this.storage.update(value => {
+      const current = data(value), list = current.operations, item = list.find(record => record.operationId === id);
       if (!item || active(item) || item.operation?.storageError || this.draftPending || this.localPending.has(id) || this.observationWrites.has(id)
-        || [...this.localDraftPending.values()].some(pending => pending.record?.operationId === id)) throw new Error('The original operation is not ready to close.');
-      if (item.workingDrafts?.length && !discardDrafts) throw new Error('Newer edits still have a saved copy. Review them before closing this operation.');
-      if (!discardDrafts && list.some(other => other.operationId !== id && other.hostId === item.hostId
-        && other.origin.section === item.origin.section && JSON.stringify(other.origin.scope ?? []) === JSON.stringify(item.origin.scope ?? []))) return list;
-      return list.filter(record => record.operationId !== id);
+        ) throw new Error('The original operation is not ready to close.');
+      if (options.consumeSubmittedDraft && item.operation?.state === 'succeeded' && item.origin.editorId && item.origin.revision) {
+        const key = draftKey({ hostId: item.hostId, section: item.origin.section, scope: item.origin.scope, editorId: item.origin.editorId });
+        current.drafts = current.drafts.filter(draft => draftKey(draft) !== key || draft.revision !== item.origin.revision);
+      }
+      current.operations = list.filter(record => record.operationId !== id); return current;
     });
     await this.refresh();
   }
@@ -419,15 +523,16 @@ export class SettingsConfigOperations {
     if (!ids.length) return;
     const unique = new Set(ids);
     await this.storage.update(value => {
-      const list = records(value), group = list.filter(item => unique.has(item.operationId));
+      const current = data(value), list = current.operations, group = list.filter(item => unique.has(item.operationId));
       if (this.draftPending || group.length !== unique.size || group.some(item => item.phase !== 'finished' || item.operation?.state !== 'succeeded'
-        || item.operation.storageError || item.workingDrafts?.length || this.localPending.has(item.operationId) || this.observationWrites.has(item.operationId)
-        || [...this.localDraftPending.values()].some(pending => pending.record?.operationId === item.operationId))) {
+        || item.operation.storageError || this.localPending.has(item.operationId) || this.observationWrites.has(item.operationId))) {
         throw new Error('The original configuration receipts or newer edits still need review.');
       }
-      if (group.some(item => list.some(other => !unique.has(other.operationId) && other.hostId === item.hostId
-        && other.origin.section === item.origin.section && JSON.stringify(other.origin.scope ?? []) === JSON.stringify(item.origin.scope ?? [])))) return list;
-      return list.filter(item => !unique.has(item.operationId));
+      for (const item of group) if (item.origin.editorId && item.origin.revision) {
+        const key = draftKey({ hostId: item.hostId, section: item.origin.section, scope: item.origin.scope, editorId: item.origin.editorId });
+        current.drafts = current.drafts.filter(draft => draftKey(draft) !== key || draft.revision !== item.origin.revision);
+      }
+      current.operations = list.filter(item => !unique.has(item.operationId)); return current;
     });
     await this.refresh();
   }

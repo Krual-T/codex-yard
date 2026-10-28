@@ -1,9 +1,11 @@
 import type { WorkbenchClient } from '../workbench-contract.ts';
-import { userConfigTarget } from './config-target.ts';
+import { isConfigTarget, userConfigTarget } from './config-target.ts';
 import type { ConfigTarget } from './config-target.ts';
 import { validScopePath } from './scope.ts';
-import { createSettingsWriteId, latestSettingsDraft, SettingsConfigOperations, SettingsWriteError, settingsConfigOperations } from './config-operations.ts';
+import { createSettingsWriteId, SettingsConfigOperations, SettingsWriteError, settingsConfigOperations } from './config-operations.ts';
 import type { WriteStatus } from './config-operations.ts';
+import { configReadSource, sameConfigSource } from './config-source.ts';
+import type { ConfigReadSource } from '../../../lib/config-write-protocol.ts';
 
 type Handler = { type: 'command'; command: string; async: boolean } | { type: 'mcpTool'; server: string; tool: string }
   | { type: 'prompt' | 'agent' } | { type: 'unknown'; label: string };
@@ -12,7 +14,7 @@ export interface HookEntry {
   trustStatus: string; isManaged: boolean; enabled: boolean; timeoutSec: number | null; handler: Handler;
 }
 interface HookGroup { cwd: string; hooks: HookEntry[]; warnings: string[]; errors: { path: string; message: string }[] }
-interface HookRead { hooks: HookEntry[]; warnings: string[]; target: ConfigTarget | null; targetError: string | null; profile: string | null }
+interface HookRead { hooks: HookEntry[]; warnings: string[]; target: ConfigTarget | null; targetError: string | null; profile: string | null; source: ConfigReadSource | null }
 export interface HookDraft { key: string; enabled: boolean }
 export interface HookSnapshot {
   loading: boolean; saving: boolean; hooks: HookEntry[]; warnings: string[]; drafts: HookDraft[];
@@ -71,11 +73,10 @@ export class HookSettings {
   private readonly hostId: string;
   private readonly cwds: readonly string[];
   private readonly operations: SettingsConfigOperations;
-  private restored = false;
   private originalId: string | null = null;
   private resolvedOriginalId: string | null = null;
   private originalBlocker: WriteStatus | null = null;
-  private readonly editorId = createSettingsWriteId();
+  readonly editorId = createSettingsWriteId();
   private draftWrites: Promise<void> = Promise.resolve();
   private draftWriteCount = 0;
   private readonly listeners = new Set<() => void>();
@@ -83,6 +84,7 @@ export class HookSettings {
   private writeInFlight = false;
   private target: ConfigTarget | null = null;
   private profile: string | null = null;
+  private source: ConfigReadSource | null = null;
   private latestRead: HookRead | null = null;
   private snapshot: HookSnapshot = { loading: true, saving: false, hooks: [], warnings: [], drafts: [], error: null, targetError: null, needsRefresh: false, writeUncertain: false, latest: null, draftStorageError: null, draftSaving: false };
   constructor(client: WorkbenchClient, hostId: string, cwds: readonly string[], operations = settingsConfigOperations(client)) {
@@ -92,14 +94,29 @@ export class HookSettings {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<HookSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
   retryDraftPersistence() {
-    const draft = structuredClone({ drafts: this.snapshot.drafts });
+    const draft = structuredClone({ drafts: this.snapshot.drafts, hooks: this.snapshot.hooks, target: this.target, profile: this.profile, source: this.source });
     this.draftWriteCount++; this.update({ draftSaving: true });
-    this.draftWrites = this.draftWrites.then(() => this.operations.saveDraft(this.hostId, 'hooks-settings', this.cwds, this.editorId, draft))
+    const dirty = this.dirty;
+    this.draftWrites = this.draftWrites.then(() => dirty ? this.operations.saveDraft(this.hostId, 'hooks-settings', this.cwds, this.editorId, draft)
+      : this.operations.clearEditorDraft(this.hostId, 'hooks-settings', this.cwds, this.editorId))
       .then(() => this.update({ draftStorageError: null }), error => this.update({ draftStorageError: text(error) }))
       .finally(() => { if (--this.draftWriteCount === 0) this.update({ draftSaving: false }); });
     return this.draftWrites;
   }
   get dirty() { return this.snapshot.drafts.length > 0; }
+  async restoreDraft(value: unknown): Promise<void> {
+    if (this.dirty || this.snapshot.loading || this.snapshot.saving) throw new Error('Finish the current edit before restoring another copy.');
+    if (!record(value) || !Array.isArray(value.drafts) || !value.drafts.every((item: unknown) =>
+      record(item) && typeof item.key === 'string' && typeof item.enabled === 'boolean')) throw new Error('The saved hook edits cannot be read.');
+    const hooks = Array.isArray(value.hooks) && value.hooks.every((item: unknown) => record(item) && typeof item.key === 'string'
+      && typeof item.enabled === 'boolean' && typeof item.trustStatus === 'string' && typeof item.isManaged === 'boolean' && record(item.handler))
+      ? value.hooks as HookEntry[] : this.snapshot.hooks;
+    this.source = configReadSource(value.source, this.hostId);
+    if (isConfigTarget(value.target)) this.target = value.target;
+    if (value.profile === null || typeof value.profile === 'string') this.profile = value.profile;
+    this.update({ drafts: value.drafts as HookDraft[], hooks, needsRefresh: true });
+    await this.retryDraftPersistence(); await this.load();
+  }
   dispose() {
     this.generation++;
     if (this.snapshot.saving) this.update({ saving: false, loading: false, needsRefresh: true,
@@ -110,25 +127,28 @@ export class HookSettings {
 
   private async read(): Promise<HookRead> {
     if (!this.cwds.length || !this.cwds.every(validScopePath)) throw new Error('Select a project or session with a working directory.');
-    const [listResult, configResult, homeResult] = await Promise.allSettled([
-      this.client.rpc<{ data: unknown }>('hooks/list', { cwds: this.cwds }, this.hostId),
-      this.client.rpc<{ config: { profile?: unknown }; layers?: unknown }>('config/read', { includeLayers: true }, this.hostId),
-      this.client.host<{ codexHome?: unknown }>('codex-home', { hostId: this.hostId }),
-    ]);
-    if (listResult.status === 'rejected') throw listResult.reason;
-    const groups = hookGroups(listResult.value?.data), hooks = uniqueHooks(groups);
+    type ConfigResponse = { config: { profile?: unknown }; layers?: unknown; yardConfigSource?: unknown };
+    const configBefore = await this.client.rpc<ConfigResponse>('config/read', { includeLayers: true }, this.hostId).catch(() => null);
+    const listResult = await this.client.rpc<{ data: unknown }>('hooks/list', { cwds: this.cwds }, this.hostId);
+    const configResult = await this.client.rpc<ConfigResponse>('config/read', { includeLayers: true }, this.hostId).catch(() => null);
+    const groups = hookGroups(listResult?.data), hooks = uniqueHooks(groups);
     const warnings = groups.flatMap(group => [...group.warnings, ...group.errors.map(error => `${error.path}: ${error.message}`)]);
     let target: ConfigTarget | null = null, targetError: string | null = null, profile: string | null = null;
-    if (configResult.status === 'fulfilled' && homeResult.status === 'fulfilled' && record(configResult.value?.config)
-      && (configResult.value.config.profile == null || typeof configResult.value.config.profile === 'string')) {
-      profile = typeof configResult.value.config.profile === 'string' && configResult.value.config.profile ? configResult.value.config.profile : null;
-      const resolved = userConfigTarget(baseLayers(configResult.value.layers), homeResult.value?.codexHome);
+    const firstSource = configReadSource(configBefore?.yardConfigSource, this.hostId), source = configReadSource(configResult?.yardConfigSource, this.hostId);
+    if (configBefore && configResult && sameConfigSource(firstSource, source) && source && record(configResult.config)
+      && (configResult.config.profile == null || typeof configResult.config.profile === 'string')) {
+      profile = typeof configResult.config.profile === 'string' && configResult.config.profile ? configResult.config.profile : null;
+      const resolved = userConfigTarget(baseLayers(configResult.layers), source.codexHome);
+      const original = userConfigTarget(baseLayers(configBefore.layers), source.codexHome);
       target = resolved.target; targetError = resolved.error;
-    } else targetError = 'Cannot save: the selected host did not provide its configuration home and version.';
-    return { hooks, warnings, target, targetError, profile };
+      if (!sameTarget(original.target, target) || configBefore.config?.profile !== configResult.config.profile) {
+        target = null; targetError = 'The configuration changed while hooks were read. Refresh and review your edits.';
+      }
+    } else targetError = 'Cannot save without a verified configuration connection. Refresh and review your edits.';
+    return { hooks, warnings, target, targetError, profile, source: target ? source : null };
   }
   private changed(read: HookRead): boolean {
-    if (!sameTarget(this.target, read.target) || this.profile !== read.profile) return true;
+    if (!sameTarget(this.target, read.target) || this.profile !== read.profile || !sameConfigSource(this.source, read.source)) return true;
     return this.snapshot.drafts.some(draft => {
       const previous = this.snapshot.hooks.find(hook => hook.key === draft.key), current = read.hooks.find(hook => hook.key === draft.key);
       return !previous || !current || JSON.stringify(previous) !== JSON.stringify(current);
@@ -152,18 +172,11 @@ export class HookSettings {
           || !blocker && await this.operations.originalFinished(this.hostId, this.originalId, 'config/batchWrite');
         if (generation !== this.generation) return;
       }
-      const savedDraft = previous && latestSettingsDraft(previous);
-      if (!this.restored && previous && record(savedDraft) && Array.isArray(savedDraft.drafts)) {
-        const drafts = savedDraft.drafts;
-        if (drafts.every((item: unknown) => record(item) && typeof item.key === 'string' && typeof item.enabled === 'boolean')) {
-          this.snapshot = { ...this.snapshot, drafts: drafts as HookDraft[], needsRefresh: true, writeUncertain: unresolved };
-        } else throw new Error('The saved hook edits cannot be read.');
-      } else if (!this.restored && previous) {
-        throw new Error('The saved hook edits cannot be read.');
+      if (unresolved && previous?.operationId === this.originalId) {
+        this.snapshot = { ...this.snapshot, writeUncertain: true, needsRefresh: true };
       } else if (this.snapshot.writeUncertain && resolved) {
         this.snapshot = { ...this.snapshot, writeUncertain: false, needsRefresh: true };
       }
-      this.restored = true;
       const read = await this.read();
       if (generation !== this.generation) return;
       if (this.dirty && (this.snapshot.needsRefresh || this.changed(read))) {
@@ -172,7 +185,7 @@ export class HookSettings {
           latest: read.hooks, warnings: read.warnings, targetError: read.targetError,
           error: this.snapshot.writeUncertain ? unknownWrite : 'Hook settings changed or the last save could not be confirmed. Review the current state before saving.' });
       } else {
-        this.latestRead = null; this.target = read.target; this.profile = read.profile;
+        this.latestRead = null; this.target = read.target; this.profile = read.profile; this.source = read.source;
         this.update({ loading: false, hooks: read.hooks, warnings: read.warnings, targetError: read.targetError, latest: null, needsRefresh: false });
       }
     } catch (error) { if (generation === this.generation) this.update({ loading: false, error: `Could not load hooks: ${text(error)}` }); }
@@ -190,7 +203,7 @@ export class HookSettings {
     if (this.snapshot.saving || this.snapshot.writeUncertain) return;
     const latest = this.latestRead;
     const refresh = this.snapshot.needsRefresh && !latest;
-    if (latest) { this.target = latest.target; this.profile = latest.profile; this.latestRead = null; }
+    if (latest) { this.target = latest.target; this.profile = latest.profile; this.source = latest.source; this.latestRead = null; }
     this.update({ drafts: [], hooks: latest?.hooks ?? this.snapshot.hooks, warnings: latest?.warnings ?? this.snapshot.warnings,
       targetError: latest ? latest.targetError : this.snapshot.targetError, error: null, latest: null, needsRefresh: false });
     void this.retryDraftPersistence();
@@ -200,10 +213,11 @@ export class HookSettings {
     if (this.snapshot.writeUncertain) { this.update({ error: unknownWrite }); return; }
     const latest = this.latestRead;
     if (!latest) return;
+    if (!latest.source) { this.update({ error: 'The configuration connection is unavailable. Refresh and review your edits.' }); return; }
     if (this.snapshot.drafts.some(draft => !latest.hooks.some(hook => hook.key === draft.key && canEditHook(hook)))) {
       this.update({ error: 'A changed hook is missing or requires review. Discard edits and refresh before continuing.' }); return;
     }
-    this.target = latest.target; this.profile = latest.profile; this.latestRead = null;
+    this.target = latest.target; this.profile = latest.profile; this.source = latest.source; this.latestRead = null;
     const drafts = this.snapshot.drafts.filter(draft => latest.hooks.find(hook => hook.key === draft.key)?.enabled !== draft.enabled);
     this.update({ hooks: latest.hooks, warnings: latest.warnings, targetError: latest.targetError, drafts, latest: null, needsRefresh: false, error: null });
     void this.retryDraftPersistence();
@@ -212,6 +226,8 @@ export class HookSettings {
     if (!this.dirty || this.snapshot.saving || this.snapshot.loading || this.snapshot.latest || this.snapshot.needsRefresh || this.snapshot.writeUncertain) return false;
     const target = this.target;
     if (!target) { this.update({ error: this.snapshot.targetError || 'Cannot save without a verified configuration version.' }); return false; }
+    const source = this.source;
+    if (!source) { this.update({ error: 'The original configuration connection is unavailable. Refresh and review your edits.' }); return false; }
     const generation = ++this.generation, drafts = this.snapshot.drafts;
     this.update({ saving: true, error: null });
     let writeStarted = false, writeFinished = false;
@@ -234,7 +250,7 @@ export class HookSettings {
       try {
         const submitted = await this.operations.submit(this.hostId, 'config/batchWrite',
           { edits, filePath: null, expectedVersion: target.version, reloadUserConfig: true },
-          { section: 'hooks-settings', scope: this.cwds, draft: { drafts } }, () => generation === this.generation,
+          { section: 'hooks-settings', scope: this.cwds, editorId: this.editorId, source, draft: { drafts, source } }, () => generation === this.generation,
           id => { this.originalId = id; this.resolvedOriginalId = null; this.originalBlocker = null; });
         if (this.originalId === submitted.operationId) this.resolvedOriginalId = submitted.operationId;
         result = submitted.result as { status: 'ok' | 'okOverridden' };
@@ -245,13 +261,13 @@ export class HookSettings {
       if (result?.status !== 'ok') throw new Error(result?.status === 'okOverridden' ? 'A higher-priority setting overrides the change' : 'The host did not confirm the write');
       const after = await this.read();
       if (generation !== this.generation) return false;
-      if (!after.target || after.target.file !== target.file || after.profile !== this.profile
+      if (!sameConfigSource(source, after.source) || !after.target || after.target.file !== target.file || after.profile !== this.profile
         || drafts.some(draft => !after.hooks.some(hook => hook.key === draft.key && canEditHook(hook) && hook.enabled === draft.enabled))) {
         this.latestRead = after;
         this.update({ saving: false, latest: after.hooks, warnings: after.warnings, targetError: after.targetError, needsRefresh: true,
           error: 'The host reported different hook settings after saving. Review the current state.' }); return false;
       }
-      await this.operations.finish(operationId);
+      await this.operations.finish(operationId, { consumeSubmittedDraft: true });
       if (generation !== this.generation) return false;
       this.target = after.target; this.profile = after.profile; this.latestRead = null;
       this.update({ saving: false, hooks: after.hooks, warnings: after.warnings, targetError: after.targetError,

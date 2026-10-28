@@ -11,6 +11,7 @@ declare global {
     check(id: string): Promise<void>;
     edit(editor: string, model: string): Promise<void>;
     find(): Promise<Record<string, unknown> | null>;
+    drafts(): Promise<{ editorId: string }[]>;
   } }
 }
 
@@ -29,10 +30,11 @@ test('browser atom transactions retain the original ID and independent newer dra
     const operations = settingsConfigOperations(client);
     window.configRecoveryHarness = {calls,
       submit:async () => {try {await operations.submit('local','config/batchWrite',{edits:[{keyPath:'model',value:'beta'}]},
-        {section:'models',draft:{model:'beta'}}); return 'success';} catch(error) {return error.message;}},
+        {section:'models',source:{hostId:'local',generation:'fixture',homeDirectory:'/fixture',codexHome:'/fixture/codex'},draft:{model:'beta'}}); return 'success';} catch(error) {return error.message;}},
       check:id => operations.check(id),
       edit:(editor,model) => operations.saveDraft('local','models',undefined,editor,{model}),
-      find:() => operations.find('local','models')};
+      find:() => operations.find('local','models'),
+      drafts:async () => {await operations.refresh();return operations.getSnapshot().drafts;}};
     createRoot(document.getElementById('root')).render(<ConfigurationRecovery client={client}/>);
   ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic' });
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
@@ -56,7 +58,7 @@ test('browser atom transactions retain the original ID and independent newer dra
     const restored = await second.evaluate(() => window.configRecoveryHarness.find());
     assert.equal(restored?.operationId, id);
     assert.deepEqual(restored?.params, { edits: [{ keyPath: 'model', value: 'beta' }] });
-    assert.deepEqual((restored?.workingDrafts as { editorId: string }[]).map(item => item.editorId).sort(), ['first-page', 'second-page']);
+    assert.deepEqual((await second.evaluate(() => window.configRecoveryHarness.drafts())).map(item => item.editorId).sort(), ['first-page', 'second-page']);
     await second.evaluate(operationId => window.configRecoveryHarness.check(operationId), id);
     assert.equal((await second.evaluate(() => window.configRecoveryHarness.find()))?.phase, 'unknown');
     assert.equal((await first.evaluate(() => window.configRecoveryHarness.calls.filter(call => call.action === 'submit'))).length, 1);
