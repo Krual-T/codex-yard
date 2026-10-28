@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { chromium } from 'playwright-core';
+import type { Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem, commandItem, NO_REPLY } from '../test/fake-codex.ts';
 import { fileDaemonFixture } from '../test/file-daemon-fixture.ts';
@@ -94,6 +95,22 @@ await context.addInitScript(() => {
 });
 const page = await context.newPage();
 const errors: string[] = [], requests: string[] = [], checks: string[] = [];
+async function holdUiWrites(target: Page) {
+  await target.evaluate(async () => {
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open('codex-yard.ui-atoms.v1', 1);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result, transaction = db.transaction('atoms', 'readwrite'), store = transaction.objectStore('atoms');
+        let held = true;
+        (window as any).releaseUiWriteBarrier = () => { held = false; };
+        transaction.oncomplete = () => db.close();
+        const keepAlive = () => { const read = store.get('native-atoms'); read.onsuccess = () => { if (held) keepAlive(); }; };
+        keepAlive(); resolve();
+      };
+    });
+  });
+}
 page.on('pageerror', error => errors.push(error.message));
 page.on('request', request => requests.push(request.url()));
 await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
@@ -147,6 +164,22 @@ try {
     throw new Error('The owned App client was not mounted.');
   });
   await installClientProbe(page);
+  const retainedComposer = page.getByRole('textbox', { name: 'Work with Codex', exact: true });
+  await retainedComposer.evaluate(element => { element.setAttribute('data-retained-archive-owner', 'original'); });
+  await holdUiWrites(page);
+  try {
+    await retainedComposer.fill('UNPERSISTED_COMPOSER_BEFORE_EXTERNAL_ARCHIVE');
+    fake.archived.add('owned-conversation');
+    fake.broadcast({ method: 'thread/archived', params: { threadId: 'owned-conversation' } });
+    await page.getByRole('button', { name: 'Restore conversation', exact: true }).waitFor();
+    assert.equal(await retainedComposer.getAttribute('data-retained-archive-owner'), 'original');
+    assert.equal(await retainedComposer.inputValue(), 'UNPERSISTED_COMPOSER_BEFORE_EXTERNAL_ARCHIVE');
+    assert.equal(await retainedComposer.evaluate(element => element.closest('[inert]') !== null), true);
+    assert.equal(fake.calls('turn/start').length, 0);
+  } finally { await page.evaluate(() => (window as any).releaseUiWriteBarrier()); }
+  await page.getByRole('button', { name: 'Restore conversation', exact: true }).click();
+  await retainedComposer.fill('');
+  checks.push('external archive revokes input while retaining the exact composer DOM and a draft blocked before its IndexedDB commit; restore does not start a turn');
   const lightTheme = { ...defaultThemes.light, surface: '#fdf3e9', ink: '#152535', fonts: { ui: 'Arial', content: 'Georgia', code: 'Courier New' } };
   await page.evaluate(async theme => {
     await (window as any).acceptanceClient.host('set-setting', { key: 'appearanceLightChromeTheme', value: theme });
@@ -275,20 +308,7 @@ try {
 
   if (!await page.getByRole('button', { name: 'Settings', exact: true }).isVisible()) await sidebarButton.click();
   await page.getByRole('button', { name: 'Edit message', exact: true }).click();
-  await page.evaluate(async () => {
-    await new Promise<void>((resolve, reject) => {
-      const request = indexedDB.open('codex-yard.ui-atoms.v1', 1);
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const db = request.result, transaction = db.transaction('atoms', 'readwrite'), store = transaction.objectStore('atoms');
-        let held = true;
-        (window as any).releaseUiWriteBarrier = () => { held = false; };
-        transaction.oncomplete = () => db.close();
-        const keepAlive = () => { const read = store.get('native-atoms'); read.onsuccess = () => { if (held) keepAlive(); }; };
-        keepAlive(); resolve();
-      };
-    });
-  });
+  await holdUiWrites(page);
   const heldEditor = page.getByRole('textbox', { name: 'Edit message text', exact: true });
   await heldEditor.fill('UNSENT_EDIT_BEFORE_NAVIGATION');
   const editLocation = page.url();
@@ -300,6 +320,21 @@ try {
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
   await page.waitForURL('**/local/owned-conversation');
   await heldEditor.waitFor(); assert.equal(await heldEditor.inputValue(), 'UNSENT_EDIT_BEFORE_NAVIGATION');
+  const originalHistory = fake.handlers.get('thread/turns/list')!;
+  let releaseRollbackHistory!: () => void, rollbackReadStarted!: () => void;
+  const rollbackHistory = new Promise<void>(resolve => { releaseRollbackHistory = resolve; });
+  const rollbackReading = new Promise<void>(resolve => { rollbackReadStarted = resolve; });
+  fake.handlers.set('thread/turns/list', async (params, peer) => { rollbackReadStarted(); await rollbackHistory; return originalHistory(params, peer); });
+  try {
+    await heldEditor.evaluate(element => { element.setAttribute('data-retained-rollback-editor', 'original'); });
+    await heldEditor.fill('UNSENT_EDIT_THROUGH_ROLLBACK');
+    fake.broadcast({ method: 'thread/reverted', params: { threadId: 'owned-conversation' } });
+    await rollbackReading;
+    assert.equal(await heldEditor.getAttribute('data-retained-rollback-editor'), 'original');
+    assert.equal(await heldEditor.inputValue(), 'UNSENT_EDIT_THROUGH_ROLLBACK');
+    assert.equal(await heldEditor.evaluate(element => document.activeElement === element), true);
+  } finally { releaseRollbackHistory(); fake.handlers.set('thread/turns/list', originalHistory); }
+  checks.push('rollback history revalidation keeps the actual mounted message editor, focus and unsent input');
   await page.locator('.yard-message-edit').getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.waitForFunction(() => !document.querySelector('.yard-message-edit'));
   checks.push('actual App freezes the message editor before navigation, awaits a blocked IndexedDB write and restores the exact unsent edit after returning');
@@ -355,12 +390,22 @@ try {
   assert(checkedEdit.recovery.some(value => value.recovery.draft.text === 'NEWER_UNSENT_EDIT_B'
     && value.submission.stage === 'started' && value.recovery.editor.revision > value.submission.editorVersion.revision));
   assert.equal(fake.calls('thread/revert').length, 2); assert.equal(fake.calls('turn/start').length, 3);
+  const confirmedA = fake.threads.get('owned-conversation')!, completedA = confirmedA.turns.at(-1)!;
+  confirmedA.status = { type: 'idle' }; completedA.status = 'completed';
+  fake.broadcast({ method: 'turn/completed', params: { threadId: confirmedA.id, turn: completedA } });
   await page.reload();
   await page.getByRole('textbox', { name: 'Edit message text', exact: true }).waitFor();
   assert.equal(await page.getByRole('textbox', { name: 'Edit message text', exact: true }).inputValue(), 'NEWER_UNSENT_EDIT_B');
-  await page.locator('.yard-message-edit').getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByRole('button', { name: 'Continue editing from the sent message', exact: true }).click();
+  await page.locator('.yard-message-edit').getByRole('button', { name: 'Send', exact: true }).click();
   await page.waitForFunction(() => !document.querySelector('.yard-message-edit'));
-  checks.push('actual edit hook retains newer B after checking submitted A, including reload; no replay');
+  assert.equal(fake.calls('thread/revert').length, 3); assert.equal(fake.calls('turn/start').length, 4);
+  const sentB = fake.calls('turn/start').at(-1)!.params;
+  assert.notEqual(sentB.clientUserMessageId, checkedEdit.calls[0].clientUserMessageId);
+  assert((sentB.input as { text?: string }[]).some(item => item.text === 'NEWER_UNSENT_EDIT_B'));
+  const completedB = confirmedA.turns.at(-1)!; completedB.status = 'completed'; confirmedA.status = { type: 'idle' };
+  fake.broadcast({ method: 'turn/completed', params: { threadId: confirmedA.id, turn: completedB } });
+  checks.push('actual edit hook retains B after checking A and reload, explicitly rebases against complete source and sends B once with a new CID under host source verification');
   await page.setViewportSize({ width: 1360, height: 900 });
   if (!await page.getByRole('button', { name: 'New chat', exact: true }).isVisible()) await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
   // A rejected first turn outlives the home composer. Keep B while explicitly
@@ -635,8 +680,23 @@ try {
   const comments = await page.evaluate(async () => (window as any).acceptanceClient.host('get-persisted-atom', { key: 'codex-yard.browser-comments.v1' }));
   assert.equal(Object.values(comments.value.entries).flat().length, 0, 'Removing an actual composer reference must await its authoritative comment deletion.');
   checks.push('actual App Chrome panel selects a disposable real Chrome target through official MCP; real DevTools element reaches composer and transactional removal');
+  const sourceBeforeSettings = new URL(page.url());
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  const expectedSettingsSource = { hostId: sourceBeforeSettings.searchParams.get('hostId') ?? 'local',
+    returnTo: sourceBeforeSettings.pathname + sourceBeforeSettings.search + sourceBeforeSettings.hash,
+    source: { kind: 'thread', threadId: decodeURIComponent(sourceBeforeSettings.pathname.split('/')[2]!) } };
+  assert.deepEqual(await page.evaluate(() => history.state.__yardState.__yardSettingsOrigin), expectedSettingsSource);
+  const sourceReads = fake.calls('thread/read').length;
+  await page.reload(); await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  await page.waitForFunction(() => history.state.__yardState.__yardSettingsOrigin?.source?.kind === 'thread');
+  assert.deepEqual(await page.evaluate(() => history.state.__yardState.__yardSettingsOrigin), expectedSettingsSource);
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await page.waitForURL(sourceBeforeSettings.href);
+  assert(fake.calls('thread/read').slice(sourceReads).some(call => record(call.params).threadId === expectedSettingsSource.source.threadId));
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  checks.push('settings retain their exact history source and return route through full reload and resolve source metadata again');
   await page.getByRole('combobox', { name: 'Language', exact: true }).selectOption('zh-CN');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.waitForFunction(() => document.documentElement.lang === 'zh-CN');

@@ -1,4 +1,4 @@
-import type { ApprovalPolicy, ApprovalsReviewer, SandboxMode, ThreadSummary } from '../../lib/codex-protocol.ts';
+import type { ApprovalPolicy, ApprovalsReviewer, SandboxMode, ThreadSummary, RequestOptions } from '../../lib/codex-protocol.ts';
 
 /** The browser talks only to Yard's host bridge, which owns CLI connections. */
 export interface WorkbenchEvent {
@@ -13,7 +13,7 @@ export interface ServerRequestEvent extends WorkbenchEvent {
   request: { id: string | number; method: string; params?: Record<string, unknown> };
 }
 export interface WorkbenchClient {
-  rpc<T = unknown>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T>;
+  rpc<T = unknown>(method: string, params?: Record<string, unknown>, hostId?: string, options?: Pick<RequestOptions, 'onLateTerminal'>): Promise<T>;
   host<T = unknown>(endpoint: string, params?: Record<string, unknown>): Promise<T>;
   subscribe(listener: (event: WorkbenchEvent) => void): () => void;
   reply(request: ServerRequestRef, response: { result: unknown } | { error: { code: number; message: string } }): Promise<void>;

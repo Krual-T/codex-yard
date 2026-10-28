@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setImmediate } from 'node:timers/promises';
-import type { ThreadSummary } from '../lib/codex-protocol.ts';
+import type { LateRpcTerminal, RequestOptions, ThreadSummary, TurnSummary } from '../lib/codex-protocol.ts';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import { ConversationSessions } from '../src/renderer/app/conversation-sessions.ts';
 
@@ -11,19 +11,23 @@ function fixture() {
   const calls: { method: string; hostId: string }[] = [];
   const thread = (id: string): ThreadSummary => ({ id, name: 'Session', cwd: '/fixture', turns: [], status: { type: 'idle' } });
   let resumeFailure: Error | undefined;
+  let unsubscribeFailure: Error | undefined;
   let heldResume: Promise<void> | undefined;
   let heldHistory: Promise<void> | undefined;
+  let history: TurnSummary[] = [];
+  const subscriptionObservers: { method: string; receive: NonNullable<RequestOptions['onLateTerminal']> }[] = [];
   const client: WorkbenchClient = {
-    async rpc<T>(method: string, params: Record<string, unknown> = {}, hostId = 'local'): Promise<T> {
+    async rpc<T>(method: string, params: Record<string, unknown> = {}, hostId = 'local', options?: Pick<RequestOptions, 'onLateTerminal'>): Promise<T> {
       calls.push({ method, hostId });
+      if (options?.onLateTerminal) subscriptionObservers.push({ method, receive: options.onLateTerminal });
       if (method === 'thread/resume') {
         await heldResume;
         if (resumeFailure) throw resumeFailure;
         return { thread: thread(String(params.threadId)), model: hostId + '-model' } as T;
       }
       if (method === 'thread/read') return { thread: thread(String(params.threadId)) } as T;
-      if (method === 'thread/turns/list') { await heldHistory; return { data: [], nextCursor: null } as T; }
-      if (method === 'thread/unsubscribe') return {} as T;
+      if (method === 'thread/turns/list') { await heldHistory; return { data: history.map(turn => ({ ...turn, itemsView: 'full' })), nextCursor: null } as T; }
+      if (method === 'thread/unsubscribe') { if (unsubscribeFailure) throw unsubscribeFailure; return {} as T; }
       throw new Error('Unexpected RPC: ' + method);
     },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -31,7 +35,10 @@ function fixture() {
   };
   return { client, calls, thread, emit: (event: WorkbenchEvent) => { for (const listener of listeners) listener(event); },
     rejectResume(error: Error | undefined) { resumeFailure = error; }, holdResume(promise: Promise<void>) { heldResume = promise; },
-    holdHistory(promise: Promise<void>) { heldHistory = promise; } };
+    rejectUnsubscribe(error: Error | undefined) { unsubscribeFailure = error; },
+    holdHistory(promise: Promise<void> | undefined) { heldHistory = promise; },
+    history(turns: TurnSummary[]) { history = turns; },
+    late(index: number, receipt: LateRpcTerminal) { return subscriptionObservers[index]!.receive(receipt); } };
 }
 
 test('two panels share one conversation subscription and only the last owner unsubscribes', async () => {
@@ -66,7 +73,7 @@ test('same thread IDs on different hosts have independent stream projections and
 
 test('an actual creation receipt permits the first send without reading unsupported empty history', async () => {
   const h = fixture(), sessions = new ConversationSessions(h.client, async () => undefined);
-  sessions.created(scope, h.thread(scope.threadId), { model: 'receipt-model' });
+  h.emit({ type: 'thread-created', hostId: scope.hostId, result: { thread: h.thread(scope.threadId), model: 'receipt-model' } });
   const release = sessions.acquire(scope, false); await sessions.ready(scope);
   assert.equal(h.calls.length, 0);
   assert.equal(sessions.view(scope).snapshot().options?.model, 'receipt-model');
@@ -106,7 +113,8 @@ test('an archived reader remains available when the last writable panel releases
   const h = fixture(), sessions = new ConversationSessions(h.client, async () => undefined);
   const primary = sessions.acquire(scope, false), archived = sessions.acquire(scope, true);
   await sessions.ready(scope);
-  primary(); await sessions.ready(scope);
+  primary(); await sessions.refresh(scope);
+  await assert.rejects(sessions.ready(scope), /writable subscription/);
   assert.equal(h.calls.filter(call => call.method === 'thread/unsubscribe').length, 1);
   assert.equal(sessions.view(scope).snapshot().thread?.id, scope.threadId);
   await sessions.refresh(scope);
@@ -141,4 +149,106 @@ test('background reconciliation keeps the editor mounted while marking history i
   finish(); await refreshing;
   assert.equal(sessions.view(scope).snapshot().historyComplete, true);
   release(); await setImmediate(); sessions.dispose();
+});
+
+test('cached options cannot authorize a write while the new subscription is pending or archived', async () => {
+  const h = fixture(), sessions = new ConversationSessions(h.client, async () => undefined);
+  const first = sessions.acquire(scope, false); await sessions.ready(scope); first(); await setImmediate();
+  let finish!: () => void;
+  h.holdResume(new Promise<void>(resolve => { finish = resolve; }));
+  const second = sessions.acquire(scope, false); await setImmediate();
+  assert.equal(sessions.view(scope).snapshot().options?.model, 'local-model');
+  assert.equal(sessions.view(scope).snapshot().canSubmit, false);
+  const waiting = sessions.ready(scope);
+  h.emit({ type: 'mcp-notification', hostId: scope.hostId, method: 'thread/archived', params: { threadId: scope.threadId } });
+  finish(); await assert.rejects(waiting, /writable subscription/);
+  assert.equal(sessions.view(scope).snapshot().canSubmit, false);
+  second(); await setImmediate(); sessions.dispose();
+});
+
+test('uncertain unsubscribe stays fenced until the original connection returns its own terminal receipt', async () => {
+  const h = fixture(), sessions = new ConversationSessions(h.client, async () => undefined);
+  const first = sessions.acquire(scope, false); await sessions.ready(scope);
+  h.rejectUnsubscribe(Object.assign(new Error('unsubscribe timed out'), { uncertain: true }));
+  first(); await setImmediate();
+  const second = sessions.acquire(scope, false);
+  await assert.rejects(sessions.ready(scope), /原订阅操作的结果尚未确认/);
+  assert.equal(h.calls.filter(call => call.method === 'thread/resume').length, 1);
+  assert.equal(sessions.view(scope).snapshot().canSubmit, false);
+  h.rejectUnsubscribe(undefined);
+  await h.late(1, { outcome: 'success', result: {} }); await sessions.ready(scope);
+  assert.equal(h.calls.filter(call => call.method === 'thread/resume').length, 2);
+  assert.equal(sessions.view(scope).snapshot().canSubmit, true);
+  second(); await setImmediate(); sessions.dispose();
+});
+
+test('an uncertain resume is not replayed and a disconnected original observer cannot bless the new bridge', async () => {
+  const h = fixture(); h.rejectResume(Object.assign(new Error('resume timed out'), { uncertain: true }));
+  const sessions = new ConversationSessions(h.client, async () => undefined), release = sessions.acquire(scope, false);
+  await assert.rejects(sessions.ready(scope), /原订阅操作的结果尚未确认/);
+  assert.equal(h.calls.filter(call => call.method === 'thread/resume').length, 1);
+  h.emit({ type: 'connection-state', state: 'disconnected' });
+  await h.late(0, { outcome: 'success', result: { thread: h.thread(scope.threadId), model: 'old-socket' } });
+  assert.equal(sessions.view(scope).snapshot().canSubmit, false);
+  h.rejectResume(undefined); h.emit({ type: 'connection-state', state: 'connected' }); await sessions.ready(scope);
+  assert.equal(h.calls.filter(call => call.method === 'thread/resume').length, 2);
+  assert.equal(sessions.view(scope).snapshot().options?.model, 'local-model');
+  release(); await setImmediate(); sessions.dispose();
+});
+
+test('a creation with no visible owner loses its subscription proof on connection replacement', async () => {
+  const h = fixture(), sessions = new ConversationSessions(h.client, async () => undefined);
+  h.emit({ type: 'thread-created', hostId: scope.hostId, result: { thread: h.thread(scope.threadId), model: 'old-created' } });
+  h.emit({ type: 'connection-state', state: 'disconnected' }); h.emit({ type: 'connection-state', state: 'connected' });
+  const release = sessions.acquire(scope, false); await sessions.ready(scope);
+  assert.equal(h.calls.filter(call => call.method === 'thread/resume').length, 1);
+  assert.equal(sessions.view(scope).snapshot().options?.model, 'local-model');
+  release(); await setImmediate(); sessions.dispose();
+});
+
+test('leaving during active output keeps a continuity warning until complete history is reconciled', async () => {
+  const h = fixture(), sessions = new ConversationSessions(h.client, async () => undefined);
+  const first = sessions.acquire(scope, false); await sessions.ready(scope);
+  const notify = (method: string, params: Record<string, unknown>) => h.emit({ type: 'mcp-notification', hostId: scope.hostId, method,
+    params: { threadId: scope.threadId, turnId: 'turn', ...params } });
+  notify('turn/started', { turn: { id: 'turn', status: 'inProgress', items: [] } });
+  notify('item/started', { item: { id: 'message', type: 'agentMessage', text: '' } });
+  notify('item/agentMessage/delta', { itemId: 'message', delta: 'A' });
+  assert.equal(sessions.view(scope).snapshot().streamGap, false);
+  first(); await setImmediate();
+  h.history([{ id: 'turn', status: 'inProgress', items: [{ id: 'message', type: 'agentMessage', text: 'AB' }] }]);
+  const second = sessions.acquire(scope, false); await sessions.ready(scope);
+  notify('item/started', { item: { id: 'later', type: 'agentMessage', text: '' } });
+  assert.equal(sessions.view(scope).snapshot().streamGap, true, 'A later start must not erase the missed interval');
+  h.history([{ id: 'turn', status: 'completed', items: [{ id: 'message', type: 'agentMessage', text: 'ABC' }] }]);
+  notify('turn/completed', { turn: { id: 'turn', status: 'completed', items: [] } });
+  await sessions.refresh(scope);
+  assert.equal(sessions.view(scope).snapshot().streamGap, false);
+  assert.equal(sessions.view(scope).snapshot().thread?.turns[0]?.items[0]?.text, 'ABC');
+  second(); await setImmediate(); sessions.dispose();
+});
+
+test('a stale history failure after leave and return triggers a new read without poisoning the new view', async () => {
+  const h = fixture(), sessions = new ConversationSessions(h.client, async () => undefined);
+  const first = sessions.acquire(scope, false); await sessions.ready(scope);
+  let fail!: (error: Error) => void;
+  h.holdHistory(new Promise<void>((_resolve, reject) => { fail = reject; }));
+  const stale = sessions.refresh(scope); await setImmediate(); first();
+  const second = sessions.acquire(scope, false); h.holdHistory(undefined); fail(new Error('old view failed'));
+  await assert.rejects(stale, /old view failed/); await sessions.ready(scope);
+  const value = sessions.view(scope).snapshot();
+  assert.equal(value.historyComplete, true); assert.equal(value.error, null);
+  assert.equal(h.calls.filter(call => call.method === 'thread/turns/list').length, 3);
+  second(); await setImmediate(); sessions.dispose();
+});
+
+test('rollback preserves the mounted conversation identity while history is revalidated', async () => {
+  const h = fixture(), sessions = new ConversationSessions(h.client, async () => undefined);
+  const release = sessions.acquire(scope, false); await sessions.ready(scope);
+  const before = sessions.view(scope).snapshot().thread;
+  h.emit({ type: 'mcp-notification', hostId: scope.hostId, method: 'thread/reverted', params: { threadId: scope.threadId } });
+  assert.equal(sessions.view(scope).snapshot().thread, before);
+  assert.equal(sessions.view(scope).snapshot().loading, false);
+  assert.equal(sessions.view(scope).snapshot().historyComplete, false);
+  await sessions.refresh(scope); release(); await setImmediate(); sessions.dispose();
 });

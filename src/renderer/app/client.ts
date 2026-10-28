@@ -1,6 +1,7 @@
 import { BrowserFiles } from '../../native/browser-files.ts';
 import { readMethods } from '../../native/protocol.ts';
 import type { HostMessage } from '../../native/protocol.ts';
+import type { LateRpcTerminal, RequestOptions } from '../../../lib/codex-protocol.ts';
 import type { ServerRequestEvent, ServerRequestRef, WorkbenchClient, WorkbenchEvent } from '../workbench-contract.ts';
 import { browserAtom } from './browser-atoms.ts';
 import { subscribeBrowserAtoms } from '../storage/ui-atoms.ts';
@@ -27,6 +28,9 @@ interface Pending {
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
   mutating: boolean;
+  rejected?: boolean;
+  onLateTerminal?: RequestOptions['onLateTerminal'];
+  onResult?: (value: unknown) => void;
 }
 const readHostEndpoints = new Set(['get-settings', 'get-setting', 'get-global-state', 'os-info', 'locale-info', 'codex-home',
   'home-directory', 'workspace-root-options', 'workspace-directory-entries', 'remote-workspace-directory-entries', 'read-file', 'read-file-metadata', 'read-file-binary',
@@ -88,7 +92,7 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
         if (message.type === 'mcp-response') {
           if (!record(message.message) || !rpcId(message.message.id)) return;
           const reply = message.message as { id: string; result?: unknown; error?: { message: string; code?: number; data?: { uncertain?: boolean } } };
-          this.settle(String(reply.id), reply.result, reply.error && new WorkbenchError(reply.error.message, reply.error.data?.uncertain === true, reply.error.code));
+          this.settle(String(reply.id), reply.result, reply.error && new WorkbenchError(reply.error.message, reply.error.data?.uncertain === true, reply.error.code), message.late === true);
         } else if (message.type === 'fetch-response') {
           this.settle(String(message.requestId), message.body, message.responseType === 'error' ? new WorkbenchError(String(message.error), message.uncertain === true) : undefined);
         } else if (message.type === 'server-request-response') {
@@ -101,34 +105,59 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
         if (this.socket !== socket) return;
         this.opening = null; this.socket = null; this.cancelOpening = undefined;
         if (!opened) reject(new WorkbenchError('Yard 宿主连接已断开。'));
-        for (const [id, pending] of this.pending) this.settle(id, undefined,
-          new WorkbenchError(pending.mutating ? '连接已断开，操作结果未知。请刷新核对后再试。' : '连接已断开，请重试。', pending.mutating));
+        this.failPending('连接已断开');
         this.publish({ type: 'connection-state', state: 'disconnected' });
         if (!this.stopped && !this.suspended) this.reconnect = setTimeout(() => { void this.connect().catch(() => {}); }, 2000);
       };
     });
     return this.opening;
   }
-  private settle(id: string, value: unknown, error?: Error) {
+  private settle(id: string, value: unknown, error?: Error, terminal = false) {
     const pending = this.pending.get(id); if (!pending) return;
+    if (pending.rejected && error instanceof WorkbenchError && error.uncertain && !terminal) return;
     clearTimeout(pending.timer); this.pending.delete(id);
+    if (pending.rejected) {
+      const receipt: LateRpcTerminal = error ? { outcome: 'error', error: { message: error.message } } : { outcome: 'success', result: value };
+      try { void Promise.resolve(pending.onLateTerminal?.(receipt)).catch(() => {}); } catch { /* Unknown remains fenced by its consumer. */ }
+      return;
+    }
+    if (error instanceof WorkbenchError && error.uncertain && pending.onLateTerminal && !terminal) {
+      pending.rejected = true;
+      // Expiration removes only the observer. It is never a terminal receipt.
+      pending.timer = setTimeout(() => { this.pending.delete(id); }, 310_000);
+      this.pending.set(id, pending); pending.reject(error); return;
+    }
+    if (!error) pending.onResult?.(value);
     if (error) pending.reject(error); else pending.resolve(value);
   }
-  private async request<T>(message: HostMessage, id: string, mutating: boolean, requireOpen = false): Promise<T> {
+  private failPending(reason: string) {
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer); this.pending.delete(id);
+      if (!pending.rejected) pending.reject(new WorkbenchError(pending.mutating ? reason + '，操作结果未知。请核对会话。' : reason + '，请重试。', pending.mutating));
+    }
+  }
+  private async request<T>(message: HostMessage, id: string, mutating: boolean, requireOpen = false,
+    observation?: { onLateTerminal?: RequestOptions['onLateTerminal']; onResult?: (value: unknown) => void }): Promise<T> {
     if (!requireOpen) await this.connect();
     if (this.socket?.readyState !== WebSocket.OPEN) throw new WorkbenchError('页面连接已断开。');
     const socket = this.socket;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => this.settle(id, undefined,
         new WorkbenchError(mutating ? '等待超时，操作结果未知。请核对会话后再试。' : '请求超时，请重试。', mutating)), 60_000);
-      this.pending.set(id, { resolve: value => resolve(value as T), reject, timer, mutating });
+      this.pending.set(id, { resolve: value => resolve(value as T), reject, timer, mutating, ...observation });
       try { socket.send(JSON.stringify(message)); }
       catch { this.settle(id, undefined, new WorkbenchError('请求发送失败。', mutating)); }
     });
   }
-  rpc<T = unknown>(method: string, params: Record<string, unknown> = {}, hostId = 'local') {
+  rpc<T = unknown>(method: string, params: Record<string, unknown> = {}, hostId = 'local', options?: Pick<RequestOptions, 'onLateTerminal'>) {
+    if (options?.onLateTerminal && !['thread/resume', 'thread/unsubscribe'].includes(method)) return Promise.reject<T>(new Error('Late observation is limited to thread subscription requests.'));
     const id = crypto.randomUUID();
-    return this.request<T>({ type: 'mcp-request', hostId, request: { id, method, params } }, id, !readMethods.has(method));
+    return this.request<T>({ type: 'mcp-request', hostId, observeSubscriptionTerminal: Boolean(options?.onLateTerminal), request: { id, method, params } }, id, !readMethods.has(method), false,
+      { onLateTerminal: options?.onLateTerminal, onResult: method === 'thread/start' ? result => {
+        // Emit while the original bridge's reply is being settled, before any
+        // caller awaits persistence or navigation and the connection can change.
+        if (record(result) && record(result.thread) && typeof result.thread.id === 'string') this.publish({ type: 'thread-created', hostId, result });
+      } : undefined });
   }
   host<T = unknown>(endpoint: string, params: Record<string, unknown> = {}): Promise<T> {
     if (endpoint === 'get-persisted-atom' || endpoint === 'set-persisted-atom') {
@@ -158,7 +187,7 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
     this.suspended = true; clearTimeout(this.reconnect);
     this.cancelOpening?.(new WorkbenchError('页面连接已挂起。')); this.cancelOpening = undefined; this.opening = null;
     const socket = this.socket; this.socket = null; socket?.close();
-    for (const [id, pending] of this.pending) this.settle(id, undefined, new WorkbenchError(pending.mutating ? '页面连接已关闭，操作结果未知。' : '页面连接已关闭。', pending.mutating));
+    this.failPending('页面连接已关闭');
     this.publish({ type: 'connection-state', state: 'disconnected' });
   }
   async resume() {

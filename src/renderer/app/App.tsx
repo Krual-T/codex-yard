@@ -5,11 +5,10 @@ import type { ComposerDraft, MessageEditOrigin, SubmitAction, SubmitOptions, Wor
 import { StandaloneComposer, bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from '../composer/StandaloneComposer.tsx';
 import type { ComposerDraftController, ComposerDraftSnapshot, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
 import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
-import type { MessageEditNavigationController, MessageEditNavigationLease, MessageEditRecovery } from '../messages/use-message-editing.ts';
+import type { MessageEditNavigationController, MessageEditNavigationLease } from '../messages/use-message-editing.ts';
 import { StandaloneGoal } from '../composer/StandaloneGoal.tsx';
 import { StandaloneSettings } from '../settings/StandaloneSettings.tsx';
 import type { SettingsInstructionEditorProps } from '../settings/PersonalizationSection.tsx';
-import type { SettingsProjectRoots, SettingsSessionCwd } from '../settings/scope.ts';
 import { CodeEditor } from '../files/CodeEditor.tsx';
 import { BrowserWorkbenchClient, isServerRequestEvent } from './client.ts';
 import { isThreadBusy } from './thread-state.ts';
@@ -19,7 +18,8 @@ import type { ServerRequest } from './ApprovalDialog.tsx';
 import { submitDraft } from './submission.ts';
 import { applyAppearance } from './appearance.ts';
 import { sessionOptions } from './session-options.ts';
-import { MessageEditRecoveryStore, messageEditChanged, messageEditsAtom } from './message-edit-recovery.ts';
+import { MessageEditRecoveryStore, messageEditChanged, messageEditRebaseMarker, messageEditsAtom } from './message-edit-recovery.ts';
+import type { StoredMessageEdit } from './message-edit-recovery.ts';
 import { projectForThread, projectsForHost } from './projects.ts';
 import type { Project, ProjectState } from './projects.ts';
 import { StandaloneSidebar } from '../sidebar/StandaloneSidebar.tsx';
@@ -28,6 +28,8 @@ import { WorkspacePanels } from '../panels/WorkspacePanels.tsx';
 import type { WorkspacePanelAppearance, WorkspacePanelRequest } from '../panels/WorkspacePanels.tsx';
 import { resolveFilePath } from '../files/file-service.ts';
 import { createRouteNavigation } from './route-navigation.ts';
+import { captureSettingsOrigin, emptySettingsContext, readSettingsOrigin, resolveSettingsOrigin, settingsNavigationState } from './settings-origin.ts';
+import type { SettingsContext, SettingsOrigin } from './settings-origin.ts';
 import { SendRecoveryStore, sendsAtom, sendThreadKey } from './send-recovery.ts';
 import type { SendIntent, SendRecoverySnapshot } from './send-recovery.ts';
 import { SendRecoveryNotice } from './SendRecoveryNotice.tsx';
@@ -39,6 +41,7 @@ import { StandaloneVisualization, readVisualizationModelContext } from '../visua
 import { homeDraftIdentity, selectHomeDraftIdentity } from './home-draft-identity.ts';
 import { I18nProvider, resolveLocale } from '../i18n/index.tsx';
 import { themeFontFamily } from './theme-fonts.ts';
+import { readSettingsRoute } from '../settings/routing.ts';
 import './app.css';
 
 type ThreadRow = ThreadSummary & { preview?: string; updatedAt?: number; createdAt?: number };
@@ -48,7 +51,8 @@ function route(): Route {
   const url = new URL(location.href), parts = url.pathname.split('/').filter(Boolean);
   return { pathname: url.pathname, search: url.search, hash: url.hash, state: history.state && Object.hasOwn(history.state, '__yardState') ? history.state.__yardState : history.state,
     threadId: ['local', 'thread'].includes(parts[0] ?? '') ? decodeURIComponent(parts[1] ?? '') || null : null,
-    hostId: url.searchParams.get('hostId') ?? url.searchParams.get('host') ?? 'local', section: parts[0] === 'settings' ? parts[1] ?? 'general' : null,
+    hostId: parts[0] === 'settings' ? readSettingsRoute({ pathname: url.pathname, search: url.search, hash: url.hash, state: null }, 'local').hostId
+      : url.searchParams.get('hostId') ?? url.searchParams.get('host') ?? 'local', section: parts[0] === 'settings' ? parts[1] ?? 'general' : null,
     readOnly: url.searchParams.get('archived') === '1' };
 }
 function record(value: unknown): Record<string, unknown> {
@@ -80,9 +84,13 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [workspace, setWorkspace] = useState('');
   const [projectState, setProjectState] = useState<ProjectState | null>(null);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [settingsContext, setSettingsContext] = useState<{
-    projectRoots: SettingsProjectRoots | null; sessionCwd: SettingsSessionCwd | null;
-  }>({ projectRoots: null, sessionCwd: null });
+  const settingsOrigin = useMemo(() => readSettingsOrigin(current.state), [current.state]);
+  const settingsSourceKey = current.section ? JSON.stringify([current.hostId, settingsOrigin]) : null;
+  const [settingsSource, setSettingsSource] = useState<{
+    key: string | null; state: 'loading' | 'error' | 'ready'; error?: string; context: SettingsContext;
+  }>({ key: null, state: 'ready', context: emptySettingsContext });
+  const [settingsSourceRetry, setSettingsSourceRetry] = useState(0);
+  const settingsContext = settingsSource.key === settingsSourceKey ? settingsSource.context : emptySettingsContext;
   const [hosts, setHosts] = useState<Host[]>([{ hostId: 'local', displayName: 'Local' }]);
   const [cwd, setCwd] = useState('');
   const [search, setSearch] = useState('');
@@ -98,7 +106,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [submitting, setSubmitting] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [navigationCommit, setNavigationCommit] = useState(0);
-  const [editRecovery, setEditRecovery] = useState<MessageEditRecovery | null>(null);
+  const [editState, setEditState] = useState<StoredMessageEdit | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelMounted, setPanelMounted] = useState(false);
   const [panelKind, setPanelKind] = useState<'workspace' | 'browser' | 'visualization'>('workspace');
@@ -119,7 +127,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     // Keep the original editor frozen until the new route actually commits.
     navigationLease.current?.release(); navigationLease.current = null; navigationLocked.current = false;
   }, [navigationCommit]);
-  const editStore = useMemo(() => new MessageEditRecoveryStore(client), [client]);
+  const editStore = useMemo(() => new MessageEditRecoveryStore(client, undefined, { hostChecksRebasedSourceBeforeRevert: true }), [client]);
   const sendStore = useMemo(() => new SendRecoveryStore(client), [client]);
   const [sendState, setSendState] = useState<SendRecoverySnapshot | null>(null);
   const sessions = useMemo(() => new ConversationSessions(client, async identity =>
@@ -165,7 +173,6 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const projectStateRef = useRef(projectState); projectStateRef.current = projectState;
   const selectedProjectRef = useRef(selectedProject); selectedProjectRef.current = selectedProject;
   const routeRef = useRef(current); routeRef.current = current;
-  const backFromSettings = useRef('/');
   const projectGeneration = useRef(0);
   const preferenceGeneration = useRef(0);
   const reloadProjects = useCallback(async () => {
@@ -176,6 +183,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
 
   const navigate = useCallback((path: string, options?: { replace?: boolean; delta?: number; state?: unknown }) => {
     navigationGeneration.current++;
+    const previous = routeRef.current;
+    if (!options?.delta && new URL(path, location.href).pathname.split('/')[1] === 'settings') {
+      const origin = previous.section ? readSettingsOrigin(previous.state) : captureSettingsOrigin(previous, selectedProjectRef.current);
+      options = { ...options, state: settingsNavigationState(options?.state, origin) };
+    }
     return navigation.current?.navigate(path, options) ?? Promise.resolve(false);
   }, []);
   const registerNavigationGuard = useCallback((guard: { requestLeave(): Promise<boolean> } | null) => { settingsGuard.current = guard; }, []);
@@ -210,19 +222,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
 
   useEffect(() => {
     const controller = createRouteNavigation(() => {
-      const next = route(), previous = routeRef.current;
-      if (next.section && !previous.section) {
-        const session = previous.threadId && threadRef.current?.id === previous.threadId ? threadRef.current : null;
-        const state = projectStateRef.current;
-        const project = previous.threadId ? session && state
-          ? projectForThread(state, projectsForHost(state, previous.hostId), previous.hostId, session) : null
-          : selectedProjectRef.current;
-        setSettingsContext({
-          projectRoots: project?.hostId === previous.hostId ? { hostId: previous.hostId, paths: project.rootPaths } : null,
-          sessionCwd: session?.cwd ? { hostId: previous.hostId, path: session.cwd } : null,
-        });
-        backFromSettings.current = previous.pathname + previous.search + previous.hash;
-      }
+      const next = route();
       navigationGeneration.current++; setLeaving(false); setCurrent(next); setNavigationCommit(value => value + 1); setError(''); setMenu(false);
     }, async () => {
       navigationLocked.current = true;
@@ -303,6 +303,22 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     return () => { unsubscribe(); controller.dispose(); if (navigation.current === controller) navigation.current = null; media.removeEventListener('change', preferences); reduced.removeEventListener('change', preferences); window.removeEventListener('languagechange', preferences); };
   }, [client, reloadPreferences, reloadProjects]);
   useEffect(() => {
+    if (!settingsSourceKey) return;
+    let active = true;
+    const [hostId, origin] = JSON.parse(settingsSourceKey) as [string, SettingsOrigin | null];
+    setSettingsSource({ key: settingsSourceKey, state: 'loading', context: emptySettingsContext });
+    void (async () => {
+      const needsCatalog = origin && origin.source.kind !== 'none' && origin.hostId === hostId;
+      const catalog = needsCatalog ? await client.host<ProjectState>('thread-project-state') : null;
+      const context = await resolveSettingsOrigin(origin, hostId, catalog,
+        (hostId, threadId) => client.rpc('thread/read', { threadId, includeTurns: false }, hostId));
+      if (active) setSettingsSource({ key: settingsSourceKey, state: 'ready', context });
+    })().catch(cause => {
+      if (active) setSettingsSource({ key: settingsSourceKey, state: 'error', error: String(cause), context: emptySettingsContext });
+    });
+    return () => { active = false; };
+  }, [client, settingsSourceKey, settingsSourceRetry]);
+  useEffect(() => {
     let active = true;
     const read = () => { void reloadSends().catch(cause => { if (active) setError(String(cause)); }); };
     read();
@@ -316,8 +332,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const read = () => {
       const revision = ++generation;
       void (current.threadId ? editStore.read(current.hostId, current.threadId) : Promise.resolve(null)).then(value => {
-        if (active && revision === generation) setEditRecovery(value?.recovery ?? null);
-      }).catch(cause => { if (active && revision === generation) { setEditRecovery(null); setError((cause as Error).message); } });
+        if (active && revision === generation) setEditState(value);
+      }).catch(cause => { if (active && revision === generation) { setEditState(null); setError((cause as Error).message); } });
     };
     read();
     window.addEventListener(messageEditChanged, read);
@@ -375,11 +391,14 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const hostId = current.hostId;
     const activeCwd = retry?.cwd ?? (thread?.cwd || cwd || workspace);
     const requireCurrent = (threadId: string | null) => {
-      if (navigationGeneration.current !== expectedNavigation || routeRef.current.hostId !== hostId || routeRef.current.threadId !== threadId) {
+      if (navigationGeneration.current !== expectedNavigation || routeRef.current.hostId !== hostId || routeRef.current.threadId !== threadId || routeRef.current.readOnly) {
         throw Object.assign(new Error('会话已切换，原输入未发送并已保留。'), { uncertain: false });
       }
+      if (threadId && !sessions.view({ hostId, threadId }).snapshot().canSubmit) throw new Error('当前连接尚未确认可写会话，输入已保留。');
     };
     try {
+      if (current.threadId) await sessions.ready({ hostId, threadId: current.threadId });
+      requireCurrent(current.threadId);
       const additionalContext = retry ? retry.additionalContext : (!origin && current.threadId && action.type !== 'queue'
         ? Object.fromEntries((await readVisualizationModelContext(client, hostId, current.threadId)).map(value =>
           ['visualization:' + JSON.stringify([value.path, value.field]), { kind: 'untrusted' as const, value: JSON.stringify(value) }])) : undefined);
@@ -409,7 +428,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         await reloadProjects();
       };
       if (retry?.created && retry.threadId) await assignCreatedProject(retry.threadId);
-      const result = await submitDraft(client, { hostId, threadId: current.threadId, cwd: activeCwd, initialOptions: initialOptions ?? undefined,
+      const active = current.threadId ? sessions.view({ hostId, threadId: current.threadId }).snapshot() : conversation;
+      const result = await submitDraft(client, { hostId, threadId: current.threadId, cwd: activeCwd, initialOptions: active.options ?? undefined,
         overrides: description?.overrides, additionalContext: intent ? intent.additionalContext : additionalContext,
         collaborationMode: intent?.collaborationMode, createdOptions: intent?.created?.settings,
         ...(intent ? { send: { clientUserMessageId: intent.clientUserMessageId,
@@ -431,9 +451,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           queued: async (queuedSubmissionId: string) => { await sendStore.queued(intent!.id, queuedSubmissionId, intent!.attemptId); },
           resolvedCollaboration: async mode => { await sendStore.resolvedCollaboration(intent!.id, mode, intent!.attemptId); },
         } } : {}),
-        activeTurnId: thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null, readOnly: current.readOnly, thread },
-      draft, options, action, async (created, settings) => {
-        sessions.created({ hostId, threadId: created.id }, created, settings);
+        activeTurnId: active.thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null, readOnly: routeRef.current.readOnly, thread: active.thread },
+      draft, options, action, async created => {
         await assignCreatedProject(created.id);
         requireCurrent(null);
         await new Promise<void>((resolve, reject) => {
@@ -620,12 +639,20 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       <div className="yard-chat-pane">
       {settings ? <InstructionEditorTheme.Provider value={panelAppearance.theme}><StandaloneSettings client={client} hostId={current.hostId}
         projectRoots={settingsContext.projectRoots} sessionCwd={settingsContext.sessionCwd} InstructionEditor={SettingsInstructionEditor}
+        scopeStatus={{ state: settingsSource.key === settingsSourceKey ? settingsSource.state : 'loading',
+          error: settingsSource.key === settingsSourceKey ? settingsSource.error : undefined, retry: () => setSettingsSourceRetry(value => value + 1) }}
         location={{ pathname: current.pathname, search: current.search, hash: current.hash, state: current.state }} onNavigate={navigate}
-        registerNavigationGuard={registerNavigationGuard} onClose={() => navigate(backFromSettings.current)} /></InstructionEditorTheme.Provider> : <>
+        registerNavigationGuard={registerNavigationGuard} onClose={() => navigate(settingsOrigin?.returnTo ?? '/')} /></InstructionEditorTheme.Provider> : <>
         {current.threadId && <header className="yard-conversation-header"><strong>{thread?.name || threads.find(item => item.id === current.threadId)?.name || 'Conversation'}</strong><span>{thread?.cwd}</span><button aria-label="Conversation menu" onClick={() => setMenu(value => !value)}>•••</button>{menu && <div className="yard-menu" role="menu">{['rename', 'fork', 'copy', 'archive'].map(name => <button role="menuitem" key={name} onClick={() => { void action(name); }}>{name === 'copy' ? 'Copy conversation link' : name[0]!.toUpperCase() + name.slice(1)}</button>)}</div>}</header>}
         <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')} inert={leaving}>
           {streamGap && <p role="status" className="yard-stream-gap">任务正在运行。此页面未收到完整的活动内容；完成后将重新读取完整记录。</p>}
-          {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} thread={thread} editRecovery={editRecovery} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
+          {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} thread={thread} editRecovery={editState?.recovery ?? null} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
+            editRebase={messageEditRebaseMarker(editState)} onPrepareEditRebase={(origin, version) => editStore.prepareRebase(origin, version)}
+            onCommitEditRebase={async candidate => {
+              const recovered = await editStore.commitRebase(candidate);
+              void sessions.refresh(recovered.origin).catch(cause => setError(String(cause)));
+              return recovered;
+            }}
             onEditNavigationController={receiveMessageEditController}
             onEditDraftChange={(value, origin, version) => editStore.save(value, origin, version)}
             onOpenFile={openFile} onOpenFileAt={location => {
@@ -636,7 +663,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         </section>
         <div className="yard-composer-container" inert={leaving}>
           {current.threadId && !loading && <StandaloneGoal client={client} hostId={current.hostId} threadId={current.threadId} readOnly={current.readOnly} />}
-          {current.readOnly ? <p role="status">此会话已归档。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p> : !sendState || current.threadId && (loading || !initialOptions) ? <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
+          {current.readOnly && <p role="status">此会话已归档，原输入已保留。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p>}
+          <div inert={current.readOnly}>
+          {!sendState || current.threadId && (loading || !initialOptions) ? current.readOnly ? null : <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
           onRemoveReference={(owner, reference) => removeBrowserDraftReference(browserDraftOwner(owner, sendState.bindings), reference)}
           onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} initialOptions={initialOptions ?? undefined} hosts={hosts} onTargetChange={async target => {
           if (await navigate('/' + (target.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(target.hostId)))) {
@@ -645,10 +674,17 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         }} onPrefillConsumed={id => setPrefills(previous => ({ ...previous, [panelScope]: (previous[panelScope] ?? []).filter(item => item.id !== id) }))} activeTurnId={thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null} busy={busy}
           onSubmit={(draft, options, action, description) => submit(draft, options, action, undefined, description)} onInterrupt={interrupt} prefill={prefill} onStartQueued={async queuedSubmissionId => {
           if (!current.threadId || current.readOnly || inFlight.current || isThreadBusy(threadRef.current)) throw new Error('当前会话暂时无法启动队列。');
+          const identity = { hostId: current.hostId, threadId: current.threadId }, generation = navigationGeneration.current;
           inFlight.current = true; setSubmitting(true);
-          try { await sessions.ready({ hostId: current.hostId, threadId: current.threadId }); await client.rpc('thread/queue/start', { threadId: current.threadId, queuedSubmissionId }, current.hostId); }
+          try {
+            await sessions.ready(identity);
+            const view = sessions.view(identity).snapshot(), route = routeRef.current;
+            if (generation !== navigationGeneration.current || route.hostId !== identity.hostId || route.threadId !== identity.threadId
+              || route.readOnly || !view.canSubmit || isThreadBusy(view.thread)) throw new Error('会话目标或状态已改变，队列未启动。');
+            await client.rpc('thread/queue/start', { threadId: identity.threadId, queuedSubmissionId }, identity.hostId);
+          }
           finally { inFlight.current = false; setSubmitting(false); }
-        }} />}</div>
+        }} />}</div></div>
       </>}
       </div>
       <aside className="yard-workspace-panel" hidden={!panelOpen || settings} aria-label="Workspace panel" inert={leaving}>

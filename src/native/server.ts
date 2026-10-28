@@ -493,7 +493,13 @@ export async function createNativeWorkbench(options: Options = {}) {
         const loaded = await connection.request('thread/loaded/list', {});
         if (!loaded.data.some(id => id === params.threadId)) params.config = { ...record(params.config), ...hostTools.config };
       }
-      const request = () => connection.requestWithCursor(method, params, { mutating: writeMethods.has(method) });
+      const observeSubscription = message.observeSubscriptionTerminal === true && ['thread/resume', 'thread/unsubscribe'].includes(method);
+      const request = () => connection.requestWithCursor(method, params, { mutating: writeMethods.has(method),
+        onLateTerminal: observeSubscription ? terminal => {
+          if (connections.get(hostId) !== connection) return;
+          send(client, { type: 'mcp-response', hostId, late: true, message: terminal.outcome === 'success'
+            ? { id, result: terminal.result } : { id, error: { code: -32000, message: terminal.error.message, data: terminal.error.data } } });
+        } : undefined });
       const response = ['turn/start', 'thread/revert', 'thread/queue/start'].includes(method) && typeof params.threadId === 'string'
         ? await conversationWrite(hostId, params.threadId, request) : await request();
       let result = response.result;

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { openClientBrowser } from '../src/native/client-browser.ts';
 import { BrowserWorkbenchClient, WorkbenchError } from '../src/renderer/app/client.ts';
 import type { WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
+import type { LateRpcTerminal } from '../lib/codex-protocol.ts';
 
 interface SentMessage {
   type: string;
@@ -96,4 +97,54 @@ test('the retained client browser helper opens safe links synchronously on the v
   }
   assert.equal(openClientBrowser({ type: 'unrelated' }), false);
   assert.equal(calls.length, 2);
+});
+
+test('subscription timeouts observe only the original terminal reply and creation is published before caller continuation', async t => {
+  const sockets: FakeSocket[] = [], terminals: LateRpcTerminal[] = [], order: string[] = [];
+  class FakeSocket {
+    static OPEN = 1;
+    readyState = 0;
+    sent: (SentMessage & { observeSubscriptionTerminal?: boolean })[] = [];
+    onopen: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    constructor(_url: string) { sockets.push(this); }
+    open() { this.readyState = FakeSocket.OPEN; this.onopen?.(); }
+    send(value: string) { this.sent.push(JSON.parse(value)); }
+    message(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
+    close() { this.readyState = 3; this.onclose?.(); }
+  }
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
+  Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: FakeSocket });
+  const client = new BrowserWorkbenchClient('ws://fixture.invalid/native-host');
+  t.after(() => {
+    client.close();
+    if (previous) Object.defineProperty(globalThis, 'WebSocket', previous);
+    else Reflect.deleteProperty(globalThis, 'WebSocket');
+  });
+  client.subscribe(event => { if (event.type === 'thread-created') order.push('creation-receipt'); });
+  const opening = client.connect(); sockets[0]!.open(); await opening;
+  const socket = sockets[0]!;
+  const resumed = client.rpc('thread/resume', { threadId: 'same' }, 'local', { onLateTerminal: receipt => { terminals.push(receipt); } });
+  const rejected = assert.rejects(resumed, error => error instanceof WorkbenchError && error.uncertain);
+  await Promise.resolve(); const request = socket.sent.at(-1)!;
+  assert.equal(request.observeSubscriptionTerminal, true);
+  socket.message({ type: 'mcp-response', message: { id: request.request!.id, error: { message: 'Original request timed out', data: { uncertain: true } } } });
+  await rejected; assert.equal(terminals.length, 0);
+  socket.message({ type: 'mcp-response', late: true, message: { id: request.request!.id, result: { subscribed: true } } });
+  socket.message({ type: 'mcp-response', late: true, message: { id: request.request!.id, result: { duplicate: true } } });
+  assert.deepEqual(terminals, [{ outcome: 'success', result: { subscribed: true } }]);
+  assert.equal(socket.sent.filter(value => value.request?.method === 'thread/resume').length, 1);
+
+  const created = client.rpc('thread/start', {}).then(() => { order.push('caller-continuation'); });
+  await Promise.resolve(); const start = socket.sent.at(-1)!;
+  socket.message({ type: 'mcp-response', message: { id: start.request!.id, result: { thread: { id: 'new' } } } });
+  assert.deepEqual(order, ['creation-receipt']); await created;
+  assert.deepEqual(order, ['creation-receipt', 'caller-continuation']);
+
+  const unsubscribed = client.rpc('thread/unsubscribe', { threadId: 'same' }, 'local', { onLateTerminal: receipt => { terminals.push(receipt); } });
+  const failed = assert.rejects(unsubscribed, error => error instanceof WorkbenchError && error.uncertain);
+  await Promise.resolve(); const old = socket.sent.at(-1)!; socket.close(); await failed;
+  socket.message({ type: 'mcp-response', late: true, message: { id: old.request!.id, result: {} } });
+  assert.equal(terminals.length, 1, 'A disconnected observer cannot settle the new connection');
 });
