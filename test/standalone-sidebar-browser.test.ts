@@ -12,6 +12,7 @@ declare global {
       pending(): number;
       resolveNext(rows: unknown[]): void;
       rejectNext(message: string): void;
+      setLocale(locale: string): void;
     };
   }
 }
@@ -24,9 +25,11 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
       import React,{useState} from 'react';
       import {createRoot} from 'react-dom/client';
       import {StandaloneSidebar} from './src/renderer/sidebar/StandaloneSidebar.tsx';
+      import {I18nProvider} from './src/renderer/i18n/index.tsx';
       import {useThreadList} from './src/renderer/sidebar/use-thread-list.ts';
       const calls={projects:[],add:0,settings:0,close:0}, waiting=[];
-      const row=(id,name,cwd,status={type:'idle'})=>({id,name,cwd,preview:'',turns:[],status});
+      let changeLocale=()=>{};
+      const row=(id,name,cwd,status={type:'idle'})=>({id,name,cwd,preview:'',turns:[],status,updatedAt:1700000000});
       const active=[row('one','Running task','/repo',{type:'active',activeFlags:[]}),
         row('two','Assigned second','/repo',{type:'active',activeFlags:['waitingOnApproval']}),row('recent','Recent task','/other')];
       const archived=[row('archive','Archived task','/other')];
@@ -42,11 +45,12 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
         return Promise.resolve({data:params.archived?archived:active,nextCursor:params.archived?null:'next'});
       }};
       function App(){
+        const [locale,setLocale]=useState('en-US'); changeLocale=setLocale;
         const [search,setSearch]=useState(''),[showArchived,setArchived]=useState(false),[tabs,setTabs]=useState([]),[current,setCurrent]=useState(null);
         const list=useThreadList(client,{hostId:'local',archived:showArchived,search,refreshKey:0});
         const open=row=>{const tab={id:row.id,name:row.name,hostId:row.hostId,archived:row.archived};
           setTabs(old=>old.some(item=>item.id===tab.id&&item.hostId===tab.hostId)?old:[...old,tab]);setCurrent(tab);};
-        return React.createElement('div',{className:'yard-app','data-sidebar-open':'true'},
+        return React.createElement(I18nProvider,{locale},React.createElement('div',{className:'yard-app','data-sidebar-open':'true'},
           React.createElement(StandaloneSidebar,{hostId:'local',currentThread:current&&{hostId:current.hostId,threadId:current.id},
             projectState,rows:list.rows,nextCursor:list.nextCursor,loading:list.loading,error:list.error,search,archived:showArchived,
             onSearchChange:setSearch,onArchivedChange:setArchived,onOpenThread:open,onNewChat:project=>calls.projects.push(project),
@@ -54,10 +58,10 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
             onRefresh:()=>void list.refresh(),onLoadMore:()=>void list.loadMore()}),
           React.createElement('main',{className:'yard-main'},React.createElement('div',{role:'tablist'},tabs.map(tab=>
             React.createElement('button',{role:'tab',key:tab.hostId+tab.id,'aria-selected':current?.id===tab.id,
-              onClick:()=>setCurrent(tab)},'Tab '+tab.name))),React.createElement('output',{id:'selected'},JSON.stringify(current))));
+              onClick:()=>setCurrent(tab)},'Tab '+tab.name))),React.createElement('output',{id:'selected'},JSON.stringify(current)))));
       }
       window.sidebarUIHarness={calls,pending:()=>waiting.length,resolveNext:rows=>waiting.shift().resolve({data:rows,nextCursor:null}),
-        rejectNext:message=>waiting.shift().reject(Error(message))};
+        rejectNext:message=>waiting.shift().reject(Error(message)),setLocale:locale=>changeLocale(locale)};
       createRoot(document.getElementById('root')).render(React.createElement(App));
     ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' },
   });
@@ -85,6 +89,16 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
     await sidebar.getByRole('button', { name: /Running task/ }).waitFor();
     assert.equal(await sidebar.getByRole('img', { name: 'In progress' }).count(), 1);
     assert.equal(await sidebar.getByRole('img', { name: 'Waiting for approval' }).count(), 1);
+    await page.evaluate(() => window.sidebarUIHarness.setLocale('zh-CN'));
+    await page.getByRole('complementary', { name: '侧边栏' }).waitFor();
+    assert.equal(await page.getByRole('img', { name: '等待审批' }).count(), 1);
+    const chineseTitle = await page.getByRole('button', { name: /Running task/ }).getAttribute('title');
+    assert.ok(chineseTitle?.includes(await page.evaluate(() => new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(1700000000 * 1000)))));
+    await page.evaluate(() => window.sidebarUIHarness.setLocale('ja-JP'));
+    await page.getByRole('img', { name: '承認待ち' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Project One', exact: true }).count(), 1);
+    await page.evaluate(() => window.sidebarUIHarness.setLocale('en-US'));
+    await sidebar.waitFor();
     const projectsToggle = sidebar.getByRole('button', { name: 'Projects', exact: true });
     await projectsToggle.click();
     assert.equal(await projectsToggle.getAttribute('aria-expanded'), 'false');

@@ -1,3 +1,5 @@
+import type { WorkspaceMessageKey } from './workspace-messages.ts';
+
 export const messageKeys = [
   'Settings', 'Settings navigation', 'Close settings', 'Close', 'Back', 'Host', 'Settings host', 'Local', 'Search settings',
   'Settings search results', 'No settings found.', 'Section', 'Settings section', 'Preferences', 'Workspace', 'Data', 'Codex',
@@ -28,7 +30,7 @@ export const messageKeys = [
   'Interface text is currently shown in English for this language.',
 ] as const;
 
-export type MessageKey = typeof messageKeys[number];
+export type MessageKey = typeof messageKeys[number] | WorkspaceMessageKey;
 export type Messages = Partial<Record<MessageKey, string>>;
 
 export const simplifiedChinese: Messages = {

@@ -3,6 +3,7 @@ import { Archive, ArchiveRestore, ChevronDown, ChevronRight, CircleAlert, Clock3
   PanelLeftClose, Plus, Settings } from 'lucide-react';
 import { projectForThread, projectsForHost } from '../app/projects.ts';
 import type { Project, ProjectState } from '../app/projects.ts';
+import { useI18n } from '../i18n/index.tsx';
 import type { ThreadListError, ThreadListRow } from './use-thread-list.ts';
 import './standalone-sidebar.css';
 
@@ -29,10 +30,6 @@ export interface StandaloneSidebarProps {
   onRetryProjectLookup?(): void;
 }
 
-function threadTitle(row: ThreadListRow): string {
-  return row.name || row.preview || 'New conversation';
-}
-
 function useExpansion(query: string): [boolean, () => void] {
   const [expanded, setExpanded] = useState(true);
   const [searchExpanded, setSearchExpanded] = useState(true);
@@ -45,17 +42,23 @@ function ThreadRow({ row, currentThread, onOpenThread }: {
   currentThread: StandaloneSidebarProps['currentThread'];
   onOpenThread: StandaloneSidebarProps['onOpenThread'];
 }) {
+  const { t, formatDate } = useI18n();
   const status = row.status;
-  const label = status?.type === 'active'
+  const statusKey = status?.type === 'active'
     ? status.activeFlags?.includes('waitingOnApproval') ? 'Waiting for approval'
       : status.activeFlags?.includes('waitingOnUserInput') ? 'Waiting for input' : 'In progress'
     : status?.type === 'systemError' ? 'System error' : null;
-  return <button type="button" className="yard-owned-sidebar-thread" title={threadTitle(row)}
+  const label = statusKey ? t(statusKey) : null;
+  const title = row.name || row.preview || t('New conversation');
+  const updated = typeof row.updatedAt === 'number' ? new Date(row.updatedAt * 1000) : null;
+  const tooltip = updated && Number.isFinite(updated.getTime())
+    ? `${title}\n${formatDate(updated, { dateStyle: 'medium', timeStyle: 'short' })}` : title;
+  return <button type="button" className="yard-owned-sidebar-thread" title={tooltip}
     aria-current={currentThread?.hostId === row.hostId && currentThread.threadId === row.id ? 'page' : undefined}
     onClick={() => onOpenThread(row)}>
-    <span className="yard-owned-sidebar-thread-title">{threadTitle(row)}</span>
+    <span className="yard-owned-sidebar-thread-title">{title}</span>
     {label && <span className="yard-owned-sidebar-thread-status" role="img" aria-label={label} title={label}>
-      {status?.type === 'systemError' ? <CircleAlert /> : label === 'In progress' ? <LoaderCircle /> : <Clock3 />}
+      {status?.type === 'systemError' ? <CircleAlert /> : statusKey === 'In progress' ? <LoaderCircle /> : <Clock3 />}
     </span>}
   </button>;
 }
@@ -69,8 +72,10 @@ function ProjectGroup({ project, fallback, rows, query, currentThread, onOpenThr
   onOpenThread: StandaloneSidebarProps['onOpenThread'];
   onNewChat: StandaloneSidebarProps['onNewChat'];
 }) {
+  const { t } = useI18n();
   const [expanded, toggle] = useExpansion(query);
   const id = useId();
+  const newChatLabel = `${t('New chat in')} ${project.name}`;
   return <section className="yard-owned-sidebar-project">
     <div className="yard-owned-sidebar-project-heading">
       <button type="button" className="yard-owned-sidebar-project-toggle" aria-expanded={expanded} aria-controls={id}
@@ -78,8 +83,8 @@ function ProjectGroup({ project, fallback, rows, query, currentThread, onOpenThr
         {expanded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
         <span>{project.name}</span>
       </button>
-      <button type="button" className="yard-owned-sidebar-icon" aria-label={'New chat in ' + project.name}
-        title={'New chat in ' + project.name} onClick={() => onNewChat(project, fallback)}><Plus aria-hidden="true" /></button>
+      <button type="button" className="yard-owned-sidebar-icon" aria-label={newChatLabel}
+        title={newChatLabel} onClick={() => onNewChat(project, fallback)}><Plus aria-hidden="true" /></button>
     </div>
     <div id={id} hidden={!expanded}>
       {rows.map(row => <ThreadRow key={row.id} row={row} currentThread={currentThread} onOpenThread={onOpenThread} />)}
@@ -91,13 +96,14 @@ function ProjectGroup({ project, fallback, rows, query, currentThread, onOpenThr
 export function StandaloneSidebar({ hostId, currentThread, projectState, fallbackWorkspace, rows, nextCursor, loading, error,
   search, archived, onSearchChange, onArchivedChange, onOpenThread, onNewChat, onAddProject, onOpenSettings, onClose,
   onRefresh, onLoadMore, onRetryProjectLookup }: StandaloneSidebarProps) {
+  const { t } = useI18n();
   const query = search.trim().toLowerCase();
   const [projectsExpanded, toggleProjects] = useExpansion(query);
   const projectsId = useId();
   const { projects, grouped, recent, fallback } = useMemo(() => {
     const assigned = projectState ? projectsForHost(projectState, hostId) : [];
     const projects: Project[] = assigned.length ? assigned : hostId === 'local' && fallbackWorkspace
-      ? [{ id: fallbackWorkspace, name: fallbackWorkspace.split(/[\\/]/).filter(Boolean).at(-1) || 'Workspace',
+      ? [{ id: fallbackWorkspace, name: fallbackWorkspace.split(/[\\/]/).filter(Boolean).at(-1) || t('Workspace'),
         rootPaths: [fallbackWorkspace], hostId }] : [];
     const grouped = new Map(projects.map(project => [project.id, [] as ThreadListRow[]]));
     const recent: ThreadListRow[] = [];
@@ -108,28 +114,28 @@ export function StandaloneSidebar({ hostId, currentThread, projectState, fallbac
       if (group) group.push(row); else recent.push(row);
     }
     return { projects, grouped, recent, fallback: assigned.length === 0 };
-  }, [projectState, hostId, fallbackWorkspace, rows]);
+  }, [projectState, hostId, fallbackWorkspace, rows, t]);
   const unresolved = projectState && (!projectState.inventory.complete || Object.keys(projectState.unresolved.assignments).length > 0
     || projectState.unresolved.projectless.length > 0 || projectState.unresolved.qualified.length > 0);
   const count = grouped.size ? [...grouped.values()].reduce((total, group) => total + group.length, recent.length) : recent.length;
 
-  return <aside id="app-shell-sidebar" className="yard-owned-sidebar" aria-label="Sidebar">
+  return <aside id="app-shell-sidebar" className="yard-owned-sidebar" aria-label={t('Sidebar')}>
     <div className="yard-owned-sidebar-brand"><img src="/brand/icon.svg" alt="" /><span>Codex Yard</span>
-      <button type="button" className="yard-owned-sidebar-icon" aria-label="Close sidebar" title="Close sidebar" onClick={onClose}>
+      <button type="button" className="yard-owned-sidebar-icon" aria-label={t('Close sidebar')} title={t('Close sidebar')} onClick={onClose}>
         <PanelLeftClose aria-hidden="true" />
       </button>
     </div>
     <button type="button" className="yard-owned-sidebar-command" onClick={() => onNewChat(null)}>
-      <MessageSquarePlus aria-hidden="true" />New chat
+      <MessageSquarePlus aria-hidden="true" />{t('New chat')}
     </button>
-    <input type="search" aria-label="Search conversations" placeholder="Search" value={search}
+    <input type="search" aria-label={t('Search conversations')} placeholder={t('Search')} value={search}
       onChange={event => onSearchChange(event.currentTarget.value)} />
     <div className="yard-owned-sidebar-heading">
       <button type="button" className="yard-owned-sidebar-section-toggle" aria-expanded={projectsExpanded} aria-controls={projectsId}
         onClick={toggleProjects}>
-        {projectsExpanded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}Projects
+        {projectsExpanded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}{t('Projects')}
       </button>
-      <button type="button" className="yard-owned-sidebar-icon" aria-label="Add project" title="Add project" onClick={onAddProject}>
+      <button type="button" className="yard-owned-sidebar-icon" aria-label={t('Add project')} title={t('Add project')} onClick={onAddProject}>
         <Plus aria-hidden="true" />
       </button>
     </div>
@@ -138,27 +144,27 @@ export function StandaloneSidebar({ hostId, currentThread, projectState, fallbac
         {projects.map(project => <ProjectGroup key={JSON.stringify([project.hostId, project.id])} project={project} fallback={fallback} query={query}
           rows={grouped.get(project.id) ?? []} currentThread={currentThread} onOpenThread={onOpenThread} onNewChat={onNewChat} />)}
       </div>
-      <div className="yard-owned-sidebar-heading yard-owned-sidebar-recents">{archived ? 'Archived' : 'Recents'}</div>
-      {unresolved && <p className="yard-owned-sidebar-message" role="status">部分旧项目归属尚无法确定，原记录已保留。
-        {onRetryProjectLookup && <button type="button" onClick={onRetryProjectLookup}>Retry project lookup</button>}
+      <div className="yard-owned-sidebar-heading yard-owned-sidebar-recents">{t(archived ? 'Archived' : 'Recents')}</div>
+      {unresolved && <p className="yard-owned-sidebar-message" role="status">{t('Some legacy project associations are unresolved. Original records are retained.')}
+        {onRetryProjectLookup && <button type="button" onClick={onRetryProjectLookup}>{t('Retry project lookup')}</button>}
       </p>}
       {recent.map(row => <ThreadRow key={row.id} row={row} currentThread={currentThread} onOpenThread={onOpenThread} />)}
-      {loading && <p className="yard-owned-sidebar-message" role="status">{search.trim() ? 'Searching conversations...' : 'Loading conversations...'}</p>}
+      {loading && <p className="yard-owned-sidebar-message" role="status">{t(search.trim() ? 'Searching conversations...' : 'Loading conversations...')}</p>}
       {error && <div className="yard-owned-sidebar-error" role="alert"><span>{error.message}</span>
-        <button type="button" onClick={error.retry === 'loadMore' ? onLoadMore : onRefresh}>Retry</button>
+        <button type="button" onClick={error.retry === 'loadMore' ? onLoadMore : onRefresh}>{t('Retry')}</button>
       </div>}
       {!search.trim() && nextCursor && !error && <button type="button" className="yard-owned-sidebar-command" disabled={loading}
-        onClick={onLoadMore}>Load more</button>}
+        onClick={onLoadMore}>{t('Load more')}</button>}
       {!loading && !error && !nextCursor && !count && <p className="yard-owned-sidebar-message">
-        {search.trim() ? 'No matching conversations' : 'No conversations yet'}
+        {t(search.trim() ? 'No matching conversations' : 'No conversations yet')}
       </p>}
     </div>
     <footer className="yard-owned-sidebar-footer">
       <button type="button" className="yard-owned-sidebar-command" onClick={() => onArchivedChange(!archived)}>
         {archived ? <ArchiveRestore aria-hidden="true" /> : <Archive aria-hidden="true" />}
-        {archived ? 'Show recent chats' : 'Archived chats'}
+        {t(archived ? 'Show recent chats' : 'Archived chats')}
       </button>
-      <button type="button" className="yard-owned-sidebar-command" onClick={onOpenSettings}><Settings aria-hidden="true" />Settings</button>
+      <button type="button" className="yard-owned-sidebar-command" onClick={onOpenSettings}><Settings aria-hidden="true" />{t('Settings')}</button>
     </footer>
   </aside>;
 }
