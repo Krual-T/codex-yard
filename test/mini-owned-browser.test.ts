@@ -60,8 +60,9 @@ test('owned Mini uses the host and parent projection across interactions and rem
         {hostId:'local',threadId:'same-id',title:'Local task',status:'running',
           approval:{requestRef:{hostId:'local',generation:'g2',id:'unknown'},title:'Unknown result',choices:[{label:'Accept',result:{decision:'accept'}}]}}
       ];
+      const hostConnections = {local:{state:'connected',fresh:true,revision:'local-1',requestGeneration:'g2'},'ssh-a':{state:'connected',fresh:true,revision:'remote-1',requestGeneration:'g1'}};
       let root;
-      function render() { root.render(React.createElement(StandaloneMini, {client,send,activities,builtinAssets:{codex:sprite,hoots:sprite},
+      function render() { root.render(React.createElement(StandaloneMini, {client,send,activities,hostConnections,quickChatHostId:'local',builtinAssets:{codex:sprite,hoots:sprite},
         onOpenThread: identity => calls.opened.push(identity), onExpand: () => calls.expanded++, onOpenSettings: () => {},
         onApprovalOutcome: (ref,outcome) => { const item=activities.find(item=>item.approval.requestRef.id===ref.id); item.approval.outcome=outcome; render(); }},
         React.createElement('textarea',{ 'aria-label':'Fixture draft',value:draft,onChange:event=>{draft=event.target.value;render();} })) ); }
@@ -80,7 +81,7 @@ test('owned Mini uses the host and parent projection across interactions and rem
     await page.route('**/*', route => route.abort());
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
-    await page.setContent('<button id="under" style="position:fixed;right:10px;top:200px">Underlying control</button><div id="root"></div>');
+    await page.setContent('<button id="under" aria-label="Underlying control" style="position:fixed;width:20px;height:20px"></button><div id="root"></div>');
     await page.addStyleTag({ content: readFileSync(new URL('../src/renderer/mini/mini.css', import.meta.url), 'utf8') });
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     await page.getByText('Remote task').waitFor();
@@ -99,12 +100,12 @@ test('owned Mini uses the host and parent projection across interactions and rem
     assert.equal(await page.getByRole('button', { name: 'Accept' }).isDisabled(), true);
     assert.equal((await page.evaluate(() => window.miniHarness.calls.replies)).length, 2);
 
-    await page.getByRole('button', { name: 'Quick chat' }).click();
+    await page.getByRole('button', { name: 'Quick chat', exact: true }).click();
     await page.getByRole('textbox', { name: 'Fixture draft' }).fill('kept by parent');
-    await page.getByRole('button', { name: 'Quick chat' }).click();
-    await page.getByRole('button', { name: 'Quick chat' }).click();
+    await page.getByRole('button', { name: 'Quick chat', exact: true }).click();
+    await page.getByRole('button', { name: 'Quick chat', exact: true }).click();
     assert.equal(await page.getByRole('textbox', { name: 'Fixture draft' }).inputValue(), 'kept by parent');
-    await page.getByRole('button', { name: 'Quick chat' }).click();
+    await page.getByRole('button', { name: 'Quick chat', exact: true }).click();
     await page.getByRole('button', { name: 'Mini menu' }).click();
     await page.getByRole('menuitem', { name: 'Choose pet' }).click();
     await page.evaluate(() => window.miniHarness.failNextSetting());
@@ -123,6 +124,11 @@ test('owned Mini uses the host and parent projection across interactions and rem
     assert.equal(await slider.inputValue(), '224');
     await page.getByRole('button', { name: 'Close pet picker' }).click();
 
+    await page.evaluate(() => {
+      const rect = document.querySelector('[data-workbench-mini]')!.getBoundingClientRect();
+      const under = document.getElementById('under')!;
+      under.style.left = `${rect.left + 2}px`; under.style.top = `${rect.top + 2}px`;
+    });
     await page.getByRole('button', { name: 'Underlying control' }).click();
     assert.equal(await page.locator('[data-workbench-mini]').count(), 1);
     const mascot = page.getByTestId('avatar-mascot-button');
@@ -159,6 +165,7 @@ test('owned Mini uses the host and parent projection across interactions and rem
     if (process.env.MINI_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.MINI_EVIDENCE_DIR, 'mini-desktop.png') });
 
     await page.evaluate(() => window.miniHarness.visibility('on-demand'));
+    await page.evaluate(() => { const under = document.getElementById('under')!; under.style.left = '2px'; under.style.top = '2px'; });
     await page.getByRole('button', { name: 'Underlying control' }).click();
     await page.locator('[data-workbench-mini]').waitFor({ state: 'detached' });
     assert.ok((await page.evaluate(() => window.miniHarness.calls.messages)).some(value => value.type === 'avatar-overlay-hide'));

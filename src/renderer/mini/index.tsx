@@ -6,19 +6,21 @@ import type { ServerRequestRef, WorkbenchClient } from '../workbench-contract.ts
 import { builtinPets, miniShortcut, petSize, readPetOptions, readPetState } from './model.ts';
 import type { BuiltinPetAssets, PetMotion, PetOption } from './model.ts';
 import { PetSprite } from './PetSprite.tsx';
+import { Approval, NotificationAction, Question } from './requests.tsx';
+import type { MiniActionOutcome, MiniActionRunner, MiniApproval, MiniIdentity, MiniNotificationAction, MiniOutcome, MiniQuestion, MiniRequest } from './requests.tsx';
 import './mini.css';
 
 export type MiniCommand =
   | { type: 'avatar-overlay-open-state-request' | 'avatar-overlay-open' | 'avatar-overlay-close' | 'avatar-overlay-hide' }
   | { type: 'workbench-pet-position'; position: PetPosition };
 
-export interface MiniApproval {
-  requestRef: ServerRequestRef;
-  title: string;
-  detail?: string;
-  choices: readonly { label: string; result: unknown }[];
-  /** The parent retains an uncertain or forwarded result until the request is resolved. */
-  outcome?: 'sent' | 'unknown';
+/** Revision changes only when the parent's host projection has been refreshed. */
+export interface MiniHostConnection {
+  state: 'connected' | 'connecting' | 'disconnected';
+  fresh: boolean;
+  revision: string;
+  /** Daemon connection generation of currently valid server requests. */
+  requestGeneration: string | null;
 }
 
 /** This is a view of the app's existing thread projection, not a separate store. */
@@ -29,20 +31,34 @@ export interface MiniActivity {
   status: 'running' | 'waiting' | 'review' | 'failed' | 'idle';
   detail?: string;
   approval?: MiniApproval;
+  question?: MiniQuestion;
+  /** Authoritative pending queue for threads with more than one request. */
+  requests?: readonly MiniRequest[];
+  actions?: readonly MiniNotificationAction[];
 }
 
 export interface StandaloneMiniProps {
   client: WorkbenchClient;
   send(message: MiniCommand): Promise<void>;
   activities: readonly MiniActivity[];
-  onOpenThread(identity: { hostId: string; threadId: string }): void;
+  /** Local bridge loss invalidates all projections; each revision must change after refresh. */
+  hostConnections: Readonly<Record<string, MiniHostConnection | undefined>>;
+  onOpenThread(identity: MiniIdentity): void;
   onExpand(): void;
-  onApprovalOutcome(requestRef: ServerRequestRef, outcome: 'sent' | 'unknown'): void;
+  /** Retain outcomes for every request, including questions, until that request is resolved. */
+  onApprovalOutcome(requestRef: ServerRequestRef, outcome: MiniOutcome): void;
+  onNotificationAction?: MiniActionRunner;
+  onNotificationActionOutcome?: MiniActionOutcome;
   onOpenSettings?(): void;
   /** Manager supplies any permitted built-in sprites; custom sprites come from the host. */
   builtinAssets?: BuiltinPetAssets;
   /** The caller owns the composer, draft identity, submit and transcript. */
   children?: ReactNode;
+  /** The host of the caller's current Quick chat draft. */
+  quickChatHostId?: string;
+  /** Required for notification follow-up; null threadId denotes a new draft. */
+  quickChatTarget?: { hostId: string; threadId: string | null };
+  onQuickChatTarget?(identity: MiniIdentity): void;
   /** Disable when the application already owns the in-page shortcut handler. */
   shortcut?: boolean;
 }
@@ -58,29 +74,6 @@ function object(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function Approval({ client, approval, onOutcome }: { client: WorkbenchClient; approval: MiniApproval; onOutcome: StandaloneMiniProps['onApprovalOutcome'] }) {
-  const [result, setResult] = useState<'idle' | 'sending' | 'sent' | 'unknown'>('idle');
-  const attempted = useRef(false);
-  async function reply(value: unknown) {
-    if (attempted.current || approval.outcome) return;
-    attempted.current = true;
-    setResult('sending');
-    let outcome: 'sent' | 'unknown';
-    try { await client.reply(approval.requestRef, { result: value }); outcome = 'sent'; }
-    catch { outcome = 'unknown'; }
-    setResult(outcome);
-    onOutcome(approval.requestRef, outcome);
-  }
-  const visibleResult = approval.outcome ?? result;
-  return <div className="yard-mini-approval">
-    <strong>{approval.title}</strong>{approval.detail && <p>{approval.detail}</p>}
-    <div className="yard-mini-approval-actions">{approval.choices.map((choice, index) => <button type="button" key={index}
-      disabled={visibleResult !== 'idle'} onClick={() => { void reply(choice.result); }}>{choice.label}</button>)}</div>
-    {visibleResult === 'sent' && <small>Response sent</small>}
-    {visibleResult === 'unknown' && <small role="alert">Response could not be confirmed. Check the conversation before responding again.</small>}
-  </div>;
-}
-
 function motionFor(activities: readonly MiniActivity[]): PetMotion {
   for (const status of ['waiting', 'failed', 'running', 'review'] as const) {
     if (activities.some(activity => activity.status === status)) return status;
@@ -88,8 +81,9 @@ function motionFor(activities: readonly MiniActivity[]): PetMotion {
   return 'idle';
 }
 
-export function StandaloneMini({ client, send, activities, onOpenThread, onExpand, onApprovalOutcome, onOpenSettings,
-  builtinAssets = noAssets, children, shortcut = true }: StandaloneMiniProps) {
+export function StandaloneMini({ client, send, activities, hostConnections, onOpenThread, onExpand, onApprovalOutcome,
+  onNotificationAction, onNotificationActionOutcome, onOpenSettings, builtinAssets = noAssets, children, quickChatHostId,
+  quickChatTarget, onQuickChatTarget, shortcut = true }: StandaloneMiniProps) {
   const [state, setState] = useState<WebPetState | null>(null);
   const [settings, setSettings] = useState<Record<string, unknown>>(emptySettings);
   const [custom, setCustom] = useState<unknown>(null);
@@ -97,14 +91,19 @@ export function StandaloneMini({ client, send, activities, onOpenThread, onExpan
   const [picker, setPicker] = useState(false);
   const [menu, setMenu] = useState(false);
   const [composer, setComposer] = useState(false);
+  const [requestedTarget, setRequestedTarget] = useState<MiniIdentity | null>(null);
   const [saving, setSaving] = useState(false);
   const [sizeDraft, setSizeDraft] = useState<number | null>(null);
   const [hover, setHover] = useState(false);
   const [position, setPosition] = useState<PetPosition | null>(null);
   const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  const [, setConnectionVersion] = useState(0);
   const container = useRef<HTMLElement>(null);
+  const composerElement = useRef<HTMLElement>(null);
+  const composerFocusRequested = useRef(false);
   const menuElement = useRef<HTMLDivElement>(null);
   const menuButton = useRef<HTMLButtonElement>(null);
+  const quickChatButton = useRef<HTMLButtonElement>(null);
   const pickerClose = useRef<HTMLButtonElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
   const stateRef = useRef<WebPetState | null>(null);
@@ -120,12 +119,66 @@ export function StandaloneMini({ client, send, activities, onOpenThread, onExpan
   const ignoreClick = useRef(false);
   const hiding = useRef(false);
   const sendRef = useRef(send);
+  const connectionsRef = useRef(hostConnections);
+  const activitiesRef = useRef(activities);
+  const quickChatHost = quickChatTarget?.hostId ?? quickChatHostId;
+  const quickChatHostRef = useRef(quickChatHost);
+  const barriers = useRef(new Map<string, string | null>());
+  const observedConnections = useRef(new Map<string, string>());
+  const invalidRequests = useRef(new Map<string, Set<string>>());
+  const localEpoch = useRef(0);
+  connectionsRef.current = hostConnections;
+  activitiesRef.current = activities;
+  quickChatHostRef.current = quickChatHost;
   useEffect(() => { sendRef.current = send; }, [send]);
 
+  const hostReady = useCallback((hostId: string) => {
+    const current = connectionsRef.current[hostId];
+    const observed = observedConnections.current.get(hostId);
+    if (!current || current.state !== 'connected' || !current.fresh || observed === 'disconnected' || observed === 'connecting') return false;
+    return !barriers.current.has(hostId) || barriers.current.get(hostId) !== current.revision;
+  }, []);
+
+  const usable = useCallback((hostId: string) => hostReady('local') && hostReady(hostId), [hostReady]);
+
+  const requestReady = useCallback((ref: ServerRequestRef, hostId: string) =>
+    ref.hostId === hostId && usable(hostId) && connectionsRef.current[hostId]?.requestGeneration === ref.generation &&
+      !invalidRequests.current.get(hostId)?.has(ref.generation), [usable]);
+
+  const invalidate = useCallback((hostId: string) => {
+    const targets = hostId === 'local' ? new Set(['local', ...Object.keys(connectionsRef.current),
+      ...activitiesRef.current.map(activity => activity.hostId), ...(quickChatHostRef.current ? [quickChatHostRef.current] : [])]) : new Set([hostId]);
+    for (const id of targets) {
+      barriers.current.set(id, connectionsRef.current[id]?.revision ?? null);
+      const generations = invalidRequests.current.get(id) ?? new Set<string>();
+      const activeGeneration = connectionsRef.current[id]?.requestGeneration;
+      if (activeGeneration) generations.add(activeGeneration);
+      for (const activity of activitiesRef.current) if (activity.hostId === id) {
+        for (const request of [activity.approval, activity.question, ...(activity.requests ?? []).map(item => item.request)]) {
+          if (request?.requestRef.hostId === id) generations.add(request.requestRef.generation);
+        }
+      }
+      invalidRequests.current.set(id, generations);
+    }
+    if (hostId === 'local') {
+      localEpoch.current++;
+      settingsRead.current++;
+      customRead.current++;
+      sizeRevision.current++;
+      setSizeDraft(null);
+    }
+    if (hostId === 'local' || hostId === quickChatHostRef.current) composerFocusRequested.current = false;
+    setConnectionVersion(version => version + 1);
+  }, []);
+
   const sendCommand = useCallback(async (message: MiniCommand) => {
+    if (message.type !== 'avatar-overlay-open-state-request' && !hostReady('local')) {
+      if (mounted.current) setError('Mini connection is unavailable.');
+      throw new Error('Mini connection is unavailable');
+    }
     try { await sendRef.current(message); }
     catch { if (mounted.current) setError('Mini could not reach the host.'); throw new Error('Mini host request failed'); }
-  }, []);
+  }, [hostReady]);
 
   const loadSettings = useCallback(async () => {
     const before = { ...settingRevisions.current };
@@ -161,7 +214,7 @@ export function StandaloneMini({ client, send, activities, onOpenThread, onExpan
         stateRef.current = next;
         setState(next);
         if (!drag.current) setPosition(next.position);
-        if (!next.isOpen) { hiding.current = false; setMenu(false); setPicker(false); setComposer(false); }
+        if (!next.isOpen) { hiding.current = false; setMenu(false); setPicker(false); setComposer(false); setRequestedTarget(null); }
       } else if (event.type === 'workbench-mini-setting' && typeof event.key === 'string' && settingKeys.includes(event.key as typeof settingKeys[number])) {
         const key = event.key;
         settingRevisions.current[key] = (settingRevisions.current[key] ?? 0) + 1;
@@ -169,17 +222,22 @@ export function StandaloneMini({ client, send, activities, onOpenThread, onExpan
       } else if (event.type === 'workbench-pet-error') {
         hiding.current = false;
         setError(typeof event.error === 'string' ? event.error : 'Mini settings could not be saved.');
-      } else if (event.type === 'codex-app-server-connection-changed' && event.hostId === 'local' && event.state === 'connected') {
-        void sendCommand({ type: 'avatar-overlay-open-state-request' }).catch(() => {});
-        void loadSettings();
-        void loadCustom();
+      } else if (event.type === 'codex-app-server-connection-changed' && typeof event.hostId === 'string') {
+        if (typeof event.state === 'string') observedConnections.current.set(event.hostId, event.state);
+        if (event.state === 'disconnected' || event.state === 'connecting') invalidate(event.hostId);
+        if (event.hostId === 'local' && event.state === 'connected') {
+          setConnectionVersion(version => version + 1);
+          void sendCommand({ type: 'avatar-overlay-open-state-request' }).catch(() => {});
+          void loadSettings();
+          void loadCustom();
+        } else if (event.state === 'connected') setConnectionVersion(version => version + 1);
       }
     });
     void sendCommand({ type: 'avatar-overlay-open-state-request' }).catch(() => {});
     void loadSettings();
     void loadCustom();
     return () => { mounted.current = false; lifecycle.current++; unsubscribe(); };
-  }, [client, loadCustom, loadSettings, sendCommand]);
+  }, [client, invalidate, loadCustom, loadSettings, sendCommand]);
 
   useEffect(() => {
     const resize = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
@@ -204,13 +262,17 @@ export function StandaloneMini({ client, send, activities, onOpenThread, onExpan
   }, [menu, picker]);
 
   useEffect(() => {
+    if (requestedTarget && quickChatTarget?.hostId === requestedTarget.hostId && quickChatTarget.threadId === requestedTarget.threadId) setRequestedTarget(null);
+  }, [requestedTarget, quickChatTarget?.hostId, quickChatTarget?.threadId]);
+
+  useEffect(() => {
     if (!menu && !picker && !composer) return;
     const keyboard = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.preventDefault(); event.stopPropagation();
       if (menu) { setMenu(false); menuButton.current?.focus(); }
       else if (picker) { setPicker(false); menuButton.current?.focus(); }
-      else setComposer(false);
+      else { setComposer(false); setRequestedTarget(null); composerFocusRequested.current = false; quickChatButton.current?.focus(); }
     };
     const outside = (event: PointerEvent) => {
       if (menu && event.target instanceof Node && !menuElement.current?.contains(event.target) && !menuButton.current?.contains(event.target)) setMenu(false);
@@ -235,34 +297,41 @@ export function StandaloneMini({ client, send, activities, onOpenThread, onExpan
     };
   }, [state?.isOpen, state?.visibility, sendCommand]);
 
-  async function writeSetting(key: typeof settingKeys[number], value: unknown) {
+  async function writeSetting(key: typeof settingKeys[number], value: unknown, epoch: number, revision: string) {
+    if (epoch !== localEpoch.current || !hostReady('local') || connectionsRef.current.local?.revision !== revision) throw new Error('Mini connection is unavailable');
     const before = settingRevisions.current[key] ?? 0;
     const generation = lifecycle.current;
     await client.host('set-setting', { key, value });
+    if (epoch !== localEpoch.current || !hostReady('local') || connectionsRef.current.local?.revision !== revision) throw new Error('Mini connection changed while saving');
     if (mounted.current && generation === lifecycle.current && (settingRevisions.current[key] ?? 0) === before) {
       settingRevisions.current[key] = before + 1;
       setSettings(previous => ({ ...previous, [key]: value }));
     }
   }
   async function selectPet(id: string) {
-    if (selectionPending.current) return;
+    if (selectionPending.current || !hostReady('local')) return;
     selectionPending.current = true;
     const generation = lifecycle.current;
+    const epoch = localEpoch.current;
+    const revision = connectionsRef.current.local!.revision;
     setSaving(true); setError('');
     try {
-      await writeSetting('selected-avatar-id', id);
+      await writeSetting('selected-avatar-id', id, epoch, revision);
       if (!mounted.current || generation !== lifecycle.current) return;
-      if (settings['avatar-overlay-pet-visible'] === false) await writeSetting('avatar-overlay-pet-visible', true);
+      if (settings['avatar-overlay-pet-visible'] === false) await writeSetting('avatar-overlay-pet-visible', true, epoch, revision);
       if (mounted.current && generation === lifecycle.current) setPicker(false);
     } catch { if (mounted.current && generation === lifecycle.current) setError('Pet selection could not be saved.'); }
     finally { selectionPending.current = false; if (mounted.current && generation === lifecycle.current) setSaving(false); }
   }
   function resizePet(value: number) {
+    if (!hostReady('local')) return;
     const revision = ++sizeRevision.current, generation = lifecycle.current;
+    const epoch = localEpoch.current;
+    const connectionRevision = connectionsRef.current.local!.revision;
     setSizeDraft(value);
     sizeWrites.current = sizeWrites.current.catch(() => {}).then(async () => {
-      if (revision !== sizeRevision.current || generation !== lifecycle.current) return;
-      await writeSetting('avatar-overlay-mascot-width-px', value);
+      if (revision !== sizeRevision.current || generation !== lifecycle.current || epoch !== localEpoch.current || !hostReady('local') || connectionsRef.current.local?.revision !== connectionRevision) return;
+      await writeSetting('avatar-overlay-mascot-width-px', value, epoch, connectionRevision);
       if (mounted.current && generation === lifecycle.current && revision === sizeRevision.current) setSizeDraft(null);
     }).catch(() => {
       if (mounted.current && generation === lifecycle.current && revision === sizeRevision.current) {
@@ -274,6 +343,25 @@ export function StandaloneMini({ client, send, activities, onOpenThread, onExpan
   const options = readPetOptions(custom, builtinAssets);
   const selectedId = typeof settings['selected-avatar-id'] === 'string' ? settings['selected-avatar-id'] as string : builtinPets[0].id;
   const selected: PetOption = options.find(option => option.id === selectedId) ?? { id: selectedId, name: selectedId, rows: 11 };
+  const localReady = hostReady('local');
+  const connectionMessage = (hostId: string) => {
+    const current = hostConnections[hostId];
+    return observedConnections.current.get(hostId) === 'disconnected' || !current || current.state === 'disconnected' ? 'Connection lost' : 'Refreshing activity';
+  };
+  const targetReady = !requestedTarget || quickChatTarget?.hostId === requestedTarget.hostId && quickChatTarget.threadId === requestedTarget.threadId;
+  const quickReady = targetReady && !!quickChatHost && usable(quickChatHost);
+  useEffect(() => {
+    if (!composer || !quickReady || !composerFocusRequested.current) return;
+    const input = composerElement.current?.querySelector<HTMLElement>('textarea:not(:disabled), input:not(:disabled), [contenteditable="true"]');
+    if (input) { composerFocusRequested.current = false; input.focus(); }
+  }, [composer, quickReady, quickChatTarget?.hostId, quickChatTarget?.threadId]);
+  function openFollowUp(identity: MiniIdentity) {
+    if (!onQuickChatTarget || !quickChatTarget || !usable(identity.hostId)) return;
+    composerFocusRequested.current = true;
+    setRequestedTarget(identity);
+    setComposer(true);
+    onQuickChatTarget(identity);
+  }
   const width = Math.min(420, viewport.width), height = Math.min(620, viewport.height);
   const left = (position?.x ?? 1) * Math.max(0, viewport.width - width), top = (position?.y ?? 1) * Math.max(0, viewport.height - height);
   const style = { left, top, width, height, '--yard-pet-width': `${sizeDraft ?? petSize(settings['avatar-overlay-mascot-width-px'])}px` } as CSSProperties;
@@ -311,34 +399,62 @@ export function StandaloneMini({ client, send, activities, onOpenThread, onExpan
   return <aside ref={container} className="yard-mini" data-workbench-mini="" aria-label="Codex Mini" style={style}>
     <div className="yard-mini-content">
       {state?.isOpen && <>
-        {composer && children && <section className="yard-mini-composer" aria-label="Mini conversation">{children}</section>}
+        {!localReady && <div className="yard-mini-connection" role="status">{connectionMessage('local')}. Activity is paused.</div>}
+        {composer && children && <section ref={composerElement} className="yard-mini-composer" aria-label="Mini conversation">
+          <div className="yard-mini-composer-heading"><strong>Quick chat</strong><button type="button" title="Close Quick chat" aria-label="Close Quick chat"
+            onClick={() => { setComposer(false); setRequestedTarget(null); composerFocusRequested.current = false; quickChatButton.current?.focus(); }}><X size={15} /></button></div>
+          {!quickReady && <p className="yard-mini-composer-status" role="status">{!targetReady ? 'Opening conversation...' : quickChatHost ? `${connectionMessage(localReady ? quickChatHost : 'local')}. Quick chat is paused.` : 'Select a conversation to use Quick chat.'}</p>}
+          <div inert={!quickReady}>{children}</div>
+        </section>}
         {activities.length > 0 && <div className="yard-mini-activities" aria-label="Recent activity">
-          {activities.map(activity => <div className="yard-mini-activity" key={JSON.stringify([activity.hostId, activity.threadId])}>
+          {activities.map(activity => {
+            const ready = usable(activity.hostId);
+            const identity = { hostId: activity.hostId, threadId: activity.threadId };
+            const unavailable = connectionMessage(localReady ? activity.hostId : 'local');
+            const requests: readonly MiniRequest[] = activity.requests ?? [
+              ...(activity.approval ? [{ kind: 'approval' as const, request: activity.approval }] : []),
+              ...(activity.question ? [{ kind: 'question' as const, request: activity.question }] : []),
+            ];
+            return <div className="yard-mini-activity" key={JSON.stringify([activity.hostId, activity.threadId])}>
             <button type="button" className="yard-mini-activity-link" onClick={() => onOpenThread({ hostId: activity.hostId, threadId: activity.threadId })}>
-              <span className={`yard-mini-status yard-mini-status-${activity.status}`} />
-              <span><strong>{activity.title || 'Untitled conversation'}</strong><small>{activity.detail || statusText[activity.status]}</small></span>
+              <span className={`yard-mini-status yard-mini-status-${ready ? activity.status : 'paused'}`} />
+              <span><strong>{activity.title || 'Untitled conversation'}</strong><small>{ready ? activity.detail || statusText[activity.status] : `${unavailable}. Activity paused.`}</small></span>
             </button>
-            {activity.approval && <Approval key={JSON.stringify(activity.approval.requestRef)} client={client} approval={activity.approval} onOutcome={onApprovalOutcome} />}
-          </div>)}
+            {requests.map(({ kind, request }) => <div key={JSON.stringify(request.requestRef)}>
+              {kind === 'approval'
+                ? <Approval client={client} approval={request} enabled={requestReady(request.requestRef, activity.hostId)}
+                  canWrite={() => requestReady(request.requestRef, activity.hostId)} onOutcome={onApprovalOutcome} />
+                : <Question client={client} question={request} enabled={requestReady(request.requestRef, activity.hostId)}
+                  canWrite={() => requestReady(request.requestRef, activity.hostId)} onOutcome={onApprovalOutcome} />}
+              {ready && !requestReady(request.requestRef, activity.hostId) && <small className="yard-mini-request-expired" role="status">Request expired. Open the conversation to check its status.</small>}
+            </div>)}
+            {activity.actions?.length ? <div className="yard-mini-request-actions yard-mini-activity-actions">{activity.actions.map(action => <NotificationAction
+              key={action.id} action={action} identity={identity} enabled={ready} canWrite={() => usable(activity.hostId)} onOpen={onOpenThread}
+              onFollowUp={children && onQuickChatTarget && quickChatTarget ? openFollowUp : undefined} onRun={onNotificationAction} onOutcome={onNotificationActionOutcome} />)}</div> : null}
+          </div>; })}
         </div>}
         {picker && <section className="yard-mini-picker" aria-label="Choose pet">
           <div className="yard-mini-picker-heading"><strong>Choose pet</strong><button ref={pickerClose} type="button" title="Close" aria-label="Close pet picker" onClick={() => { setPicker(false); menuButton.current?.focus(); }}><X size={15} /></button></div>
           <div className="yard-mini-options">{options.map(option => <button type="button" className="yard-mini-option" key={option.id}
-            aria-pressed={option.id === selectedId} disabled={saving || !option.src} title={option.src ? option.name : `${option.name}: artwork unavailable`}
+            aria-pressed={option.id === selectedId} disabled={saving || !localReady || !option.src} title={option.src ? option.name : `${option.name}: artwork unavailable`}
             onClick={() => { void selectPet(option.id); }}><span className="yard-mini-option-image"><PetSprite pet={option} motion="idle" /></span><span>{option.name}</span></button>)}</div>
           {!options.some(option => option.id === selectedId) && <p>Selected pet unavailable: {selectedId}</p>}
           <label className="yard-mini-size">Size <input type="range" min="80" max="224" step="1" value={sizeDraft ?? petSize(settings['avatar-overlay-mascot-width-px'])}
-            disabled={saving} onChange={event => resizePet(Number(event.target.value))} /></label>
-          <button type="button" className="yard-mini-refresh" onClick={() => { void loadCustom(); }}>Refresh custom pets</button>
+            disabled={saving || !localReady} onChange={event => resizePet(Number(event.target.value))} /></label>
+          <button type="button" className="yard-mini-refresh" disabled={!localReady} onClick={() => { void loadCustom(); }}>Refresh custom pets</button>
         </section>}
         <div className="yard-mini-pet-area">
           {settings['avatar-overlay-pet-visible'] !== false && <button type="button" className="yard-mini-mascot" data-testid="avatar-mascot-button"
             aria-label={`Open Codex, ${selected.name}`} title="Open Codex" onPointerDown={pointerDown} onPointerMove={pointerMove}
             onPointerUp={event => pointerEnd(event)} onPointerCancel={event => pointerEnd(event, true)} onPointerEnter={() => setHover(true)} onPointerLeave={() => setHover(false)}
             onContextMenu={event => { event.preventDefault(); setMenu(true); }} onClick={() => { if (!ignoreClick.current) onExpand(); }}>
-            <PetSprite pet={selected} motion={hover ? 'jumping' : motionFor(activities)} /></button>}
+            <PetSprite pet={selected} motion={hover ? 'jumping' : motionFor(activities.filter(activity => usable(activity.hostId)))} /></button>}
           <div className="yard-mini-controls">
-            {children && <button type="button" title="Quick chat" aria-label="Quick chat" aria-expanded={composer} onClick={() => setComposer(value => !value)}><MessageSquare size={16} /></button>}
+            {children && <button ref={quickChatButton} type="button" title="Quick chat" aria-label="Quick chat" aria-expanded={composer} onClick={() => {
+              if (composer) setRequestedTarget(null);
+              composerFocusRequested.current = !composer && quickReady;
+              setComposer(!composer);
+            }}><MessageSquare size={16} /></button>}
             <button type="button" title="Open Codex" aria-label="Open Codex" onClick={onExpand}><Maximize2 size={16} /></button>
             <button ref={menuButton} type="button" title="Mini menu" aria-label="Mini menu" aria-expanded={menu} onClick={() => setMenu(value => !value)}><MoreHorizontal size={18} /></button>
           </div>
@@ -367,3 +483,5 @@ export function StandaloneMini({ client, send, activities, onOpenThread, onExpan
 export const StandalonePetOverlay = StandaloneMini;
 export { builtinPets, miniShortcut, petFrame, readPetOptions, readPetState } from './model.ts';
 export type { BuiltinPetAssets, BuiltinPetId, PetMotion, PetOption } from './model.ts';
+export { classifyMiniFailure } from './requests.tsx';
+export type { MiniActionOutcome, MiniActionRunner, MiniApproval, MiniIdentity, MiniNotificationAction, MiniOutcome, MiniQuestion, MiniRequest } from './requests.tsx';
