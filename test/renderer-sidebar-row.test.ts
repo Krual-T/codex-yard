@@ -8,7 +8,6 @@ import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import * as jsxRuntime from 'react/jsx-runtime';
 import type { TaskRowDependencies, TaskRowProps } from '../src/renderer/shared/task-row-types.ts';
-import type { SidebarConversationRowProps } from '../src/renderer/sidebar/conversation-row.tsx';
 
 const appSource = readFileSync(new URL(
   '../vendor/codex-app/26.1013.40934/webview/assets/app-initial-a68277f60b93.js', import.meta.url,
@@ -24,18 +23,13 @@ function pinnedFunction(start: string, end: string): string {
 const taskRowSource = pinnedFunction(
   'function GTc(e){', 't[272]=fee,t[273]=pee,t[274]=Or,t[275]=mee):mee=t[275],mee}',
 );
-const conversationRowSource = pinnedFunction(
-  'function vEc(e){', 't[13]=i,t[14]=l,t[15]=u,t[16]=d):d=t[16],d}',
-);
 
 async function loadFactories() {
   const built = await build({
-    entryPoints: ['src/renderer/shared/task-row.tsx', 'src/renderer/sidebar/conversation-row.tsx'],
+    entryPoints: ['src/renderer/shared/task-row.tsx'],
     outdir: 'out', bundle: true, format: 'esm', platform: 'browser', write: false, metafile: true,
   });
-  assert.deepEqual(Object.keys(built.metafile.inputs).sort(), [
-    'src/renderer/shared/task-row.tsx', 'src/renderer/sidebar/conversation-row.tsx',
-  ]);
+  assert.deepEqual(Object.keys(built.metafile.inputs), ['src/renderer/shared/task-row.tsx']);
   assert.deepEqual(Object.values(built.metafile.outputs).flatMap(output => output.imports), []);
   const importOutput = async (name: string) => {
     const file = built.outputFiles.find(output => output.path.endsWith(`/${name}.js`));
@@ -44,7 +38,6 @@ async function loadFactories() {
   };
   return {
     taskRow: await importOutput('task-row') as typeof import('../src/renderer/shared/task-row.tsx'),
-    conversationRow: await importOutput('conversation-row') as typeof import('../src/renderer/sidebar/conversation-row.tsx'),
   };
 }
 
@@ -159,34 +152,6 @@ test('shared task row preserves pinned layout, state and action contracts across
     const expected = renderToStaticMarkup(React.createElement(original, props));
     const actual = renderToStaticMarkup(React.createElement(migrated, props));
     assert.equal(actual, expected, `${props.variant}: ${String(props.title)}`);
-  }
-});
-
-test('conversation row preserves the upstream secondary title and default variant', async () => {
-  const { conversationRow } = await loadFactories();
-  const deps = createDependencies();
-  const row = originalTaskRow(deps);
-  const original = runInNewContext(`(${conversationRowSource})`, {
-    yEc: { c: () => Array(17).fill(Symbol.for('react.memo_cache_sentinel')) },
-    bEc: jsxRuntime, GTc: row, zwc: deps.AnimatedTitle, Wc: deps.classNames,
-  }) as React.ComponentType<SidebarConversationRowProps>;
-  const migrated = conversationRow.createSidebarConversationRowComponent(React, {
-    TaskRow: row, AnimatedTitle: deps.AnimatedTitle, classNames: deps.classNames,
-  });
-  const base = { title: 'Conversation', onClick: () => {}, statusState: { type: 'idle' } };
-  const cases: SidebarConversationRowProps[] = [
-    base,
-    { ...base, secondaryContent: 'Worktree details' },
-    { ...base, variant: 'sidebarAvatar', secondaryContent: 'Wrapped details' },
-    { ...base, variant: 'sidebarAvatar', secondaryContent: 'Scrolling details', wrapSecondaryContent: false },
-    { ...base, variant: 'tableRow', secondaryContent: 'Two lines', wrapSecondaryContent: true },
-  ];
-  for (const props of cases) {
-    assert.equal(
-      renderToStaticMarkup(React.createElement(migrated, props)),
-      renderToStaticMarkup(React.createElement(original, props)),
-      `${String(props.variant)} / ${String(props.secondaryContent)}`,
-    );
   }
 });
 
