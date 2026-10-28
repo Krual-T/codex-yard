@@ -208,20 +208,36 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     const key = JSON.stringify([hostId, realTarget]);
     const id = params.operationId == null ? randomBytes(16).toString('hex') : params.operationId;
     if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(id)) throw new Error('无效的文件保存操作标识。');
-    const existing = await journal(current => ({ value: current.find(item => item.hostId === hostId && item.target === realTarget
-      && (item.state === 'pending' || item.state === 'unknown')) }));
-    if (existing) return { outcome: 'blocked' as const, operationId: existing.id };
+    const guardId = params.guardOperationId;
+    if (guardId !== undefined && (typeof guardId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(guardId))) throw new Error('无效的文件保存目标标识。');
+    const guardMatches = (current: SaveReceipt[]) => guardId === undefined || current.some(item => item.id === guardId
+      && item.hostId === hostId && item.target === realTarget && (item.state === 'saved' || item.state === 'failed'));
+    const blockedResult = (item: SaveReceipt) => {
+      if (item.requestRoot !== undefined || item.requestTarget !== undefined) {
+        if (typeof item.requestRoot !== 'string' || !posix.isAbsolute(item.requestRoot)
+          || typeof item.requestTarget !== 'string' || !posix.isAbsolute(item.requestTarget)
+          || !within(item.requestRoot, item.requestTarget) || item.requestRoot === item.requestTarget) throw new Error('原文件保存查询路径无法确认。');
+      }
+      return { outcome: 'blocked' as const, operationId: item.id,
+        query: { cwd: item.requestRoot ?? root, path: item.requestTarget ?? target } };
+    };
+    const existing = await journal(current => ({ value: { guardMatches: guardMatches(current), prior: current.find(item => item.hostId === hostId && item.target === realTarget
+      && (item.state === 'pending' || item.state === 'unknown')) } }));
+    if (!existing.guardMatches) return { outcome: 'conflict' as const };
+    if (existing.prior) return blockedResult(existing.prior);
     const result = (fileWrites.get(key) ?? Promise.resolve()).then(async () => {
       if (closed) throw new Error('文件服务已关闭，未保存。');
-      const blocked = await journal(current => {
+      const blocked = await journal<{ conflict?: true; prior?: SaveReceipt } | undefined>(current => {
+        if (!guardMatches(current)) return { value: { conflict: true as const } };
         const duplicate = current.find(item => item.id === id);
         if (duplicate && (duplicate.hostId !== hostId || duplicate.target !== realTarget)) throw new Error('文件保存操作标识已用于其他文件。');
         const prior = duplicate ?? current.find(item => item.hostId === hostId && item.target === realTarget && (item.state === 'pending' || item.state === 'unknown'));
-        return prior ? { value: prior } : { value: undefined, next: [...current, {
+        return prior ? { value: { prior } } : { value: undefined, next: [...current, {
           id, hostId, target: realTarget, requestRoot: root, requestTarget: target, state: 'pending',
         }] };
       });
-      if (blocked) return { outcome: 'blocked' as const, operationId: blocked.id };
+      if (blocked?.conflict) return { outcome: 'conflict' as const };
+      if (blocked?.prior) return blockedResult(blocked.prior);
       liveSaves.add(id);
       let issued = false, returned = false, finalized = false;
       let releaseLate!: () => void;
@@ -289,17 +305,26 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     const root = path(params.cwd, hostId);
     const target = path(params.path.startsWith('file:') ? params.path : posix.resolve(root, params.path), hostId);
     if (!within(root, target) || root === target) throw new Error('查询路径必须位于当前工作目录内。');
-    const recorded = await journal(current => ({ value: current.find(receipt => receipt.id === params.operationId && receipt.hostId === hostId
-      && receipt.requestRoot === root && receipt.requestTarget === target) }));
-    if (recorded) return { outcome: recorded.state === 'pending' && !liveSaves.has(recorded.id) ? 'unknown' : recorded.state };
-    // Legacy receipts have no submitted-path fields; preserve their former lookup.
-    const [realRoot, realTarget] = await Promise.all([canonical(hostId, root), canonical(hostId, target)]);
-    if (!within(realRoot, realTarget) || realRoot === realTarget) throw new Error('查询路径超出当前工作目录。');
-    return journal(current => {
-      const item = current.find(receipt => receipt.id === params.operationId && receipt.hostId === hostId
-        && receipt.requestRoot === undefined && receipt.target === realTarget);
-      return { value: { outcome: !item ? 'missing' : item.state === 'pending' && !liveSaves.has(item.id) ? 'unknown' : item.state } };
-    });
+    const hasQuery = params.queryCwd !== undefined || params.queryPath !== undefined;
+    if (hasQuery && (typeof params.queryCwd !== 'string' || !posix.isAbsolute(params.queryCwd)
+      || typeof params.queryPath !== 'string' || !params.queryPath || params.queryPath.includes('\0'))) throw new Error('原保存查询需要成对的工作目录和路径。');
+    const queryRoot = hasQuery ? path(params.queryCwd, hostId) : root;
+    const queryPath = hasQuery ? path((params.queryPath as string).startsWith('file:') ? params.queryPath : posix.resolve(queryRoot, params.queryPath as string), hostId) : target;
+    if (!within(queryRoot, queryPath) || queryRoot === queryPath) throw new Error('原保存查询路径必须位于其工作目录内。');
+    let recorded = await journal(current => ({ value: current.find(receipt => receipt.id === params.operationId && receipt.hostId === hostId
+      && receipt.requestRoot === queryRoot && receipt.requestTarget === queryPath) }));
+    let realRoot: string | undefined, realTarget: string | undefined;
+    try { [realRoot, realTarget] = await Promise.all([canonical(hostId, root), canonical(hostId, target)]); } catch { /* Target identity cannot be proved. */ }
+    if (!recorded && realRoot && realTarget && within(realRoot, realTarget) && realRoot !== realTarget
+      && (!hasQuery || queryRoot === root && queryPath === target)) {
+      recorded = await journal(current => ({ value: current.find(receipt => receipt.id === params.operationId
+        && receipt.hostId === hostId && receipt.target === realTarget
+        && (!hasQuery || receipt.requestRoot === undefined && receipt.requestTarget === undefined)) }));
+    }
+    if (!recorded) return { outcome: 'missing' as const, targetMatch: 'unknown' as const };
+    const targetMatch = !realRoot || !realTarget ? 'unknown' as const
+      : within(realRoot, realTarget) && realRoot !== realTarget && realTarget === recorded.target ? 'same' as const : 'different' as const;
+    return { outcome: recorded.state === 'pending' && !liveSaves.has(recorded.id) ? 'unknown' as const : recorded.state, targetMatch };
   }
   async function directory(params: ObjectValue, hostId: string, unbounded = false) {
     const root = path(unbounded ? params.directoryPath : params.workspaceRoot, hostId);
