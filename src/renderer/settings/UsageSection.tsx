@@ -58,19 +58,19 @@ export function UsageSection({ client, hostId }: { client: WorkbenchClient; host
     return `${window.usedPercent}% used${duration}${reset}`;
   };
   return <>
-    <div className="yard-section-heading"><h2>{t('Usage')}</h2><button type="button" disabled={account.loading || limits.loading} onClick={refresh}>Refresh</button></div>
+    <div className="yard-section-heading"><h2>{t('Usage')}</h2><button type="button" disabled={account.loading || limits.loading} onClick={refresh}>{t('Refresh')}</button></div>
     <p className="yard-muted">Account and usage for {hostId === 'local' ? 'the local host' : hostId}.</p>
     <div className="yard-setting-group"><Row label="Account" error={account.error ? `Could not load account: ${account.error}` : null} retry={refresh}>
-      <span>{account.loading ? 'Loading...' : accountLabel}</span></Row>
+      <span>{account.loading ? t('Loading...') : accountLabel}</span></Row>
       <Row label="Usage limits" error={limits.error ? `Could not load usage limits: ${limits.error}` : null} retry={refresh}>
-        {limits.loading ? <span>Loading...</span> : limits.data ? <div>{limits.data.buckets.map((bucket, index) => <div key={`${bucket.limitId ?? ''}:${index}`}>
+        {limits.loading ? <span>{t('Loading...')}</span> : limits.data ? <div>{limits.data.buckets.map((bucket, index) => <div key={`${bucket.limitId ?? ''}:${index}`}>
           {(bucket.limitName || bucket.limitId) && <strong>{bucket.limitName || bucket.limitId}</strong>}
           {bucket.primary && <div>{format(bucket.primary)}</div>}{bucket.secondary && <div>{format(bucket.secondary)}</div>}
           {!bucket.primary && !bucket.secondary && <span>No usage limits reported.</span>}
-        </div>)}</div> : <span>Unavailable</span>}
+        </div>)}</div> : <span>{t('Unavailable')}</span>}
       </Row>
-      {limits.data?.ordinaryUsageAllowed != null && <Row label="Included usage"><span>{limits.data.ordinaryUsageAllowed ? 'Available' : 'Unavailable'}</span></Row>}
-      {limits.data?.credits && <Row label="Credit balance"><span>{limits.data.credits.unlimited ? 'Unlimited' : limits.data.credits.balance ?? (limits.data.credits.hasCredits ? 'Available' : 'Unavailable')}</span></Row>}
+      {limits.data?.ordinaryUsageAllowed != null && <Row label="Included usage"><span>{t(limits.data.ordinaryUsageAllowed ? 'Available' : 'Unavailable')}</span></Row>}
+      {limits.data?.credits && <Row label="Credit balance"><span>{limits.data.credits.unlimited ? 'Unlimited' : limits.data.credits.balance ?? t(limits.data.credits.hasCredits ? 'Available' : 'Unavailable')}</span></Row>}
     </div>
     <p className="yard-muted">Purchasing credits, usage resets and billing management are not available for this connection.</p>
   </>;

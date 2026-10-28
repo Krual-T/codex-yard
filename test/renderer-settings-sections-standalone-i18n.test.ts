@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createI18n } from '../src/renderer/i18n/format.ts';
 import { hasTranslations, languageOptions, resolveLocale } from '../src/renderer/i18n/locale.ts';
-import { messageKeys, simplifiedChinese, traditionalChinese } from '../src/renderer/i18n/messages.ts';
+import { messageKeys, settingsMessageKeys, simplifiedChinese, traditionalChinese } from '../src/renderer/i18n/messages.ts';
 import * as otherMessages from '../src/renderer/i18n/other-messages.ts';
 import { Preferences } from '../src/renderer/settings/preferences.ts';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
@@ -34,10 +34,17 @@ test('messages and dates use the same locale, with safe English fallback for mis
   assert.equal(createI18n('bad!').locale, 'en-US');
 });
 
-test('the advertised authored catalogs cover their current typed messages', () => {
-  for (const catalog of [simplifiedChinese, traditionalChinese, ...Object.values(otherMessages)]) {
+test('Chinese settings messages are translated and other catalogs keep their previous coverage', () => {
+  for (const catalog of [simplifiedChinese, traditionalChinese]) {
     assert.deepEqual(messageKeys.filter(key => !Object.hasOwn(catalog, key)), []);
   }
+  const newSettingsKeys = new Set<string>(settingsMessageKeys);
+  for (const catalog of Object.values(otherMessages)) {
+    assert.deepEqual(messageKeys.filter(key => !newSettingsKeys.has(key) && !Object.hasOwn(catalog, key)), []);
+  }
+  assert.equal(createI18n('zh-CN').t('Sandbox mode'), '沙箱模式');
+  assert.equal(createI18n('zh-HK').t('Codex instructions'), 'Codex 指令');
+  assert.equal(createI18n('ja-JP').t('Sandbox mode'), 'Sandbox mode');
   assert.equal(languageOptions.length, 65);
   assert.equal(hasTranslations('it-IT'), false);
   assert.equal(hasTranslations('zh-HK'), true);

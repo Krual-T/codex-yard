@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { WorkbenchClient } from '../workbench-contract.ts';
+import { useI18n } from '../i18n/index.tsx';
 
 interface ArchivedThread { id: string; name: string | null; preview?: string; cwd?: string }
 interface Page { data: ArchivedThread[]; nextCursor: string | null }
 export function ArchivedSection({ client, hostId, onSavingChange }: { client: WorkbenchClient; hostId: string; onSavingChange: (saving: boolean) => void }) {
+  const { t } = useI18n();
   const [threads, setThreads] = useState<ArchivedThread[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -33,15 +35,15 @@ export function ArchivedSection({ client, hostId, onSavingChange }: { client: Wo
     finally { setRestoring(null); onSavingChange(false); }
   };
   return <>
-    <div className="yard-section-heading"><h2>Archived chats</h2><button type="button" disabled={loading || restoring !== null} onClick={() => { void load(null); }}>Refresh</button></div>
+    <div className="yard-section-heading"><h2>{t('Archived chats')}</h2><button type="button" disabled={loading || restoring !== null} onClick={() => { void load(null); }}>{t('Refresh')}</button></div>
     {error && <p className="yard-setting-error" role="alert">{error}</p>}
-    {loading && <p role="status">Loading archived chats...</p>}
-    {!loading && !threads.length && !error && <p className="yard-muted">No archived chats.</p>}
+    {loading && <p role="status">{t('Loading archived chats...')}</p>}
+    {!loading && !threads.length && !error && <p className="yard-muted">{t('No archived chats.')}</p>}
     <div className="yard-setting-group">{threads.map(thread => <div className="yard-setting-row" key={thread.id}>
-      <div className="yard-setting-copy"><div className="yard-setting-label">{thread.name || thread.preview || 'Untitled chat'}</div>
+      <div className="yard-setting-copy"><div className="yard-setting-label">{thread.name || thread.preview || t('Untitled chat')}</div>
         {thread.cwd && <div className="yard-setting-description">{thread.cwd}</div>}</div>
-      <button type="button" disabled={restoring !== null || loading} onClick={() => { void restore(thread.id); }}>{restoring === thread.id ? 'Restoring...' : 'Restore'}</button>
+      <button type="button" disabled={restoring !== null || loading} onClick={() => { void restore(thread.id); }}>{t(restoring === thread.id ? 'Restoring...' : 'Restore')}</button>
     </div>)}</div>
-    {cursor && <button type="button" disabled={loading || restoring !== null} onClick={() => { void load(cursor); }}>Load more</button>}
+    {cursor && <button type="button" disabled={loading || restoring !== null} onClick={() => { void load(cursor); }}>{t('Load more')}</button>}
   </>;
 }

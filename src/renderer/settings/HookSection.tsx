@@ -4,6 +4,7 @@ import { canEditHook, HookSettings } from './hooks.ts';
 import type { HookEntry } from './hooks.ts';
 import { scopeKey, validScopePath } from './scope.ts';
 import type { SettingsScope } from './scope.ts';
+import { translateKnown, useI18n } from '../i18n/index.tsx';
 
 const eventLabel = (hook: HookEntry) => hook.eventName.charAt(0).toUpperCase() + hook.eventName.slice(1);
 const trustLabel = (hook: HookEntry) => hook.isManaged || hook.trustStatus === 'managed' ? 'Managed' : hook.trustStatus === 'untrusted' ? 'Needs review'
@@ -12,6 +13,7 @@ const trustLabel = (hook: HookEntry) => hook.isManaged || hook.trustStatus === '
 export function HookSection({ client, hostId, projectScope, onDirtyChange, onSavingChange }: {
   client: WorkbenchClient; hostId: string; projectScope: SettingsScope; onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
 }) {
+  const { t } = useI18n();
   const [cwd, setCwd] = useState('');
   const incomingKey = scopeKey(projectScope);
   const [scope, setScope] = useState(() => ({ origin: incomingKey, paths: projectScope.paths }));
@@ -29,25 +31,25 @@ export function HookSection({ client, hostId, projectScope, onDirtyChange, onSav
   useLayoutEffect(() => { onSavingChange(state.saving); }, [state.saving, onSavingChange]);
   const locked = state.loading || state.saving || state.latest !== null || scopeChanged;
   return <>
-    <div className="yard-section-heading"><h2>Hooks</h2><button type="button" disabled={state.loading || state.saving} onClick={() => { void settings.load(); }}>Refresh</button></div>
+    <div className="yard-section-heading"><h2>{t('Hooks')}</h2><button type="button" disabled={state.loading || state.saving} onClick={() => { void settings.load(); }}>{t('Refresh')}</button></div>
     <form className="yard-filter" onSubmit={event => { event.preventDefault(); if (!settings.dirty && !state.saving && !scopeChanged) {
       if (cwd && !validScopePath(cwd)) { setScopeError('Enter an absolute working directory.'); return; }
       const paths = cwd ? [cwd] : projectScope.paths;
       setScopeError(null);
       if (JSON.stringify(scope.paths) === JSON.stringify(paths)) void settings.load(); else setScope({ origin: incomingKey, paths });
     } }}>
-      <label>Working directory <input value={cwd} disabled={settings.dirty || state.saving || scopeChanged} onChange={event => setCwd(event.target.value)} placeholder="Selected project or session" /></label>
-      <button type="submit" disabled={settings.dirty || state.saving || state.loading || scopeChanged}>Show</button>
+      <label>{t('Working directory')} <input value={cwd} disabled={settings.dirty || state.saving || scopeChanged} onChange={event => setCwd(event.target.value)} placeholder={t('Selected project or session')} /></label>
+      <button type="submit" disabled={settings.dirty || state.saving || state.loading || scopeChanged}>{t('Show')}</button>
     </form>
-    <p className="yard-muted">{scope.paths.length ? `Scope: ${scope.paths.join(', ')}` : 'Select a project or session with a working directory.'}</p>
-    {scopeError && <p className="yard-setting-error" role="alert">{scopeError}</p>}
-    {scopeChanged && settings.dirty && <div className="yard-setting-error" role="alert"><p>The selected project changed. Your hook edits remain in the previous scope.</p>
-      <button type="button" disabled={state.saving} onClick={() => { settings.discard(); setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); }}>Discard edits and switch scope</button></div>}
+    <p className="yard-muted">{scope.paths.length ? `${t('Scope:')} ${scope.paths.join(', ')}` : t('Select a project or session with a working directory.')}</p>
+    {scopeError && <p className="yard-setting-error" role="alert">{translateKnown(t, scopeError)}</p>}
+    {scopeChanged && settings.dirty && <div className="yard-setting-error" role="alert"><p>{t('The selected project changed. Your hook edits remain in the previous scope.')}</p>
+      <button type="button" disabled={state.saving} onClick={() => { settings.discard(); setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); }}>{t('Discard edits and switch scope')}</button></div>}
     {state.error && <p className="yard-setting-error" role="alert">{state.error}</p>}
     {state.targetError && <p className="yard-setting-error">{state.targetError}</p>}
     {state.warnings.map((warning, index) => <p className="yard-setting-error" key={`${warning}:${index}`}>{warning}</p>)}
-    {state.loading && <p role="status">Loading hooks...</p>}
-    {!state.loading && !state.error && !state.hooks.length && <p className="yard-muted">No hooks found.</p>}
+    {state.loading && <p role="status">{t('Loading hooks...')}</p>}
+    {!state.loading && !state.error && !state.hooks.length && <p className="yard-muted">{t('No hooks found.')}</p>}
     {state.latest && <div className="yard-hook-conflict" role="alert">
       <p>Current hook state on the host:</p>
       <ul>{state.drafts.map(draft => {
@@ -61,7 +63,7 @@ export function HookSection({ client, hostId, projectScope, onDirtyChange, onSav
       return <div className="yard-setting-row" key={hook.key}>
         <div className="yard-setting-copy"><div className="yard-setting-label">{eventLabel(hook)}{hook.matcher ? ` | ${hook.matcher}` : ''}</div>
           <div className="yard-setting-description">{[hook.source, trustLabel(hook)].filter(Boolean).join(' | ')}</div>
-          <details className="yard-hook-details"><summary>Details</summary>
+          <details className="yard-hook-details"><summary>{t('Details')}</summary>
             <p>Source: <code>{hook.sourcePath}</code></p>
             {hook.handler.type === 'command' && <><p>Command</p><pre className="yard-instructions">{hook.handler.command}</pre>
               <p>{hook.handler.async ? 'Runs asynchronously' : 'Runs synchronously'}</p></>}
@@ -77,9 +79,9 @@ export function HookSection({ client, hostId, projectScope, onDirtyChange, onSav
           disabled={locked || !canEditHook(hook)} onChange={event => settings.edit(hook.key, event.target.checked)} /></div>
       </div>;
     })}</div>
-    {settings.dirty && <div className="yard-inline-save"><span>Unsaved hook changes</span><div className="yard-actions">
-      <button type="button" disabled={state.saving || state.loading} onClick={() => settings.discard()}>Discard</button>
-      <button type="button" disabled={locked || state.needsRefresh || !!state.targetError} onClick={() => { void settings.save(); }}>{state.saving ? 'Saving...' : 'Save'}</button>
+    {settings.dirty && <div className="yard-inline-save"><span>{t('Unsaved hook changes')}</span><div className="yard-actions">
+      <button type="button" disabled={state.saving || state.loading} onClick={() => settings.discard()}>{t('Discard')}</button>
+      <button type="button" disabled={locked || state.needsRefresh || !!state.targetError} onClick={() => { void settings.save(); }}>{t(state.saving ? 'Saving...' : 'Save')}</button>
     </div></div>}
   </>;
 }
