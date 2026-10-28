@@ -70,20 +70,25 @@ test('an older host cannot make an uncertain rollback retryable from a snapshot'
   assert.equal((await h.store.read(origin.hostId, origin.threadId))?.submission?.stage, 'revertUnknown');
 });
 
-test('a known rejected start retries the submitted version without clearing newer edits', async () => {
+test('a newer edit after a known rejected start sends B with a new CID without reverting twice', async () => {
   const h = fixture(value => value.operation === 'submit' ? { stage: 'reverted', error: 'start rejected' }
     : { stage: 'started', turn: { id: 'old-start', status: 'completed', items: [] } });
   await h.store.save(recovery, origin, version);
   await assert.rejects(h.store.submit(origin, ['original'], params), /start rejected/);
   const newer = { ...recovery, draft: { ...recovery.draft, text: 'newer' }, editor: { ...recovery.editor!, revision: 2 } };
   await h.store.save(newer, origin, { ...version, revision: 2 });
-  await assert.rejects(h.store.submit(origin, [], { input: [{ type: 'text', text: 'newer' }] }), /较新草稿未发送/);
+  const newerParams = { input: [{ type: 'text', text: 'newer' }] };
+  assert.equal((await h.store.submit(origin, [], newerParams)).turn?.id, 'old-start');
   assert.equal(h.calls[1]!.operation, 'retry-start');
-  assert.equal(h.calls[1]!.clientUserMessageId, h.calls[0]!.clientUserMessageId);
-  assert.deepEqual(h.calls[1]!.turnParams, params);
+  assert.deepEqual(h.calls.map(call => call.operation), ['submit', 'retry-start']);
+  assert.deepEqual(h.calls[1]!.expectedTurnIds, ['original']);
+  assert.notEqual(h.calls[1]!.clientUserMessageId, h.calls[0]!.clientUserMessageId);
+  assert.deepEqual(h.calls[1]!.turnParams, newerParams);
   const saved = await h.store.read(origin.hostId, origin.threadId);
   assert.equal(saved?.recovery.draft.text, 'newer');
-  assert.deepEqual(saved?.submission?.editorVersion, version);
+  assert.deepEqual(saved?.submission?.editorVersion, { ...version, revision: 2 });
+  await h.store.save(null, origin, { ...version, revision: 2 });
+  assert.equal(await h.store.read(origin.hostId, origin.threadId), null);
 });
 
 test('storage failure and another page edit both stop before a destructive host call', async () => {

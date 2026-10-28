@@ -629,12 +629,15 @@ export async function createNativeWorkbench(options: Options = {}) {
         queuedSendLocks.release({ ...request, sent: params.sent === true });
         return null;
       }
-      case 'get-settings': await stateMutations.flush(); return { values: settings, configuredValues: settings };
+      case 'get-settings': return stateMutations.run(() => {
+        const values = structuredClone(settings);
+        return { values, configuredValues: values };
+      });
       case 'codex-command-keymap-state': return { bindings: [], keymapPath: null, supported: false,
         primaryNumberShortcutTarget: settings['primary-number-shortcut-target'] ?? 'tabs' };
-      case 'get-setting': await stateMutations.flush(); return { value: settings[String(params.key)], exists: Object.hasOwn(settings, String(params.key)) };
+      case 'get-setting': return stateMutations.run(() => ({ value: structuredClone(settings[String(params.key)]), exists: Object.hasOwn(settings, String(params.key)) }));
       case 'set-setting': return writePreference('setting', String(params.key ?? ''), params.value, params.expected);
-      case 'get-global-state': await stateMutations.flush(); return { value: globals[String(params.key)], exists: Object.hasOwn(globals, String(params.key)) };
+      case 'get-global-state': return stateMutations.run(() => ({ value: structuredClone(globals[String(params.key)]), exists: Object.hasOwn(globals, String(params.key)) }));
       case 'set-global-state': return writePreference('global', String(params.key ?? ''), params.value, params.expected);
       case 'os-info': return { platform: 'linux', osVersion: 'Web', osRelease: 'Web', isSystemBackdropSupported: false, isVsCodeRunningInsideWsl: false, isCodexRunningInsideWsl: false };
       // The Web host has no IDE/device UI locale; the requesting browser owns

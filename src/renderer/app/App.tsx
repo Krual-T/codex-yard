@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import type { ThreadResponse, ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { ComposerDraft, MessageEditOrigin, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
@@ -8,6 +8,9 @@ import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
 import type { MessageEditNavigationController, MessageEditNavigationLease, MessageEditRecovery } from '../messages/use-message-editing.ts';
 import { StandaloneGoal } from '../composer/StandaloneGoal.tsx';
 import { StandaloneSettings } from '../settings/StandaloneSettings.tsx';
+import type { SettingsInstructionEditorProps } from '../settings/PersonalizationSection.tsx';
+import type { SettingsProjectRoots, SettingsSessionCwd } from '../settings/scope.ts';
+import { CodeEditor } from '../files/CodeEditor.tsx';
 import { BrowserWorkbenchClient, isServerRequestEvent } from './client.ts';
 import { applyThreadEvent, isItemDelta, isThreadBusy } from './thread-state.ts';
 import { eventItemKey, loadThread, reconcileThreadSnapshot } from './load-thread.ts';
@@ -17,7 +20,7 @@ import { submitDraft } from './submission.ts';
 import { applyAppearance } from './appearance.ts';
 import { sessionOptions } from './session-options.ts';
 import { MessageEditRecoveryStore, messageEditChanged, messageEditsAtom } from './message-edit-recovery.ts';
-import { projectsForHost } from './projects.ts';
+import { projectForThread, projectsForHost } from './projects.ts';
 import type { Project, ProjectState } from './projects.ts';
 import { StandaloneSidebar } from '../sidebar/StandaloneSidebar.tsx';
 import { useThreadList } from '../sidebar/use-thread-list.ts';
@@ -62,6 +65,12 @@ function rememberNewDraftLocation(hostId: string, draftId: string, cwd: string, 
   sessionStorage.setItem('yard-new-draft-location:' + JSON.stringify([hostId, draftId]), JSON.stringify({ cwd, projectId }));
 }
 
+const InstructionEditorTheme = createContext<'light' | 'dark'>('dark');
+function SettingsInstructionEditor(props: SettingsInstructionEditorProps) {
+  const theme = useContext(InstructionEditorTheme);
+  return <CodeEditor {...props} theme={theme} visible />;
+}
+
 export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [current, setCurrent] = useState(route);
   const [status, setStatus] = useState('connecting');
@@ -74,6 +83,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [workspace, setWorkspace] = useState('');
   const [projectState, setProjectState] = useState<ProjectState | null>(null);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  const [settingsContext, setSettingsContext] = useState<{
+    projectRoots: SettingsProjectRoots | null; sessionCwd: SettingsSessionCwd | null;
+  }>({ projectRoots: null, sessionCwd: null });
   const [hosts, setHosts] = useState<Host[]>([{ hostId: 'local', displayName: 'Local' }]);
   const [cwd, setCwd] = useState('');
   const [search, setSearch] = useState('');
@@ -146,6 +158,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const navigation = useRef<ReturnType<typeof createRouteNavigation> | null>(null);
   const navigationGeneration = useRef(0);
   const threadRef = useRef(thread); threadRef.current = thread;
+  const projectStateRef = useRef(projectState); projectStateRef.current = projectState;
+  const selectedProjectRef = useRef(selectedProject); selectedProjectRef.current = selectedProject;
   const routeRef = useRef(current); routeRef.current = current;
   const backFromSettings = useRef('/');
   const projectGeneration = useRef(0);
@@ -170,8 +184,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const generation = ++preferenceGeneration.current;
     const [{ values }, reduced, locales] = await Promise.all([
       client.host<{ values: Record<string, unknown> }>('get-settings'),
-      client.host<{ value?: string }>('get-global-state', { key: 'reduced-motion-preference' }),
-      client.host<{ ideLocale?: string; systemLocale?: string }>('locale-info'),
+      client.host<{ value?: string }>('get-global-state', { key: 'reduced-motion-preference' }).catch(() => null),
+      client.host<{ ideLocale?: string; systemLocale?: string }>('locale-info').catch(() => ({ ideLocale: undefined, systemLocale: undefined })),
     ]);
     if (generation !== preferenceGeneration.current) return;
     const dark = values.appearanceTheme === 'dark' || values.appearanceTheme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches;
@@ -186,12 +200,27 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       variables: { ...Object.fromEntries(Array.from(style).filter(name => name.startsWith('--')).map(name => [name, style.getPropertyValue(name)])),
         '--viz-bg': resolved.theme.surface, '--viz-text': resolved.theme.ink, '--viz-accent': resolved.theme.accent,
         '--viz-panel': style.getPropertyValue('--yard-panel'), '--viz-border': style.getPropertyValue('--yard-border'), '--viz-muted': style.getPropertyValue('--yard-muted') } });
-    document.documentElement.dataset.reducedMotion = String(reduced.value === 'on' || reduced.value !== 'off' && matchMedia('(prefers-reduced-motion: reduce)').matches);
+    if (reduced) document.documentElement.dataset.reducedMotion = String(reduced.value === 'on' || reduced.value !== 'off' && matchMedia('(prefers-reduced-motion: reduce)').matches);
     document.documentElement.dataset.pointerCursors = String(values.usePointerCursors === true);
   }, [client]);
 
   useEffect(() => {
-    const controller = createRouteNavigation(() => { navigationGeneration.current++; setLeaving(false); setCurrent(route()); setNavigationCommit(value => value + 1); setError(''); setMenu(false); }, async () => {
+    const controller = createRouteNavigation(() => {
+      const next = route(), previous = routeRef.current;
+      if (next.section && !previous.section) {
+        const session = previous.threadId && threadRef.current?.id === previous.threadId ? threadRef.current : null;
+        const state = projectStateRef.current;
+        const project = previous.threadId ? session && state
+          ? projectForThread(state, projectsForHost(state, previous.hostId), previous.hostId, session) : null
+          : selectedProjectRef.current;
+        setSettingsContext({
+          projectRoots: project?.hostId === previous.hostId ? { hostId: previous.hostId, paths: project.rootPaths } : null,
+          sessionCwd: session?.cwd ? { hostId: previous.hostId, path: session.cwd } : null,
+        });
+        backFromSettings.current = previous.pathname + previous.search + previous.hash;
+      }
+      navigationGeneration.current++; setLeaving(false); setCurrent(next); setNavigationCommit(value => value + 1); setError(''); setMenu(false);
+    }, async () => {
       navigationLocked.current = true;
       let accepted = false;
       try {
@@ -610,7 +639,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       search={search} archived={archived} onSearchChange={setSearch} onArchivedChange={setArchived} onClose={() => setSidebar(false)}
       onOpenThread={row => { void openThread(row.id, row.hostId, row.archived); }}
       onNewChat={(project, fallback) => { void newChat(project?.rootPaths[0] ?? cwd, fallback ? undefined : project ?? undefined); }}
-      onAddProject={addProject} onOpenSettings={() => { backFromSettings.current = location.pathname + location.search; void navigate('/settings/general'); }}
+      onAddProject={addProject} onOpenSettings={() => { void navigate('/settings/general' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId))); }}
       onRefresh={() => { void list.refresh(); }} onLoadMore={() => { void list.loadMore(); }} onRetryProjectLookup={() => { void reloadProjects().catch(cause => setError(String(cause))); }} />}
     <main className="yard-main">
       <header className="yard-toolbar"><button aria-label="Toggle sidebar" onClick={() => setSidebar(value => !value)}>◧</button>
@@ -641,7 +670,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         onFinish={() => finishSend(intent)} onCancel={async () => { await sendStore.cancel(intent.id); await reloadSends(); }} />)}
       <div className="yard-workspace" data-panel-open={panelOpen && !settings}>
       <div className="yard-chat-pane">
-      {settings ? <StandaloneSettings client={client} hostId={current.hostId} location={{ pathname: current.pathname, search: current.search, hash: current.hash, state: current.state }} onNavigate={navigate} registerNavigationGuard={registerNavigationGuard} onClose={() => navigate(backFromSettings.current)} /> : <>
+      {settings ? <InstructionEditorTheme.Provider value={panelAppearance.theme}><StandaloneSettings client={client} hostId={current.hostId}
+        projectRoots={settingsContext.projectRoots} sessionCwd={settingsContext.sessionCwd} InstructionEditor={SettingsInstructionEditor}
+        location={{ pathname: current.pathname, search: current.search, hash: current.hash, state: current.state }} onNavigate={navigate}
+        registerNavigationGuard={registerNavigationGuard} onClose={() => navigate(backFromSettings.current)} /></InstructionEditorTheme.Provider> : <>
         {current.threadId && <header className="yard-conversation-header"><strong>{thread?.name || threads.find(item => item.id === current.threadId)?.name || 'Conversation'}</strong><span>{thread?.cwd}</span><button aria-label="Conversation menu" onClick={() => setMenu(value => !value)}>•••</button>{menu && <div className="yard-menu" role="menu">{['rename', 'fork', 'copy', 'archive'].map(name => <button role="menuitem" key={name} onClick={() => { void action(name); }}>{name === 'copy' ? 'Copy conversation link' : name[0]!.toUpperCase() + name.slice(1)}</button>)}</div>}</header>}
         <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')} inert={leaving}>
           {streamGap && <p role="status" className="yard-stream-gap">任务正在运行。此页面未收到完整的活动内容；完成后将重新读取完整记录。</p>}

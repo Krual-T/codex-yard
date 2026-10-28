@@ -115,16 +115,21 @@ export class MessageEditRecoveryStore {
       if (!previous || !sameOrigin(previous.recovery.origin, origin)) throw new Error('编辑恢复尚未保存，未修改会话。');
       const old = previous.submission;
       if (old?.stage === 'started') return previous;
+      const editor = previous.recovery.editor;
+      if (!editor) throw new Error('编辑版本尚未保存，未修改会话。');
+      const sameVersion = old?.editorVersion?.sessionId === editor.sessionId && old.editorVersion.revision === editor.revision;
       const operation = old && ['revertUnknown', 'startUnknown', 'conflict'].includes(old.stage) ? 'check'
         : old?.stage === 'reverted' ? 'retry-start' : 'submit';
       const request: EditMessageRequest = operation === 'check' ? { ...old!.request, operation,
         ...(old!.stage === 'revertUnknown' || old!.stage === 'startUnknown' ? { unknownPhase: old!.stage } : {}) }
-        : operation === 'retry-start' ? { ...old!.request, operation, unknownPhase: undefined }
+        : operation === 'retry-start' ? { ...old!.request, operation, unknownPhase: undefined,
+            // A known rejected start is terminal. The user's newer edit is a new
+            // request against the already reverted prefix, never a replay of A.
+            ...(!sameVersion ? { clientUserMessageId: crypto.randomUUID(), turnParams: structuredClone(turnParams) } : {}) }
           : { origin: structuredClone(origin), expectedTurnIds: old?.request.expectedTurnIds ?? [...expectedTurnIds],
             clientUserMessageId: crypto.randomUUID(), turnParams: structuredClone(turnParams), operation };
-      const editor = previous.recovery.editor;
-      if (!editor) throw new Error('编辑版本尚未保存，未修改会话。');
-      const editorVersion = operation === 'check' || operation === 'retry-start' ? old!.editorVersion : { sessionId: editor.sessionId, revision: editor.revision };
+      const editorVersion = operation === 'check' || operation === 'retry-start' && sameVersion ? old!.editorVersion
+        : { sessionId: editor.sessionId, revision: editor.revision };
       return { ...previous, submission: { request, operationId, ...(editorVersion ? { editorVersion } : {}),
         stage: operation === 'check' ? old!.stage : operation === 'retry-start' ? 'startUnknown' : 'revertUnknown' } };
     });
