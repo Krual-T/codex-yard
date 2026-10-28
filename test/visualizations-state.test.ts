@@ -7,6 +7,7 @@ function fixture() {
   const atoms: Record<string, unknown> = {};
   let fail = false;
   const client: WorkbenchClient = {
+    async reply() { throw new Error('Unexpected server response'); },
     async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
       await Promise.resolve();
       const key = String(params?.key);

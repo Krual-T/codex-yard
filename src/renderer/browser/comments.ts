@@ -1,10 +1,17 @@
 import type { ChromeElementContext } from '../../browser-reuse/protocol.ts';
 import type { ComposerDraft } from '../workbench-contract.ts';
+import { readBrowserAtom, subscribeBrowserAtoms, updateBrowserAtom } from '../storage/ui-atoms.ts';
 
 const storageKey = 'workbench.browser-comments.v1';
-const lockName = 'codex-yard:browser-comments:v1';
-const changedEvent = 'codex-yard:browser-comments-changed';
+const atomKey = 'codex-yard.browser-comments.v1';
 const ownerPrefix = 'codex-yard.browser-owner.v1:';
+
+interface CommentStore {
+  version: 1;
+  legacyRaw: string | null;
+  entries?: Record<string, unknown>;
+  importError?: string;
+}
 
 export interface BrowserOwner {
   hostId: string;
@@ -29,13 +36,31 @@ export function browserOwnerKey(owner: BrowserOwner): string {
   return ownerPrefix + JSON.stringify([owner.hostId, owner.threadId, owner.draftId]);
 }
 
-function readMap(): Record<string, unknown> {
-  const raw = localStorage.getItem(storageKey);
-  if (raw === null) return {};
-  let value: unknown;
-  try { value = JSON.parse(raw); } catch { throw new Error('浏览器批注存储无法解析，原数据已保留'); }
-  if (!record(value)) throw new Error('浏览器批注存储格式无效，原数据已保留');
-  return value;
+function importLegacy(): CommentStore {
+  const legacyRaw = localStorage.getItem(storageKey);
+  try {
+    const entries: unknown = JSON.parse(legacyRaw ?? '{}');
+    if (!record(entries)) throw new Error('Invalid comment root');
+    return { version: 1, legacyRaw, entries };
+  } catch {
+    return { version: 1, legacyRaw, importError: '旧浏览器批注无法转换，原始数据已保留，未改写。' };
+  }
+}
+
+function commentStore(value: unknown): CommentStore & { entries: Record<string, unknown> } {
+  if (!record(value) || value.version !== 1 || !(value.legacyRaw === null || typeof value.legacyRaw === 'string')) {
+    throw new Error('浏览器批注存储格式无法识别，原数据已保留。');
+  }
+  if (value.importError || !record(value.entries)) {
+    throw new Error(typeof value.importError === 'string' ? value.importError : '浏览器批注存储格式无效，原数据已保留。');
+  }
+  return value as unknown as CommentStore & { entries: Record<string, unknown> };
+}
+
+async function readStore(): Promise<CommentStore & { entries: Record<string, unknown> }> {
+  let value = await readBrowserAtom(atomKey);
+  if (value === undefined) value = await updateBrowserAtom(atomKey, previous => previous === undefined ? importLegacy() : previous);
+  return commentStore(value);
 }
 
 function ownerComments(map: Record<string, unknown>, key: string): unknown[] {
@@ -44,28 +69,33 @@ function ownerComments(map: Record<string, unknown>, key: string): unknown[] {
   return map[key] as unknown[];
 }
 
-export function readBrowserComments(owner: BrowserOwner): unknown[] {
-  return ownerComments(readMap(), browserOwnerKey(owner));
+export async function readBrowserComments(owner: BrowserOwner): Promise<unknown[]> {
+  return ownerComments((await readStore()).entries, browserOwnerKey(owner));
+}
+
+/** A bare legacy key requires independent evidence before it can be adopted. */
+export async function readLegacyBrowserComments(legacyOwner: string): Promise<unknown[] | null> {
+  if (!legacyOwner || legacyOwner.startsWith(ownerPrefix)) throw new Error('旧批注身份无效');
+  const entries = (await readStore()).entries;
+  return Object.hasOwn(entries, legacyOwner) ? ownerComments(entries, legacyOwner) : null;
 }
 
 export function subscribeBrowserComments(listener: () => void): () => void {
-  const storage = (event: StorageEvent) => { if (event.key === storageKey || event.key === null) listener(); };
-  window.addEventListener('storage', storage);
-  window.addEventListener(changedEvent, listener);
-  return () => { window.removeEventListener('storage', storage); window.removeEventListener(changedEvent, listener); };
+  return subscribeBrowserAtoms(keys => { if (keys.includes(atomKey)) listener(); });
 }
 
 async function updateMap<T>(update: (map: Record<string, unknown>) => T, isCurrent?: () => boolean): Promise<T> {
-  if (!navigator.locks) throw new Error('浏览器不支持跨页面批注锁，原数据已保留');
-  return navigator.locks.request(lockName, () => {
+  await readStore();
+  let result!: T;
+  await updateBrowserAtom(atomKey, previous => {
     if (isCurrent && !isCurrent()) throw new Error('草稿已切换，未保存浏览器引用');
-    const map = readMap();
-    const result = update(map);
+    const store = commentStore(previous);
+    const map = { ...store.entries };
+    result = update(map);
     if (isCurrent && !isCurrent()) throw new Error('草稿已切换，未保存浏览器引用');
-    localStorage.setItem(storageKey, JSON.stringify(map));
-    window.dispatchEvent(new Event(changedEvent));
-    return result;
+    return { ...store, entries: map };
   });
+  return result;
 }
 
 function commentId(value: unknown): string | undefined {

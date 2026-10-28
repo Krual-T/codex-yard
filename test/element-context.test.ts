@@ -45,9 +45,10 @@ test('element context uses the selected DevTools UID on the bound page, with no 
   } finally { await host.close(); }
 });
 
-test('original comment drafts retain edits, removal and conversation ownership; late selections cannot attach after connection changes', async () => {
+test('legacy comment writes are rejected and late selections cannot attach after connection changes', async () => {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
-  const storage = new Map<string, string>();
+  const legacyRaw = '{"thread-a":[{"unknown":"keep"}]}';
+  const storage = new Map<string, string>([['workbench.browser-comments.v1', legacyRaw]]);
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
     getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value),
   } });
@@ -65,36 +66,31 @@ test('original comment drafts retain edits, removal and conversation ownership; 
     }, message => events.push(message));
     bridge.setCommentConverter(comment => ({ ...comment, origin: 'browser' }));
     await bridge.request({ ...target, operation: 'state' });
-    await bridge.quoteSelectedElement(target, 1);
-    assert.equal(bridge.getCommentDrafts()[target.conversationId]?.length, 1);
+    await assert.rejects(bridge.quoteSelectedElement(target, 1), /旧浏览器批注入口已停用/);
+    assert.throws(() => bridge.getCommentDrafts(), /旧浏览器批注入口已停用/);
     assert.equal(bridge.getState(target)?.elementContext, undefined, 'Selection data is not cached in Chrome frames');
-    const edited = [{ content: [{ content_type: 'text', text: 'edited in original composer' }] }];
-    bridge.intercept({ type: 'shared-object-set', key: 'diff_comments', value: { 'thread-a': edited, 'thread-b': ['other draft'] } });
-    await bridge.request({ ...target, operation: 'capture' });
-    assert.deepEqual(bridge.getCommentDrafts()['thread-a'], edited);
-    bridge.intercept({ type: 'shared-object-set', key: 'diff_comments', value: { 'thread-b': ['other draft'] } });
-    const restored = new BrowserChrome(async () => state, () => {});
-    assert.deepEqual(restored.getCommentDrafts(), { 'thread-b': ['other draft'] });
+    assert.throws(() => bridge.intercept({ type: 'shared-object-set', key: 'diff_comments', value: {} }), /旧浏览器批注入口已停用/);
+    assert.throws(() => bridge.intercept({ type: 'shared-object-subscribe', key: 'diff_comments' }), /旧浏览器批注入口已停用/);
+    assert.equal(storage.get('workbench.browser-comments.v1'), legacyRaw);
     wait = true;
     const quote = bridge.quoteSelectedElement(target, 1);
     await Promise.resolve();
     await bridge.selectConnection(target, 'server');
     pending!({ ...state, elementContext: element });
     await assert.rejects(quote, /浏览器面板已切换/);
-    assert.deepEqual(bridge.getCommentDrafts(), { 'thread-b': ['other draft'] });
-    assert.equal(events.filter(event => event.type === 'shared-object-updated').length, 1);
+    assert.equal(storage.get('workbench.browser-comments.v1'), legacyRaw);
+    assert.equal(events.filter(event => event.type === 'shared-object-updated').length, 0);
     bridge.setCommentRouteResolver(route => route === '/' ? 'new-conversation' : 'thread-a');
     bridge.intercept({ type: 'browser-sidebar-owner-sync', ...target, ownerRoutePath: '/' });
     wait = false;
-    await bridge.quoteSelectedElement(target, 1);
-    assert.equal(bridge.getCommentDrafts()['new-conversation']?.length, 1, 'Browser owner IDs may differ from the original new-draft key');
-    assert.equal(bridge.getCommentDrafts()['thread-a'], undefined);
+    await assert.rejects(bridge.quoteSelectedElement(target, 1), /旧浏览器批注入口已停用/);
     wait = true;
     const moved = bridge.quoteSelectedElement(target, 1);
     await Promise.resolve();
     bridge.intercept({ type: 'browser-sidebar-owner-sync', ...target, ownerRoutePath: '/local/thread-a' });
     pending!({ ...state, elementContext: element });
     await assert.rejects(moved, /浏览器面板已切换/);
+    assert.equal(storage.get('workbench.browser-comments.v1'), legacyRaw);
   } finally {
     if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor);
     else Reflect.deleteProperty(globalThis, 'localStorage');

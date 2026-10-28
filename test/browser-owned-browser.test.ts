@@ -27,6 +27,8 @@ interface Harness {
   adopt(key: string): Promise<void>;
   acknowledge(references: Reference[]): Promise<void>;
   references(): Reference[];
+  readReferences(): Promise<Reference[]>;
+  commentStore(): Promise<{ legacyRaw: string | null; entries: Record<string, unknown> }>;
 }
 declare global { interface Window { browserHarness: Harness } }
 
@@ -162,27 +164,28 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     await page.evaluate(() => window.browserHarness.adopt('fixture'));
     await page.getByLabel('浏览器引用批注').waitFor();
     assert.equal(await page.getByLabel('浏览器引用批注').inputValue(), 'User edited legacy');
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('workbench.browser-comments.v1')!).fixture), undefined);
+    assert.equal((await page.evaluate(() => window.browserHarness.commentStore())).entries.fixture, undefined);
+    assert.ok(await page.evaluate(() => Object.hasOwn(JSON.parse(localStorage.getItem('workbench.browser-comments.v1')!), 'fixture')), 'The legacy archive stays unchanged');
     await page.getByLabel('浏览器引用批注').fill('Updated legacy comment');
     await page.getByRole('button', { name: '保存批注' }).click();
     await page.waitForFunction(() => window.browserHarness.references()[0]?.text.includes('Updated legacy comment'));
-    const migrated = await page.evaluate(() => window.browserHarness.references()[0]);
+    const migrated = await page.evaluate(async () => (await window.browserHarness.readReferences())[0]);
     assert.deepEqual(migrated?.original.unknown, { keep: 7 });
     assert.deepEqual((migrated?.original.localBrowserContext as Record<string, unknown>).unknownContext, { keep: true });
     assert.equal(((migrated?.original.content as Record<string, unknown>[])[0]).extra, 1);
     await page.evaluate(() => {
-      const prototype = Storage.prototype as Storage & { originalSet?: typeof Storage.prototype.setItem };
-      prototype.originalSet = prototype.setItem;
-      prototype.setItem = function () { throw new Error('synthetic storage failure'); };
+      const prototype = IDBObjectStore.prototype as IDBObjectStore & { originalPut?: typeof IDBObjectStore.prototype.put };
+      prototype.originalPut = prototype.put;
+      prototype.put = function () { throw new Error('synthetic storage failure'); };
     });
     await page.getByLabel('浏览器引用批注').fill('Unsaved edit');
     await page.getByRole('button', { name: '保存批注' }).click();
     await page.getByText('synthetic storage failure').waitFor();
     assert.equal(await page.getByLabel('浏览器引用批注').inputValue(), 'Unsaved edit');
-    assert.match((await page.evaluate(() => window.browserHarness.references()[0]))!.text, /Updated legacy comment/);
+    assert.match((await page.evaluate(async () => (await window.browserHarness.readReferences())[0]))!.text, /Updated legacy comment/);
     await page.evaluate(() => {
-      const prototype = Storage.prototype as Storage & { originalSet?: typeof Storage.prototype.setItem };
-      prototype.setItem = prototype.originalSet!; delete prototype.originalSet;
+      const prototype = IDBObjectStore.prototype as IDBObjectStore & { originalPut?: typeof IDBObjectStore.prototype.put };
+      prototype.put = prototype.originalPut!; delete prototype.originalPut;
     });
     await page.getByRole('button', { name: '保存批注' }).click();
     await page.waitForFunction(() => window.browserHarness.references()[0]?.text.includes('Unsaved edit'));
@@ -230,10 +233,10 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     try {
       await page.waitForFunction(() => JSON.stringify(window.browserHarness.draft().references) === JSON.stringify(window.browserHarness.references()), undefined, { timeout: 5000 });
     } catch (error) {
-      console.error('Synthetic draft synchronization:', JSON.stringify(await page.evaluate(() => ({ draft: window.browserHarness.draft().references, stored: window.browserHarness.references() }))));
+      console.error('Synthetic draft synchronization:', JSON.stringify(await page.evaluate(async () => ({ draft: window.browserHarness.draft().references, stored: await window.browserHarness.readReferences() }))));
       throw error;
     }
-    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('workbench.browser-comments.v1')!));
+    const stored = (await page.evaluate(() => window.browserHarness.commentStore())).entries;
     assert.deepEqual(stored['another-ambiguous-thread'], [{ value: 1 }]);
     assert.deepEqual(stored['new-conversation'], [{ home: true }]);
     assert.deepEqual(stored['panel-new-conversation'], [{ panel: true }]);
@@ -245,15 +248,28 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     assert.equal(selectedPending, true);
     const remote = { ...identity, hostId: 'ssh-fixture', draftId: 'draft-b' };
     await page.evaluate(value => window.browserHarness.mount(value), remote);
+    await page.waitForFunction(() => window.browserHarness.identity()?.hostId === 'ssh-fixture');
     releaseSelection!(); delaySelection = false;
     await page.waitForFunction(() => window.browserHarness.identity()?.hostId === 'ssh-fixture' && window.browserHarness.references().length === 0);
     await page.evaluate(value => window.browserHarness.mount(value), identity);
     await page.waitForFunction(() => window.browserHarness.identity()?.hostId === 'local' && window.browserHarness.references().length === 1);
-    assert.equal((await page.evaluate(() => window.browserHarness.references())).length, 1, 'Late selection did not modify the previous owner');
-    await second.evaluate(() => {
+    assert.equal((await page.evaluate(() => window.browserHarness.readReferences())).length, 1, 'Late selection did not modify the previous owner');
+    await second.evaluate(async () => {
       const scope = window as unknown as { lockReady: boolean; unlock: () => void };
-      const held = new Promise<void>(resolve => { scope.unlock = resolve; });
-      void navigator.locks.request('codex-yard:browser-comments:v1', async () => { scope.lockReady = true; await held; });
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const opening = indexedDB.open('codex-yard.ui-atoms.v1', 1);
+        opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error);
+      });
+      const tx = db.transaction('atoms', 'readwrite'), store = tx.objectStore('atoms');
+      let held = true;
+      scope.unlock = () => { held = false; };
+      tx.oncomplete = () => db.close();
+      const keep = () => {
+        if (!held) return;
+        const request = store.get('native-atoms');
+        request.onsuccess = () => { scope.lockReady = true; keep(); };
+      };
+      keep();
     });
     await second.waitForFunction(() => (window as unknown as { lockReady: boolean }).lockReady);
     await page.waitForFunction(() => !(document.querySelector('button[title^="在真实 Chrome 标签"]') as HTMLButtonElement)?.disabled);
@@ -266,11 +282,11 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     await second.evaluate(() => (window as unknown as { unlock(): void }).unlock());
     await page.evaluate(value => window.browserHarness.mount(value), identity);
     await page.waitForFunction(() => window.browserHarness.identity()?.hostId === 'local' && window.browserHarness.references().length === 1);
-    assert.equal((await page.evaluate(() => window.browserHarness.references())).length, 1, 'A quote waiting for the storage lock cannot outlive its owner');
+    assert.equal((await page.evaluate(() => window.browserHarness.readReferences())).length, 1, 'A quote waiting for the transaction cannot outlive its owner');
     await page.waitForFunction(() => JSON.stringify(window.browserHarness.draft().references) === JSON.stringify(window.browserHarness.references()), undefined, { timeout: 5000 });
-    await page.evaluate(async () => window.browserHarness.acknowledge(window.browserHarness.references()));
+    await page.evaluate(() => window.browserHarness.acknowledge(window.browserHarness.references()));
     await page.waitForFunction(() => window.browserHarness.references().length === 0 && window.browserHarness.draft().references?.length === 0);
-    const afterAcknowledgement = await page.evaluate(() => JSON.parse(localStorage.getItem('workbench.browser-comments.v1')!));
+    const afterAcknowledgement = (await page.evaluate(() => window.browserHarness.commentStore())).entries;
     assert.ok(Object.values(afterAcknowledgement).some(value => Array.isArray(value) && value.some(item => item?.unknown === 'preserve')));
 
     const home = { hostId: 'local', threadId: null, draftId: 'home-draft', browserTabId: 'tab-a' };

@@ -130,7 +130,7 @@ test('owned React Chrome controls an isolated real Chrome through the official M
     if (process.env.YARD_TEST_ARTIFACTS) await devtools.screenshot({ path: join(process.env.YARD_TEST_ARTIFACTS, 'standalone-e-devtools-selected.png') });
     await page.getByRole('button', { name: '引用所选元素' }).click();
     await page.waitForFunction(() => window.browserHarness.references().length === 1, undefined, { timeout: 60_000 });
-    const reference = (await page.evaluate(() => window.browserHarness.references()))[0]!;
+    const reference = (await page.evaluate(() => window.browserHarness.readReferences()))[0]!;
     await page.waitForFunction(id => (window.browserHarness.draft().references ?? []).some(item => item.id === id), reference.id);
     assert.deepEqual((await page.evaluate(() => window.browserHarness.draft().references))?.[0], reference);
     const element = reference.original.localBrowserContext as Record<string, unknown>;

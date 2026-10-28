@@ -11,15 +11,11 @@ export class BrowserChrome {
   private commentConverter?: (comment: ChromeElementComment, line: number) => unknown;
   private commentRouteResolver?: (route: string) => string | null;
   private readonly ownerRoutes = new Map<string, string>();
-  // This is the Web implementation of the shipped diff_comments shared object.
-  // The renderer owns its editing, removal and submission semantics.
-  private comments: Record<string, unknown[]> = {};
   private clientKey?: string;
   private readonly requestHost: (endpoint: string, body: unknown) => Promise<unknown>;
   private readonly publish: (message: HostMessage) => void;
   constructor(requestHost: (endpoint: string, body: unknown) => Promise<unknown>, publish: (message: HostMessage) => void) {
     this.requestHost = requestHost; this.publish = publish;
-    try { this.comments = JSON.parse(localStorage.getItem('workbench.browser-comments.v1') || '{}'); } catch {}
   }
   setCommentConverter(converter: (comment: ChromeElementComment, line: number) => unknown) { this.commentConverter = converter; }
   setCommentRouteResolver(resolver: (route: string) => string | null) { this.commentRouteResolver = resolver; }
@@ -27,11 +23,7 @@ export class BrowserChrome {
     const route = this.ownerRoutes.get(target.conversationId);
     return (route == null ? null : this.commentRouteResolver?.(route)) ?? target.conversationId;
   }
-  getCommentDrafts() { return this.comments; }
-  private saveComments(value: Record<string, unknown[]>) {
-    localStorage.setItem('workbench.browser-comments.v1', JSON.stringify(value));
-    this.comments = value;
-  }
+  getCommentDrafts(): Record<string, unknown[]> { throw new Error('旧浏览器批注入口已停用，请使用新的浏览器面板；原批注已保留。'); }
   async selectedElement(target: BrowserTarget, pageId: number): Promise<ChromeElementContext> {
     const key = targetKey(target), generation = this.generations.get(key) ?? 0;
     const state = await this.request({ ...target, pageId, operation: 'element-context' });
@@ -50,11 +42,7 @@ export class BrowserChrome {
     const state = await this.request({ ...target, pageId, operation: 'element-context' });
     if (generation !== (this.generations.get(key) ?? 0) || this.states.get(key)?.pageId !== pageId || owner !== this.commentOwner(target)) throw new Error('浏览器面板已切换，请重新引用');
     if (!state.elementContext) throw new Error(state.error || 'Chrome 未返回所选元素');
-    const previous = this.comments[owner] ?? [];
-    const comment = this.commentConverter({ id: crypto.randomUUID(), body: 'Chrome 中所选元素', anchor: state.elementContext }, previous.length + 1);
-    this.saveComments({ ...this.comments, [owner]: [...previous, comment] });
-    this.publish({ type: 'shared-object-updated', key: 'diff_comments', value: this.comments });
-    return state.elementContext.title;
+    throw new Error('旧浏览器批注入口已停用，请使用新的浏览器面板；原批注已保留。');
   }
   private identity() {
     if (!this.clientKey) {
@@ -123,8 +111,9 @@ export class BrowserChrome {
       return false; // The host also persists the original owner's route.
     }
     if (message.key === 'diff_comments') {
-      if (message.type === 'shared-object-set') { this.saveComments(message.value as Record<string, unknown[]> ?? {}); return true; }
-      if (message.type === 'shared-object-subscribe') { this.publish({ type: 'shared-object-updated', key: 'diff_comments', value: this.comments }); return true; }
+      if (message.type === 'shared-object-set' || message.type === 'shared-object-subscribe') {
+        throw new Error('旧浏览器批注入口已停用，请使用新的浏览器面板；原批注已保留。');
+      }
       if (message.type === 'shared-object-unsubscribe') return true;
     }
     if (message.type !== 'browser-sidebar-command') return false;

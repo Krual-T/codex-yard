@@ -8,7 +8,7 @@ import { addBrowserComment, browserOwnerKey, browserReferences, changeBrowserCom
 import type { BrowserOwner, BrowserReference } from './comments.ts';
 
 export { acknowledgeBrowserReferences, adoptLegacyBrowserComments, browserOwnerKey, browserReferences,
-  changeBrowserComment, readBrowserComments, reconcileBrowserReferences, subscribeBrowserComments } from './comments.ts';
+  changeBrowserComment, readBrowserComments, readLegacyBrowserComments, reconcileBrowserReferences, subscribeBrowserComments } from './comments.ts';
 export type { BrowserOwner, BrowserReference } from './comments.ts';
 
 export interface StandaloneBrowserProps {
@@ -70,6 +70,7 @@ function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, o
   const [address, setAddress] = React.useState('');
   const [comments, setComments] = React.useState<unknown[]>([]);
   const [error, setError] = React.useState('');
+  const [commentsError, setCommentsError] = React.useState('');
   const active = React.useRef(false);
   const previous = React.useRef<BrowserReference[]>([]);
   const onDraftChangeRef = React.useRef(onDraftChange);
@@ -86,18 +87,24 @@ function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, o
   }, [bridge, target, visible]);
   React.useEffect(() => {
     if (!visible) return;
+    let live = true;
+    let generation = 0;
     const refresh = () => {
       if (!active.current) return;
-      try {
-        const nextComments = readBrowserComments(owner), next = browserReferences(owner, nextComments), before = previous.current;
+      const current = ++generation;
+      void readBrowserComments(owner).then(nextComments => {
+        if (!live || !active.current || current !== generation) return;
+        const next = browserReferences(owner, nextComments), before = previous.current;
         previous.current = next;
-        setComments(nextComments); setError('');
+        setComments(nextComments); setCommentsError('');
         if (before.length || next.length) onDraftChangeRef.current(owner, draft => reconcileBrowserReferences(draft, before, next));
-      } catch (failure) { setError((failure as Error).message); }
+      }).catch(failure => {
+        if (live && active.current && current === generation) setCommentsError((failure as Error).message);
+      });
     };
     const unsubscribe = subscribeBrowserComments(refresh);
     refresh();
-    return unsubscribe;
+    return () => { live = false; generation++; unsubscribe(); };
   }, [bridge, target, ownerKey, visible]);
   const quote = React.useCallback(async (_target: BrowserTarget, pageId: number) => {
     const version = bridge.selectionVersion(target);
@@ -128,6 +135,7 @@ function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, o
       <button onClick={onClose}>关闭</button>
     </header>
     {error ? <p role="alert" style={{ margin: 8 }}>{error}</p> : null}
+    {commentsError ? <p role="alert" style={{ margin: 8 }}>{commentsError}</p> : null}
     <div style={{ flex: 1, minHeight: 200 }}><ChromeSurface target={target} bridge={bridge} visible={visible} onQuote={quote} /></div>
     <section aria-label="浏览器引用" style={{ maxHeight: '40%', overflow: 'auto', padding: '0 8px' }}>
       {references.length ? <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>{references.map(reference =>

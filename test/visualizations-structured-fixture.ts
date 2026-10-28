@@ -14,6 +14,7 @@ let delayWrites = false;
 const listeners = new Set<(event: WorkbenchEvent) => void>();
 function notify(key: string) { for (const listener of listeners) listener({ type: 'persisted-atom-updated', keys: [key] }); }
 const client: WorkbenchClient = {
+  async reply() { throw new Error('Unexpected server response'); },
   async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
     requests.push(endpoint);
     if (endpoint === 'visualization-read') return { path: params?.path, contents: html } as T;
