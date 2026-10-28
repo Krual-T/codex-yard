@@ -36,7 +36,10 @@ export interface ComposerController {
   };
   initialInputFocused?: boolean | null;
   getText(document?: ComposerDocument): string;
+  getPersistedText(): string;
   setText(text: string): void;
+  setPromptText(text: string): void;
+  restoreText(text: string): void;
   focus(position?: 'end'): void;
   setPlaceholder(placeholder: string | undefined): void;
   setInputActive(active: boolean): void;
