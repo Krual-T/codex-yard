@@ -92,6 +92,11 @@ test('legacy home drafts are claimed once by the actual composer', {
           ]);
         });
         assert.ok(attempts.every((view: any) => view.versions.length === 1 && view.versions[0].draft.text === ''));
+        const afterBinding = await a.evaluate(async () => { const f = (window as any).fixture;
+          await f.updateBrowserAtom('client-thread-bindings-v1', () => ({ 'old-client': 'created-thread' }));
+          return f.open({ hostId: 'local', threadId: 'created-thread', draftId: 'different-owner' });
+        });
+        assert.deepEqual(afterBinding.versions.map((v: any) => v.draft.text), ['']);
         assert.equal((await a.evaluate(() => (window as any).fixture.root())).legacyRaw, raw);
         assert.equal(await a.evaluate(() => localStorage.getItem('native-atoms')), raw);
       } finally { await context.close(); }

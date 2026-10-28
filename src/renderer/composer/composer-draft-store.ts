@@ -13,6 +13,7 @@ interface Entry { versions: Version[]; retained: Version[]; createdThreadId?: st
 interface Repository { version: 1; archive: Record<string, string>; claims: Record<string, string>; initialized: Record<string, boolean>; entries: Record<string, Entry> }
 export const composerDraftAtomKey = 'codex-yard.composer-drafts.v3';
 const legacyHomeClaim = 'native-atoms:home:new-conversation';
+const legacyHomeKeyPrefix = 'native-atoms:home:key:';
 const legacyDraftAtoms = ['composer-prompt-drafts-v2', 'composer-prompt-drafts-v1', 'composer-retained-documents-v1'] as const;
 
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -107,6 +108,16 @@ function containsLegacyHome(draft: unknown, keys: Set<string>): boolean {
     || typeof preserved.retainedKey === 'string' && keys.has(preserved.retainedKey))) return true;
   return Array.isArray(draft.pendingDrafts) && draft.pendingDrafts.some(value => containsLegacyHome(value, keys));
 }
+function rememberLegacyHomeKeys(draft: unknown, keys: Set<string>, claims: Record<string, string>, owner: string): void {
+  if (!record(draft)) return;
+  const preserved = draft.preserved;
+  if (record(preserved)) {
+    for (const key of [preserved.promptKey, preserved.retainedKey]) {
+      if (typeof key === 'string' && keys.has(key)) claims[legacyHomeKeyPrefix + key] = owner;
+    }
+  }
+  if (Array.isArray(draft.pendingDrafts)) for (const value of draft.pendingDrafts) rememberLegacyHomeKeys(value, keys, claims, owner);
+}
 function previousHomeOwner(store: Repository, keys: Set<string>): string | undefined {
   for (const entry of Object.values(store.entries)) {
     for (const value of [...entry.versions, ...entry.retained]) {
@@ -140,6 +151,7 @@ export async function openComposerDraft(context: ComposerContext, atoms: Record<
     const initialized = current.initialized[ownerKey(owner)] || owner.threadId === entry.createdThreadId
       && current.initialized[ownerKey({ ...owner, threadId: null })];
     const homeKeys = legacyHomeKeys(atoms);
+    for (const key of Object.keys(current.claims)) if (key.startsWith(legacyHomeKeyPrefix)) homeKeys.add(key.slice(legacyHomeKeyPrefix.length));
     const previousClaim = current.claims[legacyHomeClaim] ?? previousHomeOwner(current, homeKeys);
     const homeContext = context.hostId === 'local' && context.threadId === null
       && (context.placement === undefined || context.placement === 'main')
@@ -171,6 +183,13 @@ export async function openComposerDraft(context: ComposerContext, atoms: Record<
     const claims = { ...current.claims };
     if (key && saved) claims[key] = ownerKey(owner);
     if (previousClaim || home.length || savedHome) claims[legacyHomeClaim] = previousClaim ?? ownerKey(owner);
+    if (home.length && !savedHome) for (const value of home) rememberLegacyHomeKeys(value.draft, homeKeys, claims, ownerKey(owner));
+    if (savedHome) rememberLegacyHomeKeys(saved.draft, homeKeys, claims, ownerKey(owner));
+    if (previousClaim && !current.claims[legacyHomeClaim]) {
+      for (const item of Object.values(current.entries)) for (const value of [...item.versions, ...item.retained]) {
+        if (ownerKey(value.owner) === previousClaim) rememberLegacyHomeKeys(value.draft, homeKeys, claims, previousClaim);
+      }
+    }
     return replaceEntry({ ...current, claims, initialized: { ...current.initialized, [ownerKey(owner)]: true } }, owner,
       { ...entry, versions: [...existing, ...values.map(value => asVersion(owner, value, placeholder))] });
   });
