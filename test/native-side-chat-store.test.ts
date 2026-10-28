@@ -256,6 +256,7 @@ test('ambiguous post-rename failure quarantines the shared authority until disk 
 test('unrecognized or inconsistent sections and non-JSON values fail closed without rewriting', async t => {
   for (const section of [null, {}, { version: 2, operations: {}, prepared: {} },
     { version: 1, operations: {}, prepared: { missing: 'gone' } },
+    { version: 1, operations: { one: { ...op('one'), instructionSource: ['host-config'] } }, prepared: {} },
     { version: 1, operations: { one: { version: 2, operationId: 'one' } }, prepared: {} }]) {
     const f = await fileState({ globals: {}, settings: {}, sideChats: section });
     t.after(f.dispose);

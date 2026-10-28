@@ -69,7 +69,7 @@ function operation(value: unknown, id?: string): value is SideChatOperation {
     || !(value.parent.effort === null || typeof value.parent.effort === 'string')
     || !(value.parent.serviceTier === null || typeof value.parent.serviceTier === 'string')
     || !object(value.parent.submitOptions) || !object(value.parent.sandboxPolicy)
-    || !['thread-override', 'host-config'].includes(String(value.instructionSource))
+    || !(value.instructionSource === 'thread-override' || value.instructionSource === 'host-config')
     || !(value.configuredInstructions === null || typeof value.configuredInstructions === 'string')
     || !object(value.forkParams) || !Array.isArray(value.boundaryItems)
     || !object(value.fork) || !nonempty(value.fork.status) || !object(value.inject) || !nonempty(value.inject.status)
