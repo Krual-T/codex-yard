@@ -4,6 +4,7 @@ import type { SubmitOptions } from '../workbench-contract.ts';
 export type SideChatRequestStatus = 'waiting' | 'inflight' | 'not-sent' | 'rejected' | 'unknown' | 'received' | 'invalid';
 export type SideChatCloseStatus = 'idle' | 'preparing' | 'prepare-failed' | 'inflight' | 'not-sent' | 'rejected' | 'unknown'
   | 'cleanup-pending' | 'cleaning' | 'closed';
+export type SideChatHostAction = 'start' | 'retry' | 'close' | 'retryPersistence';
 
 /** Authorized and sanitized projection of one native SideChatOperation. */
 export interface SideChatHostView {
@@ -20,6 +21,8 @@ export interface SideChatHostView {
   close: { requested: boolean; status: SideChatCloseStatus; error: string | null };
   /** Sanitized host recovery callback error for this operation, if any. */
   recoveryError: string | null;
+  /** On read only: the parent's scoped endpoint fence proves all prior calls of this action terminated. */
+  settledCalls?: Partial<Record<SideChatHostAction, boolean>>;
 }
 
 export interface SideChatHostPort {

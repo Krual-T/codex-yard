@@ -34,6 +34,7 @@ test('the React panel consumes actual E host operations over an isolated synthet
   const store = new Store(), calls: { host: string; method: string; params: Record<string, unknown>; generation: string }[] = [];
   const scopes: unknown[] = []; let boundaryLate: ((terminal: LateRpcTerminal) => void | Promise<void>) | undefined;
   let recoveryError: string | null = null;
+  let persistenceSettled = false;
   const options = { model: 'synthetic-model', effort: null, serviceTier: 'default', mode: 'plan' };
   const deps: SideChatDependencies = {
     store,
@@ -65,7 +66,8 @@ test('the React panel consumes actual E host operations over an isolated synthet
       childId: op.childId ?? null, child: op.fork.status === 'received' && thread
         ? { thread: { id: thread.id, name: thread.name, cwd: thread.cwd, turns: thread.turns, status: thread.status }, options } : null,
       fork: { status: op.fork.status, error: op.fork.error ?? null }, inject: { status: op.inject.status, error: op.inject.error ?? null },
-      close: { requested: op.close.requested, status: op.close.status, error: op.close.error ?? null }, recoveryError };
+      close: { requested: op.close.requested, status: op.close.status, error: op.close.error ?? null }, recoveryError,
+      settledCalls: { retryPersistence: persistenceSettled } };
   }
   const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'jsx', contents: `
     import React from 'react'; import {createRoot} from 'react-dom/client';
@@ -134,13 +136,28 @@ test('the React panel consumes actual E host operations over an isolated synthet
     await page.evaluate(id => (window as any).peer.hint({hostId:'host-b',operationId:id}), id);
     await page.waitForTimeout(50); assert.equal(reads, beforeForeign);
     let failures = 0;
-    store.fail = (next, previous) => previous.inject.status === 'unknown' && next.inject.status === 'received' && failures++ === 0;
+    store.fail = (next, previous) => previous.inject.status === 'unknown' && next.inject.status === 'received' && ++failures <= 3;
     await boundaryLate!({ outcome: 'success', result: {} });
     await eventually(() => recoveryError !== null);
     await page.evaluate(id => (window as any).peer.hint({hostId:'host-a',operationId:id}), id);
     await page.getByText(/synthetic late receipt persistence failure/).waitFor();
     assert.equal(await page.evaluate(() => (window as any).peer.controller.getSnapshot().phase), 'inject-unknown');
-    await page.getByRole('button', { name: '重试保存回执' }).click();
+    const persist = page.getByRole('button', { name: '重试保存回执' });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      persistenceSettled = false;
+      await persist.click();
+      await page.waitForFunction(() => (window as any).peer.controller.getSnapshot().error?.includes('结果未确认'));
+      assert.equal(await persist.isDisabled(), true);
+      await Promise.all([page.waitForResponse(response => response.url().endsWith('/side/read')),
+        page.getByRole('button', { name: '核对结果' }).click()]);
+      assert.equal(await persist.isDisabled(), true);
+      persistenceSettled = true;
+      await Promise.all([page.waitForResponse(response => response.url().endsWith('/side/read')),
+        page.getByRole('button', { name: '核对结果' }).click()]);
+      await page.waitForFunction(() => (window as any).peer.controller.canRetryPersistence);
+      assert.equal(calls.filter(call => call.method === 'thread/inject_items').length, 1);
+    }
+    await persist.click();
     await eventually(async () => (await host.read(id)).inject.status === 'received');
     const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await editor.waitFor();
     await editor.fill('side message'); await editor.press('Enter');

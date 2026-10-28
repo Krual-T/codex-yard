@@ -104,3 +104,92 @@ test('scoped interrupt and the real queue preserve dispatch and lock boundaries'
     assert.deepEqual(errors, []);
   } finally { await context.close(); await browser.close(); }
 });
+
+test('a close barrier observes a concurrently closed operation once and preserves draft on failure', {
+  skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
+}, async () => {
+  const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'jsx', contents: `
+    import React from 'react'; import {createRoot} from 'react-dom/client';
+    import {SideChatController} from './src/renderer/side-chat/controller.ts';
+    import {SideChatPanel} from './src/renderer/side-chat/SideChatPanel.tsx';
+    const state={closes:[],retries:[],barriers:[],gates:{}};
+    const hosts=['success','failure'];
+    const views=Object.fromEntries(hosts.map(host=>{
+      const thread={id:'child-'+host,name:null,cwd:'/synthetic',turns:[],status:{type:'idle'}};
+      return [host,{operationId:'op-'+host,parent:{hostId:host,threadId:'parent-'+host,cwd:'/synthetic'},childId:thread.id,
+        child:{thread,options:{}},fork:{status:'received',error:null},inject:{status:'received',error:null},
+        close:{requested:false,status:'idle',error:null},recoveryError:null}];
+    }));
+    const controllers=Object.fromEntries(hosts.map(host=>{
+      const port={read:async()=>structuredClone(views[host]),prepare:async()=>structuredClone(views[host]),
+        start:async()=>structuredClone(views[host]),retry:async()=>{state.retries.push(host);return structuredClone(views[host]);},
+        close:async()=>{state.retries.push('close-'+host);return structuredClone(views[host]);},
+        retryPersistence:async()=>{state.retries.push('persistence-'+host);return structuredClone(views[host]);},subscribe:()=>()=>{}};
+      return [host,new SideChatController({hostId:host,parentThreadId:'parent-'+host,draftId:'draft-'+host,port,
+        restored:views[host],canDispatch:()=>true,onPrepared:async()=>{}})];
+    }));
+    const client={async rpc(method){if(method==='thread/queue/list'||method==='model/list')return {data:[],nextCursor:null};
+      if(method==='config/read')return {config:{}};throw Error('unexpected rpc '+method);},
+      async host(endpoint){if(endpoint==='get-setting')return {value:'enter'};throw Error('unexpected host '+endpoint);},
+      subscribe:()=>()=>{},async reply(){}};
+    let selected='success';const root=createRoot(document.getElementById('root'));
+    function render(){root.render(<>{hosts.map(host=><SideChatPanel key={host} client={client} controller={controllers[host]}
+      open={selected===host} history={{hostId:host,threadId:'child-'+host,thread:views[host].child.thread,options:{},
+        loading:false,historyComplete:true,streamGap:false,error:null,canSubmit:true,canInterrupt:true,retry(){}}}
+      onClose={()=>state.closes.push(host)} onBeforeClose={async scope=>{
+        state.barriers.push({host,operationId:scope.operationId,draftId:scope.draftId});
+        await new Promise((resolve,reject)=>{state.gates[host]={resolve,reject};});}}
+      onSubmit={async()=>{throw Error('unexpected submission');}} onInterrupt={async()=>{}} />)}</>);}
+    window.peer={state,controllers,views,render,select(host){selected=host;render();},
+      async prepareClose(host){views[host].close={requested:true,status:'prepare-failed',error:'synthetic prepare failure'};await controllers[host].read();},
+      async markClosed(host){views[host].close={requested:true,status:'closed',error:null};await controllers[host].read();},
+      release(host){state.gates[host].resolve();},reject(host){state.gates[host].reject(Error('synthetic close gate failure'));}};
+    render();
+  ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' } });
+  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
+    args: ['--no-sandbox', '--disable-background-networking'] });
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage(); page.setDefaultTimeout(8_000);
+    const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+    await page.route('**/*', route => new URL(route.request().url()).pathname === '/'
+      ? route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }) : route.abort());
+    await page.goto('http://localhost/'); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+    const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' });
+    await editor.fill('success retained draft');
+    await page.evaluate(() => (window as any).peer.prepareClose('success'));
+    await page.getByRole('button', { name: '继续操作' }).click();
+    await page.waitForFunction(() => !!(window as any).peer.state.gates.success);
+    await page.evaluate(() => (window as any).peer.markClosed('success'));
+    await page.getByText(/宿主已关闭此侧聊/).waitFor();
+    assert.deepEqual(await page.evaluate(() => (window as any).peer.state.closes), []);
+    await page.evaluate(() => (window as any).peer.release('success'));
+    await page.waitForFunction(() => (window as any).peer.state.closes.length === 1);
+    await page.evaluate(async () => { const p=(window as any).peer; await p.controllers.success.read();p.render(); });
+    assert.deepEqual(await page.evaluate(() => (window as any).peer.state.closes), ['success']);
+    assert.deepEqual(await page.evaluate(() => (window as any).peer.state.retries), []);
+    assert.equal(await page.locator('.yard-side-chat:visible .yard-side-chat__draft textarea').first().inputValue(), 'success retained draft');
+
+    await page.evaluate(() => (window as any).peer.select('failure'));
+    await editor.fill('failure retained draft');
+    await page.evaluate(() => (window as any).peer.prepareClose('failure'));
+    await page.getByRole('button', { name: '继续操作' }).click();
+    await page.waitForFunction(() => !!(window as any).peer.state.gates.failure);
+    await page.evaluate(() => (window as any).peer.markClosed('failure'));
+    await page.getByText(/宿主已关闭此侧聊/).waitFor();
+    await page.evaluate(() => (window as any).peer.reject('failure'));
+    await page.getByText(/synthetic close gate failure/).waitFor();
+    const retained = page.locator('.yard-side-chat:visible .yard-side-chat__draft textarea').first();
+    assert.equal(await retained.inputValue(), 'failure retained draft');
+    await retained.focus(); await retained.evaluate((node: HTMLTextAreaElement) => node.select());
+    assert.ok(await retained.evaluate((node: HTMLTextAreaElement) => node.selectionEnd > node.selectionStart));
+    assert.equal(await page.getByRole('button', { name: '关闭侧聊', exact: true }).isDisabled(), false);
+    assert.deepEqual(await page.evaluate(() => (window as any).peer.state.closes), ['success']);
+    assert.deepEqual(await page.evaluate(() => (window as any).peer.state.retries), []);
+    assert.deepEqual(await page.evaluate(() => (window as any).peer.state.barriers), [
+      {host:'success',operationId:'op-success',draftId:'draft-success'},
+      {host:'failure',operationId:'op-failure',draftId:'draft-failure'},
+    ]);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); await browser.close(); }
+});

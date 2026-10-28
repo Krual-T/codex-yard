@@ -5,7 +5,7 @@ import { createSideChatHost } from '../src/native/side-chat.ts';
 import type { SideChatDependencies, SideChatOperation, SideChatParent, SideChatStore } from '../src/native/side-chat.ts';
 import type { SubmitOptions } from '../src/renderer/workbench-contract.ts';
 import { SideChatController } from '../src/renderer/side-chat/controller.ts';
-import type { SideChatHostPort, SideChatHostView } from '../src/renderer/side-chat/types.ts';
+import type { SideChatHostAction, SideChatHostPort, SideChatHostView } from '../src/renderer/side-chat/types.ts';
 
 type Call = { hostId: string; method: string; params: Record<string, unknown>; generation: string;
   late?: (terminal: LateRpcTerminal) => void | Promise<void> };
@@ -27,8 +27,9 @@ class Store implements SideChatStore {
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(done => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 async function eventually(check: () => boolean | Promise<boolean>) {
   for (let n = 0; n < 200; n++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
@@ -39,6 +40,7 @@ function fixture(hostId = 'host-a', parentThreadId = 'parent-a') {
   const hints = new Set<(hint: { hostId: string; operationId: string }) => void>();
   let handler: ((call: Call) => Promise<unknown>) | null = null, failLink = false, failClose = false, failCleanup = false;
   let recoveryError: string | null = null;
+  const settledCalls: Partial<Record<SideChatHostAction, boolean>> = {};
   let parent: SideChatParent = { hostId, threadId: parentThreadId, connectionGeneration: 'original-connection', cwd: '/workspace/a',
     workspaceRoots: ['/workspace/a', '/workspace/b'], archived: false, model: 'model-a', modelProvider: 'provider-a',
     effort: null, serviceTier: null, sandboxPolicy: { type: 'readOnly', networkAccess: false }, project: { id: 'project-a' },
@@ -76,7 +78,8 @@ function fixture(hostId = 'host-a', parentThreadId = 'parent-a') {
       child: op.fork.status === 'received' && receipt?.thread ? { thread: structuredClone(receipt.thread),
         options: { ...op.parent.submitOptions, effort: null, serviceTier: 'default' } as SubmitOptions } : null,
       fork: { status: op.fork.status, error: op.fork.error ?? null }, inject: { status: op.inject.status, error: op.inject.error ?? null },
-      close: { requested: op.close.requested, status: op.close.status, error: op.close.error ?? null }, recoveryError };
+      close: { requested: op.close.requested, status: op.close.status, error: op.close.error ?? null }, recoveryError,
+      settledCalls: { ...settledCalls } };
   };
   const portCalls: string[] = [];
   const port: SideChatHostPort = {
@@ -96,6 +99,7 @@ function fixture(hostId = 'host-a', parentThreadId = 'parent-a') {
     handle(fn: (call: Call) => Promise<unknown>) { handler = fn; },
     failLink(value: boolean) { failLink = value; }, failClose(value: boolean) { failClose = value; },
     failCleanup(value: boolean) { failCleanup = value; },
+    settle(action: SideChatHostAction, value: boolean) { settledCalls[action] = value; },
     hint(host: string, id: string) { for (const fn of hints) fn({ hostId: host, operationId: id }); } };
 }
 
@@ -198,8 +202,84 @@ test('lost start response cannot be cleared or replayed by reading the original 
   await c.read(); assert.match(c.getSnapshot().error!, /结果未确认/); assert.equal(c.canRetry, false);
   await c.retry(); await c.start(); assert.equal(startCalls, 1); assert.equal(f.calls.filter(call => call.method === 'thread/fork').length, 0);
   await f.host.start(id); f.hint('host-a', id);
-  await eventually(() => c.getSnapshot().phase === 'ready'); assert.equal(c.getSnapshot().error, null);
+  await eventually(() => c.getSnapshot().phase === 'ready'); assert.match(c.getSnapshot().error!, /结果未确认/);
+  f.settle('start', true); await c.read(); assert.equal(c.getSnapshot().error, null);
   assert.equal(f.calls.filter(call => call.method === 'thread/fork').length, 1);
+});
+
+test('a read begun before an endpoint becomes unknown cannot use an old settled proof', async () => {
+  const f = fixture(), start = deferred<SideChatHostView>(), read = deferred<SideChatHostView>();
+  let readCount = 0;
+  const port = { ...f.port, start: async () => start.promise, read: async (id: string) => {
+    if (++readCount === 1) return read.promise;
+    return f.port.read(id);
+  } };
+  const c = new SideChatController({ hostId: 'host-a', parentThreadId: 'parent-a', draftId: 'draft', port,
+    onPrepared: async () => {}, canDispatch: () => true });
+  const starting = c.start(); await eventually(() => c.getSnapshot().phase === 'starting');
+  const reading = c.read(); start.reject(Error('lost endpoint response')); await starting;
+  const stale = structuredClone(c.getSnapshot().view!); stale.settledCalls = { start: true };
+  read.resolve(stale); await reading;
+  assert.match(c.getSnapshot().error!, /结果未确认/); assert.equal(c.canRetry, false);
+  f.settle('start', true); await c.read(); assert.equal(c.canRetry, true); assert.equal(c.getSnapshot().error, null);
+});
+
+test('read proof resolves only its action and cannot clear a concurrent persistence outcome', async () => {
+  const f = fixture(); let persistenceCalls = 0;
+  const port = { ...f.port,
+    async start(): Promise<SideChatHostView> { throw Error('start outcome unknown'); },
+    async retryPersistence(): Promise<SideChatHostView> { persistenceCalls++; throw Error('persistence outcome unknown'); },
+  };
+  const c = new SideChatController({ hostId: 'host-a', parentThreadId: 'parent-a', draftId: 'draft', port,
+    onPrepared: async () => {}, canDispatch: () => true });
+  await c.start(); await c.retryPersistence(); assert.equal(persistenceCalls, 1);
+  f.settle('retryPersistence', true); await c.read();
+  assert.match(c.getSnapshot().error!, /start outcome unknown/); assert.equal(c.canRetry, false);
+  assert.equal(c.canRetryPersistence, true);
+  f.settle('retryPersistence', false); f.settle('start', true); await c.read();
+  assert.equal(c.getSnapshot().error, null); assert.equal(c.canRetry, true);
+});
+
+test('late receipt survives repeated persistence failures and fenced reads without repeating RPC', async () => {
+  const f = fixture();
+  f.handle(async call => {
+    if (call.method === 'thread/fork') throw Object.assign(Error('fork response lost'), { delivery: 'unknown' });
+    return f.result(call);
+  });
+  await f.controller.start(); const id = f.controller.getSnapshot().view!.operationId;
+  const fork = f.calls.find(call => call.method === 'thread/fork')!; let failures = 0;
+  f.store.fail = (next, old) => old.inject.status === 'inflight' && next.inject.status === 'received' && ++failures <= 3;
+  await fork.late!({ outcome: 'success', result: f.result(fork) });
+  await eventually(() => f.controller.getSnapshot().view?.recoveryError != null);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    f.settle('retryPersistence', false);
+    await f.controller.retryPersistence();
+    assert.equal(f.controller.canRetryPersistence, false);
+    await f.controller.read(); assert.equal(f.controller.canRetryPersistence, false);
+    assert.equal((await f.host.read(id)).inject.status, 'inflight');
+    f.settle('retryPersistence', true); await f.controller.read();
+    assert.equal(f.controller.canRetryPersistence, true);
+    assert.equal(f.calls.filter(call => call.method === 'thread/inject_items').length, 1);
+  }
+  await f.controller.retryPersistence();
+  assert.equal(f.controller.getSnapshot().phase, 'ready');
+  assert.equal(f.calls.filter(call => call.method === 'thread/fork').length, 1);
+  assert.equal(f.calls.filter(call => call.method === 'thread/inject_items').length, 1);
+  assert.equal(f.portCalls.filter(call => call === 'retryPersistence').length, 3);
+});
+
+test('settled close endpoint with unchanged unrequested record permits only explicit continuation', async () => {
+  const f = fixture(); await f.controller.start(); let failures = 0;
+  f.store.fail = (next, old) => !old.close.requested && next.close.requested && failures++ === 0;
+  await f.controller.close(); assert.equal(f.controller.getSnapshot().phase, 'close-unknown');
+  assert.equal(f.controller.getSnapshot().view!.close.requested, false);
+  await f.controller.read(); await f.controller.retry();
+  assert.equal(f.controller.canRetry, false); assert.equal(f.portCalls.filter(call => call === 'close').length, 1);
+  f.settle('close', true); await f.controller.read();
+  assert.equal(f.controller.canRetry, true); assert.equal(f.portCalls.filter(call => call === 'close').length, 1);
+  await f.controller.retry(); assert.equal(f.controller.getSnapshot().phase, 'closed');
+  assert.equal(f.portCalls.filter(call => call === 'close').length, 2);
+  assert.equal(f.calls.filter(call => call.method === 'thread/unsubscribe').length, 1);
 });
 
 test('only explicit proof that this endpoint call was not dispatched permits an explicit retry', async () => {

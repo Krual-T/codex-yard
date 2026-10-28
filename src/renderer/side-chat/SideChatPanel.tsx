@@ -102,6 +102,7 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
     && (!view?.close.requested && !state.pendingClose || ['prepare-failed', 'not-sent', 'rejected', 'unknown', 'cleanup-pending'].includes(view!.close.status)))
     mountedComposer.current = true;
   const showComposer = mountedComposer.current && !!child;
+  const finishClose = () => { if (!closed.current) { closed.current = true; onClose(); } };
 
   useEffect(() => { if (!open) setConfirm(false); }, [open]);
   useEffect(() => {
@@ -109,12 +110,12 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
   }, [controller, ownedHistory]);
   useEffect(() => {
     if (state.phase === 'closed' && !closed.current && gatePassed.current) {
-      closed.current = true; onClose();
+      finishClose();
     }
   }, [state.phase, onClose]);
   useEffect(() => {
     if (!state.view && state.phase === 'idle' && state.pendingClose && gatePassed.current && !closed.current) {
-      closed.current = true; onClose();
+      finishClose();
     }
   }, [state.view, state.phase, state.pendingClose, onClose]);
   useEffect(() => {
@@ -160,8 +161,8 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
     try {
       await barrier();
       const current = controller.getSnapshot();
-      if (current.phase === 'closed') { if (!closed.current) { closed.current = true; onClose(); } return; }
-      if (!current.view && current.phase !== 'preparing') { closed.current = true; onClose(); return; }
+      if (current.phase === 'closed') { finishClose(); return; }
+      if (!current.view && current.phase !== 'preparing') { finishClose(); return; }
       await controller.close();
     } catch (error) { setLocalError('无法关闭侧聊，草稿已保留：' + (error instanceof Error ? error.message : String(error))); }
   };
@@ -173,6 +174,7 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
     const current = controller.getSnapshot();
     try {
       if ((current.pendingClose || current.view?.close.requested) && !gatePassed.current) await barrier();
+      if (controller.getSnapshot().phase === 'closed') { finishClose(); return; }
       if (persistence) await controller.retryPersistence(); else await controller.retry();
     } catch (error) { setLocalError('无法继续关闭，草稿已保留：' + (error instanceof Error ? error.message : String(error))); }
   };
