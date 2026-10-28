@@ -1,6 +1,7 @@
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { userConfigTarget } from './config-target.ts';
 import type { ConfigTarget } from './config-target.ts';
+import { validScopePath } from './scope.ts';
 
 type Handler = { type: 'command'; command: string; async: boolean } | { type: 'mcpTool'; server: string; tool: string }
   | { type: 'prompt' | 'agent' } | { type: 'unknown'; label: string };
@@ -64,14 +65,14 @@ function baseLayers(layers: unknown): unknown {
 export class HookSettings {
   private readonly client: WorkbenchClient;
   private readonly hostId: string;
-  private readonly cwd: string;
+  private readonly cwds: readonly string[];
   private readonly listeners = new Set<() => void>();
   private generation = 0;
   private target: ConfigTarget | null = null;
   private profile: string | null = null;
   private latestRead: HookRead | null = null;
   private snapshot: HookSnapshot = { loading: true, saving: false, hooks: [], warnings: [], drafts: [], error: null, targetError: null, needsRefresh: false, latest: null };
-  constructor(client: WorkbenchClient, hostId: string, cwd: string) { this.client = client; this.hostId = hostId; this.cwd = cwd; }
+  constructor(client: WorkbenchClient, hostId: string, cwds: readonly string[]) { this.client = client; this.hostId = hostId; this.cwds = [...cwds]; }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<HookSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
@@ -79,8 +80,9 @@ export class HookSettings {
   dispose() { this.generation++; }
 
   private async read(): Promise<HookRead> {
+    if (!this.cwds.length || !this.cwds.every(validScopePath)) throw new Error('Select a project or session with a working directory.');
     const [listResult, configResult, homeResult] = await Promise.allSettled([
-      this.client.rpc<{ data: unknown }>('hooks/list', { cwds: this.cwd ? [this.cwd] : [] }, this.hostId),
+      this.client.rpc<{ data: unknown }>('hooks/list', { cwds: this.cwds }, this.hostId),
       this.client.rpc<{ config: { profile?: unknown }; layers?: unknown }>('config/read', { includeLayers: true }, this.hostId),
       this.client.host<{ codexHome?: unknown }>('codex-home', { hostId: this.hostId }),
     ]);

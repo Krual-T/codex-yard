@@ -1,19 +1,23 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { pluginDetailPath, pluginsPath, readPlugin, readPlugins, resolvePluginSource } from './plugins.ts';
 import type { PluginDetail, PluginEntry, PluginListing } from './plugins.ts';
 import { pluginRoute } from './routing.ts';
 import type { SettingsRoute } from './routing.ts';
+import { scopeKey, validScopePath } from './scope.ts';
+import type { SettingsScope } from './scope.ts';
 
 const message = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 const displayName = (entry: PluginEntry) => entry.summary.interface?.displayName || entry.summary.name;
 const status = (entry: PluginEntry) => !entry.summary.installed ? 'Not installed' : entry.summary.enabled ? 'Enabled' : 'Disabled';
 
-export function PluginSection({ client, hostId, route, navigate }: {
-  client: WorkbenchClient; hostId: string; route: SettingsRoute; navigate: (path: string) => void;
+export function PluginSection({ client, hostId, route, navigate, projectScope }: {
+  client: WorkbenchClient; hostId: string; route: SettingsRoute; navigate: (path: string) => void; projectScope: SettingsScope;
 }) {
   const [cwd, setCwd] = useState('');
-  const [scope, setScope] = useState('');
+  const [override, setOverride] = useState<string | null>(null);
+  const [scopeError, setScopeError] = useState<string | null>(null);
+  const scope = useMemo(() => override ? [override] : projectScope.paths, [override, scopeKey(projectScope)]);
   const [query, setQuery] = useState('');
   const [revision, setRevision] = useState(0);
   const [listing, setListing] = useState<PluginListing | null>(null);
@@ -53,10 +57,17 @@ export function PluginSection({ client, hostId, route, navigate }: {
         <button type="button" aria-pressed={!directory} onClick={() => navigate(pluginsPath(route, false))}>Installed</button>
         <button type="button" aria-pressed={directory} onClick={() => navigate(pluginsPath(route, true))}>Browse directory</button>
       </div>
-      <form className="yard-filter" onSubmit={event => { event.preventDefault(); if (scope === cwd.trim()) refresh(); else setScope(cwd.trim()); }}>
-        <label>Working directory <input value={cwd} onChange={event => setCwd(event.target.value)} placeholder="Host default" /></label>
+      <form className="yard-filter" onSubmit={event => { event.preventDefault();
+        if (cwd && !validScopePath(cwd)) { setScopeError('Enter an absolute working directory.'); return; }
+        setScopeError(null);
+        const next = cwd || null;
+        if (override === next) refresh(); else setOverride(next);
+      }}>
+        <label>Working directory <input value={cwd} onChange={event => setCwd(event.target.value)} placeholder="Selected project or session" /></label>
         <button type="submit" disabled={loading}>Show</button>
       </form>
+      <p className="yard-muted">{scope.length ? `Scope: ${scope.join(', ')}` : 'Select a project or session with a working directory.'}</p>
+      {scopeError && <p className="yard-setting-error" role="alert">{scopeError}</p>}
       <label className="yard-plugin-search">Search plugins<input type="search" value={query} onChange={event => setQuery(event.target.value)} /></label>
     </>}
     {error && <p className="yard-setting-error" role="alert">Could not load {nested ? 'plugin details' : 'plugins'}: {error} <button type="button" className="yard-link" onClick={refresh}>Retry</button></p>}

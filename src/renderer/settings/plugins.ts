@@ -1,6 +1,7 @@
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { pluginRoute } from './routing.ts';
 import type { SettingsRoute } from './routing.ts';
+import { validScopePath } from './scope.ts';
 
 interface PluginSummary {
   id: string; name: string; remotePluginId?: string | null; installed: boolean; enabled: boolean;
@@ -29,8 +30,9 @@ function validSummary(value: PluginSummary): boolean {
     && (value.interface == null || typeof value.interface === 'object' && [value.interface.displayName, value.interface.shortDescription,
       value.interface.longDescription, value.interface.developerName].every(optionalString));
 }
-export async function readPlugins(client: WorkbenchClient, hostId: string, cwd: string, directory: boolean): Promise<PluginListing> {
-  const params = { cwds: cwd ? [cwd] : null };
+export async function readPlugins(client: WorkbenchClient, hostId: string, cwds: readonly string[], directory: boolean): Promise<PluginListing> {
+  if (!cwds.length || !cwds.every(validScopePath)) throw new Error('Select a project or session with a working directory.');
+  const params = { cwds };
   const result = await client.rpc<PluginResponse>(directory ? 'plugin/list' : 'plugin/installed', params, hostId);
   if (!Array.isArray(result?.marketplaces) || result.marketplaces.some(marketplace => !marketplace || typeof marketplace.name !== 'string' || !marketplace.name
     || !(typeof marketplace.path === 'string' && !!marketplace.path || marketplace.path == null) || !Array.isArray(marketplace.plugins)
@@ -89,12 +91,12 @@ export function pluginDetailPath(route: SettingsRoute, entry: PluginEntry): stri
   else if (entry.source.remoteMarketplaceName !== null) params.set('remoteMarketplaceName', entry.source.remoteMarketplaceName);
   return `/settings/plugins-settings/hosts/${encodeURIComponent(route.hostId)}/plugins/${encodeURIComponent(entry.summary.id)}?${params}`;
 }
-export async function resolvePluginSource(client: WorkbenchClient, route: SettingsRoute, cwd: string): Promise<PluginSource> {
+export async function resolvePluginSource(client: WorkbenchClient, route: SettingsRoute, cwds: readonly string[]): Promise<PluginSource> {
   const identity = pluginRoute(route.pathname);
   if (!identity) throw new Error('The plugin address is invalid');
   const source = pluginSource(route.search);
   if (source) return source;
-  const listing = await readPlugins(client, identity.hostId, cwd, false);
+  const listing = await readPlugins(client, identity.hostId, cwds, false);
   const matches = listing.entries.filter(entry => entry.summary.id === identity.pluginId);
   if (matches.length !== 1 || !matches[0].source) throw new Error('The plugin marketplace could not be identified. Return to Plugins and refresh.');
   return matches[0].source;

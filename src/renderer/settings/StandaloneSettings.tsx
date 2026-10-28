@@ -21,6 +21,8 @@ import { WorktreesSection } from './WorktreesSection.tsx';
 import { UsageSection } from './UsageSection.tsx';
 import { VoiceSection } from './VoiceSection.tsx';
 import { hostPath, readSettingsRoute, sectionPath } from './routing.ts';
+import { scopeKey, settingsScope } from './scope.ts';
+import type { SettingsProjectRoots, SettingsSessionCwd } from './scope.ts';
 import './standalone-settings.css';
 
 export interface SettingsSection { id: string; title: string; group: string }
@@ -56,6 +58,8 @@ interface RemoteConnection { hostId: string; displayName?: string; sshAlias?: st
 export interface SettingsNavigationGuard { requestLeave(): Promise<boolean> }
 export type SettingsIntegrationProps = StandaloneSettingsProps & {
   registerNavigationGuard?: (guard: SettingsNavigationGuard | null) => void;
+  projectRoots: SettingsProjectRoots | null;
+  sessionCwd: SettingsSessionCwd | null;
 };
 const searchLabels: Record<string, string[]> = {
   'general-settings': ['Default terminal location', 'Prevent sleep while running', 'Automatically archive inactive chats', 'Suggestions', 'Language',
@@ -113,10 +117,11 @@ export function StandaloneSettings(props: SettingsIntegrationProps) {
   return <I18nProvider locale={locale}><SettingsPage {...props} preferences={preferences} snapshot={snapshot} /></I18nProvider>;
 }
 
-function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
+function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, projectRoots, sessionCwd, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
   const { t, locale } = useI18n();
   const route = readSettingsRoute(location, hostId);
   const { section, hostId: selectedHost } = route;
+  const projectScope = settingsScope(selectedHost, projectRoots, sessionCwd);
   const [hosts, setHosts] = useState<RemoteConnection[]>([]);
   const [hostError, setHostError] = useState<string | null>(null);
   const [platform, setPlatform] = useState('unknown');
@@ -274,12 +279,12 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
                 section === 'worktrees' ? <WorktreesSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
                   preferences={preferences} snapshot={snapshot} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
                   section === 'keyboard-shortcuts' ? <KeyboardSection client={client} preferences={preferences} snapshot={snapshot} platform={platform} /> :
-              section === 'plugins-settings' ? <PluginSection key={selectedHost} client={client} hostId={selectedHost} route={route}
+              section === 'plugins-settings' ? <PluginSection key={`${selectedHost}:${scopeKey(projectScope)}`} client={client} hostId={selectedHost} route={route} projectScope={projectScope}
                 navigate={path => guard(() => onNavigate(path, { state: location.state }))} /> :
               section === 'hooks-settings' ? <HookSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
-                onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+                projectScope={projectScope} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
               section === 'skills-settings' ? <SkillSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
-                onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+                projectScope={projectScope} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
               isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
                 section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving} /> :
                   section === 'connections' ? <ConnectionsSection client={client} onSavingChange={setOtherSaving} /> :

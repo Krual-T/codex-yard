@@ -33,7 +33,7 @@ class FakeClient implements WorkbenchClient {
     throw new Error(`Unexpected ${method}`);
   }
 }
-const setup = async () => { const client = new FakeClient(), settings = new SkillSettings(client, 'ssh:one', '/project'); await settings.load(); return { client, settings }; };
+const setup = async () => { const client = new FakeClient(), settings = new SkillSettings(client, 'ssh:one', ['/project']); await settings.load(); return { client, settings }; };
 const id = (name: string, path: string) => JSON.stringify([path, name]);
 
 test('skill writes use original path and namespaced selectors and refresh the authoritative result', async () => {

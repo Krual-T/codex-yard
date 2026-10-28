@@ -42,7 +42,7 @@ class FakeClient implements WorkbenchClient {
     throw new Error(`Unexpected ${method}`);
   }
 }
-const setup = async () => { const client = new FakeClient(), settings = new HookSettings(client, 'ssh:one', '/project'); await settings.load(); return { client, settings }; };
+const setup = async () => { const client = new FakeClient(), settings = new HookSettings(client, 'ssh:one', ['/project']); await settings.load(); return { client, settings }; };
 
 test('only trusted editable hooks can change and saves target the verified base user config', async () => {
   const { client, settings } = await setup(); client.profile = 'profile.with.dots';
@@ -91,7 +91,7 @@ test('omitted optional matcher and command async use protocol defaults', async (
   const withoutOptionals = { ...trusted } as Partial<typeof trusted>;
   delete withoutOptionals.matcher; delete withoutOptionals.async;
   client.hooks = [withoutOptionals as typeof trusted];
-  const settings = new HookSettings(client, 'ssh:one', '/project');
+  const settings = new HookSettings(client, 'ssh:one', ['/project']);
   await settings.load();
   assert.equal(settings.getSnapshot().error, null);
   assert.equal(settings.getSnapshot().hooks[0].matcher, null);

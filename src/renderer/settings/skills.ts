@@ -1,4 +1,5 @@
 import type { WorkbenchClient } from '../workbench-contract.ts';
+import { validScopePath } from './scope.ts';
 
 export interface SkillEntry {
   id: string; name: string; displayName: string; description: string; path: string;
@@ -29,8 +30,9 @@ function parseSkill(value: unknown): SkillEntry {
     description: value.description, path: value.path, scope: value.scope, pluginId: value.pluginId ?? null, enabled: value.enabled };
 }
 
-async function readSkills(client: WorkbenchClient, hostId: string, cwd: string): Promise<SkillRead> {
-  const result = await client.rpc<{ data: unknown }>('skills/list', { cwds: cwd ? [cwd] : [], forceReload: true }, hostId);
+async function readSkills(client: WorkbenchClient, hostId: string, cwds: readonly string[]): Promise<SkillRead> {
+  if (!cwds.length || !cwds.every(validScopePath)) throw new Error('Select a project or session with a working directory.');
+  const result = await client.rpc<{ data: unknown }>('skills/list', { cwds, forceReload: true }, hostId);
   if (!Array.isArray(result?.data)) throw new Error('Invalid skills response');
   const unique = new Map<string, SkillEntry>(), warnings: string[] = [];
   for (const group of result.data) {
@@ -51,13 +53,13 @@ async function readSkills(client: WorkbenchClient, hostId: string, cwd: string):
 export class SkillSettings {
   private readonly client: WorkbenchClient;
   private readonly hostId: string;
-  private readonly cwd: string;
+  private readonly cwds: readonly string[];
   private readonly listeners = new Set<() => void>();
   private snapshot: SkillSnapshot = { loading: true, saving: false, skills: [], warnings: [], drafts: [], latest: null, needsRefresh: false, error: null };
   private latestRead: SkillRead | null = null;
   private generation = 0;
   private invalidated = false;
-  constructor(client: WorkbenchClient, hostId: string, cwd: string) { this.client = client; this.hostId = hostId; this.cwd = cwd; }
+  constructor(client: WorkbenchClient, hostId: string, cwds: readonly string[]) { this.client = client; this.hostId = hostId; this.cwds = [...cwds]; }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<SkillSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
@@ -84,7 +86,7 @@ export class SkillSettings {
     const generation = ++this.generation;
     this.update({ loading: true, error: null });
     try {
-      const read = await readSkills(this.client, this.hostId, this.cwd);
+      const read = await readSkills(this.client, this.hostId, this.cwds);
       if (generation !== this.generation) return;
       if (this.dirty && (this.snapshot.latest || this.snapshot.needsRefresh || this.changed(read))) {
         this.latestRead = read;
@@ -131,7 +133,7 @@ export class SkillSettings {
     const generation = ++this.generation, drafts = this.snapshot.drafts;
     this.update({ saving: true, error: null });
     try {
-      const before = await readSkills(this.client, this.hostId, this.cwd);
+      const before = await readSkills(this.client, this.hostId, this.cwds);
       if (generation !== this.generation) return false;
       if (this.changed(before)) {
         this.latestRead = before;
@@ -145,7 +147,7 @@ export class SkillSettings {
         if (generation !== this.generation) return false;
         if (result?.effectiveEnabled !== draft.enabled) throw new Error('The host reported a different effective skill state');
       }
-      const after = await readSkills(this.client, this.hostId, this.cwd);
+      const after = await readSkills(this.client, this.hostId, this.cwds);
       if (generation !== this.generation) return false;
       if (drafts.some(draft => {
         const previous = before.skills.find(skill => skill.id === draft.id), current = after.skills.find(skill => skill.id === draft.id);

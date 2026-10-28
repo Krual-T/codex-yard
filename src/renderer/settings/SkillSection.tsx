@@ -1,15 +1,20 @@
 import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { canEditSkill, SkillSettings } from './skills.ts';
+import { scopeKey, validScopePath } from './scope.ts';
+import type { SettingsScope } from './scope.ts';
 
-export function SkillSection({ client, hostId, onDirtyChange, onSavingChange }: {
-  client: WorkbenchClient; hostId: string; onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
+export function SkillSection({ client, hostId, projectScope, onDirtyChange, onSavingChange }: {
+  client: WorkbenchClient; hostId: string; projectScope: SettingsScope; onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
 }) {
   const [cwd, setCwd] = useState('');
-  const [scope, setScope] = useState('');
+  const incomingKey = scopeKey(projectScope);
+  const [scope, setScope] = useState(() => ({ origin: incomingKey, paths: projectScope.paths }));
+  const [scopeError, setScopeError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const settings = useMemo(() => new SkillSettings(client, hostId, scope), [client, hostId, scope]);
+  const settings = useMemo(() => new SkillSettings(client, hostId, scope.paths), [client, hostId, scope]);
   const state = useSyncExternalStore(settings.subscribe, settings.getSnapshot, settings.getSnapshot);
+  const scopeChanged = scope.origin !== incomingKey;
   useEffect(() => {
     const unsubscribe = client.subscribe(event => {
       if (event.type === 'mcp-notification' && event.hostId === hostId && event.method === 'skills/changed') settings.invalidate();
@@ -17,20 +22,32 @@ export function SkillSection({ client, hostId, onDirtyChange, onSavingChange }: 
     void settings.load();
     return () => { unsubscribe(); settings.dispose(); };
   }, [client, hostId, settings]);
+  useEffect(() => {
+    if (scopeChanged && !settings.dirty && !state.saving && !state.loading) {
+      setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); setScopeError(null);
+    }
+  }, [scopeChanged, incomingKey, projectScope, settings, state.drafts, state.saving, state.loading]);
   useLayoutEffect(() => { onDirtyChange(settings.dirty); }, [settings, state.drafts, onDirtyChange]);
   useLayoutEffect(() => { onSavingChange(state.saving); }, [state.saving, onSavingChange]);
-  const locked = state.loading || state.saving || state.latest !== null || state.needsRefresh;
+  const locked = state.loading || state.saving || state.latest !== null || state.needsRefresh || scopeChanged;
   const search = query.trim().toLocaleLowerCase();
   const visible = state.skills.filter(skill => [skill.name, skill.displayName, skill.description, skill.scope, skill.path]
     .some(value => value.toLocaleLowerCase().includes(search)));
   return <>
     <div className="yard-section-heading"><h2>Skills</h2><button type="button" disabled={state.loading || state.saving} onClick={() => { void settings.load(); }}>Refresh</button></div>
-    <form className="yard-filter" onSubmit={event => { event.preventDefault(); if (!settings.dirty && !state.saving) {
-      if (scope === cwd.trim()) void settings.load(); else setScope(cwd.trim());
+    <form className="yard-filter" onSubmit={event => { event.preventDefault(); if (!settings.dirty && !state.saving && !scopeChanged) {
+      if (cwd && !validScopePath(cwd)) { setScopeError('Enter an absolute working directory.'); return; }
+      const paths = cwd ? [cwd] : projectScope.paths;
+      setScopeError(null);
+      if (JSON.stringify(scope.paths) === JSON.stringify(paths)) void settings.load(); else setScope({ origin: incomingKey, paths });
     } }}>
-      <label>Working directory <input value={cwd} disabled={settings.dirty || state.saving} onChange={event => setCwd(event.target.value)} placeholder="Host default" /></label>
-      <button type="submit" disabled={settings.dirty || state.saving || state.loading}>Show</button>
+      <label>Working directory <input value={cwd} disabled={settings.dirty || state.saving || scopeChanged} onChange={event => setCwd(event.target.value)} placeholder="Selected project or session" /></label>
+      <button type="submit" disabled={settings.dirty || state.saving || state.loading || scopeChanged}>Show</button>
     </form>
+    <p className="yard-muted">{scope.paths.length ? `Scope: ${scope.paths.join(', ')}` : 'Select a project or session with a working directory.'}</p>
+    {scopeError && <p className="yard-setting-error" role="alert">{scopeError}</p>}
+    {scopeChanged && settings.dirty && <div className="yard-setting-error" role="alert"><p>The selected project changed. Your skill edits remain in the previous scope.</p>
+      <button type="button" disabled={state.saving} onClick={() => { settings.discard(); setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); }}>Discard edits and switch scope</button></div>}
     <label className="yard-plugin-search">Search skills<input type="search" value={query} onChange={event => setQuery(event.target.value)} /></label>
     {state.error && <p className="yard-setting-error" role="alert">{state.error}</p>}
     {state.warnings.map((warning, index) => <p className="yard-setting-error" key={`${warning}:${index}`}>{warning}</p>)}
