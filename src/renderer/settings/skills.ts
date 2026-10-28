@@ -69,7 +69,7 @@ export class SkillSettings {
     this.generation++; this.invalidated = false;
     if (this.snapshot.saving) this.update({ saving: false, loading: false, needsRefresh: true,
       writeUncertain: this.snapshot.writeUncertain || this.writeInFlight,
-      error: this.writeInFlight ? 'The previous save has an unknown result. The host must confirm it has ended before another save.' :
+      error: this.writeInFlight ? null :
         'The save was interrupted. Refresh and review your edits before saving.' });
     else if (this.snapshot.loading) this.update({ loading: false });
   }
