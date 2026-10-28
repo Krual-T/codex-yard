@@ -8,6 +8,7 @@ import type { CatalogKind } from './catalog.ts';
 import { ConnectionsSection } from './ConnectionsSection.tsx';
 import { GeneralSection } from './GeneralSection.tsx';
 import { GitSection } from './GitSection.tsx';
+import { HookSection } from './HookSection.tsx';
 import { KeyboardSection } from './KeyboardSection.tsx';
 import { ModelSection } from './ModelSection.tsx';
 import { PersonalizationSection } from './PersonalizationSection.tsx';
@@ -244,6 +245,8 @@ export function StandaloneSettings({ client, hostId, location, onNavigate, onClo
                   section === 'keyboard-shortcuts' ? <KeyboardSection client={client} preferences={preferences} snapshot={snapshot} platform={platform} /> :
               section === 'plugins-settings' ? <PluginSection key={selectedHost} client={client} hostId={selectedHost} route={route}
                 navigate={path => guard(() => onNavigate(path, { state: location.state }))} /> :
+              section === 'hooks-settings' ? <HookSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
+                onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
               isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
                 section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving} /> :
                   section === 'connections' ? <ConnectionsSection client={client} onSavingChange={setOtherSaving} /> :
