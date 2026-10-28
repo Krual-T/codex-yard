@@ -921,6 +921,29 @@ async function configureModelFixture(fake: Awaited<ReturnType<typeof createFakeC
   fake.handlers.set('config/read', () => ({ config: {}, origins: {}, layers: [{ name: { type: 'user', file, profile: null }, version: 'v1' }] }));
 }
 
+test('Hooks and bracketed settings reads use one owned source across page closure', async t => {
+  const h = await fixture(t, undefined, undefined, { beforeStart: async (fake, root) => {
+    await configureModelFixture(fake, root);
+    fake.handlers.set('hooks/list', () => ({ data: [] }));
+    fake.handlers.set('skills/list', () => ({ data: [] }));
+  } });
+  const first = await h.connect();
+  const before = await first.rpc(1, 'config/read');
+  const hooks = await first.rpc(2, 'hooks/list', {});
+  const skills = await first.rpc(3, 'skills/list', {});
+  const after = await first.rpc(4, 'config/read');
+  assert.ok(before.result?.yardConfigSource?.generation);
+  for (const response of [hooks, skills, after]) {
+    assert.equal(response.error, undefined, JSON.stringify(response));
+    assert.deepEqual(response.result?.yardConfigSource, before.result.yardConfigSource);
+  }
+  first.socket.close(); await once(first.socket, 'close');
+  const second = await h.connect();
+  const reopened = await second.rpc(5, 'hooks/list', {});
+  assert.deepEqual(reopened.result?.yardConfigSource, before.result.yardConfigSource);
+  assert.equal(h.fake.calls('hooks/list').length, 2);
+});
+
 test('configuration operations preserve verified base targets, backend errors and the selected host', async t => {
   const remoteRoot = await mkdtemp('/tmp/aw-model-remote-'), remote = await createFakeCodex(remoteRoot);
   t.after(async () => { await remote.close(); await rm(remoteRoot, { recursive: true, force: true }); });

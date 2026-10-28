@@ -19,8 +19,9 @@ export function isServerRequestEvent(value: WorkbenchEvent): value is ServerRequ
 export class WorkbenchError extends Error {
   readonly uncertain: boolean;
   readonly code?: number;
-  constructor(message: string, uncertain = false, code?: number) {
-    super(message); this.uncertain = uncertain; this.code = code;
+  readonly sendPhase?: 'before-send';
+  constructor(message: string, uncertain = false, code?: number, sendPhase?: 'before-send') {
+    super(message); this.uncertain = uncertain; this.code = code; this.sendPhase = sendPhase;
   }
 }
 interface Pending {
@@ -139,14 +140,21 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
   }
   private async request<T>(message: HostMessage, id: string, mutating: boolean, requireOpen = false,
     observation?: { onLateTerminal?: RequestOptions['onLateTerminal']; onResult?: (value: unknown) => void }): Promise<T> {
-    if (!requireOpen) await this.connect();
-    if (this.socket?.readyState !== WebSocket.OPEN) throw new WorkbenchError('页面连接已断开。');
-    const socket = this.socket;
+    let payload: string, socket: WebSocket;
+    try {
+      payload = JSON.stringify(message);
+      if (!requireOpen) await this.connect();
+      if (this.socket?.readyState !== WebSocket.OPEN) throw new WorkbenchError('页面连接已断开。');
+      socket = this.socket;
+    } catch (failure) {
+      throw new WorkbenchError(failure instanceof Error ? failure.message : String(failure), false,
+        failure instanceof WorkbenchError ? failure.code : undefined, 'before-send');
+    }
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => this.settle(id, undefined,
         new WorkbenchError(mutating ? '等待超时，操作结果未知。请核对会话后再试。' : '请求超时，请重试。', mutating)), 60_000);
       this.pending.set(id, { resolve: value => resolve(value as T), reject, timer, mutating, ...observation });
-      try { socket.send(JSON.stringify(message)); }
+      try { socket.send(payload); }
       catch { this.settle(id, undefined, new WorkbenchError('请求发送失败。', mutating)); }
     });
   }
@@ -180,7 +188,7 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
     return this.request<T>({ type: 'fetch', requestId, url: 'vscode://codex/' + endpoint, body: JSON.stringify(params) }, requestId, mutating);
   }
   async reply(ref: ServerRequestRef, response: { result: unknown } | { error: { code: number; message: string } }) {
-    if (this.socket?.readyState !== WebSocket.OPEN) throw new WorkbenchError('审批连接已断开，请核对请求状态。');
+    if (this.socket?.readyState !== WebSocket.OPEN) throw new WorkbenchError('审批连接已断开，请核对请求状态。', false, undefined, 'before-send');
     const requestId = crypto.randomUUID();
     await this.request({ type: 'mcp-response', requestId, hostId: ref.hostId, generation: ref.generation, response: { id: ref.id, ...response } }, requestId, true, true);
   }

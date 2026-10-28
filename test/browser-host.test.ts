@@ -78,6 +78,58 @@ test('the owned client isolates host requests and never replays them after disco
   assert.equal(second.sent.filter(message => message.request?.method === 'turn/start').length, 0);
 });
 
+test('only failures before the original socket send carry not-sent evidence', async t => {
+  const sockets: FakeSocket[] = [];
+  class FakeSocket {
+    static OPEN = 1;
+    readyState = 0;
+    sent: Record<string, any>[] = [];
+    failSend = false;
+    onopen: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor(_url: string) { sockets.push(this); }
+    open() { this.readyState = 1; this.onopen?.(); }
+    send(value: string) { this.sent.push(JSON.parse(value)); if (this.failSend) throw new Error('send failed'); }
+    message(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
+    close() { this.readyState = 3; this.onclose?.(); }
+  }
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
+  Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: FakeSocket });
+  const client = new BrowserWorkbenchClient('ws://fixture.invalid/native-host');
+  t.after(() => { client.close(); if (original) Object.defineProperty(globalThis, 'WebSocket', original); else Reflect.deleteProperty(globalThis, 'WebSocket'); });
+  const unavailable = client.host('configuration-write', { action: 'submit' }).catch(error => error);
+  sockets[0]!.close();
+  const before = await unavailable;
+  assert.ok(before instanceof WorkbenchError && !before.uncertain && before.sendPhase === 'before-send');
+  assert.equal(sockets[0]!.sent.length, 0);
+  const connected = client.connect(), socket = sockets[1]!; socket.open(); await connected;
+  const rejected = client.host('configuration-write', { action: 'submit' }).catch(error => error);
+  await Promise.resolve();
+  const id = socket.sent.at(-1)!.requestId;
+  socket.message({ type: 'fetch-response', requestId: id, responseType: 'error', error: 'host rejected', uncertain: false, sendPhase: 'before-send' });
+  const after = await rejected;
+  assert.ok(after instanceof WorkbenchError && !after.uncertain && after.sendPhase === undefined);
+  const circular: Record<string, unknown> = {}; circular.self = circular;
+  const count = socket.sent.length;
+  const serialization = await client.rpc('turn/start', circular).catch(error => error);
+  assert.ok(serialization instanceof WorkbenchError && serialization.sendPhase === 'before-send');
+  assert.equal(socket.sent.length, count);
+  socket.failSend = true;
+  const attempted = await client.host('configuration-write', { action: 'submit' }).catch(error => error);
+  assert.ok(attempted instanceof WorkbenchError && attempted.uncertain && attempted.sendPhase === undefined);
+  socket.failSend = false;
+  const lost = client.host('configuration-write', { action: 'submit' }).catch(error => error);
+  await Promise.resolve(); socket.close();
+  const unknown = await lost;
+  assert.ok(unknown instanceof WorkbenchError && unknown.uncertain && unknown.sendPhase === undefined);
+  client.close();
+  const stopped = await client.host('configuration-write', { action: 'submit' }).catch(error => error);
+  assert.ok(stopped instanceof WorkbenchError && stopped.sendPhase === 'before-send');
+  assert.equal(sockets.length, 2);
+});
+
 test('the retained client browser helper opens safe links synchronously on the visiting client', t => {
   const calls: unknown[][] = [];
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');

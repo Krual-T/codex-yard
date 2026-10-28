@@ -550,7 +550,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         const result = await files.rpc(method, params, hostId, hostPaths.get(hostId)?.codexHome);
         send(client, { type: 'mcp-response', hostId, message: { id, result } }); return;
       }
-      const readsConfigurationSource = method === 'config/read' || method === 'skills/list';
+      const readsConfigurationSource = method === 'config/read' || method === 'skills/list' || method === 'hooks/list';
       const connection = readsConfigurationSource ? await ownedConnectionFor(hostId) : await connectedFor(client, connections, hostId);
       const sourceSocket = connection.socket;
       const readSource = readsConfigurationSource ? configurationSource(hostId, connection, sourceSocket) : undefined;
