@@ -9,6 +9,8 @@ import type { Completion } from './standalone-completions.tsx';
 import { StandaloneOptions } from './standalone-options.tsx';
 import { StandaloneQueue } from './standalone-queue.tsx';
 import { useEnterSetting } from './standalone-enter-setting.ts';
+import { StandaloneTarget } from './standalone-target.tsx';
+import type { ComposerHost, ComposerTarget } from './standalone-target.tsx';
 import './standalone-composer.css';
 
 export { draftToInput } from './standalone-draft.ts';
@@ -17,6 +19,8 @@ export type StandaloneComposerRuntimeProps = StandaloneComposerProps & {
   /** The app's authoritative active turn, used as the steer precondition. */
   activeTurnId?: string | null;
   initialOptions?: SubmitOptions;
+  hosts?: ComposerHost[];
+  onTargetChange?: (target: ComposerTarget) => void | Promise<void>;
 };
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -30,7 +34,7 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
   }}><summary>{name}</summary>{preview == null ? '正在读取…' : <pre>{preview}</pre>}</details>;
 }
 
-function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, prefill, activeTurnId, initialOptions }: StandaloneComposerRuntimeProps) {
+function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, prefill, activeTurnId, initialOptions, hosts, onTargetChange }: StandaloneComposerRuntimeProps) {
   const key = draftKey(context);
   const [initial] = useState(() => loadDraft(context));
   const current = useRef(initial);
@@ -210,6 +214,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ''; void addFiles(files);
         }} />
         <button type="button" aria-label="添加附件" title="添加附件" disabled={uploading || !!editIssue || structuredInput} onClick={() => picker.current?.click()}>＋</button>
+        {onTargetChange ? <StandaloneTarget client={client} context={context} hosts={hosts} disabled={busy || sending || uploading} onTargetChange={onTargetChange} /> : null}
         <StandaloneOptions client={client} hostId={context.hostId} cwd={context.cwd} threadId={context.threadId} busy={busy} modelRef={modelPicker} value={options} onChange={setOptions} />
         <label className="standalone-composer__enter">发送方式 <select aria-label="发送方式" value={enterSetting.value} disabled={enterSetting.pending} onChange={event => {
           const value = event.target.value;

@@ -1,0 +1,69 @@
+import { useEffect, useMemo, useState } from 'react';
+import type { ComposerContext, WorkbenchClient } from '../workbench-contract.ts';
+
+export interface ComposerHost { hostId: string; displayName: string }
+export interface ComposerTarget { hostId: string; cwd: string }
+interface TargetProps {
+  client: WorkbenchClient;
+  context: ComposerContext;
+  hosts?: ComposerHost[];
+  disabled: boolean;
+  onTargetChange(target: ComposerTarget): void | Promise<void>;
+}
+interface Root { hostId: string; hostName: string; cwd: string }
+function key(target: ComposerTarget): string { return JSON.stringify([target.hostId, target.cwd]); }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function StandaloneTarget({ client, context, hosts, disabled, onTargetChange }: TargetProps) {
+  const [roots, setRoots] = useState<Root[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [changing, setChanging] = useState(false);
+  const [error, setError] = useState('');
+  const [version, setVersion] = useState(0);
+  const hostKey = JSON.stringify(hosts ?? []);
+  const availableHosts = useMemo(() => {
+    const result = new Map<string, ComposerHost>();
+    for (const host of hosts ?? []) if (host.hostId && host.displayName) result.set(host.hostId, host);
+    if (!result.has(context.hostId)) result.set(context.hostId, { hostId: context.hostId, displayName: context.hostId === 'local' ? '本地' : context.hostId });
+    return [...result.values()];
+  }, [hostKey, context.hostId]);
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    void Promise.allSettled(availableHosts.map(async host => {
+      const response: unknown = await client.host('workspace-root-options', { hostId: host.hostId });
+      if (!isRecord(response) || !Array.isArray(response.roots) || !response.roots.every(root => typeof root === 'string')) {
+        throw new Error(host.displayName + ' 的工作区列表无效');
+      }
+      return [...new Set(response.roots.filter(Boolean))].map(cwd => ({ hostId: host.hostId, hostName: host.displayName, cwd }));
+    })).then(results => {
+      if (!active) return;
+      setRoots(results.flatMap(result => result.status === 'fulfilled' ? result.value : []));
+      const failures = results.flatMap((result, index) => result.status === 'rejected' ? [availableHosts[index]!.displayName] : []);
+      setError(failures.length ? '无法读取工作区：' + failures.join('、') : '');
+    }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [client, availableHosts, version]);
+  const current = key(context);
+  const options = roots.some(root => key(root) === current) ? roots : [
+    { hostId: context.hostId, hostName: availableHosts.find(host => host.hostId === context.hostId)?.displayName ?? context.hostId, cwd: context.cwd },
+    ...roots,
+  ];
+  const change = async (selected: string) => {
+    const target = options.find(option => key(option) === selected);
+    if (!target || selected === current || changing || disabled || context.threadId !== null) return;
+    setChanging(true); setError('');
+    try { await onTargetChange({ hostId: target.hostId, cwd: target.cwd }); }
+    catch (reason) { setError('无法切换工作区：' + String(reason instanceof Error ? reason.message : reason)); }
+    finally { setChanging(false); }
+  };
+  return <div className="standalone-composer__target">
+    <label>运行位置 <select aria-label="运行位置" value={current} disabled={disabled || changing || loading || context.threadId !== null}
+      onChange={event => void change(event.target.value)}>
+      {options.map(option => <option key={key(option)} value={key(option)}>{option.hostName}: {option.cwd || '未选择工作区'}</option>)}
+    </select></label>
+    {error ? <span role="alert">{error} <button type="button" onClick={() => setVersion(value => value + 1)}>重试</button></span> : null}
+  </div>;
+}
