@@ -5,16 +5,18 @@ import { ModelSettings, resolveConfiguredModel } from './model-settings.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
 import { SettingsDraftRecovery } from './SettingsDraftRecovery.tsx';
 
-export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: {
+export function ModelSection({ client, hostId, onDirtyChange, onSavingChange, registerDiscard }: {
   client: WorkbenchClient; hostId: string; onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
+  registerDiscard?: (discard: (() => Promise<boolean>) | null) => void;
 }) {
   const { t } = useI18n();
   const modelSettings = useMemo(() => new ModelSettings(client, hostId), [client, hostId]);
   const state = useSyncExternalStore(modelSettings.subscribe, modelSettings.getSnapshot, modelSettings.getSnapshot);
   const dirty = modelSettings.dirty;
   useEffect(() => { void modelSettings.load(); return () => modelSettings.dispose(); }, [modelSettings]);
-  useLayoutEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
+  useLayoutEffect(() => { onDirtyChange(dirty || Boolean(state.draftStorageError)); }, [dirty, state.draftStorageError, onDirtyChange]);
   useLayoutEffect(() => { onSavingChange(state.saving || state.draftSaving); }, [state.saving, state.draftSaving, onSavingChange]);
+  useLayoutEffect(() => { registerDiscard?.(() => modelSettings.discard()); return () => registerDiscard?.(null); }, [modelSettings, registerDiscard]);
   const selected = resolveConfiguredModel(state.models, state.model);
   const efforts = Array.isArray(selected?.supportedReasoningEfforts) ? selected.supportedReasoningEfforts : [];
   return <>
@@ -48,7 +50,7 @@ export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: 
       </select></Row>
     </div>}
     {dirty && <div className="yard-inline-save"><span>{t('Unsaved model settings')}</span><div className="yard-actions">
-      <button type="button" disabled={state.saving} onClick={() => modelSettings.discard()}>{t('Discard')}</button>
+      <button type="button" disabled={state.saving} onClick={() => { void modelSettings.discard(); }}>{t('Discard')}</button>
       <button type="button" disabled={state.saving || Boolean(state.writeError) || state.conflicts.length > 0} onClick={() => { void modelSettings.save(); }}>{t(state.saving ? 'Saving...' : 'Save')}</button>
     </div></div>}
   </>;

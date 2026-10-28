@@ -284,3 +284,48 @@ test('managed override remains visible after effective values are verified', asy
   assert.equal(await settings.save(), true);
   assert.equal(settings.getSnapshot().warning, 'Managed override');
 });
+
+test('a persisted model conflict retains its original baseline across controller replacement', async () => {
+  const client = new FakeClient(), first = new ModelSettings(client, 'local', client.operations);
+  await first.load(); first.setModel('beta'); client.config.model = 'gamma'; client.version = 'v2';
+  await first.load(); await first.retryDraftPersistence();
+  const saved = await fixtureDraft(client.operations, first.editorId) as { conflicts: string[]; conflictBaselines: { model: string } };
+  assert.deepEqual(saved.conflicts, ['model']); assert.equal(saved.conflictBaselines.model, 'alpha');
+  const restored = new ModelSettings(client, 'local', client.operations); await restored.load(); await restored.restoreDraft(saved);
+  assert.deepEqual(restored.getSnapshot().conflicts, ['model']); assert.equal(await restored.save(), false);
+  restored.resolveConflict('model', 'draft'); assert.equal(await restored.save(), true);
+  assert.equal(client.config.model, 'beta');
+});
+
+test('a null-target model edit survives recovery but requires explicit target review', async () => {
+  const client = new FakeClient(); client.layers = [];
+  const first = new ModelSettings(client, 'local', client.operations); await first.load(); first.setModel('beta'); await first.retryDraftPersistence();
+  const saved = await fixtureDraft(client.operations, first.editorId) as { target: unknown }; assert.equal(saved.target, null);
+  client.layers = null;
+  const restored = new ModelSettings(client, 'local', client.operations); await restored.load(); await restored.restoreDraft(saved);
+  assert.equal(restored.getSnapshot().model, 'beta'); assert.match(restored.getSnapshot().writeError ?? '', /no verified configuration target/);
+  assert.equal(await restored.save(), false); assert.equal(client.calls.some(call => call.method === 'configuration-write'), false);
+  await restored.load(true); assert.equal(await restored.save(), true);
+});
+
+test('model reload clears its own draft after the authoritative value converges', async () => {
+  const client = new FakeClient(), first = new ModelSettings(client, 'local', client.operations);
+  await first.load(); first.setModel('beta'); await first.retryDraftPersistence();
+  client.config.model = 'beta'; client.version = 'v2'; await first.load(); await first.retryDraftPersistence();
+  await client.operations.refresh(); assert.equal(client.operations.getSnapshot().drafts.some(item => item.editorId === first.editorId), false);
+});
+
+test('discard invalidates a late reload before clearing the exact editor revision', async () => {
+  const client = new FakeClient(), first = new ModelSettings(client, 'local', client.operations);
+  await first.load(); first.setModel('beta'); await first.retryDraftPersistence();
+  const rpc = client.rpc.bind(client); let enter = () => {}, release = () => {};
+  const waiting = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  client.rpc = async <T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> => {
+    if (method === 'config/read') { enter(); await gate; }
+    return rpc<T>(method, params, hostId);
+  };
+  const loading = first.load(); await waiting;
+  assert.equal(await first.discard(), true); client.config.model = 'gamma'; release(); await loading;
+  assert.equal(first.getSnapshot().model, 'alpha'); assert.equal(first.dirty, false);
+  await client.operations.refresh(); assert.equal(client.operations.getSnapshot().drafts.some(item => item.editorId === first.editorId), false);
+});

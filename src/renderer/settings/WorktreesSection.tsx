@@ -6,7 +6,8 @@ import type { PreferenceProps } from './PreferenceControls.tsx';
 import { RemoteWorktreesSection } from './RemoteWorktreesSection.tsx';
 
 type WorktreesProps = PreferenceProps & { client: WorkbenchClient; hostId: string;
-  onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void };
+  onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
+  registerDiscard?: (discard: (() => Promise<boolean>) | null) => void };
 
 function UpstreamControl({ preferences, snapshot }: PreferenceProps) {
   const { t } = useI18n();
@@ -23,6 +24,7 @@ function UpstreamControl({ preferences, snapshot }: PreferenceProps) {
 export function WorktreesSection(props: WorktreesProps) {
   return props.hostId === 'local' ? <LocalWorktreesSection {...props} /> :
     <RemoteWorktreesSection client={props.client} hostId={props.hostId} onDirtyChange={props.onDirtyChange} onSavingChange={props.onSavingChange}
+      registerDiscard={props.registerDiscard}
       upstream={<UpstreamControl preferences={props.preferences} snapshot={props.snapshot} />} />;
 }
 

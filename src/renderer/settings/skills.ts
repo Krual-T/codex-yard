@@ -65,6 +65,7 @@ export class SkillSettings {
   private originalBlocker: WriteStatus | null = null;
   readonly editorId = createSettingsWriteId();
   private draftWrites: Promise<void> = Promise.resolve();
+  private draftRevision: number | null = null;
   private draftWriteCount = 0;
   private readonly listeners = new Set<() => void>();
   private snapshot: SkillSnapshot = { loading: true, saving: false, skills: [], warnings: [], drafts: [], latest: null, needsRefresh: false, writeUncertain: false, error: null, draftStorageError: null, draftSaving: false };
@@ -73,6 +74,7 @@ export class SkillSettings {
   private generation = 0;
   private invalidated = false;
   private writeInFlight = false;
+  private discarding = false;
   constructor(client: WorkbenchClient, hostId: string, cwds: readonly string[], operations = settingsConfigOperations(client)) {
     this.client = client; this.hostId = hostId; this.cwds = [...cwds]; this.operations = operations;
   }
@@ -80,12 +82,13 @@ export class SkillSettings {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<SkillSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
   retryDraftPersistence() {
+    if (this.snapshot.saving) return this.draftWrites;
     const draft = structuredClone({ drafts: this.snapshot.drafts, skills: this.snapshot.skills, source: this.source });
     this.draftWriteCount++; this.update({ draftSaving: true });
     const dirty = this.dirty;
     this.draftWrites = this.draftWrites.then(() => dirty ? this.operations.saveDraft(this.hostId, 'skills-settings', this.cwds, this.editorId, draft)
       : this.operations.clearEditorDraft(this.hostId, 'skills-settings', this.cwds, this.editorId))
-      .then(() => this.update({ draftStorageError: null }), error => this.update({ draftStorageError: errorText(error) }))
+      .then(revision => { this.draftRevision = revision; this.update({ draftStorageError: null }); }, error => this.update({ draftStorageError: errorText(error) }))
       .finally(() => { if (--this.draftWriteCount === 0) this.update({ draftSaving: false }); });
     return this.draftWrites;
   }
@@ -103,6 +106,7 @@ export class SkillSettings {
   }
   dispose() {
     this.generation++; this.invalidated = false;
+    if (this.discarding) return;
     if (this.snapshot.saving) this.update({ saving: false, loading: false, needsRefresh: true,
       writeUncertain: this.snapshot.writeUncertain || this.writeInFlight,
       error: this.writeInFlight ? null :
@@ -139,6 +143,7 @@ export class SkillSettings {
       if (this.snapshot.writeUncertain && this.originalId && !resolved && previous?.operationId !== this.originalId) {
         const blocker = this.originalBlocker;
         resolved = this.resolvedOriginalId === this.originalId
+          || await this.operations.originalNotSentClosed(this.hostId, this.originalId, 'skills/config/write')
           || !!(blocker?.method && await this.operations.originalFinished(blocker.hostId, blocker.operationId, blocker.method))
           || !blocker && await this.operations.originalFinished(this.hostId, this.originalId, 'skills/config/write');
         if (generation !== this.generation) return;
@@ -170,19 +175,27 @@ export class SkillSettings {
     this.update({ drafts, error: null });
     void this.retryDraftPersistence();
   }
-  discard() {
-    if (this.snapshot.saving || this.snapshot.writeUncertain) return;
-    const latest = this.latestRead, refresh = this.snapshot.needsRefresh && !latest;
-    if (latest) this.source = latest.source;
-    this.latestRead = null;
-    this.update({ drafts: [], skills: latest?.skills ?? this.snapshot.skills, warnings: latest?.warnings ?? this.snapshot.warnings,
-      latest: null, needsRefresh: refresh || this.snapshot.writeUncertain, error: null });
-    void this.retryDraftPersistence();
-    if (refresh) void this.load();
+  async discard(): Promise<boolean> {
+    if (this.snapshot.saving || this.snapshot.writeUncertain || this.discarding) return false;
+    this.discarding = true;
+    this.generation++; this.update({ saving: true, loading: false });
+    try {
+      await this.draftWrites;
+      await this.operations.clearEditorDraft(this.hostId, 'skills-settings', this.cwds, this.editorId);
+      this.draftRevision = null;
+      const latest = this.latestRead, refresh = this.snapshot.needsRefresh && !latest;
+      if (latest) this.source = latest.source;
+      this.latestRead = null;
+      this.update({ saving: false, drafts: [], skills: latest?.skills ?? this.snapshot.skills, warnings: latest?.warnings ?? this.snapshot.warnings,
+        latest: null, needsRefresh: refresh || this.snapshot.writeUncertain, error: null, draftStorageError: null });
+      if (refresh) void this.load();
+      return true;
+    } catch (error) { this.update({ saving: false, draftStorageError: errorText(error) }); return false; }
+    finally { this.discarding = false; }
   }
   useLatest() {
     const latest = this.latestRead;
-    if (!latest || this.snapshot.writeUncertain) return;
+    if (!latest || this.snapshot.writeUncertain || this.snapshot.saving) return;
     if (!latest.source) { this.update({ error: 'The configuration connection is unavailable. Refresh and review your edits.' }); return; }
     if (this.snapshot.drafts.some(draft => {
       const skill = latest.skills.find(item => item.id === draft.id);
@@ -206,6 +219,7 @@ export class SkillSettings {
     try {
       await this.draftWrites;
       if (this.snapshot.draftStorageError) throw new Error('The newer edit could not be saved in the browser.');
+      if (this.draftRevision === null) throw new Error('The current edit has no saved browser revision.');
       if (generation !== this.generation) return false;
       const before = await readSkills(this.client, this.hostId, this.cwds);
       if (generation !== this.generation) return false;
@@ -222,7 +236,7 @@ export class SkillSettings {
         let result: { effectiveEnabled?: unknown };
         try {
           const submitted = await this.operations.submit(this.hostId, 'skills/config/write', { ...selector(skill), enabled: draft.enabled },
-            { section: 'skills-settings', scope: this.cwds, editorId: this.editorId, source, draft: { drafts, source } }, () => generation === this.generation,
+            { section: 'skills-settings', scope: this.cwds, editorId: this.editorId, revision: this.draftRevision, source, draft: { drafts, source } }, () => generation === this.generation,
             id => { this.originalId = id; this.resolvedOriginalId = null; this.originalBlocker = null; });
           if (this.originalId === submitted.operationId) this.resolvedOriginalId = submitted.operationId;
           result = submitted.result as { effectiveEnabled?: unknown };

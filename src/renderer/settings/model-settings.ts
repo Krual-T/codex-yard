@@ -40,6 +40,9 @@ export class ModelSettings {
   private readonly operations: SettingsConfigOperations;
   readonly editorId = createSettingsWriteId();
   private draftWrites: Promise<void> = Promise.resolve();
+  private draftRevision: number | null = null;
+  private conflictBaselines: Partial<Record<ModelField, string | null>> = {};
+  private targetNeedsReview = false;
   private draftWriteCount = 0;
   private listeners = new Set<() => void>();
   private generation = 0;
@@ -59,13 +62,15 @@ export class ModelSettings {
     for (const listener of this.listeners) listener();
   }
   retryDraftPersistence() {
-    const { model, effort, savedModel, savedEffort, profile } = this.snapshot;
-    const draft = { model, effort, savedModel, savedEffort, profile, target: this.draftTarget ?? this.target, source: this.draftSource };
+    if (this.snapshot.saving) return this.draftWrites;
+    const { model, effort, savedModel, savedEffort, profile, conflicts } = this.snapshot;
+    const draft = structuredClone({ model, effort, savedModel, savedEffort, profile, conflicts, conflictBaselines: this.conflictBaselines,
+      target: this.draftTarget, source: this.draftSource, targetNeedsReview: this.targetNeedsReview });
     this.draftWriteCount++; this.update({ draftSaving: true });
     const dirty = this.dirty;
     this.draftWrites = this.draftWrites.then(() => dirty ? this.operations.saveDraft(this.hostId, 'models', undefined, this.editorId, draft)
       : this.operations.clearEditorDraft(this.hostId, 'models', undefined, this.editorId))
-      .then(() => this.update({ draftStorageError: null }), error => this.update({ draftStorageError: message(error) }))
+      .then(revision => { this.draftRevision = revision; this.update({ draftStorageError: null }); }, error => this.update({ draftStorageError: message(error) }))
       .finally(() => { if (--this.draftWriteCount === 0) this.update({ draftSaving: false }); });
     return this.draftWrites;
   }
@@ -77,11 +82,19 @@ export class ModelSettings {
     const saved = draft as Record<string, unknown>;
     const nullable = (value: unknown) => value === null || typeof value === 'string';
     if (!nullable(saved.model) || !nullable(saved.effort) || !nullable(saved.savedModel) || !nullable(saved.savedEffort)
-      || !nullable(saved.profile) || !isConfigTarget(saved.target)) throw new Error('The saved model edit has no verifiable baseline.');
-    this.draftTarget = saved.target;
+      || !nullable(saved.profile) || !(saved.target === null || isConfigTarget(saved.target))) throw new Error('The saved model edit has no verifiable baseline.');
+    const fields: ModelField[] = ['model', 'effort'];
+    if (saved.conflicts !== undefined && (!Array.isArray(saved.conflicts) || saved.conflicts.some(field => !fields.includes(field)))) throw new Error('The saved model conflicts cannot be read.');
+    const conflicts = saved.conflicts === undefined ? fields.filter(field => saved[field] !== saved[field === 'model' ? 'savedModel' : 'savedEffort']) : saved.conflicts as ModelField[];
+    const baselines = saved.conflictBaselines;
+    if (baselines !== undefined && (!baselines || typeof baselines !== 'object' || Array.isArray(baselines) || fields.some(field => field in baselines && !nullable((baselines as Record<string, unknown>)[field])))) throw new Error('The saved model conflict baseline cannot be read.');
+    this.conflictBaselines = { ...(baselines as Partial<Record<ModelField, string | null>> | undefined) };
+    for (const field of conflicts) if (!(field in this.conflictBaselines)) this.conflictBaselines[field] = saved[field === 'model' ? 'savedModel' : 'savedEffort'] as string | null;
+    this.draftTarget = saved.target as ConfigTarget | null;
+    this.targetNeedsReview = !saved.target || saved.targetNeedsReview === true;
     this.draftSource = configReadSource(saved.source, this.hostId);
     this.update({ model: saved.model as string | null, effort: saved.effort as string | null,
-      savedModel: saved.savedModel as string | null, savedEffort: saved.savedEffort as string | null, profile: saved.profile as string | null });
+      savedModel: saved.savedModel as string | null, savedEffort: saved.savedEffort as string | null, profile: saved.profile as string | null, conflicts });
     await this.retryDraftPersistence(); await this.load();
   }
   private async readConfig(): Promise<ConfigRead> {
@@ -120,6 +133,9 @@ export class ModelSettings {
       const target = await this.targetFor(read);
       if (generation !== this.generation) return;
       const source = configReadSource(read.yardConfigSource, this.hostId);
+      if (this.dirty && (!this.draftTarget || this.targetNeedsReview) && (!reviewSource || !source || !target.target)) {
+        this.update({ loading: false, writeError: 'This edit has no verified configuration target. Reload and review your edit before saving.' }); return;
+      }
       if (this.dirty && !sameConfigSource(this.draftSource, source) && (!reviewSource || !source)) {
         this.update({ loading: false, writeError: 'The configuration connection changed or is unavailable. Reload and review your edit.' }); return;
       }
@@ -134,28 +150,34 @@ export class ModelSettings {
       }
       const currentModel = asValue(config.model), currentEffort = asValue(config.model_reasoning_effort);
       const previous = this.snapshot, conflicts: ModelField[] = [];
+      const wasDirty = this.dirty;
       const modelDirty = previous.model !== previous.savedModel && previous.model !== currentModel;
       const effortDirty = previous.effort !== previous.savedEffort && previous.effort !== currentEffort;
       const model = modelDirty ? previous.model : currentModel, effort = effortDirty ? previous.effort : currentEffort;
       if (modelDirty && (currentModel !== previous.savedModel || previous.conflicts.includes('model'))) conflicts.push('model');
       if (effortDirty && (currentEffort !== previous.savedEffort || previous.conflicts.includes('effort'))) conflicts.push('effort');
+      for (const field of ['model', 'effort'] as const) {
+        if (conflicts.includes(field)) {
+          if (!(field in this.conflictBaselines)) this.conflictBaselines[field] = field === 'model' ? previous.savedModel : previous.savedEffort;
+        } else delete this.conflictBaselines[field];
+      }
       this.target = target.target;
       this.source = source;
-      if (this.dirty && reviewSource) { this.draftSource = source; this.draftTarget = target.target; }
-      if (modelDirty || effortDirty) this.draftTarget ??= target.target;
-      else this.draftTarget = null;
+      if (this.dirty && reviewSource) { this.draftSource = source; this.draftTarget = target.target; this.targetNeedsReview = false; }
+      if (!modelDirty && !effortDirty) { this.draftTarget = null; this.targetNeedsReview = false; }
       this.update({ loading: false, models, profile: asValue(config.profile), savedModel: currentModel, savedEffort: currentEffort,
         writeError: target.error, model, effort, conflicts,
         error: conflicts.length ? 'Some settings changed elsewhere. Review each conflict before saving.' : null });
-      if (this.dirty) void this.retryDraftPersistence();
+      if (wasDirty || this.dirty) void this.retryDraftPersistence();
     } catch (error) { if (generation === this.generation) this.update({ loading: false, error: message(error) }); }
   }
   setModel(model: string) {
     if (this.snapshot.loading || this.snapshot.saving) return;
     const selected = this.snapshot.models.find(item => item.model === model);
     if (!selected) return;
-    if (!this.dirty && model !== this.snapshot.savedModel) { this.draftTarget = this.target; this.draftSource = this.source; }
+    if (!this.dirty && model !== this.snapshot.savedModel) { this.draftTarget = this.target; this.draftSource = this.source; this.targetNeedsReview = !this.target; }
     const conflicts = model === this.snapshot.savedModel ? this.snapshot.conflicts.filter(field => field !== 'model') : this.snapshot.conflicts;
+    if (!conflicts.includes('model')) delete this.conflictBaselines.model;
     if (model === this.snapshot.savedModel && this.snapshot.effort === this.snapshot.savedEffort) this.draftTarget = null;
     this.update({ model, conflicts, error: conflicts.length ? this.snapshot.error : null, warning: null });
     void this.retryDraftPersistence();
@@ -169,8 +191,9 @@ export class ModelSettings {
     if (!selected.supportedReasoningEfforts.some(item => item.reasoningEffort === effort)) {
       this.update({ error: 'The selected model does not support this reasoning effort. Review your selection before saving.' }); return;
     }
-    if (!this.dirty && effort !== this.snapshot.savedEffort) { this.draftTarget = this.target; this.draftSource = this.source; }
+    if (!this.dirty && effort !== this.snapshot.savedEffort) { this.draftTarget = this.target; this.draftSource = this.source; this.targetNeedsReview = !this.target; }
     const conflicts = effort === this.snapshot.savedEffort ? this.snapshot.conflicts.filter(field => field !== 'effort') : this.snapshot.conflicts;
+    if (!conflicts.includes('effort')) delete this.conflictBaselines.effort;
     if (this.snapshot.model === this.snapshot.savedModel && effort === this.snapshot.savedEffort) this.draftTarget = null;
     this.update({ effort, conflicts, error: conflicts.length ? this.snapshot.error : null, warning: null });
     void this.retryDraftPersistence();
@@ -180,11 +203,22 @@ export class ModelSettings {
     const model = choice === 'current' && field === 'model' ? this.snapshot.savedModel : this.snapshot.model;
     const effort = choice === 'current' && field === 'effort' ? this.snapshot.savedEffort : this.snapshot.effort;
     const conflicts = this.snapshot.conflicts.filter(item => item !== field);
+    delete this.conflictBaselines[field];
     if (model === this.snapshot.savedModel && effort === this.snapshot.savedEffort) this.draftTarget = null;
     this.update({ model, effort, conflicts, error: conflicts.length ? this.snapshot.error : null });
     void this.retryDraftPersistence();
   }
-  discard() { if (this.snapshot.saving) return; this.draftTarget = null; this.update({ model: this.snapshot.savedModel, effort: this.snapshot.savedEffort, conflicts: [], error: null, warning: null }); void this.retryDraftPersistence(); }
+  async discard(): Promise<boolean> {
+    if (this.snapshot.saving) return false;
+    this.generation++; this.update({ saving: true, loading: false });
+    try {
+      await this.draftWrites;
+      await this.operations.clearEditorDraft(this.hostId, 'models', undefined, this.editorId);
+      this.draftRevision = null; this.draftTarget = null; this.targetNeedsReview = false; this.conflictBaselines = {};
+      this.update({ saving: false, model: this.snapshot.savedModel, effort: this.snapshot.savedEffort, conflicts: [], error: null, warning: null, draftStorageError: null });
+      return true;
+    } catch (error) { this.update({ saving: false, draftStorageError: message(error) }); return false; }
+  }
   async save(): Promise<boolean> {
     if (!this.dirty || this.snapshot.saving || this.snapshot.loading) return false;
     if (this.snapshot.conflicts.length) { this.update({ error: 'Review each conflicting setting before saving.' }); return false; }
@@ -192,7 +226,7 @@ export class ModelSettings {
     const target = this.target;
     const source = this.draftSource;
     if (!source) { this.update({ error: 'The original configuration connection is unavailable. Reload and review your edit.' }); return false; }
-    if (!target) {
+    if (!target || !this.draftTarget || this.targetNeedsReview) {
       this.update({ error: this.snapshot.writeError || 'Cannot save without a verified configuration version. Your edit is preserved.' }); return false;
     }
     if ((!model && model !== savedModel) || (!effort && effort !== savedEffort)) {
@@ -207,6 +241,7 @@ export class ModelSettings {
     try {
       await this.draftWrites;
       if (this.snapshot.draftStorageError) throw new Error('The newer edit could not be saved in the browser.');
+      if (this.draftRevision === null) throw new Error('The current edit has no saved browser revision.');
       if (generation !== this.generation) return false;
       const before = await this.readConfig();
       if (!sameConfigSource(source, configReadSource(before.yardConfigSource, this.hostId))) {
@@ -231,7 +266,7 @@ export class ModelSettings {
       if (effort !== savedEffort && effort !== null) edits.push({ keyPath: 'model_reasoning_effort', value: effort, mergeStrategy: 'upsert' });
       const submitted = await this.operations.submit(this.hostId, 'config/batchWrite', {
         edits, filePath: target.filePath, expectedVersion: target.version, reloadUserConfig: true,
-      }, { section: 'models', editorId: this.editorId, source, draft: { model, effort, savedModel, savedEffort, profile, target, source } }, () => generation === this.generation);
+      }, { section: 'models', editorId: this.editorId, revision: this.draftRevision, source, draft: { model, effort, savedModel, savedEffort, profile, target, source } }, () => generation === this.generation);
       if (generation !== this.generation) return false;
       const result = submitted.result as { status: 'ok' | 'okOverridden'; version?: string; overriddenMetadata?: { message?: string } | null };
       if (result?.status !== 'ok' && result?.status !== 'okOverridden') throw new Error('The host did not confirm the write');
@@ -246,14 +281,17 @@ export class ModelSettings {
       const conflicts: ModelField[] = [];
       if (!matches && model !== savedModel && model !== actualModel) conflicts.push('model');
       if (!matches && effort !== savedEffort && effort !== actualEffort) conflicts.push('effort');
+      if (conflicts.includes('model')) this.conflictBaselines.model = savedModel;
+      if (conflicts.includes('effort')) this.conflictBaselines.effort = savedEffort;
       if (matches) await this.operations.finish(submitted.operationId, { consumeSubmittedDraft: true });
       if (generation !== this.generation) return false;
-      if (matches) this.draftTarget = null;
+      if (matches) { this.draftTarget = null; this.draftRevision = null; this.conflictBaselines = {}; }
       this.update({ saving: false, savedModel: actualModel, savedEffort: actualEffort, writeError: afterTarget.error,
         model: matches || model === savedModel ? actualModel : model,
         effort: matches || effort === savedEffort ? actualEffort : effort, conflicts,
         warning: result.status === 'okOverridden' ? result.overriddenMetadata?.message || 'A higher-priority configuration overrides this change.' : null,
         error: matches ? null : 'The saved configuration differs from your edit. Review the effective values.' });
+      if (!matches) void this.retryDraftPersistence();
       return matches;
     } catch (error) {
       if (generation === this.generation) this.update({ saving: false, error: `Could not confirm save: ${message(error)}. Your edit is preserved.` });

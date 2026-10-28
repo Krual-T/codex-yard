@@ -12,9 +12,10 @@ export interface SkillSectionMemory {
   scope: { origin: string; paths: string[] }; settings: SkillSettings;
 }
 
-export function SkillSection({ client, hostId, projectScope, memory, revision, onDirtyChange, onSavingChange }: {
+export function SkillSection({ client, hostId, projectScope, memory, revision, onDirtyChange, onSavingChange, registerDiscard }: {
   client: WorkbenchClient; hostId: string; projectScope: SettingsScope; onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
   memory: RefObject<SkillSectionMemory | null>; revision: number;
+  registerDiscard?: (discard: (() => Promise<boolean>) | null) => void;
 }) {
   const { t } = useI18n();
   const [retained] = useState(() => memory.current?.client === client && memory.current.hostId === hostId && memory.current.revision === revision ? memory.current : null);
@@ -37,12 +38,13 @@ export function SkillSection({ client, hostId, projectScope, memory, revision, o
     return () => { unsubscribe(); settings.dispose(); onSavingChange(false); };
   }, [client, hostId, settings, scopeChanged, onSavingChange]);
   useEffect(() => {
-    if (scopeChanged && !settings.dirty && !state.saving && !state.draftSaving && !state.loading && !state.writeUncertain) {
+    if (scopeChanged && !settings.dirty && !state.draftStorageError && !state.saving && !state.draftSaving && !state.loading && !state.writeUncertain) {
       setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); setScopeError(null);
     }
-  }, [scopeChanged, incomingKey, projectScope, settings, state.drafts, state.saving, state.draftSaving, state.loading, state.writeUncertain]);
-  useLayoutEffect(() => { onDirtyChange(settings.dirty); }, [settings, state.drafts, onDirtyChange]);
+  }, [scopeChanged, incomingKey, projectScope, settings, state.drafts, state.draftStorageError, state.saving, state.draftSaving, state.loading, state.writeUncertain]);
+  useLayoutEffect(() => { onDirtyChange(settings.dirty || Boolean(state.draftStorageError)); }, [settings, state.drafts, state.draftStorageError, onDirtyChange]);
   useLayoutEffect(() => { onSavingChange(state.saving || state.draftSaving); }, [state.saving, state.draftSaving, onSavingChange]);
+  useLayoutEffect(() => { registerDiscard?.(() => settings.discard()); return () => registerDiscard?.(null); }, [settings, registerDiscard]);
   const locked = state.loading || state.saving || state.latest !== null || state.needsRefresh || state.writeUncertain || scopeChanged;
   const search = query.trim().toLocaleLowerCase();
   const visible = state.skills.filter(skill => [skill.name, skill.displayName, skill.description, skill.scope, skill.path]
@@ -51,19 +53,21 @@ export function SkillSection({ client, hostId, projectScope, memory, revision, o
     <div className="yard-section-heading"><h2>{t('Skills')}</h2><button type="button" disabled={state.loading || state.saving} onClick={() => { void settings.load(); }}>{t('Refresh')}</button></div>
     <SettingsDraftRecovery client={client} hostId={hostId} section="skills-settings" scope={scope.paths} editorId={settings.editorId}
       disabled={settings.dirty || state.loading || state.saving || state.draftSaving || scopeChanged} onRestore={draft => settings.restoreDraft(draft)} />
-    <form className="yard-filter" onSubmit={event => { event.preventDefault(); if (!settings.dirty && !state.saving && !state.writeUncertain && !scopeChanged) {
+    <form className="yard-filter" onSubmit={event => { event.preventDefault(); if (!settings.dirty && !state.draftStorageError && !state.saving && !state.writeUncertain && !scopeChanged) {
       if (cwd && !validScopePath(cwd)) { setScopeError('Enter an absolute working directory.'); return; }
       const paths = cwd ? [cwd] : projectScope.paths;
       setScopeError(null);
       if (JSON.stringify(scope.paths) === JSON.stringify(paths)) void settings.load(); else setScope({ origin: incomingKey, paths });
     } }}>
-      <label>{t('Working directory')} <input value={cwd} disabled={settings.dirty || state.saving || state.writeUncertain || scopeChanged} onChange={event => setCwd(event.target.value)} placeholder={t('Selected project or session')} /></label>
-      <button type="submit" disabled={settings.dirty || state.saving || state.loading || state.writeUncertain || scopeChanged}>{t('Show')}</button>
+      <label>{t('Working directory')} <input value={cwd} disabled={settings.dirty || !!state.draftStorageError || state.saving || state.writeUncertain || scopeChanged} onChange={event => setCwd(event.target.value)} placeholder={t('Selected project or session')} /></label>
+      <button type="submit" disabled={settings.dirty || !!state.draftStorageError || state.saving || state.loading || state.writeUncertain || scopeChanged}>{t('Show')}</button>
     </form>
     <p className="yard-muted">{scope.paths.length ? `${t('Scope:')} ${scope.paths.join(', ')}` : t('Select a project or session with a working directory.')}</p>
     {scopeError && <p className="yard-setting-error" role="alert">{translateKnown(t, scopeError)}</p>}
     {scopeChanged && (settings.dirty || state.writeUncertain) && <div className="yard-setting-error" role="alert"><p>{t('The selected project changed. Your skill edits remain in the previous scope.')}</p>
-      <button type="button" disabled={state.saving || state.writeUncertain} onClick={() => { settings.discard(); setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); }}>{t('Discard edits and switch scope')}</button></div>}
+      <button type="button" disabled={state.saving || state.writeUncertain} onClick={() => { void settings.discard().then(discarded => {
+        if (discarded) { setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); }
+      }); }}>{t('Discard edits and switch scope')}</button></div>}
     <label className="yard-plugin-search">{t('Search skills')}<input type="search" value={query} onChange={event => setQuery(event.target.value)} /></label>
     {state.error && <p className="yard-setting-error" role="alert">{state.error}</p>}
     {state.draftStorageError && <p className="yard-setting-error" role="alert">Could not save the newer edit in this browser: {state.draftStorageError}{' '}
@@ -77,7 +81,7 @@ export function SkillSection({ client, hostId, projectScope, memory, revision, o
         const previous = state.skills.find(skill => skill.id === draft.id), current = state.latest?.find(skill => skill.id === draft.id);
         return <li key={draft.id}>{previous?.displayName ?? draft.id}: {current ? t(current.enabled ? 'Enabled' : 'Disabled') : 'No longer present'}; {t('Your edit:')} {t(draft.enabled ? 'Enabled' : 'Disabled')}</li>;
       })}</ul>
-      <button type="button" disabled={state.writeUncertain} onClick={() => settings.useLatest()}>{t('Use current state and keep edits')}</button>
+      <button type="button" disabled={state.writeUncertain || state.saving} onClick={() => settings.useLatest()}>{t('Use current state and keep edits')}</button>
     </div>}
     {state.writeUncertain && <p className="yard-setting-error" role="alert">{t('The previous save has an unknown result. The host must confirm it has ended before another save.')}</p>}
     <div className="yard-setting-group">{visible.map(skill => <div className="yard-setting-row" key={skill.id}>
@@ -92,7 +96,7 @@ export function SkillSection({ client, hostId, projectScope, memory, revision, o
         onChange={event => settings.edit(skill.id, event.target.checked)} /></div>
     </div>)}</div>
     {settings.dirty && <div className="yard-inline-save"><span>{t('Unsaved skill changes')}</span><div className="yard-actions">
-      <button type="button" disabled={state.saving || state.loading} onClick={() => settings.discard()}>{t('Discard')}</button>
+      <button type="button" disabled={state.saving || state.loading || state.writeUncertain} onClick={() => { void settings.discard(); }}>{t('Discard')}</button>
       <button type="button" disabled={locked} onClick={() => { void settings.save(); }}>{t(state.saving ? 'Saving...' : 'Save')}</button>
     </div></div>}
   </>;

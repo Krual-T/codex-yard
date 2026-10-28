@@ -186,3 +186,33 @@ test('agent profile changes cannot redirect a pending sandbox edit', async () =>
   assert.match(agent.getSnapshot().error ?? '', /profile changed/);
   assert.equal(client.calls.some(call => call.method === 'config/batchWrite'), false);
 });
+
+test('an advanced approval conflict retains the original raw policy through recovery', async () => {
+  const client = new FakeClient(); client.config.approval_policy = { granular: { rules: true } };
+  const first = new AgentSettings(client, 'local', client.operations); await first.load(); first.edit('approval', 'never');
+  client.config.approval_policy = { granular: { rules: false } }; client.version = 'v2';
+  await first.load(); await first.retryDraftPersistence();
+  const saved = await fixtureDraft(client.operations, first.editorId) as { conflicts: string[]; conflictBaselines: { approval: { raw: unknown } } };
+  assert.deepEqual(saved.conflicts, ['approval']); assert.deepEqual(saved.conflictBaselines.approval.raw, { granular: { rules: true } });
+  const restored = new AgentSettings(client, 'local', client.operations); await restored.load(); await restored.restoreDraft(saved);
+  assert.deepEqual(restored.getSnapshot().conflicts, ['approval']); assert.equal(await restored.save(), false);
+  restored.resolveConflict('approval', 'draft'); assert.equal(await restored.save(), true);
+});
+
+test('a null-target agent edit requires review before a later valid target can be used', async () => {
+  const client = new FakeClient(); client.missingVersion = true;
+  const first = new AgentSettings(client, 'local', client.operations); await first.load(); first.edit('sandbox', 'workspace-write'); await first.retryDraftPersistence();
+  const saved = await fixtureDraft(client.operations, first.editorId) as { target: unknown }; assert.equal(saved.target, null);
+  client.missingVersion = false;
+  const restored = new AgentSettings(client, 'local', client.operations); await restored.load(); await restored.restoreDraft(saved);
+  assert.equal(restored.getSnapshot().values.sandbox, 'workspace-write'); assert.equal(await restored.save(), false);
+  assert.equal(client.calls.some(call => call.method === 'configuration-write'), false);
+  await restored.load(true); assert.equal(await restored.save(), true);
+});
+
+test('agent reload removes the exact local draft when the authoritative policy converges', async () => {
+  const client = new FakeClient(), first = new AgentSettings(client, 'local', client.operations);
+  await first.load(); first.edit('approval', 'never'); await first.retryDraftPersistence();
+  client.config.approval_policy = 'never'; client.version = 'v2'; await first.load(); await first.retryDraftPersistence();
+  await client.operations.refresh(); assert.equal(client.operations.getSnapshot().drafts.some(item => item.editorId === first.editorId), false);
+});

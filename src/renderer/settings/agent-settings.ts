@@ -33,6 +33,9 @@ export class AgentSettings {
   private readonly operations: SettingsConfigOperations;
   readonly editorId = createSettingsWriteId();
   private draftWrites: Promise<void> = Promise.resolve();
+  private draftRevision: number | null = null;
+  private conflictBaselines: Partial<Record<AgentField, { value: string; raw?: unknown }>> = {};
+  private targetNeedsReview = false;
   private draftWriteCount = 0;
   private readonly listeners = new Set<() => void>();
   private generation = 0;
@@ -51,13 +54,15 @@ export class AgentSettings {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<AgentSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
   retryDraftPersistence() {
-    const { values, saved, profile } = this.snapshot;
-    const draft = structuredClone({ values, saved, profile, rawApproval: this.rawApproval, target: this.draftTarget ?? this.target, source: this.draftSource });
+    if (this.snapshot.saving) return this.draftWrites;
+    const { values, saved, profile, conflicts } = this.snapshot;
+    const draft = structuredClone({ values, saved, profile, rawApproval: this.rawApproval, conflicts, conflictBaselines: this.conflictBaselines,
+      target: this.draftTarget, source: this.draftSource, targetNeedsReview: this.targetNeedsReview });
     this.draftWriteCount++; this.update({ draftSaving: true });
     const dirty = this.dirty;
     this.draftWrites = this.draftWrites.then(() => dirty ? this.operations.saveDraft(this.hostId, 'agent', undefined, this.editorId, draft)
       : this.operations.clearEditorDraft(this.hostId, 'agent', undefined, this.editorId))
-      .then(() => this.update({ draftStorageError: null }), error => this.update({ draftStorageError: message(error) }))
+      .then(revision => { this.draftRevision = revision; this.update({ draftStorageError: null }); }, error => this.update({ draftStorageError: message(error) }))
       .finally(() => { if (--this.draftWriteCount === 0) this.update({ draftSaving: false }); });
     return this.draftWrites;
   }
@@ -69,11 +74,22 @@ export class AgentSettings {
     const value = draft as Record<string, unknown>, values = value.values, saved = value.saved;
     const valid = (v: unknown): v is AgentValues => !!v && typeof v === 'object' && !Array.isArray(v)
       && typeof (v as AgentValues).approval === 'string' && typeof (v as AgentValues).sandbox === 'string';
-    if (!valid(values) || !valid(saved) || !(value.profile === null || typeof value.profile === 'string') || !isConfigTarget(value.target)) {
+    if (!valid(values) || !valid(saved) || !(value.profile === null || typeof value.profile === 'string') || !(value.target === null || isConfigTarget(value.target))) {
       throw new Error('The saved agent edit has no verifiable baseline.');
     }
-    this.rawApproval = value.rawApproval; this.draftTarget = value.target; this.draftSource = configReadSource(value.source, this.hostId);
-    this.update({ values, saved, profile: value.profile });
+    const fields: AgentField[] = ['approval', 'sandbox'];
+    if (value.conflicts !== undefined && (!Array.isArray(value.conflicts) || value.conflicts.some(field => !fields.includes(field)))) throw new Error('The saved agent conflicts cannot be read.');
+    const conflicts = value.conflicts === undefined ? fields.filter(field => values[field] !== saved[field]) : value.conflicts as AgentField[];
+    const baselines = value.conflictBaselines;
+    if (baselines !== undefined && (!baselines || typeof baselines !== 'object' || Array.isArray(baselines) || fields.some(field => {
+      const baseline = (baselines as Record<string, unknown>)[field];
+      return baseline !== undefined && (!baseline || typeof baseline !== 'object' || Array.isArray(baseline) || typeof (baseline as { value?: unknown }).value !== 'string');
+    }))) throw new Error('The saved agent conflict baseline cannot be read.');
+    this.conflictBaselines = structuredClone((baselines ?? {}) as typeof this.conflictBaselines);
+    for (const field of conflicts) this.conflictBaselines[field] ??= { value: saved[field], ...(field === 'approval' ? { raw: value.rawApproval } : {}) };
+    this.rawApproval = value.rawApproval; this.draftTarget = value.target as ConfigTarget | null; this.draftSource = configReadSource(value.source, this.hostId);
+    this.targetNeedsReview = !value.target || value.targetNeedsReview === true;
+    this.update({ values, saved, profile: value.profile, conflicts });
     await this.retryDraftPersistence(); await this.load();
   }
   private async read(): Promise<ConfigRead> {
@@ -110,6 +126,9 @@ export class AgentSettings {
       const target = await this.targetFor(read);
       if (generation !== this.generation) return;
       const source = configReadSource(read.yardConfigSource, this.hostId);
+      if (this.dirty && (!this.draftTarget || this.targetNeedsReview) && (!reviewSource || !source || !target.target)) {
+        this.update({ loading: false, writeError: 'This edit has no verified configuration target. Reload and review your edit before saving.' }); return;
+      }
       if (this.dirty && !sameConfigSource(this.draftSource, source) && (!reviewSource || !source)) {
         this.update({ loading: false, writeError: 'The configuration connection changed or is unavailable. Reload and review your edit.' }); return;
       }
@@ -123,6 +142,7 @@ export class AgentSettings {
       }
       const saved = { approval: valueOf(read.config.approval_policy, 'on-request'), sandbox: valueOf(read.config.sandbox_mode, 'read-only') };
       const previous = this.snapshot;
+      const wasDirty = this.dirty;
       const fields: AgentField[] = ['approval', 'sandbox'];
       const values = { ...saved };
       const conflicts: AgentField[] = [];
@@ -133,25 +153,29 @@ export class AgentSettings {
         const changed = field === 'approval'
           ? JSON.stringify(read.config.approval_policy) !== JSON.stringify(this.rawApproval)
           : saved[field] !== previous.saved[field];
-        if (changed || previous.conflicts.includes(field)) conflicts.push(field);
+        if (changed || previous.conflicts.includes(field)) {
+          conflicts.push(field);
+          this.conflictBaselines[field] ??= { value: previous.saved[field], ...(field === 'approval' ? { raw: this.rawApproval } : {}) };
+        }
       }
+      for (const field of fields) if (!conflicts.includes(field)) delete this.conflictBaselines[field];
       this.rawApproval = read.config.approval_policy;
       this.target = target.target;
       this.source = source;
-      if (this.dirty && reviewSource) { this.draftSource = source; this.draftTarget = target.target; }
-      if (!matches(values, saved)) this.draftTarget ??= target.target;
-      else this.draftTarget = null;
+      if (this.dirty && reviewSource) { this.draftSource = source; this.draftTarget = target.target; this.targetNeedsReview = false; }
+      if (matches(values, saved)) { this.draftTarget = null; this.targetNeedsReview = false; }
       this.update({ loading: false, profile, saved, values, conflicts,
         error: conflicts.length ? 'Some settings changed elsewhere. Review each conflict before saving.' : null,
         writeError: target.error, ...allowed });
-      if (this.dirty) void this.retryDraftPersistence();
+      if (wasDirty || this.dirty) void this.retryDraftPersistence();
     } catch (error) { if (generation === this.generation) this.update({ loading: false, error: message(error), approvals: [], sandboxes: [] }); }
   }
   edit(field: AgentField, value: string) {
     if (this.snapshot.saving || this.snapshot.loading || !(field === 'approval' ? this.snapshot.approvals : this.snapshot.sandboxes).includes(value as never)) return;
-    if (!this.dirty && value !== this.snapshot.saved[field]) { this.draftTarget = this.target; this.draftSource = this.source; }
+    if (!this.dirty && value !== this.snapshot.saved[field]) { this.draftTarget = this.target; this.draftSource = this.source; this.targetNeedsReview = !this.target; }
     const values = { ...this.snapshot.values, [field]: value };
     const conflicts = value === this.snapshot.saved[field] ? this.snapshot.conflicts.filter(item => item !== field) : this.snapshot.conflicts;
+    if (!conflicts.includes(field)) delete this.conflictBaselines[field];
     if (matches(values, this.snapshot.saved)) this.draftTarget = null;
     this.update({ values, conflicts, error: conflicts.length ? this.snapshot.error : null, warning: null });
     void this.retryDraftPersistence();
@@ -160,23 +184,34 @@ export class AgentSettings {
     if (this.snapshot.saving || !this.snapshot.conflicts.includes(field)) return;
     const values = choice === 'current' ? { ...this.snapshot.values, [field]: this.snapshot.saved[field] } : this.snapshot.values;
     const conflicts = this.snapshot.conflicts.filter(item => item !== field);
+    delete this.conflictBaselines[field];
     if (matches(values, this.snapshot.saved)) this.draftTarget = null;
     this.update({ values, conflicts, error: conflicts.length ? this.snapshot.error : null });
     void this.retryDraftPersistence();
   }
-  discard() { if (this.snapshot.saving) return; this.draftTarget = null; this.update({ values: this.snapshot.saved, conflicts: [], error: null, warning: null }); void this.retryDraftPersistence(); }
+  async discard(): Promise<boolean> {
+    if (this.snapshot.saving) return false;
+    this.generation++; this.update({ saving: true, loading: false });
+    try {
+      await this.draftWrites;
+      await this.operations.clearEditorDraft(this.hostId, 'agent', undefined, this.editorId);
+      this.draftRevision = null; this.draftTarget = null; this.targetNeedsReview = false; this.conflictBaselines = {};
+      this.update({ saving: false, values: this.snapshot.saved, conflicts: [], error: null, warning: null, draftStorageError: null }); return true;
+    } catch (error) { this.update({ saving: false, draftStorageError: message(error) }); return false; }
+  }
   async save(): Promise<boolean> {
     if (!this.dirty || this.snapshot.saving || this.snapshot.loading) return false;
     if (this.snapshot.conflicts.length) { this.update({ error: 'Review each conflicting setting before saving.' }); return false; }
     const { values, saved, profile } = this.snapshot, target = this.target, rawApproval = this.rawApproval;
     const source = this.draftSource;
     if (!source) { this.update({ error: 'The original configuration connection is unavailable. Reload and review your edit.' }); return false; }
-    if (!target) { this.update({ error: this.snapshot.writeError || 'Cannot save without a verified configuration version.' }); return false; }
+    if (!target || !this.draftTarget || this.targetNeedsReview) { this.update({ error: this.snapshot.writeError || 'Cannot save without a verified configuration version.' }); return false; }
     const generation = ++this.generation;
     this.update({ saving: true, error: null, warning: null });
     try {
       await this.draftWrites;
       if (this.snapshot.draftStorageError) throw new Error('The newer edit could not be saved in the browser.');
+      if (this.draftRevision === null) throw new Error('The current edit has no saved browser revision.');
       if (generation !== this.generation) return false;
       const [before, allowed] = await Promise.all([this.read(), this.requirements()]);
       if (!sameConfigSource(source, configReadSource(before.yardConfigSource, this.hostId))) {
@@ -199,7 +234,7 @@ export class AgentSettings {
       if (values.sandbox !== saved.sandbox) edits.push({ keyPath: 'sandbox_mode', value: values.sandbox, mergeStrategy: 'upsert' });
       const submitted = await this.operations.submit(this.hostId, 'config/batchWrite',
         { edits, filePath: target.filePath, expectedVersion: target.version, reloadUserConfig: true },
-        { section: 'agent', editorId: this.editorId, source, draft: { values, saved, profile, rawApproval, target, source } }, () => generation === this.generation);
+        { section: 'agent', editorId: this.editorId, revision: this.draftRevision, source, draft: { values, saved, profile, rawApproval, target, source } }, () => generation === this.generation);
       if (generation !== this.generation) return false;
       const result = submitted.result as { status: 'ok' | 'okOverridden'; overriddenMetadata?: { message?: string } | null };
       if (result?.status !== 'ok' && result?.status !== 'okOverridden') throw new Error('The host did not confirm the write');
@@ -218,13 +253,16 @@ export class AgentSettings {
       };
       const conflicts: AgentField[] = confirmed ? [] : (['approval', 'sandbox'] as AgentField[]).filter(field =>
         values[field] !== saved[field] && values[field] !== actual[field]);
+      if (conflicts.includes('approval')) this.conflictBaselines.approval = { value: saved.approval, raw: rawApproval };
+      if (conflicts.includes('sandbox')) this.conflictBaselines.sandbox = { value: saved.sandbox };
       if (confirmed) await this.operations.finish(submitted.operationId, { consumeSubmittedDraft: true });
       if (generation !== this.generation) return false;
-      if (confirmed) this.draftTarget = null;
+      if (confirmed) { this.draftTarget = null; this.draftRevision = null; this.conflictBaselines = {}; }
       this.update({ saving: false, saved: actual, writeError: afterTarget.error,
         values: nextValues, conflicts,
         warning: result.status === 'okOverridden' ? result.overriddenMetadata?.message || 'A higher-priority configuration overrides this change.' : null,
         error: confirmed ? null : 'The saved configuration differs from your edit. Review the effective values.' });
+      if (!confirmed) void this.retryDraftPersistence();
       return confirmed;
     } catch (error) { if (generation === this.generation) this.update({ saving: false, error: `Could not confirm save: ${message(error)}. Your edit is preserved.` }); return false; }
   }

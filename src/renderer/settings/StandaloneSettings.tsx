@@ -113,6 +113,11 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
   const [searchTarget, setSearchTarget] = useState<{ section: string; id: string; hostId: string } | null>(null);
   const content = useRef<HTMLDivElement>(null);
   const [confirmLeave, setConfirmLeave] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  const [discardError, setDiscardError] = useState<string | null>(null);
+  const discardInFlight = useRef(false);
+  const editorDiscard = useRef<(() => Promise<boolean>) | null>(null);
+  const registerDiscard = useCallback((discard: (() => Promise<boolean>) | null) => { editorDiscard.current = discard; }, []);
   const pending = useRef<{ promise: Promise<boolean>; resolve: (allowed: boolean) => void } | null>(null);
   const transition = useRef(0);
   const dirty = preferences.dirty || otherDirty || !!recovery.localRetry.length || !!recovery.draftRetry.length
@@ -136,14 +141,24 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
     setConfirmLeave(true);
     return promise;
   }, [preferences]);
-  const finishLeave = (allowed: boolean) => {
-    if (allowed && (flags.current.saving || preferences.saving)) return;
+  const finishLeave = async (allowed: boolean) => {
+    if (discardInFlight.current || allowed && (flags.current.saving || preferences.saving)) return;
     const current = pending.current;
     if (!current) return;
-    pending.current = null;
-    if (allowed) { preferences.discard(); flags.current.dirty = false; setOtherDirty(false); setEditorRevision(value => value + 1); }
-    setConfirmLeave(false);
-    current.resolve(allowed);
+    if (allowed) {
+      discardInFlight.current = true; setDiscarding(true); setDiscardError(null);
+      try {
+        const retained = section === 'hooks-settings' ? hookMemory.current?.settings : section === 'skills-settings' ? skillMemory.current?.settings : null;
+        const discard = editorDiscard.current ?? (retained ? () => retained.discard() : null);
+        if (discard && !await discard()) {
+          setDiscardError('Could not discard this configuration edit. Retry or keep editing.'); return;
+        }
+        preferences.discard(); flags.current.dirty = false; setOtherDirty(false); setEditorRevision(value => value + 1);
+      } catch (error) {
+        setDiscardError(`Could not discard this configuration edit: ${error instanceof Error ? error.message : String(error)}`); return;
+      } finally { discardInFlight.current = false; setDiscarding(false); }
+    }
+    pending.current = null; setConfirmLeave(false); setDiscardError(null); current.resolve(allowed);
   };
 
   useEffect(() => preferences.start(), [preferences]);
@@ -275,21 +290,21 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
           <p role="status">{t('Selected project or session')}: {t('Loading...')}</p> :
         section === 'general-settings' ? <GeneralSection preferences={preferences} snapshot={snapshot} platform={platform} navigate={navigate} /> :
           section === 'appearance' ? <AppearanceSection key={editorRevision} preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} onDirtyChange={setOtherDirty} /> :
-            section === 'models' ? <ModelSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
-              section === 'agent' ? <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+            section === 'models' ? <ModelSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
+              section === 'agent' ? <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
                 section === 'personalization' ? <PersonalizationSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} InstructionEditor={InstructionEditor} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
                   section === 'voice' ? <VoiceSection preferences={preferences} snapshot={snapshot} /> :
                     section === 'usage' ? <UsageSection key={selectedHost} client={client} hostId={selectedHost} /> :
               section === 'git-settings' ? <GitSection preferences={preferences} snapshot={snapshot} suspended={confirmLeave} /> :
                 section === 'worktrees' ? <WorktreesSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
-                  preferences={preferences} snapshot={snapshot} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+                  preferences={preferences} snapshot={snapshot} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
                   section === 'keyboard-shortcuts' ? <KeyboardSection client={client} preferences={preferences} snapshot={snapshot} platform={platform} /> :
               section === 'plugins-settings' ? <PluginSection key={`${selectedHost}:${scopeKey(projectScope)}`} client={client} hostId={selectedHost} route={route} projectScope={projectScope}
                 navigate={path => guard(() => onNavigate(path, { state: location.state }))} /> :
               section === 'hooks-settings' ? <HookSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
-                projectScope={projectScope} memory={hookMemory} revision={editorRevision} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+                projectScope={projectScope} memory={hookMemory} revision={editorRevision} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
               section === 'skills-settings' ? <SkillSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
-                projectScope={projectScope} memory={skillMemory} revision={editorRevision} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+                projectScope={projectScope} memory={skillMemory} revision={editorRevision} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
               isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
                 section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving} /> :
                   section === 'connections' ? <ConnectionsSection client={client} onSavingChange={setOtherSaving} /> :
@@ -304,10 +319,11 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
       </div></div>}
       {preferenceKeys.some(key => snapshot[key].saving) && <span className="yard-sr-only" role="status">{t('Saving preferences')}</span>}
     </main>
-    {confirmLeave && <div className="yard-dialog-backdrop"><div className="yard-dialog" role="dialog" aria-modal="true" aria-labelledby="yard-unsaved-title" onKeyDown={event => { if (event.key === 'Escape') finishLeave(false); }}>
+    {confirmLeave && <div className="yard-dialog-backdrop"><div className="yard-dialog" role="dialog" aria-modal="true" aria-labelledby="yard-unsaved-title" onKeyDown={event => { if (event.key === 'Escape') void finishLeave(false); }}>
       <h2 id="yard-unsaved-title">{t('Discard unsaved changes?')}</h2><p>{t('Your edits have not been saved.')}</p>
-      <div className="yard-actions"><button type="button" autoFocus onClick={() => finishLeave(false)}>{t('Keep editing')}</button>
-        <button type="button" disabled={anySaving} onClick={() => finishLeave(true)}>{t('Discard changes')}</button></div>
+      {discardError && <p className="yard-setting-error" role="alert">{discardError}</p>}
+      <div className="yard-actions"><button type="button" autoFocus disabled={discarding} onClick={() => { void finishLeave(false); }}>{t('Keep editing')}</button>
+        <button type="button" disabled={anySaving || discarding} onClick={() => { void finishLeave(true); }}>{t('Discard changes')}</button></div>
     </div></div>}
   </div>;
 }

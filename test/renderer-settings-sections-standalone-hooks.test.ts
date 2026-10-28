@@ -97,7 +97,7 @@ test('lost replies retain the draft and a refresh cannot release the unknown wri
   assert.match(settings.getSnapshot().error || '', /unknown result/); assert.equal(await settings.save(), false);
   client.failRead = true; await settings.load(); assert.equal(settings.dirty, true); assert.match(settings.getSnapshot().error || '', /list failed/);
   client.failRead = false; await settings.load(); assert.equal(settings.dirty, true); assert.ok(settings.getSnapshot().latest);
-  settings.useLatest(); settings.discard();
+  settings.useLatest(); await settings.discard();
   assert.equal(settings.dirty, true); assert.equal(settings.getSnapshot().writeUncertain, true);
   assert.equal(await settings.save(), false); assert.equal(client.writes.length, 1);
 });
@@ -110,7 +110,7 @@ test('a late original write remains fenced after an earlier unchanged refresh', 
   assert.equal(settings.dirty, true); assert.equal(await settings.save(), false);
   assert.ok(client.late); client.late();
   assert.equal(client.hooks[0].enabled, false);
-  await settings.load(); settings.useLatest(); settings.discard();
+  await settings.load(); settings.useLatest(); await settings.discard();
   assert.equal(settings.getSnapshot().writeUncertain, true);
   assert.equal(settings.dirty, true); assert.equal(client.writes.length, 1);
 });
@@ -203,29 +203,63 @@ test('a retained hook controller checks its own original ID after the saved copy
 test('a closed blocked hook request is reconciled using its distinct blocker identity', async () => {
   const { client, settings } = await setup();
   const host = client.host.bind(client), checked: unknown[] = [];
+  let present = true;
   client.host = async <T>(endpoint: string, params?: Record<string, unknown>): Promise<T> => {
     if (endpoint === 'configuration-write' && params?.action === 'submit') {
       return { outcome: 'blocked', operation: { operationId: 'other-id', hostId: 'other-host', method: 'skills/config/write', state: 'unknown' } } as T;
     }
     if (endpoint === 'configuration-write' && params?.action === 'status') {
       checked.push([params.hostId, params.operationId]);
-      return { operation: { operationId: 'other-id', hostId: 'other-host', method: 'skills/config/write', state: 'succeeded', terminal: { kind: 'effectiveEnabled', value: true } } } as T;
+      return { operation: present ? { operationId: 'other-id', hostId: 'other-host', method: 'skills/config/write', state: 'succeeded', terminal: { kind: 'effectiveEnabled', value: true } } : null } as T;
     }
     return host<T>(endpoint, params);
   };
   settings.edit(trusted.key, false); assert.equal(await settings.save(), false);
   const original = await client.operations.find('ssh:one', 'hooks-settings', ['/project']); assert.ok(original);
-  await client.operations.check(original.operationId); await client.operations.finish(original.operationId);
+  await client.operations.check(original.operationId); await client.operations.finish(original.operationId); present = false;
   await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, false);
   settings.useLatest(); assert.equal(settings.dirty, true); assert.equal(client.writes.length, 0);
-  assert.deepEqual(checked, [['other-host', 'other-id'], ['other-host', 'other-id']]);
+  assert.deepEqual(checked, [['other-host', 'other-id']]);
+});
+
+test('a retained hook editor can review its exact closed not-sent operation after the host restarts', async () => {
+  const { client, settings } = await setup();
+  const host = client.host.bind(client); const calls: string[] = [];
+  client.host = async <T>(endpoint: string, params?: Record<string, unknown>): Promise<T> => {
+    if (endpoint === 'configuration-write') {
+      calls.push(String(params?.action));
+      if (params?.action === 'submit') return { outcome: 'not-started', error: { message: 'prepare failed', uncertain: false }, operation: {
+        operationId: params.operationId, hostId: params.hostId, method: params.method, state: 'preparing', storageError: true,
+        observedTerminal: { kind: 'not-sent' },
+      } } as T;
+      if (params?.action === 'status') return { operation: null } as T;
+    }
+    return host<T>(endpoint, params);
+  };
+  settings.edit(trusted.key, false); assert.equal(await settings.save(), false);
+  const original = await client.operations.find('ssh:one', 'hooks-settings', ['/project']); assert.ok(original);
+  assert.equal(settings.getSnapshot().writeUncertain, true);
+  await client.operations.check(original.operationId); await client.operations.confirmNotSent(original.operationId); await client.operations.finish(original.operationId);
+  await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, false);
+  assert.ok(settings.getSnapshot().latest); settings.useLatest(); assert.equal(settings.dirty, true);
+  assert.deepEqual(calls, ['submit', 'status']); assert.equal(client.writes.length, 0);
+});
+
+test('suspending a hook editor does not unfreeze a pending discard', async () => {
+  const { client, settings } = await setup(); settings.edit(trusted.key, false); await settings.retryDraftPersistence();
+  const clear = client.operations.clearEditorDraft.bind(client.operations); let enter = () => {}, release = () => {};
+  const waiting = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  client.operations.clearEditorDraft = async (...args) => { enter(); await gate; return clear(...args); };
+  const discarding = settings.discard(); await waiting; settings.dispose();
+  assert.equal(settings.getSnapshot().saving, true); settings.edit(trusted.key, true); assert.equal(settings.dirty, true);
+  release(); assert.equal(await discarding, true); assert.equal(settings.dirty, false);
 });
 
 test('a changed trust state or override cannot silently apply a pending edit', async () => {
   const { client, settings } = await setup(); settings.edit(trusted.key, false); client.hooks[0].trustStatus = 'modified';
   assert.equal(await settings.save(), false); settings.useLatest();
   assert.equal(settings.dirty, true); assert.match(settings.getSnapshot().error || '', /requires review/); assert.equal(client.writes.length, 0);
-  settings.discard(); assert.equal(settings.dirty, false); assert.equal(settings.getSnapshot().hooks[0].trustStatus, 'modified');
+  await settings.discard(); assert.equal(settings.dirty, false); assert.equal(settings.getSnapshot().hooks[0].trustStatus, 'modified');
   client.hooks[0].trustStatus = 'trusted'; await settings.load(); settings.edit(trusted.key, false); client.override = true;
   assert.equal(await settings.save(), false); assert.equal(settings.dirty, true); assert.match(settings.getSnapshot().error || '', /overrides/);
 });

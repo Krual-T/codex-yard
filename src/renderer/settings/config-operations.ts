@@ -23,7 +23,8 @@ export interface SettingsDraftRecord {
   hostId: string; section: SettingsWriteSection; scope?: readonly string[];
   editorId: string; revision: number; draft: unknown;
 }
-interface SettingsWriteData { version: 2; nextRevision: number; operations: SettingsWriteRecord[]; drafts: SettingsDraftRecord[] }
+interface ClosedNotSent { operationId: string; hostId: string; method: SettingsWriteMethod }
+interface SettingsWriteData { version: 2; nextRevision: number; operations: SettingsWriteRecord[]; drafts: SettingsDraftRecord[]; closedNotSent: ClosedNotSent[] }
 export interface SettingsWriteStorage {
   read(): Promise<unknown>;
   update(change: (value: unknown) => unknown): Promise<unknown>;
@@ -105,7 +106,7 @@ function records(value: unknown): SettingsWriteRecord[] {
 }
 function data(value: unknown): SettingsWriteData {
   const operations = records(value);
-  if (value === undefined) return { version: 2, nextRevision: 1, operations, drafts: [] };
+  if (value === undefined) return { version: 2, nextRevision: 1, operations, drafts: [], closedNotSent: [] };
   if (Array.isArray(value)) {
     const drafts: SettingsDraftRecord[] = [];
     for (const item of operations) {
@@ -117,7 +118,7 @@ function data(value: unknown): SettingsWriteData {
           editorId: `legacy:${item.operationId}:${copy.editorId}`, revision: copy.revision, draft: copy.draft });
       }
     }
-    return { version: 2, nextRevision: Math.max(0, ...drafts.map(draft => draft.revision)) + 1, operations, drafts };
+    return { version: 2, nextRevision: Math.max(0, ...drafts.map(draft => draft.revision)) + 1, operations, drafts, closedNotSent: [] };
   }
   if (!object(value) || value.version !== 2 || !Array.isArray(value.drafts) || !Number.isSafeInteger(value.nextRevision)
     || (value.nextRevision as number) < 1) throw new Error('Configuration drafts cannot be read. Writes are blocked.');
@@ -134,7 +135,18 @@ function data(value: unknown): SettingsWriteData {
   if ((value.nextRevision as number) <= Math.max(0, ...(value.drafts as SettingsDraftRecord[]).map(draft => draft.revision))) {
     throw new Error('Configuration draft revisions cannot be read. Writes are blocked.');
   }
-  return { version: 2, nextRevision: value.nextRevision as number, operations, drafts: value.drafts as SettingsDraftRecord[] };
+  const closed = value.closedNotSent === undefined ? [] : value.closedNotSent;
+  if (!Array.isArray(closed)) throw new Error('Closed configuration results cannot be read. Writes are blocked.');
+  const closedIds = new Set<string>();
+  for (const item of closed) {
+    if (!object(item) || typeof item.operationId !== 'string' || !item.operationId || closedIds.has(item.operationId)
+      || typeof item.hostId !== 'string' || !item.hostId || !methods.has(String(item.method))
+      || operations.some(operation => operation.operationId === item.operationId)) {
+      throw new Error('Closed configuration results cannot be verified. Writes are blocked.');
+    }
+    closedIds.add(item.operationId);
+  }
+  return { version: 2, nextRevision: value.nextRevision as number, operations, drafts: value.drafts as SettingsDraftRecord[], closedNotSent: closed as ClosedNotSent[] };
 }
 const draftKey = (draft: Pick<SettingsDraftRecord, 'hostId' | 'section' | 'scope' | 'editorId'>) =>
   JSON.stringify([draft.hostId, draft.section, draft.scope ?? [], draft.editorId]);
@@ -205,7 +217,7 @@ export class SettingsWriteError extends Error {
   }
 }
 export interface SettingsWriteSnapshot { records: SettingsWriteRecord[]; drafts: SettingsDraftRecord[]; loading: boolean; error: string | null; localRetry: string[]; draftRetry: string[]; draftPending: number; inFlight: string[] }
-interface PendingDraft { hostId: string; section: SettingsWriteSection; scope?: readonly string[]; draft: unknown }
+interface PendingDraft { hostId: string; section: SettingsWriteSection; scope?: readonly string[]; draft: unknown; sequence: number }
 interface PendingReceipt { patch: Partial<SettingsWriteRecord>; record?: SettingsWriteRecord }
 class ObservationMismatch extends Error {}
 
@@ -219,6 +231,9 @@ export class SettingsConfigOperations {
   private localPending = new Map<string, PendingReceipt>();
   private observationWrites = new Map<string, Promise<void>>();
   private localDraftPending = new Map<string, PendingDraft>();
+  private draftSequences = new Map<string, number>();
+  private draftQueues = new Map<string, Promise<unknown>>();
+  private committedDrafts = new Map<string, { key: string; revision: number }>();
   private inFlight = new Set<string>();
   private draftPending = 0;
   private sequence = 0;
@@ -249,30 +264,58 @@ export class SettingsConfigOperations {
     return [...list].reverse().find(item => item.hostId === hostId && item.origin.section === section
       && JSON.stringify(item.origin.scope ?? []) === JSON.stringify(scope ?? [])) ?? null;
   }
-  async saveDraft(hostId: string, section: SettingsWriteSection, scope: readonly string[] | undefined,
-    editorId: string, draft: unknown): Promise<void> {
-    const copy = structuredClone(draft);
+  private queueDraft<T>(editorId: string, action: () => Promise<T>): Promise<T> {
     this.draftPending++; this.publish({});
-    try {
-      await this.storage.update(value => {
-        const current = data(value), key = draftKey({ hostId, section, scope, editorId });
-        if (!Number.isSafeInteger(current.nextRevision + 1)) throw new Error('Configuration draft revisions are exhausted.');
-        current.drafts = [...current.drafts.filter(item => draftKey(item) !== key),
-          { hostId, section, scope, editorId, revision: current.nextRevision++, draft: copy }];
-        return current;
-      });
-      this.localDraftPending.delete(editorId);
-      await this.refresh();
-    } catch (error) {
-      this.localDraftPending.set(editorId, { hostId, section, scope, draft: copy });
-      this.publish({ error: `The browser could not save a newer configuration edit: ${message(error)}` });
-      throw error;
-    } finally { this.draftPending--; this.publish({}); }
+    const previous = this.draftQueues.get(editorId);
+    const current = (previous ? previous.catch(() => {}) : Promise.resolve()).then(action);
+    this.draftQueues.set(editorId, current);
+    return current.finally(() => {
+      if (this.draftQueues.get(editorId) === current) this.draftQueues.delete(editorId);
+      this.draftPending--; this.publish({});
+    });
+  }
+  private nextDraftSequence(editorId: string): number {
+    const sequence = (this.draftSequences.get(editorId) ?? 0) + 1;
+    this.draftSequences.set(editorId, sequence); return sequence;
+  }
+  private persistDraft(editorId: string, pending: PendingDraft): Promise<number | null> {
+    return this.queueDraft(editorId, async () => {
+      if (this.draftSequences.get(editorId) !== pending.sequence) return null;
+      const key = draftKey({ hostId: pending.hostId, section: pending.section, scope: pending.scope, editorId });
+      let revision: number | null = null;
+      try {
+        await this.storage.update(value => {
+          const current = data(value);
+          if (this.draftSequences.get(editorId) !== pending.sequence) return current;
+          if (!Number.isSafeInteger(current.nextRevision + 1)) throw new Error('Configuration draft revisions are exhausted.');
+          revision = current.nextRevision++;
+          current.drafts = [...current.drafts.filter(item => draftKey(item) !== key),
+            { hostId: pending.hostId, section: pending.section, scope: pending.scope, editorId, revision, draft: pending.draft }];
+          return current;
+        });
+        if (revision !== null) this.committedDrafts.set(editorId, { key, revision });
+        if (this.draftSequences.get(editorId) === pending.sequence) this.localDraftPending.delete(editorId);
+        await this.refresh();
+        return revision;
+      } catch (error) {
+        if (this.draftSequences.get(editorId) === pending.sequence) {
+          this.localDraftPending.set(editorId, pending);
+          this.publish({ error: `The browser could not save a newer configuration edit: ${message(error)}` });
+        }
+        throw error;
+      }
+    });
+  }
+  saveDraft(hostId: string, section: SettingsWriteSection, scope: readonly string[] | undefined,
+    editorId: string, draft: unknown): Promise<number | null> {
+    const pending = { hostId, section, scope: scope && [...scope], draft: structuredClone(draft), sequence: this.nextDraftSequence(editorId) };
+    this.localDraftPending.delete(editorId);
+    return this.persistDraft(editorId, pending);
   }
   async retryDraft(editorId: string): Promise<void> {
     const pending = this.localDraftPending.get(editorId);
     if (!pending) throw new Error('The newer browser edit is no longer available.');
-    await this.saveDraft(pending.hostId, pending.section, pending.scope, editorId, pending.draft);
+    await this.persistDraft(editorId, pending);
   }
   async discardDraft(draft: SettingsDraftRecord): Promise<void> {
     await this.storage.update(value => {
@@ -282,13 +325,31 @@ export class SettingsConfigOperations {
     });
     await this.refresh();
   }
-  async clearEditorDraft(hostId: string, section: SettingsWriteSection, scope: readonly string[] | undefined, editorId: string): Promise<void> {
-    await this.storage.update(value => {
-      const current = data(value), key = draftKey({ hostId, section, scope, editorId });
-      current.drafts = current.drafts.filter(item => draftKey(item) !== key);
-      return current;
+  clearEditorDraft(hostId: string, section: SettingsWriteSection, scope: readonly string[] | undefined, editorId: string): Promise<null> {
+    const sequence = this.nextDraftSequence(editorId), pending = this.localDraftPending.get(editorId);
+    return this.queueDraft(editorId, async () => {
+      if (this.draftSequences.get(editorId) !== sequence) throw new Error('The edit changed while it was being discarded.');
+      const key = draftKey({ hostId, section, scope, editorId });
+      try {
+        await this.storage.update(value => {
+          const current = data(value);
+          if (this.draftSequences.get(editorId) !== sequence) throw new Error('The edit changed while it was being discarded.');
+          const draft = current.drafts.find(item => draftKey(item) === key), committed = this.committedDrafts.get(editorId);
+          if (draft && (!committed || committed.key !== key || committed.revision !== draft.revision)) {
+            throw new Error('The saved edit changed. Review it before discarding.');
+          }
+          if (draft) current.drafts = current.drafts.filter(item => draftKey(item) !== key || item.revision !== draft.revision);
+          return current;
+        });
+        if (this.draftSequences.get(editorId) === sequence) {
+          this.localDraftPending.delete(editorId); this.committedDrafts.delete(editorId);
+        }
+        await this.refresh(); return null;
+      } catch (error) {
+        if (pending && this.draftSequences.get(editorId) === sequence) this.localDraftPending.set(editorId, { ...pending, sequence });
+        throw error;
+      }
     });
-    this.localDraftPending.delete(editorId); await this.refresh();
   }
   private async change(id: string, patch: Partial<SettingsWriteRecord>, fallback?: SettingsWriteRecord) {
     await this.storage.update(value => {
@@ -393,12 +454,13 @@ export class SettingsConfigOperations {
       await this.storage.update(value => {
         const current = data(value), list = current.operations;
         if (list.some(active)) throw new Error('An earlier configuration save must be checked before another save.');
-        if (list.some(item => item.operationId === operationId)) throw new Error('The configuration operation ID is already in use.');
+        if (list.some(item => item.operationId === operationId) || current.closedNotSent.some(item => item.operationId === operationId)) throw new Error('The configuration operation ID is already in use.');
         if (entry.origin.editorId) {
           const key = draftKey({ hostId, section: entry.origin.section, scope: entry.origin.scope, editorId: entry.origin.editorId });
           const draft = current.drafts.find(item => draftKey(item) === key);
-          if (!draft) throw new Error('The original editor draft is not saved in this browser.');
-          entry.origin.revision = draft.revision;
+          if (!draft || !entry.origin.revision || draft.revision !== entry.origin.revision) {
+            throw new Error('The original editor draft revision changed. Review and save the edit again.');
+          }
         }
         current.operations = [...list, entry]; return current;
       });
@@ -461,7 +523,12 @@ export class SettingsConfigOperations {
     } else await this.saveObservation(operationId, { phase: 'unknown', error: 'The host did not return the original operation identity.' }, entry);
     throw new SettingsWriteError('The original save has an unknown result. Check the original operation before saving again.', true, operationId);
   }
+  async originalNotSentClosed(hostId: string, operationId: string, method: SettingsWriteMethod): Promise<boolean> {
+    const closed = data(await this.storage.read()).closedNotSent;
+    return closed.some(item => item.operationId === operationId && item.hostId === hostId && item.method === method);
+  }
   async originalFinished(hostId: string, operationId: string, method: SettingsWriteMethod): Promise<boolean> {
+    if (await this.originalNotSentClosed(hostId, operationId, method)) return true;
     const response = await this.client.host<unknown>('configuration-write', { hostId, action: 'status', operationId });
     const operation = object(response) ? status(response.operation, operationId, hostId, method) : null;
     return !!operation && completed(operation);
@@ -515,6 +582,9 @@ export class SettingsConfigOperations {
         const key = draftKey({ hostId: item.hostId, section: item.origin.section, scope: item.origin.scope, editorId: item.origin.editorId });
         current.drafts = current.drafts.filter(draft => draftKey(draft) !== key || draft.revision !== item.origin.revision);
       }
+      if (item.phase === 'not-started' || item.operation?.terminal?.kind === 'not-sent') {
+        current.closedNotSent.push({ operationId: item.operationId, hostId: item.hostId, method: item.method });
+      }
       current.operations = list.filter(record => record.operationId !== id); return current;
     });
     await this.refresh();
@@ -536,12 +606,6 @@ export class SettingsConfigOperations {
     });
     await this.refresh();
   }
-}
-
-export function latestSettingsDraft(record: SettingsWriteRecord): unknown {
-  const copies = record.workingDrafts;
-  if (!Array.isArray(copies) || !copies.length) return record.origin.draft;
-  return copies.reduce((a, b) => a.revision > b.revision ? a : b).draft;
 }
 
 const instances = new WeakMap<WorkbenchClient, SettingsConfigOperations>();

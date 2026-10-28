@@ -78,7 +78,7 @@ test('changed state is reviewed before a write and missing or ambiguous selector
   client.skills.push({ ...plugin, path: '/other/review/SKILL.md' });
   assert.equal(await settings.save(), false); assert.ok(settings.getSnapshot().latest);
   settings.useLatest(); assert.equal(settings.dirty, true); assert.match(settings.getSnapshot().error || '', /ambiguous/);
-  settings.discard(); assert.equal(settings.dirty, false);
+  await settings.discard(); assert.equal(settings.dirty, false);
   const sameSelector = settings.getSnapshot().skills.filter(skill => skill.name === plugin.name);
   assert.equal(sameSelector.every(skill => !canEditSkill(skill, settings.getSnapshot().skills)), true);
 });
@@ -95,7 +95,7 @@ test('lost or partial replies remain fenced after refresh and review within the 
   assert.equal(settings.getSnapshot().writeUncertain, true);
   settings.useLatest(); assert.equal(settings.getSnapshot().drafts.length, 2);
   assert.equal(await settings.save(), false); assert.equal(client.writes.length, 2);
-  settings.discard(); await settings.load();
+  await settings.discard(); await settings.load();
   settings.edit(id(plugin.name, plugin.path), false);
   assert.equal(settings.dirty, true);
   assert.equal(settings.getSnapshot().writeUncertain, true);
@@ -213,6 +213,39 @@ test('an older skill receipt cannot release a later unknown operation after its 
   present = true; await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, false);
   settings.useLatest(); assert.equal(settings.dirty, false); assert.equal(client.writes.length, 2);
   assert.deepEqual(checked, [original.operationId, original.operationId, original.operationId]);
+});
+
+test('a retained skill editor can review its exact closed not-sent operation after the host restarts', async () => {
+  const { client, settings } = await setup();
+  const host = client.host.bind(client); const calls: string[] = [];
+  client.host = async <T>(endpoint: string, params?: Record<string, unknown>): Promise<T> => {
+    if (endpoint === 'configuration-write') {
+      calls.push(String(params?.action));
+      if (params?.action === 'submit') return { outcome: 'not-started', error: { message: 'prepare failed', uncertain: false }, operation: {
+        operationId: params.operationId, hostId: params.hostId, method: params.method, state: 'preparing', storageError: true,
+        observedTerminal: { kind: 'not-sent' },
+      } } as T;
+      if (params?.action === 'status') return { operation: null } as T;
+    }
+    return host<T>(endpoint, params);
+  };
+  settings.edit(id(local.name, local.path), false); assert.equal(await settings.save(), false);
+  const original = await client.operations.find('ssh:one', 'skills-settings', ['/project']); assert.ok(original);
+  assert.equal(settings.getSnapshot().writeUncertain, true);
+  await client.operations.check(original.operationId); await client.operations.confirmNotSent(original.operationId); await client.operations.finish(original.operationId);
+  await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, false);
+  assert.ok(settings.getSnapshot().latest); settings.useLatest(); assert.equal(settings.dirty, true);
+  assert.deepEqual(calls, ['submit', 'status']); assert.equal(client.writes.length, 0);
+});
+
+test('suspending a skill editor does not unfreeze a pending discard', async () => {
+  const { client, settings } = await setup(); settings.edit(id(local.name, local.path), false); await settings.retryDraftPersistence();
+  const clear = client.operations.clearEditorDraft.bind(client.operations); let enter = () => {}, release = () => {};
+  const waiting = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  client.operations.clearEditorDraft = async (...args) => { enter(); await gate; return clear(...args); };
+  const discarding = settings.discard(); await waiting; settings.dispose();
+  assert.equal(settings.getSnapshot().saving, true); settings.edit(id(local.name, local.path), true); assert.equal(settings.dirty, true);
+  release(); assert.equal(await discarding, true); assert.equal(settings.dirty, false);
 });
 
 test('a completed first skill cannot release a suspended second in-flight write', async () => {

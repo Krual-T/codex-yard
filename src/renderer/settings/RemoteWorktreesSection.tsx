@@ -6,9 +6,10 @@ import { Row } from './PreferenceControls.tsx';
 import { RemoteWorktreeSettings } from './worktrees.ts';
 import { SettingsDraftRecovery } from './SettingsDraftRecovery.tsx';
 
-export function RemoteWorktreesSection({ client, hostId, onDirtyChange, onSavingChange, upstream }: {
+export function RemoteWorktreesSection({ client, hostId, onDirtyChange, onSavingChange, registerDiscard, upstream }: {
   client: WorkbenchClient; hostId: string; onDirtyChange: (dirty: boolean) => void;
   onSavingChange: (saving: boolean) => void; upstream: ReactNode;
+  registerDiscard?: (discard: (() => Promise<boolean>) | null) => void;
 }) {
   const { t } = useI18n();
   const settings = useMemo(() => new RemoteWorktreeSettings(client, hostId), [client, hostId]);
@@ -16,8 +17,9 @@ export function RemoteWorktreesSection({ client, hostId, onDirtyChange, onSaving
   const [confirmDisable, setConfirmDisable] = useState(false);
   const dirty = settings.dirty;
   useEffect(() => { void settings.load(); return () => settings.dispose(); }, [settings]);
-  useLayoutEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
+  useLayoutEffect(() => { onDirtyChange(dirty || Boolean(state.draftStorageError)); }, [dirty, state.draftStorageError, onDirtyChange]);
   useLayoutEffect(() => { onSavingChange(state.saving || state.draftSaving); }, [state.saving, state.draftSaving, onSavingChange]);
+  useLayoutEffect(() => { registerDiscard?.(() => settings.discard()); return () => registerDiscard?.(null); }, [settings, registerDiscard]);
   return <>
     <h2>{t('Worktrees')}</h2>
     <SettingsDraftRecovery client={client} hostId={hostId} section="worktrees" editorId={settings.editorId}
@@ -55,7 +57,7 @@ export function RemoteWorktreesSection({ client, hostId, onDirtyChange, onSaving
       </>}
     </div>
     {dirty && <div className="yard-inline-save"><span>{t('Unsaved worktree settings')}</span><div className="yard-actions">
-      <button type="button" disabled={state.saving} onClick={() => settings.discard()}>{t('Discard')}</button>
+      <button type="button" disabled={state.saving} onClick={() => { void settings.discard(); }}>{t('Discard')}</button>
       <button type="button" disabled={state.loading || state.saving || Boolean(state.writeError) || state.conflicts.length > 0} onClick={() => { void settings.save(); }}>{t(state.saving ? 'Saving...' : 'Save')}</button>
     </div></div>}
     {confirmDisable && <div className="yard-dialog-backdrop"><div className="yard-dialog" role="dialog" aria-modal="true" aria-labelledby="yard-remote-worktree-confirm">

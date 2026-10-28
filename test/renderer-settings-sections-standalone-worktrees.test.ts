@@ -140,3 +140,54 @@ test('remote worktree recovery retains newer fields without replaying the origin
   client.conflict = false; assert.equal(await second.save(), false);
   assert.equal(client.calls.filter(call => call.method === 'config/batchWrite').length, 1);
 });
+
+test('remote worktree conflict baseline survives restore until an explicit choice', async () => {
+  const client = new RemoteClient(), first = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations);
+  await first.load(); first.edit({ root: '/remote/mine' }); client.desktop['git-worktree-root'] = '/remote/theirs'; client.version = 'v2';
+  await first.load(); await first.retryDraftPersistence();
+  const saved = await fixtureDraft(client.operations, first.editorId) as { conflicts: string[]; conflictBaselines: { root: string } };
+  assert.deepEqual(saved.conflicts, ['root']); assert.equal(saved.conflictBaselines.root, '');
+  const restored = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations); await restored.load(); await restored.restoreDraft(saved);
+  assert.deepEqual(restored.getSnapshot().conflicts, ['root']); assert.equal(await restored.save(), false);
+  restored.resolveConflict('root', 'draft'); assert.equal(await restored.save(), true);
+});
+
+test('remote worktree null-target recovery requires review and normalized no-op retires only its own edit', async () => {
+  const client = new RemoteClient(); client.layers = [];
+  const first = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations); await first.load(); first.edit({ keepCount: '015' }); await first.retryDraftPersistence();
+  const saved = await fixtureDraft(client.operations, first.editorId) as { target: unknown }; assert.equal(saved.target, null);
+  client.layers = null;
+  const restored = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations); await restored.load(); await restored.restoreDraft(saved);
+  assert.equal(restored.getSnapshot().draft?.keepCount, '015'); assert.equal(await restored.save(), false);
+  await restored.load(true); assert.equal(await restored.save(), true); await client.operations.refresh();
+  assert.equal(client.operations.getSnapshot().drafts.some(item => item.editorId === restored.editorId), false);
+  assert.equal(client.operations.getSnapshot().drafts.some(item => item.editorId === first.editorId), true);
+  assert.equal(client.calls.some(call => call.method === 'configuration-write'), false);
+});
+
+test('remote worktree reload removes its draft when the authoritative value converges', async () => {
+  const client = new RemoteClient(), first = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations);
+  await first.load(); first.edit({ root: '/remote/mine' }); await first.retryDraftPersistence();
+  client.desktop['git-worktree-root'] = '/remote/mine'; client.version = 'v2'; await first.load(); await first.retryDraftPersistence();
+  await client.operations.refresh(); assert.equal(client.operations.getSnapshot().drafts.some(item => item.editorId === first.editorId), false);
+});
+
+test('a worktree override persists the affected conflict and adopts untouched fields', async () => {
+  const client = new RemoteClient(), settings = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations);
+  const rpc = client.rpc.bind(client);
+  client.rpc = async <T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> => {
+    const response = await rpc<T>(method, params, hostId);
+    if (method === 'config/batchWrite') {
+      client.desktop['git-worktree-root'] = '/remote/overridden'; client.desktop['worktree-keep-count'] = 3;
+      return { status: 'okOverridden' } as T;
+    }
+    return response;
+  };
+  await settings.load(); settings.edit({ root: '/remote/mine' }); assert.equal(await settings.save(), false);
+  assert.deepEqual(settings.getSnapshot().conflicts, ['root']); assert.equal(settings.getSnapshot().draft?.keepCount, '3');
+  await settings.retryDraftPersistence();
+  const draft = await fixtureDraft(client.operations, settings.editorId) as { conflicts: string[]; conflictBaselines: { root: string } };
+  assert.deepEqual(draft.conflicts, ['root']); assert.equal(draft.conflictBaselines.root, '');
+  const restored = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations); await restored.load(); await restored.restoreDraft(draft);
+  assert.deepEqual(restored.getSnapshot().conflicts, ['root']); assert.equal(await restored.save(), false);
+});

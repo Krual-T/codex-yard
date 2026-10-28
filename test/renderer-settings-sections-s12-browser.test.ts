@@ -103,8 +103,8 @@ test('the recovery panel uses persisted original not-sent evidence after host re
       }};
     const ops=settingsConfigOperations(client);
     window.s12NotSentHarness={calls,drafts:async () => {await ops.refresh();return ops.getSnapshot().drafts.length;},submit:async () => {
-      await ops.saveDraft('local','models',undefined,'fixture-editor',{model:'beta',baseline:'alpha'});
-      try {await ops.submit('local','config/batchWrite',{edits:[]},{section:'models',editorId:'fixture-editor',source,draft:{model:'beta'}});
+      const revision=await ops.saveDraft('local','models',undefined,'fixture-editor',{model:'beta',baseline:'alpha'});
+      try {await ops.submit('local','config/batchWrite',{edits:[]},{section:'models',editorId:'fixture-editor',revision,source,draft:{model:'beta'}});
         return 'unexpected success';} catch(error) {return error.message;}
     }};
     createRoot(document.getElementById('root')).render(<ConfigurationRecovery client={client}/>);

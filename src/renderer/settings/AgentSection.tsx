@@ -41,15 +41,17 @@ function ExperimentalFeatures({ client, hostId }: { client: WorkbenchClient; hos
   </>;
 }
 
-export function AgentSection({ client, hostId, onDirtyChange, onSavingChange }: {
+export function AgentSection({ client, hostId, onDirtyChange, onSavingChange, registerDiscard }: {
   client: WorkbenchClient; hostId: string; onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
+  registerDiscard?: (discard: (() => Promise<boolean>) | null) => void;
 }) {
   const { t } = useI18n();
   const agent = useMemo(() => new AgentSettings(client, hostId), [client, hostId]);
   const state = useSyncExternalStore(agent.subscribe, agent.getSnapshot, agent.getSnapshot), dirty = agent.dirty;
   useEffect(() => { void agent.load(); return () => agent.dispose(); }, [agent]);
-  useLayoutEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
+  useLayoutEffect(() => { onDirtyChange(dirty || Boolean(state.draftStorageError)); }, [dirty, state.draftStorageError, onDirtyChange]);
   useLayoutEffect(() => { onSavingChange(state.saving || state.draftSaving); }, [state.saving, state.draftSaving, onSavingChange]);
+  useLayoutEffect(() => { registerDiscard?.(() => agent.discard()); return () => registerDiscard?.(null); }, [agent, registerDiscard]);
   const approvalLabels: Record<string, string> = { 'on-request': t('Ask when requested'), never: t('Never ask'), untrusted: t('Untrusted commands'), 'on-failure': t('On failure'), __advanced__: t('Advanced policy') };
   const sandboxLabels: Record<string, string> = { 'read-only': t('Read only'), 'workspace-write': t('Workspace write'), 'danger-full-access': t('Full access') };
   return <>
@@ -85,7 +87,7 @@ export function AgentSection({ client, hostId, onDirtyChange, onSavingChange }: 
       </Row>
     </div>}
     {dirty && <div className="yard-inline-save"><span>{t('Unsaved agent settings')}</span><div className="yard-actions">
-      <button type="button" disabled={state.saving} onClick={() => agent.discard()}>{t('Discard')}</button>
+      <button type="button" disabled={state.saving} onClick={() => { void agent.discard(); }}>{t('Discard')}</button>
       <button type="button" disabled={state.saving || Boolean(state.writeError) || state.conflicts.length > 0} onClick={() => { void agent.save(); }}>{t(state.saving ? 'Saving...' : 'Save')}</button>
     </div></div>}
     <p className="yard-muted">{t('Project-specific settings, network access, web search and response detail cannot be changed from this connection.')}</p>

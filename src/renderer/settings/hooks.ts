@@ -78,10 +78,12 @@ export class HookSettings {
   private originalBlocker: WriteStatus | null = null;
   readonly editorId = createSettingsWriteId();
   private draftWrites: Promise<void> = Promise.resolve();
+  private draftRevision: number | null = null;
   private draftWriteCount = 0;
   private readonly listeners = new Set<() => void>();
   private generation = 0;
   private writeInFlight = false;
+  private discarding = false;
   private target: ConfigTarget | null = null;
   private profile: string | null = null;
   private source: ConfigReadSource | null = null;
@@ -94,12 +96,13 @@ export class HookSettings {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<HookSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
   retryDraftPersistence() {
+    if (this.snapshot.saving) return this.draftWrites;
     const draft = structuredClone({ drafts: this.snapshot.drafts, hooks: this.snapshot.hooks, target: this.target, profile: this.profile, source: this.source });
     this.draftWriteCount++; this.update({ draftSaving: true });
     const dirty = this.dirty;
     this.draftWrites = this.draftWrites.then(() => dirty ? this.operations.saveDraft(this.hostId, 'hooks-settings', this.cwds, this.editorId, draft)
       : this.operations.clearEditorDraft(this.hostId, 'hooks-settings', this.cwds, this.editorId))
-      .then(() => this.update({ draftStorageError: null }), error => this.update({ draftStorageError: text(error) }))
+      .then(revision => { this.draftRevision = revision; this.update({ draftStorageError: null }); }, error => this.update({ draftStorageError: text(error) }))
       .finally(() => { if (--this.draftWriteCount === 0) this.update({ draftSaving: false }); });
     return this.draftWrites;
   }
@@ -119,6 +122,7 @@ export class HookSettings {
   }
   dispose() {
     this.generation++;
+    if (this.discarding) return;
     if (this.snapshot.saving) this.update({ saving: false, loading: false, needsRefresh: true,
       writeUncertain: this.snapshot.writeUncertain || this.writeInFlight,
       error: this.writeInFlight ? unknownWrite : 'The save was interrupted. Refresh and review your edits before saving.' });
@@ -168,6 +172,7 @@ export class HookSettings {
       if (this.snapshot.writeUncertain && this.originalId && !resolved && previous?.operationId !== this.originalId) {
         const blocker = this.originalBlocker;
         resolved = this.resolvedOriginalId === this.originalId
+          || await this.operations.originalNotSentClosed(this.hostId, this.originalId, 'config/batchWrite')
           || !!(blocker?.method && await this.operations.originalFinished(blocker.hostId, blocker.operationId, blocker.method))
           || !blocker && await this.operations.originalFinished(this.hostId, this.originalId, 'config/batchWrite');
         if (generation !== this.generation) return;
@@ -199,17 +204,26 @@ export class HookSettings {
     this.update({ drafts, error: null });
     void this.retryDraftPersistence();
   }
-  discard() {
-    if (this.snapshot.saving || this.snapshot.writeUncertain) return;
-    const latest = this.latestRead;
-    const refresh = this.snapshot.needsRefresh && !latest;
-    if (latest) { this.target = latest.target; this.profile = latest.profile; this.source = latest.source; this.latestRead = null; }
-    this.update({ drafts: [], hooks: latest?.hooks ?? this.snapshot.hooks, warnings: latest?.warnings ?? this.snapshot.warnings,
-      targetError: latest ? latest.targetError : this.snapshot.targetError, error: null, latest: null, needsRefresh: false });
-    void this.retryDraftPersistence();
-    if (refresh) void this.load();
+  async discard(): Promise<boolean> {
+    if (this.snapshot.saving || this.snapshot.writeUncertain || this.discarding) return false;
+    this.discarding = true;
+    this.generation++; this.update({ saving: true, loading: false });
+    try {
+      await this.draftWrites;
+      await this.operations.clearEditorDraft(this.hostId, 'hooks-settings', this.cwds, this.editorId);
+      this.draftRevision = null;
+      const latest = this.latestRead;
+      const refresh = this.snapshot.needsRefresh && !latest;
+      if (latest) { this.target = latest.target; this.profile = latest.profile; this.source = latest.source; this.latestRead = null; }
+      this.update({ saving: false, drafts: [], hooks: latest?.hooks ?? this.snapshot.hooks, warnings: latest?.warnings ?? this.snapshot.warnings,
+        targetError: latest ? latest.targetError : this.snapshot.targetError, error: null, draftStorageError: null, latest: null, needsRefresh: false });
+      if (refresh) void this.load();
+      return true;
+    } catch (error) { this.update({ saving: false, draftStorageError: text(error) }); return false; }
+    finally { this.discarding = false; }
   }
   useLatest() {
+    if (this.snapshot.saving) return;
     if (this.snapshot.writeUncertain) { this.update({ error: unknownWrite }); return; }
     const latest = this.latestRead;
     if (!latest) return;
@@ -234,6 +248,7 @@ export class HookSettings {
     try {
       await this.draftWrites;
       if (this.snapshot.draftStorageError) throw new Error('The newer edit could not be saved in the browser.');
+      if (this.draftRevision === null) throw new Error('The current edit has no saved browser revision.');
       if (generation !== this.generation) return false;
       const before = await this.read();
       if (generation !== this.generation) return false;
@@ -250,7 +265,7 @@ export class HookSettings {
       try {
         const submitted = await this.operations.submit(this.hostId, 'config/batchWrite',
           { edits, filePath: null, expectedVersion: target.version, reloadUserConfig: true },
-          { section: 'hooks-settings', scope: this.cwds, editorId: this.editorId, source, draft: { drafts, source } }, () => generation === this.generation,
+          { section: 'hooks-settings', scope: this.cwds, editorId: this.editorId, revision: this.draftRevision, source, draft: { drafts, source } }, () => generation === this.generation,
           id => { this.originalId = id; this.resolvedOriginalId = null; this.originalBlocker = null; });
         if (this.originalId === submitted.operationId) this.resolvedOriginalId = submitted.operationId;
         result = submitted.result as { status: 'ok' | 'okOverridden' };
