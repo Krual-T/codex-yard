@@ -131,6 +131,27 @@ test('late observers are capped and observer failures cannot reject the transpor
   assert.equal(connection.pending.size, 0);
 });
 
+test('a reused RPC id on a new connection cannot settle the old connection observer', async t => {
+  const { peer, connection } = await fixture(t);
+  peer.handlers.set('fixture/reused-id', () => NO_REPLY);
+  let oldObserved = false;
+  const old = connection.request('fixture/reused-id', {}, { mutating: true, timeoutMs: 20,
+    onLateTerminal: () => { oldObserved = true; } });
+  const first = await peer.waitForCall('fixture/reused-id');
+  await assert.rejects(old, { code: 'TIMEOUT' });
+  peer.disconnect();
+  await once(connection, 'status');
+  const next = new CodexConnection(peer.socketPath);
+  t.after(() => next.close());
+  await next.connect();
+  const current = next.request('fixture/reused-id', {}, { mutating: true });
+  const second = await peer.waitForCall('fixture/reused-id', 2);
+  assert.equal(second!.id, first!.id);
+  peer.send({ id: second!.id, result: { current: true } });
+  assert.deepEqual(await current, { current: true });
+  assert.equal(oldObserved, false);
+});
+
 test('disconnect rejects every pending RPC, preserves write uncertainty, and never reconnects implicitly', async t => {
   const { peer, connection } = await fixture(t);
   peer.handlers.set('fixture/pending', () => NO_REPLY);
