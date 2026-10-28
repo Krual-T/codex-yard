@@ -28,6 +28,9 @@ import type { HostPaths } from './ssh.ts';
 import { createQueuedSendLocks } from './queued-send-locks.ts';
 import { createPreferenceWrites } from './preference-writes.ts';
 import { createStateMutations } from './state-mutations.ts';
+import { createConfigWrites } from './config-writes.ts';
+import { createConfigWriteTargets } from './config-write-targets.ts';
+import { createConfigWriteHost } from './config-write-host.ts';
 import { createRemoteConnectionPreferences } from './remote-connection-preferences.ts';
 import { createProjectCatalogWrites } from './project-catalog-writes.ts';
 import { readToolHistory } from './tool-history.ts';
@@ -138,7 +141,7 @@ export async function createNativeWorkbench(options: Options = {}) {
   const control = new CodexConnection(socketPath, { cwd: workspace });
   let persistQueue = Promise.resolve();
   function persist() {
-    const snapshot = JSON.stringify({ globals, settings }, null, 2) + '\n';
+    const snapshot = JSON.stringify({ ...state, globals, settings }, null, 2) + '\n';
     persistQueue = persistQueue.catch(() => {}).then(async () => {
       await writeFile(join(dataDir, 'native-state.json.tmp'), snapshot, { mode: 0o600 });
       await rename(join(dataDir, 'native-state.json.tmp'), join(dataDir, 'native-state.json'));
@@ -150,6 +153,17 @@ export async function createNativeWorkbench(options: Options = {}) {
   }
   function broadcast(message: unknown) { for (const client of clients.keys()) send(client, message); }
   const stateMutations = createStateMutations();
+  const configurationWrites = createConfigWrites({ state, persist, mutations: stateMutations,
+    resolveTarget: createConfigWriteTargets({
+      getSshHost: hostId => sshHosts.get(hostId),
+      getHostPaths: hostId => hostPaths.get(hostId),
+      remoteCommand: options.remoteFileCommand,
+    }),
+  });
+  const configurationWriteHost = createConfigWriteHost<{ client: WebSocket; connections: Map<string, CodexConnection> }>({
+    writes: configurationWrites, validateHost: validHost,
+    connect: (hostId, context) => connectedFor(context.client, context.connections, hostId),
+  });
   const addProject = createProjectCatalogWrites(globals, stateMutations, persist, broadcast);
   let projectCompatibility: import('./thread-projects.ts').ThreadProjectCompatibility = {};
   let projectInventoryGeneration = 0;
@@ -474,6 +488,9 @@ export async function createNativeWorkbench(options: Options = {}) {
     if ((message.type === 'mcp-request' || message.type === 'thread-prewarm-start') && message.request) {
       const { method, id } = message.request;
       const params = { ...message.request.params };
+      if (method === 'config/batchWrite' || method === 'skills/config/write') {
+        throw new Error('Configuration changes require an original operation ID through configuration-write.');
+      }
       if (fileMethods.has(method)) {
         if (method === 'fs/createDirectory' || method === 'fs/writeFile') await connectedFor(client, connections, hostId);
         const result = await files.rpc(method, params, hostId, hostPaths.get(hostId)?.codexHome);
@@ -544,6 +561,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     validHost(hostId);
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
     switch (endpoint) {
+      case 'configuration-write': return configurationWriteHost.handle(params, { client, connections });
       case 'chrome-browser': return browsers.get(client)!.request(params as unknown as ChromeRequest);
       case 'chrome-connections': return chromeClients.connections(params as unknown as ConnectionRequest);
       case 'refresh-remote-connections': return { remoteConnections: await remoteProfiles() };
