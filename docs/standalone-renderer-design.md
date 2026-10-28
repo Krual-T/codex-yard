@@ -1,12 +1,12 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v2，2026-10-28，尚未完成实现验收。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v3，2026-10-28，尚未完成实现验收。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
 浏览器加载自有 HTML、CSS 和 `src/native/browser-entry.ts` 生成的 bundle。入口直接从 npm 导入 React、`react-dom/client`，挂载 `src/renderer/app/App.tsx`。应用自己管理路由、页面树、交互和浏览器状态。最终构建、服务器静态路由和部署产物均没有 App 快照路径或回退。
 
-原入口调用 `Ag/jg`，`browser-host.ts` 动态导入快照 RPC 基类；这些不再用于自有入口。自有 HTML 位于 `public/index.html`，构建由 npm React 生成 `.local/renderer`，服务器只服务该目录。旧 `renderer-migration.ts`、资源元数据和原工厂在替代消费者上线后定向删除；最终检查从源码导入、bundle metafile、打包清单及运行网络四处排除加载路径。
+原入口调用 `Ag/jg`，`browser-host.ts` 动态导入快照 RPC 基类；这些不再用于自有入口。自有 HTML 位于 `public/index.html`，构建由 npm React 生成 `.local/renderer`，服务器的自有页面静态资源只从该目录服务；文件API、受限可视化iframe、Chrome companion下载分别沿用既有路由及权限边界。旧 `renderer-migration.ts`、资源元数据和原工厂在替代消费者上线后定向删除；最终检查从源码导入、bundle metafile、打包清单及运行网络四处排除加载路径。
 
 | 已有能力与仓库证据 | 本次处理与实际消费者 |
 | --- | --- |
@@ -23,23 +23,23 @@
 
 Manager 负责入口、shell/路由、WorkbenchClient、会话 reducer、共享契约、服务集成和构建。A 负责 composer/草稿/提交控件/队列，B 负责消息/Markdown/工具展示，D 负责设置/主题/自有控件。共享契约在 `src/renderer/workbench-contract.ts`；组件通过 props 接收真实客户端和当前 host/thread/cwd，直接使用 npm React。没有注入 framework 或第二套业务服务。
 
-WorkbenchClient 提供 `rpc(method,params,hostId)`、`host(endpoint,params)`、事件 `subscribe` 和审批 `reply(ref,response)`。它使用 `/native-host` WebSocket，关联请求id、超时及响应错误，建立后发送ready。审批ref由服务端产生，包含hostId、daemon连接代次和原请求id；只向收到请求的原连接发送，禁止回复时自动重连。resolved/取消/连接断开使ref失效；同ID新请求不能接受旧代次。服务端发送回执表示已转发，不能声称daemon已完成业务处理；发送不确定时保留未知结果，不能自动再次批准。
+WorkbenchClient 提供 `rpc(method,params,hostId)`、`host(endpoint,params)`、事件 `subscribe` 和审批 `reply(ref,response)`。它使用 `/native-host` WebSocket，关联请求id、超时及响应错误，建立后发送ready。reply为必需方法，反向请求有必填ServerRequestEvent.requestRef；浏览器验证后才交UI。审批ref由服务端产生，包含hostId、daemon连接代次和原请求id；只向收到请求的原连接发送，禁止回复时自动重连。resolved/取消/连接断开使ref失效；同ID新请求不能接受旧代次。服务端发送回执表示已转发，不能声称daemon已完成业务处理；发送不确定时保留未知结果，不能自动再次批准。
 
-App 以 `/`、`/local/:threadId`、`/settings/:section` 和已存在的独立页面路由为入口，并兼容当前host查询参数、旧会话别名和分享后的直接链接。页面历史使用History API；模块不另存一份当前会话。设置接收当前pathname/search及onNavigate，内部切换、重定向、host更换、关闭和back/forward均经过同一个未保存守卫。非默认路由逐项按F20/F23实证恢复，未核实分支保持打开。
+App 以 `/`、`/local/:threadId`、`/settings/:section` 和已存在的独立页面路由为入口，并兼容当前host查询参数、旧会话别名和分享后的直接链接。页面历史使用History API；模块不另存一份当前会话。设置接收必填的pathname/search/hash/history state及onNavigate，导航携带replace/back语义，不保留initialSection或第二份section权威状态；内部切换、重定向、host更换、关闭和back/forward均经过同一个未保存守卫。非默认路由逐项按F20/F23实证恢复，未核实分支保持打开。
 
-会话reducer只维护当前host/thread的界面投影。先安装事件消费者，活动页面以thread/resume(excludeTurns:true)订阅；读取thread元数据，再完整分页thread/turns/list(itemsView:full)，summary turn继续分页thread/items/list。重复游标、失败均显示错误，不静默截断。离开时按同一host/thread串行unsubscribe，重连重建订阅；归档页只读、不resume。thread/start/turn/start由单个提交控制链执行。
+会话reducer只维护当前host/thread的界面投影。先安装事件消费者，活动页面以thread/resume(excludeTurns:true)订阅；读取thread元数据，再完整分页thread/turns/list(itemsView:full)，非full（含summary/notLoaded/缺省或未知值）turn继续分页thread/items/list。重复游标、失败均显示错误，不静默截断。离开时按同一host/thread串行unsubscribe，重连重建订阅；归档页只读、不resume。thread/start/turn/start由单个提交控制链执行。
 
-CLI0.164和隔离桌面CLI0.163.0-alpha.10.2的脚本provider实测都表明：活动assistant前缀不在thread/read、turns/items或resume结果中；turn/completed还可能是itemsView:summary。arrival eventCursor不能代表快照包含范围。观察到item/started的项从起点应用delta；读取期间保留本地已观察投影，完成item按ID替换。未观察起点的活动项仅展示明确标注的已收到后缀，不能伪称完整；新打开/重连显示活动内容尚未完整的提示，完成后重新读取完整历史。summary合并已有items，只有完整历史可移除省略项。该限制的实际UI与共享daemon版本仍须验收。
+CLI0.164和隔离桌面CLI0.163.0-alpha.10.2的脚本provider实测都表明：活动assistant前缀不在thread/read、turns/items或resume结果中；turn/completed还可能是itemsView:summary。arrival eventCursor不能代表快照包含范围。观察到item/started的项从起点应用delta；读取期间保留本地已观察投影，完成item按ID替换。未观察起点的活动项仅展示明确标注的已收到后缀，不能伪称完整；新打开/重连显示活动内容尚未完整的提示，完成后重新读取完整历史。summary/notLoaded/缺省或未知itemsView均按不完整合并已有items；只有明确full且终态的历史可移除省略项。读取晚于完成通知返回时保留已观察完成项和终态，再以完整历史核对。该限制的实际UI与共享daemon版本仍须验收。
 
-草稿属于浏览器状态，身份为host、稳定clientThreadId/draftId、placement和旧draftKey；cwd是上下文，不能把同cwd的两个新草稿合并。兼容native-atoms中composer-prompt-drafts-v2/v1、composer-retained-documents-v1、client-thread-bindings-v1及draft-thread-identities-v1，保留document marks/attrs、ordered input、text_elements、hints、图片fileId/detail和浏览器引用上下文。无法转换的旧内容保留原值并显示恢复选项，不以空串覆盖。成功回执只清除所提交版本，失败及更晚编辑保留。
+草稿属于浏览器状态，身份为host、必填稳定clientThreadId/draftId、placement和旧draftKey；cwd是上下文，不能把同cwd的两个新草稿合并。兼容native-atoms中composer-prompt-drafts-v2/v1、composer-retained-documents-v1、client-thread-bindings-v1及draft-thread-identities-v1，保留document marks/attrs、ordered input、text_elements、hints、图片fileId/detail和浏览器引用上下文。无法转换的旧内容保留原值并显示恢复选项，不以空串覆盖。成功回执只清除所提交版本，失败及更晚编辑保留。
 
-输入回调显式区分send/queue/steer及目标turnId，保留granular审批、permissions profile、reviewer等协议值。编辑回调带原turnId/itemId/format/hints，App按原行为在目标位置回滚/分叉并预填，不能把编辑当末尾追加。队列权威来源为thread/queue/*，queue/start前由App恢复订阅。host/thread/message限定发送锁；未知start结果按queue和clientUserMessageId关联历史核对，无法证明时保持未知，不自动重试或假定条目仍在。临时UI草稿不形成第二份持久业务队列。
+输入回调的action必填，判别联合区分send/queue/steer，steer必带目标turnId；保留granular审批、permissions profile、reviewer等协议值。编辑回调返回Promise并必带原turnId/itemId/format/hints。固定原页面min实现要求默认仅最后一条user消息可编辑、拒绝活动tail；以thread/revert(beforeTurnId)移除源turn及以后内容，再turn/start(turnTrigger:edit_user_message)重启；旧非分页协议才回退rollback。App保留完整原始输入，改变文本时仅替换对应text并清除已失效text_elements，不把编辑当末尾追加或无依据分叉。队列权威来源为thread/queue/*，queue/start前由App恢复订阅。活动发送锁键为(hostId,threadId)，sent回执键为(hostId,threadId,messageId)，保留会话级互斥；未知start结果按queue和clientUserMessageId关联历史核对，无法证明时保持未知，不自动重试或假定条目仍在。临时UI草稿不形成第二份持久业务队列。
 
 消息组件接收 CLI ThreadSummary/turn/items，负责逐类型展示、正文/附件/复制/编辑/代码和工具活动。未知 item 以可展开的明确类型与数据展示，不悄悄丢弃。Markdown parser、高亮、数学、Mermaid 等采用按真实功能需要引入的包管理依赖；应用特有链接、文件路径、复制、外部资源和展示策略留在自有 TSX。
 
 设置通过get/set-setting、get/set-global-state、get/set-persisted-atom和CLI config/read/batchWrite访问原来源。UI偏好是全局host设置，CLI配置是执行host作用域；界面不接触token/env。浏览器仅得到需要的非敏感session字段及user层version/filePath，写入带expectedVersion，冲突保留编辑。host设置串行提交、persist失败回滚后不广播；回执后读取验证，较晚编辑不被覆盖。原设置保存须连接真实消费者：composerEnterBehavior、followUpQueueMode、主题字体、终端位置等，不能只证明值写入。平台原先不支持的操作保留准确错误/空态，不能用“不支持”代替已有Web功能。
 
-host工具read_thread在真实server接线中使用turnLimit/cursor分页历史，按includeOutputs投影，按maxOutputLength截断输出并返回nextCursor；不能把外层参数检查或mock handler测试当作真实实现。取消沿MCP适配器到host请求，断线不重放写入。
+host工具read_thread在真实server接线中使用turnLimit/cursor分页历史，按includeOutputs投影，默认最新10轮、每轮最新60项、不含输出，按maxOutputCharsPerItem（默认4000）截断输出并返回可继续读取较早turn/items的游标；不能把外层参数检查或mock handler测试当作真实实现。取消沿MCP适配器到host请求，断线不重放写入。
 
 ## 兼容、并发和断线
 
@@ -50,7 +50,7 @@ host工具read_thread在真实server接线中使用turnLimit/cursor分页历史�
 | 切换 thread 时旧 read 晚返回 | App 以 host/thread 和读取代次匹配，旧结果不会覆盖新页 |
 | 流式增量与完整读取交错 | 已观察started项保留流投影；完成历史按ID替换；未观察前缀明确提示，summary合并；不根据到达游标重复追加delta |
 | socket 断线或写请求超时 | client 拒绝在途请求并标记结果未知；不重放写入。保留草稿，重连读取 thread/queue 核对后让用户决定再发送 |
-| 多页面同时消费队列 | host/thread/message锁和CLI queue id；成功release(sent)，未知结果先核对queue及历史，不能假定条目仍在或重发 |
+| 多页面同时消费队列 | host/thread活动互斥、host/thread/message已发回执和CLI queue id；成功release(sent)，未知结果先核对queue及历史，不能假定条目仍在或重发 |
 | 审批/工具取消与连接变化 | 绑定原host/daemon连接代次/id，resolved和断开使ref失效；转发回执与不确定发送分别报告 |
 | 文件/终端/Chrome 不可用 | 对应组件呈现真实失败并保留可恢复输入；终端输入和 mutation 均不自动重发 |
 
