@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import type { ThreadResponse, ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-protocol.ts';
+import type { ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { ComposerDraft, MessageEditOrigin, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
 import { StandaloneComposer, bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from '../composer/StandaloneComposer.tsx';
 import type { ComposerDraftController, ComposerDraftSnapshot, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
@@ -12,8 +12,8 @@ import type { SettingsInstructionEditorProps } from '../settings/Personalization
 import type { SettingsProjectRoots, SettingsSessionCwd } from '../settings/scope.ts';
 import { CodeEditor } from '../files/CodeEditor.tsx';
 import { BrowserWorkbenchClient, isServerRequestEvent } from './client.ts';
-import { applyThreadEvent, isItemDelta, isThreadBusy } from './thread-state.ts';
-import { eventItemKey, loadThread, reconcileThreadSnapshot } from './load-thread.ts';
+import { isThreadBusy } from './thread-state.ts';
+import { ConversationSessions, useConversationSession } from './conversation-sessions.ts';
 import { ApprovalDialog } from './ApprovalDialog.tsx';
 import type { ServerRequest } from './ApprovalDialog.tsx';
 import { submitDraft } from './submission.ts';
@@ -76,10 +76,6 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [current, setCurrent] = useState(route);
   const [status, setStatus] = useState('connecting');
   const [error, setError] = useState('');
-  const [thread, setThread] = useState<ThreadSummary | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [historyComplete, setHistoryComplete] = useState(false);
-  const [streamGap, setStreamGap] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [workspace, setWorkspace] = useState('');
   const [projectState, setProjectState] = useState<ProjectState | null>(null);
@@ -102,7 +98,6 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [submitting, setSubmitting] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [navigationCommit, setNavigationCommit] = useState(0);
-  const [initialOptions, setInitialOptions] = useState<SubmitOptions | null>(null);
   const [editRecovery, setEditRecovery] = useState<MessageEditRecovery | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelMounted, setPanelMounted] = useState(false);
@@ -127,6 +122,12 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const editStore = useMemo(() => new MessageEditRecoveryStore(client), [client]);
   const sendStore = useMemo(() => new SendRecoveryStore(client), [client]);
   const [sendState, setSendState] = useState<SendRecoverySnapshot | null>(null);
+  const sessions = useMemo(() => new ConversationSessions(client, async identity =>
+    (await sendStore.read()).creations[sendThreadKey(identity.hostId, identity.threadId)]), [client, sendStore]);
+  const conversation = useConversationSession(sessions, current.threadId ? { hostId: current.hostId, threadId: current.threadId } : null,
+    current.readOnly, sendState !== null, refresh);
+  const { thread, loading, historyComplete, streamGap, options: initialOptions } = conversation;
+  useEffect(() => () => sessions.dispose(), [sessions]);
   const composerController = useRef<ComposerDraftController | null>(null);
   const [composerSnapshot, setComposerSnapshot] = useState<ComposerDraftSnapshot | null>(null);
   const [browserSyncError, setBrowserSyncError] = useState('');
@@ -156,9 +157,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [homeGeneration, setHomeGeneration] = useState(0);
   const newDraftId = useMemo(() => homeDraftIdentity(current.hostId), [current.hostId, homeGeneration]);
   const inFlight = useRef(false);
-  const subscription = useRef(Promise.resolve());
   const selectionReady = useRef<{ key: string; resolve(): void; reject(error: Error): void } | null>(null);
-  const createdThreads = useRef(new Map<string, { thread: ThreadSummary; settings: ThreadSettingsResponse }>());
   const settingsGuard = useRef<{ requestLeave(): Promise<boolean> } | null>(null);
   const navigation = useRef<ReturnType<typeof createRouteNavigation> | null>(null);
   const navigationGeneration = useRef(0);
@@ -262,6 +261,12 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         void reloadProjects().catch(cause => setError(String(cause)));
       }
       if (event.type === 'protocol-error') setError(String(event.error));
+      if (event.type === 'mcp-notification' && event.method === 'thread/name/updated') {
+        const params = record(event.params);
+        if (typeof params.threadName === 'string') setTabs(previous => previous.map(tab =>
+          tab.hostId === event.hostId && tab.id === params.threadId ? { ...tab, title: params.threadName as string } : tab));
+        void refreshList();
+      }
       if (event.type === 'mcp-notification' && ['thread/archived', 'thread/unarchived'].includes(String(event.method))) {
         navigationGeneration.current++;
         const id = record(event.params).threadId;
@@ -337,97 +342,20 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     if (selectionReady.current && selectionReady.current.key !== selectionKey) {
       selectionReady.current.reject(new Error('会话已切换，草稿已保留，未发送。')); selectionReady.current = null;
     }
-    if (!current.threadId) { setThread(null); setInitialOptions(null); setLoading(false); setStreamGap(false); setHistoryComplete(false); return; }
-    if (!sendState) { setLoading(true); return; }
-    let active = true, reading = false, needsRead = false, hydrated = false, subscribed = false, historyGeneration = 0;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const observedItems = new Set<string>();
-    const buffered: WorkbenchEvent[] = [];
-    setLoading(true); setThread(null); setInitialOptions(null); setStreamGap(false); setHistoryComplete(false);
-    const scheduleRead = () => { needsRead = true; if (!reading && !timer) timer = setTimeout(() => { timer = undefined; void read(); }, 150); };
-    const read = async () => {
-      if (!active || reading) return;
-      const generation = historyGeneration;
-      reading = true; needsRead = false;
-      try {
-        const snapshot = await loadThread(client, current.hostId, current.threadId!);
-        if (!active || generation !== historyGeneration) return;
-        const events = buffered.splice(0), owned = new Set(observedItems);
-        setThread(previous => generation === historyGeneration ? reconcileThreadSnapshot(snapshot, previous, events, owned) : previous);
-        hydrated = true;
-        createdThreads.current.delete(selectionKey); setHistoryComplete(true);
-        setStreamGap(snapshot.thread.turns.some(turn => turn.status === 'inProgress'
-          && ![...owned].some(key => key.startsWith(JSON.stringify([turn.id]).slice(0, -1) + ','))));
-        setCwd(snapshot.thread.cwd ?? workspace); setLoading(false);
-        if (selectionReady.current?.key === selectionKey) { selectionReady.current.resolve(); selectionReady.current = null; }
-        setTabs(previous => previous.some(item => item.id === snapshot.thread.id && item.hostId === current.hostId)
-          ? previous.map(item => item.id === snapshot.thread.id && item.hostId === current.hostId ? { ...item, title: title(snapshot.thread), readOnly: current.readOnly } : item)
-          : [...previous, { id: snapshot.thread.id, hostId: current.hostId, title: title(snapshot.thread), readOnly: current.readOnly }]);
-      } catch (cause) { if (active && generation === historyGeneration) {
-        setLoading(false); setError((cause as Error).message);
-        if (selectionReady.current?.key === selectionKey) { selectionReady.current.reject(cause as Error); selectionReady.current = null; }
-      } }
-      finally { reading = false; if (active && needsRead) scheduleRead(); }
-    };
-    const unsubscribe = client.subscribe(event => {
-      if (event.hostId !== current.hostId || event.type !== 'mcp-notification') return;
-      if ((event.params as { threadId?: string } | undefined)?.threadId !== current.threadId) return;
-      if (event.method === 'thread/settings/updated') {
-        const settings = record(event.params).threadSettings as ThreadSettingsResponse & { effort?: string | null; sandboxPolicy?: ThreadSettingsResponse['sandbox'] };
-        setInitialOptions(sessionOptions({ ...settings, reasoningEffort: settings.effort, sandbox: settings.sandboxPolicy }));
+    if (conversation.error) {
+      setError(conversation.error);
+      if (selectionReady.current?.key === selectionKey) {
+        selectionReady.current.reject(new Error(conversation.error)); selectionReady.current = null;
       }
-      const key = eventItemKey(event);
-      if (event.method === 'item/started' && key) { observedItems.add(key); setStreamGap(false); }
-      if (event.method === 'thread/reverted') { historyGeneration++; buffered.length = 0; observedItems.clear(); setThread(null); setHistoryComplete(false); hydrated = false; scheduleRead(); return; }
-      if (event.method === 'turn/started' || event.method === 'turn/completed') setHistoryComplete(false);
-      if (isItemDelta(event) && !observedItems.has(key ?? '')) setStreamGap(true);
-      if (reading || !hydrated) buffered.push(event);
-      else setThread(previous => previous ? applyThreadEvent(previous, event) : previous);
-      if (event.method === 'turn/completed') scheduleRead();
-      if (['thread/name/updated', 'thread/archived', 'thread/unarchived'].includes(String(event.method))) {
-        void refreshList().catch(cause => setError(String(cause)));
-      }
-    });
-    const ready = subscription.current.catch(() => {}).then(async () => {
-      if (!active || current.readOnly) return;
-      const created = createdThreads.current.get(selectionKey);
-      if (created) {
-        hydrated = true; subscribed = true;
-        setThread(created.thread); setInitialOptions(sessionOptions(created.settings));
-        setCwd(created.thread.cwd); setLoading(false);
-        setTabs(previous => previous.some(tab => tab.hostId === current.hostId && tab.id === created.thread.id)
-          ? previous : [...previous, { id: created.thread.id, hostId: current.hostId, title: title(created.thread), readOnly: false }]);
-        if (selectionReady.current?.key === selectionKey) { selectionReady.current.resolve(); selectionReady.current = null; }
-        return;
-      }
-      try {
-        const resumed = await client.rpc<ThreadResponse>('thread/resume', { threadId: current.threadId!, excludeTurns: true }, current.hostId);
-        if (active) setInitialOptions(sessionOptions(resumed));
-        subscribed = true;
-      } catch (cause) {
-        // A persisted actual creation receipt identifies this one incomplete
-        // first-turn phase. Other history errors remain errors, never empty data.
-        const known = (await sendStore.read()).creations[selectionKey];
-        if (!known || !(cause instanceof Error) || !cause.message.includes('list_turns is not supported yet')) throw cause;
-        const metadata = await client.rpc<ThreadResponse>('thread/read', { threadId: current.threadId!, includeTurns: false }, current.hostId);
-        if (!active) return;
-        hydrated = true; setThread(metadata.thread); setCwd(metadata.thread.cwd);
-        setInitialOptions(known.settings); setLoading(false); setHistoryComplete(false);
-        setError('新会话尚未形成首轮历史。草稿已保留，未自动发送。');
-      }
-    });
-    subscription.current = ready.catch(() => {});
-    void ready.then(() => { if (!hydrated) return read(); }).catch(cause => { if (active) {
-      setLoading(false); setError((cause as Error).message);
-      if (selectionReady.current?.key === selectionKey) { selectionReady.current.reject(cause as Error); selectionReady.current = null; }
-    } });
-    return () => {
-      active = false; clearTimeout(timer); unsubscribe();
-      subscription.current = subscription.current.catch(() => {}).then(async () => {
-        if (subscribed && client.connected) await client.rpc('thread/unsubscribe', { threadId: current.threadId! }, current.hostId);
-      }).catch(() => {});
-    };
-  }, [client, current.hostId, current.threadId, current.readOnly, refresh, sendState !== null, sendStore]);
+      return;
+    }
+    if (!thread || loading || thread.id !== current.threadId) return;
+    setCwd(thread.cwd ?? workspace);
+    setTabs(previous => previous.some(item => item.id === thread.id && item.hostId === current.hostId)
+      ? previous.map(item => item.id === thread.id && item.hostId === current.hostId ? { ...item, title: title(thread), readOnly: current.readOnly } : item)
+      : [...previous, { id: thread.id, hostId: current.hostId, title: title(thread), readOnly: current.readOnly }]);
+    if (selectionReady.current?.key === selectionKey) { selectionReady.current.resolve(); selectionReady.current = null; }
+  }, [current.hostId, current.threadId, current.readOnly, thread?.id, thread?.cwd, thread?.name, loading, conversation.error, workspace]);
 
   const finishSend = async (intent: SendIntent) => {
     await acknowledgeSubmittedBrowserReferences(intent, composerController.current, (await sendStore.read()).bindings);
@@ -505,7 +433,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         } } : {}),
         activeTurnId: thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null, readOnly: current.readOnly, thread },
       draft, options, action, async (created, settings) => {
-        createdThreads.current.set(JSON.stringify([hostId, created.id]), { thread: created, settings });
+        sessions.created({ hostId, threadId: created.id }, created, settings);
         await assignCreatedProject(created.id);
         requireCurrent(null);
         await new Promise<void>((resolve, reject) => {
@@ -521,8 +449,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         expectedNavigation = navigationGeneration.current;
         await reloadSends();
       }, origin, (target, expected, params) => editStore.submit(target, expected, params));
-      if (result.turn) setThread(previous => previous?.id === result.threadId && routeRef.current.hostId === hostId
-        ? applyThreadEvent(previous, { type: 'mcp-notification', method: 'turn/started', params: { threadId: result.threadId, turn: result.turn } }) : previous);
+      if (result.turn) sessions.started({ hostId, threadId: result.threadId }, result.turn);
       void refreshList().catch(cause => setError(String(cause)));
       if (intent) await finishSend((await sendStore.read()).requests[intent.id]!);
     } catch (cause) {
@@ -719,7 +646,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           onSubmit={(draft, options, action, description) => submit(draft, options, action, undefined, description)} onInterrupt={interrupt} prefill={prefill} onStartQueued={async queuedSubmissionId => {
           if (!current.threadId || current.readOnly || inFlight.current || isThreadBusy(threadRef.current)) throw new Error('当前会话暂时无法启动队列。');
           inFlight.current = true; setSubmitting(true);
-          try { await subscription.current; await client.rpc('thread/queue/start', { threadId: current.threadId, queuedSubmissionId }, current.hostId); }
+          try { await sessions.ready({ hostId: current.hostId, threadId: current.threadId }); await client.rpc('thread/queue/start', { threadId: current.threadId, queuedSubmissionId }, current.hostId); }
           finally { inFlight.current = false; setSubmitting(false); }
         }} />}</div>
       </>}

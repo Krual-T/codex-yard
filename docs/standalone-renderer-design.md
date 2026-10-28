@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v10，2026-10-28，完整功能和快照退役仍在实施。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v11，2026-10-29，完整功能和快照退役仍在实施。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -23,11 +23,13 @@
 
 Manager 负责入口、shell/路由、WorkbenchClient、会话 reducer、共享契约、服务集成和构建。A 负责 composer/草稿/提交控件/队列，B 负责消息/Markdown/工具展示，D 负责设置/主题/自有控件。共享契约在 `src/renderer/workbench-contract.ts`；组件通过 props 接收真实客户端和当前 host/thread/cwd，直接使用 npm React。没有注入 framework 或第二套业务服务。
 
-WorkbenchClient 提供 `rpc(method,params,hostId)`、`host(endpoint,params)`、事件 `subscribe` 和审批 `reply(ref,response)`。它使用 `/native-host` WebSocket，关联请求id、超时及响应错误，建立后发送ready。reply为必需方法，反向请求有必填ServerRequestEvent.requestRef；浏览器验证后才交UI。审批ref由服务端产生，包含hostId、daemon连接代次和原请求id；只向收到请求的原连接发送，禁止回复时自动重连。resolved/取消/连接断开使ref失效；同ID新请求不能接受旧代次。服务端发送回执表示已转发，不能声称daemon已完成业务处理；发送不确定时保留未知结果，不能自动再次批准。
+WorkbenchClient 提供 `rpc(method,params,hostId)`、`host(endpoint,params)`、事件 `subscribe` 和审批 `reply(ref,response)`。它使用 `/native-host` WebSocket，关联请求id、超时及响应错误，建立后发送ready。reply为必需方法，反向请求有必填ServerRequestEvent.requestRef；浏览器验证后才交UI。审批ref由服务端产生，包含hostId、每个请求唯一的generation和原请求id，并在宿主绑定原连接。generation不是host代次，同host的不同请求可有不同值。只向收到请求的原连接发送，禁止回复时自动重连；resolved/取消/断开使原ref失效，同ID新请求不能接受旧ref。服务端发送回执表示已转发，不能声称daemon已完成业务处理；发送不确定时保留未知结果，不能自动再次批准。
 
 App 以 `/`、`/local/:threadId`、`/settings/:section` 和已存在的独立页面路由为入口，并兼容当前host查询参数、旧会话别名和分享后的直接链接。页面历史使用History API；模块不另存一份当前会话。设置接收必填的pathname/search/hash/history state及onNavigate，导航携带replace/back语义，不保留initialSection或第二份section权威状态；内部切换、重定向、host更换、关闭和back/forward均经过同一个未保存守卫。非默认路由逐项按F20/F23实证恢复，未核实分支保持打开。
 
-会话reducer只维护当前host/thread的界面投影。既有会话先安装事件消费者，以thread/resume(excludeTurns:true)订阅；读取thread元数据，再完整分页thread/turns/list(itemsView:full)，非full（含summary/notLoaded/缺省或未知值）turn继续分页thread/items/list。重复游标、失败均显示错误，不静默截断。离开时按同一host/thread串行unsubscribe，重连重建订阅；归档页只读、不resume。完整历史标记在读取全部页后成立；活动事件或回退使它失效，消息编辑不能根据局部历史猜测最后一条消息。
+App 的 ConversationSessions 按实际host/thread复用现有loadThread和thread-state reducer，只维护CLI数据的界面投影。主页面、Mini和侧聊可以同时引用同一会话，首次可写消费者以thread/resume(excludeTurns:true)订阅，最后一个消费者离开才unsubscribe；归档消费者不resume，最后一个可写消费者离开时解除订阅，保留只读投影。每个key串行处理原订阅、读取与释放，旧代次结果不发布到新连接。读取先取元数据，再完整分页thread/turns/list(itemsView:full)，非full（含summary/notLoaded/缺省或未知值）turn继续分页thread/items/list；重复游标或失败显示真实错误，不静默截断。
+
+首次进入无投影的会话可显示加载页。后台历史核对、完成事件、revert和断线恢复保留已挂载编辑器；历史完整标记先失效，只有完整读取后恢复。不能以加载占位卸载正在等待回执的编辑器，丢掉错误或内存稿。桥断线使全部实际host投影失效，单host daemon断线只影响该host；重连重新订阅，不能把旧连接回执作为新订阅证明。该服务没有第二套传输、发送账本或会话业务状态；CLI仍为历史权威。当前主页面已经接入，Mini和侧聊的真实消费者接线仍须验收。
 
 新会话的首发顺序由实际CLI0.164/0.163的空历史阶段决定：先持久冻结提交版本和clientUserMessageId，再thread/start，保存返回的真实thread、会话设置、原稿身份及所选项目ID；绑定原稿到这个thread后安装路由和事件监听，随后才turn/start。首turn之前不能resume或读取完整历史。刷新遇到该阶段时，只对仍持有本客户端真实创建回执的目标，在精确的list_turns阶段错误后读取includeTurns:false元数据；显示保留草稿和恢复入口，不自动发送。其他历史错误仍显示为错误。创建回执在首turn确认后退役，显式取消尚未发送的提交仍保留空阶段回执，避免刷新后无法继续使用这个已创建的会话。
 
@@ -88,26 +90,22 @@ Chrome和可视化通过App实际工具栏及消息链接进入同一侧面板�
 
 旧首页 new-conversation 槽位只在原 IDB 事务内认领一次，保留精确原记录和旧别名；输入发生在认领等待期间也不能被旧稿覆盖。实际会话目标组件直接读写 CLI thread/goal，富文本往返仍以原 objective 为准，暂停创建不启动 turn。队列手动启动也先持久保存原 CID，未知回执不自动重放。目标预算、未知结果和其他剩余体验仍按功能账推进。
 
-文件保存将操作 ID、原内容及较新编辑保存在浏览器恢复记录，宿主先持久化同路径围栏再调用 daemon，刷新只核对原操作。C 对 f78c727c 的复审仍要求修正目录别名与写入目标一致性、超时后原 RPC 晚到终态、关闭期间冻结/终端失败时恢复归属，以及存储冲突的恢复出口；这些在当前设计 v9 仍明确开放。已有字节比较不承诺对外部 writer 的原子 CAS，普通读到旧内容或 missing 都不能解除未知写入。
+文件保存将操作 ID、原内容及较新编辑保存在浏览器恢复记录，宿主先持久化同路径围栏再调用 daemon，刷新只核对原操作。已接入的原规范路径、原RPC晚到终态与恢复事务继续保留；F的后续v4来源将原查询归属与当前canonical target分别核对，未知或路径冲突不能直接再次保存，终端持续关闭失败须显式保留恢复并脱离本页。该候选正独立审阅，尚非本组集成证据。已有字节比较不承诺对外部 writer 的原子 CAS，普通读到旧内容或missing不能解除未知写入。
 
-独立审阅80a09a61 v6的共享attempt/check、queue/steer身份与project fallback已在v8实施，C正按冻结2746d18d复审。上述编辑、旧稿、导航和文件来源在S05实际接入，不将局部定向通过视为全体关闭。审批4a0b8774第二轮仍需修改，完整ref父级状态与原Web特殊模式继续由B和共享App按归属实施。
+共享attempt/check、queue/steer身份、project fallback及旧请求成功只清理原revision已经接入；局部证据不关闭全功能。完整ref父级审批状态、特殊模式和较新编辑的显式继续出口按实际消费者接线，避免将旧快照或读取结果作为新的写授权。
 
-## 实施与验收
+## 当前交付顺序与验收
 
-S06将提交权限限于本次prepare/attempt真正返回的token；旧恢复快照本身不授予改写另一页sending阶段的权限。冻结的additionalContext显式包含空对象；解析后的collaborationMode（含model、nullable effort及无覆盖的null）在首次turn/start前保存，恢复时不读取当前模型或widget状态来替换原请求。队列末页允许nextCursor省略，仍继续精确clientId历史核对；不再写入无生产消费者的queuedSubmissionId，旧额外字段继续容纳。实际App两页竞争验证旧prepared token不能降另一页状态或重复turn/start。
+共享会话组先证明主页面使用同一服务且不回归输入、消息编辑、首发空历史、队列和断线。Mini与侧聊随后使用各自不可变host/thread/draft及实际controller，复用同一SendRecoveryStore、submitDraft和原revision清理。它们不能调用主route闭包冒充自己的提交，也不能因隐藏面板而卸载有未保存数据的输入。Mini审批消费完整pending refs和父级结果状态；复杂表单、URL和高风险请求打开完整对话，简单审批才就地处理。内置pet资源保留原notice和MIT排除，自定义资源沿现有宿主来源。
 
-偏好仍只存在原native-state提交区间或原浏览器IDB事务中。set-setting、set-global-state、set-persisted-atom支持expected:{exists,value}；比较原键存在性及JSON值后才写入，冲突不落盘、不广播。读取返回exists；get-settings以values原始键为准。旧非编辑消费者可省略expected，设置编辑器必须保留原观察基线，不能把dirty旧对象配外部新版本静默覆盖；该消费者接线与冲突交互仍由设置后续组完成。设置重置删除宿主键，失败恢复原存在性。
+临时侧聊由自有native/side-chat服务持久冻结原操作和fork/inject/unsubscribe回执，浏览器只消费安全投影。实际CLI0.164与0.163拒绝ephemeral+deferGoalContinuation组合；采用已验证的ephemeral fork、明确host-config或已知thread override来源的隔离developer指令，以及developer/user双条边界注入。null effort不作为model_reasoning_effort写入。父运行时私有override无法从普通config/read推断，不能声称已恢复不可见值；也不能因此永久隐藏原Web入口。边界失败保留child，未知不重发；关闭先协调原child输入和共享发送，再按原连接回执清理。新连接read可读或notSubscribed不证明原订阅恢复/停止，不能据此丢弃草稿。首轮模型是否实际消费指令、活动goal及SSH边界仍须分别记录证据，真实额外推理须Leader裁定。
 
-应用根从localeOverride及实际host/browser语言派生同一个I18nProvider和html.lang。Web宿主没有IDE/设备界面语言，返回空来源而非服务器硬编码语言。主题消费者保留CSS字体列表与fallback语义，保存的ui/content/code Face通过本机local字体加载；缺失字体继续使用保存的fallback，不下载外部字体。本组整页证明字体列表、实际明暗正文与设置/侧栏/文档语言保存刷新；全部语言文本及本地face选择仍按F22后续核实。
+C/core-v11冻结6d15的开放问题按真实归属修订：批注显示/编辑必须对应草稿完整引用版本，旧批注须有实际认领入口；Preferences保留首次原始exists/value并接条件写；SSH配置读取也需在原提交区间复制；Hook等未知写须由宿主原请求身份围栏且仅可信终态解除；settings history.state保留来源身份与返回路由、刷新按权威源恢复；旧A确认后较新B需显式无损rebase，并在宿主revert前再次核对原CID及内容签名；共享编辑器消费根字号。读取配置或历史本身不能消除一个仍可能迟到的写请求。终端位置、代码主题、diff标记及其余已存偏好的实际消费继续逐项完成。
 
-文件来源已加入规范目标路径、原连接/原RPC晚到终态、关闭期间同步冻结及相关记录原子丢弃。服务端直接把原onLateTerminal传回原连接，不以新连接同ID或一次读回解除未知写入。外部进程和规范路径祖先替换不具有原子CAS保证。Leader正独立复审F/7d64837e，未把该未提交server接线算作已验。
+浏览器引用的显式删除与prepare共同使用原IDB事务：删除先提交则阻止旧引用进入新意图；prepare先提交则原意图不可变，后来删除不等于撤销已授权请求。显式原发送重试显示并使用冻结内容。确认消费只清理同owner/revision对应版本，较新引用及其他草稿保留。两种顺序都须行为验证。
 
-本组typecheck通过；必要全量418项中417通过、一项设置测试仍把Language select当textbox，保留失败并沿原D修订。新增20项提交/偏好定向与实际浏览器事务1项通过；自有App合成peer整页19组/errors=[]，含两页atom、编辑/队列/steer恢复、目标、文件/终端、Chrome真实官方MCP和可视化、语言完整刷新及三档宽度。首轮验收脚本在未保存文件流程中途刷新导致无界等待，已保留中止材料并修驱动顺序，不改产品或原断言。实际CLI、完整F00–F23、Mini/侧聊入口及整个vendor删除后的干净来源验收仍未关闭。
+各功能关闭须有自有入口、状态/服务/资产归属、真实消费者使用证据、针对失败和并发的检查，以及必要npm run typecheck/npm test。CLI证据、合成peer实际App和组件测试分别记录。旧vendor oracle仅作过渡研究，最终测试不得读取快照；不能以静态页面、默认隐藏、空实现或改变既有断言来关闭功能。共享会话组首次整页发现后台loading卸载编辑器的实际回归；修订保留挂载后，原断言的实际App19组/errors=[]、21项定向及typecheck通过。完整442项441通过、唯一旧Language textbox驱动失败由设置组修订，零跳过；这不是全量迁移或最终无vendor验收。
 
-第一批走通自有页面启动、会话列表/read、消息、输入/中断、通知和审批链，再按 inventory 完成侧栏、队列、菜单、设置、面板、Chrome、输出及附属窗口。设计冻结后由原 C 会话按 technical_design_reviewer 的原文职责做只读协议委派审阅；实际代码与文档仍须逐批审阅。
+最终逐条退休app-resources、旧configuration/bootstrap、私有工厂和oracle、静态路由、验证脚本和文档中的真实快照消费者，再删除整个vendor/codex-app。第三方库通过包管理使用；部署保留自有stdio适配器及必要notice。无快照干净检出执行npm ci、构建、typecheck、完整测试、实际启动及功能验收；检查bundle metafile、部署文件和运行网络，证明没有快照代码、动态加载或回退。Codex CLI0.164.0、既有daemon0.163.0、隔离桌面CLI0.163.0-alpha.10.2和历史UI参考26.1013.40934分开记录。
 
-每个功能关闭都需要自有入口/状态/服务/资产归属、真实消费者使用证据、针对失败/并发的行为检查和必要 typecheck/npm test。原版差异测试仅为过渡研究，最终运行测试不得读取 vendor。现有 189 项通过只证明旧结构，不作为新架构完成证据。
-
-删除快照前，逐条清理 app-resources、静态路由、MCP adapter、mini/pet 资产、字体/图标、CSS、动态导入、构建脚本、验证脚本、测试和分发说明。第三方资产通过包管理或项目自有资源替代，保留适用 notices。最终从不含整个 vendor/codex-app 的干净来源安装/构建/启动/完整测试，检查 bundle metafile、部署目录和浏览器网络，真实 CLI 只读验证与隔离 synthetic peer 验证分别记录；需要真实推理时交 Leader 裁定授权。
-
-本组必要检查随冻结提交记录。自有入口的隔离synthetic peer整页十二组检查包含三档内容边界、主题正文配色/字体、两页事务更新、CodeMirror保存/取消导航/diff/终端、编辑旧A核对后保留新B，以及首发创建成功但发送被拒后的刷新恢复、同一thread重试原A和普通发送回执丢失后按精确clientId核对。实际组件加载、delta/summary/刷新及无自动重发均有单独断言。模拟persisted页面事件只验证client挂起/恢复，不等同实际BFcache。完整功能、实际CLI整页和最终无vendor验收仍开放；设计v3独立审阅为需修改，本次v6冻结后复审。CLI 0.164.0、现有 daemon 0.163.0 与历史 UI 参考 26.1013.40934 分开记录；正式8765、个人数据/模型/配置、共享daemon和App保持现有状态。
+设计与实际来源按稳定提交独立审阅。C是原持久审阅会话按technical_design_reviewer职责执行的只读协议委派，不声称原生命名角色加载。最终F00–F23及无vendor干净来源尚未关闭；本地提交和PR材料由Leader收口，不推送、发布远端PR、合入main或正式部署。正式8765、App、共享daemon、个人会话/配置/默认模型保持既有状态。
