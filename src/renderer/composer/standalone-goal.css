@@ -1,0 +1,10 @@
+.standalone-goal { min-width: 0; color: var(--yard-fg, #222); background: var(--yard-surface, var(--yard-bg, #fff)); font: var(--yard-font-size, 13px) var(--yard-ui-font, system-ui, sans-serif); }
+.standalone-goal__header, .standalone-goal__actions, .standalone-goal__progress { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.standalone-goal__header { justify-content: space-between; }
+.standalone-goal__status, .standalone-goal__progress { color: var(--yard-muted, #666); margin-top: 8px; }
+.standalone-goal__objective { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 8px; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
+.standalone-goal__editor textarea { box-sizing: border-box; width: 100%; min-height: 100px; margin-top: 8px; padding: 8px; resize: vertical; color: inherit; background: transparent; border: 1px solid var(--yard-border, #c9c9c9); border-radius: 4px; font: inherit; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
+.standalone-goal button { color: inherit; font: inherit; border: 0; border-radius: 4px; padding: 5px 8px; background: transparent; cursor: pointer; }
+.standalone-goal button:hover:not(:disabled) { background: color-mix(in srgb, var(--yard-fg, #222) 10%, transparent); }
+.standalone-goal button:disabled { opacity: .5; cursor: default; }
+.standalone-goal :is(button, textarea):focus-visible { outline: 2px solid var(--yard-accent, #3159b5); outline-offset: 2px; }
