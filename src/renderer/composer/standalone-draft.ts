@@ -3,9 +3,11 @@ import type { ComposerContext, ComposerDraft, ComposerImage } from '../workbench
 export interface DraftImage extends ComposerImage {
   previewSrc: string;
 }
+export interface DraftSkill { name: string; path: string }
 export interface Draft extends ComposerDraft {
   images: DraftImage[];
   references: { id: string; text: string }[];
+  skills: DraftSkill[];
 }
 interface StoredDraft { revision: string; draft: Draft; prefills: string[] }
 
@@ -16,13 +18,14 @@ export function createId(): string {
   const hex = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
-export const emptyDraft = (): Draft => ({ text: '', images: [], files: [], references: [] });
+export const emptyDraft = (): Draft => ({ text: '', images: [], files: [], references: [], skills: [] });
 export function normalizeDraft(draft: ComposerDraft): Draft {
   return {
     text: draft.text,
     images: draft.images.map(image => ({ ...image, previewSrc: image.previewSrc ?? image.src })),
     files: draft.files.map(file => ({ ...file })),
     references: (draft.references ?? []).map(reference => ({ ...reference })),
+    skills: 'skills' in draft && isSkillList(draft.skills) ? draft.skills.map(skill => ({ ...skill })) : [],
   };
 }
 export function draftKey(context: ComposerContext): string {
@@ -31,21 +34,25 @@ export function draftKey(context: ComposerContext): string {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value);
 }
-function validDraft(value: unknown): value is Draft {
+function isSkillList(value: unknown): value is DraftSkill[] {
+  return Array.isArray(value) && value.every(skill => isRecord(skill) && typeof skill.name === 'string' && typeof skill.path === 'string');
+}
+function validDraft(value: unknown): value is Omit<Draft, 'skills'> & { skills?: DraftSkill[] } {
   if (!isRecord(value) || typeof value.text !== 'string' || !Array.isArray(value.images)
     || !Array.isArray(value.files) || !Array.isArray(value.references)) return false;
   return value.images.every(image => isRecord(image) && typeof image.id === 'string' && typeof image.src === 'string'
       && typeof image.previewSrc === 'string' && (image.path === undefined || typeof image.path === 'string')
       && (image.name === undefined || typeof image.name === 'string'))
     && value.files.every(file => isRecord(file) && typeof file.path === 'string' && typeof file.name === 'string')
-    && value.references.every(reference => isRecord(reference) && typeof reference.id === 'string' && typeof reference.text === 'string');
+    && value.references.every(reference => isRecord(reference) && typeof reference.id === 'string' && typeof reference.text === 'string')
+    && (value.skills === undefined || isSkillList(value.skills));
 }
 export function readDraft(key: string): StoredDraft | null {
   try {
     const value: unknown = JSON.parse(localStorage.getItem(key) ?? 'null');
     if (!isRecord(value) || typeof value.revision !== 'string' || !validDraft(value.draft)
       || !Array.isArray(value.prefills) || !value.prefills.every(id => typeof id === 'string')) return null;
-    return { revision: value.revision, draft: value.draft, prefills: value.prefills };
+    return { revision: value.revision, draft: { ...value.draft, skills: value.draft.skills ?? [] }, prefills: value.prefills };
   } catch { return null; }
 }
 export function writeDraft(key: string, value: StoredDraft): boolean {
@@ -67,12 +74,14 @@ export function mergePrefill(current: Draft, incoming: ComposerDraft): Draft {
     images: merge(current.images, next.images, value => value.id),
     files: merge(current.files, next.files, value => value.path),
     references: merge(current.references, next.references, value => value.id),
+    skills: merge(current.skills, next.skills, value => value.path),
   };
 }
 
 export type QueueInput = { type: 'text'; text: string; text_elements: [] }
   | { type: 'image'; url: string }
-  | { type: 'localImage'; path: string };
+  | { type: 'localImage'; path: string }
+  | { type: 'skill'; name: string; path: string };
 export function draftToInput(draft: ComposerDraft, hostId: string): QueueInput[] {
   const parts = [draft.text, ...draft.files.map(file => file.path), ...(draft.references ?? []).map(reference => reference.text)].filter(Boolean);
   const input: QueueInput[] = parts.length ? [{ type: 'text', text: parts.join('\n'), text_elements: [] }] : [];
@@ -87,8 +96,11 @@ export function draftToInput(draft: ComposerDraft, hostId: string): QueueInput[]
       input.push({ type: 'localImage', path });
     }
   }
+  if ('skills' in draft && isSkillList(draft.skills)) {
+    for (const skill of draft.skills) input.push({ type: 'skill', name: skill.name, path: skill.path });
+  }
   return input;
 }
 export function hasContent(draft: Draft): boolean {
-  return !!(draft.text.trim() || draft.images.length || draft.files.length || draft.references.length);
+  return !!(draft.text.trim() || draft.images.length || draft.files.length || draft.references.length || draft.skills.length);
 }

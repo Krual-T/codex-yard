@@ -4,11 +4,14 @@ import type { ComposerDraft, StandaloneComposerProps, SubmitOptions, WorkbenchCl
 import { createId, draftKey, draftToInput, emptyDraft, hasContent, mergePrefill, readDraft, writeDraft } from './standalone-draft.ts';
 import type { Draft } from './standalone-draft.ts';
 import { importAttachments } from './standalone-files.ts';
+import { useCompletions } from './standalone-completions.tsx';
+import type { Completion } from './standalone-completions.tsx';
 import { StandaloneOptions } from './standalone-options.tsx';
 import { StandaloneQueue } from './standalone-queue.tsx';
 import './standalone-composer.css';
 
 export { draftToInput } from './standalone-draft.ts';
+export type { DraftSkill } from './standalone-draft.ts';
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; hostId: string; path: string; name: string }) {
@@ -33,6 +36,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill
   const [interrupting, setInterrupting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [queueVersion, setQueueVersion] = useState(0);
+  const [cursor, setCursor] = useState(0);
   const [enterBehavior, setEnterBehavior] = useState(() => {
     try { return localStorage.getItem('codex-yard.composer.enter.v1') === 'mod' ? 'mod' : 'enter'; } catch { return 'enter'; }
   });
@@ -42,6 +46,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill
   const uploadInFlight = useRef(false);
   const editor = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
+  const modelPicker = useRef<HTMLSelectElement>(null);
+  const completions = useCompletions(client, context.hostId, context.cwd, draft.text, cursor, busy);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   const changeDraft = useCallback((update: (draft: Draft) => Draft, prefillId?: string) => {
@@ -103,8 +109,43 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill
       }
     } finally { submitInFlight.current = false; if (mounted.current) setSending(false); }
   };
+  const chooseCompletion = (item: Completion) => {
+    const query = completions.query;
+    if (!query) return;
+    let replacement = '';
+    if (item.kind === 'directory') replacement = '@' + item.path + '/';
+    else if (item.kind === 'file') {
+      const path = context.cwd.replace(/\/$/, '') + '/' + item.path;
+      const longest = Math.max(0, ...Array.from(path.matchAll(/`+/g), match => match[0].length));
+      const fence = '`'.repeat(longest + 1);
+      replacement = fence + path + fence + ' ';
+    }
+    const caret = query.start + replacement.length;
+    changeDraft(value => ({ ...value, text: value.text.slice(0, query.start) + replacement + value.text.slice(query.end),
+      skills: item.kind === 'skill' && !value.skills.some(skill => skill.path === item.path)
+        ? [...value.skills, { name: item.name, path: item.path }] : value.skills }));
+    setCursor(caret);
+    if (item.kind === 'directory') completions.show(); else completions.dismiss();
+    requestAnimationFrame(() => {
+      if (item.kind === 'command') modelPicker.current?.focus();
+      else { editor.current?.focus(); editor.current?.setSelectionRange(caret, caret); }
+    });
+  };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== 'Enter' || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || event.shiftKey || event.altKey) return;
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+    if (completions.query) {
+      if (event.key === 'Escape') { event.preventDefault(); completions.dismiss(); return; }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        if (completions.items.length) { event.preventDefault(); completions.move(event.key === 'ArrowDown' ? 1 : -1); }
+        return;
+      }
+      if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        const selected = completions.items[completions.selected];
+        if (selected) { event.preventDefault(); chooseCompletion(selected); return; }
+        if (event.key === 'Enter' && completions.loading) { event.preventDefault(); return; }
+      }
+    }
+    if (event.key !== 'Enter' || event.shiftKey || event.altKey) return;
     const modifier = event.ctrlKey || event.metaKey;
     if (enterBehavior === 'enter' ? !modifier : modifier) { event.preventDefault(); void submit(); }
   };
@@ -118,7 +159,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill
   return <div className="standalone-composer">
     {context.threadId ? <StandaloneQueue client={client} hostId={context.hostId} threadId={context.threadId} busy={busy} refreshVersion={queueVersion} /> : null}
     <div className="standalone-composer__editor">
-      {draft.images.length || draft.files.length || draft.references.length ? <div className="standalone-composer__attachments">
+      {draft.images.length || draft.files.length || draft.references.length || draft.skills.length ? <div className="standalone-composer__attachments">
         {draft.images.map(image => <div className="standalone-composer__image" key={image.id}>
           <img src={image.previewSrc} alt={image.name ?? '图片附件'} />
           <button type="button" title="移除图片" aria-label={'移除图片 ' + (image.name ?? '')} onClick={() => changeDraft(value => ({ ...value, images: value.images.filter(item => item.id !== image.id) }))}>×</button>
@@ -130,15 +171,30 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill
         {draft.references.map(reference => <div className="standalone-composer__reference" key={reference.id}>
           <span>{reference.text}</span><button type="button" title="移除引用" aria-label="移除引用" onClick={() => changeDraft(value => ({ ...value, references: value.references.filter(item => item.id !== reference.id) }))}>×</button>
         </div>)}
+        {draft.skills.map(skill => <div className="standalone-composer__reference" key={skill.path}>
+          <span>技能：{skill.name}</span><button type="button" title="移除技能" aria-label={'移除技能 ' + skill.name} onClick={() => changeDraft(value => ({ ...value, skills: value.skills.filter(item => item.path !== skill.path) }))}>×</button>
+        </div>)}
       </div> : null}
       <textarea ref={editor} aria-label="和 Codex 一起工作" placeholder="输入消息" value={draft.text}
-        onChange={event => changeDraft(value => ({ ...value, text: event.target.value }))} onKeyDown={keyDown} onPaste={paste} />
+        aria-autocomplete="list" aria-controls={completions.query ? completions.listId : undefined}
+        aria-activedescendant={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
+        onChange={event => { const text = event.target.value; setCursor(event.target.selectionStart); changeDraft(value => ({ ...value, text })); }}
+        onSelect={event => setCursor(event.currentTarget.selectionStart)} onKeyDown={keyDown} onPaste={paste} />
+      {completions.query ? <div className="standalone-composer__completions" id={completions.listId} role="listbox" aria-label={completions.query.kind === 'file' ? '工作区文件' : '技能'}>
+        {completions.items.map((item, index) => <button type="button" role="option" id={completions.listId + '-' + index} key={item.kind + ':' + (item.kind === 'command' ? item.name : item.path)}
+          aria-selected={index === completions.selected} onMouseDown={event => event.preventDefault()} onClick={() => chooseCompletion(item)}>
+          <span>{item.kind === 'command' ? '/' : ''}{item.name}{item.kind === 'directory' ? '/' : ''}</span><small>{item.kind === 'skill' || item.kind === 'command' ? item.description : item.path}</small>
+        </button>)}
+        {completions.loading ? <div role="status">加载中…</div> : null}
+        {completions.error ? <div role="alert">无法读取建议：{completions.error}</div> : null}
+        {!completions.loading && !completions.error && !completions.items.length ? <div>无匹配结果</div> : null}
+      </div> : null}
       <div className="standalone-composer__footer">
         <input ref={picker} type="file" multiple hidden onChange={event => {
           const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ''; void addFiles(files);
         }} />
         <button type="button" aria-label="添加附件" title="添加附件" disabled={uploading} onClick={() => picker.current?.click()}>＋</button>
-        <StandaloneOptions client={client} hostId={context.hostId} cwd={context.cwd} threadId={context.threadId} busy={busy} value={options} onChange={setOptions} />
+        <StandaloneOptions client={client} hostId={context.hostId} cwd={context.cwd} threadId={context.threadId} busy={busy} modelRef={modelPicker} value={options} onChange={setOptions} />
         <label className="standalone-composer__enter">发送方式 <select aria-label="发送方式" value={enterBehavior} onChange={event => {
           setEnterBehavior(event.target.value); try { localStorage.setItem('codex-yard.composer.enter.v1', event.target.value); } catch { setStorageError(true); }
         }}><option value="enter">Enter</option><option value="mod">Ctrl/⌘ + Enter</option></select></label>

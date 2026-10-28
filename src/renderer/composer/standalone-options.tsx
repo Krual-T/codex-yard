@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { Ref } from 'react';
 import type { SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 
 interface Model { value: string; label: string; default: boolean; defaultEffort: string | null; efforts: string[] }
@@ -8,6 +9,7 @@ interface OptionsProps {
   cwd: string;
   threadId: string | null;
   busy: boolean;
+  modelRef: Ref<HTMLSelectElement>;
   value: SubmitOptions;
   onChange(value: SubmitOptions): void;
 }
@@ -37,7 +39,7 @@ async function models(client: WorkbenchClient, hostId: string): Promise<Model[]>
   return result;
 }
 
-export function StandaloneOptions({ client, hostId, cwd, threadId, busy, value, onChange }: OptionsProps) {
+export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRef, value, onChange }: OptionsProps) {
   const [available, setAvailable] = useState<Model[]>([]);
   const [defaults, setDefaults] = useState<SubmitOptions>({});
   const [loading, setLoading] = useState(true);
@@ -64,7 +66,7 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, value, 
   const selected = available.find(item => item.value === (value.model ?? configured.model));
   const change = (part: Partial<SubmitOptions>) => onChange({ ...value, ...part });
   return <fieldset className="standalone-composer__options" disabled={busy} title={busy ? '排队消息使用会话设置' : undefined} aria-label="会话选项">
-    <label>模型 <select aria-label="模型" value={value.model ?? ''} disabled={loading || !available.length} onChange={event => {
+    <label>模型 <select ref={modelRef} aria-label="模型" value={value.model ?? ''} disabled={loading || !available.length} onChange={event => {
       const model = available.find(item => item.value === (event.target.value || configured.model));
       const effort = model?.efforts.includes(value.effort ?? '') ? value.effort : model?.defaultEffort ?? model?.efforts[0] ?? null;
       change({ model: event.target.value || undefined, effort: event.target.value ? effort : undefined });

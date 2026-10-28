@@ -3,6 +3,10 @@
 .standalone-composer textarea { box-sizing: border-box; width: 100%; resize: vertical; color: inherit; background: transparent; font: inherit; }
 .standalone-composer__editor > textarea { display: block; min-height: 84px; max-height: 320px; border: 0; padding: 12px; outline: none; }
 .standalone-composer__editor:focus-within { border-color: #558077; }
+.standalone-composer__completions { max-height: 220px; overflow-y: auto; border-top: 1px solid #8884; padding: 4px; }
+.standalone-composer .standalone-composer__completions button { width: 100%; display: flex; gap: 8px; align-items: center; text-align: left; }
+.standalone-composer__completions [aria-selected="true"] { background: #56877b22; }
+.standalone-composer__completions small { color: #777; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .standalone-composer button, .standalone-composer select { color: inherit; font: inherit; }
 .standalone-composer button { border: 0; border-radius: 4px; padding: 5px 8px; background: transparent; cursor: pointer; }
 .standalone-composer button:hover:not(:disabled) { background: #8882; }
