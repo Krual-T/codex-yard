@@ -95,6 +95,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   const original = 'first line\nsecond line\nthird line\n';
   await writeFile(join(project, 'notes.txt'), original);
   await writeFile(join(project, 'mixed.txt'), 'one\r\ntwo\nthree\rfour\r\n');
+  await writeFile(join(project, 'long.txt'), Array.from({ length: 200 }, (_, index) => `line ${index + 1}`).join('\n'));
   await writeFile(join(project, 'folder', 'nested.txt'), 'nested contents');
   await writeFile(join(project, 'slow.txt'), 'slow contents');
   await writeFile(join(project, 'fast.txt'), 'fast contents');
@@ -146,7 +147,11 @@ test('workspace file panels use the real host with a disposable synthetic daemon
       const client = {
         async host(endpoint, params = {}) {
           state.calls.push({ kind: 'host', endpoint, params: structuredClone(params) });
-          if (endpoint === 'workspace-file-save') { state.writes.push(structuredClone(params)); return window.fixtureSave(params, state.writeOutcome); }
+          if (endpoint === 'workspace-file-save') {
+            state.writes.push(structuredClone(params));
+            if (state.writeOutcome === 'known-failure') throw Object.assign(new Error('synthetic unsupported endpoint'), {uncertain:false});
+            return window.fixtureSave(params, state.writeOutcome);
+          }
           const id = 'host-' + ++sequence;
           const result = await send({type:'fetch', requestId:id, url:'vscode://codex/' + endpoint, body:JSON.stringify(params)}, id);
           if (endpoint === 'workspace-files' && params.operation === 'read' && params.path === state.delayedPath) {
@@ -163,6 +168,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
         async reply() { throw new Error('unexpected approval'); },
       };
       let props = {client, scopeId:'thread-a', hostId:'local', cwd:${JSON.stringify(project)},
+        appearance:{theme:'light',codeFontSize:13,codeLineHeight:20,codeFontFamily:'monospace'},
         request:{id:'initial',scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(project)},kind:'file',path:'notes.txt',line:2,column:3},
         onRequestConsumed: id => state.consumed.push(id), onReference: draft => state.references.push(draft),
         onDirtyChange: dirty => state.dirty.push(dirty), onClose: () => state.closed++};
@@ -234,6 +240,53 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   assert.equal(await editor.getAttribute('readonly'), null);
   assert.equal(await page.getByRole('button', { name: 'Save file' }).isDisabled(), true);
   assert.equal(await editor.evaluate(element => (element as HTMLTextAreaElement).selectionStart), 'first line\nse'.length);
+  await page.keyboard.press('Control+f');
+  const find = page.getByRole('searchbox', { name: 'Find in file' });
+  await find.fill('LiNe');
+  await page.getByRole('status').filter({ hasText: '1 / 3' }).waitFor();
+  assert.equal(await editor.evaluate(element => (element as HTMLTextAreaElement).selectionStart), original.indexOf('line'));
+  await page.getByRole('button', { name: 'Next match' }).click();
+  await page.getByRole('status').filter({ hasText: '2 / 3' }).waitFor();
+  assert.equal(await editor.evaluate(element => (element as HTMLTextAreaElement).selectionStart), original.indexOf('line', original.indexOf('line') + 1));
+  await find.press('Shift+Enter');
+  await page.getByRole('status').filter({ hasText: '1 / 3' }).waitFor();
+  await find.fill('missing');
+  await page.getByRole('status').filter({ hasText: '0 / 0' }).waitFor();
+  await find.press('Escape');
+  assert.equal(await find.count(), 0);
+
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty('--yard-bg', '#121c1a');
+    document.documentElement.style.setProperty('--yard-fg', '#edf3f1');
+    (window as any).fixture.render({appearance:{theme:'dark',codeFontSize:18,codeLineHeight:27,codeFontFamily:'monospace'},
+      request:{id:'long',kind:'file',path:'long.txt',line:120,column:2}});
+  });
+  const long = page.getByRole('textbox', { name: `File: ${join(project, 'long.txt')}` });
+  await long.waitFor();
+  const longAppearance = await long.evaluate(element => {
+    const style = getComputedStyle(element);
+    return { size: style.fontSize, lineHeight: style.lineHeight, color: style.color,
+      background: getComputedStyle(element.closest('.yard-workspace-panels')!).backgroundColor,
+      selection: (element as HTMLTextAreaElement).selectionStart, scroll: (element as HTMLTextAreaElement).scrollTop };
+  });
+  assert.equal(longAppearance.size, '18px');
+  assert.equal(longAppearance.lineHeight, '27px');
+  assert.equal(longAppearance.color, 'rgb(237, 243, 241)');
+  assert.equal(longAppearance.background, 'rgb(18, 28, 26)');
+  assert.equal(longAppearance.selection, Array.from({ length: 119 }, (_, index) => `line ${index + 1}\n`).join('').length + 1);
+  assert.ok(longAppearance.scroll > 2700);
+  const gutter = await page.locator('.yard-file-gutter span').evaluate(element => ({ top: parseFloat((element as HTMLElement).style.top), first: Number(element.textContent?.split('\n')[0]) }));
+  const scrolled = await long.evaluate(element => (element as HTMLTextAreaElement).scrollTop);
+  assert.equal(gutter.top, 8 + (gutter.first - 1) * 27 - scrolled);
+  const themeScreenshots = process.env.AGENTS_PANEL_SCREENSHOTS;
+  if (themeScreenshots) { await mkdir(themeScreenshots, { recursive: true }); await page.screenshot({ path: join(themeScreenshots, 'theme-find.png') }); }
+  await page.evaluate(() => {
+    document.documentElement.style.removeProperty('--yard-bg'); document.documentElement.style.removeProperty('--yard-fg');
+    (window as any).fixture.render({appearance:{theme:'light',codeFontSize:13,codeLineHeight:20,codeFontFamily:'monospace'},request:null});
+  });
+  await page.getByRole('tab', { name: 'notes.txt' }).click();
+  assert.equal(await find.count(), 0);
   await page.getByRole('button', { name: 'Add file to conversation' }).click();
   assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.references[0]), {
     text: '', images: [], files: [{ path: join(project, 'notes.txt'), name: 'notes.txt' }],
@@ -307,10 +360,21 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   await page.waitForFunction(() => (document.querySelector('[aria-label="Save file"]') as HTMLButtonElement)?.disabled);
   assert.equal(await readFile(join(project, 'mixed.txt'), 'utf8'), 'ABone\r\nTWO\nthree\rfour\r\n');
 
+  await page.evaluate(() => { (window as any).fixture.state.writeOutcome = 'known-failure'; });
+  await mixedEditor.evaluate(element => { const input = element as HTMLTextAreaElement; input.focus(); input.setSelectionRange(2, 2); });
+  await page.keyboard.insertText('!');
+  await page.getByRole('button', { name: 'Save file' }).click();
+  await page.getByRole('alert').filter({ hasText: 'synthetic unsupported endpoint' }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Check save result' }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: 'Save file' }).isEnabled(), true);
+  assert.equal(await mixedEditor.inputValue(), 'AB!one\nTWO\nthree\nfour\n');
+
   await page.evaluate(() => (window as any).fixture.render({scopeId:'draft-b',request:{id:'stale',scopeId:'thread-a',hostId:'old-host',cwd:'/old-cwd',kind:'file',path:'fast.txt'}}));
   await page.waitForFunction(() => (window as any).fixture.state.consumed.includes('stale'));
   assert.equal(await page.getByRole('tab', { name: /fast.txt/ }).count(), 0);
-  await page.evaluate(() => (window as any).fixture.render({scopeId:'thread-a',request:null}));
+  await page.evaluate(() => (window as any).fixture.render({scopeId:'thread-a'}));
+  assert.equal(await page.getByRole('tab', { name: /fast.txt/ }).count(), 0);
+  assert.equal(await page.evaluate(() => (window as any).fixture.state.consumed.filter((id: string) => id === 'stale').length), 1);
 
   await page.evaluate(path => { (window as any).fixture.state.delayedPath = path; }, join(project, 'slow.txt'));
   await page.getByRole('button', { name: 'slow.txt', exact: true }).click();
@@ -416,8 +480,13 @@ test('workspace file panels use the real host with a disposable synthetic daemon
     await page.screenshot({ path: join(screenshotDir, 'desktop.png') });
   }
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Find in file' }).click();
+  await page.getByRole('searchbox', { name: 'Find in file' }).fill('edit');
+  await page.getByRole('status').filter({ hasText: '1 / 1' }).waitFor();
   if (screenshotDir) await page.screenshot({ path: join(screenshotDir, 'mobile.png') });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  assert.equal(await page.locator('.yard-file-find').evaluate(element => element.scrollWidth <= element.clientWidth), true);
+  await page.getByRole('button', { name: 'Close find' }).click();
   await page.getByRole('button', { name: 'Hide files' }).click();
   await page.getByRole('button', { name: 'Show files' }).click();
   assert.ok(await page.evaluate(() => (window as any).fixture.state.dirty.includes(true)));

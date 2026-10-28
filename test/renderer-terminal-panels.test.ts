@@ -59,7 +59,7 @@ test('terminal panels use the page-owned host session and never replay input aft
       import { createRoot } from 'react-dom/client';
       import { WorkspacePanels } from './src/renderer/panels/WorkspacePanels.tsx';
       import { TerminalPanel } from './src/renderer/terminal/TerminalPanel.tsx';
-      const state = { calls: [], events: [], failClose: false }, listeners = new Set(), pending = new Map();
+      const state = { calls: [], events: [], failClose: false, delayClose: false, releaseClose: null }, listeners = new Set(), pending = new Map();
       let socket, opened, seq = 0;
       function connect() {
         const next = new WebSocket(location.origin.replace('http', 'ws') + '/native-host');
@@ -84,6 +84,7 @@ test('terminal panels use the page-owned host session and never replay input aft
         async host(endpoint, params = {}) {
           state.calls.push({endpoint, params: structuredClone(params)}); await opened;
           if (endpoint === 'terminal' && params.operation === 'close' && state.failClose) throw new Error('fixture close failure');
+          if (endpoint === 'terminal' && params.operation === 'close' && state.delayClose) await new Promise(resolve => { state.releaseClose = resolve; });
           const id = 'host-' + ++seq;
           return new Promise((resolve, reject) => { pending.set(id, {resolve,reject});
             socket.send(JSON.stringify({type:'fetch',requestId:id,url:'vscode://codex/' + endpoint,body:JSON.stringify(params)})); });
@@ -92,7 +93,7 @@ test('terminal panels use the page-owned host session and never replay input aft
         async rpc() { throw new Error('unexpected RPC'); }, async reply() { throw new Error('unexpected reply'); },
       };
       const root = createRoot(document.getElementById('root'));
-      let props = {client,scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},
+      let props = {client,scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},appearance:{theme:'dark',codeFontSize:13,codeLineHeight:20},
         request:{id:'one',scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},kind:'terminal'},onRequestConsumed:()=>{},onClose:()=>{}};
       window.fixture = { state, disconnect() { socket.close(); }, reconnect: connect,
         render(changes) { const next = {...props,...changes};
@@ -130,6 +131,9 @@ test('terminal panels use the page-owned host session and never replay input aft
   await page.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent?.includes('abc'));
   const inputs = () => fake.calls('process/writeStdin').map(call => Buffer.from(String(call.params.deltaBase64), 'base64').toString()).join('');
   assert.equal(inputs(), 'abc');
+  await page.evaluate(() => (window as any).fixture.render({appearance:{theme:'light',codeFontSize:18,codeLineHeight:27},request:null}));
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('.yard-terminal-screen')!).backgroundColor === 'rgb(255, 255, 255)');
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 1);
   await page.evaluate(() => (window as any).fixture.render({scopeId:'draft-b',request:null}));
   assert.equal(await page.getByRole('tab', { name: 'Terminal' }).count(), 0);
   await page.evaluate(() => (window as any).fixture.render({scopeId:'thread-a',request:null}));
@@ -152,6 +156,19 @@ test('terminal panels use the page-owned host session and never replay input aft
   await page.locator('.xterm-rows').getByText('READY').waitFor();
   assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 2);
   assert.equal(inputs(), 'abc');
+  await page.evaluate(() => { (window as any).fixture.state.delayClose = true; });
+  await page.getByRole('button', { name: 'Close terminal' }).click();
+  await page.waitForFunction(() => Boolean((window as any).fixture.state.releaseClose));
+  await page.evaluate(() => (window as any).fixture.render({scopeId:'draft-b',request:{id:'new-in-b',kind:'terminal'}}));
+  assert.equal(await page.getByRole('tab', { name: 'Terminal' }).count(), 0);
+  await page.evaluate(() => { (window as any).fixture.state.delayClose = false; (window as any).fixture.state.releaseClose(); });
+  await page.getByRole('tab', { name: 'Terminal' }).waitFor();
+  await page.locator('.xterm-rows').getByText('READY').waitFor();
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 3);
+  await page.evaluate(() => (window as any).fixture.render({scopeId:'thread-a',request:null}));
+  assert.equal(await page.getByRole('tab', { name: 'Terminal' }).count(), 0);
+  await page.evaluate(() => (window as any).fixture.render({scopeId:'draft-b',request:null}));
+  await page.getByRole('tab', { name: 'Terminal' }).waitFor();
   await page.evaluate(() => { (window as any).fixture.state.failClose = true; });
   await page.getByRole('button', { name: 'Close terminal' }).click();
   await page.getByRole('status').filter({ hasText: 'Terminal close failed' }).waitFor();

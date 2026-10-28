@@ -15,12 +15,17 @@ export interface TerminalPanelProps {
   /** An existing page-owned session may be attached, but is never recreated automatically. */
   sessionId?: string;
   visible?: boolean;
+  theme?: 'light' | 'dark';
+  fontSize?: number;
+  lineHeight?: number;
+  fontFamily?: string;
   ref?: Ref<TerminalPanelHandle>;
 }
 export interface TerminalPanelHandle { close(): Promise<boolean> }
 
-export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visible = true, ref }: TerminalPanelProps) {
+export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visible = true, theme = 'dark', fontSize = 13, lineHeight = 20, fontFamily, ref }: TerminalPanelProps) {
   const element = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<() => void>(() => {});
   const closeRef = useRef<() => Promise<boolean>>(async () => true);
   const [attempt, setAttempt] = useState(0);
@@ -33,6 +38,7 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
     const id = attempt === 0 && sessionId ? sessionId : crypto.randomUUID();
     const terminal = new Terminal({ cursorBlink: true, scrollback: 10000, fontSize: 13, fontFamily: 'ui-monospace, monospace',
       theme: { background: '#202324', foreground: '#e5e8e8', cursor: '#e5e8e8' } });
+    terminalRef.current = terminal;
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(element.current);
@@ -131,11 +137,30 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
       input.dispose();
       fitRef.current = () => {};
       closeRef.current = async () => true;
+      terminalRef.current = null;
       if (ownsSession) void call('close', [id]).catch(() => {});
       terminal.dispose();
     };
   }, [attempt, client, cwd, hostId, sessionId, threadId]);
 
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    const screen = element.current;
+    if (!terminal || !screen) return;
+    const apply = () => {
+      const computed = getComputedStyle(screen);
+      const family = fontFamily || computed.getPropertyValue('--yard-code-font').trim() || 'ui-monospace, monospace';
+      terminal.options.fontFamily = family;
+      terminal.options.fontSize = fontSize;
+      terminal.options.lineHeight = Math.max(1, lineHeight / fontSize);
+      terminal.options.theme = { background: computed.backgroundColor, foreground: computed.color, cursor: computed.color };
+      fitRef.current();
+    };
+    apply();
+    const observer = new MutationObserver(apply);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'data-theme'] });
+    return () => observer.disconnect();
+  }, [attempt, theme, fontSize, lineHeight, fontFamily]);
   useEffect(() => { if (visible) fitRef.current(); }, [visible]);
   return <div className="yard-terminal-panel">
     <div className="yard-terminal-header"><span role="status">{status}</span>

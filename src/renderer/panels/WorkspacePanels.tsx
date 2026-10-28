@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { Download, PanelLeftClose, PanelLeftOpen, Plus, RotateCw, Save, X } from 'lucide-react';
 import { BrowserFiles } from '../../native/browser-files.ts';
 import { DirectoryTree } from '../files/DirectoryTree.tsx';
@@ -16,6 +17,14 @@ export type FilePanelRequest = RequestScope & { kind: 'file'; path: string; line
 export type TerminalPanelRequest = RequestScope & { kind: 'terminal' };
 export type DiffPanelRequest = RequestScope & { kind: 'diff'; path?: string; diff?: string };
 export type WorkspacePanelRequest = FilePanelRequest | TerminalPanelRequest | DiffPanelRequest;
+export interface WorkspacePanelAppearance {
+  theme: 'light' | 'dark';
+  codeFontSize: number;
+  /** Resolved line height in CSS pixels. */
+  codeLineHeight: number;
+  /** Defaults to the App's inherited --yard-code-font. */
+  codeFontFamily?: string;
+}
 export interface WorkspacePanelsProps {
   client: WorkbenchClient;
   /** Stable identity of a thread or a new conversation draft. */
@@ -23,6 +32,7 @@ export interface WorkspacePanelsProps {
   hostId: string;
   threadId?: string;
   cwd: string;
+  appearance: WorkspacePanelAppearance;
   request: WorkspacePanelRequest | null;
   onRequestConsumed(id: string): void;
   onClose(): void;
@@ -52,7 +62,7 @@ interface DiffTab { key: string; scopeId: string; hostId: string; cwd: string; p
 
 const isDirty = (tab: FileTab) => tab.content?.kind === 'text' && (tab.draft !== tab.saved || !!tab.uncertain);
 
-export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, request, onRequestConsumed, onClose, onReference, onDirtyChange }: WorkspacePanelsProps) {
+export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appearance, request, onRequestConsumed, onClose, onReference, onDirtyChange }: WorkspacePanelsProps) {
   const [tabs, setTabs] = useState<FileTab[]>([]);
   const [terminals, setTerminals] = useState<TerminalTab[]>([]);
   const terminalHandles = useRef(new Map<string, TerminalPanelHandle>());
@@ -60,6 +70,8 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, reques
   const [diffs, setDiffs] = useState<DiffTab[]>([]);
   const tabsRef = useRef<FileTab[]>([]);
   const [selected, setSelected] = useState<string>();
+  const selectedRef = useRef<string | undefined>(undefined);
+  const [findRequest, setFindRequest] = useState<{ key: string; id: number }>();
   const [showFiles, setShowFiles] = useState(true);
   const tabList = useRef<HTMLDivElement>(null);
   const sequence = useRef(0);
@@ -68,9 +80,12 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, reques
   const mounted = useRef(true);
   const dirty = tabs.some(tab => isDirty(tab) || tab.saving);
   const scopeKey = JSON.stringify([scopeId, hostId, cwd]);
+  const currentScope = useRef(scopeKey);
+  currentScope.current = scopeKey;
   const select = useCallback((key: string | undefined) => {
     if (key) selections.current.set(scopeKey, key);
     else selections.current.delete(scopeKey);
+    selectedRef.current = key;
     setSelected(key);
   }, [scopeKey]);
 
@@ -124,12 +139,14 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, reques
 
   useEffect(() => {
     const matches = [...tabsRef.current, ...terminals, ...diffs].filter(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd);
-    setSelected(matches.find(tab => tab.key === selections.current.get(scopeKey))?.key ?? matches[0]?.key);
+    const restored = matches.find(tab => tab.key === selections.current.get(scopeKey))?.key ?? matches[0]?.key;
+    selectedRef.current = restored;
+    setSelected(restored);
     // Restore selection only when the active scope changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey]);
   useEffect(() => {
-    if (!request || consumedRequests.current.has(request.id)) return;
+    if (closing || !request || consumedRequests.current.has(request.id)) return;
     consumedRequests.current.add(request.id);
     onRequestConsumed(request.id);
     if (request.scopeId !== scopeId || request.hostId !== hostId || request.cwd !== cwd) return;
@@ -143,7 +160,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, reques
       setDiffs(previous => previous.some(tab => tab.key === key) ? previous : [...previous, { key, scopeId, hostId, cwd, path: request.path, diff: request.diff }]);
       select(key);
     }
-  }, [openFile, request, scopeId, hostId, cwd, threadId, onRequestConsumed, select]);
+  }, [closing, openFile, request, scopeId, hostId, cwd, threadId, onRequestConsumed, select]);
 
   function closeTab(key: string) {
     const tab = tabsRef.current.find(item => item.key === key);
@@ -161,8 +178,10 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, reques
     setClosing(false);
     if (!closed) return;
     const remaining = terminals.filter(tab => tab.key !== key);
-    setTerminals(remaining);
-    if (selected === key) select([...tabsRef.current, ...remaining, ...diffs].find(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd)?.key);
+    setTerminals(previous => previous.filter(tab => tab.key !== key));
+    if (currentScope.current === scopeKey && selectedRef.current === key) {
+      select([...tabsRef.current, ...remaining, ...diffs].find(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd)?.key);
+    }
   }
 
   function closeDiff(key: string) {
@@ -260,12 +279,21 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, reques
   const activeTerminal = visibleTerminals.find(tab => tab.key === selected);
   const visibleDiffs = diffs.filter(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd);
   const activeDiff = visibleDiffs.find(tab => tab.key === selected);
-  return <section className="yard-workspace-panels" aria-label="Workspace files">
+  const fontSize = Number.isFinite(appearance.codeFontSize) && appearance.codeFontSize > 0 ? appearance.codeFontSize : 12;
+  const lineHeight = Number.isFinite(appearance.codeLineHeight) && appearance.codeLineHeight > 0 ? appearance.codeLineHeight : 18;
+  const style = { '--yard-panel-code-size': `${fontSize}px`, '--yard-panel-code-line-height': `${lineHeight}px`,
+    ...(appearance.codeFontFamily ? { '--yard-panel-code-font': appearance.codeFontFamily } : {}) } as CSSProperties;
+  return <section className="yard-workspace-panels" data-theme={appearance.theme} style={style} aria-label="Workspace files" onKeyDownCapture={event => {
+    if (active?.content?.kind === 'text' && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+      event.preventDefault(); event.stopPropagation();
+      setFindRequest({ key: active.key, id: ++sequence.current });
+    }
+  }}>
     <div className="yard-panel-header">
-      <button type="button" className="yard-panel-icon" title={showFiles ? 'Hide files' : 'Show files'} aria-label={showFiles ? 'Hide files' : 'Show files'} onClick={() => setShowFiles(value => !value)}>
+      <button type="button" className="yard-panel-icon" title={showFiles ? 'Hide files' : 'Show files'} aria-label={showFiles ? 'Hide files' : 'Show files'} disabled={closing} onClick={() => setShowFiles(value => !value)}>
         {showFiles ? <PanelLeftClose /> : <PanelLeftOpen />}
       </button>
-      <div ref={tabList} className="yard-panel-tabs" role="tablist" aria-label="Open workspace tabs">
+      <div ref={tabList} className="yard-panel-tabs" role="tablist" aria-label="Open workspace tabs" inert={closing}>
         {visible.map(tab => <div className={`yard-panel-tab${tab.key === selected ? ' is-active' : ''}`} key={tab.key}>
           <button type="button" role="tab" aria-selected={tab.key === selected} title={tab.path} onClick={() => select(tab.key)}>
             <span>{fileName(tab.path)}</span>{isDirty(tab) ? <span aria-label="Unsaved changes" className="yard-panel-dirty" /> : null}
@@ -286,11 +314,12 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, reques
       </div>
       <button type="button" className="yard-panel-icon" title="Close panel" aria-label="Close panel" disabled={closing || tabs.some(tab => tab.saving)} onClick={() => void closePanel()}><X /></button>
     </div>
-    <div className="yard-panel-body">
+    <div className="yard-panel-body" inert={closing}>
       {showFiles ? <DirectoryTree key={scopeKey} client={client} hostId={hostId} cwd={cwd} onOpen={openFile} /> : null}
       <div className="yard-file-main">
         {terminals.map(tab => <div className="yard-terminal-container" key={tab.key} hidden={tab.key !== activeTerminal?.key}>
           <TerminalPanel client={client} hostId={tab.hostId} cwd={tab.cwd} threadId={tab.threadId} visible={tab.key === activeTerminal?.key}
+            theme={appearance.theme} fontSize={fontSize} lineHeight={lineHeight} fontFamily={appearance.codeFontFamily}
             ref={handle => { if (handle) terminalHandles.current.set(tab.key, handle); else terminalHandles.current.delete(tab.key); }} />
         </div>)}
         {activeDiff ? <DiffViewer diff={activeDiff.diff} path={activeDiff.path ? resolveFilePath(activeDiff.cwd, activeDiff.path) : undefined} onOpenFile={openFile} onReference={onReference} /> : null}
@@ -307,7 +336,9 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, reques
           {active.error ? <div className="yard-file-error" role="alert">{active.error}</div> : null}
           {active.uncertain ? <div className="yard-file-check"><button type="button" disabled={active.saving} onClick={() => void checkSave(active)}>Check save result</button></div> : null}
           {active.loading ? <div className="yard-file-status" role="status">Loading...</div> : active.content ?
-            <FileViewer key={`${active.key}:${active.loadId}`} path={active.path} content={active.content} text={editorText(active.draft)} location={active.location}
+            <FileViewer key={`${active.key}:${active.loadId}`} path={active.path} content={active.content} text={editorText(active.draft)} location={active.location} lineHeight={lineHeight}
+              findRequest={findRequest?.key === active.key ? findRequest.id : undefined}
+              onFindRequestConsumed={id => setFindRequest(previous => previous?.id === id ? undefined : previous)}
               readOnly={false}
               onChange={(text, edit) => updateTabs(previous => previous.map(tab => tab.key === active.key ? { ...tab, draft: editFileText(tab.draft, text, edit) } : tab))}
               onSave={() => void save(active)} /> : <div className="yard-file-status"><button type="button" onClick={() => reload(active)}>Retry</button></div>}
