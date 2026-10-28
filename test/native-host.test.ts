@@ -22,7 +22,8 @@ import { fileMethods } from '../src/native/files.ts';
 import { nativeFixture } from './native-fixture.ts';
 
 async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fetch, snapshot?: { data: string; metadata: unknown },
-  remote: { hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand } = {}) {
+  remote: { hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand;
+    beforeStart?(fake: Awaited<ReturnType<typeof createFakeCodex>>, root: string): Promise<void> } = {}) {
   const root = await mkdtemp('/tmp/aw-native-test-');
   const fake = await createFakeCodex(root);
   const fileRpc = fileDaemonFixture();
@@ -35,8 +36,10 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
     await writeFile(join(directory, 'initialize.json'), snapshot.data);
     await writeFile(join(directory, 'metadata.json'), JSON.stringify(snapshot.metadata));
   }
+  const { beforeStart, ...hostOptions } = remote;
+  await beforeStart?.(fake, root);
   const app = await createNativeWorkbench({ socketPath: fake.socketPath, codexHome: join(root, 'codex'), dataDir: join(root, 'data'), workspace: root,
-    renderer, adapterPath, port: 0, publicOrigin: 'https://workbench.example.ts.net:8765', httpFetch, ...remote });
+    renderer, adapterPath, port: 0, publicOrigin: 'https://workbench.example.ts.net:8765', httpFetch, ...hostOptions });
   const sockets: WebSocket[] = [];
   t.after(async () => { for (const socket of sockets) socket.terminate(); await app.close(); await fake.close(); await rm(root, { recursive: true, force: true }); });
   async function connect() {
@@ -55,7 +58,15 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
       send({ type: 'mcp-request', hostId, request: { id, method, params } });
       return (await until(message => message.type === 'mcp-response' && message.hostId === hostId && message.message.id === id)).message;
     }
-    return { socket, send, until, rpc, messages };
+    let hostSequence = 0;
+    async function host(params: Record<string, unknown>) {
+      const requestId = 'configuration-' + ++hostSequence;
+      send({ type: 'fetch', requestId, url: 'vscode://codex/configuration-write', body: JSON.stringify(params) });
+      const response = await until(message => message.type === 'fetch-response' && message.requestId === requestId);
+      assert.equal(response.responseType, 'success', JSON.stringify(response));
+      return response.body;
+    }
+    return { socket, send, until, rpc, host, messages };
   }
   return { root, fake, app, connect };
 }
@@ -852,34 +863,49 @@ test('native prewarming, notifications and approval answers use the real RPC bri
   assert.deepEqual((await h.fake.waitFor((message: Record<string, unknown>) => message.id === 'approval' && message.result)).result, { decision: 'decline' });
 });
 
-test('official model config batches preserve profile targets, backend errors and the selected host', async t => {
+async function configureModelFixture(fake: Awaited<ReturnType<typeof createFakeCodex>>, root: string) {
+  const codexHome = join(root, 'codex'), file = join(codexHome, 'config.toml');
+  await mkdir(codexHome, { recursive: true }); await writeFile(file, 'model = "fixture-model"\n');
+  fake.handlers.set('initialize', () => ({ userAgent: 'codex/fixture', codexHome }));
+  fake.handlers.set('config/read', () => ({ config: {}, origins: {}, layers: [{ name: { type: 'user', file, profile: null }, version: 'v1' }] }));
+}
+
+test('configuration operations preserve verified base targets, backend errors and the selected host', async t => {
   const remoteRoot = await mkdtemp('/tmp/aw-model-remote-'), remote = await createFakeCodex(remoteRoot);
   t.after(async () => { await remote.close(); await rm(remoteRoot, { recursive: true, force: true }); });
+  await configureModelFixture(remote, remoteRoot);
   const hostId = 'remote-ssh-discovered:model-fixture';
   const h = await fixture(t, undefined, undefined, {
     hostCatalog: { hosts: [{ hostId, displayName: 'Model fixture', sshAlias: 'fixture', sshHost: 'fixture', sshPort: null, identity: null }], projects: [], assignments: {} },
-    sshStream: () => createConnection(remote.socketPath),
+    sshStream: (_host, onPaths) => { onPaths?.({ homeDirectory: remoteRoot, codexHome: join(remoteRoot, 'codex') }); return createConnection(remote.socketPath); },
+    remoteFileCommand: async () => Buffer.from('file\0' + join(remoteRoot, 'codex/config.toml') + '\0'),
+    beforeStart: configureModelFixture,
   });
   const client = await h.connect();
   const params = {
-    edits: [{ keyPath: 'profiles.work.model', value: 'fixture-model', mergeStrategy: 'upsert' },
-      { keyPath: 'profiles.work.model_reasoning_effort', value: 'low', mergeStrategy: 'upsert' }],
-    filePath: null, expectedVersion: null, reloadUserConfig: true,
+    edits: [{ keyPath: 'model', value: 'fixture-model', mergeStrategy: 'upsert' },
+      { keyPath: 'model_reasoning_effort', value: 'low', mergeStrategy: 'upsert' }],
+    filePath: null, expectedVersion: 'v1', reloadUserConfig: true,
   };
   const localResult = { status: 'ok', version: 'local-version', filePath: '/fixture/local/config.toml', overriddenMetadata: null };
   const remoteResult = { status: 'okOverridden', version: 'remote-version', filePath: '/fixture/remote/config.toml',
     overriddenMetadata: { message: 'Managed model override', overridingLayer: { name: { type: 'mdm', domain: 'fixture', key: 'model' }, version: 'managed' } } };
   h.fake.handlers.set('config/batchWrite', received => { assert.deepEqual(received, params); return localResult; });
   remote.handlers.set('config/batchWrite', received => { assert.deepEqual(received, params); return remoteResult; });
-  assert.deepEqual((await client.rpc(1, 'config/batchWrite', params, hostId)).result, remoteResult);
+  const write = (operationId: string, selectedHost: string, value = params) => client.host({
+    hostId: selectedHost, action: 'submit', operationId, method: 'config/batchWrite', params: value,
+  });
+  assert.deepEqual((await write('remote-model', hostId)).result, remoteResult);
   assert.equal(h.fake.calls('config/batchWrite').length, 0);
-  assert.deepEqual((await client.rpc(2, 'config/batchWrite', params)).result, localResult);
+  assert.deepEqual((await write('local-model', 'local')).result, localResult);
   assert.equal(remote.calls('config/batchWrite').length, 1);
-  remote.handlers.set('config/batchWrite', () => { throw Object.assign(new Error('Fixture version conflict'), { code: -32600, data: { kind: 'versionConflict' } }); });
-  const rejected = await client.rpc(3, 'config/batchWrite', { ...params, expectedVersion: 'stale' }, hostId);
+  remote.handlers.set('config/batchWrite', () => { throw Object.assign(new Error('Fixture version conflict'), { code: -32600, data: { config_write_error_code: 'configVersionConflict' } }); });
+  const rejected = await write('remote-rejection', hostId, { ...params, expectedVersion: 'stale' });
+  assert.equal(rejected.outcome, 'error');
   assert.equal(rejected.error.code, -32600);
-  assert.equal(rejected.error.message, 'Fixture version conflict');
-  assert.deepEqual(rejected.error.data, { kind: 'versionConflict' });
+  assert.equal(rejected.error.uncertain, false);
+  assert.equal(rejected.operation.terminal.kind, 'rejected');
+  assert.equal(rejected.operation.terminal.code, -32600);
   assert.equal(h.fake.calls('config/batchWrite').length, 1);
 });
 
@@ -888,11 +914,18 @@ test('lost turn and model config write replies report uncertainty without replay
     ['turn/start', { threadId: 'test', input: [] }],
     ['config/batchWrite', { edits: [{ keyPath: 'model', value: 'fixture-model', mergeStrategy: 'upsert' }], filePath: null, expectedVersion: null, reloadUserConfig: true }],
   ] as const) await t.test(method, async t => {
-    const h = await fixture(t), client = await h.connect();
+    const h = await fixture(t, undefined, undefined, { beforeStart: configureModelFixture }), client = await h.connect();
     h.fake.handlers.set(method, (_params, { socket }) => { socket.terminate(); });
-    const reply = await client.rpc(1, method, params);
-    assert.equal(reply.error.data.uncertain, true);
+    const reply = method === 'config/batchWrite'
+      ? await client.host({ hostId: 'local', action: 'submit', operationId: 'lost-model', method, params })
+      : await client.rpc(1, method, params);
+    assert.equal(method === 'config/batchWrite' ? reply.error.uncertain : reply.error.data.uncertain, true);
     assert.equal(h.fake.calls(method).length, 1);
+    if (method === 'config/batchWrite') {
+      const original = await client.host({ hostId: 'local', action: 'status', operationId: 'lost-model' });
+      assert.equal(original.operation.state, 'unknown');
+      assert.equal(h.fake.calls(method).length, 1);
+    }
   });
 });
 
