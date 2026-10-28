@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { link, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
@@ -98,29 +99,29 @@ test('one service fences actual local and SSH requests across methods, hardlinks
   const options = { state, persist, mutations: createStateMutations(), resolveTarget: h.resolveTarget };
   const writes = createConfigWrites(options), original = batch(), snapshot = structuredClone(original);
   first.peer.handlers.set('config/batchWrite', () => NO_REPLY);
-  const submitted = await writes.submit({ hostId: 'local', method: 'config/batchWrite', params: original, connection: first.connection });
+  const submitted = await writes.submit({ operationId: randomUUID(), hostId: 'local', method: 'config/batchWrite', params: original, connection: first.connection });
   assert.equal(submitted.outcome, 'started'); if (submitted.outcome !== 'started') return;
   await first.peer.waitForCall('config/batchWrite');
   assert.deepEqual(first.peer.calls('config/batchWrite')[0]!.params, snapshot);
   const skillParams = { path: join(h.root, 'skill', 'SKILL.md'), enabled: false };
-  const blocked = await writes.submit({ hostId: h.host.hostId, method: 'skills/config/write', params: skillParams, connection: second.connection });
+  const blocked = await writes.submit({ operationId: randomUUID(), hostId: h.host.hostId, method: 'skills/config/write', params: skillParams, connection: second.connection });
   assert.equal(blocked.outcome, 'blocked'); assert.equal(blocked.operation.operationId, submitted.operation.operationId);
   assert.equal(blocked.operation.binding, h.config); assert.equal(second.peer.calls('skills/config/write').length, 0);
   await unlink(h.config); await symlink(later, h.config);
-  const afterMove = await writes.submit({ hostId: h.host.hostId, method: 'config/batchWrite', params: batch(), connection: first.connection });
+  const afterMove = await writes.submit({ operationId: randomUUID(), hostId: h.host.hostId, method: 'config/batchWrite', params: batch(), connection: first.connection });
   assert.equal(afterMove.outcome, 'blocked'); assert.equal(afterMove.operation.operationId, submitted.operation.operationId);
   await unlink(h.config);
   await rename(h.home, h.home + '-unavailable');
-  const unavailable = await writes.submit({ hostId: h.host.hostId, method: 'config/batchWrite', params: batch(), connection: first.connection });
+  const unavailable = await writes.submit({ operationId: randomUUID(), hostId: h.host.hostId, method: 'config/batchWrite', params: batch(), connection: first.connection });
   assert.equal(unavailable.outcome, 'blocked'); assert.equal(unavailable.operation.operationId, submitted.operation.operationId);
   const disconnected = await h.connect(h.secondHome); disconnected.connection.close();
-  const offline = await writes.submit({ hostId: h.host.hostId, method: 'skills/config/write', params: skillParams, connection: disconnected.connection });
+  const offline = await writes.submit({ operationId: randomUUID(), hostId: h.host.hostId, method: 'skills/config/write', params: skillParams, connection: disconnected.connection });
   assert.equal(offline.outcome, 'blocked'); assert.equal(offline.operation.operationId, submitted.operation.operationId);
   assert.equal((await submitted.completion).outcome, 'unknown');
   const restored = JSON.parse(await readFile(stateFile, 'utf8')) as Record<string, unknown>;
   const recovered = createConfigWrites({ ...options, state: restored, mutations: createStateMutations() });
   assert.equal((await recovered.status(submitted.operation.operationId))?.state, 'unknown');
-  const blockedAfterRestart = await recovered.submit({ hostId: h.host.hostId, method: 'skills/config/write', params: skillParams, connection: second.connection });
+  const blockedAfterRestart = await recovered.submit({ operationId: randomUUID(), hostId: h.host.hostId, method: 'skills/config/write', params: skillParams, connection: second.connection });
   assert.equal(blockedAfterRestart.outcome, 'blocked'); assert.equal(blockedAfterRestart.operation.operationId, submitted.operation.operationId);
   assert.equal(second.peer.calls('skills/config/write').length, 0);
 });
@@ -131,7 +132,8 @@ test('legacy unfinished records remain readable and block a newly resolved globa
     hostKey: 'old-host-key', target: '/different/config.toml', binding: '/different/config.toml', state: 'pending' }] };
   const writes = createConfigWrites({ state, persist: async () => {}, mutations: createStateMutations(), resolveTarget: h.resolveTarget });
   assert.equal((await writes.status('previous-operation'))?.state, 'unknown');
-  const result = await writes.submit({ hostId: 'local', method: 'config/batchWrite', params: batch(), connection });
+  connection.close();
+  const result = await writes.submit({ operationId: randomUUID(), hostId: 'local', method: 'config/batchWrite', params: batch(), connection });
   assert.equal(result.outcome, 'blocked'); assert.equal(result.operation.operationId, 'previous-operation');
 });
 
@@ -143,10 +145,10 @@ test('only the original late terminal releases a global record for the next meth
   first.peer.handlers.set('config/batchWrite', (_params, context) => {
     reply = () => context.send({ id: context.message.id, result: { status: 'ok' } }); return NO_REPLY;
   });
-  const started = await writes.submit({ hostId: 'local', method: 'config/batchWrite', params: batch(), connection: first.connection });
+  const started = await writes.submit({ operationId: randomUUID(), hostId: 'local', method: 'config/batchWrite', params: batch(), connection: first.connection });
   assert.equal(started.outcome, 'started'); if (started.outcome !== 'started') return;
   assert.equal((await started.completion).outcome, 'unknown');
-  const input = { hostId: h.host.hostId, method: 'skills/config/write' as const, params: { name: 'fixture:skill', enabled: false }, connection: second.connection };
+  const input = { operationId: randomUUID(), hostId: h.host.hostId, method: 'skills/config/write' as const, params: { name: 'fixture:skill', enabled: false }, connection: second.connection };
   assert.equal((await writes.submit(input)).outcome, 'blocked');
   assert.ok(reply); reply();
   const deadline = Date.now() + 3000;
@@ -168,7 +170,7 @@ test('unregistered hosts, different homes, ambiguous layers, unverified methods 
   await assert.rejects(submit(), /does not match/);
   h.paths.set(connection, { homeDirectory: h.root, codexHome: h.home });
   await assert.rejects(submit({ ...batch(), filePath: h.secondConfig }), /not the verified/);
-  await assert.rejects(h.resolveTarget({ hostId: 'local', method: 'config/value/write', params: {}, connection }), /not verified/);
+  await assert.rejects(h.resolveTarget({ hostId: 'local', method: 'config/value/write' as never, params: {}, connection }), /not verified/);
   await assert.rejects(h.resolveTarget({ hostId: 'local', method: 'skills/config/write', params: { enabled: false }, connection }), /selector/);
   await assert.rejects(h.resolveTarget({ hostId: 'local', method: 'skills/config/write', params: { name: 'a', path: '/b', enabled: false }, connection }), /selector/);
   peer.handlers.set('config/read', () => ({ layers: [
@@ -195,4 +197,23 @@ test('dangling links, non-files, missing parents and malformed SSH output are re
   const missingHome = join(h.root, 'missing-home');
   const missing = await h.connect(missingHome);
   await assert.rejects(h.resolveTarget({ hostId: 'local', method: 'config/batchWrite', params: batch(), connection: missing.connection }));
+});
+
+test('literal backslash-zero is a valid Linux path while an actual NUL is rejected', async t => {
+  const h = await fixture(t), unusualHome = join(h.root, 'literal\\0path');
+  await mkdir(unusualHome);
+  const unusual = await h.connect(unusualHome);
+  const input = { hostId: 'local', method: 'config/batchWrite' as const, params: batch(), connection: unusual.connection };
+  const local = await h.resolveTarget(input);
+  assert.equal(local.binding, join(unusualHome, 'config.toml'));
+  const ssh = await h.resolveTarget({ ...input, hostId: h.host.hostId });
+  assert.equal(ssh.binding, local.binding); assert.equal(ssh.target, local.target);
+  const writes = createConfigWrites({ state: {}, persist: async () => {}, mutations: createStateMutations(), resolveTarget: h.resolveTarget });
+  unusual.peer.handlers.set('config/batchWrite', () => ({ status: 'ok' }));
+  const started = await writes.submit({ ...input, operationId: 'literal-backslash' });
+  assert.equal(started.outcome, 'started');
+  if (started.outcome === 'started') assert.equal((await started.completion).outcome, 'success');
+  h.paths.set(unusual.connection, { homeDirectory: h.root, codexHome: unusualHome + '\0invalid' });
+  await assert.rejects(h.resolveTarget(input), /unavailable or ambiguous/);
+  await assert.rejects(writes.status('invalid\0operation'), /Invalid configuration write operation/);
 });

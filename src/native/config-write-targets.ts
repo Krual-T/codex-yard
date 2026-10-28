@@ -4,7 +4,7 @@ import { posix } from 'node:path';
 import { userConfigTarget } from '../renderer/settings/config-target.ts';
 import { remoteFileCommand } from './files.ts';
 import type { RemoteFileCommand } from './files.ts';
-import type { ConfigWriteConnection, ConfigWriteInput, ConfigWriteTarget } from './config-writes.ts';
+import type { ConfigWriteConnection, ConfigWriteTargetInput, ConfigWriteTarget } from './config-writes.ts';
 import type { HostPaths, SshHost } from './ssh.ts';
 
 interface Options {
@@ -67,7 +67,7 @@ async function sshTarget(host: SshHost, binding: string, command: RemoteFileComm
 
 /** Resolve only current base-user configuration writes using the original daemon. */
 export function createConfigWriteTargets(options: Options) {
-  return async function resolveTarget(input: ConfigWriteInput): Promise<ConfigWriteTarget> {
+  return async function resolveTarget(input: ConfigWriteTargetInput): Promise<ConfigWriteTarget> {
     const { hostId, method, params, connection } = input;
     const registered = hostId === 'local' ? undefined : await options.getSshHost(hostId, connection);
     if (hostId !== 'local' && (!registered || registered.hostId !== hostId)) throw new Error('The configuration host is not registered.');
