@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { StandaloneSettingsProps } from '../workbench-contract.ts';
 import { AppearanceSection } from './AppearanceSection.tsx';
 import { GeneralSection } from './GeneralSection.tsx';
+import { ModelSection } from './ModelSection.tsx';
 import { Preferences, preferenceKeys } from './preferences.ts';
 import './standalone-settings.css';
 
@@ -51,6 +52,7 @@ export function StandaloneSettings({ client, hostId, initialSection, onClose }: 
   const [backdropSupported, setBackdropSupported] = useState(false);
   const [saving, setSaving] = useState(false);
   const [otherDirty, setOtherDirty] = useState(false);
+  const [otherSaving, setOtherSaving] = useState(false);
   const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
   const dirty = preferences.dirty || otherDirty;
 
@@ -66,13 +68,13 @@ export function StandaloneSettings({ client, hostId, initialSection, onClose }: 
     return () => { active = false; };
   }, [client]);
   useEffect(() => {
-    const preventUnload = (event: BeforeUnloadEvent) => { if (dirty || saving) { event.preventDefault(); event.returnValue = ''; } };
+    const preventUnload = (event: BeforeUnloadEvent) => { if (dirty || saving || otherSaving) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', preventUnload);
     return () => window.removeEventListener('beforeunload', preventUnload);
-  }, [dirty, saving]);
+  }, [dirty, saving, otherSaving]);
 
   const guard = (action: () => void) => {
-    if (saving) return;
+    if (saving || otherSaving) return;
     if (dirty) setPendingAction(() => action); else action();
   };
   const navigate = (next: string) => {
@@ -109,9 +111,10 @@ export function StandaloneSettings({ client, hostId, initialSection, onClose }: 
       <div className="yard-settings-content">
         {section === 'general-settings' ? <GeneralSection preferences={preferences} snapshot={snapshot} platform={platform} navigate={navigate} /> :
           section === 'appearance' ? <AppearanceSection preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} /> :
+            section === 'models' ? <ModelSection key={selectedHost} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
             <><h2>{title}</h2><p className="yard-setting-error">This settings section is not yet available in the web host.</p></>}
       </div>
-      {(dirty || saving) && <div className="yard-save-bar"><span>Unsaved changes</span><div className="yard-actions">
+      {(preferences.dirty || saving) && <div className="yard-save-bar"><span>Unsaved changes</span><div className="yard-actions">
         <button type="button" disabled={saving} onClick={() => preferences.discard()}>Discard</button>
         <button type="button" disabled={saving || !preferences.dirty} onClick={() => {
           setSaving(true); void preferences.save().finally(() => setSaving(false));
