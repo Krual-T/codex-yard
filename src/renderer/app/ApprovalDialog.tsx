@@ -10,13 +10,18 @@ import type { ApprovalPersistence } from './approval-elicitation.ts';
 import type { ApprovalBrowserAuth, ApprovalToolSuggestion } from './approval-special.ts';
 import { ApprovalBrowserAuthQr, browserAuthScopeKey, sameBrowserAuthScope } from './approval-browser-auth.tsx';
 import { ApprovalBrowserAuthSavedLogins } from './approval-browser-auth-candidates.tsx';
+import { ApprovalBrowserAuthManual, ApprovalBrowserAuthPasswordManager } from './approval-browser-auth-interactions.tsx';
 import type { ApprovalBrowserAuthAcknowledgeRequest, ApprovalBrowserAuthAcknowledgement, ApprovalBrowserAuthBinding,
   ApprovalBrowserAuthQrSubscribe, ApprovalBrowserAuthScope, ApprovalQrCodeRenderer } from './approval-browser-auth.tsx';
 import type { ApprovalBrowserAuthCandidates, ApprovalBrowserAuthRequestCandidates, ApprovalBrowserAuthUseCandidate } from './approval-browser-auth-candidates.tsx';
+import type { ApprovalBrowserAuthManualAction, ApprovalBrowserAuthManualState, ApprovalBrowserAuthPasswordManagerAction,
+  ApprovalBrowserAuthPasswordManagerState } from './approval-browser-auth-interactions.tsx';
 export type { ApprovalBrowserAuthAcknowledgeRequest, ApprovalBrowserAuthAcknowledgement, ApprovalBrowserAuthBinding,
   ApprovalBrowserAuthQrSubscribe, ApprovalBrowserAuthQrUpdate, ApprovalBrowserAuthScope, ApprovalQrCodeRenderer } from './approval-browser-auth.tsx';
 export type { ApprovalBrowserAuthCandidate, ApprovalBrowserAuthCandidates, ApprovalBrowserAuthRequestCandidates,
   ApprovalBrowserAuthUseCandidate } from './approval-browser-auth-candidates.tsx';
+export type { ApprovalBrowserAuthManualAction, ApprovalBrowserAuthManualState, ApprovalBrowserAuthPasswordManagerAction,
+  ApprovalBrowserAuthPasswordManagerState } from './approval-browser-auth-interactions.tsx';
 
 export interface ServerRequest {
   hostId: string; id: string | number; method: string; params: Record<string, unknown>;
@@ -89,6 +94,12 @@ export interface ApprovalDialogProps {
   onRequestBrowserAuthCandidates?: ApprovalBrowserAuthRequestCandidates;
   /** The host resolves the choice in its private credential transaction. */
   onUseBrowserAuthCandidate?: ApprovalBrowserAuthUseCandidate;
+  /** Host-owned manual browser session; unavailable when the consumer has no such browser. */
+  browserAuthManual?: ApprovalBrowserAuthManualState;
+  onBrowserAuthManualAction?: ApprovalBrowserAuthManualAction;
+  /** The host retains the 1Password authorization URL, handles and operation identity. */
+  browserAuthPasswordManager?: ApprovalBrowserAuthPasswordManagerState;
+  onBrowserAuthPasswordManagerAction?: ApprovalBrowserAuthPasswordManagerAction;
   /** Resolved original-conversation agent identity, not an email address or a code. */
   emailOtpIdentity?: ApprovalOtpIdentity;
   completionContext?: ApprovalCompletionContext;
@@ -281,8 +292,8 @@ function BrowserAuthFields({ view, disabled, available, onSubmit, children }: {
         value={own(values, field.id) ?? ''} onChange={event => setValues(current => ({ ...current, [field.id]: event.target.value }))} />
     </label>)}
     {children}
-    {view.hasWebauthn && <p>Passkey sign-in requires the original browser host.</p>}
-    {!available && <p>Private sign-in is unavailable on this host.</p>}
+    {!view.hasQrCode && view.fields.length === 0 && view.options.length === 0 && <p>Continue signing in on the website.</p>}
+    {!available && (view.fields.length > 0 || view.options.length > 0) && <p>Private sign-in is unavailable on this host.</p>}
     {(view.fields.length > 0 || view.options.length > 0) && <button type="submit" disabled={!canSubmit}>Send sign-in details</button>}
   </form>;
 }
@@ -361,7 +372,8 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   inputDraft, onInputDraftChange, formDraft, onFormDraftChange, onCheckRequestValidity, onPickApprovalFiles, onBeginUserVerification,
   onApplyToolSuggestion, onSubmitBrowserAuth, browserAuthBinding, onSubscribeBrowserAuthQr, browserAuthQrCode,
   browserAuthAcknowledgement, onAcknowledgeBrowserAuth, browserAuthCandidates, onRequestBrowserAuthCandidates,
-  onUseBrowserAuthCandidate, emailOtpIdentity, completionContext, onCheckConnectorAuthorization }: ApprovalDialogProps) {
+  onUseBrowserAuthCandidate, browserAuthManual, onBrowserAuthManualAction, browserAuthPasswordManager,
+  onBrowserAuthPasswordManagerAction, emailOtpIdentity, completionContext, onCheckConnectorAuthorization }: ApprovalDialogProps) {
   const dialog = useRef<HTMLElement>(null);
   const inFlight = useRef(false);
   const acknowledgementInFlight = useRef(false);
@@ -406,11 +418,12 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   // A parent-owned ready state makes remounts safe even after an uncertain reply.
   const managed = stateRef?.hostId === request.ref.hostId && stateRef.generation === request.ref.generation
     && stateRef.id === request.ref.id && outcome !== undefined && Boolean(onOutcome && onInputDraftChange && onFormDraftChange);
-  const authScope: ApprovalBrowserAuthScope | undefined = view?.kind === 'browser-auth' && browserAuthBinding
+  const authScope: ApprovalBrowserAuthScope | undefined = view?.kind === 'browser-auth' && browserAuthBinding && browserAuthBinding.ref
     && browserAuthBinding.ref.hostId === request.ref.hostId && browserAuthBinding.ref.generation === request.ref.generation
     && browserAuthBinding.ref.id === request.ref.id && browserAuthBinding.hostId === request.ref.hostId
     && browserAuthBinding.threadId === threadId && browserAuthBinding.challengeId === view.challengeId
-    && browserAuthBinding.accountId.trim() && browserAuthBinding.userId.trim() && threadId && serverName
+    && typeof browserAuthBinding.accountId === 'string' && browserAuthBinding.accountId.trim()
+    && typeof browserAuthBinding.userId === 'string' && browserAuthBinding.userId.trim() && threadId && serverName
     ? { ...browserAuthBinding, serverName, origin: view.origin, ...(view.targetTabId ? { targetTabId: view.targetTabId } : {}) } : undefined;
   const authScopeKey = authScope ? browserAuthScopeKey(authScope) : '';
   const recoveryContextKey = view?.kind === 'browser-auth'
@@ -421,13 +434,41 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   const authScopeKeyRef = useRef(authScopeKey);
   authScopeKeyRef.current = authScopeKey;
   const acknowledgement = authScope && browserAuthAcknowledgement
-    && sameBrowserAuthScope(authScope, browserAuthAcknowledgement.scope) && browserAuthAcknowledgement.operationId.trim()
+    && sameBrowserAuthScope(authScope, browserAuthAcknowledgement.scope)
+    && typeof browserAuthAcknowledgement.operationId === 'string' && browserAuthAcknowledgement.operationId.trim()
     && (browserAuthAcknowledgement.fillStatus === 'submitted' || browserAuthAcknowledgement.fillStatus === 'not_submitted')
     ? browserAuthAcknowledgement : undefined;
   const acknowledgementKey = acknowledgement ? JSON.stringify([authScopeKey, acknowledgement.operationId, acknowledgement.fillStatus]) : '';
   const acknowledgementRef = useRef({ key: acknowledgementKey, status: acknowledgement?.status, outcome });
   acknowledgementRef.current = { key: acknowledgementKey, status: acknowledgement?.status, outcome };
-  const locked = busy || !managed || outcome !== 'ready' || Boolean(localOutcome && localOutcome !== 'ready') || !sourceValid || authRecoveryPresent;
+  const manual = view?.kind === 'browser-auth' ? browserAuthManual : undefined;
+  const passwordManager = view?.kind === 'browser-auth' ? browserAuthPasswordManager : undefined;
+  const manualMatches = Boolean(authScope && manual && sameBrowserAuthScope(authScope, manual.scope)
+    && Number.isSafeInteger(manual.revision) && manual.revision >= 0
+    && ['available', 'opening', 'active', 'finishing', 'unknown'].includes(manual.phase));
+  const passwordManagerMatches = Boolean(authScope && passwordManager && sameBrowserAuthScope(authScope, passwordManager.scope)
+    && passwordManager.provider === 'onepassword' && Number.isSafeInteger(passwordManager.revision) && passwordManager.revision >= 0
+    && ['available', 'starting', 'waiting', 'denied', 'expired', 'failed', 'filling', 'unknown'].includes(passwordManager.phase));
+  const seenManual = useRef(new Map<string, number>());
+  const seenPasswordManager = useRef(new Map<string, number>());
+  const [pendingManualKey, setPendingManualKey] = useState<string | null>(null);
+  const [pendingPasswordManagerKey, setPendingPasswordManagerKey] = useState<string | null>(null);
+  const manualRevision = seenManual.current.get(recoveryContextKey);
+  const passwordManagerRevision = seenPasswordManager.current.get(recoveryContextKey);
+  const manualNeedsNewer = manualRevision !== undefined && (!manualMatches || !manual || manual.revision < manualRevision
+    || manual.phase === 'available' && manual.revision <= manualRevision);
+  const passwordManagerNeedsNewer = passwordManagerRevision !== undefined && (!passwordManagerMatches || !passwordManager
+    || passwordManager.revision < passwordManagerRevision || passwordManager.phase === 'available' && passwordManager.revision <= passwordManagerRevision);
+  const manualActive = Boolean(recoveryContextKey && (pendingManualKey === recoveryContextKey
+    || manualNeedsNewer || manualMatches && manual?.phase !== 'available'));
+  const passwordManagerActive = Boolean(recoveryContextKey && (pendingPasswordManagerKey === recoveryContextKey
+    || passwordManagerNeedsNewer || passwordManagerMatches && passwordManager?.phase !== 'available'));
+  const externalMismatch = Boolean(manual && !manualMatches || passwordManager && !passwordManagerMatches
+    || manualNeedsNewer && pendingManualKey !== recoveryContextKey || passwordManagerNeedsNewer && pendingPasswordManagerKey !== recoveryContextKey);
+  const externalConflict = manualActive && passwordManagerActive;
+  const externalExclusive = externalMismatch || manualActive || passwordManagerActive;
+  const baseLocked = busy || !managed || outcome !== 'ready' || Boolean(localOutcome && localOutcome !== 'ready') || !sourceValid || authRecoveryPresent;
+  const locked = baseLocked || externalExclusive;
   const lockedRef = useRef(locked);
   lockedRef.current = locked;
   const authorizationKey = view?.kind === 'url' ? JSON.stringify([request.ref.hostId, request.ref.generation, request.ref.id, threadId,
@@ -450,6 +491,22 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   useEffect(() => {
     if (recoveryContextKey && browserAuthAcknowledgement !== undefined) seenRecovery.current.add(recoveryContextKey);
   }, [recoveryContextKey, browserAuthAcknowledgement]);
+  useEffect(() => {
+    if (!recoveryContextKey) return;
+    if (manualMatches && manual) {
+      const previous = seenManual.current.get(recoveryContextKey);
+      if (manual.phase !== 'available') seenManual.current.set(recoveryContextKey, Math.max(previous ?? 0, manual.revision));
+      else if (previous !== undefined && manual.revision > previous && pendingManualKey !== recoveryContextKey)
+        seenManual.current.delete(recoveryContextKey);
+    }
+    if (passwordManagerMatches && passwordManager) {
+      const previous = seenPasswordManager.current.get(recoveryContextKey);
+      if (passwordManager.phase !== 'available') seenPasswordManager.current.set(recoveryContextKey, Math.max(previous ?? 0, passwordManager.revision));
+      else if (previous !== undefined && passwordManager.revision > previous && pendingPasswordManagerKey !== recoveryContextKey)
+        seenPasswordManager.current.delete(recoveryContextKey);
+    }
+  }, [recoveryContextKey, manualMatches, manual?.phase, manual?.revision, pendingManualKey,
+    passwordManagerMatches, passwordManager?.phase, passwordManager?.revision, pendingPasswordManagerKey]);
   useEffect(() => {
     if (acknowledgement?.status === 'ready') setError('');
   }, [acknowledgementKey, acknowledgement?.status]);
@@ -721,6 +778,21 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
           || acknowledgement.status !== 'ready' || !onAcknowledgeBrowserAuth || !onCheckRequestValidity}
           onClick={() => { void retryBrowserAuthAcknowledgement(); }}>Retry chat response</button>}
       </div> : <>
+      {externalMismatch && <p role="alert">The browser sign-in state does not match this request.</p>}
+      {externalConflict && <p role="alert">The browser host reported conflicting sign-in operations.</p>}
+      {manualMatches && manual && <ApprovalBrowserAuthManual key={'manual:' + authScopeKey} state={manual}
+        disabled={baseLocked || externalMismatch || externalConflict || passwordManagerActive || manualNeedsNewer} onAction={onBrowserAuthManualAction}
+        onPendingChange={pending => {
+          if (pending) seenManual.current.set(recoveryContextKey, Math.max(seenManual.current.get(recoveryContextKey) ?? 0, manual.revision));
+          setPendingManualKey(current => pending ? recoveryContextKey : current === recoveryContextKey ? null : current);
+        }} />}
+      {passwordManagerMatches && passwordManager && <ApprovalBrowserAuthPasswordManager key={'password-manager:' + authScopeKey} state={passwordManager}
+        disabled={baseLocked || externalMismatch || externalConflict || manualActive || passwordManagerNeedsNewer} onAction={onBrowserAuthPasswordManagerAction}
+        onPendingChange={pending => {
+          if (pending) seenPasswordManager.current.set(recoveryContextKey, Math.max(seenPasswordManager.current.get(recoveryContextKey) ?? 0, passwordManager.revision));
+          setPendingPasswordManagerKey(current => pending ? recoveryContextKey : current === recoveryContextKey ? null : current);
+        }} />}
+      {!externalExclusive && <>
       {browserAuthCandidates && (authScope ? <ApprovalBrowserAuthSavedLogins key={authScopeKey} scope={authScope}
         snapshot={browserAuthCandidates} disabled={locked} onRequest={onRequestBrowserAuthCandidates}
         onUse={onUseBrowserAuthCandidate ? submitBrowserAuthCandidate : undefined} />
@@ -737,7 +809,10 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
                 || !onSubmitBrowserAuth || authScopeKeyRef.current !== authScopeKey || lockedRef.current || inFlight.current) return;
               submitBrowserAuth({});
             }} /> : <p>The sign-in code requires the original account and browser host.</p>)}
-      </BrowserAuthFields></>)}
+      </BrowserAuthFields>
+      {!manual && !view.hasQrCode && view.fields.length === 0 && view.options.length === 0
+        && <button type="button" disabled>Take over to sign in</button>}
+      </>}</>)}
       {form && <form id={formId} noValidate onSubmit={(event) => { event.preventDefault(); submitForm(); }}>
         {view?.kind === 'form' && view.confirmation && <div>
           {view.confirmation.title && <h3>{view.confirmation.title}</h3>}

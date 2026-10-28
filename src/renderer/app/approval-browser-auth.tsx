@@ -45,10 +45,10 @@ export interface ApprovalBrowserAuthAcknowledgeRequest {
 }
 
 export function sameBrowserAuthScope(a: ApprovalBrowserAuthScope, b: ApprovalBrowserAuthScope): boolean {
-  return a.ref.hostId === b.ref.hostId && a.ref.generation === b.ref.generation && a.ref.id === b.ref.id
+  return Boolean(a && b && a.ref && b.ref && a.ref.hostId === b.ref.hostId && a.ref.generation === b.ref.generation && a.ref.id === b.ref.id
     && a.hostId === b.hostId && a.threadId === b.threadId && a.serverName === b.serverName
     && a.challengeId === b.challengeId && a.accountId === b.accountId && a.userId === b.userId
-    && a.origin === b.origin && a.targetTabId === b.targetTabId;
+    && a.origin === b.origin && a.targetTabId === b.targetTabId);
 }
 
 export function browserAuthScopeKey(scope: ApprovalBrowserAuthScope): string {

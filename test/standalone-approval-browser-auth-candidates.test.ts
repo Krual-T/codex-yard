@@ -123,5 +123,7 @@ test('saved sign-in choices remain scoped, expire, and use only the private host
     await snapshot({status:'error',candidates:[],hasMore:false});
     await dialog.getByRole('button', {name:'Retry saved sign-ins'}).click();
     await page.waitForFunction(() => window.candidateHarness.summary().pages.some(item => item.page === 'refresh'));
+    await snapshot({scope:null});
+    await dialog.getByText('Saved sign-in choices do not match this request.').waitFor();
   } finally { await browser.close(); }
 });
