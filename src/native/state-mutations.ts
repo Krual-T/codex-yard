@@ -4,11 +4,11 @@ export interface StateMutations {
   flush(): Promise<void>;
 }
 
-export function createStateMutations(): StateMutations {
+export function createStateMutations(beforeAction?: () => void | Promise<void>): StateMutations {
   let pending = Promise.resolve();
   return {
     run<T>(action: () => T | Promise<T>) {
-      const result = pending.then(action);
+      const result = pending.then(beforeAction ? async () => { await beforeAction(); return action(); } : action);
       pending = result.then(() => {}, () => {});
       return result;
     },
