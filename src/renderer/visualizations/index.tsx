@@ -2,7 +2,9 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from
 import type { ComposerDraft, WorkbenchClient } from '../workbench-contract.ts';
 import { parseRegistration, validControlValue, type AnnotationChange, type AnnotationControl, type AnnotationRegistration, type ControlValue } from './annotations.ts';
 import { normalizeWidgetState, readVisualizationState, visualizationAtomKey, writeVisualizationState } from './state.ts';
+import type { VisualizationInteraction } from './interaction-runtime.ts';
 export { readVisualizationModelContext, type VisualizationModelContext } from './state.ts';
+export type { VisualizationInteraction } from './interaction-runtime.ts';
 
 export interface VisualizationReferenceContext {
   type: 'visualization';
@@ -22,6 +24,8 @@ export interface StandaloneVisualizationProps {
   theme?: 'light' | 'dark';
   themeVariables?: Record<string, string>;
   locale?: string;
+  onPreviewNavigate?(direction: 'previous' | 'next'): void;
+  onInteraction?(event: VisualizationInteraction): void;
   initialWidgetState?: unknown;
   onWidgetStateChange?(state: unknown): void | Promise<void>;
 }
@@ -76,6 +80,8 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
   const selectionRef = useRef<{ registrationId: string; targetId: string } | null>(null);
   const variantsRef = useRef<{ carousel: number; variant: string; label?: string }[]>([]);
   const epochRef = useRef(0);
+  const expandedRef = useRef(false);
+  const hoveringRef = useRef(false);
   const propsRef = useRef(props);
   useLayoutEffect(() => { propsRef.current = props; });
   const sourceRef = useRef<{ path: string; contents: string } | null>(null);
@@ -83,6 +89,8 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
   const [error, setError] = useState('');
   const [height, setHeight] = useState(320);
   const [expanded, setExpanded] = useState(false);
+  const [hovering, setHovering] = useState(false);
+  const [inputMethod, setInputMethod] = useState<'pointer' | 'keyboard' | 'keyboard-navigation'>('pointer');
   const [annotating, setAnnotating] = useState(false);
   const [excerpt, setExcerpt] = useState<string | null>(null);
   const [comment, setComment] = useState('');
@@ -93,6 +101,13 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
   const [pendingLink, setPendingLink] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [savingAnnotation, setSavingAnnotation] = useState(false);
+
+  function pointerLeftFrame() {
+    if (hoveringRef.current) {
+      portRef.current?.postMessage({ type: 'pointer-leave' });
+      hoveringRef.current = false; setHovering(false); propsRef.current.onInteraction?.({ type: 'hover', isHovering: false });
+    }
+  }
 
   useLayoutEffect(() => {
     const frame = frameRef.current;
@@ -108,7 +123,7 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
     const frameUrl = new URL('/', window.location.origin);
     frameUrl.searchParams.set('app', 'skybridge');
     frameUrl.searchParams.set('yard_viz_init', initId);
-    setStatus('loading'); setError(''); setHeight(320); setExpanded(false);
+    setStatus('loading'); setError(''); setHeight(320); expandedRef.current = false; setExpanded(false); hoveringRef.current = false; setHovering(false); setInputMethod('pointer');
     setAnnotating(false); setExcerpt(null); setComment(''); setPendingDownload(null); setPendingLink(null);
     registrationsRef.current = new Map(); changesRef.current = []; annotationActiveRef.current = false; selectionRef.current = null;
     variantsRef.current = []; setSavingAnnotation(false);
@@ -118,6 +133,11 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
     let persisted = propsRef.current.initialWidgetState === undefined && !propsRef.current.onWidgetStateChange;
     const currentIdentity = () => active && propsRef.current.client === client && propsRef.current.hostId === hostId &&
       propsRef.current.threadId === threadId && propsRef.current.path === path;
+    const pointerOutside = (event: PointerEvent) => {
+      if (event.isTrusted && event.pointerType !== 'touch' && event.target !== frame) pointerLeftFrame();
+    };
+    window.addEventListener('pointerover', pointerOutside, true);
+    window.addEventListener('pointermove', pointerOutside, true);
 
     function fail(message: string) {
       if (!currentIdentity()) return;
@@ -125,6 +145,8 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
       setError(message);
       setStatus('error');
       window.removeEventListener('message', onMessage);
+      window.removeEventListener('pointerover', pointerOutside, true);
+      window.removeEventListener('pointermove', pointerOutside, true);
       if (timer !== undefined) clearTimeout(timer);
       unsubscribe?.(); unsubscribe = undefined;
       port?.close();
@@ -152,6 +174,7 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
           } else propsRef.current.onPrefill({ text: input.prompt, images: [], files: [] });
         } else if (message.method === 'display-mode') {
           if (input.mode !== 'inline' && input.mode !== 'fullscreen') throw new Error('Invalid display mode');
+          expandedRef.current = input.mode === 'fullscreen';
           setExpanded(input.mode === 'fullscreen');
           port?.postMessage({ type: 'display-mode', mode: input.mode });
           value = { mode: input.mode };
@@ -254,6 +277,22 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
           selectionRef.current = next; setSelection(next);
           setExcerpt(typeof value.excerpt === 'string' ? value.excerpt.slice(0, 500) : '');
           port?.postMessage({ type: 'annotate', enabled: false, selection: next, changes: changesRef.current });
+        } else if (value.type === 'annotation-escape') {
+          annotationActiveRef.current = false; setAnnotating(false); selectionRef.current = null; setSelection(null);
+          changesRef.current = []; setChanges([]); setExcerpt(null); setComment('');
+          port?.postMessage({ type: 'annotate', enabled: false, selection: null, changes: [] });
+        } else if (value.type === 'preview-key' && expandedRef.current) {
+          if (value.key === 'Escape') { expandedRef.current = false; setExpanded(false); port?.postMessage({ type: 'display-mode', mode: 'inline' }); }
+          else if (value.key === 'ArrowLeft' || value.key === 'ArrowRight') propsRef.current.onPreviewNavigate?.(value.key === 'ArrowLeft' ? 'previous' : 'next');
+        } else if (value.type === 'hover' && typeof value.isHovering === 'boolean' && (value.pointerType === undefined || value.pointerType === 'touch')) {
+          hoveringRef.current = value.isHovering;
+          setHovering(value.isHovering);
+          propsRef.current.onInteraction?.({ type: 'hover', isHovering: value.isHovering, ...(value.pointerType === 'touch' ? { pointerType: 'touch' } : {}) });
+        } else if (value.type === 'input' && (value.method === 'pointer' || value.method === 'keyboard' || value.method === 'keyboard-navigation')) {
+          setInputMethod(value.method);
+          propsRef.current.onInteraction?.({ type: 'input', method: value.method });
+        } else if (value.type === 'click' && typeof value.isInteractive === 'boolean') {
+          propsRef.current.onInteraction?.({ type: 'click', isInteractive: value.isInteractive });
         } else if (value.type === 'leaving') fail('Visualization frame navigated away');
         else if (value.type === 'request') void handleRequest(value);
       };
@@ -291,6 +330,8 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
       active = false;
       if (epochRef.current === epoch) epochRef.current++;
       window.removeEventListener('message', onMessage);
+      window.removeEventListener('pointerover', pointerOutside, true);
+      window.removeEventListener('pointermove', pointerOutside, true);
       if (timer !== undefined) clearTimeout(timer);
       unsubscribe?.();
       try { port?.postMessage({ type: 'dispose' }); } catch { /* already closed */ }
@@ -301,6 +342,7 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
 
   useEffect(() => { portRef.current?.postMessage({ type: 'theme', theme, themeVariables: props.themeVariables ?? {}, locale: props.locale }); }, [theme, props.themeVariables, props.locale]);
   function changeMode(next: boolean) {
+    expandedRef.current = next;
     setExpanded(next);
     portRef.current?.postMessage({ type: 'display-mode', mode: next ? 'fullscreen' : 'inline' });
   }
@@ -358,7 +400,7 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
     setExcerpt(null); setComment('');
   }
 
-  return <section aria-label="Visualization" style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'auto', color: theme === 'dark' ? '#f2f4f4' : '#1c252a', background: theme === 'dark' ? '#20272a' : '#fff', ...(expanded ? { position: 'fixed', inset: 12, zIndex: 1000, boxShadow: '0 8px 32px #0005' } : {}) }}>
+  return <section aria-label="Visualization" data-visualization-hover={hovering} data-visualization-input={inputMethod} style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'auto', color: theme === 'dark' ? '#f2f4f4' : '#1c252a', background: theme === 'dark' ? '#20272a' : '#fff', ...(expanded ? { position: 'fixed', inset: 12, zIndex: 1000, boxShadow: '0 8px 32px #0005' } : {}) }}>
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', padding: 8, borderBottom: '1px solid #9ca9ad' }}>
       <strong style={{ flex: '1 1 120px', overflowWrap: 'anywhere' }}>{filename(sourceRef.current?.path ?? path)}</strong>
       <button style={buttonStyle} disabled={status !== 'ready' || savingAnnotation} onClick={startAnnotation}>{annotating ? 'Cancel annotation' : 'Annotate'}</button>
@@ -397,6 +439,9 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
     </div>}
     {pendingDownload && <div style={{ padding: 8 }}>Download {pendingDownload.name}? <button style={buttonStyle} onClick={() => { download(pendingDownload.blob, pendingDownload.name); setPendingDownload(null); }}>Download file</button> <button style={buttonStyle} onClick={() => setPendingDownload(null)}>Dismiss download</button></div>}
     {pendingLink && <div style={{ padding: 8, overflowWrap: 'anywhere' }}>Open {pendingLink}? <a href={pendingLink} target="_blank" rel="noopener noreferrer" onClick={() => setPendingLink(null)}>Open link</a> <button style={buttonStyle} onClick={() => setPendingLink(null)}>Dismiss link</button></div>}
-    <iframe key={JSON.stringify([hostId, threadId, path, attempt])} ref={frameRef} title="Visualization content" sandbox="allow-scripts" referrerPolicy="no-referrer" style={{ display: status === 'ready' ? 'block' : 'none', border: 0, width: '100%', height: expanded ? '100%' : height, minHeight: expanded ? 160 : undefined, flex: expanded ? '1 1 auto' : undefined, background: 'transparent' }} />
+    <iframe key={JSON.stringify([hostId, threadId, path, attempt])} ref={frameRef} title="Visualization content" sandbox="allow-scripts" referrerPolicy="no-referrer" onPointerLeave={event => {
+      if (!event.isTrusted || event.pointerType === 'touch') return;
+      pointerLeftFrame();
+    }} style={{ display: status === 'ready' ? 'block' : 'none', border: 0, width: '100%', height: expanded ? '100%' : height, minHeight: expanded ? 160 : undefined, flex: expanded ? '1 1 auto' : undefined, background: 'transparent' }} />
   </section>;
 }

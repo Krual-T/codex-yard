@@ -1,4 +1,6 @@
 import { installTweak } from '../renderer/visualizations/tweak-runtime.ts';
+import { installVisualizationCarousels } from '../renderer/visualizations/carousel-runtime.ts';
+import { installVisualizationInteractions } from '../renderer/visualizations/interaction-runtime.ts';
 import type { AnnotationChange } from '../renderer/visualizations/annotations.ts';
 
 // Browser transport for the pinned renderer's mcp-sandbox-rpc MessagePort API.
@@ -148,6 +150,8 @@ function startOwnedVisualization(initId: string) {
   let globals: Value = {};
   let themeSheet: CSSStyleSheet | null = null;
   let tweak: ReturnType<typeof installTweak> | null = null;
+  let disposeCarousels: (() => void) | undefined;
+  let interactions: ReturnType<typeof installVisualizationInteractions> | undefined;
   let variables: Value = {};
   let locale: string | undefined;
 
@@ -228,6 +232,8 @@ function startOwnedVisualization(initId: string) {
   function dispose() {
     if (disposed) return;
     tweak?.cleanup();
+    interactions?.dispose();
+    disposeCarousels?.();
     disposed = true;
     port.close();
     for (const item of pending.values()) {
@@ -280,7 +286,7 @@ function startOwnedVisualization(initId: string) {
     window.addEventListener('click', event => {
       if (!event.isTrusted) return;
       const target = event.target;
-      if (annotating && target instanceof Element) {
+      if (annotating && target instanceof Element && !target.closest('.viz-carousel-controls')) {
         event.preventDefault();
         event.stopImmediatePropagation();
         annotating = false;
@@ -299,6 +305,13 @@ function startOwnedVisualization(initId: string) {
     }, true);
     document.write(message.html);
     document.close();
+    disposeCarousels = installVisualizationCarousels();
+    interactions = installVisualizationInteractions({
+      send: event => send({ ...event }),
+      isFullscreen: () => globals.displayMode === 'fullscreen',
+      isAnnotating: () => annotating,
+      cancelAnnotation: () => { annotating = false; send({ type: 'annotation-escape' }); },
+    });
     tweak.observe();
     setTheme(message.theme, message.themeVariables, message.locale);
     const observer = new ResizeObserver(measure);
@@ -320,6 +333,7 @@ function startOwnedVisualization(initId: string) {
       try { render(message); } catch (error) { send({ type: 'error', message: error instanceof Error ? error.message : String(error) }); }
     } else if (message.type === 'theme') setTheme(message.theme, message.themeVariables, message.locale);
     else if (message.type === 'display-mode') updateGlobals({ displayMode: message.mode });
+    else if (message.type === 'pointer-leave') interactions?.resetHover();
     else if (message.type === 'widget-state') updateGlobals({ widgetState: message.state });
     else if (message.type === 'annotate') {
       annotating = message.enabled === true;
