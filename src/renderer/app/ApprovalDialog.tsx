@@ -5,6 +5,8 @@ import { useCompletions } from '../composer/standalone-completions.tsx';
 import type { Completion } from '../composer/standalone-completions.tsx';
 import { initialApprovalValues, isApprovalFileUri, validateApprovalForm } from './approval-schema.ts';
 import type { ApprovalField, ApprovalFormValues, ApprovalResourceOption } from './approval-schema.ts';
+import { questionsFrom } from './approval-questions.ts';
+import type { ApprovalQuestion as Question } from './approval-questions.ts';
 import { classifyElicitation, displayApprovalParameters } from './approval-elicitation.ts';
 import type { ApprovalPersistence } from './approval-elicitation.ts';
 import type { ApprovalBrowserAuth, ApprovalToolSuggestion } from './approval-special.ts';
@@ -28,10 +30,6 @@ export interface ServerRequest {
   ref: ServerRequestRef;
 }
 
-interface Question {
-  id: string; header?: string; question: string; isSecret?: boolean; isOther?: boolean;
-  options?: { label: string; description?: string }[] | null;
-}
 type DecisionChoice = { label: string; decision: unknown; detail?: string };
 export type ApprovalOutcome = 'ready' | 'sending' | 'sent' | 'unknown';
 export type ApprovalInputDraft = Record<string, { selected: string | null; other: string }>;
@@ -64,9 +62,13 @@ export interface ApprovalDialogProps {
   /** Identity of the parent-owned outcome and both draft snapshots. */
   stateRef?: ServerRequestRef;
   outcome?: ApprovalOutcome;
+  /** Atomically reserve this exact request before any reply or host action. */
+  onBegin?(ref: ServerRequestRef): boolean;
   onOutcome?(ref: ServerRequestRef, outcome: ApprovalOutcome): void;
   inputDraft?: ApprovalInputDraft;
   onInputDraftChange?(ref: ServerRequestRef, draft: ApprovalInputDraft): void;
+  /** Update one answer without overwriting edits made by another surface. */
+  onInputAnswerChange?(ref: ServerRequestRef, questionId: string, answer: { selected: string | null; other: string }): void;
   formDraft?: ApprovalFormValues;
   onFormDraftChange?(ref: ServerRequestRef, draft: ApprovalFormValues): void;
   /** Return true only while this exact original request is still pending at its original host. */
@@ -164,26 +166,6 @@ function permissionGrant(value: unknown): Record<string, unknown> | null {
     entries.push([key, value[key]]);
   }
   return Object.fromEntries(entries);
-}
-
-function questionsFrom(value: unknown): Question[] | null {
-  if (!Array.isArray(value) || value.length === 0) return null;
-  const ids = new Set<string>();
-  const questions: Question[] = [];
-  for (const item of value) {
-    if (!record(item) || typeof item.id !== 'string' || !item.id || ids.has(item.id) || typeof item.question !== 'string'
-      || (item.header != null && typeof item.header !== 'string') || (item.isSecret != null && typeof item.isSecret !== 'boolean')
-      || (item.isOther != null && typeof item.isOther !== 'boolean')
-      || (item.options != null && (!Array.isArray(item.options) || !item.options.every((option: unknown) =>
-        record(option) && typeof option.label === 'string' && (option.description == null || typeof option.description === 'string'))))) return null;
-    if (Array.isArray(item.options)) {
-      const labels = item.options.map((option: { label: string }) => option.label);
-      if (labels.some((label: string) => !label.trim()) || new Set(labels).size !== labels.length) return null;
-    }
-    ids.add(item.id);
-    questions.push(item as unknown as Question);
-  }
-  return questions;
 }
 
 function ElicitationField({ field, value, error, disabled, picking, onPick, onChange }: {
@@ -368,8 +350,8 @@ export function ApprovalDialog(props: ApprovalDialogProps) {
   return <ApprovalDialogContent key={JSON.stringify([props.request.ref.hostId, props.request.ref.generation, props.request.ref.id])} {...props} />;
 }
 
-function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscape, inputDismissMode = 'interrupt', stateRef, outcome, onOutcome,
-  inputDraft, onInputDraftChange, formDraft, onFormDraftChange, onCheckRequestValidity, onPickApprovalFiles, onBeginUserVerification,
+function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscape, inputDismissMode = 'interrupt', stateRef, outcome, onBegin, onOutcome,
+  inputDraft, onInputDraftChange, onInputAnswerChange, formDraft, onFormDraftChange, onCheckRequestValidity, onPickApprovalFiles, onBeginUserVerification,
   onApplyToolSuggestion, onSubmitBrowserAuth, browserAuthBinding, onSubscribeBrowserAuthQr, browserAuthQrCode,
   browserAuthAcknowledgement, onAcknowledgeBrowserAuth, browserAuthCandidates, onRequestBrowserAuthCandidates,
   onUseBrowserAuthCandidate, browserAuthManual, onBrowserAuthManualAction, browserAuthPasswordManager,
@@ -403,7 +385,8 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   const formRef = useRef(form);
   formRef.current = form;
   const questions = input ? questionsFrom(request.params.questions) : null;
-  const [answers, setAnswers] = useState<ApprovalInputDraft>(() => initialInputDraft(questions, inputDraft));
+  const [localAnswers, setAnswers] = useState<ApprovalInputDraft>(() => initialInputDraft(questions, inputDraft));
+  const answers = onInputAnswerChange ? initialInputDraft(questions, inputDraft) : localAnswers;
   const decisions = command ? commandChoices(request.params.availableDecisions, request.params) : null;
   const grant = permissions ? permissionGrant(request.params.permissions) : null;
   const blocking = !input || request.params.isBlocking !== false;
@@ -417,7 +400,7 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
     && completionContext.cwd ? completionContext : undefined;
   // A parent-owned ready state makes remounts safe even after an uncertain reply.
   const managed = stateRef?.hostId === request.ref.hostId && stateRef.generation === request.ref.generation
-    && stateRef.id === request.ref.id && outcome !== undefined && Boolean(onOutcome && onInputDraftChange && onFormDraftChange);
+    && stateRef.id === request.ref.id && outcome !== undefined && Boolean(onOutcome && (onInputDraftChange || onInputAnswerChange) && onFormDraftChange);
   const authScope: ApprovalBrowserAuthScope | undefined = view?.kind === 'browser-auth' && browserAuthBinding && browserAuthBinding.ref
     && browserAuthBinding.ref.hostId === request.ref.hostId && browserAuthBinding.ref.generation === request.ref.generation
     && browserAuthBinding.ref.id === request.ref.id && browserAuthBinding.hostId === request.ref.hostId
@@ -527,12 +510,13 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
 
   const send = async (action: () => Promise<void>, retryKnownFailure = true, redactFailure = false) => {
     if (inFlight.current || lockedRef.current || !onOutcome) return;
+    if (onBegin && !onBegin(request.ref)) return;
     inFlight.current = true; setBusy(true); setError('');
     try {
       onOutcome(request.ref, 'sending');
       await action();
-      setLocalOutcome('sent');
       onOutcome(request.ref, 'sent');
+      if (!onBegin && mounted.current) setLocalOutcome('sent');
     }
     catch (cause) {
       const detail = redactFailure ? 'The host transaction failed.' : cause instanceof Error ? cause.message : String(cause);
@@ -540,15 +524,19 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
       if (retryKnownFailure && record(cause) && cause.uncertain === false && onCheckRequestValidity) {
         try { stillPending = await onCheckRequestValidity(request.ref); } catch { /* An unverified request stays locked. */ }
       }
-      if (stillPending && mounted.current) {
+      if (stillPending) {
         onOutcome(request.ref, 'ready');
-        setLocalOutcome('ready');
         inFlight.current = false;
-        setError(detail + ' The original request is still pending; you can retry.');
+        if (mounted.current) {
+          if (!onBegin) setLocalOutcome('ready');
+          setError(detail + ' The original request is still pending; you can retry.');
+        }
       } else {
-        setLocalOutcome('unknown');
         onOutcome(request.ref, 'unknown');
-        setError(detail + ' Response could not be confirmed; check the original conversation before responding again.');
+        if (mounted.current) {
+          if (!onBegin) setLocalOutcome('unknown');
+          setError(detail + ' Response could not be confirmed; check the original conversation before responding again.');
+        }
       }
     }
     finally { if (mounted.current) setBusy(false); }
@@ -594,6 +582,7 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   const retryBrowserAuthAcknowledgement = async () => {
     if (!acknowledgement || !authScope || !onAcknowledgeBrowserAuth || !onCheckRequestValidity || !onOutcome
       || !managed || !sourceValid || outcome !== 'ready' || acknowledgement.status !== 'ready' || busy || acknowledgementInFlight.current) return;
+    if (onBegin && !onBegin(request.ref)) return;
     const key = acknowledgementKey;
     const current = () => mounted.current && acknowledgementRef.current.key === key
       && acknowledgementRef.current.status !== 'unknown' && acknowledgementRef.current.status !== 'sent'
@@ -604,11 +593,11 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
     try {
       if (!await onCheckRequestValidity(request.ref) || !current()) throw new Error('Request no longer available');
       await onAcknowledgeBrowserAuth({ scope: authScope, operationId: acknowledgement.operationId, fillStatus: acknowledgement.fillStatus });
-      if (!current()) return;
-      setLocalOutcome('sent');
       onOutcome(request.ref, 'sent');
-    } catch (cause) {
       if (!current()) return;
+      if (!onBegin) setLocalOutcome('sent');
+    } catch (cause) {
+      if (!current()) { onOutcome(request.ref, 'unknown'); return; }
       let stillPending = false;
       if (record(cause) && cause.uncertain === false) {
         try { stillPending = await onCheckRequestValidity(request.ref); } catch { /* Keep an unverified reply locked. */ }
@@ -616,11 +605,11 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
       if (!current()) return;
       if (stillPending) {
         acknowledgementInFlight.current = false;
-        setLocalOutcome('ready');
+        if (!onBegin) setLocalOutcome('ready');
         onOutcome(request.ref, 'ready');
         setError('The chat response was not sent. You can retry the chat response.');
       } else {
-        setLocalOutcome('unknown');
+        if (!onBegin) setLocalOutcome('unknown');
         onOutcome(request.ref, 'unknown');
         setError('The chat response could not be confirmed. Check the original conversation before retrying.');
       }
@@ -719,8 +708,8 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   };
   const setAnswer = (key: string, value: { selected: string | null; other: string }) => {
     const next = { ...answers, [key]: value };
-    setAnswers(next);
-    onInputDraftChange?.(request.ref, next);
+    if (onInputAnswerChange) onInputAnswerChange(request.ref, key, value);
+    else { setAnswers(next); onInputDraftChange?.(request.ref, next); }
     setFieldErrors((current) => { const next = { ...current }; delete next[key]; return next; });
     setError('');
   };
