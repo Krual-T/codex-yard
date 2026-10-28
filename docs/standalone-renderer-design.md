@@ -37,7 +37,9 @@ CLI0.164和隔离桌面CLI0.163.0-alpha.10.2的脚本provider实测都表明：�
 
 消息组件接收 CLI ThreadSummary/turn/items，负责逐类型展示、正文/附件/复制/编辑/代码和工具活动。未知 item 以可展开的明确类型与数据展示，不悄悄丢弃。Markdown parser、高亮、数学、Mermaid 等采用按真实功能需要引入的包管理依赖；应用特有链接、文件路径、复制、外部资源和展示策略留在自有 TSX。
 
-设置通过get/set-setting、get/set-global-state、get/set-persisted-atom和CLI config/read/batchWrite访问原来源。UI偏好是全局host设置，CLI配置是执行host作用域；界面不接触token/env。浏览器仅得到需要的非敏感session字段及user层version/filePath，写入带expectedVersion，冲突保留编辑。host设置串行提交、persist失败回滚后不广播；回执后读取验证，较晚编辑不被覆盖。原设置保存须连接真实消费者：composerEnterBehavior、followUpQueueMode、主题字体、终端位置等，不能只证明值写入。平台原先不支持的操作保留准确错误/空态，不能用“不支持”代替已有Web功能。
+设置通过get/set-setting、get/set-global-state、get/set-persisted-atom和CLI config/read/batchWrite访问原来源。UI偏好是全局host设置，CLI配置是执行host作用域；界面不接触token/env。浏览器仅得到需要的非敏感session字段及user层version/filePath，写入带expectedVersion，冲突保留编辑。实际CLI0.164及桌面0.163-alpha均只提供可写的base user层，不支持旧profile/profiles配置；当前模型与effort按该层真实file/version写顶层键，不依据旧config.profile发明目标。其他后端若有多个user层，必须按真实目标身份选择，不能拿合成多层fixture当本机能力。
+
+共用native-state.json的项目、偏好、pet与SSH自动连接变更共享一个串行提交区间，包含读取旧值、修改内存、捕获快照、原子写入和失败回滚。不能只串行文件写入，否则会保存其他尚未提交的内存值。成功持久化后才广播；较晚编辑不被旧回执覆盖。原设置保存须连接真实消费者：composerEnterBehavior、followUpQueueMode、主题字体、终端位置等，不能只证明值写入。平台原先不支持的操作保留准确错误/空态，不能用“不支持”代替已有Web功能。
 
 host工具read_thread在真实server接线中使用turnLimit/cursor分页历史，按includeOutputs投影，默认最新10轮、每轮最新60项、不含输出，按maxOutputCharsPerItem（默认4000）截断输出并返回可继续读取较早turn/items的游标；不能把外层参数检查或mock handler测试当作真实实现。取消沿MCP适配器到host请求，断线不重放写入。
 
@@ -48,6 +50,7 @@ host工具read_thread在真实server接线中使用turnLimit/cursor分页历史�
 | 场景 | 所有者与结果 |
 | --- | --- |
 | 切换 thread 时旧 read 晚返回 | App 以 host/thread 和读取代次匹配，旧结果不会覆盖新页 |
+| 编辑触发thread/reverted时历史读取未完成 | 回退使之前读取代次失效，清除旧buffer并重读；完整分页历史移除缺失的已存turn，仅保留本次读取之后确实收到的新活动，不永久合并已删除历史 |
 | 流式增量与完整读取交错 | 已观察started项保留流投影；完成历史按ID替换；未观察前缀明确提示，summary合并；不根据到达游标重复追加delta |
 | socket 断线或写请求超时 | client 拒绝在途请求并标记结果未知；不重放写入。保留草稿，重连读取 thread/queue 核对后让用户决定再发送 |
 | 多页面同时消费队列 | host/thread活动互斥、host/thread/message已发回执和CLI queue id；成功release(sent)，未知结果先核对queue及历史，不能假定条目仍在或重发 |

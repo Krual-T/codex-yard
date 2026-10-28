@@ -77,6 +77,8 @@ export interface StandaloneComposerProps {
   onStartQueued?(queuedSubmissionId: string): Promise<void>;
   /** Optional explicit edit/reference prefill, consumed once per id. */
   prefill?: { id: string; draft: ComposerDraft } | null;
+  /** Called only after this prefill has been durably merged into its draft. */
+  onPrefillConsumed?(id: string): void;
 }
 export interface StandaloneMessagesProps {
   client: WorkbenchClient;
