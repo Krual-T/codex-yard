@@ -75,6 +75,12 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         await page.evaluate(() => (window as any).miniFixture.setFailure(true));
         await rich.click(); await page.keyboard.press('End'); await page.keyboard.insertText(' unsaved');
         await mini.getByRole('alert').filter({ hasText: /保存|存储/ }).first().waitFor();
+        await page.evaluate(() => (window as any).miniFixture.renderOwner(false));
+        await page.waitForFunction(() => (document.querySelector('.yard-mini-conversation .standalone-composer')?.parentElement as HTMLElement)?.inert);
+        assert.equal(await mini.locator('.ProseMirror').count(), 1);
+        assert.match(await rich.innerText(), /retain rich.*unsaved/);
+        await page.evaluate(() => (window as any).miniFixture.renderOwner(true));
+        await page.waitForFunction(() => !(document.querySelector('.yard-mini-conversation .standalone-composer')?.parentElement as HTMLElement)?.inert);
         assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', 'thread-b')), false);
         assert.equal(await mini.locator('strong').count(), 1);
         await page.getByRole('button', { name: 'Close Quick chat' }).click();

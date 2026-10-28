@@ -113,10 +113,14 @@ function initialTarget(): MiniConversationTarget {
 function Fixture() {
   const [target, setTarget] = useState(initialTarget);
   const [online, setOnline] = useState(true);
+  const [ownerAvailable, setOwnerAvailable] = useState(true);
   const [connectionRevision, setConnectionRevision] = useState(0);
   const main = useConversationSession(sessions, { hostId: 'local', threadId: 'thread-a' }, false, true, 0);
   const targetRef = useRef(target); targetRef.current = target;
-  useEffect(() => { fixture.renderConnection = value => { setOnline(value); if (value) setConnectionRevision(revision => revision + 1); }; }, []);
+  useEffect(() => {
+    fixture.renderConnection = value => { setOnline(value); if (value) setConnectionRevision(revision => revision + 1); };
+    fixture.renderOwner = setOwnerAvailable;
+  }, []);
   return <>
     <div id="main"><StandaloneComposer client={client} context={{ hostId: 'local', threadId: 'thread-a', draftId: 'main-draft', cwd: '/fixture/local' }}
       busy={false} initialOptions={main.options ?? undefined} onDraftController={value => { mainController = value; }}
@@ -136,7 +140,7 @@ function Fixture() {
       try { return await lease.flush(); } finally { lease.release(); } }}>
       <MiniConversation client={client} sessions={sessions} sends={sends} edits={edits} initialTarget={target}
         initialOptions={{ model: 'fixture-model', approvalPolicy: 'on-request', sandboxMode: 'workspace-write' }}
-        isConnected={() => connected} canUseOwner={owner => owner.draftId !== 'main-draft'} onController={value => { controller = value; }}
+        isConnected={() => connected} canUseOwner={owner => ownerAvailable && owner.draftId !== 'main-draft'} onController={value => { controller = value; }}
         onDraftChange={value => { miniSnapshot = structuredClone(value); }}
         onTargetChanged={value => { if (rejectTarget) throw new Error('Synthetic target persistence failure');
           targets.push(value); sessionStorage.setItem('fixture-mini-target', JSON.stringify(value)); setTarget(value); }}
@@ -152,7 +156,7 @@ IDBObjectStore.prototype.put = function (...args: Parameters<IDBObjectStore['put
 };
 const root = createRoot(document.getElementById('root')!);
 const fixture = {
-  calls, hostCalls, opened, errors, targets, sends, sessions, renderConnection: (_value: boolean) => {},
+  calls, hostCalls, opened, errors, targets, sends, sessions, renderConnection: (_value: boolean) => {}, renderOwner: (_value: boolean) => {},
   controller: () => controller, main: () => mainController?.snapshot(),
   async target(hostId: string, threadId: string | null) {
     const state = await sends.read(), draftId = miniDraftIdentity(hostId, threadId, state.bindings);

@@ -79,18 +79,22 @@ export function MiniConversation(props: MiniConversationProps) {
   const [frozen, setFrozen] = useState(false);
   const [editState, setEditState] = useState<{ key: string; value: StoredMessageEdit | null } | null>(null);
   const composer = useRef<ComposerDraftController | null>(null);
+  const mountedComposerKey = useRef<string | null>(null);
   const messageEditor = useRef<MessageEditNavigationController | null>(null);
   const locked = useRef(false), inFlight = useRef(false), mounted = useRef(false);
   const provisionalRelease = useRef<(() => void) | null>(null);
   const key = targetKey(target), usable = validTarget(target) && props.canUseOwner(ownerOf(target));
-  const initialized = readyKey === key && usable;
+  const initialized = readyKey === key && (usable || mountedComposerKey.current === key);
   const conversation = useConversationSession(props.sessions, target.threadId ? { hostId: target.hostId, threadId: target.threadId } : null,
     target.readOnly === true, initialized, 0);
   const report = useCallback((cause: unknown) => {
     const text = errorText(cause); if (mounted.current) setError(text); latest.current.onError(text);
   }, []);
   const changed = useCallback(() => latest.current.onRecoveryChanged(), []);
-  const receiveComposer = useCallback((value: ComposerDraftController | null) => { composer.current = value; }, []);
+  const receiveComposer = useCallback((value: ComposerDraftController | null) => {
+    composer.current = value;
+    mountedComposerKey.current = value ? targetKey(targetRef.current) : null;
+  }, []);
   const receiveEditor = useCallback((value: MessageEditNavigationController | null) => { messageEditor.current = value; }, []);
 
   useEffect(() => {
@@ -305,14 +309,14 @@ export function MiniConversation(props: MiniConversationProps) {
   const edit = editState?.key === key ? editState.value : null;
   const thread = conversation.thread?.id === target.threadId ? conversation.thread : null;
   return <div className="yard-mini-conversation" inert={frozen}>
-    {target.threadId && <button type="button" className="yard-mini-conversation-open" onClick={() => props.onOpenThread({ hostId: target.hostId, threadId: target.threadId! })}>
+    {target.threadId && <button type="button" className="yard-mini-conversation-open" disabled={!usable} onClick={() => props.onOpenThread({ hostId: target.hostId, threadId: target.threadId! })}>
       {thread?.name || 'Open conversation'}
     </button>}
     {error && <p role="alert">{error}</p>}
     {!usable && <p role="status">Mini 草稿正在其他编辑器中使用，原内容已保留。</p>}
     {conversation.error && <p role="status">{conversation.error}</p>}
     {conversation.streamGap && <p role="status">会话内容正在核对。</p>}
-    {target.threadId && <div className="yard-mini-conversation-messages">
+    {target.threadId && <div className="yard-mini-conversation-messages" inert={!usable}>
       {conversation.loading ? <p role="status">Loading conversation...</p> : <StandaloneMessages client={props.client} hostId={target.hostId} thread={thread}
         editRecovery={edit?.recovery ?? null} editRebase={messageEditRebaseMarker(edit)} editHistory={{ order: 'ascending', tailComplete: conversation.historyComplete }}
         onEditNavigationController={receiveEditor} onEditDraftChange={(value, origin, version) => props.edits.save(value, origin, version)}
@@ -324,7 +328,7 @@ export function MiniConversation(props: MiniConversationProps) {
         onOpenVisualization={props.onOpenVisualization} onOpenBrowser={props.onOpenBrowser} />}
     </div>}
     {target.readOnly && <p role="status">此会话已归档，原输入已保留。</p>}
-    <div inert={target.readOnly === true}>
+    <div inert={target.readOnly === true || !usable}>
     {initialized && (!target.threadId || !conversation.loading && conversation.options || composer.current) && <StandaloneComposer
       client={props.client} context={{ ...ownerOf(target), cwd: thread?.cwd || target.cwd, placement: 'mini' }}
       busy={working || isThreadBusy(thread)} activeTurnId={thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null}
