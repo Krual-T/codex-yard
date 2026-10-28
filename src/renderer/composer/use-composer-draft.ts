@@ -3,7 +3,7 @@ import type { RefObject } from 'react';
 import { readBrowserAtoms, subscribeBrowserAtoms } from '../storage/ui-atoms.ts';
 import type { ComposerContext, ComposerDraft } from '../workbench-contract.ts';
 import { clearComposerDraftRevision, composerDraftAtomKey, openComposerDraft, readComposerDraftVersions,
-  retainComposerDraftVersion, writeComposerDraftVersion } from './composer-draft-store.ts';
+  retainComposerDraftVersion, sameComposerDraftValue, writeComposerDraftVersion } from './composer-draft-store.ts';
 import type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerDraftVersions } from './composer-draft-store.ts';
 import { createId, emptyDraft, normalizeDraft } from './standalone-draft.ts';
 import type { Draft, StoredDraft } from './standalone-draft.ts';
@@ -15,6 +15,8 @@ export interface ComposerDraftController {
   flush(owner: ComposerDraftOwner): Promise<boolean>;
   /** Freeze this owner before a parent changes or unmounts it. */
   freeze(owner: ComposerDraftOwner): ComposerDraftLease | null;
+  /** Adopt an independently committed active version only if this projection still matches. */
+  acceptCommittedVersion(before: ComposerDraftSnapshot, after: ComposerDraftSnapshot): Promise<boolean>;
 }
 export interface ComposerDraftLease {
   flush(): Promise<boolean>;
@@ -46,6 +48,9 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   const frozen = useRef<ComposerDraftLease | null>(null);
   const cancelFrozen = useRef<(() => void) | null>(null);
   const operations = useRef(new Set<Promise<boolean>>());
+  const failedOperations = useRef(0);
+  const pendingProjection = useRef(0);
+  const preserveProjection = useRef(false);
   const operationUpdate = useRef<((owner: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft) => Promise<boolean>) | null>(null);
   const generation = useRef(0);
   const ready = useRef<Promise<ComposerDraftVersions> | null>(null);
@@ -61,14 +66,14 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   changeCallback.current = onChange;
   const freezeCallback = useRef(onFreeze);
   freezeCallback.current = onFreeze;
-  const beginOperation = useCallback((): FinishComposerOperation | null => {
-    if (!mounted.current || !active.current || frozen.current) return null;
+  const beginOperation = useCallback((finishCommitted = false): FinishComposerOperation | null => {
+    if (!mounted.current || !active.current || frozen.current && (!finishCommitted || !operations.current.size)) return null;
     let resolve!: (success: boolean) => void;
     const pending = new Promise<boolean>(done => { resolve = done; });
     operations.current.add(pending);
     void pending.then(() => operations.current.delete(pending));
     let finished = false;
-    return success => { if (!finished) { finished = true; resolve(success); } };
+    return success => { if (!finished) { finished = true; if (!success) failedOperations.current++; resolve(success); } };
   }, []);
   const enqueue = useCallback(<T,>(operation: () => Promise<T>): Promise<T> => {
     const result = queue.current.then(operation);
@@ -88,7 +93,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       if (active.current === controller) {
         durableRevision.current = next.revision;
         if (current.current.revision === next.revision) {
-          dirty.current = false; pendingAncestors.current.clear(); setSaving(false); setVersions(view.versions);
+          dirty.current = false; preserveProjection.current = false; pendingAncestors.current.clear(); setSaving(false); setVersions(view.versions);
           refreshVersions.current?.();
         }
         setStorageError(''); publish(controller, next);
@@ -119,8 +124,12 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     apply(update, prefillId)?.saved ?? Promise.resolve(false), [apply]);
   const changeDraftFromOperation = useCallback((update: (draft: Draft) => Draft): Promise<boolean> =>
     apply(update, undefined, true)?.saved ?? Promise.resolve(false), [apply]);
-  const updateDraftFromOperation = useCallback((expected: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft) =>
-    operationUpdate.current?.(expected, update) ?? Promise.resolve(false), []);
+  const updateDraftFromOperation = useCallback(async (expected: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft) => {
+    const applyUpdate = operationUpdate.current;
+    if (!applyUpdate) return false;
+    pendingProjection.current++;
+    try { return await applyUpdate(expected, update); } finally { pendingProjection.current--; }
+  }, []);
 
   const controller = useMemo<ComposerDraftController>(() => {
     const result: ComposerDraftController = {
@@ -144,18 +153,25 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
         if (active.current !== result || !sameOwner(owner, expected) || frozen.current) return null;
         if (initializing.current) { setStorageError(value => value || '草稿正在恢复，请稍后再切换。'); return null; }
         if (!freezeGuard?.current?.(false)) return null;
-        const pending = [...operations.current];
+        const pending = [...operations.current], failureCount = failedOperations.current;
         let cancelDrain!: () => void;
         const cancelled = new Promise<false>(resolve => { cancelDrain = () => resolve(false); });
         const lease: ComposerDraftLease = {
           async flush() {
             // Deliver pending DOM mutations (including ProseMirror's observer) before checking the write queue.
             await Promise.resolve();
-            const completed = await Promise.race([Promise.all(pending).then(values => values.every(Boolean)), cancelled]);
-            if (frozen.current !== lease || active.current !== result || !completed
-              || !freezeGuard?.current?.(true)) return false;
+            let waiting = pending;
+            for (;;) {
+              const completed = await Promise.race([Promise.all(waiting).then(values => values.every(Boolean)), cancelled]);
+              if (frozen.current !== lease || active.current !== result || !completed || failedOperations.current !== failureCount) return false;
+              await Promise.resolve();
+              waiting = [...operations.current];
+              if (!waiting.length) break;
+            }
+            if (!freezeGuard?.current?.(true)) return false;
             if (!await Promise.race([result.flush(expected).catch(() => false), cancelled])) return false;
-            return frozen.current === lease && active.current === result && !!freezeGuard?.current?.(true);
+            return frozen.current === lease && active.current === result && failedOperations.current === failureCount
+              && !operations.current.size && !!freezeGuard?.current?.(true);
           },
           release() {
             if (frozen.current !== lease || active.current !== result) return;
@@ -175,9 +191,56 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
         if (active.current !== result || !sameOwner(owner, expected)) return false;
         const finish = beginOperation();
         if (!finish) return false;
+        pendingProjection.current++;
         let success = false;
         try { success = await updateFromOperation(expected, update); return success; }
-        finally { finish(success); }
+        finally { pendingProjection.current--; finish(success); }
+      },
+      async acceptCommittedVersion(before, after) {
+        const reject = () => {
+          if (active.current === result && frozen.current && operations.current.size) failedOperations.current++;
+          return false;
+        };
+        if (active.current !== result || !sameOwner(owner, before.owner) || !sameOwner(owner, after.owner)
+          || !before.revision || !after.revision || initializing.current || dirty.current || pendingProjection.current) return reject();
+        let original: ComposerDraftSnapshot, target: ComposerDraftSnapshot;
+        try { original = structuredClone(before); target = structuredClone(after); } catch { return reject(); }
+        const observed = current.current;
+        const matches = (version: StoredDraft, expected: ComposerDraftSnapshot) => version.revision === expected.revision
+          && sameComposerDraftValue(version.draft, expected.draft);
+        if (!matches(observed, original) && !matches(observed, target)) return reject();
+        if (original.revision === target.revision && !sameComposerDraftValue(original.draft, target.draft)) return reject();
+        const finish = beginOperation(true);
+        if (!finish) return false;
+        pendingProjection.current++;
+        let success = false;
+        try {
+          if (!ready.current) return false;
+          await ready.current;
+          const waiting = queue.current, saved = lastWrite.current;
+          await waiting;
+          if (!await saved || saved !== lastWrite.current || waiting !== queue.current) return false;
+          const view = await readComposerDraftVersions(owner);
+          if (active.current !== result || current.current !== observed || dirty.current || pendingProjection.current !== 1
+            || saved !== lastWrite.current || waiting !== queue.current) return false;
+          const candidates = view.versions.filter(version => version.revision === target.revision);
+          if (candidates.length !== 1 || !sameComposerDraftValue(candidates[0]!.draft, target.draft)) return false;
+          const next = candidates[0]!;
+          current.current = next; setStored(next); setVersions(view.versions);
+          durableRevision.current = next.revision; dirty.current = false; preserveProjection.current = false; setSaving(false);
+          lastWrite.current = Promise.resolve(true); setStorageError(''); publish(result, next);
+          success = true;
+          return true;
+        } catch (reason) {
+          if (active.current === result) setStorageError('无法读取草稿版本，当前内容已保留：' + message(reason));
+          return false;
+        } finally {
+          pendingProjection.current--;
+          if (!success && active.current === result && current.current === observed) {
+            preserveProjection.current = true; refreshVersions.current?.();
+          }
+          finish(success);
+        }
       },
     };
     async function updateFromOperation(expected: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft): Promise<boolean> {
@@ -202,7 +265,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
             if (active.current !== result) return false;
             if (!view || current.current !== previous) continue;
             current.current = next; setStored(next); setVersions(view.versions);
-            durableRevision.current = next.revision; dirty.current = false; setSaving(false);
+            durableRevision.current = next.revision; dirty.current = false; preserveProjection.current = false; setSaving(false);
             lastWrite.current = Promise.resolve(true); setStorageError(''); publish(result, next);
             return true;
           } catch (reason) {
@@ -238,7 +301,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       setVersions(view.versions);
       if (current.current === initial) {
         current.current = first; setStored(first); lastWrite.current = Promise.resolve(true); durableRevision.current = first.revision;
-        dirty.current = false; setSaving(false); publish(controller, first);
+        dirty.current = false; preserveProjection.current = false; setSaving(false); publish(controller, first);
       } else if (retry > 0) {
         const value = current.current;
         void persist(controller, { ...initial, revision: durableRevision.current ?? initial.revision }, value);
@@ -247,11 +310,12 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     }).catch(reason => { if (valid()) setStorageError('无法恢复草稿，当前内容已保留：' + message(reason)); });
     const refresh = () => {
       if (dirty.current) return;
-      const serial = ++versionRead, observed = current.current;
+      const serial = ++versionRead, observed = current.current, mayAdopt = !pendingProjection.current && !preserveProjection.current;
       void readComposerDraftVersions(owner).then(view => {
         if (!valid() || serial !== versionRead || dirty.current || current.current !== observed) return;
         setVersions(view.versions);
-        if (!frozen.current && finished && !view.versions.some(value => value.revision === observed.revision) && view.versions.length === 1) {
+        if (mayAdopt && !pendingProjection.current && !preserveProjection.current && !frozen.current && finished
+          && !view.versions.some(value => value.revision === observed.revision) && view.versions.length === 1) {
           const next = view.versions[0]!;
           current.current = next; setStored(next); durableRevision.current = next.revision;
           lastWrite.current = Promise.resolve(true); publish(controller, next);
@@ -286,12 +350,13 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     if (current.current.revision === revision && view.versions[0]) {
       const next = view.versions[0];
       current.current = next; setStored(next); lastWrite.current = Promise.resolve(true); durableRevision.current = next.revision;
-      dirty.current = false; setSaving(false); publish(controller, next);
+      dirty.current = false; preserveProjection.current = false; setSaving(false); publish(controller, next);
     }
   }, [controller, owner, publish]);
   const selectVersion = useCallback(async (revision: string): Promise<void> => {
     const finish = beginOperation();
     if (!finish) return;
+    pendingProjection.current++;
     let success = false;
     try {
       await queue.current;
@@ -302,9 +367,9 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       const selected = view.versions.find(value => value.revision === revision);
       if (!selected) { setStorageError('该草稿版本已变化，请重新选择。'); setVersions(view.versions); return; }
       current.current = selected; setStored(selected); setVersions(view.versions); lastWrite.current = Promise.resolve(true);
-      durableRevision.current = selected.revision; dirty.current = false; setSaving(false);
+      durableRevision.current = selected.revision; dirty.current = false; preserveProjection.current = false; setSaving(false);
       setStorageError(''); publish(controller, selected); success = true;
-    } finally { finish(success); }
+    } finally { pendingProjection.current--; finish(success); }
   }, [beginOperation, controller, owner, publish]);
   useEffect(() => () => { generation.current += 1; }, []);
   useEffect(() => {

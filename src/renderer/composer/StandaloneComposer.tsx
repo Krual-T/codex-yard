@@ -41,7 +41,7 @@ export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSu
   onPrefillConsumed?: (id: string) => void;
   onDraftController?: (controller: ComposerDraftController | null) => void;
   onDraftChange?: (snapshot: ComposerDraftSnapshot) => void;
-  onRemoveReference?: (owner: ComposerDraftOwner, reference: ComposerReference) => Promise<void>;
+  onRemoveReference?: (owner: ComposerDraftOwner, reference: ComposerReference) => Promise<'handled' | void>;
 };
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -189,8 +189,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     setRemoving(previous => ({ controller, ids: new Set([...(previous?.controller === controller ? previous.ids : []), reference.id]) }));
     setError('');
     try {
-      await onRemoveReference?.(structuredClone(owner), structuredClone(reference));
-      if (!await updateDraftFromOperation(owner, value => ({ ...value, references: (value.references ?? []).filter(item =>
+      const result = await onRemoveReference?.(structuredClone(owner), structuredClone(reference));
+      if (result !== 'handled' && !await updateDraftFromOperation(owner, value => ({ ...value, references: (value.references ?? []).filter(item =>
         item.id !== reference.id || JSON.stringify(item) !== JSON.stringify(reference)) }))) throw new Error('Draft owner changed');
       success = true;
     } catch (reason) {

@@ -43,6 +43,49 @@ function repository(value: unknown): Repository {
   }
   return value as unknown as Repository;
 }
+
+/** Compare persisted structured values without discarding unknown fields. */
+export function sameComposerDraftValue(left: unknown, right: unknown): boolean {
+  const leftSeen = new WeakMap<object, object>(), rightSeen = new WeakMap<object, object>();
+  function same(a: unknown, b: unknown): boolean {
+    if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return Object.is(a, b);
+    const prototype = Object.getPrototypeOf(a);
+    if (prototype !== Object.getPrototypeOf(b) || prototype !== Object.prototype && prototype !== null && prototype !== Array.prototype) return false;
+    if (Array.isArray(a) && Array.isArray(b) && a.length !== b.length) return false;
+    if (leftSeen.has(a) || rightSeen.has(b)) return leftSeen.get(a) === b && rightSeen.get(b) === a;
+    leftSeen.set(a, b); rightSeen.set(b, a);
+    const keys = Object.keys(a);
+    return keys.length === Object.keys(b).length && keys.every(key => Object.hasOwn(b, key)
+      && same((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]));
+  }
+  return same(left, right);
+}
+
+/** Prepare one exact active-version replacement for an existing root atom transaction. */
+export function updateComposerDraftVersionInRoot(root: unknown, before: ComposerDraftSnapshot,
+  change: (draft: ComposerDraft) => ComposerDraft, nextRevision: string): { root: unknown; after: ComposerDraftSnapshot; changed: boolean } {
+  if (!before || !isOwner(before.owner) || typeof before.revision !== 'string' || !before.revision
+    || typeof nextRevision !== 'string' || !nextRevision) throw new Error('草稿版本或身份无效。');
+  const store = repository(root), entry = entryFor(store, before.owner);
+  const matches = entry.versions.flatMap((version, index) =>
+    sameOwner(entry, version.owner, before.owner) && version.revision === before.revision ? [index] : []);
+  if (matches.length !== 1) throw new Error('草稿版本已改变，请核对后重试。');
+  const index = matches[0]!, previous = entry.versions[index]!;
+  if (!sameComposerDraftValue(previous.draft, before.draft)) throw new Error('草稿内容已改变，请核对后重试。');
+  const changed = change(structuredClone(previous.draft));
+  if (!record(changed)) throw new Error('草稿更新无法无损保存。');
+  const draft = { ...previous.draft, ...structuredClone(changed) };
+  const candidate = { ...previous, draft };
+  if (!isVersion(candidate)) throw new Error('草稿更新无法无损保存。');
+  if (sameComposerDraftValue(previous.draft, draft)) return { root, after: snapshot(previous, before.owner), changed: false };
+  if ([...entry.versions, ...entry.retained].some(version => version.revision === nextRevision)) {
+    throw new Error('草稿新版本已存在，请重新核对。');
+  }
+  const next: Version = { ...candidate, revision: nextRevision, placeholder: false };
+  const versions = [...entry.versions]; versions[index] = next;
+  return { root: replaceEntry(store, before.owner, { ...entry, versions }), after: snapshot(next, before.owner), changed: true };
+}
+
 function importArchive(): Repository {
   const archive: Record<string, string> = {};
   for (let index = 0; index < localStorage.length; index += 1) {
