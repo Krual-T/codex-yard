@@ -24,6 +24,9 @@ function fixture(loadSnapshot?: () => Promise<StatsigConfigurationSnapshot | nul
     cacheSource = 'Cache';
     values = 'uninitialized';
     updates = 0;
+    modelAvailability = { value: { available_models: ['old-model'], use_hidden_models: true } };
+    otherConfig = { value: { enabled: true } };
+    getDynamicConfig(name: string): { value: Record<string, unknown> } { return name === '107580212' ? this.modelAvailability : this.otherConfig; }
     dataAdapter = {
       getDataSync: (_user: StatsigStartupUser) => { calls.reads++; return this.cache; },
       setDataLegacy: (data: string, user: StatsigStartupUser) => {
@@ -75,6 +78,19 @@ test('matching cached evaluations make the client ready while real refresh is pe
   assert.equal(h.client.values, 'Network');
   assert.equal(h.client.updates, 1);
   assert.deepEqual(h.errors, []);
+});
+
+test('model visibility follows the backend across cached and refreshed catalogs without modifying evaluations', async () => {
+  const h = fixture(), original = structuredClone(h.client.modelAvailability);
+  await h.client.initializeAsync();
+  assert.equal(h.client.getDynamicConfig('107580212').value.use_hidden_models, false);
+  assert.deepEqual(h.client.modelAvailability, original);
+  assert.equal(h.client.getDynamicConfig('unrelated'), h.client.otherConfig);
+  h.client.modelAvailability = { value: { available_models: ['another-model'], use_hidden_models: true } };
+  h.remote.resolve(success('Network'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.client.getDynamicConfig('107580212').value.use_hidden_models, false);
+  assert.equal(h.client.modelAvailability.value.use_hidden_models, true);
 });
 
 test('first startup without a cache keeps the SDK network initialization and its options', async () => {

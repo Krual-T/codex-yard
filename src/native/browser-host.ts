@@ -2,7 +2,7 @@ import { record, updatedAtom } from './protocol.ts';
 import type { HostMessage } from './protocol.ts';
 import { BrowserHttpFetch } from './browser-http-fetch.ts';
 import { BrowserFiles } from './browser-files.ts';
-import { BrowserClipboard } from './browser-clipboard.ts';
+import { BrowserClipboard, writeClipboardText } from './browser-clipboard.ts';
 import type { ClipboardImage } from './browser-clipboard.ts';
 import { BrowserTerminal, registerTerminalShortcut, terminalRpcService } from './browser-terminal.ts';
 import type { TerminalEvent } from './terminal-protocol.ts';
@@ -210,6 +210,9 @@ window.addEventListener('message', async event => {
   class FileAttachments extends original.Eot {
     persistImageFileToTemp(value: ClipboardImage) { return clipboard.persistImageFileToTemp(value); }
   }
+  class Clipboard extends original.Eot {
+    writeText(text: string) { return writeClipboardText(text); }
+  }
   class OpenIn extends original.Eot {
     open(value: Parameters<BrowserFiles['open']>[0]) { return files.open(value); }
   }
@@ -221,7 +224,7 @@ window.addEventListener('message', async event => {
   const browserService = chromeRpcService(original.Eot);
   const visualizations = visualizationService(original.Eot, requestHost);
   class AppHost extends original.Eot {
-    get services() { return { ...(isMiniWindow ? { avatarOverlay: mini.service(original.Eot), settings: mini.settings(original.Eot, requestHost) } : {}), appInfo: new AppInfo(), httpFetch: new HttpFetch(), workspaceFiles: new WorkspaceFiles(), fileAttachments: new FileAttachments(), openIn: new OpenIn(), threadProjectAssignments: new ThreadProjects(), customAvatars: new CustomAvatars(), terminal: terminalService, browserHost: browserService, visualizations, requestUserInputAutoResolution: {} }; }
+    get services() { return { ...(isMiniWindow ? { avatarOverlay: mini.service(original.Eot), settings: mini.settings(original.Eot, requestHost) } : {}), appInfo: new AppInfo(), httpFetch: new HttpFetch(), workspaceFiles: new WorkspaceFiles(), fileAttachments: new FileAttachments(), clipboard: new Clipboard(), openIn: new OpenIn(), threadProjectAssignments: new ThreadProjects(), customAvatars: new CustomAvatars(), terminal: terminalService, browserHost: browserService, visualizations, requestUserInputAutoResolution: {} }; }
     onRpcBroken() {}
   }
   original.kot(event.data.port, new AppHost());

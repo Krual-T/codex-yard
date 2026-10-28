@@ -18,6 +18,7 @@ export interface StatsigStartupResult {
 
 export interface StatsigStartupClient {
   loadingStatus: string;
+  getDynamicConfig(name: string, options?: unknown): { value: Record<string, unknown> };
   dataAdapter: {
     getDataSync(user: StatsigStartupUser): {
       data: string;
@@ -55,6 +56,16 @@ export function installStatsigStartup(Client: StatsigStartupConstructor, core: S
     if (this.loadingStatus !== 'Uninitialized') {
       return initializeAsync.call(this, options);
     }
+    // The pinned desktop catalog can replace the daemon's model visibility
+    // with an older allowlist. Yard follows each backend's `hidden` field.
+    // Adapt the evaluated value, leaving saved and refreshed responses intact.
+    const getDynamicConfig = this.getDynamicConfig.bind(this);
+    this.getDynamicConfig = (name, configOptions) => {
+      const config = getDynamicConfig(name, configOptions);
+      return name === '107580212'
+        ? { ...config, value: { ...config.value, use_hidden_models: false } }
+        : config;
+    };
     performance.mark('workbench-config-initialize');
 
     const { user, options: clientOptions } = this.getContext();
