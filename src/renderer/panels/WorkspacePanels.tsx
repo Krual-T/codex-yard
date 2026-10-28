@@ -161,7 +161,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
       let recovery: FileSaveRecovery | undefined, storageError: string | undefined;
       try { recovery = await queueRecovery(key, async () => {
         const stored = await readFileRecovery(key);
-        if (content && stored && !unresolved(stored) && stored.draft === stored.saved) {
+        if (content && stored && !unresolved(stored) && stored.phase !== 'conflict' && stored.draft === stored.saved) {
           await discardFileRecovery(key, stored);
           return undefined;
         }
@@ -178,6 +178,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
         revision: recovery?.revision ?? 0, recovery, storageError: !!storageError,
         error: storageError ? `File recovery is unavailable: ${storageError}` : unresolved(recovery)
           ? 'Save result is unknown. Check the original operation before saving again.'
+          : recovery?.phase === 'conflict' ? 'File changed on disk. Keep or copy your changes before reloading.'
           : readError ? `Could not read the file: ${readError}`
             : recovery && (disk?.kind !== 'text' || recovery.saved !== disk.text) && recovery.draft !== recovery.saved
               ? 'File changed on disk. Keep or copy your changes before reloading.' : undefined,
@@ -287,7 +288,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
 
   async function save(tab: FileTab) {
     const current = tabsRef.current.find(item => item.key === tab.key);
-    if (closingRef.current || !current || current.loading || current.saving || unresolved(current.recovery) || current.storageError || current.content?.kind !== 'text' || !isDirty(current)) return;
+    if (closingRef.current || !current || current.loading || current.saving || unresolved(current.recovery) || current.recovery?.phase === 'conflict' || current.storageError || current.content?.kind !== 'text' || !isDirty(current)) return;
     const { saved: expectedContents, draft: contents, loadId } = current;
     const id = crypto.randomUUID();
     const recovery: FileSaveRecovery = { ...current.recovery, id, checkId: id, submitted: true, phase: 'pending', contents,
@@ -315,7 +316,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
         saved: result.outcome === 'saved' ? contents : item.saved,
         content: result.outcome === 'saved' ? { kind: 'text', text: contents } : item.content,
         error: result.outcome === 'blocked' ? 'Another save for this file has an unknown result. Check its original operation before saving.'
-          : result.outcome === 'conflict' ? 'File changed on disk. Reload or copy your changes before saving.' : undefined,
+          : result.outcome === 'conflict' ? 'File changed on disk. Keep or copy your changes before reloading.' : undefined,
       }));
     } catch (error) {
       const knownFailure = typeof error === 'object' && error !== null && 'uncertain' in error && error.uncertain === false;
@@ -361,7 +362,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
         ...item, saving: false, recovery: { ...stored, draft: item.draft, revision: item.revision },
         saved: saved ? recovery.contents : item.saved,
         content: saved ? { kind: 'text', text: recovery.contents } : item.content,
-        error: saved || unchanged ? undefined : 'File changed on disk. Reload or copy your changes before saving.',
+        error: phase === 'conflict' ? 'File changed on disk. Keep or copy your changes before reloading.' : undefined,
       }));
     } catch (error) {
       updateTabs(previous => previous.map(item => item.key !== tab.key || item.loadId !== loadId || item.recovery?.id !== recovery.id ? item : {
@@ -405,6 +406,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
       updateTabs(previous => previous.map(item => item.key !== key || item.loadId !== tab.loadId ? item : {
         ...item, recovery: reconciled, storageError: false,
         error: unresolved(reconciled) ? 'Save result is unknown. Check the original operation before saving again.'
+          : reconciled?.phase === 'conflict' ? 'File changed on disk. Keep or copy your changes before reloading.'
           : disk?.kind !== 'text' ? 'Could not reread this file. Keep or copy your edits.'
             : disk.text !== item.saved ? 'File changed on disk. Reload or copy your changes before saving.' : undefined,
       }));
@@ -524,7 +526,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
           <div className="yard-file-toolbar">
             <span className="yard-file-path" title={active.path}>{active.path}</span>
             {active.content?.kind === 'text' ? <button type="button" className="yard-panel-icon" title={t('Save file')} aria-label={t('Save file')}
-              disabled={!isDirty(active) || active.saving || active.loading || unresolved(active.recovery) || active.storageError} onClick={() => void save(active)}><Save /></button> : null}
+              disabled={!isDirty(active) || active.saving || active.loading || unresolved(active.recovery) || active.recovery?.phase === 'conflict' || active.storageError} onClick={() => void save(active)}><Save /></button> : null}
             <button type="button" className="yard-panel-icon" title={t('Reload file')} aria-label={t('Reload file')} disabled={active.saving || active.loading || unresolved(active.recovery) || active.storageError} onClick={() => reload(active)}><RotateCw /></button>
             <button type="button" className="yard-panel-icon" title={t('Download file')} aria-label={t('Download file')} onClick={() => void download(active)}><Download /></button>
             {onReference ? <button type="button" className="yard-panel-icon" title={t('Add file to conversation')} aria-label={t('Add file to conversation')}
