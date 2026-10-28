@@ -34,9 +34,16 @@
     "test:terminal:ui": "node --use-env-proxy scripts/verify-terminal.ts"
   },
   "dependencies": {
-    "katex": "0.16.47",
+    "katex": "0.19.1",
     "lucide-react": "0.468.0",
-    "mermaid": "11.12.0",
+    "mermaid": "11.17.2",
+    "prosemirror-commands": "1.7.2",
+    "prosemirror-history": "1.5.1",
+    "prosemirror-keymap": "1.2.3",
+    "prosemirror-markdown": "1.13.9",
+    "prosemirror-model": "1.25.12",
+    "prosemirror-state": "1.4.4",
+    "prosemirror-view": "1.42.8",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "react-markdown": "10.1.0",
@@ -47,6 +54,9 @@
     "remark-gfm": "4.0.1",
     "remark-math": "6.0.0",
     "ws": "8.21.3"
+  },
+  "overrides": {
+    "katex": "0.19.1"
   },
   "devDependencies": {
     "@types/node": "26.2.0",
