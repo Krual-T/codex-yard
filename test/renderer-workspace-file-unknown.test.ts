@@ -51,7 +51,7 @@ test('file recovery retains the original pending operation and later edits acros
     import { EditorView } from '@codemirror/view';
     import { BrowserWorkbenchClient } from './src/renderer/app/client.ts';
     import { WorkspacePanels } from './src/renderer/panels/WorkspacePanels.tsx';
-    import { readFileRecovery } from './src/renderer/panels/file-save-recovery.ts';
+    import { readFileRecovery, updateFileRecovery } from './src/renderer/panels/file-save-recovery.ts';
     import { updateBrowserAtom } from './src/renderer/storage/ui-atoms.ts';
     const client = new BrowserWorkbenchClient();
     const host = client.host.bind(client);
@@ -97,6 +97,12 @@ test('file recovery retains the original pending operation and later edits acros
       },
       clearRecovery(scope, target) {
         return updateBrowserAtom('codex-yard.file-save-recovery.v1:' + JSON.stringify([scope,'local',cwd,target]), () => null);
+      },
+      async tryUnchangedRestore(scope, target, confirmed) {
+        try {
+          await updateFileRecovery(JSON.stringify([scope,'local',cwd,target]), confirmed.id, value => ({...value}), confirmed);
+          return null;
+        } catch (error) { return error.message; }
       },
       failNextAtomTransaction() {
         const original = IDBDatabase.prototype.transaction;
@@ -427,6 +433,9 @@ test('file recovery retains the original pending operation and later edits acros
       request:{id:'recreate-other',scopeId:'recreate',hostId:'local',cwd,kind:'file',path}}), { cwd: project, path: recreatePath });
     await newerPage.getByRole('textbox', { name: `File: ${recreatePath}` }).waitFor();
     assert.equal(await newerPage.evaluate(async path => (window as any).fixture.fileRecovery('recreate', path), recreatePath), undefined);
+    assert.match(await page.evaluate(async ({ path, confirmed }) => (window as any).fixture.tryUnchangedRestore('recreate', path, confirmed),
+      { path: recreatePath, confirmed }), /File recovery changed in another page/);
+    assert.equal(await page.evaluate(async path => (window as any).fixture.fileRecovery('recreate', path), recreatePath), undefined);
     await page.evaluate(() => (window as any).fixture.edit(1, 'Y'));
     await page.waitForFunction(async path => (await (window as any).fixture.fileRecovery('recreate', path))?.draft === 'XYbase\n', recreatePath);
     const recreated = await page.evaluate(async path => (window as any).fixture.fileRecovery('recreate', path), recreatePath);

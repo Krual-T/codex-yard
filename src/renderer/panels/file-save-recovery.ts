@@ -66,9 +66,12 @@ export async function claimFileRecovery(key: string, previous: FileSaveRecovery 
 export async function updateFileRecovery(key: string, id: string, update: (current: FileSaveRecovery) => FileSaveRecovery,
   confirmed?: FileSaveRecovery) {
   const result = await updateBrowserAtom(keyFor(key), value => {
-    const current = recovery(value) ?? (confirmed?.id === id && confirmed.phase !== 'pending' && confirmed.phase !== 'unknown' ? confirmed : undefined);
+    const stored = recovery(value);
+    const current = stored ?? (confirmed?.id === id && confirmed.phase !== 'pending' && confirmed.phase !== 'unknown' ? confirmed : undefined);
     if (!current || current.id !== id) throw new Error('File recovery changed in another page. Keep or copy this edit before reopening.');
-    return update(current);
+    const next = update(current);
+    if (!stored && next.revision <= current.revision) throw new Error('File recovery changed in another page. Keep or copy this edit before reopening.');
+    return next;
   });
   return recovery(result)!;
 }
@@ -78,7 +81,7 @@ export async function reconcileFileRecovery(key: string, expected: FileSaveRecov
   const result = await updateBrowserAtom(keyFor(key), value => {
     const current = recovery(value);
     if (!sameFileRecovery(current, expected)) throw new Error('File recovery changed in another page. Keep or copy this edit before closing.');
-    const source = current ?? (restore && restore.phase !== 'pending' && restore.phase !== 'unknown' ? restore : undefined);
+    const source = current ?? (restore && restore.phase !== 'pending' && restore.phase !== 'unknown' && revision > restore.revision ? restore : undefined);
     return source ? { ...source, draft, revision } : value;
   });
   return recovery(result);

@@ -414,7 +414,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
       const confirmed = confirmedRecoveries.current.get(key);
       const acceptStored = !hadConfirmation && current.revision === 0;
       const restore = hadConfirmation && !stored && confirmed && !unresolved(confirmed)
-        && current.recovery?.id === confirmed.id && current.revision >= confirmed.revision ? confirmed : undefined;
+        && current.recovery?.id === confirmed.id && current.revision > confirmed.revision ? confirmed : undefined;
       if (!acceptStored && (hadConfirmation && !sameFileRecovery(stored, confirmed) && !restore
         || stored && current.recovery?.id !== stored.id || current.recovery && !stored && !restore
         || stored && current.revision < stored.revision)) {
