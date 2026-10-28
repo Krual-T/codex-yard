@@ -6,6 +6,7 @@ import { languages } from '@codemirror/language-data';
 import { closeSearchPanel, getSearchQuery, openSearchPanel, search, searchKeymap, searchPanelOpen, SearchQuery, setSearchQuery } from '@codemirror/search';
 import { Compartment, EditorState, Prec } from '@codemirror/state';
 import { EditorView, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from '@codemirror/view';
+import { resolveCodeTheme } from '../appearance/code-theme.ts';
 import { editorText } from './file-service.ts';
 import { fileFormat, fileText } from './editor-format.ts';
 import { panelError, usePanelText } from '../panels/panel-i18n.ts';
@@ -14,6 +15,7 @@ interface Props {
   path: string;
   text: string;
   theme: 'light' | 'dark';
+  codeThemeId?: string;
   visible: boolean;
   readOnly: boolean;
   wrap?: boolean;
@@ -33,7 +35,19 @@ const darkHighlightStyle = HighlightStyle.define(defaultHighlightStyle.specs.map
   const color = typeof spec.color === 'string' ? darkColors[spec.color] : undefined;
   return color ? { ...spec, color } : spec;
 }));
-const editorTheme = (dark: boolean) => [EditorView.theme({}, { dark }), syntaxHighlighting(dark ? darkHighlightStyle : defaultHighlightStyle)];
+const editorTheme = (mode: 'light' | 'dark', id?: string) => {
+  const resolved = resolveCodeTheme(mode, id);
+  if (resolved.id === 'codex') return [EditorView.theme({}, { dark: mode === 'dark' }), syntaxHighlighting(mode === 'dark' ? darkHighlightStyle : defaultHighlightStyle)];
+  const { keyword, atom, literal, string, definition, type, comment, invalid } = resolved.colors;
+  const colors: Record<string, string> = { '#404740': comment, '#708': keyword, '#219': atom, '#164': literal,
+    '#a11': string, '#e40': string, '#00f': definition, '#30a': definition, '#085': type,
+    '#167': type, '#256': type, '#00c': definition, '#940': comment, '#f00': invalid };
+  const highlight = HighlightStyle.define(defaultHighlightStyle.specs.map(spec => {
+    const color = typeof spec.color === 'string' ? colors[spec.color] : undefined;
+    return color ? { ...spec, color } : spec;
+  }));
+  return [EditorView.theme({}, { dark: mode === 'dark' }), syntaxHighlighting(highlight)];
+};
 const searchPhrases = ['Find', 'Replace', 'next', 'previous', 'all', 'match case', 'regexp', 'by word', 'replace',
   'replace all', 'close', 'Go to line', 'go', 'current match', 'on line', 'replaced match on line $', 'replaced $ matches'];
 
@@ -93,7 +107,7 @@ export function CodeEditor(props: Props) {
           attributes.current.of(EditorView.contentAttributes.of({ 'aria-label': t('File: {path}', { path: props.path }), role: 'textbox', 'aria-multiline': 'true', spellcheck: 'false' })),
           phrases.current.of(EditorState.phrases.of(Object.fromEntries(searchPhrases.map(key => [key, t(key)])))),
           editable.current.of([EditorState.readOnly.of(props.readOnly), EditorView.editable.of(!props.readOnly)]),
-          theme.current.of(editorTheme(props.theme === 'dark')),
+          theme.current.of(editorTheme(props.theme, props.codeThemeId)),
           wrapping.current.of(props.wrap ? EditorView.lineWrapping : []),
           language.current.of([]),
           Prec.highest(keymap.of([
@@ -131,8 +145,8 @@ export function CodeEditor(props: Props) {
     view.current?.dispatch({ effects: editable.current.reconfigure([EditorState.readOnly.of(props.readOnly), EditorView.editable.of(!props.readOnly)]) });
   }, [props.readOnly]);
   useEffect(() => {
-    view.current?.dispatch({ effects: theme.current.reconfigure(editorTheme(props.theme === 'dark')) });
-  }, [props.theme]);
+    view.current?.dispatch({ effects: theme.current.reconfigure(editorTheme(props.theme, props.codeThemeId)) });
+  }, [props.theme, props.codeThemeId]);
   useEffect(() => {
     view.current?.dispatch({ effects: wrapping.current.reconfigure(props.wrap ? EditorView.lineWrapping : []) });
   }, [props.wrap]);

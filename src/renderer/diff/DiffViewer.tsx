@@ -11,11 +11,12 @@ import './diff.css';
 export interface DiffViewerProps {
   diff?: string;
   path?: string;
+  markerStyle?: 'color' | 'symbols';
   onOpenFile?(path: string, line?: number): void;
   onReference?(draft: ComposerDraft): void;
 }
 
-export function DiffViewer({ diff, path, onOpenFile, onReference }: DiffViewerProps) {
+export function DiffViewer({ diff, path, markerStyle = 'color', onOpenFile, onReference }: DiffViewerProps) {
   const t = usePanelText();
   const rows = useMemo(() => diff == null ? [] : diffRows(diff, path), [diff, path]);
   const splitRows = useMemo(() => splitDiffRows(rows), [rows]);
@@ -31,6 +32,14 @@ export function DiffViewer({ diff, path, onOpenFile, onReference }: DiffViewerPr
       aria-label={t('Open {path} line {line}', {path: row.path, line: row.newLine})} onClick={() => onOpenFile(row.path!, row.newLine)}>{row.newLine}</button> :
       <span className="yard-diff-number">{row.newLine ?? ''}</span>;
   }
+  function marker(row?: DiffRow) {
+    const kind = row?.kind === 'add' || row?.kind === 'delete' ? row.kind : undefined;
+    return <span className={`yard-diff-marker${kind ? ` is-${kind}` : ''}`}
+      role={kind ? 'img' : undefined} aria-label={kind ? t(kind === 'add' ? 'Added line' : 'Removed line') : undefined} aria-hidden={kind ? undefined : true}>
+      {markerStyle === 'symbols' ? kind === 'add' ? '+' : kind === 'delete' ? '-' : '' : ''}
+    </span>;
+  }
+  const text = (row?: DiffRow) => row ? row.kind === 'add' || row.kind === 'delete' || row.kind === 'context' ? row.text.slice(1) || ' ' : row.text || ' ' : ' ';
   return <div className="yard-diff-viewer">
     <div className="yard-file-toolbar">
       <span className="yard-file-path" title={path ?? t('Changes')}>{path ?? t('Changes')}</span>
@@ -46,19 +55,19 @@ export function DiffViewer({ diff, path, onOpenFile, onReference }: DiffViewerPr
     </div>
     {error ? <div className="yard-file-error" role="alert">{panelError(t, error)}</div> : null}
     {diff == null ? <div className="yard-file-status" role="status">{t('Diff is unavailable')}</div> :
-      <div className={`yard-diff-lines${wrap ? ' is-wrapped' : ''}`} aria-label={t('Diff')}>{layout === 'unified' ? rows.map((row, index) => <div className={`yard-diff-line is-${row.kind}`} key={index}>
+      <div className={`yard-diff-lines${wrap ? ' is-wrapped' : ''}`} data-marker-style={markerStyle} aria-label={t('Diff')}>{layout === 'unified' ? rows.map((row, index) => <div className={`yard-diff-line is-${row.kind}`} key={index}>
         <span className="yard-diff-number">{row.oldLine ?? ''}</span>
         {newLine(row)}
-        <span className="yard-diff-text">{row.text || ' '}</span>
+        {marker(row)}<span className="yard-diff-text">{text(row)}</span>
       </div>) : splitRows.map((pair, index) => pair.kind === 'meta' ?
         <div className={`yard-diff-line is-${pair.row.kind}`} key={index}><span className="yard-diff-text">{pair.row.text || ' '}</span></div> :
         <div className="yard-diff-split-row" key={index}>
           <div className={`yard-diff-side is-${pair.old?.kind ?? 'empty'}`}>
-            <span className="yard-diff-number">{pair.old?.oldLine ?? ''}</span><span className="yard-diff-text">{pair.old?.text ?? ' '}</span>
+            <span className="yard-diff-number">{pair.old?.oldLine ?? ''}</span>{marker(pair.old)}<span className="yard-diff-text">{text(pair.old)}</span>
           </div>
           <div className={`yard-diff-side is-${pair.current?.kind ?? 'empty'}`}>
             {pair.current ? newLine(pair.current) : <span className="yard-diff-number" />}
-            <span className="yard-diff-text">{pair.current?.text ?? ' '}</span>
+            {marker(pair.current)}<span className="yard-diff-text">{text(pair.current)}</span>
           </div>
         </div>)}</div>}
   </div>;

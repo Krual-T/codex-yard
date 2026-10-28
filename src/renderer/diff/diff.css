@@ -3,6 +3,10 @@
 .yard-diff-side.is-add { background: color-mix(in srgb, var(--yard-diff-added, #27904c) 18%, var(--yard-panel-background)); }
 .yard-diff-side.is-delete { background: color-mix(in srgb, var(--yard-diff-removed, #bf3a32) 18%, var(--yard-panel-background)); }
 .yard-diff-side.is-empty { background: var(--yard-panel-subtle); }
+.yard-diff-marker { display: flex; flex: 0 0 16px; align-items: center; justify-content: center; user-select: none; }
+.yard-diff-marker.is-add { color: var(--yard-diff-added, #27904c); }
+.yard-diff-marker.is-delete { color: var(--yard-diff-removed, #bf3a32); }
+.yard-diff-lines[data-marker-style="color"] .yard-diff-marker:is(.is-add, .is-delete)::before { content: ''; width: 3px; align-self: stretch; background: currentColor; }
 .yard-diff-side .yard-diff-text { min-width: 0; overflow-x: auto; }
 .yard-diff-lines.is-wrapped .yard-diff-line { width: 100%; }
 .yard-diff-lines.is-wrapped .yard-diff-text { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }

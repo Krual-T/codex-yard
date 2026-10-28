@@ -532,7 +532,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
 
   const patch = '@@ -1,3 +1,3 @@\n first\n-old\n+new\n third\n';
   await page.evaluate(diff => (window as any).fixture.render({ request: { id: 'diff-1', kind: 'diff', path: 'diff-target.txt', diff } }), patch);
-  await page.getByLabel('Diff').getByText('+new', { exact: true }).waitFor();
+  await page.getByLabel('Diff').getByText('new', { exact: true }).waitFor();
   await page.getByRole('button', { name: 'Switch to split diff' }).click();
   await page.getByRole('button', { name: 'Enable word wrap' }).click();
   await page.getByRole('tab', { name: /notes.txt/ }).click();

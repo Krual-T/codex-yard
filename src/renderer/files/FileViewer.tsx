@@ -21,6 +21,7 @@ interface Props {
   content: FileContents;
   text: string;
   theme: 'light' | 'dark';
+  codeThemeId?: string;
   visible: boolean;
   findRequest?: number;
   onFindRequestConsumed?(id: number): void;

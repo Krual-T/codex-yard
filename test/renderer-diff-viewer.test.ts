@@ -56,7 +56,7 @@ test('diff layout and wrap controls preserve real change lines and open the targ
     await page.goto('http://127.0.0.1:47833/');
     await page.addStyleTag({content:bundle.outputFiles.find(file => file.path.endsWith('.css'))!.text});
     await page.addScriptTag({content:bundle.outputFiles.find(file => file.path.endsWith('.js'))!.text});
-    await page.getByText('+new three', {exact:true}).waitFor();
+    await page.getByText('new three', {exact:true}).waitFor();
     await page.getByRole('button', {name:'Copy diff'}).click();
     assert.equal(await page.evaluate(() => navigator.clipboard.readText()), patch);
     await page.getByRole('button', {name:'Switch to split diff'}).click();
@@ -69,7 +69,7 @@ test('diff layout and wrap controls preserve real change lines and open the targ
     await page.getByRole('button', {name:'Open a.txt line 4'}).click();
     assert.deepEqual(await page.evaluate(() => (window as any).opened), [{path:'a.txt',line:4}]);
     await page.getByRole('button', {name:'Switch to unified diff'}).click();
-    assert.equal(await page.getByText('+new three', {exact:true}).count(), 1);
+    assert.equal(await page.getByText('new three', {exact:true}).count(), 1);
     assert.deepEqual(errors, []);
     completed = true;
   } catch (error) {

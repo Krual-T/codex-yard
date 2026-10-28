@@ -47,7 +47,7 @@
 .yard-file-find span { overflow: hidden; color: var(--yard-panel-muted); text-overflow: ellipsis; white-space: nowrap; }
 .yard-file-editor { flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .yard-file-editor .cm-editor { height: 100%; color: var(--yard-panel-foreground); background: var(--yard-panel-background); }
-.yard-file-editor .cm-scroller { overflow: auto; font: var(--yard-panel-code-size, 12px)/var(--yard-panel-code-line-height, 18px) var(--yard-panel-code-font, var(--yard-code-font, ui-monospace, monospace)); }
+.yard-file-editor .cm-scroller { overflow: auto; font: var(--yard-panel-code-size, var(--yard-code-size, 12px))/var(--yard-panel-code-line-height, var(--yard-code-line-height, calc(var(--yard-code-size, 12px) * 1.5))) var(--yard-panel-code-font, var(--yard-code-font, ui-monospace, monospace)); }
 .yard-file-editor .cm-content { font: inherit; caret-color: currentColor; }
 .yard-file-editor .cm-gutters { color: var(--yard-panel-muted); background: var(--yard-panel-subtle); border-color: var(--yard-panel-border); }
 .yard-file-editor .cm-activeLine, .yard-file-editor .cm-activeLineGutter { background: var(--yard-panel-hover); }

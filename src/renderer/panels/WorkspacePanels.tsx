@@ -29,6 +29,8 @@ export interface WorkspacePanelAppearance {
   codeLineHeight: number;
   /** Defaults to the App's inherited --yard-code-font. */
   codeFontFamily?: string;
+  codeThemeId?: string;
+  diffMarkerStyle?: 'color' | 'symbols';
 }
 export interface WorkspacePanelsProps {
   client: WorkbenchClient;
@@ -41,6 +43,8 @@ export interface WorkspacePanelsProps {
   request: WorkspacePanelRequest | null;
   onRequestConsumed(id: string): void;
   onClose(): void;
+  /** Selected tab in the current scope, or null when none is selected. */
+  onActiveKindChange?(kind: 'file' | 'diff' | 'terminal' | null): void;
   onReference?(draft: ComposerDraft): void;
   /** Includes drafts and pending or uncertain saves in every retained scope. */
   onDirtyChange?(dirty: boolean): void;
@@ -73,7 +77,7 @@ const unresolved = (recovery?: FileSaveRecovery) => recovery?.phase === 'pending
 const retainRecovery = (recovery?: FileSaveRecovery) => unresolved(recovery) || recovery?.phase === 'conflict';
 const isDirty = (tab: FileTab) => tab.content?.kind === 'text' && (tab.draft !== tab.saved || retainRecovery(tab.recovery) || !!tab.storageError);
 
-export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appearance, request, onRequestConsumed, onClose, onReference, onDirtyChange, onRecoveryBarrier }: WorkspacePanelsProps) {
+export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appearance, request, onRequestConsumed, onClose, onReference, onDirtyChange, onRecoveryBarrier, onActiveKindChange }: WorkspacePanelsProps) {
   const t = usePanelText();
   const [tabs, setTabs] = useState<FileTab[]>([]);
   const [terminals, setTerminals] = useState<TerminalTab[]>([]);
@@ -99,6 +103,8 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
   const scopeKey = JSON.stringify([scopeId, hostId, cwd]);
   const currentScope = useRef(scopeKey);
   currentScope.current = scopeKey;
+  const activeKindCallback = useRef(onActiveKindChange);
+  activeKindCallback.current = onActiveKindChange;
   const select = useCallback((key: string | undefined) => {
     if (key) selections.current.set(scopeKey, key);
     else selections.current.delete(scopeKey);
@@ -487,6 +493,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
       setDiffs([]);
       selections.current.clear();
       onDirtyChange?.(false);
+      onActiveKindChange?.(null);
       onClose();
     } catch (error) {
       setPanelError(errorMessage(error));
@@ -500,6 +507,11 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
   const activeTerminal = visibleTerminals.find(tab => tab.key === selected);
   const visibleDiffs = diffs.filter(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd);
   const activeDiff = visibleDiffs.find(tab => tab.key === selected);
+  const activeKind = active ? 'file' : activeTerminal ? 'terminal' : activeDiff ? 'diff' : null;
+  useEffect(() => {
+    if (selectedRef.current === selected) onActiveKindChange?.(activeKind);
+  }, [activeKind, scopeKey, selected, onActiveKindChange]);
+  useEffect(() => () => { activeKindCallback.current?.(null); }, []);
   const fontSize = Number.isFinite(appearance.codeFontSize) && appearance.codeFontSize > 0 ? appearance.codeFontSize : 12;
   const lineHeight = Number.isFinite(appearance.codeLineHeight) && appearance.codeLineHeight > 0 ? appearance.codeLineHeight : 18;
   const style = { '--yard-panel-code-size': `${fontSize}px`, '--yard-panel-code-line-height': `${lineHeight}px`,
@@ -547,7 +559,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
             ref={handle => { if (handle) terminalHandles.current.set(tab.key, handle); else terminalHandles.current.delete(tab.key); }} />
         </div>)}
         {diffs.map(tab => <div className="yard-diff-container" key={tab.key} hidden={tab.key !== activeDiff?.key}>
-          <DiffViewer diff={tab.diff} path={tab.path ? resolveFilePath(tab.cwd, tab.path) : undefined}
+          <DiffViewer diff={tab.diff} path={tab.path ? resolveFilePath(tab.cwd, tab.path) : undefined} markerStyle={appearance.diffMarkerStyle}
             onOpenFile={tab.key === activeDiff?.key ? openFile : undefined} onReference={tab.key === activeDiff?.key ? onReference : undefined} />
         </div>)}
         {active ? <>
@@ -569,7 +581,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
         </> : !activeTerminal && !activeDiff ? <div className="yard-file-status">{t('Select a file')}</div> : null}
         {tabs.filter(tab => tab.content?.kind === 'text' && !tab.loading).map(tab => <div className="yard-editor-container" key={`${tab.key}:${tab.loadId}`} hidden={tab.key !== active?.key}>
           <FileViewer client={client} hostId={tab.hostId} cwd={tab.cwd} threadId={tab.scopeId === scopeId ? threadId : undefined}
-            onOpenFile={tab.key === active?.key ? openFile : undefined} path={tab.path} content={tab.content!} text={tab.draft} location={tab.location} theme={appearance.theme} visible={tab.key === active?.key}
+            onOpenFile={tab.key === active?.key ? openFile : undefined} path={tab.path} content={tab.content!} text={tab.draft} location={tab.location} theme={appearance.theme} codeThemeId={appearance.codeThemeId} visible={tab.key === active?.key}
             findRequest={findRequest?.key === tab.key ? findRequest.id : undefined}
             onFindRequestConsumed={id => setFindRequest(previous => previous?.id === id ? undefined : previous)}
             readOnly={closing}
