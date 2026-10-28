@@ -25,7 +25,7 @@ import type { Project, ProjectState } from './projects.ts';
 import { StandaloneSidebar } from '../sidebar/StandaloneSidebar.tsx';
 import { useThreadList } from '../sidebar/use-thread-list.ts';
 import { WorkspacePanels } from '../panels/WorkspacePanels.tsx';
-import type { WorkspacePanelAppearance, WorkspacePanelRequest } from '../panels/WorkspacePanels.tsx';
+import type { WorkspacePanelAppearance, WorkspacePanelRequest, WorkspacePanelsHandle } from '../panels/WorkspacePanels.tsx';
 import { resolveFilePath } from '../files/file-service.ts';
 import { createRouteNavigation } from './route-navigation.ts';
 import { captureSettingsOrigin, emptySettingsContext, readSettingsOrigin, readSettingsOriginURL, resolveSettingsOrigin, settingsOriginParameter, settingsOriginURL } from './settings-origin.ts';
@@ -124,7 +124,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [visualization, setVisualization] = useState<{ hostId: string; threadId: string; path: string } | null>(null);
   const [previewAppearance, setPreviewAppearance] = useState<{ theme: 'dark' | 'light'; variables: Record<string, string>; locale: string }>({ theme: 'dark', variables: {}, locale: 'en' });
   const [panelRequest, setPanelRequest] = useState<WorkspacePanelRequest | null>(null);
-  const [activePanelKind, setActivePanelKind] = useState<'file' | 'diff' | 'terminal' | null>(null);
+  const workspacePanels = useRef<WorkspacePanelsHandle | null>(null);
   const [panelAppearance, setPanelAppearance] = useState<WorkspacePanelAppearance>({ theme: 'dark', codeFontSize: 12, codeLineHeight: 18 });
   const panelsDirty = useRef(false);
   const panelRecoveryBarrier = useRef<(() => Promise<void>) | null>(null);
@@ -667,7 +667,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     },
     toggleTerminal: () => {
       if (current.section || !panelCwd || status !== 'connected') return false;
-      if (panelOpen && panelKind === 'workspace' && activePanelKind === 'terminal') setPanelOpen(false);
+      if (panelOpen && panelKind === 'workspace' && workspacePanels.current?.isActiveTerminal()) setPanelOpen(false);
       else showPanel({ kind: 'terminal', reuse: true });
       return true;
     },
@@ -770,10 +770,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       </>}
       </div>
       <aside className="yard-workspace-panel" hidden={!panelOpen || settings} aria-label="Workspace panel" inert={leaving}>
-        <div hidden={panelKind !== 'workspace'} style={{ height: '100%' }}>{panelMounted && <WorkspacePanels client={client} scopeId={panelScope} hostId={current.hostId} threadId={current.threadId ?? undefined} cwd={panelCwd}
+        <div hidden={panelKind !== 'workspace'} style={{ height: '100%' }}>{panelMounted && <WorkspacePanels ref={workspacePanels} client={client} scopeId={panelScope} hostId={current.hostId} threadId={current.threadId ?? undefined} cwd={panelCwd}
           appearance={panelAppearance} request={panelRequest} onRequestConsumed={id => setPanelRequest(previous => previous?.id === id ? null : previous)}
           onRecoveryBarrier={receivePanelRecoveryBarrier}
-          onActiveKindChange={setActivePanelKind}
           onClose={() => setPanelOpen(false)} onReference={addReference} onDirtyChange={dirty => { panelsDirty.current = dirty; }} />}</div>
         {browserMounted && <StandaloneBrowser client={client} {...browserOwner} browserTabId="primary"
           draft={composerSnapshot && browserOwnerKey(browserDraftOwner(composerSnapshot.owner, sendState?.bindings ?? {})) === browserOwnerKey(browserOwner)

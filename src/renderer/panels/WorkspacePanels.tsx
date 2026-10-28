@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, Ref } from 'react';
 import { Download, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, RotateCw, Save, X } from 'lucide-react';
 import { BrowserFiles } from '../../native/browser-files.ts';
 import { DirectoryTree } from '../files/DirectoryTree.tsx';
@@ -23,6 +23,7 @@ export type FilePanelRequest = RequestScope & { kind: 'file'; path: string; line
 export type TerminalPanelRequest = RequestScope & { kind: 'terminal'; reuse?: boolean };
 export type DiffPanelRequest = RequestScope & { kind: 'diff'; path?: string; diff?: string };
 export type WorkspacePanelRequest = FilePanelRequest | TerminalPanelRequest | DiffPanelRequest;
+export interface WorkspacePanelsHandle { isActiveTerminal(): boolean }
 export interface WorkspacePanelAppearance {
   theme: 'light' | 'dark';
   codeFontSize: number;
@@ -34,6 +35,7 @@ export interface WorkspacePanelAppearance {
   diffMarkerStyle?: 'color' | 'symbols';
 }
 export interface WorkspacePanelsProps {
+  ref?: Ref<WorkspacePanelsHandle>;
   client: WorkbenchClient;
   /** Stable identity of a thread or a new conversation draft. */
   scopeId: string;
@@ -87,7 +89,7 @@ function mergeStoredRecovery(tab: FileTab, stored: FileSaveRecovery): FileTab {
     ...(different ? { storageError: true, storageConflict: true, error: recoveryConflict } : {}) };
 }
 
-export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appearance, request, onRequestConsumed, onClose, onReference, onDirtyChange, onRecoveryBarrier, onActiveKindChange }: WorkspacePanelsProps) {
+export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appearance, request, onRequestConsumed, onClose, onReference, onDirtyChange, onRecoveryBarrier, onActiveKindChange, ref }: WorkspacePanelsProps) {
   const t = usePanelText();
   const [tabs, setTabs] = useState<FileTab[]>([]);
   const [terminals, setTerminals] = useState<TerminalTab[]>([]);
@@ -587,6 +589,8 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
   const visibleDiffs = diffs.filter(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd);
   const activeDiff = visibleDiffs.find(tab => tab.key === selected);
   const activeKind = active ? 'file' : activeTerminal ? 'terminal' : activeDiff ? 'diff' : null;
+  useImperativeHandle(ref, () => ({ isActiveTerminal: () => !!activeTerminal && selectedRef.current === activeTerminal.key
+    && terminalHandles.current.get(activeTerminal.key)?.isActive() === true }), [activeTerminal]);
   useEffect(() => {
     if (!terminalActivation) return;
     if (terminalActivation.scope !== scopeKey || selected !== terminalActivation.key) { setTerminalActivation(undefined); return; }
