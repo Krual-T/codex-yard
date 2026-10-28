@@ -43,6 +43,8 @@ import { I18nProvider, resolveLocale } from '../i18n/index.tsx';
 import { themeFontFamily } from './theme-fonts.ts';
 import { readSettingsRoute } from '../settings/routing.ts';
 import { readThreadArchived } from './thread-archive.ts';
+import { useWorkbenchShortcuts } from './use-workbench-shortcuts.ts';
+import type { NumberShortcutSlot } from './workbench-shortcuts.ts';
 import './app.css';
 
 type ThreadRow = ThreadSummary & { preview?: string; updatedAt?: number; createdAt?: number };
@@ -122,6 +124,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [visualization, setVisualization] = useState<{ hostId: string; threadId: string; path: string } | null>(null);
   const [previewAppearance, setPreviewAppearance] = useState<{ theme: 'dark' | 'light'; variables: Record<string, string>; locale: string }>({ theme: 'dark', variables: {}, locale: 'en' });
   const [panelRequest, setPanelRequest] = useState<WorkspacePanelRequest | null>(null);
+  const [activePanelKind, setActivePanelKind] = useState<'file' | 'diff' | 'terminal' | null>(null);
   const [panelAppearance, setPanelAppearance] = useState<WorkspacePanelAppearance>({ theme: 'dark', codeFontSize: 12, codeLineHeight: 18 });
   const panelsDirty = useRef(false);
   const panelRecoveryBarrier = useRef<(() => Promise<void>) | null>(null);
@@ -621,7 +624,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     if (source.hostId !== current.hostId || source.threadId !== current.threadId) { setError('可视化所属会话已改变，请返回原会话。'); return; }
     setVisualization(source); setPanelKind('visualization'); setPanelOpen(true);
   };
-  const showPanel = (request?: { kind: 'terminal' } | { kind: 'file'; path: string; line?: number; column?: number } | { kind: 'diff'; path?: string; diff?: string }) => {
+  const showPanel = (request?: { kind: 'terminal'; reuse?: boolean } | { kind: 'file'; path: string; line?: number; column?: number } | { kind: 'diff'; path?: string; diff?: string }) => {
     setPanelMounted(true); setPanelKind('workspace'); setPanelOpen(true);
     if (request) setPanelRequest({ ...request, id: crypto.randomUUID(), scopeId: panelScope, hostId: current.hostId, cwd: panelCwd });
   };
@@ -654,17 +657,37 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     } catch (cause) { setError(String(cause)); }
   };
 
+  const shortcuts = useWorkbenchShortcuts(client, {
+    blocked: () => navigationLocked.current || leaving || menu || requests.length > 0,
+    selectTab: slot => {
+      const ordered = document.documentElement.dir === 'rtl' ? [...tabs].reverse() : tabs;
+      const tab = ordered[slot - 1];
+      if (!tab) return false;
+      void openTab(tab); return true;
+    },
+    toggleTerminal: () => {
+      if (current.section || !panelCwd || status !== 'connected') return false;
+      if (panelOpen && panelKind === 'workspace' && activePanelKind === 'terminal') setPanelOpen(false);
+      else showPanel({ kind: 'terminal', reuse: true });
+      return true;
+    },
+  });
+  const shortcutSidebarHints = new Map(shortcuts.hints === 'sidebar' ? shortcuts.sidebarHintKeys.map((key, index) =>
+    [key, shortcuts.label('sidebar', index + 1 as NumberShortcutSlot)] as const) : []);
   return <I18nProvider locale={previewAppearance.locale}><div className="yard-app" data-sidebar-open={sidebar} data-owned-renderer="true">
     {sidebar && <StandaloneSidebar hostId={current.hostId} currentThread={current.threadId ? { hostId: current.hostId, threadId: current.threadId } : null}
       projectState={projectState} fallbackWorkspace={workspace} rows={list.rows} nextCursor={list.nextCursor} loading={list.loading} error={list.error}
-      search={search} archived={archived} onSearchChange={setSearch} onArchivedChange={setArchived} onClose={() => setSidebar(false)}
+      search={search} archived={archived} shortcutHints={shortcutSidebarHints} onSearchChange={setSearch} onArchivedChange={setArchived} onClose={() => setSidebar(false)}
       onOpenThread={row => { void openThread(row.id, row.hostId, row.archived); }}
       onNewChat={(project, fallback) => { void newChat(project?.rootPaths[0] ?? cwd, fallback ? undefined : project ?? undefined); }}
       onAddProject={addProject} onOpenSettings={() => { void navigate('/settings/general' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId))); }}
       onRefresh={() => { void list.refresh(); }} onLoadMore={() => { void list.loadMore(); }} onRetryProjectLookup={() => { void reloadProjects().catch(cause => setError(String(cause))); }} />}
     <main className="yard-main">
       <header className="yard-toolbar"><button aria-label="Toggle sidebar" onClick={() => setSidebar(value => !value)}>◧</button>
-        <div className="yard-tab-strip" role="tablist" aria-label="Workspace tabs">{tabs.map(tab => <div className="yard-tab" key={tab.hostId + ':' + tab.id}><button role="tab" aria-selected={tab.id === current.threadId && tab.hostId === current.hostId} onClick={() => { void openTab(tab); }}>{tab.title}</button><button aria-label={'Close ' + tab.title} onClick={() => setTabs(previous => previous.filter(item => item !== tab))}>×</button></div>)}</div>
+        <div className="yard-tab-strip" role="tablist" aria-label="Workspace tabs">{tabs.map((tab, index) => {
+          const slot = document.documentElement.dir === 'rtl' ? tabs.length - index : index + 1;
+          return <div className="yard-tab" key={tab.hostId + ':' + tab.id}><button role="tab" aria-selected={tab.id === current.threadId && tab.hostId === current.hostId} onClick={() => { void openTab(tab); }}>{tab.title}{shortcuts.hints === 'tabs' && slot <= 9 && <kbd>{shortcuts.label('tabs', slot as NumberShortcutSlot)}</kbd>}</button><button aria-label={'Close ' + tab.title} onClick={() => setTabs(previous => previous.filter(item => item !== tab))}>×</button></div>;
+        })}</div>
         <select aria-label="Execution host" value={current.hostId} onChange={event => navigate('/?hostId=' + encodeURIComponent(event.target.value))}>{hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.displayName}</option>)}</select>
         <span className="yard-connection" title={'Browser: ' + bridgeStatus + '; Host: ' + (hostStatuses[current.hostId] ?? 'connecting')} data-state={status}>●</span>
         {bridgeStatus === 'connected' && hostStatuses[current.hostId] === 'disconnected' && <button onClick={() => {
@@ -750,6 +773,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         <div hidden={panelKind !== 'workspace'} style={{ height: '100%' }}>{panelMounted && <WorkspacePanels client={client} scopeId={panelScope} hostId={current.hostId} threadId={current.threadId ?? undefined} cwd={panelCwd}
           appearance={panelAppearance} request={panelRequest} onRequestConsumed={id => setPanelRequest(previous => previous?.id === id ? null : previous)}
           onRecoveryBarrier={receivePanelRecoveryBarrier}
+          onActiveKindChange={setActivePanelKind}
           onClose={() => setPanelOpen(false)} onReference={addReference} onDirtyChange={dirty => { panelsDirty.current = dirty; }} />}</div>
         {browserMounted && <StandaloneBrowser client={client} {...browserOwner} browserTabId="primary"
           draft={composerSnapshot && browserOwnerKey(browserDraftOwner(composerSnapshot.owner, sendState?.bindings ?? {})) === browserOwnerKey(browserOwner)

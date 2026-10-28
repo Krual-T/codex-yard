@@ -28,6 +28,7 @@ export interface StandaloneSidebarProps {
   onRefresh(): void;
   onLoadMore(): void;
   onRetryProjectLookup?(): void;
+  shortcutHints?: ReadonlyMap<string, string>;
 }
 
 function useExpansion(query: string): [boolean, () => void] {
@@ -53,10 +54,11 @@ function StatusIndicator({ status }: { status: StatusKey }) {
   </span>;
 }
 
-function ThreadRow({ row, currentThread, onOpenThread }: {
+function ThreadRow({ row, currentThread, onOpenThread, shortcutHints }: {
   row: ThreadListRow;
   currentThread: StandaloneSidebarProps['currentThread'];
   onOpenThread: StandaloneSidebarProps['onOpenThread'];
+  shortcutHints?: StandaloneSidebarProps['shortcutHints'];
 }) {
   const { t, formatDate } = useI18n();
   const statusKey = threadStatus(row);
@@ -64,15 +66,17 @@ function ThreadRow({ row, currentThread, onOpenThread }: {
   const updated = typeof row.updatedAt === 'number' ? new Date(row.updatedAt * 1000) : null;
   const tooltip = updated && Number.isFinite(updated.getTime())
     ? `${title}\n${formatDate(updated, { dateStyle: 'medium', timeStyle: 'short' })}` : title;
-  return <button type="button" className="yard-owned-sidebar-thread" title={tooltip}
+  const shortcutKey = JSON.stringify([row.hostId, row.id]);
+  return <button type="button" className="yard-owned-sidebar-thread" title={tooltip} data-sidebar-thread={shortcutKey}
     aria-current={currentThread?.hostId === row.hostId && currentThread.threadId === row.id ? 'page' : undefined}
     onClick={() => onOpenThread(row)}>
     <span className="yard-owned-sidebar-thread-title">{title}</span>
+    {shortcutHints?.get(shortcutKey) && <kbd>{shortcutHints.get(shortcutKey)}</kbd>}
     {statusKey && <StatusIndicator status={statusKey} />}
   </button>;
 }
 
-function ProjectGroup({ project, fallback, rows, query, currentThread, onOpenThread, onNewChat }: {
+function ProjectGroup({ project, fallback, rows, query, currentThread, onOpenThread, onNewChat, shortcutHints }: {
   project: Project;
   fallback: boolean;
   rows: readonly ThreadListRow[];
@@ -80,6 +84,7 @@ function ProjectGroup({ project, fallback, rows, query, currentThread, onOpenThr
   currentThread: StandaloneSidebarProps['currentThread'];
   onOpenThread: StandaloneSidebarProps['onOpenThread'];
   onNewChat: StandaloneSidebarProps['onNewChat'];
+  shortcutHints?: StandaloneSidebarProps['shortcutHints'];
 }) {
   const { t } = useI18n();
   const [expanded, toggle] = useExpansion(query);
@@ -100,7 +105,7 @@ function ProjectGroup({ project, fallback, rows, query, currentThread, onOpenThr
         title={newChatLabel} onClick={() => onNewChat(project, fallback)}><Plus aria-hidden="true" /></button>
     </div>
     <div id={id} hidden={!expanded}>
-      {rows.map(row => <ThreadRow key={row.id} row={row} currentThread={currentThread} onOpenThread={onOpenThread} />)}
+      {rows.map(row => <ThreadRow key={row.id} row={row} currentThread={currentThread} onOpenThread={onOpenThread} shortcutHints={shortcutHints} />)}
     </div>
   </section>;
 }
@@ -108,7 +113,7 @@ function ProjectGroup({ project, fallback, rows, query, currentThread, onOpenThr
 /** Navigation and collapse state only; project and thread state belong to the caller. */
 export function StandaloneSidebar({ hostId, currentThread, projectState, fallbackWorkspace, rows, nextCursor, loading, error,
   search, archived, onSearchChange, onArchivedChange, onOpenThread, onNewChat, onAddProject, onOpenSettings, onClose,
-  onRefresh, onLoadMore, onRetryProjectLookup }: StandaloneSidebarProps) {
+  onRefresh, onLoadMore, onRetryProjectLookup, shortcutHints }: StandaloneSidebarProps) {
   const { t } = useI18n();
   const query = search.trim().toLowerCase();
   const [projectsExpanded, toggleProjects] = useExpansion(query);
@@ -155,13 +160,13 @@ export function StandaloneSidebar({ hostId, currentThread, projectState, fallbac
     <div className="yard-owned-sidebar-scroll">
       <div id={projectsId} hidden={!projectsExpanded}>
         {projects.map(project => <ProjectGroup key={JSON.stringify([project.hostId, project.id])} project={project} fallback={fallback} query={query}
-          rows={grouped.get(project.id) ?? []} currentThread={currentThread} onOpenThread={onOpenThread} onNewChat={onNewChat} />)}
+          rows={grouped.get(project.id) ?? []} currentThread={currentThread} onOpenThread={onOpenThread} onNewChat={onNewChat} shortcutHints={shortcutHints} />)}
       </div>
       <div className="yard-owned-sidebar-heading yard-owned-sidebar-recents">{t(archived ? 'Archived' : 'Recents')}</div>
       {unresolved && <p className="yard-owned-sidebar-message" role="status">{t('Some legacy project associations are unresolved. Original records are retained.')}
         {onRetryProjectLookup && <button type="button" onClick={onRetryProjectLookup}>{t('Retry project lookup')}</button>}
       </p>}
-      {recent.map(row => <ThreadRow key={row.id} row={row} currentThread={currentThread} onOpenThread={onOpenThread} />)}
+      {recent.map(row => <ThreadRow key={row.id} row={row} currentThread={currentThread} onOpenThread={onOpenThread} shortcutHints={shortcutHints} />)}
       {loading && <p className="yard-owned-sidebar-message" role="status">{t(search.trim() ? 'Searching conversations...' : 'Loading conversations...')}</p>}
       {error && <div className="yard-owned-sidebar-error" role="alert"><span>{error.message}</span>
         <button type="button" onClick={error.retry === 'loadMore' ? onLoadMore : onRefresh}>{t('Retry')}</button>
