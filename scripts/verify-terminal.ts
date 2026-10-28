@@ -300,10 +300,20 @@ try {
     const secondPid = await pid('TW_SECOND');
     assert.notEqual(secondPid, initialPid);
     const terminalTabs = page.locator('.yard-panel-tab').filter({ has: page.getByRole('tab', { name: 'Terminal' }) });
-    await terminalTabs.first().getByRole('tab', { name: 'Terminal' }).click();
+    await command('exit');
+    await stopped(secondPid);
+    await page.getByRole('button', { name: 'New terminal', exact: true }).waitFor();
+    await page.keyboard.press('Control+Backquote');
+    try {
+      await until(async () => await terminalTabs.first().getByRole('tab', { name: 'Terminal' }).getAttribute('aria-selected') === 'true',
+        'shortcut selects an existing live terminal', 1000);
+      checks.push('Shortcut selects a live shell instead of restarting the stopped tab');
+    } catch {
+      gaps.push('Ctrl+Backquote did not select the existing live shell when another tab had exited');
+      await terminalTabs.first().getByRole('tab', { name: 'Terminal' }).click();
+    }
     assert.equal(await pid('TW_FIRST_AGAIN'), initialPid);
     await terminalTabs.last().getByRole('button', { name: 'Close terminal' }).click();
-    await stopped(secondPid);
     await until(async () => await page!.getByRole('tab', { name: 'Terminal' }).count() === 1, 'second terminal tab closes');
     assert.equal(requests.filter(request => request.operation === 'create').length, 2);
     checks.push('Explicit new terminal opens another shell; switching tabs preserves the first');
