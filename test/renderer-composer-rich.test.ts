@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
+import { defaultMarkdownParser } from 'prosemirror-markdown';
 import { documentFromText, draftToInput, emptyDraft, hasContent, normalizeDraft, richEditIssue, updateRichDraft } from '../src/renderer/composer/standalone-draft.ts';
 import { readRichDocument, serializeRichDocument } from '../src/renderer/composer/rich-document.ts';
 import type { ComposerDocument } from '../src/renderer/workbench-contract.ts';
@@ -56,6 +57,14 @@ test('rich drafts preserve ordered input and reject unsupported document or hint
   assert.equal(hasContent({ ...emptyDraft(), document: documentFromText('') }), false);
   const plain = normalizeDraft({ text: 'literal *text*', document: documentFromText('literal *text*'), images: [], files: [] });
   assert.equal(updateRichDraft(plain, documentFromText('literal *text*!')).text, 'literal *text*!');
+  const spaced: ComposerDocument = { type: 'doc', content: [{ type: 'paragraph', content: [
+    { type: 'atMention', attrs: { label: '@file', path: '/workspace/my folder/a.ts', fsPath: '/workspace/my folder/a.ts' } },
+    { type: 'text', text: ' link', marks: [{ type: 'link', attrs: { href: 'https://example.test/my path', title: 'example' } }] },
+  ] }] };
+  const markdown = serializeRichDocument(readRichDocument(spaced)!);
+  const parsed = defaultMarkdownParser.parse(markdown);
+  assert.equal(decodeURI(parsed.firstChild!.child(0).marks[0]!.attrs.href), '/workspace/my folder/a.ts');
+  assert.equal(decodeURI(parsed.firstChild!.child(1).marks[0]!.attrs.href), 'https://example.test/my path');
 });
 
 test('ProseMirror mounts, edits a legacy document, restores it after refresh and submits it', {

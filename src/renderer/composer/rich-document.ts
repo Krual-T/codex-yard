@@ -63,6 +63,14 @@ export const composerSchema = new Schema({
 });
 
 const base = defaultMarkdownSerializer.nodes;
+const defaultLink = defaultMarkdownSerializer.marks.link!;
+function markdownDestination(path: string): string {
+  if (/[\s<>]/.test(path)) {
+    return '<' + path.replace(/\\/g, '\\\\').replace(/[<>]/g, '\\$&').replace(/\r/g, '%0D').replace(/\n/g, '%0A') + '>';
+  }
+  return path.replace(/[\\()"\x00-\x1f]/g, character => character.charCodeAt(0) < 32
+    ? '%' + character.charCodeAt(0).toString(16).padStart(2, '0').toUpperCase() : '\\' + character);
+}
 const serializer = new MarkdownSerializer({
   paragraph: base.paragraph!, text: base.text!, hard_break: state => state.write('\\\n'), heading: base.heading!, blockquote: base.blockquote!,
   regular_list_item: base.list_item!,
@@ -78,10 +86,21 @@ const serializer = new MarkdownSerializer({
     state.write(fence + (node.attrs.language ?? '') + '\n');
     state.text(node.textContent, false); state.write('\n' + fence); state.closeBlock(node);
   },
-  atMention: (state, node) => state.write('[' + state.esc(node.attrs.label) + '](' + node.attrs.path.replace(/[()]/g, '\\$&') + ')'),
+  atMention: (state, node) => state.write('[' + state.esc(node.attrs.label) + '](' + markdownDestination(node.attrs.path) + ')'),
   skillMention: (state, node) => state.write('[' + state.esc(node.attrs.promptLinkLabel || '$' + node.attrs.name) + ']('
-    + node.attrs.path.replace(/[()]/g, '\\$&') + ')'),
-}, defaultMarkdownSerializer.marks);
+    + markdownDestination(node.attrs.path) + ')'),
+}, { ...defaultMarkdownSerializer.marks, link: {
+  ...defaultLink,
+  open: (state, mark, parent, index) => /[\s<>]/.test(mark.attrs.href) ? '['
+    : typeof defaultLink.open === 'function' ? defaultLink.open(state, mark, parent, index) : defaultLink.open,
+  close: (state, mark, parent, index) => {
+    if (!/[\s<>]/.test(mark.attrs.href)) {
+      return typeof defaultLink.close === 'function' ? defaultLink.close(state, mark, parent, index) : defaultLink.close;
+    }
+    return '](' + markdownDestination(mark.attrs.href)
+      + (mark.attrs.title ? ' "' + mark.attrs.title.replace(/"/g, '\\"') + '"' : '') + ')';
+  },
+} });
 
 function knownKeys(value: object, allowed: string[]): boolean {
   return Object.keys(value).every(key => allowed.includes(key));
