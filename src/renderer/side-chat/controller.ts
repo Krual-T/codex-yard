@@ -8,12 +8,13 @@ function stable(value: unknown): unknown {
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, stable(entry)]));
   return value;
 }
-function evidence(view: SideChatHostView, method: 'start' | 'retry' | 'close'): string {
+type DispatchMethod = 'start' | 'retry' | 'close' | 'retryPersistence';
+function evidence(view: SideChatHostView, method: DispatchMethod): string {
   return method === 'close' ? JSON.stringify([view.close.requested, view.close.status])
     : JSON.stringify([view.fork.status, view.inject.status, view.childId, view.close.requested, view.close.status]);
 }
-
-export function createSideChatDraftId(): string { return 'side-chat:' + crypto.randomUUID(); }
+const notDispatched = (error: unknown): boolean => !!error && typeof error === 'object'
+  && 'uncertain' in error && error.uncertain === false;
 
 function phase(view: SideChatHostView | null, command: string | null, linkFailed: boolean, pendingClose: boolean, closeDispatched: boolean): SideChatPhase {
   if (!view) return command === 'prepare' ? 'preparing' : 'idle';
@@ -39,17 +40,15 @@ function phase(view: SideChatHostView | null, command: string | null, linkFailed
 
 function validate(view: SideChatHostView, hostId: string, parentThreadId: string, previous: SideChatHostView | null): SideChatHostView {
   if (!view || typeof view.operationId !== 'string' || !view.operationId || !view.parent || view.parent.hostId !== hostId || view.parent.threadId !== parentThreadId
-    || typeof view.parent.cwd !== 'string' || !view.parent.cwd || !Array.isArray(view.parent.workspaceRoots)
-    || view.parent.workspaceRoots.some(root => typeof root !== 'string' || !root) || typeof view.parent.archived !== 'boolean'
-    || !view.parent.options || typeof view.parent.options !== 'object' || Array.isArray(view.parent.options)
+    || typeof view.parent.cwd !== 'string' || !view.parent.cwd
     || !requestStatuses.has(view.fork?.status) || !requestStatuses.has(view.inject?.status) || !closeStatuses.has(view.close?.status)
-    || [view.fork.error, view.inject.error, view.close.error].some(error => error !== null && typeof error !== 'string')
-    || typeof view.close.requested !== 'boolean' || !['thread-override', 'host-config'].includes(view.instructionSource)
+    || [view.fork.error, view.inject.error, view.close.error, view.recoveryError].some(error => error !== null && typeof error !== 'string')
+    || typeof view.close.requested !== 'boolean'
     || !(view.childId === null || typeof view.childId === 'string' && !!view.childId && view.childId !== parentThreadId)
     || view.child != null && (!view.childId || view.child.thread?.id !== view.childId || !view.child.options || view.fork.status !== 'received')
     || view.inject.status === 'received' && view.fork.status !== 'received'
     || previous && (previous.operationId !== view.operationId || JSON.stringify(stable(previous.parent)) !== JSON.stringify(stable(view.parent))
-      || previous.instructionSource !== view.instructionSource || previous.childId != null && previous.childId !== view.childId
+      || previous.childId != null && previous.childId !== view.childId
       || previous.child != null && view.child == null || previous.fork.status === 'received' && view.fork.status !== 'received'
       || previous.inject.status === 'received' && view.inject.status !== 'received'
       || previous.close.requested && !view.close.requested || previous.close.status === 'closed' && view.close.status !== 'closed')) {
@@ -70,7 +69,8 @@ export class SideChatController {
   private closeInFlight = false;
   private closeDispatched = false;
   private linking: Promise<boolean> | null = null;
-  private uncertain: { method: 'start' | 'retry' | 'close'; evidence: string; error: string } | null = null;
+  private uncertain: { method: DispatchMethod; evidence: string; error: string } | null = null;
+  private persistenceInFlight = false;
   private requestVersion = 0;
   private disposed = false;
   private listeners = new Set<() => void>();
@@ -101,6 +101,11 @@ export class SideChatController {
       : view.fork.status === 'waiting' || view.fork.status === 'not-sent'
         || view.fork.status === 'received' && ['waiting', 'not-sent'].includes(view.inject.status);
   }
+  get canRetryPersistence(): boolean {
+    const view = this.value.view;
+    return !!view && this.linked && !this.persistenceInFlight && this.uncertain?.method !== 'retryPersistence'
+      && this.permitted(view, 'persistence');
+  }
   dispose(): void { this.disposed = true; this.unwatch(); this.listeners.clear(); }
   private set(patch: Partial<SideChatSnapshot>): void {
     if (this.disposed) return;
@@ -112,7 +117,7 @@ export class SideChatController {
   private scope(view: SideChatHostView): SideChatScope {
     return { hostId: this.value.hostId, parentThreadId: this.value.parentThreadId, operationId: view.operationId, draftId: this.value.draftId };
   }
-  private permitted(view: SideChatHostView, action: 'advance' | 'close'): boolean {
+  private permitted(view: SideChatHostView, action: 'advance' | 'close' | 'persistence'): boolean {
     try { return this.canDispatch(this.scope(view), action) === true; } catch { return false; }
   }
   private accept(view: SideChatHostView, version: number): void {
@@ -125,15 +130,17 @@ export class SideChatController {
     const view = this.value.view;
     if (!view || this.disposed) return;
     const version = ++this.requestVersion;
-    const baseline = method === 'start' || method === 'retry' || method === 'close' ? evidence(view, method) : null;
+    const baseline = method === 'read' ? null : evidence(view, method);
     try {
       const result = await this.port[method](view.operationId);
       this.accept(result, version);
       if (method !== 'read' && version !== this.requestVersion && !this.disposed) void this.read();
     } catch (error) {
       if (!this.disposed) {
-        const text = '宿主操作结果未确认，原记录已保留：' + message(error);
-        if (baseline !== null && (method === 'start' || method === 'retry' || method === 'close') && this.value.view
+        const unsent = method !== 'read' && notDispatched(error);
+        const text = (unsent ? '宿主调用尚未派发，可以显式继续：' : '宿主操作结果未确认，原记录已保留：') + message(error);
+        if (unsent && method === 'close' && !this.value.view?.close.requested) this.closeDispatched = false;
+        if (!unsent && baseline !== null && method !== 'read' && this.value.view
           && evidence(this.value.view, method) === baseline) this.uncertain = { method, evidence: baseline, error: text };
         if (version === this.requestVersion || this.uncertain) this.set({ error: this.uncertain?.error ?? text });
       }
@@ -195,8 +202,9 @@ export class SideChatController {
     try { await this.call('retry'); } finally { this.command = null; this.set({}); }
   }
   async retryPersistence(): Promise<void> {
-    if (!this.value.view || this.disposed) return;
-    await this.call('retryPersistence');
+    if (this.disposed || !this.canRetryPersistence) return;
+    this.persistenceInFlight = true; this.set({});
+    try { await this.call('retryPersistence'); } finally { this.persistenceInFlight = false; this.set({}); }
   }
   markActivity(): void { if (!this.value.hasActivity) this.set({ hasActivity: true }); }
   private async dispatchClose(): Promise<void> {

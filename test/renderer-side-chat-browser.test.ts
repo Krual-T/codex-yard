@@ -25,13 +25,11 @@ test('side panel keeps the real composer across hidden, host changes, failure an
     const calls = (name,id) => state.calls.push({name,id});
     const port = {
       async prepare(hostId,parentThreadId) {
-        calls('prepare',hostId); return views[hostId] = {operationId:'op-' + hostId,parent:{hostId,threadId:parentThreadId,cwd:'/synthetic/' + hostId,
-          workspaceRoots:['/synthetic/' + hostId],project:{id:'project-' + hostId},archived:false,
-          options:{model:'model-' + hostId,effort:null,mode:'plan'}},childId:null,child:null,
-          fork:{status:'waiting',error:null},inject:{status:'waiting',error:null},close:{requested:false,status:'idle',error:null},instructionSource:'host-config'};
+        calls('prepare',hostId); return views[hostId] = {operationId:'op-' + hostId,parent:{hostId,threadId:parentThreadId,cwd:'/synthetic/' + hostId},childId:null,child:null,
+          fork:{status:'waiting',error:null},inject:{status:'waiting',error:null},close:{requested:false,status:'idle',error:null},recoveryError:null};
       },
       async start(id) { calls('start',id); const host=id.slice(3), v=views[host];
-        v.childId='child-' + host; v.child={thread:thread(host),options:{...v.parent.options}};
+        v.childId='child-' + host; v.child={thread:thread(host),options:{model:'model-' + host,effort:null,mode:'plan'}};
         v.fork.status='received'; v.inject.status='received'; return structuredClone(v); },
       async read(id) {calls('read',id); return structuredClone(views[id.slice(3)]);},
       async retry(id) {calls('retry',id); const v=views[id.slice(3)]; v.close.status='closed'; v.close.error=null; return structuredClone(v);},
@@ -54,22 +52,31 @@ test('side panel keeps the real composer across hidden, host changes, failure an
     };
     const controllers = Object.fromEntries(['a','b','c'].map(host=>[host,new SideChatController({hostId:host,parentThreadId:'parent-'+host,
       draftId:'draft-side-'+host,port,canDispatch:()=>true,async onPrepared(scope){state.calls.push({name:'link',scope});}})]));
-    const histories = Object.fromEntries(['a','b','c'].map(host=>[host,{hostId:host,threadId:'child-'+host,thread:thread(host),loading:false,
-      options:{model:'model-'+host,effort:null,mode:'plan'},historyComplete:true,streamGap:false,error:null,expired:false,canSubmit:true,retry(){state.calls.push({name:'retryHistory',host});}}]));
-    let selected='a', visible=true, replaceCalls=[];
+    const newPort={...port,async prepare(hostId,parentThreadId){const value=await port.prepare('d',parentThreadId);
+      value.parent.hostId=hostId;value.parent.cwd='/synthetic/c';return structuredClone(value);},
+      async start(id){await port.start(id);views.d.child.thread.cwd='/synthetic/c';return structuredClone(views.d);}};
+    controllers.d=new SideChatController({hostId:'c',parentThreadId:'parent-c',draftId:'draft-side-d',port:newPort,
+      canDispatch:()=>true,async onPrepared(scope){state.calls.push({name:'link',scope});}});
+    const histories = Object.fromEntries(['a','b','c','d'].map(host=>[host,{hostId:host,threadId:'child-'+host,thread:thread(host),loading:false,
+      options:{model:'model-'+host,effort:null,mode:'plan'},historyComplete:true,streamGap:false,error:null,canSubmit:true,canInterrupt:true,retry(){state.calls.push({name:'retryHistory',host});}}]));
+    histories.d.hostId='c';histories.d.thread.cwd='/synthetic/c';
+    let selected='a', visible=true, newCalls=[]; const instanceKey={a:0,b:0,c:0,d:0};
     let rejectSend;
     const root=createRoot(document.getElementById('root'));
-    function render() {root.render(<>{['a','b','c'].map(host=><SideChatPanel key={host} client={client} controller={controllers[host]}
+    function render() {root.render(<>{['a','b','c','d'].map(host=><SideChatPanel key={host+instanceKey[host]} client={client} controller={controllers[host]}
       open={visible && selected===host} history={histories[host]} onClose={()=>state.closes.push(host)}
       onBeforeClose={async scope=>{state.calls.push({name:'barrier',scope:{...scope,draftController:!!scope.draftController}});
         if(state.failGate) throw Error('synthetic unresolved send');}}
       onSubmit={(description,draft,options,action,controller)=>{state.submissions.push({description,draft,options,action,owner:controller.snapshot().owner});
         return new Promise((_resolve,reject)=>{rejectSend=reject;});}}
-      onReplaceExpired={scope=>{replaceCalls.push({...scope,draftController:!!scope.draftController});}} />)}</>);}
+      onInterrupt={async scope=>{state.calls.push({name:'interrupt',scope});}}
+      onOpenNew={async scope=>{newCalls.push(scope);if(scope.childThreadId==='child-c'){await controllers.d.start();selected='d';render();}}} />)}</>);}
     window.peer={state,controllers,histories,views,render,select(host){selected=host;visible=true;render();},
       hide(){visible=false;render();},show(){visible=true;render();},rejectSend(){rejectSend(Error('unknown send'));},
-      replaceCalls,markNode(host){window.savedNode=document.querySelectorAll('.yard-side-chat')[['a','b','c'].indexOf(host)].querySelector('textarea');},
-      sameNode(host){return window.savedNode===document.querySelectorAll('.yard-side-chat')[['a','b','c'].indexOf(host)].querySelector('textarea');}};
+      newCalls,restoreA(){controllers.a=new SideChatController({hostId:'a',parentThreadId:'parent-a',draftId:'draft-side-a',port,
+        canDispatch:()=>true,onPrepared:async()=>{},restored:structuredClone(views.a)});instanceKey.a++;selected='a';render();},
+      markNode(host){window.savedNode=document.querySelectorAll('.yard-side-chat')[['a','b','c','d'].indexOf(host)].querySelector('.yard-side-chat__composer textarea');},
+      sameNode(host){return window.savedNode===document.querySelectorAll('.yard-side-chat')[['a','b','c','d'].indexOf(host)].querySelector('.yard-side-chat__composer textarea');}};
     render();
   ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' } });
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
@@ -106,7 +113,7 @@ test('side panel keeps the real composer across hidden, host changes, failure an
     assert.equal(await page.evaluate(() => (window as any).peer.sameNode('a')), true);
     await page.evaluate(() => { const p=(window as any).peer; p.histories.a.error='no rollout found'; p.histories.a.canSubmit=false; p.render(); });
     await page.getByText('no rollout found').waitFor(); assert.equal(await editor.inputValue(), 'newer side draft');
-    assert.equal(await page.getByRole('button', { name: '开始新侧聊' }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: '另开侧聊' }).count(), 1);
     await page.getByRole('button', { name: '重试加载' }).click();
     assert.equal(await page.evaluate(() => (window as any).peer.state.calls.filter((c:any)=>c.name==='retryHistory').length), 1);
     await page.evaluate(async () => { const p=(window as any).peer; await p.controllers.b.start(); p.select('b'); });
@@ -115,7 +122,7 @@ test('side panel keeps the real composer across hidden, host changes, failure an
     await page.getByText('正在等待该侧聊的会话投影。').waitFor();
     assert.equal(await page.getByText('History a').isVisible(), false); assert.equal(await editor.inputValue(), 'draft b');
     await page.evaluate(() => { const p=(window as any).peer; p.histories.b={hostId:'b',threadId:'child-b',thread:p.views.b.child.thread,
-      options:{model:'model-b',effort:null,mode:'plan'},loading:false,historyComplete:true,streamGap:false,error:null,expired:false,canSubmit:true,retry(){}}; p.render(); });
+      options:{model:'model-b',effort:null,mode:'plan'},loading:false,historyComplete:true,streamGap:false,error:null,canSubmit:true,canInterrupt:true,retry(){}}; p.render(); });
     await page.getByText('History b').waitFor();
     await page.evaluate(() => { const p=(window as any).peer; p.histories.b.historyComplete=false; p.histories.b.streamGap=true; p.render(); });
     await page.getByText(/部分进行中的内容尚未收到/).waitFor(); await editor.press('Enter');
@@ -153,33 +160,57 @@ test('side panel keeps the real composer across hidden, host changes, failure an
     dialog = page.getByRole('dialog'); await dialog.getByRole('button', { name: '关闭侧聊', exact: true }).click();
     await page.getByText('synthetic close failure').waitFor();
     assert.equal(await page.evaluate(() => (window as any).peer.sameNode('a')), true);
-    assert.equal(await page.locator('.yard-side-chat:visible textarea').inputValue(), 'newer side draft');
+    assert.equal(await page.locator('.yard-side-chat:visible .yard-side-chat__draft textarea').first().inputValue(), 'newer side draft');
     assert.equal(await page.locator('.yard-side-chat:visible .yard-side-chat__composer').evaluate(e => (e as HTMLElement).inert), true);
     await page.getByRole('button', { name: '继续操作' }).click();
     await page.waitForFunction(() => (window as any).peer.state.closes.includes('a'));
     assert.equal(await page.evaluate(() => (window as any).peer.state.calls.filter((c:any)=>c.name==='close').length), 1);
-    await page.evaluate(() => { const p=(window as any).peer; p.select('b'); p.histories.b.expired=true; p.histories.b.canSubmit=false; p.render(); });
-    await page.getByText(/临时侧聊已过期/).waitFor();
-    await page.getByRole('button', { name: '开始新侧聊' }).click();
-    await page.getByText(/无法开始新侧聊，原草稿已保留/).waitFor();
+    await page.evaluate(() => { const p=(window as any).peer; p.select('b'); p.histories.b.error='b connection lost'; p.histories.b.canSubmit=false; p.render(); });
+    await page.getByText('b connection lost').waitFor();
+    await page.getByText(/无法关闭侧聊，草稿已保留/).waitFor();
+    await page.getByRole('button', { name: '另开侧聊' }).click();
+    await page.waitForFunction(() => (window as any).peer.newCalls.length === 1);
     assert.equal(await editor.inputValue(), 'unsaved b');
-    assert.equal(await page.evaluate(() => (window as any).peer.replaceCalls.length), 0);
-    await page.evaluate(() => { const p=(window as any).peer; p.histories.b.expired=false;
+    await page.evaluate(() => { const p=(window as any).peer; p.histories.b.error=null;
       p.views.b.close={requested:true,status:'prepare-failed',error:'restored close failure'};
       for (const subscriber of p.state.subscribers) subscriber({hostId:'b',operationId:'op-b'}); p.render(); });
     await page.getByRole('button', { name: '继续操作' }).click();
     await page.getByText(/无法继续关闭，草稿已保留/).waitFor();
-    assert.equal(await page.locator('.yard-side-chat:visible textarea').inputValue(), 'unsaved b');
+    assert.equal(await page.locator('.yard-side-chat:visible .yard-side-chat__draft textarea').first().inputValue(), 'unsaved b');
     assert.equal(await page.evaluate(() => (window as any).peer.state.calls.filter((c:any)=>c.name==='retry'&&c.id==='op-b').length), 0);
     await page.evaluate(async () => { const p=(window as any).peer; p.select('c'); await p.controllers.c.start(); });
-    await page.getByText('History c').waitFor(); await editor.fill('retained c draft');
-    await page.evaluate(() => { const p=(window as any).peer; p.histories.c.expired=true; p.histories.c.canSubmit=false; p.render(); });
-    await page.getByRole('button', { name: '开始新侧聊' }).click();
-    await page.waitForFunction(() => (window as any).peer.replaceCalls.length === 1);
-    const replaced = await page.evaluate(() => (window as any).peer.replaceCalls[0]);
-    assert.deepEqual(replaced, {hostId:'c',parentThreadId:'parent-c',childThreadId:'child-c',operationId:'op-c',draftId:'draft-side-c',draftController:true});
-    assert.equal(await page.getByRole('button', { name: '开始新侧聊' }).isDisabled(), true);
+    await page.getByText('History c').waitFor(); await editor.fill('unconfirmed c send'); await editor.press('Enter');
+    await page.waitForFunction(() => (window as any).peer.state.submissions.length === 2);
+    await editor.fill('retained c draft'); await page.evaluate(() => (window as any).peer.rejectSend());
+    await page.locator('.yard-side-chat:visible').getByText(/发送未确认/).waitFor();
+    await page.evaluate(() => (window as any).peer.markNode('c'));
+    await page.evaluate(() => { const p=(window as any).peer; p.histories.c.error='connection lost'; p.histories.c.canSubmit=false; p.render(); });
+    await page.getByRole('button', { name: '另开侧聊' }).click();
+    await page.waitForFunction(() => (window as any).peer.newCalls.length === 2);
+    const replaced = await page.evaluate(() => (window as any).peer.newCalls[1]);
+    assert.deepEqual(replaced, {hostId:'c',parentThreadId:'parent-c',childThreadId:'child-c',operationId:'op-c',draftId:'draft-side-c'});
+    await page.getByText('History d').waitFor();
+    assert.equal(await page.evaluate(() => (window as any).peer.controllers.d.getSnapshot().view.operationId), 'op-d');
+    assert.equal(await page.evaluate(() => (window as any).peer.controllers.d.getSnapshot().draftId), 'draft-side-d');
+    assert.equal(await page.evaluate(() => (window as any).peer.controllers.d.getSnapshot().parentThreadId), 'parent-c');
+    assert.equal(await page.evaluate(() => (window as any).peer.controllers.d.getSnapshot().hostId), 'c');
+    assert.equal(await page.evaluate(() => (window as any).peer.state.submissions.length), 2);
+    assert.equal(await page.evaluate(() => (window as any).peer.state.calls.filter((c:any)=>c.name==='close'&&c.id==='op-c').length), 0);
+    assert.equal(await page.evaluate(() => (window as any).peer.sameNode('c')), true);
+    await page.evaluate(() => (window as any).peer.select('c'));
+    assert.equal(await page.getByRole('button', { name: '另开侧聊' }).isDisabled(), true);
     assert.equal(await page.locator('.yard-side-chat:visible textarea').inputValue(), 'retained c draft');
+    await page.locator('.yard-side-chat:visible').getByText(/发送未确认/).waitFor();
+    await page.evaluate(() => (window as any).peer.restoreA());
+    await page.getByText(/宿主已关闭此侧聊/).waitFor();
+    assert.equal(await page.evaluate(() => (window as any).peer.state.closes.filter((host:any)=>host==='a').length), 1);
+    const savedDraft = page.locator('.yard-side-chat:visible .yard-side-chat__draft textarea');
+    await page.waitForFunction(() => [...document.querySelectorAll('.yard-side-chat:not([hidden]) .yard-side-chat__draft textarea')].some((node:any)=>node.value==='newer side draft'));
+    const selected = savedDraft.first();
+    await selected.focus(); await selected.evaluate((node: HTMLTextAreaElement) => node.select());
+    assert.ok(await selected.evaluate((node: HTMLTextAreaElement) => node.selectionEnd > node.selectionStart));
+    await page.getByRole('button', { name: '关闭侧聊', exact: true }).click();
+    await page.waitForFunction(() => (window as any).peer.state.closes.filter((host:any)=>host==='a').length === 2);
     await page.setViewportSize({ width: 1100, height: 760 });
     if (process.env.SIDE_CHAT_SCREENSHOTS) await page.screenshot({ path: join(process.env.SIDE_CHAT_SCREENSHOTS, 'side-chat-host-desktop.png') });
     assert.deepEqual(errors, []);

@@ -12,21 +12,19 @@ export interface SideChatHostView {
     hostId: string;
     threadId: string;
     cwd: string;
-    workspaceRoots: string[];
-    project: unknown;
-    archived: boolean;
-    options: SubmitOptions;
   };
   childId: string | null;
   child: { thread: ThreadSummary; options: SubmitOptions } | null;
   fork: { status: SideChatRequestStatus; error: string | null };
   inject: { status: SideChatRequestStatus; error: string | null };
   close: { requested: boolean; status: SideChatCloseStatus; error: string | null };
-  instructionSource: 'thread-override' | 'host-config';
+  /** Sanitized host recovery callback error for this operation, if any. */
+  recoveryError: string | null;
 }
 
 export interface SideChatHostPort {
   prepare(hostId: string, parentThreadId: string): Promise<SideChatHostView>;
+  /** An endpoint rejection may carry uncertain: false only when this exact call was not dispatched. */
   start(operationId: string): Promise<SideChatHostView>;
   read(operationId: string): Promise<SideChatHostView>;
   retry(operationId: string): Promise<SideChatHostView>;
@@ -43,8 +41,8 @@ export interface SideChatControllerOptions {
   port: SideChatHostPort;
   /** Resolve only after the operation and draft association is durable. */
   onPrepared(scope: SideChatScope): Promise<void>;
-  /** Consult the owner's durable dispatch state; host endpoints must enforce it too. */
-  canDispatch(scope: SideChatScope, action: 'advance' | 'close'): boolean;
+  /** Advisory check; endpoints must atomically enforce the original operation and connection scope. */
+  canDispatch(scope: SideChatScope, action: 'advance' | 'close' | 'persistence'): boolean;
   /** A restored operation must already have its durable draft association. */
   restored?: SideChatHostView;
 }
@@ -74,7 +72,8 @@ export interface SideChatHistory {
   historyComplete: boolean;
   streamGap: boolean;
   error: string | null;
-  expired: boolean;
   canSubmit: boolean;
+  /** The original connection generation and current turn are still authorized to interrupt. */
+  canInterrupt: boolean;
   retry(): void | Promise<void>;
 }

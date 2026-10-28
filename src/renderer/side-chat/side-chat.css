@@ -9,6 +9,13 @@
 .yard-side-chat__status button, .yard-side-chat__dialog button { margin: 6px 6px 0 0; padding: 6px 10px; border: 1px solid var(--yard-border, #d7dfdc); border-radius: 4px; background: var(--yard-surface, #edf1ef); color: var(--yard-fg, #202524); font: inherit; cursor: pointer; }
 .yard-side-chat__messages { flex: 1 1 auto; min-height: 0; }
 .yard-side-chat__composer { flex: 0 0 auto; min-width: 0; }
+.yard-side-chat__composer[hidden] { display: none; }
+.yard-side-chat__draft { min-width: 0; max-height: 45%; overflow: auto; padding: 10px 12px; border-top: 1px solid var(--yard-border, #d7dfdc); }
+.yard-side-chat__draft-version { margin-top: 8px; }
+.yard-side-chat__draft label { display: block; }
+.yard-side-chat__draft textarea { display: block; width: 100%; min-height: 96px; resize: vertical; color: var(--yard-fg, #202524); background: var(--yard-surface, #edf1ef); border: 1px solid var(--yard-border, #d7dfdc); font: inherit; }
+.yard-side-chat__draft pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--yard-code-font, monospace); font-size: var(--yard-code-size, 13px); }
+.yard-side-chat__draft button { margin-top: 8px; color: inherit; background: var(--yard-surface, #edf1ef); border: 1px solid var(--yard-border, #d7dfdc); border-radius: 4px; padding: 6px 10px; font: inherit; }
 .yard-side-chat__dialog { width: min(400px, calc(100vw - 32px)); border: 1px solid var(--yard-border, #d7dfdc); border-radius: 6px; padding: 20px; color: var(--yard-fg, #202524); background: var(--yard-bg, #fff); font: inherit; }
 .yard-side-chat__dialog::backdrop { background: rgb(0 0 0 / 35%); }
 .yard-side-chat__dialog h2 { margin: 0; font-size: 16px; }

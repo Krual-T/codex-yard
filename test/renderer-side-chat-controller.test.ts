@@ -38,6 +38,7 @@ function fixture(hostId = 'host-a', parentThreadId = 'parent-a') {
   const store = new Store(), calls: Call[] = [], scopes: unknown[] = [], linked: unknown[] = [];
   const hints = new Set<(hint: { hostId: string; operationId: string }) => void>();
   let handler: ((call: Call) => Promise<unknown>) | null = null, failLink = false, failClose = false, failCleanup = false;
+  let recoveryError: string | null = null;
   let parent: SideChatParent = { hostId, threadId: parentThreadId, connectionGeneration: 'original-connection', cwd: '/workspace/a',
     workspaceRoots: ['/workspace/a', '/workspace/b'], archived: false, model: 'model-a', modelProvider: 'provider-a',
     effort: null, serviceTier: null, sandboxPolicy: { type: 'readOnly', networkAccess: false }, project: { id: 'project-a' },
@@ -63,18 +64,19 @@ function fixture(hostId = 'host-a', parentThreadId = 'parent-a') {
     classifyFailure(_method, error) { return (error as { delivery?: 'unknown' | 'not-sent' | 'rejected' }).delivery ?? 'unknown'; },
     async prepareClose(scope) { scopes.push({ prepare: scope }); if (failClose) throw Error('pending send'); },
     async cleanup(scope) { scopes.push({ cleanup: scope }); if (failCleanup) throw Error('cleanup failed'); },
-    onRecoveryError(_id, error) { throw error; },
+    onRecoveryError(id, error) {
+      recoveryError = error instanceof Error ? error.message : String(error);
+      for (const fn of hints) fn({ hostId, operationId: id });
+    },
   };
   const host = createSideChatHost(deps);
   const project = (op: SideChatOperation): SideChatHostView => {
     const receipt = op.fork.receipt as { thread?: ThreadSummary } | undefined;
-    return { operationId: op.operationId, parent: { hostId: op.parent.hostId, threadId: op.parent.threadId, cwd: op.parent.cwd,
-      workspaceRoots: [...op.parent.workspaceRoots], project: structuredClone(op.parent.project), archived: op.parent.archived,
-      options: structuredClone(op.parent.submitOptions) as SubmitOptions }, childId: op.childId ?? null,
+    return { operationId: op.operationId, parent: { hostId: op.parent.hostId, threadId: op.parent.threadId, cwd: op.parent.cwd }, childId: op.childId ?? null,
       child: op.fork.status === 'received' && receipt?.thread ? { thread: structuredClone(receipt.thread),
         options: { ...op.parent.submitOptions, effort: null, serviceTier: 'default' } as SubmitOptions } : null,
       fork: { status: op.fork.status, error: op.fork.error ?? null }, inject: { status: op.inject.status, error: op.inject.error ?? null },
-      close: { requested: op.close.requested, status: op.close.status, error: op.close.error ?? null }, instructionSource: op.instructionSource };
+      close: { requested: op.close.requested, status: op.close.status, error: op.close.error ?? null }, recoveryError };
   };
   const portCalls: string[] = [];
   const port: SideChatHostPort = {
@@ -83,7 +85,7 @@ function fixture(hostId = 'host-a', parentThreadId = 'parent-a') {
     async read(id) { portCalls.push('read'); return project(await host.read(id)); },
     async retry(id) { portCalls.push('retry'); return project(await host.retry(id)); },
     async close(id) { portCalls.push('close'); return project(await host.close(id)); },
-    async retryPersistence(id) { portCalls.push('retryPersistence'); return project(await host.retryPersistence(id)); },
+    async retryPersistence(id) { portCalls.push('retryPersistence'); const value = await host.retryPersistence(id); recoveryError = null; return project(value); },
     subscribe(listener) { hints.add(listener); return () => hints.delete(listener); },
   };
   const controller = new SideChatController({ hostId, parentThreadId, draftId: 'draft-' + hostId, port,
@@ -200,6 +202,32 @@ test('lost start response cannot be cleared or replayed by reading the original 
   assert.equal(f.calls.filter(call => call.method === 'thread/fork').length, 1);
 });
 
+test('only explicit proof that this endpoint call was not dispatched permits an explicit retry', async () => {
+  const f = fixture(); let starts = 0, retries = 0, closes = 0;
+  const port: SideChatHostPort = { ...f.port,
+    async start(_id) { starts++; throw Object.assign(Error('endpoint disconnected before dispatch'), { uncertain: false }); },
+    async retry(id) { retries++; if (retries === 1) throw Object.assign(Error('retry not dispatched'), { uncertain: false }); return f.port.retry(id); },
+    async close(id) { closes++; if (closes === 1) throw Object.assign(Error('close not dispatched'), { uncertain: false }); return f.port.close(id); },
+  };
+  const c = new SideChatController({ hostId: 'host-a', parentThreadId: 'parent-a', draftId: 'draft', port, onPrepared: async () => {}, canDispatch: () => true });
+  await c.start(); assert.match(c.getSnapshot().error!, /尚未派发/); assert.equal(c.canRetry, true);
+  await c.retry(); assert.equal(c.canRetry, true); assert.equal(f.calls.filter(call => call.method === 'thread/fork').length, 0);
+  await c.read(); await c.retry(); assert.equal(c.getSnapshot().phase, 'ready'); assert.equal(starts, 1); assert.equal(retries, 2);
+  await c.close(); assert.equal(c.getSnapshot().pendingClose, true); assert.equal(c.canRetry, true);
+  assert.match(c.getSnapshot().error!, /尚未派发/); assert.equal(f.calls.filter(call => call.method === 'thread/unsubscribe').length, 0);
+  await c.retry(); assert.equal(c.getSnapshot().phase, 'closed'); assert.equal(closes, 2);
+  assert.equal(f.calls.filter(call => call.method === 'thread/fork').length, 1);
+  assert.equal(f.calls.filter(call => call.method === 'thread/unsubscribe').length, 1);
+
+  const g = fixture();
+  const ambiguous = { ...g.port, async start(): Promise<SideChatHostView> {
+    throw Object.assign(Error('ordinary server error'), { data: { uncertain: false } });
+  } };
+  const other = new SideChatController({ hostId: 'host-a', parentThreadId: 'parent-a', draftId: 'other', port: ambiguous,
+    onPrepared: async () => {}, canDispatch: () => true });
+  await other.start(); await other.read(); assert.equal(other.canRetry, false); assert.match(other.getSnapshot().error!, /结果未确认/);
+});
+
 test('a restored waiting record obeys the owner dispatch guard across reads', async () => {
   const f = fixture(), initial = await f.port.prepare('host-a', 'parent-a'); let permitted = false;
   const c = new SideChatController({ hostId: 'host-a', parentThreadId: 'parent-a', draftId: 'restored-draft', port: f.port,
@@ -231,6 +259,30 @@ test('host terminal persistence failure is recovered without a second fork', asy
   assert.equal(f.controller.getSnapshot().phase, 'ready');
   assert.equal(f.calls.filter(call => call.method === 'thread/fork').length, 1);
   assert.equal(f.calls.filter(call => call.method === 'thread/inject_items').length, 1);
+});
+
+test('late fork can reach an inflight inject whose terminal persistence needs scoped recovery', async () => {
+  const f = fixture(); let permitted = true;
+  f.handle(async call => {
+    if (call.method === 'thread/fork') throw Object.assign(Error('fork response lost'), { delivery: 'unknown' });
+    return f.result(call);
+  });
+  await f.controller.start(); const id = f.controller.getSnapshot().view!.operationId;
+  const fork = f.calls.find(call => call.method === 'thread/fork')!; let failures = 0;
+  f.store.fail = (next, old) => old.inject.status === 'inflight' && next.inject.status === 'received' && failures++ === 0;
+  await fork.late!({ outcome: 'success', result: f.result(fork) });
+  await eventually(() => f.controller.getSnapshot().view?.recoveryError != null);
+  assert.equal(f.controller.getSnapshot().phase, 'injecting');
+  assert.match(f.controller.getSnapshot().view!.recoveryError!, /persistence failure/);
+  const restored = new SideChatController({ hostId: 'host-a', parentThreadId: 'parent-a', draftId: 'draft-host-a', port: f.port,
+    onPrepared: async () => {}, canDispatch: (_scope, action) => action !== 'persistence' || permitted,
+    restored: f.controller.getSnapshot().view! });
+  permitted = false; await restored.retryPersistence(); assert.equal(f.portCalls.filter(call => call === 'retryPersistence').length, 0);
+  permitted = true; await restored.retryPersistence(); assert.equal(restored.getSnapshot().phase, 'ready');
+  assert.equal(restored.getSnapshot().view!.operationId, id); assert.equal(restored.getSnapshot().view!.childId, 'child-host-a');
+  assert.equal(f.calls.filter(call => call.method === 'thread/fork').length, 1);
+  assert.equal(f.calls.filter(call => call.method === 'thread/inject_items').length, 1);
+  await restored.retryPersistence(); assert.equal(f.calls.filter(call => call.method === 'thread/inject_items').length, 1);
 });
 
 test('invalid fork receipt retains its child identity without injecting or inventing success', async () => {
