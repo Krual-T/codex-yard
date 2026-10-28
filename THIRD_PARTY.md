@@ -2,7 +2,7 @@
 
 ## Codex App resources
 
-The current interface is based on Codex App **26.1013.40934**. Its compiled `webview/` resources and `codex-app-tools/` Node adapter are tracked as ordinary Git files under `vendor/codex-app/26.1013.40934/`. Build and startup read that snapshot directly. A desktop app installation and a separate App package download are not required.
+Codex App **26.1013.40934** is the historical UI behavior reference. Its compiled `webview/` resources and `codex-app-tools/` Node adapter remain tracked under `vendor/codex-app/26.1013.40934/` during the migration. The owned React entry and build no longer load the snapshot renderer; remaining reference tests and resource helpers are being replaced before deleting the snapshot. A desktop app installation and a separate App package download are not required.
 
 The snapshot was extracted from [OpenAI's versioned Linux package](https://persistent.oaistatic.com/codex-app-prod/linux/arch/26.1013.40934/x86_64/chatgpt-bin-26.1013.40934-1-x86_64.pkg.tar.zst). The web files and adapter are preserved byte-for-byte, including bundled copyright and license notices. The repository does not contain the package archive, desktop executable, original App TypeScript/TSX sources, account data, or downloaded configuration responses.
 
@@ -13,6 +13,8 @@ Changes to Codex App's private module exports or host contracts can require upda
 ## Package dependencies
 
 The npm dependencies are declared in `package.json` and locked in `package-lock.json`. They retain the licenses and notices distributed in their packages. `npm ci` installs them locally; `node_modules/` stays outside Git.
+
+The owned file editor uses the MIT-licensed CodeMirror 6 packages for editing, commands, search and language support. These packages and their language parsers come from npm, with their packaged licenses; no original App editor bundle is copied into the source tree.
 
 The Chrome companion bundles this project's transport and declares dependencies on `chrome-devtools-mcp` and `ws`. It is generated into `.local/` during the host build. It does not contain Chrome, browser profiles, cookies, or paired-device credentials.
 
