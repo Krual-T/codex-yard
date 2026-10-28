@@ -22,6 +22,15 @@ export function resolveFilePath(cwd: string, path: string): string {
   return '/' + parts.join('/');
 }
 
+export function previewMimeType(path: string, mimeType: string): string {
+  if (mimeType !== 'application/octet-stream') return mimeType;
+  const extension = /\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase();
+  const media: Record<string, string> = { aac: 'audio/aac', aif: 'audio/aiff', aiff: 'audio/aiff', flac: 'audio/flac',
+    m4a: 'audio/mp4', oga: 'audio/ogg', ogg: 'audio/ogg', opus: 'audio/ogg', m4v: 'video/mp4', mov: 'video/quicktime',
+    ogv: 'video/ogg', webm: 'video/webm' };
+  return extension && media[extension] || mimeType;
+}
+
 export async function readWorkspaceFile(client: WorkbenchClient, hostId: string, path: string): Promise<FileContents> {
   const result = await client.host<{ text?: unknown; blob?: unknown }>('workspace-files', {
     operation: 'read', hostId, path, representation: 'auto',
@@ -41,24 +50,50 @@ export async function readWorkspaceFile(client: WorkbenchClient, hostId: string,
       }
     }
   }
-  return { kind: 'binary', base64: binary.contentsBase64, mimeType: binary.mimeType };
+  return { kind: 'binary', base64: binary.contentsBase64, mimeType: previewMimeType(path, binary.mimeType) };
 }
 
 export function editorText(text: string): string {
   return text.replace(/\r\n|\r/g, '\n');
 }
 
-export function fileText(text: string, original: string): string {
-  let ending: string | undefined;
-  for (let index = 0; index < original.length; index++) {
-    const char = original[index];
-    if (char !== '\r' && char !== '\n') continue;
-    const current = char === '\r' && original[index + 1] === '\n' ? '\r\n' : char;
-    if (current === '\r\n') index++;
-    if (ending && ending !== current) throw new Error('File has mixed line endings. Copy your changes before editing it with another tool.');
-    ending = current;
+export interface TextEdit { start: number; end: number; inputType: string }
+
+/** Apply a textarea edit to the original bytes, preserving untouched line endings. */
+export function editFileText(original: string, text: string, edit?: TextEdit): string {
+  const previous = editorText(original);
+  if (previous === text) return original;
+  let start = edit?.start ?? -1;
+  let end = edit?.end ?? -1;
+  if (edit && start === end && edit.inputType.startsWith('delete')) {
+    const removed = previous.length - text.length;
+    if (edit.inputType.endsWith('Backward')) start -= removed;
+    else end += removed;
   }
-  return ending && ending !== '\n' ? text.replaceAll('\n', ending) : text;
+  let insertedLength = text.length - (previous.length - (end - start));
+  if (start < 0 || end < start || end > previous.length || insertedLength < 0 ||
+      text !== previous.slice(0, start) + text.slice(start, start + insertedLength) + previous.slice(end)) {
+    start = 0;
+    while (start < previous.length && start < text.length && previous[start] === text[start]) start++;
+    end = previous.length;
+    let textEnd = text.length;
+    while (end > start && textEnd > start && previous[end - 1] === text[textEnd - 1]) { end--; textEnd--; }
+    insertedLength = textEnd - start;
+  }
+  const rawOffset = (offset: number) => {
+    let raw = 0, normalized = 0;
+    while (raw < original.length && normalized < offset) {
+      if (original[raw] === '\r' && original[raw + 1] === '\n') raw++;
+      raw++; normalized++;
+    }
+    return raw;
+  };
+  const rawStart = rawOffset(start), rawEnd = rawOffset(end);
+  const nextEnding = /\r\n|\r|\n/.exec(original.slice(rawStart))?.[0];
+  const previousEndings = original.slice(0, rawStart).match(/\r\n|\r|\n/g);
+  const ending = nextEnding ?? previousEndings?.at(-1) ?? '\n';
+  const inserted = text.slice(start, start + insertedLength).replaceAll('\n', ending);
+  return original.slice(0, rawStart) + inserted + original.slice(rawEnd);
 }
 
 export function toBase64(text: string): string {

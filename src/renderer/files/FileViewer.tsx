@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { base64Bytes } from './file-service.ts';
-import type { FileContents } from './file-service.ts';
+import type { FileContents, TextEdit } from './file-service.ts';
 import { PdfViewer } from './PdfViewer.tsx';
 
 interface Location { line: number; column?: number; id: number }
@@ -9,7 +9,8 @@ interface Props {
   content: FileContents;
   text: string;
   location?: Location;
-  onChange(text: string): void;
+  readOnly: boolean;
+  onChange(text: string, edit?: TextEdit): void;
   onSave(): void;
 }
 
@@ -27,8 +28,9 @@ function lineOffset(text: string, requestedLine: number, requestedColumn: number
   return { offset: Math.min(offset + column - 1, end < 0 ? text.length : end), line: actual };
 }
 
-function TextViewer({ path, text, location, onChange, onSave }: Omit<Props, 'content'>) {
+function TextViewer({ path, text, location, readOnly, onChange, onSave }: Omit<Props, 'content'>) {
   const editor = useRef<HTMLTextAreaElement>(null);
+  const edit = useRef<TextEdit | undefined>(undefined);
   const [viewport, setViewport] = useState({ top: 0, height: 400 });
   const count = useMemo(() => {
     let count = 1;
@@ -41,11 +43,15 @@ function TextViewer({ path, text, location, onChange, onSave }: Omit<Props, 'con
   useEffect(() => {
     if (!editor.current) return;
     const element = editor.current;
+    const beforeInput = (event: InputEvent) => {
+      edit.current = { start: element.selectionStart, end: element.selectionEnd, inputType: event.inputType };
+    };
+    element.addEventListener('beforeinput', beforeInput);
     const resize = () => setViewport(previous => ({ ...previous, height: element.clientHeight }));
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(element);
-    return () => observer.disconnect();
+    return () => { observer.disconnect(); element.removeEventListener('beforeinput', beforeInput); };
   }, []);
   useEffect(() => {
     if (!location || !editor.current) return;
@@ -61,8 +67,8 @@ function TextViewer({ path, text, location, onChange, onSave }: Omit<Props, 'con
     <pre className="yard-file-gutter" aria-hidden="true" style={{ width: `${Math.max(3, String(count).length) + 2}ch` }}>
       <span style={{ top: 8 + first * 20 - viewport.top }}>{numbers}</span>
     </pre>
-    <textarea ref={editor} className="yard-file-text" aria-label={`File: ${path}`} value={text} spellCheck={false} wrap="off"
-      onChange={event => onChange(event.target.value)} onScroll={event => {
+    <textarea ref={editor} className="yard-file-text" aria-label={`File: ${path}`} value={text} readOnly={readOnly} spellCheck={false} wrap="off"
+      onChange={event => { onChange(event.target.value, edit.current); edit.current = undefined; }} onScroll={event => {
         const top = event.currentTarget.scrollTop;
         setViewport(previous => ({ ...previous, top }));
       }}
@@ -85,7 +91,9 @@ function hexPreview(bytes: Uint8Array): string {
 function BinaryViewer({ path, content }: { path: string; content: Extract<FileContents, { kind: 'binary' }> }) {
   const bytes = useMemo(() => base64Bytes(content.base64), [content.base64]);
   const [url, setUrl] = useState<string>();
+  const [mediaError, setMediaError] = useState(false);
   useEffect(() => {
+    setMediaError(false);
     if (content.mimeType === 'application/pdf') { setUrl(undefined); return; }
     const next = URL.createObjectURL(new Blob([bytes], { type: content.mimeType }));
     setUrl(next);
@@ -93,9 +101,10 @@ function BinaryViewer({ path, content }: { path: string; content: Extract<FileCo
   }, [bytes, content.mimeType]);
   if (content.mimeType === 'application/pdf') return <PdfViewer bytes={bytes} />;
   if (!url) return <div className="yard-file-status">Loading preview...</div>;
-  if (content.mimeType.startsWith('image/')) return <div className="yard-file-media"><img src={url} alt={path} /></div>;
-  if (content.mimeType.startsWith('audio/')) return <div className="yard-file-media"><audio controls src={url} /></div>;
-  if (content.mimeType.startsWith('video/')) return <div className="yard-file-media"><video controls src={url} /></div>;
+  if (mediaError) return <div className="yard-file-status" role="alert">Media preview failed. Download the file to open it.</div>;
+  if (content.mimeType.startsWith('image/')) return <div className="yard-file-media"><img src={url} alt={path} onError={() => setMediaError(true)} /></div>;
+  if (content.mimeType.startsWith('audio/')) return <div className="yard-file-media"><audio controls src={url} aria-label={`Audio: ${path}`} onError={() => setMediaError(true)} /></div>;
+  if (content.mimeType.startsWith('video/')) return <div className="yard-file-media"><video controls src={url} aria-label={`Video: ${path}`} onError={() => setMediaError(true)} /></div>;
   return <pre className="yard-file-hex" aria-label={`Binary: ${path}`}>{hexPreview(bytes)}</pre>;
 }
 

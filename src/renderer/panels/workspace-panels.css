@@ -46,5 +46,24 @@
 .yard-pdf-text-layer > :not(.markedContent), .yard-pdf-text-layer .markedContent span:not(.markedContent) { font-size: calc(var(--text-scale-factor) * var(--font-height, 0)); transform: rotate(var(--rotate, 0deg)) scaleX(var(--scale-x, 1)) scale(var(--min-font-size-inv)); }
 .yard-pdf-text-layer .markedContent { display: contents; }
 .yard-pdf-text-layer ::selection { background: #0074cc55; }
+.yard-terminal-container, .yard-terminal-panel { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.yard-terminal-container[hidden] { display: none; }
+.yard-terminal-header { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 12px; border-bottom: 1px solid var(--yard-panel-border); }
+.yard-terminal-header span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.yard-terminal-header button { padding: 4px 8px; border: 1px solid var(--yard-panel-border); border-radius: 4px; background: transparent; cursor: pointer; }
+.yard-terminal-screen { flex: 1; min-height: 0; padding: 8px; overflow: hidden; background: #202324; }
+.yard-terminal-screen .xterm { height: 100%; }
+.yard-diff-viewer { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.yard-diff-lines { flex: 1; min-height: 0; overflow: auto; font: 12px/20px ui-monospace, monospace; }
+.yard-diff-line { display: flex; width: max-content; min-width: 100%; }
+.yard-diff-line.is-add { background: #ddf4e3; }
+.yard-diff-line.is-delete { background: #ffe7e5; }
+.yard-diff-line.is-hunk { background: #e6f0f4; color: #355c6b; }
+.yard-diff-line.is-header { color: var(--yard-panel-muted); }
+.yard-diff-number { flex: 0 0 5ch; padding: 0 8px; border: 0; color: #687477; background: transparent; text-align: right; user-select: none; font: inherit; }
+button.yard-diff-number { cursor: pointer; }
+button.yard-diff-number:hover { color: #12675e; text-decoration: underline; }
+.yard-diff-text { padding-right: 12px; white-space: pre; }
 @media (max-width: 560px) { .yard-files-tree { flex-basis: 36%; } .yard-file-toolbar { padding-left: 6px; } }
 @media (prefers-color-scheme: dark) { .yard-workspace-panels { --yard-panel-border: #414648; --yard-panel-muted: #a4abad; color: #e5e8e8; background: #202324; } .yard-panel-icon:hover, .yard-panel-tab-close:hover, .yard-files-tree-entry:hover { background: #353a3b; } .yard-file-gutter, .yard-file-media { background: #292d2e; } .yard-file-error { color: #ffb0a9; background: #472b29; border-color: #70433f; } }
+@media (prefers-color-scheme: dark) { .yard-diff-line.is-add { background: #173b2a; } .yard-diff-line.is-delete { background: #482624; } .yard-diff-line.is-hunk { background: #293c45; color: #c0d8df; } .yard-diff-number { color: #a4abad; } }

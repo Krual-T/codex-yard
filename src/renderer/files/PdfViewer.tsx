@@ -38,14 +38,16 @@ export function PdfViewer({ bytes }: { bytes: Uint8Array<ArrayBuffer> }) {
     void document.getPage(page).then(async pdfPage => {
       if (!active) return;
       const viewport = pdfPage.getViewport({ scale });
-      const pixelRatio = window.devicePixelRatio || 1;
-      canvas.width = Math.ceil(viewport.width * pixelRatio);
-      canvas.height = Math.ceil(viewport.height * pixelRatio);
+      if (!Number.isFinite(viewport.width) || !Number.isFinite(viewport.height) || viewport.width <= 0 || viewport.height <= 0) throw new Error('Invalid PDF page size');
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, Math.sqrt(16_000_000 / (viewport.width * viewport.height)),
+        8192 / viewport.width, 8192 / viewport.height);
+      canvas.width = Math.max(1, Math.ceil(viewport.width * pixelRatio));
+      canvas.height = Math.max(1, Math.ceil(viewport.height * pixelRatio));
       canvas.style.width = `${viewport.width}px`;
       canvas.style.height = `${viewport.height}px`;
       container.style.width = `${viewport.width}px`;
       container.style.height = `${viewport.height}px`;
-      container.style.setProperty('--total-scale-factor', String(viewport.scale));
+      container.style.setProperty('--total-scale-factor', String(viewport.scale * viewport.userUnit));
       text.replaceChildren();
       rendering = pdfPage.render({ canvas, viewport, transform: [pixelRatio, 0, 0, pixelRatio, 0, 0] });
       textLayer = new TextLayer({ textContentSource: pdfPage.streamTextContent(), container: text, viewport });
