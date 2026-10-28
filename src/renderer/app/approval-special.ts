@@ -12,7 +12,8 @@ export interface ApprovalBrowserAuthField {
 export interface ApprovalBrowserAuth {
   kind: 'browser-auth'; origin: string; reason: string; challengeId: string; targetTabId?: string;
   fields: ApprovalBrowserAuthField[]; options: { id: string; label: string; fieldIds: string[] }[];
-  hasQrCode: boolean; hasWebauthn: boolean; riskLevel?: 'low' | 'high';
+  hasQrCode: boolean; qrCode: boolean; initialQrPayload?: string; qrCodeRequiresApp?: boolean;
+  hasWebauthn: boolean; riskLevel?: 'low' | 'high';
 }
 export type ApprovalSpecial = ApprovalToolSuggestion
   | { kind: 'user-verification'; title: string; description: string; challenge: string }
@@ -94,9 +95,18 @@ function browserAuth(params: Record<string, unknown>, meta: Record<string, unkno
     options.push({ id: option.id, label: option.label, fieldIds: option.field_ids });
   }
   if (new Set(options.map(option => option.id)).size !== options.length) return invalid();
+  let initialQrPayload = typeof meta.qrCodePayload === 'string' && meta.qrCodePayload ? meta.qrCodePayload : undefined;
+  if (!initialQrPayload && typeof meta.qrCodeUrl === 'string') {
+    try {
+      const url = new URL(meta.qrCodeUrl);
+      if (url.protocol === 'https:' && url.hostname && !url.username && !url.password) initialQrPayload = meta.qrCodeUrl;
+    } catch { /* The initial URL is not a usable QR payload. */ }
+  }
   return { kind: 'browser-auth', origin: meta.origin, reason: meta.reason, challengeId: meta.browser_auth_challenge_id,
     ...(targetTabId ? { targetTabId } : {}), fields, options,
-    hasQrCode: meta.qrCode === true || typeof meta.qrCodeUrl === 'string' || typeof meta.qrCodePayload === 'string',
+    hasQrCode: meta.qrCode === true || Boolean(initialQrPayload), qrCode: meta.qrCode === true,
+    ...(initialQrPayload ? { initialQrPayload } : {}),
+    ...(typeof meta.qrCodeRequiresApp === 'boolean' ? { qrCodeRequiresApp: meta.qrCodeRequiresApp } : {}),
     hasWebauthn: meta.webauthn != null, ...(meta.riskLevel === 'low' || meta.riskLevel === 'high' ? { riskLevel: meta.riskLevel } : {}) };
 }
 

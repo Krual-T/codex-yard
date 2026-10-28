@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { ServerRequestRef, WorkbenchClient } from '../workbench-contract.ts';
 import { useCompletions } from '../composer/standalone-completions.tsx';
 import type { Completion } from '../composer/standalone-completions.tsx';
@@ -7,6 +8,11 @@ import type { ApprovalField, ApprovalFormValues, ApprovalResourceOption } from '
 import { classifyElicitation, displayApprovalParameters } from './approval-elicitation.ts';
 import type { ApprovalPersistence } from './approval-elicitation.ts';
 import type { ApprovalBrowserAuth, ApprovalToolSuggestion } from './approval-special.ts';
+import { ApprovalBrowserAuthQr, browserAuthScopeKey, sameBrowserAuthScope } from './approval-browser-auth.tsx';
+import type { ApprovalBrowserAuthAcknowledgeRequest, ApprovalBrowserAuthAcknowledgement, ApprovalBrowserAuthBinding,
+  ApprovalBrowserAuthQrSubscribe, ApprovalBrowserAuthScope, ApprovalQrCodeRenderer } from './approval-browser-auth.tsx';
+export type { ApprovalBrowserAuthAcknowledgeRequest, ApprovalBrowserAuthAcknowledgement, ApprovalBrowserAuthBinding,
+  ApprovalBrowserAuthQrSubscribe, ApprovalBrowserAuthQrUpdate, ApprovalBrowserAuthScope, ApprovalQrCodeRenderer } from './approval-browser-auth.tsx';
 
 export interface ServerRequest {
   hostId: string; id: string | number; method: string; params: Record<string, unknown>;
@@ -36,6 +42,7 @@ export interface ApprovalSuggestionRequest extends ApprovalHostRequest { suggest
 export interface ApprovalOtpIdentity { ref: ServerRequestRef; threadId: string; displayName: string }
 export interface ApprovalBrowserAuthRequest extends ApprovalHostRequest {
   origin: string; challengeId: string; targetTabId?: string;
+  accountId?: string; userId?: string;
   fields: Record<string, { value: string }>; selectedOption?: string;
 }
 export interface ApprovalDialogProps {
@@ -63,6 +70,16 @@ export interface ApprovalDialogProps {
   onApplyToolSuggestion?(request: ApprovalSuggestionRequest): Promise<void>;
   /** Complete private fill and acknowledge the original request without resending credentials on retries. */
   onSubmitBrowserAuth?(request: ApprovalBrowserAuthRequest): Promise<void>;
+  /** Original account and user identities as resolved by the owning host. */
+  browserAuthBinding?: ApprovalBrowserAuthBinding;
+  /** The host owns polling, authentication, cancellation and expiration. */
+  onSubscribeBrowserAuthQr?: ApprovalBrowserAuthQrSubscribe;
+  /** A managed QR encoder, such as qrcode.react's QRCodeSVG. */
+  browserAuthQrCode?: ApprovalQrCodeRenderer;
+  /** Parent-owned, positively confirmed fill operation and acknowledgement state. */
+  browserAuthAcknowledgement?: ApprovalBrowserAuthAcknowledgement;
+  /** Retry only the chat acknowledgement for this exact confirmed operation. */
+  onAcknowledgeBrowserAuth?(request: ApprovalBrowserAuthAcknowledgeRequest): Promise<void>;
   /** Resolved original-conversation agent identity, not an email address or a code. */
   emailOtpIdentity?: ApprovalOtpIdentity;
   completionContext?: ApprovalCompletionContext;
@@ -224,9 +241,10 @@ function ElicitationField({ field, value, error, disabled, picking, onPick, onCh
   </div>;
 }
 
-function BrowserAuthFields({ view, disabled, available, onSubmit }: {
+function BrowserAuthFields({ view, disabled, available, onSubmit, children }: {
   view: ApprovalBrowserAuth; disabled: boolean; available: boolean;
   onSubmit(fields: Record<string, { value: string }>, selectedOption?: string): void;
+  children?: ReactNode;
 }) {
   const [selected, setSelected] = useState('');
   const [values, setValues] = useState<Record<string, string>>({});
@@ -253,9 +271,10 @@ function BrowserAuthFields({ view, disabled, available, onSubmit }: {
       <input name={'browser-auth-field-' + field.id} type={field.type} required={field.required} autoComplete="off" disabled={disabled}
         value={own(values, field.id) ?? ''} onChange={event => setValues(current => ({ ...current, [field.id]: event.target.value }))} />
     </label>)}
-    {(view.hasQrCode || view.hasWebauthn) && <p>QR code and passkey sign-in require the original browser host.</p>}
+    {children}
+    {view.hasWebauthn && <p>Passkey sign-in requires the original browser host.</p>}
     {!available && <p>Private sign-in is unavailable on this host.</p>}
-    <button type="submit" disabled={!canSubmit}>Send sign-in details</button>
+    {(view.fields.length > 0 || view.options.length > 0) && <button type="submit" disabled={!canSubmit}>Send sign-in details</button>}
   </form>;
 }
 
@@ -331,9 +350,11 @@ export function ApprovalDialog(props: ApprovalDialogProps) {
 
 function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscape, inputDismissMode = 'interrupt', stateRef, outcome, onOutcome,
   inputDraft, onInputDraftChange, formDraft, onFormDraftChange, onCheckRequestValidity, onPickApprovalFiles, onBeginUserVerification,
-  onApplyToolSuggestion, onSubmitBrowserAuth, emailOtpIdentity, completionContext, onCheckConnectorAuthorization }: ApprovalDialogProps) {
+  onApplyToolSuggestion, onSubmitBrowserAuth, browserAuthBinding, onSubscribeBrowserAuthQr, browserAuthQrCode,
+  browserAuthAcknowledgement, onAcknowledgeBrowserAuth, emailOtpIdentity, completionContext, onCheckConnectorAuthorization }: ApprovalDialogProps) {
   const dialog = useRef<HTMLElement>(null);
   const inFlight = useRef(false);
+  const acknowledgementInFlight = useRef(false);
   const verificationController = useRef<AbortController | null>(null);
   const checkingAuth = useRef(false);
   const mounted = useRef(false);
@@ -375,7 +396,28 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   // A parent-owned ready state makes remounts safe even after an uncertain reply.
   const managed = stateRef?.hostId === request.ref.hostId && stateRef.generation === request.ref.generation
     && stateRef.id === request.ref.id && outcome !== undefined && Boolean(onOutcome && onInputDraftChange && onFormDraftChange);
-  const locked = busy || !managed || outcome !== 'ready' || Boolean(localOutcome && localOutcome !== 'ready') || !sourceValid;
+  const authScope: ApprovalBrowserAuthScope | undefined = view?.kind === 'browser-auth' && browserAuthBinding
+    && browserAuthBinding.ref.hostId === request.ref.hostId && browserAuthBinding.ref.generation === request.ref.generation
+    && browserAuthBinding.ref.id === request.ref.id && browserAuthBinding.hostId === request.ref.hostId
+    && browserAuthBinding.threadId === threadId && browserAuthBinding.challengeId === view.challengeId
+    && browserAuthBinding.accountId.trim() && browserAuthBinding.userId.trim() && threadId && serverName
+    ? { ...browserAuthBinding, serverName, origin: view.origin, ...(view.targetTabId ? { targetTabId: view.targetTabId } : {}) } : undefined;
+  const authScopeKey = authScope ? browserAuthScopeKey(authScope) : '';
+  const recoveryContextKey = view?.kind === 'browser-auth'
+    ? JSON.stringify([request.ref.hostId, request.ref.generation, request.ref.id, threadId, serverName,
+      view.challengeId, view.origin, view.targetTabId]) : '';
+  const seenRecovery = useRef(new Set<string>());
+  const authRecoveryPresent = Boolean(recoveryContextKey && (browserAuthAcknowledgement !== undefined || seenRecovery.current.has(recoveryContextKey)));
+  const authScopeKeyRef = useRef(authScopeKey);
+  authScopeKeyRef.current = authScopeKey;
+  const acknowledgement = authScope && browserAuthAcknowledgement
+    && sameBrowserAuthScope(authScope, browserAuthAcknowledgement.scope) && browserAuthAcknowledgement.operationId.trim()
+    && (browserAuthAcknowledgement.fillStatus === 'submitted' || browserAuthAcknowledgement.fillStatus === 'not_submitted')
+    ? browserAuthAcknowledgement : undefined;
+  const acknowledgementKey = acknowledgement ? JSON.stringify([authScopeKey, acknowledgement.operationId, acknowledgement.fillStatus]) : '';
+  const acknowledgementRef = useRef({ key: acknowledgementKey, status: acknowledgement?.status, outcome });
+  acknowledgementRef.current = { key: acknowledgementKey, status: acknowledgement?.status, outcome };
+  const locked = busy || !managed || outcome !== 'ready' || Boolean(localOutcome && localOutcome !== 'ready') || !sourceValid || authRecoveryPresent;
   const lockedRef = useRef(locked);
   lockedRef.current = locked;
   const authorizationKey = view?.kind === 'url' ? JSON.stringify([request.ref.hostId, request.ref.generation, request.ref.id, threadId,
@@ -388,12 +430,19 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   let warning = '';
   if (!sourceValid) warning = 'This request has inconsistent host or request identity.';
   else if (!managed) warning = 'Approval state is unavailable. Open this request in a connected conversation to respond.';
+  else if (authRecoveryPresent && !acknowledgement) warning = 'The saved sign-in operation does not match this request.';
   else if (input && !questions) warning = 'This input request cannot be represented safely.';
   else if (permissions && !grant) warning = 'These requested permissions cannot be represented safely.';
   else if (command && decisions?.unsupported) warning = 'Some approval decisions cannot be represented safely.';
   else if (view?.kind === 'unsupported') warning = view.reason;
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; verificationController.current?.abort(); }; }, []);
+  useEffect(() => {
+    if (recoveryContextKey && browserAuthAcknowledgement !== undefined) seenRecovery.current.add(recoveryContextKey);
+  }, [recoveryContextKey, browserAuthAcknowledgement]);
+  useEffect(() => {
+    if (acknowledgement?.status === 'ready') setError('');
+  }, [acknowledgementKey, acknowledgement?.status]);
   useEffect(() => {
     const root = dialog.current;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -468,7 +517,43 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
     if (view?.kind !== 'browser-auth' || !onSubmitBrowserAuth || !threadId || !serverName) return;
     void send(() => onSubmitBrowserAuth({ ref: request.ref, hostId: request.ref.hostId, threadId, serverName,
       origin: view.origin, challengeId: view.challengeId, ...(view.targetTabId ? { targetTabId: view.targetTabId } : {}),
+      ...(authScope ? { accountId: authScope.accountId, userId: authScope.userId } : {}),
       fields, ...(selectedOption ? { selectedOption } : {}) }), false, true);
+  };
+  const retryBrowserAuthAcknowledgement = async () => {
+    if (!acknowledgement || !authScope || !onAcknowledgeBrowserAuth || !onCheckRequestValidity || !onOutcome
+      || !managed || !sourceValid || outcome !== 'ready' || acknowledgement.status !== 'ready' || busy || acknowledgementInFlight.current) return;
+    const key = acknowledgementKey;
+    const current = () => mounted.current && acknowledgementRef.current.key === key
+      && acknowledgementRef.current.status !== 'unknown' && acknowledgementRef.current.status !== 'sent'
+      && (acknowledgementRef.current.outcome === 'ready' || acknowledgementRef.current.outcome === 'sending');
+    acknowledgementInFlight.current = true;
+    setBusy(true); setError('');
+    onOutcome(request.ref, 'sending');
+    try {
+      if (!await onCheckRequestValidity(request.ref) || !current()) throw new Error('Request no longer available');
+      await onAcknowledgeBrowserAuth({ scope: authScope, operationId: acknowledgement.operationId, fillStatus: acknowledgement.fillStatus });
+      if (!current()) return;
+      setLocalOutcome('sent');
+      onOutcome(request.ref, 'sent');
+    } catch (cause) {
+      if (!current()) return;
+      let stillPending = false;
+      if (record(cause) && cause.uncertain === false) {
+        try { stillPending = await onCheckRequestValidity(request.ref); } catch { /* Keep an unverified reply locked. */ }
+      }
+      if (!current()) return;
+      if (stillPending) {
+        acknowledgementInFlight.current = false;
+        setLocalOutcome('ready');
+        onOutcome(request.ref, 'ready');
+        setError('The chat response was not sent. You can retry the chat response.');
+      } else {
+        setLocalOutcome('unknown');
+        onOutcome(request.ref, 'unknown');
+        setError('The chat response could not be confirmed. Check the original conversation before retrying.');
+      }
+    } finally { if (mounted.current) setBusy(false); }
   };
   const checkConnectorAuthorization = async () => {
     if (view?.kind !== 'url' || !view.connectorId || view.consent || !threadId || !onCheckConnectorAuthorization
@@ -612,8 +697,28 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
       {view?.kind === 'tool-suggestion' && <><h3>{view.action === 'install' ? 'Install' : 'Enable'} {view.toolName}</h3>
         <p>{view.reason}</p><p>{view.toolType}: {view.toolId}</p>{view.riskLevel === 'high' && <p role="status">Elevated risk</p>}
         {!onApplyToolSuggestion && <p>Tool setup is unavailable on this host.</p>}</>}
-      {view?.kind === 'browser-auth' && <BrowserAuthFields key={JSON.stringify([threadId, serverName, view])} view={view} disabled={locked}
-        available={Boolean(onSubmitBrowserAuth && threadId && serverName)} onSubmit={submitBrowserAuth} />}
+      {view?.kind === 'browser-auth' && (authRecoveryPresent ? <div>
+        <h3>{acknowledgement ? 'Sign-in operation completed' : 'Sign-in operation unavailable'}</h3>
+        {acknowledgement?.status === 'ready' && <p role="status">The chat response needs to be retried. Sign-in details will not be sent again.</p>}
+        {acknowledgement?.status === 'unknown' && <p role="alert">The chat response could not be confirmed.</p>}
+        {acknowledgement?.status === 'sending' && <p role="status">Sending the chat response...</p>}
+        {acknowledgement?.status === 'sent' && <p role="status">The chat response was sent.</p>}
+        {acknowledgement && <button type="button" disabled={busy || acknowledgementInFlight.current || !managed || !sourceValid || outcome !== 'ready'
+          || acknowledgement.status !== 'ready' || !onAcknowledgeBrowserAuth || !onCheckRequestValidity}
+          onClick={() => { void retryBrowserAuthAcknowledgement(); }}>Retry chat response</button>}
+      </div> : <BrowserAuthFields key={JSON.stringify([threadId, serverName, view.origin, view.challengeId, view.fields, view.options, authScopeKey])}
+        view={view} disabled={locked} available={Boolean(onSubmitBrowserAuth && threadId && serverName)} onSubmit={submitBrowserAuth}>
+        {view.hasQrCode && (authScope && onSubscribeBrowserAuthQr && browserAuthQrCode
+          ? <ApprovalBrowserAuthQr key={authScopeKey} scope={authScope} enabled={!locked} initialPayload={view.initialQrPayload}
+            requiresApp={view.qrCodeRequiresApp} subscribe={onSubscribeBrowserAuthQr} QrCode={browserAuthQrCode}
+            canComplete={view.fields.length === 0 && view.options.length === 0 && !view.hasWebauthn && Boolean(onSubmitBrowserAuth)}
+            isCurrent={() => authScopeKeyRef.current === authScopeKey && !inFlight.current && !acknowledgementInFlight.current}
+            onComplete={automatic => {
+              if (automatic && !view.qrCode || view.fields.length || view.options.length || view.hasWebauthn
+                || !onSubmitBrowserAuth || authScopeKeyRef.current !== authScopeKey || lockedRef.current || inFlight.current) return;
+              submitBrowserAuth({});
+            }} /> : <p>The sign-in code requires the original account and browser host.</p>)}
+      </BrowserAuthFields>)}
       {form && <form id={formId} noValidate onSubmit={(event) => { event.preventDefault(); submitForm(); }}>
         {view?.kind === 'form' && view.confirmation && <div>
           {view.confirmation.title && <h3>{view.confirmation.title}</h3>}
