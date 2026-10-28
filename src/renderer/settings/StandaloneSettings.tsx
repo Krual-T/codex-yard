@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import type { ComponentType } from 'react';
 import type { StandaloneSettingsProps } from '../workbench-contract.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
 import { AgentSection } from './AgentSection.tsx';
@@ -13,6 +14,7 @@ import { HookSection } from './HookSection.tsx';
 import { KeyboardSection } from './KeyboardSection.tsx';
 import { ModelSection } from './ModelSection.tsx';
 import { PersonalizationSection } from './PersonalizationSection.tsx';
+import type { SettingsInstructionEditorProps } from './PersonalizationSection.tsx';
 import { PluginSection } from './PluginSection.tsx';
 import { SkillSection } from './SkillSection.tsx';
 import { Preferences, preferenceKeys } from './preferences.ts';
@@ -61,6 +63,7 @@ export type SettingsIntegrationProps = StandaloneSettingsProps & {
   registerNavigationGuard?: (guard: SettingsNavigationGuard | null) => void;
   projectRoots: SettingsProjectRoots | null;
   sessionCwd: SettingsSessionCwd | null;
+  InstructionEditor: ComponentType<SettingsInstructionEditorProps>;
 };
 const remainingSections: Record<string, string> = {
   'local-environments': 'Project setup scripts cannot be managed from this page yet.',
@@ -81,7 +84,7 @@ export function StandaloneSettings(props: SettingsIntegrationProps) {
   return <SettingsPage {...props} preferences={preferences} snapshot={snapshot} />;
 }
 
-function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, projectRoots, sessionCwd, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
+function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, projectRoots, sessionCwd, InstructionEditor, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
   const { t, locale } = useI18n();
   const route = readSettingsRoute(location, hostId);
   const { section, hostId: selectedHost } = route;
@@ -159,7 +162,9 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
       if (!target) return;
       target.scrollIntoView({ block: 'center' });
       const control = target.matches('input, select, textarea, button') ? target :
-        target.querySelector<HTMLElement>('input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled)');
+        target.querySelector<HTMLElement>('[contenteditable="true"], input:not(:disabled), select:not(:disabled), textarea:not(:disabled)') ??
+        target.querySelector<HTMLElement>('button:not(:disabled)');
+      if (searchTarget.id === 'instructions' && !target.querySelector('[contenteditable="true"], textarea:not(:disabled)')) return;
       if (control) control.focus(); else { target.tabIndex = -1; target.focus(); }
       setSearchTarget(null);
     };
@@ -248,7 +253,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
           section === 'appearance' ? <AppearanceSection key={editorRevision} preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} onDirtyChange={setOtherDirty} /> :
             section === 'models' ? <ModelSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
               section === 'agent' ? <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
-                section === 'personalization' ? <PersonalizationSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+                section === 'personalization' ? <PersonalizationSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} InstructionEditor={InstructionEditor} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
                   section === 'voice' ? <VoiceSection preferences={preferences} snapshot={snapshot} /> :
                     section === 'usage' ? <UsageSection key={selectedHost} client={client} hostId={selectedHost} /> :
               section === 'git-settings' ? <GitSection preferences={preferences} snapshot={snapshot} suspended={confirmLeave} /> :

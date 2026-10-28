@@ -3,7 +3,7 @@ import type { WorkbenchClient } from '../workbench-contract.ts';
 export type InstructionFileName = 'AGENTS.md' | 'AGENTS.override.md';
 export interface InstructionFile {
   name: InstructionFileName; path: string; saved: string | null; draft: string;
-  latest: string | null | undefined; needsRefresh: boolean;
+  latest: string | null | undefined; needsRefresh: boolean; editorRevision: number;
 }
 export interface InstructionsSnapshot {
   loading: boolean; saving: boolean; error: string | null; files: InstructionFile[] | null;
@@ -53,7 +53,8 @@ export class Instructions {
       const files = names.map((name, index): InstructionFile => {
         const saved = values[index], old = previous?.find(file => file.name === name);
         if (old && (isDirty(old) || old.needsRefresh)) return { ...old, path: paths[index], latest: saved === old.saved ? undefined : saved };
-        return { name, path: paths[index], saved, draft: saved ?? '', latest: undefined, needsRefresh: false };
+        return { name, path: paths[index], saved, draft: saved ?? '', latest: undefined, needsRefresh: false,
+          editorRevision: old ? old.editorRevision + (old.saved === saved ? 0 : 1) : 0 };
       });
       this.update({ loading: false, files });
     } catch (error) { if (generation === this.generation) this.update({ loading: false, error: `Could not load instructions: ${errorMessage(error)}` }); }
@@ -66,7 +67,7 @@ export class Instructions {
     if (this.snapshot.loading || this.snapshot.saving) return;
     this.updateFile(name, file => {
       const saved = file.latest === undefined ? file.saved : file.latest;
-      return { ...file, saved, draft: saved ?? '', latest: undefined };
+      return { ...file, saved, draft: saved ?? '', latest: undefined, editorRevision: file.editorRevision + 1 };
     });
   }
   useLatest(name: InstructionFileName) {

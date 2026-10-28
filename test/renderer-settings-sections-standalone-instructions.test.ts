@@ -98,3 +98,18 @@ test('reading the old file cannot release an earlier write that may arrive later
   assert.equal(await editor.save('AGENTS.md'), false);
   assert.equal(client.calls.filter(call => call.endpoint === 'codex-agents-md-save').length, 1);
 });
+
+test('discard and clean external reload request an editor remount without changing exact saved text', async () => {
+  const client = new FakeClient(), editor = new Instructions(client, 'local');
+  const original = '\ufeffFirst\r\nSecond\nThird\r';
+  client.files.set('/fixture/AGENTS.md', original);
+  await editor.load();
+  assert.equal(editor.getSnapshot().files?.[0].draft, original);
+  assert.equal(editor.getSnapshot().files?.[0].editorRevision, 0);
+  editor.edit('AGENTS.md', `${original}draft`); editor.discard('AGENTS.md');
+  assert.equal(editor.getSnapshot().files?.[0].draft, original);
+  assert.equal(editor.getSnapshot().files?.[0].editorRevision, 1);
+  client.files.set('/fixture/AGENTS.md', `${original}external`); await editor.load();
+  assert.equal(editor.getSnapshot().files?.[0].draft, `${original}external`);
+  assert.equal(editor.getSnapshot().files?.[0].editorRevision, 2);
+});

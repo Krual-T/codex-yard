@@ -1,10 +1,16 @@
 import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import type { ComponentType } from 'react';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { Instructions } from './instructions.ts';
 import { Row } from './PreferenceControls.tsx';
 
-export function PersonalizationSection({ client, hostId, onDirtyChange, onSavingChange }: {
-  client: WorkbenchClient; hostId: string; onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
+export interface SettingsInstructionEditorProps {
+  path: string; text: string; readOnly: boolean; onChange(text: string): void; onSave(): void;
+}
+
+export function PersonalizationSection({ client, hostId, InstructionEditor, onDirtyChange, onSavingChange }: {
+  client: WorkbenchClient; hostId: string; InstructionEditor: ComponentType<SettingsInstructionEditorProps>;
+  onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
 }) {
   const instructions = useMemo(() => new Instructions(client, hostId), [client, hostId]);
   const state = useSyncExternalStore(instructions.subscribe, instructions.getSnapshot, instructions.getSnapshot);
@@ -31,10 +37,10 @@ export function PersonalizationSection({ client, hostId, onDirtyChange, onSaving
     {state.loading && <p role="status">Loading instructions...</p>}
     {state.files?.find(file => file.name === 'AGENTS.override.md')?.saved?.trim() && <p role="status">AGENTS.override.md takes precedence over AGENTS.md.</p>}
     {state.files?.map(file => <section className="yard-instruction-editor" key={file.name} data-setting-id={file.name === 'AGENTS.md' ? 'instructions' : undefined}>
-      <label htmlFor={`yard-instructions-${file.name}`}><strong>{file.name}</strong></label>
+      <strong>{file.name}</strong>
       <p className="yard-muted"><code>{file.path}</code>{file.saved === null ? ' (not created)' : ''}</p>
-      <textarea id={`yard-instructions-${file.name}`} aria-label={file.name} value={file.draft} disabled={state.loading || state.saving}
-        onChange={event => instructions.edit(file.name, event.target.value)} />
+      <InstructionEditor key={`${file.name}:${file.editorRevision}`} path={file.path} text={file.draft} readOnly={state.loading || state.saving}
+        onChange={text => instructions.edit(file.name, text)} onSave={() => { void instructions.save(file.name); }} />
       {file.latest !== undefined && <div role="alert" className="yard-setting-error">
         <p>The file changed on the host. Review its current contents before saving your draft.</p>
         <details><summary>Current file on host</summary><pre className="yard-instructions">{file.latest === null ? '(File no longer exists)' : file.latest || '(Empty file)'}</pre></details>
