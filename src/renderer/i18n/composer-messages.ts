@@ -27,11 +27,19 @@ export const composerMessageKeys = [
   'This draft contains hints that cannot be edited without loss.',
   'This message contains formatted or segmented content that cannot be edited without loss.',
   'This skill reference contains extra information that cannot be edited without loss.',
+  'Existing formatting is retained while plain text mode is on.', 'Could not read plain text preference:',
+  'Default setting changed elsewhere:', 'Current value', 'Your change', 'Use current value', 'Keep my change',
+  'Reload default settings', 'Save default change', 'Discard change', 'Resolve the default model change before sending.',
 ] as const;
 export type ComposerMessageKey = typeof composerMessageKeys[number];
 type Catalog = Partial<Record<ComposerMessageKey, string>>;
 
 const simplified: Catalog = {
+  'Existing formatting is retained while plain text mode is on.': '已开启纯文本模式，现有格式会保留。',
+  'Could not read plain text preference:': '无法读取纯文本偏好：',
+  'Default setting changed elsewhere:': '默认设置已在其他位置更改：', 'Current value': '当前值', 'Your change': '你的更改',
+  'Use current value': '使用当前值', 'Keep my change': '保留我的更改', 'Reload default settings': '重新读取默认设置',
+  'Save default change': '保存默认设置', 'Discard change': '放弃更改', 'Resolve the default model change before sending.': '请先处理默认模型更改，再发送。',
   'This draft contains formatting or context that cannot be edited without loss.': '此草稿包含格式或上下文，当前编辑器不能无损编辑。',
   'The saved draft contains unreadable content. The original data has been retained.': '保存的草稿包含无法读取的内容，已保留原始数据。',
   'This draft contains unsupported document content. The original data has been retained.': '此草稿包含尚不支持的文档内容，已保留原始数据。',

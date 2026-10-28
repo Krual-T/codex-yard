@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { Ref } from 'react';
 import type { SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
+import { ModelSettings } from '../settings/model-settings.ts';
 import type { ApprovalPolicy, ApprovalsReviewer, SandboxMode } from '../../../lib/codex-protocol.ts';
 
 interface Model { value: string; label: string; default: boolean; defaultEffort: string | null; efforts: string[] }
@@ -14,11 +15,28 @@ interface OptionsProps {
   modelRef: Ref<HTMLSelectElement>;
   value: SubmitOptions;
   onChange(patch: Partial<SubmitOptions>): void;
+  onDefaultPendingChange(pending: boolean): void;
 }
 function record(value: unknown): Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 function string(value: unknown): string | undefined { return typeof value === 'string' ? value : undefined; }
+function effectiveModelClient(client: WorkbenchClient, defaultModel: string | undefined): WorkbenchClient {
+  if (!defaultModel) return client;
+  return {
+    async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
+      const result = await client.rpc<T>(method, params, hostId);
+      if (method !== 'config/read') return result;
+      const response = record(result), rawConfig = response.config;
+      if (rawConfig === null || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) return result;
+      const config = record(rawConfig);
+      if (config.model !== null && config.model !== undefined) return result;
+      // A missing configured model still has an effective model from model/list.
+      return { ...response, config: { ...config, model: defaultModel } } as T;
+    },
+    host: client.host.bind(client), subscribe: client.subscribe.bind(client), reply: client.reply.bind(client),
+  };
+}
 function approval(value: unknown): ApprovalPolicy | undefined {
   if (value === 'untrusted' || value === 'on-request' || value === 'never') return value;
   const granular = record(record(value).granular);
@@ -57,12 +75,27 @@ async function models(client: WorkbenchClient, hostId: string): Promise<Model[]>
   return result;
 }
 
-export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRef, value, onChange }: OptionsProps) {
+export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRef, value, onChange, onDefaultPendingChange }: OptionsProps) {
   const { t } = useI18n('zh-CN');
   const [available, setAvailable] = useState<Model[]>([]);
   const [defaults, setDefaults] = useState<SubmitOptions>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const defaultModels = available.filter(item => item.default);
+  const defaultModel = defaultModels.length === 1 ? defaultModels[0]?.value : undefined;
+  const modelClient = useMemo(() => effectiveModelClient(client, defaultModel), [client, defaultModel]);
+  const modelSettings = useMemo(() => new ModelSettings(modelClient, hostId), [modelClient, hostId]);
+  const homeState = useSyncExternalStore(modelSettings.subscribe, modelSettings.getSnapshot, modelSettings.getSnapshot);
+  const isHome = threadId === null;
+  useEffect(() => {
+    if (!isHome) return;
+    void modelSettings.load();
+    return () => modelSettings.dispose();
+  }, [isHome, modelSettings]);
+  useEffect(() => {
+    onDefaultPendingChange(isHome && (homeState.saving || modelSettings.dirty));
+    return () => onDefaultPendingChange(false);
+  }, [isHome, modelSettings, homeState, onDefaultPendingChange]);
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -70,7 +103,8 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRe
       .then(([list, response]) => {
         if (!active) return;
         const config = record(record(response).config);
-        const model = string(config.model) ?? list.find(item => item.default)?.value ?? list[0]?.value;
+        const defaults = list.filter(item => item.default);
+        const model = string(config.model) ?? (defaults.length === 1 ? defaults[0]?.value : undefined);
         const selected = list.find(item => item.value === model);
         setAvailable(list);
         setDefaults({ model, effort: string(config.model_reasoning_effort) ?? selected?.defaultEffort ?? null,
@@ -83,26 +117,38 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRe
     return () => { active = false; };
   }, [client, hostId, cwd]);
   const configured = threadId == null ? defaults : {};
-  const selected = available.find(item => item.value === (value.model ?? configured.model));
+  const selectedModel = isHome ? homeState.model ?? configured.model : value.model ?? configured.model;
+  const selected = available.find(item => item.value === selectedModel);
+  const modelValue = isHome ? homeState.model ?? '' : value.model ?? '';
+  const effortValue = isHome ? homeState.effort ?? '' : value.effort ?? '';
+  const defaultUnavailable = isHome && (homeState.loading || homeState.saving || modelSettings.dirty || !!homeState.error);
   const change = (part: Partial<SubmitOptions>) => onChange(part);
+  const saveDefault = (field: 'model' | 'effort', next: string) => {
+    if (!next || defaultUnavailable) return;
+    if (field === 'model') modelSettings.setModel(next); else modelSettings.setEffort(next);
+    if (!modelSettings.dirty) return;
+    onDefaultPendingChange(true);
+    void modelSettings.save();
+  };
   const configuredLabel = (setting: string | undefined | null) => setting ? `${t('Configured default')} (${setting})` : t('Session default');
   const approvalLabel = (policy: ApprovalPolicy | undefined) => policy && typeof policy === 'object' ? t('Custom approval') : policy;
   return <fieldset className="standalone-composer__options" disabled={busy} title={busy ? t('Queued messages use conversation settings') : undefined} aria-label={t('Conversation options')}>
     <label>{t('Model')} <select ref={modelRef} aria-label={t('Model')}
-      title={value.model ? selected?.label ?? value.model : configuredLabel(configured.model ? selected?.label ?? configured.model : undefined)}
-      value={value.model ?? ''} disabled={loading || !available.length} onChange={event => {
+      title={modelValue ? selected?.label ?? modelValue : configuredLabel(configured.model ? selected?.label ?? configured.model : undefined)}
+      value={modelValue} disabled={loading || !available.length || defaultUnavailable} onChange={event => {
+      if (isHome) { saveDefault('model', event.target.value); return; }
       const model = available.find(item => item.value === (event.target.value || configured.model));
       const effort = model?.efforts.includes(value.effort ?? '') ? value.effort : model?.defaultEffort ?? model?.efforts[0] ?? null;
       change({ model: event.target.value || undefined, effort: event.target.value ? effort : undefined });
     }}>
-      {!selected && value.model ? <option value={value.model}>{value.model}</option> : null}
-      <option value="">{loading ? t('Loading') : configuredLabel(configured.model ? selected?.label ?? configured.model : undefined)}</option>
+      {!selected && modelValue ? <option value={modelValue}>{modelValue}</option> : null}
+      <option value="" disabled={isHome && !!modelValue}>{loading ? t('Loading') : configuredLabel(configured.model ? selected?.label ?? configured.model : undefined)}</option>
       {available.map(model => <option key={model.value} value={model.value}>{model.label}</option>)}
     </select></label>
-    <label>{t('Effort')} <select aria-label={t('Reasoning effort')} value={value.effort ?? ''} disabled={loading || !selected?.efforts.length}
-      onChange={event => change({ effort: event.target.value || null })}>
-      <option value="">{configuredLabel(configured.effort)}</option>
-      {value.effort && !selected?.efforts.includes(value.effort) ? <option value={value.effort}>{value.effort}</option> : null}
+    <label>{t('Effort')} <select aria-label={t('Reasoning effort')} value={effortValue} disabled={loading || !selected?.efforts.length || defaultUnavailable || isHome && !homeState.model}
+      onChange={event => isHome ? saveDefault('effort', event.target.value) : change({ effort: event.target.value || null })}>
+      <option value="" disabled={isHome && !!effortValue}>{configuredLabel(configured.effort)}</option>
+      {effortValue && !selected?.efforts.includes(effortValue) ? <option value={effortValue}>{effortValue}</option> : null}
       {selected?.efforts.map(effort => <option key={effort} value={effort}>{effort}</option>)}
     </select></label>
     <label>{t('Approval')} <select aria-label={t('Approval policy')} value={typeof value.approvalPolicy === 'object' ? '__granular__' : value.approvalPolicy ?? ''} onChange={event => change({ approvalPolicy: approval(event.target.value) })}>
@@ -115,5 +161,18 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRe
     <label><input type="checkbox" checked={(value.serviceTier === undefined ? configured.serviceTier : value.serviceTier) === 'fast'} onChange={event => change({ serviceTier: event.target.checked ? 'fast' : null })} />{t('Fast')}</label>
     <label><input type="checkbox" checked={value.mode === 'plan'} onChange={event => change({ mode: event.target.checked ? 'plan' : 'default' })} />{t('Plan')}</label>
     {error ? <span role="alert">{error}</span> : null}
+    {isHome && (modelSettings.dirty || homeState.error) ? <div className="standalone-composer__model-save" role="status">
+      {homeState.error || homeState.writeError ? <span role="alert">{homeState.error ?? homeState.writeError}</span> : null}
+      {homeState.conflicts.map(field => <div key={field}>
+        <span>{t('Default setting changed elsewhere:')} {field === 'model' ? t('Model') : t('Reasoning effort')} ({t('Current value')}: {field === 'model' ? homeState.savedModel : homeState.savedEffort}; {t('Your change')}: {field === 'model' ? homeState.model : homeState.effort})</span>
+        <button type="button" onClick={() => modelSettings.resolveConflict(field, 'current')}>{t('Use current value')}</button>
+        <button type="button" onClick={() => modelSettings.resolveConflict(field, 'draft')}>{t('Keep my change')}</button>
+      </div>)}
+      <button type="button" disabled={homeState.saving || homeState.loading} onClick={() => void modelSettings.load()}>{t('Reload default settings')}</button>
+      {modelSettings.dirty && <><button type="button" disabled={homeState.saving || homeState.loading || !!homeState.error || !!homeState.writeError || !!homeState.conflicts.length}
+        onClick={() => void modelSettings.save()}>{t('Save default change')}</button>
+      <button type="button" disabled={homeState.saving || homeState.loading} onClick={() => modelSettings.discard()}>{t('Discard change')}</button></>}
+    </div> : null}
+    {isHome && homeState.warning ? <span role="status">{homeState.warning}</span> : null}
   </fieldset>;
 }

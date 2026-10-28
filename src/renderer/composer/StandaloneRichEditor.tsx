@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import { Bold, Code2, Italic, Link as LinkIcon } from 'lucide-react';
 import { toggleMark } from 'prosemirror-commands';
+import { Fragment, Slice } from 'prosemirror-model';
 import { EditorState } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import type { ComposerDocument } from '../workbench-contract.ts';
@@ -28,6 +29,7 @@ interface RichEditorProps {
   readOnly?: boolean;
   allowMentions?: boolean;
   enableCompletions?: boolean;
+  plainTextMode?: boolean;
 }
 
 function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
@@ -63,6 +65,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
   latest.current = props;
   const latestTranslation = useRef(t);
   latestTranslation.current = t;
+  const applyMode = useRef<(() => void) | null>(null);
   const [linkOpen, setLinkOpen] = useState(false);
   const [href, setHref] = useState('');
   useImperativeHandle(ref, () => ({
@@ -77,8 +80,9 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
   useLayoutEffect(() => {
     const doc = readRichDocument(latest.current.document);
     if (!host.current || !doc) return;
+    const plugins = richEditorPlugins();
     const editor = new EditorView(host.current, {
-      state: EditorState.create({ doc, plugins: richEditorPlugins() }),
+      state: EditorState.create({ doc, plugins: latest.current.plainTextMode ? plugins.plain : plugins.rich }),
       editable: () => !latest.current.readOnly,
       attributes: { role: 'textbox', 'aria-label': latest.current.ariaLabel ?? latestTranslation.current('Work with Codex'), 'aria-multiline': 'true',
         ...(latest.current.enableCompletions === false ? {} : { 'aria-autocomplete': 'list' }) },
@@ -95,6 +99,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         compositionend: editor => {
           requestAnimationFrame(() => {
             composing.current = false;
+            applyMode.current?.();
             if (view.current === editor && editor.hasFocus()) latest.current.onCompletionContext(richCompletionContext(editor));
           });
           return false;
@@ -113,21 +118,42 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         if (editor.hasFocus()) latest.current.onCompletionContext(composing.current ? null : richCompletionContext(editor));
       },
       handleKeyDown: (editor, event) => editor.composing || composing.current || event.isComposing || event.keyCode === 229 ? false : latest.current.onKeyDown(event),
-      handlePaste: (_editor, event) => {
+      handlePaste: (editor, event) => {
         const files = Array.from(event.clipboardData?.files ?? []).filter(file => file.type.startsWith('image/'));
         if (files.length && !event.clipboardData?.getData('text/plain')) {
           latest.current.onImages(files);
           return true;
         }
         if (files.length) { latest.current.onInvalid(latestTranslation.current('Text and images cannot be pasted together.')); return true; }
+        if (latest.current.plainTextMode) {
+          const text = event.clipboardData?.getData('text/plain')?.replace(/\r\n?/g, '\n');
+          if (text) {
+            if (editor.state.selection.$from.parent.type.spec.code) editor.dispatch(editor.state.tr.insertText(text).scrollIntoView());
+            else {
+              const paragraph = editor.state.schema.nodes.paragraph!;
+              const nodes = text.split('\n').map(line => paragraph.create(null, line ? editor.state.schema.text(line) : undefined));
+              editor.dispatch(editor.state.tr.replaceSelection(new Slice(Fragment.fromArray(nodes), 1, 1)).scrollIntoView());
+            }
+          }
+          return true;
+        }
         const html = event.clipboardData?.getData('text/html');
         if (html && !supportedClipboardHTML(html, latest.current.allowMentions !== false)) { latest.current.onInvalid(); return true; }
         return false;
       },
     });
     view.current = editor;
-    return () => { view.current = null; editor.destroy(); };
+    let plain = !!latest.current.plainTextMode;
+    applyMode.current = () => {
+      const next = !!latest.current.plainTextMode;
+      if (plain === next || composing.current || editor.composing || editor.isDestroyed) return;
+      plain = next;
+      editor.updateState(editor.state.reconfigure({ plugins: plain ? plugins.plain : plugins.rich }));
+    };
+    return () => { applyMode.current = null; view.current = null; editor.destroy(); };
   }, []);
+
+  useLayoutEffect(() => { applyMode.current?.(); }, [props.plainTextMode]);
 
   useEffect(() => {
     if (props.currentDocument() !== props.document) return;
@@ -150,7 +176,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     if (editor && type && !props.readOnly) { syncRichSelection(editor); toggleMark(type)(editor.state, editor.dispatch, editor); editor.focus(); }
   };
   return <>
-    <div className="standalone-composer__rich-toolbar" role="toolbar" aria-label={t('Text formatting')}>
+    {!props.plainTextMode && <div className="standalone-composer__rich-toolbar" role="toolbar" aria-label={t('Text formatting')}>
       <button type="button" title={t('Bold')} aria-label={t('Bold')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('strong')}><Bold size={16} /></button>
       <button type="button" title={t('Italic')} aria-label={t('Italic')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('em')}><Italic size={16} /></button>
       <button type="button" title={t('Inline code')} aria-label={t('Inline code')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('code')}><Code2 size={16} /></button>
@@ -164,7 +190,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
           setLinkOpen(false); setHref(''); editor.focus();
         }
       }}><input aria-label={t('Link address')} value={href} disabled={props.readOnly} onChange={event => setHref(event.target.value)} /><button type="submit" disabled={props.readOnly}>{t('Apply')}</button></form> : null}
-    </div>
+    </div>}
     <div ref={host} className="standalone-composer__rich" />
   </>;
 });

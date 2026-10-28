@@ -73,26 +73,25 @@ function separateHistory(command: Command): Command {
 export function richEditorPlugins() {
   const nodes = composerSchema.nodes;
   const listItem = nodes.regular_list_item!;
-  return [
-    history(),
-    inputRules({ rules: [
-      wrappingInputRule(/^\s*([-+*])\s$/, nodes.list!),
-      wrappingInputRule(/^([1-9]\d{0,8})\.\s$/, nodes.ordered_list!, match => ({ startingNumber: Number(match[1]) }),
-        (match, node) => node.attrs.startingNumber + node.childCount === Number(match[1])),
-      wrappingInputRule(/^\s*>\s$/, nodes.blockquote!),
-      textblockTypeInputRule(/^(#{1,6})\s$/, nodes.heading!, match => ({ level: match[1]!.length })),
-      textblockTypeInputRule(/^```([\w+-]*)\s$/, nodes.code_block!, match => ({ autoDetectLanguage: !match[1], language: match[1] || null })),
-    ] }),
-    keymap({
-      'Mod-z': undo, 'Mod-Shift-z': redo, 'Mod-y': redo, Backspace: undoInputRule,
-      Enter: separateHistory(splitListItem(listItem)), Tab: separateHistory(sinkListItem(listItem)), 'Shift-Tab': separateHistory(liftListItem(listItem)),
-      'Shift-Enter': (state, dispatch) => {
-        const br = state.schema.nodes.hard_break;
-        if (!br || state.selection.$from.parent.type.spec.code) return false;
-        if (dispatch) dispatch(state.tr.replaceSelectionWith(br.create()).scrollIntoView());
-        return true;
-      },
-    }),
-    keymap(baseKeymap),
-  ];
+  const historyPlugin = history();
+  const markdownRules = inputRules({ rules: [
+    wrappingInputRule(/^\s*([-+*])\s$/, nodes.list!),
+    wrappingInputRule(/^([1-9]\d{0,8})\.\s$/, nodes.ordered_list!, match => ({ startingNumber: Number(match[1]) }),
+      (match, node) => node.attrs.startingNumber + node.childCount === Number(match[1])),
+    wrappingInputRule(/^\s*>\s$/, nodes.blockquote!),
+    textblockTypeInputRule(/^(#{1,6})\s$/, nodes.heading!, match => ({ level: match[1]!.length })),
+    textblockTypeInputRule(/^```([\w+-]*)\s$/, nodes.code_block!, match => ({ autoDetectLanguage: !match[1], language: match[1] || null })),
+  ] });
+  const keys = keymap({
+    'Mod-z': undo, 'Mod-Shift-z': redo, 'Mod-y': redo, Backspace: undoInputRule,
+    Enter: separateHistory(splitListItem(listItem)), Tab: separateHistory(sinkListItem(listItem)), 'Shift-Tab': separateHistory(liftListItem(listItem)),
+    'Shift-Enter': (state, dispatch) => {
+      const br = state.schema.nodes.hard_break;
+      if (!br || state.selection.$from.parent.type.spec.code) return false;
+      if (dispatch) dispatch(state.tr.replaceSelectionWith(br.create()).scrollIntoView());
+      return true;
+    },
+  });
+  const baseKeys = keymap(baseKeymap);
+  return { rich: [historyPlugin, markdownRules, keys, baseKeys], plain: [historyPlugin, keys, baseKeys] };
 }

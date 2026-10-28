@@ -24,6 +24,7 @@
 .standalone-composer :is(button, select, input):focus-visible { outline: 2px solid var(--yard-accent, #3159b5); outline-offset: 2px; }
 .standalone-composer button:disabled { cursor: default; opacity: .5; }
 .standalone-composer__footer, .standalone-composer__options, .standalone-composer__attachments, .standalone-queue__actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.standalone-composer__model-save { flex-basis: 100%; max-width: 100%; overflow-wrap: anywhere; }
 .standalone-composer__footer { padding: 6px 8px 8px; }
 .standalone-composer__options { flex: 1 1 360px; min-width: 0; border: 0; padding: 0; margin: 0; }
 .standalone-composer__options label, .standalone-composer__enter { white-space: nowrap; }

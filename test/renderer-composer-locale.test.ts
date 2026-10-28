@@ -16,10 +16,12 @@ test('locale changes update composer controls without replacing the draft or ric
     import {StandaloneComposer} from './src/renderer/composer/StandaloneComposer.tsx';
     const state={submissions:[]};
     const client={async rpc(method) {
-      if(method==='model/list') return {data:[{model:'fixture-model',displayName:'Fixture Model',isDefault:true,supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};
-      if(method==='config/read') return {config:{model:'fixture-model',sandbox_mode:'workspace-write'}};
+      if(method==='model/list') return {data:[{id:'fixture-model',model:'fixture-model',displayName:'Fixture Model',isDefault:true,supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};
+      if(method==='config/read') return {config:{model:'fixture-model',sandbox_mode:'workspace-write'},
+        layers:[{name:{type:'user',file:'/fixture/codex/config.toml',profile:null},version:'1'}]};
       throw Error('unexpected RPC '+method);
-    },async host(endpoint){if(endpoint==='get-setting') return {value:undefined}; throw Error('unexpected host '+endpoint);},
+    },async host(endpoint){if(endpoint==='get-setting') return {value:undefined};
+      if(endpoint==='codex-home') return {codexHome:'/fixture/codex'}; throw Error('unexpected host '+endpoint);},
       subscribe(){return ()=>{};},async reply(){throw Error('unexpected approval');}};
     const props={client,context:{hostId:'local',threadId:null,draftId:'locale-fixture',cwd:'/fixture'},busy:false,
       async onSubmit(draft,options,action){state.submissions.push({draft,options,action});},async onInterrupt(){}};
@@ -44,7 +46,10 @@ test('locale changes update composer controls without replacing the draft or ric
     await english.waitFor();
     assert.equal(await english.inputValue(), 'draft stays');
     assert.equal(await page.evaluate(() => document.activeElement === (window as any).originalEditor), true);
-    await page.waitForFunction(() => document.querySelector('[aria-label="Model"]')?.getAttribute('title') === 'Configured default (Fixture Model)');
+    await page.waitForFunction(() => {
+      const model = document.querySelector('[aria-label="Model"]') as HTMLSelectElement | null;
+      return model?.value === 'fixture-model' && model.title === 'Fixture Model';
+    });
     await page.getByLabel('Sandbox permissions').selectOption('read-only');
     await page.getByRole('button', { name: 'Rich text editor' }).click();
     const rich = page.getByRole('textbox', { name: 'Work with Codex' });

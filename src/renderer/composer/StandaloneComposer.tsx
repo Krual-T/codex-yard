@@ -14,6 +14,7 @@ import { StandaloneOptions } from './standalone-options.tsx';
 import { StandaloneQueue } from './standalone-queue.tsx';
 import { useEnterSetting } from './standalone-enter-setting.ts';
 import { useFollowUpSetting } from './standalone-follow-up.ts';
+import { usePlainTextSetting } from './standalone-plain-text-setting.ts';
 import type { FollowUpAction } from './standalone-follow-up.ts';
 import { StandaloneTarget } from './standalone-target.tsx';
 import type { ComposerHost, ComposerTarget } from './standalone-target.tsx';
@@ -75,11 +76,13 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const [interrupting, setInterrupting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [switchingTarget, setSwitchingTarget] = useState(false);
+  const [defaultPending, setDefaultPending] = useState(false);
   const [queueVersion, setQueueVersion] = useState(0);
   const [cursor, setCursor] = useState(0);
   const [richContext, setRichContext] = useState<RichCompletionContext | null>(null);
   const enterSetting = useEnterSetting(client);
   const followUpSetting = useFollowUpSetting(client);
+  const plainTextSetting = usePlainTextSetting(client);
   const mounted = useRef(false);
   const activeController = useRef<ComposerDraftController | null>(null);
   const pendingReferences = useRef(new Map<string, ComposerDraftController>());
@@ -185,6 +188,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   };
   const submit = async (followUp: FollowUpAction = followUpSetting.value) => {
     if (submitInFlight.current || uploadInFlight.current || !hasContent(current.current.draft)) return;
+    if (defaultPending) { setError(t('Resolve the default model change before sending.')); return; }
     if (current.current.draft.blocked
       || current.current.draft.document && richEditIssue(current.current.draft)) {
       setError(t('This draft cannot be sent without losing content.')); return;
@@ -315,7 +319,9 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         </div>)}
       </div> : null}
       {editIssue ? <div className="standalone-composer__retained" role="status">{localizeDraftIssue(editIssue, t)}<details><summary>{t('View retained content')}</summary><pre>{JSON.stringify({ document: draft.document, input: draft.input, hints: draft.hints, preserved: draft.preserved, pending: draft.pendingDrafts }, null, 2)}</pre></details></div> : null}
+      {plainTextSetting.value && richActive && textEditIssue(draft) ? <div role="status">{t('Existing formatting is retained while plain text mode is on.')}</div> : null}
       {richActive && draft.document ? <StandaloneRichEditor ref={richEditor} document={draft.document} currentDocument={() => current.current.draft.document}
+        plainTextMode={plainTextSetting.value}
         onChange={document => changeDraft(value => updateRichDraft(value, document))} onKeyDown={keyDown}
         onCompletionContext={onRichContext} completionListId={completions.query ? completions.listId : undefined}
         completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
@@ -340,7 +346,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ''; void addFiles(files);
         }} />
         <button type="button" aria-label={t('Add attachment')} title={t('Add attachment')} disabled={uploading || !!editIssue || structuredInput} onClick={() => picker.current?.click()}>＋</button>
-        {!draft.document ? <button type="button" aria-label={t('Rich text editor')} title={t('Rich text editor')} disabled={!!editIssue}
+        {!draft.document && !plainTextSetting.value ? <button type="button" aria-label={t('Rich text editor')} title={t('Rich text editor')} disabled={!!editIssue}
           onClick={() => { changeDraft(value => ({ ...value, document: documentFromText(value.text) }));
             requestAnimationFrame(() => richEditor.current?.focus()); }}><FilePenLine size={16} /></button> : null}
         {onTargetChange ? <StandaloneTarget client={client} context={context} hosts={hosts} disabled={busy || sending || uploading || !!removing || switchingTarget}
@@ -350,6 +356,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
             finally { if (mounted.current) setSwitchingTarget(false); }
           }} /> : null}
         <StandaloneOptions client={client} hostId={context.hostId} cwd={context.cwd} threadId={context.threadId} busy={busy} modelRef={modelPicker} value={options}
+          onDefaultPendingChange={setDefaultPending}
           onChange={patch => setOverrides(previous => ({ ...previous, ...patch }))} />
         <label className="standalone-composer__enter">{t('Send method')} <select aria-label={t('Send method')} value={enterSetting.value} disabled={enterSetting.pending} onChange={event => {
           const value = event.target.value;
@@ -362,11 +369,12 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           {t(followUpSetting.value === 'queue' ? 'Send to current task' : 'Queue message')}</button> : null}
         <button className="standalone-composer__submit" type="button" onClick={() => void submit()}
           title={busy && followUpSetting.value === 'steer' && !activeTurnId ? t('Current task has no confirmed turn ID') : undefined}
-          disabled={sending || uploading || !hasContent(draft) || busy && (followUpSetting.pending || followUpSetting.value === 'steer' && !activeTurnId)}>
+          disabled={sending || uploading || defaultPending || !hasContent(draft) || busy && (followUpSetting.pending || followUpSetting.value === 'steer' && !activeTurnId)}>
           {t(sending ? 'Sending...' : busy ? followUpSetting.value === 'queue' ? 'Queue message' : 'Send to current task' : 'Send')}</button>
       </div>
     </div>
     {uploading ? <div role="status">{t('Uploading attachments...')}</div> : null}
+    {plainTextSetting.error ? <div role="status">{t('Could not read plain text preference:')} {plainTextSetting.error}</div> : null}
     {saving ? <div role="status">{t('Saving draft...')}</div> : null}
     {storageError ? <div role="alert">{storageError} <button type="button" onClick={retry}>{t('Retry saving')}</button></div> : null}
     {enterSetting.error ? <div role="alert">{enterSetting.error}</div> : null}
