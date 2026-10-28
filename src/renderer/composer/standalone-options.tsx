@@ -21,22 +21,6 @@ function record(value: unknown): Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 function string(value: unknown): string | undefined { return typeof value === 'string' ? value : undefined; }
-function effectiveModelClient(client: WorkbenchClient, defaultModel: string | undefined): WorkbenchClient {
-  if (!defaultModel) return client;
-  return {
-    async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
-      const result = await client.rpc<T>(method, params, hostId);
-      if (method !== 'config/read') return result;
-      const response = record(result), rawConfig = response.config;
-      if (rawConfig === null || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) return result;
-      const config = record(rawConfig);
-      if (config.model !== null && config.model !== undefined) return result;
-      // A missing configured model still has an effective model from model/list.
-      return { ...response, config: { ...config, model: defaultModel } } as T;
-    },
-    host: client.host.bind(client), subscribe: client.subscribe.bind(client), reply: client.reply.bind(client),
-  };
-}
 function approval(value: unknown): ApprovalPolicy | undefined {
   if (value === 'untrusted' || value === 'on-request' || value === 'never') return value;
   const granular = record(record(value).granular);
@@ -81,10 +65,7 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRe
   const [defaults, setDefaults] = useState<SubmitOptions>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const defaultModels = available.filter(item => item.default);
-  const defaultModel = defaultModels.length === 1 ? defaultModels[0]?.value : undefined;
-  const modelClient = useMemo(() => effectiveModelClient(client, defaultModel), [client, defaultModel]);
-  const modelSettings = useMemo(() => new ModelSettings(modelClient, hostId), [modelClient, hostId]);
+  const modelSettings = useMemo(() => new ModelSettings(client, hostId), [client, hostId]);
   const homeState = useSyncExternalStore(modelSettings.subscribe, modelSettings.getSnapshot, modelSettings.getSnapshot);
   const isHome = threadId === null;
   useEffect(() => {
@@ -119,7 +100,7 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRe
   const configured = threadId == null ? defaults : {};
   const selectedModel = isHome ? homeState.model ?? configured.model : value.model ?? configured.model;
   const selected = available.find(item => item.value === selectedModel);
-  const modelValue = isHome ? homeState.model ?? '' : value.model ?? '';
+  const modelValue = isHome ? homeState.model ?? configured.model ?? '' : value.model ?? '';
   const effortValue = isHome ? homeState.effort ?? '' : value.effort ?? '';
   const defaultUnavailable = isHome && (homeState.loading || homeState.saving || modelSettings.dirty || !!homeState.error);
   const change = (part: Partial<SubmitOptions>) => onChange(part);
@@ -145,7 +126,7 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRe
       <option value="" disabled={isHome && !!modelValue}>{loading ? t('Loading') : configuredLabel(configured.model ? selected?.label ?? configured.model : undefined)}</option>
       {available.map(model => <option key={model.value} value={model.value}>{model.label}</option>)}
     </select></label>
-    <label>{t('Effort')} <select aria-label={t('Reasoning effort')} value={effortValue} disabled={loading || !selected?.efforts.length || defaultUnavailable || isHome && !homeState.model}
+    <label>{t('Effort')} <select aria-label={t('Reasoning effort')} value={effortValue} disabled={loading || !selected?.efforts.length || defaultUnavailable}
       onChange={event => isHome ? saveDefault('effort', event.target.value) : change({ effort: event.target.value || null })}>
       <option value="" disabled={isHome && !!effortValue}>{configuredLabel(configured.effort)}</option>
       {effortValue && !selected?.efforts.includes(effortValue) ? <option value={effortValue}>{effortValue}</option> : null}

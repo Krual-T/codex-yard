@@ -29,7 +29,7 @@ test('home model preferences use versioned single-field writes and thread choice
       }
       throw Error('unexpected RPC '+method)},
       async host(method,params){if(method==='codex-home')return {codexHome:'/fixture/codex'};
-        if(method==='get-setting')return {value:params.key==='composerPlainTextMode'?false:params.key==='composerEnterBehavior'?'cmdAlways':'queue'};
+        if(method==='get-setting')return {exists:true,value:params.key==='composerPlainTextMode'?false:params.key==='composerEnterBehavior'?'cmdAlways':'queue'};
         throw Error('unexpected host '+method)},subscribe(){return ()=>{}},async reply(){throw Error('unexpected approval')}};
     const root=createRoot(document.getElementById('root'));
     let props={client,context:{hostId:'ssh:fixture',threadId:null,draftId:'home-model',cwd:'/fixture'},busy:false,
@@ -49,12 +49,19 @@ test('home model preferences use versioned single-field writes and thread choice
     await page.goto('http://models.test/'); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     const model = page.getByLabel('模型'), effort = page.getByLabel('推理强度');
     await page.waitForFunction(() => (document.querySelector('select[aria-label="模型"]') as HTMLSelectElement)?.value === 'alpha');
+    // An explicit model equal to the effective default is still a changed configured value.
+    await page.evaluate(() => (window as any).fixture.external('alpha'));
     await effort.selectOption('low');
+    await page.getByRole('alert').filter({ hasText: 'Configuration changed elsewhere' }).waitFor();
+    assert.equal((await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'config/batchWrite'))).length, 0);
+    await page.evaluate(() => (window as any).fixture.external(null));
+    await page.getByRole('button', { name: '重新读取默认设置' }).click();
+    await page.getByRole('button', { name: '保存默认设置' }).click();
     await page.waitForFunction(() => (window as any).fixture.saved().model_reasoning_effort === 'low');
     let calls = await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'config/batchWrite'));
     assert.deepEqual(calls[0], { method: 'config/batchWrite', hostId: 'ssh:fixture', params: {
       edits: [{ keyPath: 'model_reasoning_effort', value: 'low', mergeStrategy: 'upsert' }], filePath: null,
-      expectedVersion: '1', reloadUserConfig: true,
+      expectedVersion: '3', reloadUserConfig: true,
     } });
     assert.equal(await page.evaluate(() => (window as any).fixture.saved().model), null);
     await page.reload(); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
@@ -74,7 +81,7 @@ test('home model preferences use versioned single-field writes and thread choice
     await page.getByRole('button', { name: '保存默认设置' }).click();
     await page.waitForFunction(() => (window as any).fixture.saved().model === 'gamma');
     calls = await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'config/batchWrite'));
-    assert.equal(calls[1].params.expectedVersion, '4');
+    assert.equal(calls[1].params.expectedVersion, '6');
     assert.deepEqual(calls[1].params.edits, [{ keyPath: 'model', value: 'gamma', mergeStrategy: 'upsert' }]);
     await page.waitForFunction(() => !(document.querySelector('select[aria-label="模型"]') as HTMLSelectElement)?.disabled);
     await page.evaluate(() => { (window as any).fixture.state.mode = 'reject'; });
