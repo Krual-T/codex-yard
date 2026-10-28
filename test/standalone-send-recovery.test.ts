@@ -51,6 +51,18 @@ test('preparation serializes one owner, preserves different drafts and refuses u
   assert.equal(Object.keys((await h.store.read()).requests).length, 2); assert.deepEqual(h.calls, []);
 });
 
+test('a submitted widget context stays immutable when the live widget changes and its send receipt is lost', async () => {
+  const h = fixture(), context = { widget: { kind: 'untrusted' as const, value: JSON.stringify({ modelContent: { choice: 7 } }) } };
+  const intent = await h.store.prepare({ ...version, owner: { ...version.owner, threadId: 'existing' } }, '/fixture', draft, {}, {}, undefined, context);
+  context.widget.value = JSON.stringify({ modelContent: { choice: 9 } });
+  await h.store.sending(intent.id); await h.store.failed(intent.id, new Error('lost receipt'));
+  const restored = (await new SendRecoveryStore(h.client, h.storage).read()).requests[intent.id];
+  assert.equal(restored.clientUserMessageId, intent.clientUserMessageId);
+  assert.deepEqual(JSON.parse(restored.additionalContext!.widget.value), { modelContent: { choice: 7 } });
+  assert.equal(restored.stage, 'unknown');
+  assert.deepEqual(h.calls, []);
+});
+
 test('unrecognized recovery data is retained and a late check cannot recreate a dismissed record', async () => {
   const h = fixture(); h.seed({ requests: null, bindings: {}, future: true });
   await assert.rejects(h.store.prepare(version, '/fixture', draft, {}, {}), /原值已保留/);

@@ -20,9 +20,11 @@ export interface StandaloneBrowserProps {
   browserTabId: string;
   draft: ComposerDraft;
   /** Apply the update to the latest draft only when its owner still matches. */
-  onDraftChange(owner: BrowserOwner, update: (draft: ComposerDraft) => ComposerDraft): void;
+  onDraftChange(owner: BrowserOwner, update: (draft: ComposerDraft) => ComposerDraft): void | Promise<void>;
   visible: boolean;
   allowNavigation: boolean;
+  navigationRequest?: { id: string; url: string } | null;
+  onNavigationConsumed?(id: string): void;
   onClose(): void;
 }
 
@@ -59,9 +61,10 @@ function CommentEditor({ owner, reference }: { owner: BrowserOwner; reference: B
   </li>;
 }
 
-function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, onDraftChange, onClose }: {
+function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, navigationRequest, onNavigationConsumed, onDraftChange, onClose }: {
   client: WorkbenchClient; owner: BrowserOwner; browserTabId: string; visible: boolean; allowNavigation: boolean;
   onDraftChange: StandaloneBrowserProps['onDraftChange']; onClose(): void;
+  navigationRequest: StandaloneBrowserProps['navigationRequest']; onNavigationConsumed: StandaloneBrowserProps['onNavigationConsumed'];
 }) {
   const ownerKey = browserOwnerKey(owner);
   const target = React.useMemo<BrowserTarget>(() => ({ conversationId: ownerKey, browserTabId }), [ownerKey, browserTabId]);
@@ -77,6 +80,20 @@ function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, o
   React.useLayoutEffect(() => { onDraftChangeRef.current = onDraftChange; }, [onDraftChange]);
   React.useEffect(() => bridge.subscribe(target, setState), [bridge, target]);
   React.useEffect(() => { setAddress(state?.frame?.url ?? ''); }, [state?.frame?.url]);
+  const attemptedNavigation = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!visible || !allowNavigation || !navigationRequest || attemptedNavigation.current === navigationRequest.id) return;
+    attemptedNavigation.current = navigationRequest.id;
+    const request = navigationRequest;
+    void (async () => {
+      try {
+        const url = new URL(request.url);
+        if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new Error('网页地址无效。');
+        await bridge.request({ ...target, operation: 'command', command: { type: 'navigate', url: url.href } });
+      } catch (failure) { if (active.current) setError((failure as Error).message); }
+      finally { onNavigationConsumed?.(request.id); }
+    })();
+  }, [bridge, target, visible, allowNavigation, navigationRequest, onNavigationConsumed]);
   React.useLayoutEffect(() => {
     if (!visible) return;
     active.current = true;
@@ -88,23 +105,33 @@ function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, o
   React.useEffect(() => {
     if (!visible) return;
     let live = true;
-    let generation = 0;
+    let refreshing = false, pending = false;
     const refresh = () => {
-      if (!active.current) return;
-      const current = ++generation;
-      void readBrowserComments(owner).then(nextComments => {
-        if (!live || !active.current || current !== generation) return;
-        const next = browserReferences(owner, nextComments), before = previous.current;
-        previous.current = next;
-        setComments(nextComments); setCommentsError('');
-        if (before.length || next.length) onDraftChangeRef.current(owner, draft => reconcileBrowserReferences(draft, before, next));
-      }).catch(failure => {
-        if (live && active.current && current === generation) setCommentsError((failure as Error).message);
-      });
+      if (!live || !active.current) return;
+      pending = true;
+      if (refreshing) return;
+      refreshing = true;
+      void (async () => {
+        while (live && active.current && pending) {
+          pending = false;
+          const nextComments = await readBrowserComments(owner);
+          if (!live || !active.current) return;
+          const next = browserReferences(owner, nextComments), before = previous.current;
+          // Another notification may arrive while the draft transaction is
+          // pending. Reconcile it after this version has committed, so a later
+          // deletion cannot miss a reference that is still being inserted.
+          if (before.length || next.length) await onDraftChangeRef.current(owner, draft => reconcileBrowserReferences(draft, before, next));
+          if (!live || !active.current) return;
+          previous.current = next;
+          setComments(nextComments); setCommentsError('');
+        }
+      })().catch(failure => {
+        if (live && active.current) setCommentsError((failure as Error).message);
+      }).finally(() => { refreshing = false; if (pending) refresh(); });
     };
     const unsubscribe = subscribeBrowserComments(refresh);
     refresh();
-    return () => { live = false; generation++; unsubscribe(); };
+    return () => { live = false; unsubscribe(); };
   }, [bridge, target, ownerKey, visible]);
   const quote = React.useCallback(async (_target: BrowserTarget, pageId: number) => {
     const version = bridge.selectionVersion(target);
@@ -149,5 +176,6 @@ export function StandaloneBrowser(props: StandaloneBrowserProps) {
   const owner = { hostId: props.hostId, threadId: props.threadId, draftId: props.draftId };
   const key = JSON.stringify([browserOwnerKey(owner), props.browserTabId]);
   return <BrowserPanel key={key} client={props.client} owner={owner} browserTabId={props.browserTabId} visible={props.visible}
-    allowNavigation={props.allowNavigation} onDraftChange={props.onDraftChange} onClose={props.onClose} />;
+    allowNavigation={props.allowNavigation} navigationRequest={props.navigationRequest} onNavigationConsumed={props.onNavigationConsumed}
+    onDraftChange={props.onDraftChange} onClose={props.onClose} />;
 }

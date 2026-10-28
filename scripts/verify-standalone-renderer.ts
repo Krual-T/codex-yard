@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 import { chromium } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem, commandItem, NO_REPLY } from '../test/fake-codex.ts';
@@ -20,6 +22,7 @@ const fake = await createFakeCodex(temporary);
 const createdEmpty = new Set<string>();
 fake.handlers.set('thread/start', params => {
   const result = fake.defaultResult('thread/start', record(params)) as { thread: { id: string } };
+  fake.threads.get(result.thread.id)!.name = 'Created ' + result.thread.id;
   createdEmpty.add(result.thread.id); return result;
 });
 for (const method of ['thread/resume', 'thread/turns/list']) fake.handlers.set(method, params => {
@@ -60,11 +63,24 @@ await writeFile(join(dataDir, 'native-state.json'), JSON.stringify({ globals: { 
   second: { id: 'project-b', name: 'Second project', rootPaths: [temporary] },
 } }, settings: { appearanceTheme: 'dark',
   appearanceDarkChromeTheme: { ...defaultThemes.dark, surface: '#152535', ink: '#edf5fc', fonts: { ui: 'Arial', content: 'Georgia', code: 'Courier New' } } } }));
-const app = await createNativeWorkbench({ socketPath: fake.socketPath, codexHome: join(temporary, 'codex'),
-  dataDir, workspace: temporary, port: 0, hostCatalog: { hosts: [], projects: [], assignments: {} } });
 const context = await chromium.launchPersistentContext(join(temporary, 'browser'), { executablePath: '/usr/bin/google-chrome',
-  headless: true, args: ['--no-sandbox'], viewport: { width: 1360, height: 900 } });
+  headless: true, args: ['--no-sandbox', '--disable-background-networking', '--remote-debugging-port=0'], viewport: { width: 1360, height: 900 } });
+const debugPort = Number((await readFile(join(temporary, 'browser/DevToolsActivePort'), 'utf8')).split('\n')[0]);
+assert(Number.isInteger(debugPort) && debugPort > 0);
+const browserUrl = 'http://127.0.0.1:' + debugPort;
+const targetServer = createServer((_request, response) => {
+  response.setHeader('Content-Type', 'text/html');
+  response.end('<!doctype html><title>Owned Chrome target</title><style>body{font:24px Arial;padding:35px}button{padding:15px;font:inherit}</style><button id="chosen" aria-label="Owned selected element">Owned Chrome element</button>');
+});
+targetServer.listen(0, '127.0.0.1'); await once(targetServer, 'listening');
+const targetAddress = targetServer.address(); assert(targetAddress && typeof targetAddress !== 'string');
+const targetUrl = 'http://127.0.0.1:' + targetAddress.port + '/owned-target';
+const targetPage = await context.newPage(); await targetPage.goto(targetUrl);
+const app = await createNativeWorkbench({ socketPath: fake.socketPath, codexHome: join(temporary, 'codex'),
+  chromeConnection: { browserUrl }, dataDir, workspace: temporary, port: 0, hostCatalog: { hosts: [], projects: [], assignments: {} } });
+let inspectorBrowser: { disconnect(): Promise<void> } | undefined;
 await context.addInitScript(() => {
+  if (window !== window.top) return;
   if (localStorage.getItem('native-atoms') === null) localStorage.setItem('native-atoms', JSON.stringify({ unknown: { keep: true }, 'acceptance-record': {} }));
 });
 const page = await context.newPage();
@@ -351,6 +367,21 @@ try {
   await page.reload();
   await page.getByText('STREAMED_OWNED_ANSWER', { exact: true }).waitFor();
   checks.push('new thread installs from its creation receipt without empty-history resume; notLoaded start, delta, summary completion and full reload');
+  const beforeHomeReturn = fake.calls('turn/start').length;
+  await page.goto(app.url + '/');
+  await input.fill('FRESH_HOME_UNSENT_AFTER_CREATION');
+  await page.getByText('正在保存草稿…', { exact: true }).waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: 'Created ' + id, exact: true }).click();
+  await page.waitForURL('**/local/' + id);
+  await input.waitFor(); assert.equal(await input.inputValue(), '', 'A fresh home must not alias the thread that consumed its old identity.');
+  await page.goto(app.url + '/');
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'FRESH_HOME_UNSENT_AFTER_CREATION');
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'FRESH_HOME_UNSENT_AFTER_CREATION');
+  assert.equal(fake.calls('turn/start').length, beforeHomeReturn);
+  await page.getByRole('button', { name: 'Created ' + id, exact: true }).click();
+  await page.waitForURL('**/local/' + id); await input.waitFor(); assert.equal(await input.inputValue(), '');
+  checks.push('direct home navigation after first send gets a distinct stable draft; sidebar return and complete reload preserve it without an extra turn');
   await installClientProbe(page);
   await writeFile(join(artifacts, 'send-after-reload.json'), JSON.stringify(await page.evaluate(async () =>
     (window as any).acceptanceClient.host('get-persisted-atom', { key: 'codex-yard.send-recovery.v1' })), null, 2));
@@ -404,6 +435,91 @@ try {
   await page.waitForFunction(() => document.querySelector('.yard-conversation-header strong')?.textContent === 'RESTORED_PAGE_THREAD');
   assert.equal(fake.calls('thread/name/set').length, 1, 'Resuming must not replay a write with a lost receipt.');
   checks.push('persisted page lifecycle events reconnect the real client, rehydrate history and retain an unknown write without replay (simulated cache events)');
+  const visualizationPath = join(temporary, 'owned-chart.html');
+  await writeFile(visualizationPath, '<!doctype html><html><body><div class="viz-carousel"><section data-variant="One"><div id="viz-target" aria-label="Owned chart">Owned visualization</div></section><section data-variant="Two">Second variant</section></div><button id="save-widget" onclick="openai.setWidgetState({modelContent:{choice:7},privateContent:{privateMarker:\'PRIVATE_WIDGET_VALUE\'}}).then(()=>document.querySelector(\'#saved\').textContent=\'Widget saved\')">Save widget state</button><p id="saved"></p><script>const config={width:25};new Tweak({container:document.querySelector(\'#viz-target\'),onChange:()=>document.querySelector(\'#viz-target\').style.width=config.width+\'%\'}).addSlider(config,\'width\',{label:\'Chart width\',min:1,max:100,step:1});</script></body></html>');
+  fake.threads.get(id)!.turns[0]!.items.push(agentItem('owned-widget-link', '\uE200visualize\uE202' + JSON.stringify({ path: visualizationPath, title: 'Owned chart' }) + '\uE201'));
+  await page.reload(); await installClientProbe(page);
+  await page.getByRole('button', { name: 'Owned chart', exact: true }).click();
+  const visualizationFrame = page.frameLocator('iframe[title="Visualization content"]');
+  await visualizationFrame.getByText('Owned visualization', { exact: true }).waitFor();
+  await visualizationFrame.getByRole('button', { name: 'Next variant', exact: true }).click();
+  await visualizationFrame.getByText('Second variant', { exact: true }).waitFor();
+  await visualizationFrame.getByRole('button', { name: 'Previous variant', exact: true }).click();
+  await visualizationFrame.getByRole('button', { name: 'Save widget state', exact: true }).click();
+  await visualizationFrame.getByText('Widget saved', { exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Annotate', exact: true }).click();
+  await visualizationFrame.locator('#viz-target').click();
+  await page.getByLabel('Chart width', { exact: true }).fill('70');
+  await page.getByRole('button', { name: 'Add to draft', exact: true }).click();
+  await page.locator('.standalone-composer__reference').filter({ hasText: 'Visualization changes' }).waitFor();
+  await input.fill('WIDGET_CONTEXT_SEND');
+  await page.getByRole('button', { name: '发送', exact: true }).click();
+  const widgetSend = await fake.waitFor(message => message.method === 'turn/start' && JSON.stringify(message.params.input).includes('WIDGET_CONTEXT_SEND'));
+  const widgetContextEntries = Object.values(record(widgetSend.params.additionalContext)).map(record);
+  assert(widgetContextEntries.length >= 2);
+  for (const entry of widgetContextEntries) assert.equal(entry.kind, 'untrusted');
+  const widgetContext = widgetContextEntries.map(entry => JSON.parse(String(entry.value)));
+  assert(widgetContext.some(entry => entry.field === 'state' && entry.modelContent?.choice === 7));
+  assert(widgetContext.some(entry => entry.field === 'interaction' && entry.modelContent?.changes?.some((change: any) => change.edits?.some((edit: any) => edit.label === 'Chart width' && edit.value === 70))));
+  assert(!JSON.stringify(widgetContext).includes('PRIVATE_WIDGET_VALUE'));
+  await recovery.waitFor({ state: 'visible' }); await recovery.waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: 'Open visualization', exact: true }).click();
+  await visualizationFrame.getByText('Owned visualization', { exact: true }).waitFor();
+  assert.equal(await visualizationFrame.locator('html').getAttribute('lang'), await page.locator('html').getAttribute('lang'));
+  await page.getByRole('region', { name: 'Visualization', exact: true }).getByRole('button', { name: 'Close', exact: true }).click();
+  checks.push('actual App visualization directive, carousel, Tweak, widget persistence, structured prefill and model-visible context; private content excluded');
+
+  await page.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
+  const browserSelection = page.getByLabel('浏览器所在电脑');
+  await page.waitForFunction(() => { const option = document.querySelector<HTMLOptionElement>('select[aria-label="浏览器所在电脑"] option[value="server"]'); return option !== null && !option.disabled; });
+  await browserSelection.selectOption('server');
+  const chromeTab = page.getByLabel('已有 Chrome 标签'), targetOption = chromeTab.locator('option').filter({ hasText: '/owned-target' });
+  await targetOption.waitFor({ state: 'attached', timeout: 60_000 });
+  const targetId = await targetOption.getAttribute('value'); assert(targetId); await chromeTab.selectOption(targetId);
+  await page.getByAltText('Chrome 标签的最新画面').waitFor({ timeout: 60_000 });
+  const { puppeteer } = await import(new URL('../node_modules/chrome-devtools-mcp/build/src/third_party/index.js', import.meta.url).href);
+  const inspector = await puppeteer.connect({ browserURL: browserUrl }); inspectorBrowser = inspector;
+  const inspected = (await inspector.pages()).find((item: { url(): string }) => item.url() === targetUrl); assert(inspected);
+  const devtools = await inspected.openDevTools();
+  await devtools.waitForFunction(() => document.readyState === 'complete');
+  await devtools.waitForFunction(async () => {
+    const uiPath = '/bundled/ui/legacy/legacy.js', sdkPath = '/bundled/core/sdk/sdk.js';
+    const UI = await import(uiPath), SDK = await import(sdkPath);
+    return !!UI.Context.Context.instance().flavor(SDK.DOMModel.DOMNode);
+  }, { timeout: 15_000 });
+  const inspectedSession = await inspected.createCDPSession();
+  const { root: documentRoot } = await inspectedSession.send('DOM.getDocument');
+  const { nodeId } = await inspectedSession.send('DOM.querySelector', { nodeId: documentRoot.nodeId, selector: '#chosen' });
+  const { node } = await inspectedSession.send('DOM.describeNode', { nodeId });
+  await devtools.bringToFront();
+  await devtools.keyboard.down('Control'); await devtools.keyboard.down('Shift'); await devtools.keyboard.press('C');
+  await devtools.keyboard.up('Shift'); await devtools.keyboard.up('Control');
+  await inspected.bringToFront(); await inspected.click('#chosen');
+  await devtools.waitForFunction(async (expected: number) => {
+    const uiPath = '/bundled/ui/legacy/legacy.js', sdkPath = '/bundled/core/sdk/sdk.js';
+    const UI = await import(uiPath), SDK = await import(sdkPath);
+    return UI.Context.Context.instance().flavor(SDK.DOMModel.DOMNode)?.backendNodeId() === expected;
+  }, { timeout: 5_000 }, node.backendNodeId);
+  await page.bringToFront(); await page.getByRole('button', { name: '引用所选元素', exact: true }).click();
+  const browserChip = page.locator('.standalone-composer__reference').filter({ hasText: 'Owned Chrome element' });
+  await browserChip.waitFor({ state: 'attached' });
+  await page.screenshot({ path: join(artifacts, 'owned-chrome-panel.png'), fullPage: true });
+  await page.getByRole('region', { name: '浏览器', exact: true }).getByRole('button', { name: '关闭', exact: true }).click();
+  await browserChip.waitFor({ timeout: 60_000 });
+  const quotedComments = await page.evaluate(async () => (window as any).acceptanceClient.host('get-persisted-atom', { key: 'codex-yard.browser-comments.v1' }));
+  const quoted = Object.values(record(quotedComments.value.entries)).flat().map(record);
+  assert.equal(quoted.length, 1);
+  const quotedElement = record(quoted[0].localBrowserContext);
+  assert.equal(quotedElement.pageUrl, targetUrl);
+  assert.equal(quotedElement.targetName, 'Owned selected element');
+  assert.equal(quotedElement.targetImmediateText, 'Owned Chrome element');
+  assert.match(String(quotedElement.targetSelector), /#chosen/);
+  await page.screenshot({ path: join(artifacts, 'owned-chrome-reference.png'), fullPage: true });
+  await browserChip.getByRole('button', { name: '移除引用', exact: true }).click();
+  await browserChip.waitFor({ state: 'hidden' });
+  const comments = await page.evaluate(async () => (window as any).acceptanceClient.host('get-persisted-atom', { key: 'codex-yard.browser-comments.v1' }));
+  assert.equal(Object.values(comments.value.entries).flat().length, 0, 'Removing an actual composer reference must await its authoritative comment deletion.');
+  checks.push('actual App Chrome panel selects a disposable real Chrome target through official MCP; real DevTools element reaches composer and transactional removal');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
   assert.deepEqual(errors, []);
@@ -423,5 +539,7 @@ try {
   throw error;
 } finally {
   await page.screenshot({ path: join(artifacts, 'last-page.png'), fullPage: true }).catch(() => {});
-  await context.close(); await app.close(); await fake.close(); await rm(temporary, { recursive: true, force: true });
+  await inspectorBrowser?.disconnect(); await app.close(); await context.close();
+  await new Promise<void>((resolve, reject) => targetServer.close(error => error ? reject(error) : resolve()));
+  await fake.close(); await rm(temporary, { recursive: true, force: true });
 }

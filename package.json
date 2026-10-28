@@ -16,7 +16,7 @@
     "prestart": "npm run build",
     "start": "node --env-file-if-exists=.env --env-file-if-exists=.local/chrome.env --use-env-proxy src/native/server.ts",
     "pretest": "npm run build:host",
-    "test": "node --test test/*.test.mjs test/*.test.ts",
+    "test": "node --test --test-concurrency=2 test/*.test.mjs test/*.test.ts",
     "test:app-tools": "node --test test/app-tools.test.mjs",
     "browser:poc": "node scripts/browser-reuse-poc.ts",
     "test:browser-reuse": "node --use-env-proxy scripts/verify-browser-reuse.ts",

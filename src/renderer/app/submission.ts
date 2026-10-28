@@ -13,6 +13,8 @@ export interface SubmissionContext {
   initialOptions?: SubmitOptions;
   /** Explicit composer edits, when supplied by its versioned submit callback. */
   overrides?: Partial<SubmitOptions>;
+  /** Immutable model-visible widget state captured for this submission. */
+  additionalContext?: Record<string, { kind: 'untrusted'; value: string }>;
   /** A durable ordinary-send intent; hooks complete before issuing each write. */
   send?: {
     clientUserMessageId: string;
@@ -58,8 +60,8 @@ export async function submitDraft(client: WorkbenchClient, context: SubmissionCo
     await client.rpc('thread/queue/add', { threadId: context.threadId, input, clientUserMessageId }, context.hostId);
     return { threadId: context.threadId };
   }
-  const additionalContext = Object.fromEntries((draft.references ?? []).flatMap(reference => reference.original !== undefined || reference.context !== undefined
-    ? [[reference.id, { kind: 'untrusted', value: JSON.stringify(reference.original !== undefined ? reference.original : reference.context) }]] : []));
+  const additionalContext = { ...context.additionalContext, ...Object.fromEntries((draft.references ?? []).flatMap(reference => reference.original !== undefined || reference.context !== undefined
+    ? [[reference.id, { kind: 'untrusted', value: JSON.stringify(reference.original !== undefined ? reference.original : reference.context) }]] : [])) };
   if (action.type === 'steer') {
     if (!context.threadId || !context.activeTurnId || action.turnId !== context.activeTurnId || origin) throw new Error('当前任务已改变，请核对会话后再发送。');
     await client.rpc('turn/steer', { threadId: context.threadId, expectedTurnId: action.turnId, input, clientUserMessageId,

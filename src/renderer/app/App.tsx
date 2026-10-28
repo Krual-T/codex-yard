@@ -26,6 +26,11 @@ import { createRouteNavigation } from './route-navigation.ts';
 import { SendRecoveryStore, sendsAtom, sendThreadKey } from './send-recovery.ts';
 import type { SendIntent, SendRecoverySnapshot } from './send-recovery.ts';
 import { SendRecoveryNotice } from './SendRecoveryNotice.tsx';
+import { StandaloneBrowser } from '../browser/index.tsx';
+import { browserOwnerKey } from '../browser/comments.ts';
+import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference } from './browser-draft.ts';
+import { StandaloneVisualization, readVisualizationModelContext } from '../visualizations/index.tsx';
+import { homeDraftIdentity, selectHomeDraftIdentity } from './home-draft-identity.ts';
 import './app.css';
 
 type ThreadRow = ThreadSummary & { preview?: string; updatedAt?: number; createdAt?: number };
@@ -83,6 +88,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [editRecovery, setEditRecovery] = useState<MessageEditRecovery | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelMounted, setPanelMounted] = useState(false);
+  const [panelKind, setPanelKind] = useState<'workspace' | 'browser' | 'visualization'>('workspace');
+  const [browserMounted, setBrowserMounted] = useState(false);
+  const [browserNavigation, setBrowserNavigation] = useState<{ id: string; url: string } | null>(null);
+  const [visualization, setVisualization] = useState<{ hostId: string; threadId: string; path: string } | null>(null);
+  const [previewAppearance, setPreviewAppearance] = useState<{ theme: 'dark' | 'light'; variables: Record<string, string>; locale: string }>({ theme: 'dark', variables: {}, locale: 'en' });
   const [panelRequest, setPanelRequest] = useState<WorkspacePanelRequest | null>(null);
   const [panelAppearance, setPanelAppearance] = useState<WorkspacePanelAppearance>({ theme: 'dark', codeFontSize: 12, codeLineHeight: 18 });
   const panelsDirty = useRef(false);
@@ -96,15 +106,23 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const generation = ++sendReadGeneration.current;
     const state = await sendStore.read();
     for (const receipt of Object.values(state.creations)) await bindComposerDraftToThread(receipt.owner, receipt.thread.id);
-    if (generation === sendReadGeneration.current) setSendState(state);
+    if (generation === sendReadGeneration.current) {
+      // At startup no composer is mounted; after navigation its old home owner
+      // has been flushed. Rotate only the home pointer, never the retained draft.
+      if (routeRef.current.threadId || !composerController.current) {
+        const hostId = routeRef.current.hostId, before = homeDraftIdentity(hostId), next = homeDraftIdentity(hostId, state.bindings);
+        if (next !== before) {
+          const location = newDraftLocation(hostId, before);
+          if (location.cwd) rememberNewDraftLocation(hostId, next, location.cwd, location.projectId);
+          setHomeGeneration(value => value + 1);
+        }
+      }
+      setSendState(state);
+    }
     return state;
   }, [sendStore]);
-  const [newDraftId, setNewDraftId] = useState(() => {
-    try {
-      const stored = sessionStorage.getItem('yard-current-new-draft');
-      const id = stored || crypto.randomUUID(); sessionStorage.setItem('yard-current-new-draft', id); return id;
-    } catch { return crypto.randomUUID(); }
-  });
+  const [homeGeneration, setHomeGeneration] = useState(0);
+  const newDraftId = useMemo(() => homeDraftIdentity(current.hostId), [current.hostId, homeGeneration]);
   const inFlight = useRef(false);
   const subscription = useRef(Promise.resolve());
   const selectionReady = useRef<{ key: string; resolve(): void; reject(error: Error): void } | null>(null);
@@ -142,6 +160,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const codeFontSize = typeof values.codeFontSize === 'number' && Number.isFinite(values.codeFontSize) ? values.codeFontSize : 12;
     setPanelAppearance({ theme: resolved.mode, codeFontSize, codeLineHeight: codeFontSize * 1.5,
       codeFontFamily: resolved.theme.fonts.code ? JSON.stringify(resolved.theme.fonts.code) : undefined });
+    const style = document.documentElement.style;
+    setPreviewAppearance({ theme: resolved.mode, locale: document.documentElement.lang,
+      variables: { ...Object.fromEntries(Array.from(style).filter(name => name.startsWith('--')).map(name => [name, style.getPropertyValue(name)])),
+        '--viz-bg': resolved.theme.surface, '--viz-text': resolved.theme.ink, '--viz-accent': resolved.theme.accent,
+        '--viz-panel': style.getPropertyValue('--yard-panel'), '--viz-border': style.getPropertyValue('--yard-border'), '--viz-muted': style.getPropertyValue('--yard-muted') } });
     document.documentElement.dataset.reducedMotion = String(reduced.value === 'on' || reduced.value !== 'off' && matchMedia('(prefers-reduced-motion: reduce)').matches);
     document.documentElement.dataset.pointerCursors = String(values.usePointerCursors === true);
   }, [client]);
@@ -343,6 +366,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   }, [client, current.hostId, current.threadId, current.readOnly, refresh, sendState !== null, sendStore]);
 
   const finishSend = async (intent: SendIntent) => {
+    await acknowledgeSubmittedBrowserReferences(intent, composerController.current, (await sendStore.read()).bindings);
     await clearComposerDraftRevision(intent.owner, intent.revision);
     await sendStore.dismiss(intent.id, intent);
     await reloadSends();
@@ -362,6 +386,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       }
     };
     try {
+      const additionalContext = retry?.additionalContext ?? (!origin && current.threadId && action.type !== 'queue'
+        ? Object.fromEntries((await readVisualizationModelContext(client, hostId, current.threadId)).map(value =>
+          ['visualization:' + JSON.stringify([value.path, value.field]), { kind: 'untrusted' as const, value: JSON.stringify(value) }])) : undefined);
+      requireCurrent(current.threadId);
       if (action.type === 'send' && !origin) {
         if (!description || description.owner.hostId !== hostId || (retry ? retry.threadId : description.owner.threadId) !== current.threadId) {
           throw new Error('提交草稿身份已改变，未发送。');
@@ -371,7 +399,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           if (!stored || JSON.stringify(stored.draft) !== JSON.stringify(draft)) throw new Error('原提交版本未能核对，未发送。');
           requireCurrent(current.threadId);
           intent = await sendStore.prepare(description, activeCwd, draft, options, description.overrides,
-            selectedProject?.hostId === hostId ? selectedProject.id : undefined);
+            selectedProject?.hostId === hostId ? selectedProject.id : undefined, additionalContext);
         } else {
           const latest = (await sendStore.read()).requests[retry.id];
           if (!latest || !['prepared', 'ready', 'failed'].includes(latest.stage)) throw new Error('原发送结果尚未核对，未重复发送。');
@@ -389,7 +417,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       };
       if (retry?.created && retry.threadId) await assignCreatedProject(retry.threadId);
       const result = await submitDraft(client, { hostId, threadId: current.threadId, cwd: activeCwd, initialOptions: initialOptions ?? undefined,
-        overrides: description?.overrides,
+        overrides: description?.overrides, additionalContext: intent?.additionalContext ?? additionalContext,
         ...(intent ? { send: { clientUserMessageId: intent.clientUserMessageId,
           creating: async () => { requireCurrent(null); await sendStore.creating(intent!.id); },
           created: async (created: ThreadSummary, settings: ThreadSettingsResponse) => {
@@ -423,6 +451,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         });
         });
         expectedNavigation = navigationGeneration.current;
+        await reloadSends();
       }, origin, (target, expected, params) => editStore.submit(target, expected, params));
       if (result.turn) setThread(previous => previous?.id === result.threadId && routeRef.current.hostId === hostId
         ? applyThreadEvent(previous, { type: 'mcp-notification', method: 'turn/started', params: { threadId: result.threadId, turn: result.turn } }) : previous);
@@ -463,18 +492,33 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     if (!await navigate('/' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId)))) return;
     const id = crypto.randomUUID();
     try {
-      sessionStorage.setItem('yard-current-new-draft', id);
+      selectHomeDraftIdentity(current.hostId, id);
       rememberNewDraftLocation(current.hostId, id, nextCwd, project?.id);
     } catch (cause) { setError('新草稿的目标位置未能保存：' + String(cause)); }
-    setNewDraftId(id); setCwd(nextCwd);
+    setHomeGeneration(value => value + 1); setCwd(nextCwd);
     setSelectedProject(project ?? null);
   };
   const settings = current.section !== null;
   const busy = submitting || isThreadBusy(thread);
   const panelScope = JSON.stringify([current.hostId, current.threadId ?? newDraftId]);
   const panelCwd = thread?.cwd || cwd || workspace;
+  const composerOwner = { hostId: current.hostId, threadId: current.threadId,
+    draftId: current.threadId ? sendState?.bindings[sendThreadKey(current.hostId, current.threadId)] ?? current.threadId : newDraftId };
+  const browserOwner = browserDraftOwner(composerOwner, sendState?.bindings ?? {});
+  const activeBrowserOwner = useRef(browserOwner); activeBrowserOwner.current = browserOwner;
+  const showBrowser = (source?: { hostId: string; threadId: string; url?: string }) => {
+    if (source && (source.hostId !== current.hostId || source.threadId !== current.threadId)) {
+      setError('浏览器链接所属会话已改变，请返回原会话。'); return;
+    }
+    setBrowserMounted(true); setPanelKind('browser'); setPanelOpen(true);
+    if (source?.url) setBrowserNavigation({ id: crypto.randomUUID(), url: source.url });
+  };
+  const showVisualization = (source: { hostId: string; threadId: string; path: string }) => {
+    if (source.hostId !== current.hostId || source.threadId !== current.threadId) { setError('可视化所属会话已改变，请返回原会话。'); return; }
+    setVisualization(source); setPanelKind('visualization'); setPanelOpen(true);
+  };
   const showPanel = (request?: { kind: 'terminal' } | { kind: 'file'; path: string; line?: number; column?: number } | { kind: 'diff'; path?: string; diff?: string }) => {
-    setPanelMounted(true); setPanelOpen(true);
+    setPanelMounted(true); setPanelKind('workspace'); setPanelOpen(true);
     if (request) setPanelRequest({ ...request, id: crypto.randomUUID(), scopeId: panelScope, hostId: current.hostId, cwd: panelCwd });
   };
   const openFile = (path: string, line?: number, column?: number, fileCwd = panelCwd) =>
@@ -534,8 +578,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         <div className="yard-tab-strip" role="tablist" aria-label="Workspace tabs">{tabs.map(tab => <div className="yard-tab" key={tab.hostId + ':' + tab.id}><button role="tab" aria-selected={tab.id === current.threadId && tab.hostId === current.hostId} onClick={() => { void openTab(tab); }}>{tab.title}</button><button aria-label={'Close ' + tab.title} onClick={() => setTabs(previous => previous.filter(item => item !== tab))}>×</button></div>)}</div>
         <select aria-label="Execution host" value={current.hostId} onChange={event => navigate('/?hostId=' + encodeURIComponent(event.target.value))}>{hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.displayName}</option>)}</select>
         <span className="yard-connection" title={status} data-state={status}>●</span>
-        <button aria-label="Workspace files" aria-pressed={panelOpen} onClick={() => showPanel()}>Files</button>
+        <button aria-label="Workspace files" aria-pressed={panelOpen && panelKind === 'workspace'} onClick={() => showPanel()}>Files</button>
         <button aria-label="Open terminal" onClick={() => showPanel({ kind: 'terminal' })}>Terminal</button>
+        <button aria-label="Open Chrome panel" disabled={!sendState} aria-pressed={panelOpen && panelKind === 'browser'} onClick={() => showBrowser()}>Chrome</button>
+        {visualization?.hostId === current.hostId && visualization.threadId === current.threadId && <button aria-label="Open visualization" onClick={() => showVisualization(visualization)}>Preview</button>}
         {turnDiff !== undefined && <button aria-label="Open turn changes" onClick={() => showPanel({ kind: 'diff', diff: turnDiff })}>Changes</button>}
       </header>
       {error && <div role="alert" className="yard-error">{error}<button onClick={() => { setError(''); setRefresh(value => value + 1); }}>Retry</button><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
@@ -545,9 +591,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         onOpen={async () => {
           if (intent.threadId) { await openThread(intent.threadId, intent.owner.hostId, false); return; }
           if (await navigate('/' + (intent.owner.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(intent.owner.hostId)))) {
-            sessionStorage.setItem('yard-current-new-draft', intent.owner.draftId);
+            selectHomeDraftIdentity(intent.owner.hostId, intent.owner.draftId);
             rememberNewDraftLocation(intent.owner.hostId, intent.owner.draftId, intent.cwd, intent.projectId);
-            setNewDraftId(intent.owner.draftId); setCwd(intent.cwd);
+            setHomeGeneration(value => value + 1); setCwd(intent.cwd);
             setSelectedProject(projectState ? projectsForHost(projectState, intent.owner.hostId).find(project => project.id === intent.projectId) ?? null : null);
           }
         }} onCheck={async () => { await sendStore.check(intent.id); await reloadSends(); }}
@@ -565,13 +611,14 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
             onOpenFile={openFile} onOpenFileAt={location => {
               if (location.hostId !== current.hostId) { setError('文件所属主机已改变，请返回原会话打开。'); return; }
               openFile(location.path, location.line, location.column, location.cwd ?? panelCwd);
-            }} onEdit={current.readOnly ? undefined : (draft, origin) => submit(draft, initialOptions ?? {}, { type: 'send' }, origin)} onFork={turnId => action('fork', turnId)} /> : <div className="yard-home-heading"><img src="/brand/icon.svg" alt="" /><h1>What would you like to work on?</h1><p>{cwd || workspace}</p></div>}
+            }} onOpenVisualization={showVisualization} onOpenBrowser={showBrowser}
+            onEdit={current.readOnly ? undefined : (draft, origin) => submit(draft, initialOptions ?? {}, { type: 'send' }, origin)} onFork={turnId => action('fork', turnId)} /> : <div className="yard-home-heading"><img src="/brand/icon.svg" alt="" /><h1>What would you like to work on?</h1><p>{cwd || workspace}</p></div>}
         </section>
-        <div className="yard-composer-container" inert={leaving}>{current.readOnly ? <p role="status">此会话已归档。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p> : !sendState || current.threadId && (loading || !initialOptions) ? <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ hostId: current.hostId, threadId: current.threadId, cwd: thread?.cwd ?? cwd,
-          draftId: current.threadId ? sendState.bindings[sendThreadKey(current.hostId, current.threadId)] ?? current.threadId : newDraftId }}
+        <div className="yard-composer-container" inert={leaving}>{current.readOnly ? <p role="status">此会话已归档。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p> : !sendState || current.threadId && (loading || !initialOptions) ? <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
+          onRemoveReference={(owner, reference) => removeBrowserDraftReference(browserDraftOwner(owner, sendState.bindings), reference)}
           onDraftController={receiveComposerController} initialOptions={initialOptions ?? undefined} hosts={hosts} onTargetChange={async target => {
           if (await navigate('/' + (target.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(target.hostId)))) {
-            rememberNewDraftLocation(target.hostId, newDraftId, target.cwd); setCwd(target.cwd); setSelectedProject(null);
+            rememberNewDraftLocation(target.hostId, homeDraftIdentity(target.hostId), target.cwd); setCwd(target.cwd); setSelectedProject(null);
           }
         }} onPrefillConsumed={id => setPrefills(previous => ({ ...previous, [panelScope]: (previous[panelScope] ?? []).filter(item => item.id !== id) }))} activeTurnId={thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null} busy={busy}
           onSubmit={(draft, options, action, description) => submit(draft, options, action, undefined, description)} onInterrupt={interrupt} prefill={prefill} onStartQueued={async queuedSubmissionId => {
@@ -583,9 +630,21 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       </>}
       </div>
       <aside className="yard-workspace-panel" hidden={!panelOpen || settings} aria-label="Workspace panel">
-        {panelMounted && <WorkspacePanels client={client} scopeId={panelScope} hostId={current.hostId} threadId={current.threadId ?? undefined} cwd={panelCwd}
+        <div hidden={panelKind !== 'workspace'} style={{ height: '100%' }}>{panelMounted && <WorkspacePanels client={client} scopeId={panelScope} hostId={current.hostId} threadId={current.threadId ?? undefined} cwd={panelCwd}
           appearance={panelAppearance} request={panelRequest} onRequestConsumed={id => setPanelRequest(previous => previous?.id === id ? null : previous)}
-          onClose={() => setPanelOpen(false)} onReference={addReference} onDirtyChange={dirty => { panelsDirty.current = dirty; }} />}
+          onClose={() => setPanelOpen(false)} onReference={addReference} onDirtyChange={dirty => { panelsDirty.current = dirty; }} />}</div>
+        {browserMounted && <StandaloneBrowser client={client} {...browserOwner} browserTabId="primary"
+          draft={composerController.current?.snapshot()?.draft ?? { text: '', images: [], files: [] }}
+          visible={panelOpen && !settings && panelKind === 'browser'} allowNavigation
+          navigationRequest={browserNavigation} onNavigationConsumed={id => setBrowserNavigation(previous => previous?.id === id ? null : previous)}
+          onDraftChange={async (owner, update) => {
+            const controller = composerController.current, snapshot = controller?.snapshot();
+            if (!controller || !snapshot || current.readOnly || leaving || browserOwnerKey(owner) !== browserOwnerKey(activeBrowserOwner.current)) throw new Error('草稿已切换，浏览器批注已保留。');
+            if (!await controller.update(snapshot.owner, update)) throw new Error('草稿已切换，浏览器批注已保留。');
+          }} onClose={() => setPanelOpen(false)} />}
+        {panelOpen && !settings && panelKind === 'visualization' && visualization?.hostId === current.hostId && visualization.threadId === current.threadId
+          && <StandaloneVisualization client={client} {...visualization} theme={previewAppearance.theme} themeVariables={previewAppearance.variables}
+            locale={previewAppearance.locale} onPrefill={addReference} onClose={() => setPanelOpen(false)} />}
       </aside>
       </div>
     </main>

@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v6，2026-10-28，完整功能和快照退役仍在实施。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v7，2026-10-28，完整功能和快照退役仍在实施。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -75,6 +75,12 @@ host工具read_thread在真实server接线中使用turnLimit/cursor分页历史�
 | 文件/终端/Chrome 不可用 | 对应组件呈现真实失败并保留可恢复输入；终端输入和 mutation 均不自动重发 |
 
 可视化继续使用独立opaque-origin iframe和严格CSP。父页面只接受当前iframe的source、初始化ID和一次性MessagePort，切页/卸载撤销端口。端口仅实现现有widget请求目录，禁止向内容提供通用WorkbenchClient.rpc/host。sendFollowUp走可见确认/预填再由输入链提交；文件读取仍受原host路径与权限约束。
+
+首页身份是每个host的sessionStorage指针，实际稿仍由既有IDB事务保存。首发创建回执将原draftId绑定到真实thread；离开已flush的首页或从持久回执启动时，只轮换已经被该host/thread消费的首页指针。直接访问 `/`、显式New chat和切host均使用该host尚未消费的身份；刷新保留当前未发送稿。旧单UUID指针保留为其他host的迁移身份，不删除原稿/绑定。旧原版new-conversation稿的首次事务认领仍由composer迁移消费者继续补齐。
+
+Chrome和可视化通过App实际工具栏及消息链接进入同一侧面板。Chrome批注保持原host/thread/draft归属，新建thread沿原稿身份使用同一批注；向composer同步必须等待原稿事务成功，再串行处理后续批注版本，避免插入未完成时丢失删除。移除和已发送确认按精确引用版本操作，旧发送不得清理后来批注。可视化Tweak和carousel选择保存在原widget状态服务；每次发送冻结当时的modelContent与标准references为untrusted上下文，privateContent不进入模型输入，未知发送恢复复用被冻结内容。队列上下文能力、live分支和完整F18/F19体验仍需逐项验收。
+
+独立审阅80a09a61 v6仍有必须修订项：跨页迟到失败的attempt约束、编辑未知请求的终态判断、queue/steer持久身份、check阶段约束、旧首页稿认领、编辑导航落盘、真实项目ID/fallback和文件保存未知终态。本v7接线不关闭这些裁决；分别由共享提交、消息、composer和files/panels所有者继续实现，随后冻结复审。
 
 ## 实施与验收
 

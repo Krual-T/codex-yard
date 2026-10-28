@@ -12,6 +12,7 @@ export interface SendIntent extends SendVersion {
   threadId: string | null;
   cwd: string;
   projectId?: string;
+  additionalContext?: Record<string, { kind: 'untrusted'; value: string }>;
   /** Immutable submitted version, not another editable draft. */
   draft: ComposerDraft;
   options: SubmitOptions;
@@ -43,6 +44,10 @@ function snapshot(value: unknown): SendRecoverySnapshot {
       || !Array.isArray(request.draft.images) || !Array.isArray(request.draft.files) || !object(request.options)
       || !object(request.overrides) || request.projectId !== undefined && typeof request.projectId !== 'string'
       || !stages.includes(request.stage as SendStage)) throw new Error('发送恢复内容无法安全读取，原值已保留。');
+    if (request.additionalContext !== undefined && (!object(request.additionalContext)
+      || Object.values(request.additionalContext).some(entry => !object(entry) || entry.kind !== 'untrusted' || typeof entry.value !== 'string'))) {
+      throw new Error('发送上下文无法安全读取，原值已保留。');
+    }
     if (request.created !== undefined && (!object(request.created) || !object(request.created.thread)
       || request.created.thread.id !== request.threadId || !object(request.created.settings))) throw new Error('新会话创建回执无效，原值已保留。');
   }
@@ -69,10 +74,12 @@ export class SendRecoveryStore {
     await this.storage.update(value => { result = snapshot(value); update(result); return result; });
     return result;
   }
-  async prepare(version: SendVersion, cwd: string, draft: ComposerDraft, options: SubmitOptions, overrides: Partial<SubmitOptions>, projectId?: string) {
+  async prepare(version: SendVersion, cwd: string, draft: ComposerDraft, options: SubmitOptions, overrides: Partial<SubmitOptions>, projectId?: string,
+    additionalContext?: SendIntent['additionalContext']) {
     const intent: SendIntent = { ...structuredClone(version), id: crypto.randomUUID(), clientUserMessageId: crypto.randomUUID(),
       threadId: version.owner.threadId, cwd, draft: structuredClone(draft), options: structuredClone(options),
-      overrides: structuredClone(overrides), stage: 'prepared', ...(projectId ? { projectId } : {}) };
+      overrides: structuredClone(overrides), stage: 'prepared', ...(projectId ? { projectId } : {}),
+      ...(additionalContext && Object.keys(additionalContext).length ? { additionalContext: structuredClone(additionalContext) } : {}) };
     await this.change(state => {
       if (Object.values(state.requests).some(value => sendOwnerKey(value.owner) === sendOwnerKey(version.owner))) {
         throw new Error('此草稿还有待核对的发送结果，请先处理恢复记录。');
