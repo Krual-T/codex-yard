@@ -122,3 +122,56 @@ test('goal and queue controls follow the same locale while retaining edits and u
       { type: 'text', text: 'Edited user queue', text_elements: [] });
   } finally { await browser.close(); }
 });
+
+test('protected draft warnings follow locale without changing retained document data', {
+  skip: !existsSync('/usr/bin/google-chrome') && 'An isolated headless browser is unavailable', timeout: 60_000,
+}, async () => {
+  const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'jsx', contents: `
+    import React from 'react';
+    import {createRoot} from 'react-dom/client';
+    import {I18nProvider} from './src/renderer/i18n/index.tsx';
+    import {StandaloneComposer} from './src/renderer/composer/StandaloneComposer.tsx';
+    const documentValue={type:'doc',content:[{type:'unknown_node',attrs:{keep:'untouched'}}]};
+    const state={controller:null,consumed:false,documentValue};
+    const client={async rpc(method){if(method==='model/list') return {data:[],nextCursor:null};
+      if(method==='config/read') return {config:{}}; throw Error('unexpected RPC '+method);},
+      async host(endpoint){if(endpoint==='get-setting') return {value:undefined}; throw Error('unexpected host '+endpoint);},
+      subscribe(){return ()=>{}},async reply(){throw Error('unexpected approval')}};
+    const props={client,context:{hostId:'local',threadId:null,draftId:'protected-locale',cwd:'/fixture'},busy:false,
+      prefill:{id:'opaque',draft:{text:'Retained text',images:[],files:[],references:[],document:documentValue}},
+      onDraftController(value){state.controller=value},onPrefillConsumed(){state.consumed=true},
+      async onSubmit(){throw Error('unexpected submit')},async onInterrupt(){}};
+    const root=createRoot(document.getElementById('root'));
+    window.fixture={state,render(locale){root.render(React.createElement(I18nProvider,{locale},React.createElement(StandaloneComposer,props)));}};
+    window.fixture.render('en-US');
+  ` }, bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' } });
+  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] });
+  try {
+    const page = await browser.newPage();
+    await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }));
+    await page.goto('http://protected-composer.test/');
+    await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+    const warning = 'This draft contains unsupported document content. The original data has been retained.';
+    await page.getByText(warning).waitFor();
+    await page.waitForFunction(() => (window as any).fixture.state.consumed);
+    const before = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+    assert.equal(await page.getByRole('textbox', { name: 'Work with Codex' }).getAttribute('readonly'), '');
+    await page.evaluate(() => (window as any).fixture.render('zh-TW'));
+    await page.getByText('此草稿包含尚不支援的文件內容，原始資料已保留。').waitFor();
+    const after = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+    assert.deepEqual(after, before);
+    await page.reload();
+    await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+    await page.getByText(warning).waitFor();
+    const restored = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+    assert.deepEqual(restored.draft.document, before.draft.document);
+    assert.equal(restored.revision, before.revision);
+    await page.evaluate(async () => {
+      const controller = (window as any).fixture.state.controller, owner = controller.snapshot().owner;
+      await controller.update(owner, (draft: any) => ({ ...draft, blocked: 'An unrecognized retained warning' }));
+      (window as any).fixture.render('zh-CN');
+    });
+    await page.getByText('An unrecognized retained warning').waitFor();
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document), before.draft.document);
+  } finally { await browser.close(); }
+});

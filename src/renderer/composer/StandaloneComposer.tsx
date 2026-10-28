@@ -3,6 +3,7 @@ import type { ClipboardEvent } from 'react';
 import type { ComposerDraft, StandaloneComposerProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
 import { activatePending, documentFromText, draftToInput, hasContent, mergePrefill, richEditIssue, textEditIssue, updateDraftText, updateRichDraft } from './standalone-draft.ts';
+import { localizeDraftIssue } from './standalone-draft-issues.ts';
 import { useComposerDraft } from './use-composer-draft.ts';
 import type { ComposerDraftController } from './use-composer-draft.ts';
 import type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescription } from './composer-draft-store.ts';
@@ -313,7 +314,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           <span>{t('Skill')}：{skill.name}</span><button type="button" title={t('Remove skill')} aria-label={t('Remove skill') + ' ' + skill.name} disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, skills: value.skills.filter(item => item.path !== skill.path) }))}>×</button>
         </div>)}
       </div> : null}
-      {editIssue ? <div className="standalone-composer__retained" role="status">{editIssue}<details><summary>{t('View retained content')}</summary><pre>{JSON.stringify({ document: draft.document, input: draft.input, hints: draft.hints, preserved: draft.preserved, pending: draft.pendingDrafts }, null, 2)}</pre></details></div> : null}
+      {editIssue ? <div className="standalone-composer__retained" role="status">{localizeDraftIssue(editIssue, t)}<details><summary>{t('View retained content')}</summary><pre>{JSON.stringify({ document: draft.document, input: draft.input, hints: draft.hints, preserved: draft.preserved, pending: draft.pendingDrafts }, null, 2)}</pre></details></div> : null}
       {richActive && draft.document ? <StandaloneRichEditor ref={richEditor} document={draft.document} currentDocument={() => current.current.draft.document}
         onChange={document => changeDraft(value => updateRichDraft(value, document))} onKeyDown={keyDown}
         onCompletionContext={onRichContext} completionListId={completions.query ? completions.listId : undefined}
