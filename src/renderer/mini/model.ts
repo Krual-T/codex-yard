@@ -13,7 +13,6 @@ export const builtinPets = [
 ] as const;
 
 export type BuiltinPetId = typeof builtinPets[number]['id'];
-export type BuiltinPetAssets = Partial<Record<BuiltinPetId, string>>;
 export const builtinPetAssets: Readonly<Record<BuiltinPetId, string>> = {
   codex: '/pets/codex-spritesheet-v6-51045ae208c0.webp',
   dewey: '/pets/dewey-spritesheet-v5-f5285016f310.webp',
@@ -47,7 +46,7 @@ export function readPetState(value: unknown): WebPetState | null {
   return { isOpen: state.isOpen, position, visibility: state.visibility === 'on-demand' ? 'on-demand' : 'always-visible' };
 }
 
-export function readPetOptions(value: unknown, assets: BuiltinPetAssets): PetOption[] {
+export function readPetOptions(value: unknown): PetOption[] {
   const records = object(value).avatars;
   const custom = Array.isArray(records) ? records.flatMap((entry): PetOption[] => {
     const avatar = object(entry);
@@ -57,22 +56,26 @@ export function readPetOptions(value: unknown, assets: BuiltinPetAssets): PetOpt
     return [{ id: avatar.id, name: avatar.displayName, description: typeof avatar.description === 'string' ? avatar.description : undefined,
       src: avatar.spritesheetDataUrl, rows: avatar.spriteVersionNumber === 2 ? 11 : 9 }];
   }) : [];
-  return [...custom, ...builtinPets.map(({ id, name }) => ({ id, name, src: assets[id], rows: 11 as const }))];
+  return [...custom, ...builtinPets.map(({ id, name }) => ({ id, name, src: builtinPetAssets[id], rows: 11 as const }))];
 }
 
 export function petSize(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 80 && value <= 224 ? value : 112;
 }
 
-export function petFrame(motion: PetMotion, step: number): { row: number; column: number; duration: number } {
-  const spec = {
+const petFrames = {
     idle: { row: 0, durations: [1680, 660, 660, 840, 840, 1920] },
     running: { row: 7, durations: [120, 120, 120, 120, 120, 220] },
     waiting: { row: 6, durations: [150, 150, 150, 150, 150, 260] },
     failed: { row: 5, durations: [140, 140, 140, 140, 140, 140, 140, 240] },
     review: { row: 8, durations: [150, 150, 150, 150, 150, 280] },
     jumping: { row: 4, durations: [140, 140, 140, 140, 280] },
-  }[motion];
+} as const;
+
+export function petFrameCount(motion: PetMotion): number { return petFrames[motion].durations.length; }
+
+export function petFrame(motion: PetMotion, step: number): { row: number; column: number; duration: number } {
+  const spec = petFrames[motion];
   const column = ((step % spec.durations.length) + spec.durations.length) % spec.durations.length;
   return { row: spec.row, column, duration: spec.durations[column]! };
 }

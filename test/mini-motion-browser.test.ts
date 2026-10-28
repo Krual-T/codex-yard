@@ -85,3 +85,60 @@ test('PetSprite follows resolved app motion and system fallback, stops timers an
     assert.deepEqual(errors, []);
   } finally { await browser.close(); }
 });
+
+test('PetSprite plays exactly three timed non-idle cycles, pauses while hidden and returns to idle', {
+  skip: !existsSync('/usr/bin/google-chrome') && 'An isolated headless browser is unavailable', timeout: 60_000,
+}, async () => {
+  const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'jsx', contents: `
+    import React from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { PetSprite } from './src/renderer/mini/PetSprite.tsx';
+    const originalSet=window.setTimeout.bind(window),originalClear=window.clearTimeout.bind(window);
+    const timers=new Map();let id=100000;
+    window.setTimeout=(callback,delay,...args)=>{
+      if(typeof callback!=='function'||![120,220,1680,660,840,1920].includes(delay))return originalSet(callback,delay,...args);
+      const key=++id;timers.set(key,{callback,delay});return key;
+    };
+    window.clearTimeout=key=>{if(timers.has(key))timers.delete(key);else originalClear(key)};
+    let visibility='visible';Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>visibility});
+    const root=createRoot(document.getElementById('root'));
+    root.render(React.createElement(PetSprite,{pet:{id:'fixture',name:'Fixture',rows:11,src:'data:image/png;base64,AA=='},motion:'running'}));
+    window.petTimingHarness={pending:()=>Array.from(timers.values()).map(value=>value.delay),
+      tick(){const [key,value]=timers.entries().next().value;timers.delete(key);value.callback()},
+      hidden(value){visibility=value?'hidden':'visible';document.dispatchEvent(new Event('visibilitychange'))},
+      dispose(){root.unmount()}};
+  ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic' });
+  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--disable-background-networking'] });
+  try {
+    const page = await browser.newPage({ reducedMotion: 'no-preference' });
+    await page.setContent('<div id="root"></div>');
+    await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+    const sprite = page.locator('[data-codex-pet-id="fixture"]');
+    await sprite.waitFor({ state: 'attached' });
+    await page.waitForFunction(() => (window as any).petTimingHarness.pending().length === 1);
+    const cycle = [120, 120, 120, 120, 120, 220];
+    for (let step = 0; step < 18; step++) {
+      assert.deepEqual(await page.evaluate(() => (window as any).petTimingHarness.pending()), [cycle[step % cycle.length]]);
+      if (step === 7) {
+        const position = await sprite.evaluate(el => (el as HTMLElement).style.backgroundPosition);
+        await page.evaluate(() => (window as any).petTimingHarness.hidden(true));
+        await page.waitForFunction(() => (window as any).petTimingHarness.pending().length === 0);
+        assert.equal(await sprite.evaluate(el => (el as HTMLElement).style.backgroundPosition), position);
+        await page.evaluate(() => (window as any).petTimingHarness.hidden(false));
+        await page.waitForFunction(() => (window as any).petTimingHarness.pending().length === 1);
+        assert.deepEqual(await page.evaluate(() => (window as any).petTimingHarness.pending()), [cycle[step % cycle.length]]);
+      }
+      await page.evaluate(() => (window as any).petTimingHarness.tick());
+      const expectedMotion = step === 17 ? 'idle' : 'running';
+      const expectedColumn = step === 17 ? 0 : (step + 1) % 6;
+      await page.waitForFunction(({ expectedMotion, expectedColumn }) => {
+        const element = document.querySelector<HTMLElement>('[data-codex-pet-id="fixture"]');
+        return element?.dataset.codexPetState === expectedMotion && Math.abs(parseFloat(element.style.backgroundPosition) - expectedColumn / 7 * 100) < .001;
+      }, { expectedMotion, expectedColumn });
+    }
+    assert.deepEqual(await page.evaluate(() => (window as any).petTimingHarness.pending()), [1680]);
+    assert.equal(await sprite.getAttribute('data-codex-pet-state'), 'idle');
+    await page.evaluate(() => (window as any).petTimingHarness.dispose());
+    assert.deepEqual(await page.evaluate(() => (window as any).petTimingHarness.pending()), []);
+  } finally { await browser.close(); }
+});

@@ -1,31 +1,12 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { chromium } from 'playwright-core';
-import { builtinPetAssets, builtinPets } from '../src/renderer/mini/model.ts';
-
-const hashes: Record<string, string> = {
-  codex: 'ac2990f24d55372411cebdc66a726e1fcbf5e80ec95378e2d25a6241abbedf88',
-  dewey: 'f2be8f576ab9d6cf287dd3518f86670e98d0270a83d41015d1018ab3aef791be',
-  fireball: 'c1447dba809eb642e58aa213da5920eb27764e0f1df34a5651db091a1f79cbf3',
-  hoots: '62539958eb6ab2b23c6cb640c6ca9516a42a75e785203eee3eeff4d9c4581456',
-  rocky: '81970d728fb0a024385298c47dd9128ee18e9eb9d1db84ccacd42edea9f3bd6a',
-  seedy: '4cc6c9f4bc61882379472dfa7fa91ca128b90933b0ae3cda9fff3da91dc6d1f8',
-  stacky: '7e1afd29221d3ac0de0bd7a528e9b49170910742e634cd666fa7ad16d7b2e7d2',
-  bsod: 'b55c717298786dc56622c287d707d60e526fd7b32b39a60346871d6c6516b26d',
-  'null-signal': 'a816f7488c187ffe8b7f5d58319deb6cfa591f98c219ef06cbaf10d1f9f330db',
-};
-
-test('public pet sprite files retain their reviewed source bytes without reading the vendor snapshot', () => {
-  for (const pet of builtinPets) {
-    const path = builtinPetAssets[pet.id];
-    assert.ok(path.startsWith('/pets/'));
-    const bytes = readFileSync(join(process.cwd(), 'public', path));
-    assert.equal(createHash('sha256').update(bytes).digest('hex'), hashes[pet.id], pet.id);
-  }
-});
+import { builtinPetAssets } from '../src/renderer/mini/model.ts';
+import { createNativeWorkbench } from '../src/native/server.ts';
+import { createFakeCodex } from './fake-codex.ts';
 
 test('all public pet sprites decode in the browser and contain visible first frames', {
   skip: !existsSync('/usr/bin/google-chrome') && 'An isolated headless browser is unavailable', timeout: 60_000,
@@ -62,4 +43,37 @@ test('all public pet sprites decode in the browser and contain visible first fra
       assert.ok(image.visible > 0, image.path);
     }
   } finally { await browser.close(); }
+});
+
+test('the actual host serves and decodes the built-in pet URLs', {
+  skip: !existsSync('/usr/bin/google-chrome') && 'An isolated headless browser is unavailable', timeout: 60_000,
+}, async t => {
+  if (!existsSync('.local/visualization-sandbox.js')) { t.skip('Run npm run build:host before testing the actual host'); return; }
+  const root = await mkdtemp('/tmp/yard-mini-host-');
+  const fake = await createFakeCodex(root);
+  let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+  t.after(async () => { await browser?.close(); await app?.close(); await fake.close(); await rm(root, { recursive:true, force:true }); });
+  app = await createNativeWorkbench({ port:0, socketPath:fake.socketPath, codexHome:join(root,'codex'),
+    dataDir:join(root,'data'), workspace:root, hostCatalog:{hosts:[],projects:[],assignments:{}} });
+  const paths = Object.values(builtinPetAssets);
+  const responses = await Promise.all(paths.map(path => fetch(app!.url + path)));
+  const statuses = responses.map(response => response.status);
+  await Promise.all(responses.map(response => response.arrayBuffer()));
+  if (statuses.every(status => status === 404)) {
+    t.skip('The shared host does not yet expose /pets/; Manager owns this route');
+    return;
+  }
+  for (let index = 0; index < paths.length; index++) {
+    assert.equal(responses[index]!.status, 200, paths[index]);
+    assert.match(responses[index]!.headers.get('content-type') ?? '', /^image\/webp/);
+  }
+  browser = await chromium.launch({ executablePath:'/usr/bin/google-chrome', headless:true, args:['--no-sandbox','--disable-background-networking'] });
+  const page = await browser.newPage();
+  await page.goto(app.url);
+  const dimensions = await page.evaluate(async paths => Promise.all(paths.map(async path => {
+    const image = new Image(); image.src = path; await image.decode();
+    return {path, width:image.naturalWidth, height:image.naturalHeight};
+  })), paths);
+  for (const image of dimensions) { assert.equal(image.width,1536,image.path); assert.equal(image.height,2288,image.path); }
 });

@@ -1,248 +1,175 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
+import { WebSocketServer } from 'ws';
+import type WebSocket from 'ws';
 
-declare global {
-  interface Window {
-    miniInteractionHarness: {
-      calls: { messages: { type: string }[]; hosts: string[]; replies: { ref: { id: string }; response: unknown }[]; outcomes: unknown[]; actions: unknown[]; targets: unknown[]; submissions: number };
-      disconnect(host: string): void;
-      reconnect(host: string): void;
-      refresh(host: string, revision: string): void;
-      remount(): void;
-      resolveHeld(): void;
-      resolveTarget(): void;
-      renewRequests(host: string): void;
-    };
-  }
-}
-
-test('Mini freezes stale hosts, preserves reply certainty, and renders real question and action requests', {
-  skip: !existsSync('/usr/bin/google-chrome') && 'An isolated headless browser is unavailable', timeout: 90_000,
+test('Mini consumes real browser-client requests and distinguishes daemon loss, bridge loss and parent outcomes', {
+  skip: !existsSync('/usr/bin/google-chrome') && 'An isolated headless browser is unavailable', timeout: 120_000,
 }, async () => {
-  const bundle = await build({
-    stdin: { resolveDir: process.cwd(), loader: 'jsx', contents: `
-      import React from 'react';
-      import { createRoot } from 'react-dom/client';
-      import { StandaloneMini } from './src/renderer/mini/index.tsx';
-      const listeners = new Set();
-      const calls = {messages:[],hosts:[],replies:[],outcomes:[],actions:[],targets:[],submissions:0};
-      const emit = event => { for (const listener of [...listeners]) listener(event); };
-      const state = {isOpen:true,visibility:'always-visible',position:null};
-      const hostConnections = {local:{state:'connected',fresh:true,revision:'l1',requestGeneration:'g2'},'ssh-a':{state:'connected',fresh:true,revision:'r1',requestGeneration:'g1'}};
-      let draft='', retryCount=0, actionCount=0, root, resolveHeld, pendingTarget;
-      let quickChatTarget={hostId:'ssh-a',threadId:'questions'};
-      const heldReply = new Promise(resolve=>{resolveHeld=resolve;});
-      const activities = [
-        {hostId:'ssh-a',threadId:'remote',title:'Remote work',status:'waiting',detail:'Approval requested',
-          approval:{requestRef:{hostId:'ssh-a',generation:'g1',id:'retry'},title:'Run command?',detail:'Fixture command',choices:[{label:'Allow once',result:{decision:'accept'}}]},
-          actions:[{id:'stop-1',kind:'stop',label:'Stop task',turnId:'turn-r'},
-            {id:'follow-1',kind:'follow-up',label:'Follow up'},
-            {id:'plan-1',kind:'implement-plan',label:'Implement plan',turnId:'turn-r',planContent:'- [ ] Fixture',collaborationMode:{mode:'default'}}]},
-        {hostId:'local',threadId:'local',title:'Local work',status:'waiting',
-          approval:{requestRef:{hostId:'local',generation:'g2',id:'unknown'},title:'Apply changes?',choices:[{label:'Apply changes',result:{decision:'accept'}}]}},
-        {hostId:'local',threadId:'held',title:'Pending work',status:'waiting',
-          approval:{requestRef:{hostId:'local',generation:'g2',id:'held'},title:'Pending approval',choices:[{label:'Send held approval',result:{decision:'accept'}}]}},
-        {hostId:'local',threadId:'forwarded',title:'Forwarded work',status:'waiting',
-          approval:{requestRef:{hostId:'local',generation:'g2',id:'forwarded'},title:'Forwarded approval',choices:[{label:'Forward approval',result:{decision:'accept'}}]}},
-        {hostId:'ssh-a',threadId:'queue',title:'Pending requests',status:'waiting',requests:[
-          {kind:'approval',request:{requestRef:{hostId:'ssh-a',generation:'g1',id:'permission'},title:'More access?',choices:[{label:'Deny access',result:{permissions:{},scope:'turn'}}]}},
-          {kind:'approval',request:{requestRef:{hostId:'ssh-a',generation:'g1',id:'elicitation'},title:'Tool request',choices:[{label:'Decline tool',result:{action:'decline',content:null,_meta:null}}]}}]},
-        {hostId:'ssh-a',threadId:'questions',title:'Questions',status:'waiting',
-          question:{requestRef:{hostId:'ssh-a',generation:'g1',id:'question'},title:'Choose settings',questions:[
-            {id:'first',header:'Environment',question:'Which environment?',isOther:true,isSecret:false,options:[{label:'Staging',description:'Test changes'}]},
-            {id:'secret',header:'Access',question:'Access code?',isOther:false,isSecret:true,options:null}]}}
-      ];
-      const client = {rpc:async()=>{throw Error('Unexpected RPC');},
-        subscribe:listener=>{listeners.add(listener);return()=>listeners.delete(listener);},
-        host:async(endpoint,params)=>{calls.hosts.push(endpoint);if(endpoint==='get-settings')return {values:{}};
-          if(endpoint==='custom-avatars')return {avatars:[]};throw Error('Unexpected host write');},
-        reply:async(ref,response)=>{calls.replies.push({ref,response});
-          if(ref.id==='retry' && retryCount++===0)throw Object.assign(Error('Host refused before forwarding'),{forwarded:false,uncertain:false});
-          if(ref.id==='unknown')throw Object.assign(Error('Reply acknowledgement lost'),{uncertain:true});
-          if(ref.id==='forwarded')throw Object.assign(Error('Forwarded to the daemon'),{forwarded:true,uncertain:false});
-          if(ref.id==='held')await heldReply;}
-      };
-      const send = async message=>{calls.messages.push(message);if(message.type==='avatar-overlay-open-state-request')emit({type:'workbench-pet-state',state});};
-      function render(){root.render(React.createElement(StandaloneMini,{client,send,activities,hostConnections,quickChatTarget,shortcut:true,
-        onOpenThread:()=>{},onExpand:()=>{},
-        onQuickChatTarget:identity=>{calls.targets.push(identity);pendingTarget=identity;render();},
-        onApprovalOutcome:(ref,outcome)=>{calls.outcomes.push({ref,outcome});for(const activity of activities){
-          for(const request of [activity.approval,activity.question,...(activity.requests??[]).map(item=>item.request)])if(request?.requestRef.id===ref.id)request.outcome=outcome;}render();},
-        onNotificationAction:async(identity,action)=>{calls.actions.push({identity,action:{...action}});
-          if(actionCount++===0)throw Object.assign(Error('Stop was not forwarded'),{uncertain:false});},
-        onNotificationActionOutcome:(identity,action,outcome)=>{calls.outcomes.push({identity,id:action.id,outcome});action.outcome=outcome;render();}},
-        React.createElement('div',null,React.createElement('code',null,'Fixture code'),React.createElement('textarea',{'aria-label':'Quick draft',value:draft,onChange:e=>{draft=e.target.value;render();}}),
-          React.createElement('button',{type:'button',onClick:()=>{calls.submissions++;}},'Send draft'))));}
-      function mount(){root=createRoot(document.getElementById('root'));render();}
-      window.miniInteractionHarness={calls,
-        disconnect(host){hostConnections[host]={...hostConnections[host],state:'disconnected',fresh:false};emit({type:'codex-app-server-connection-changed',hostId:host,state:'disconnected'});render();},
-        reconnect(host){hostConnections[host]={...hostConnections[host],state:'connected',fresh:false};emit({type:'codex-app-server-connection-changed',hostId:host,state:'connected'});render();},
-        refresh(host,revision){const generations={r1:'g1',r2:'g3',r3:'g4',l2:'g5'};
-          hostConnections[host]={...hostConnections[host],state:'connected',fresh:true,revision,requestGeneration:generations[revision]};render();},
-        renewRequests(host){for(const activity of activities)if(activity.hostId===host){
-          for(const request of [activity.approval,activity.question,...(activity.requests??[]).map(item=>item.request)])
-            if(request)request.requestRef={...request.requestRef,generation:hostConnections[host].requestGeneration};}render();},
-        remount(){root.unmount();mount();},resolveHeld(){resolveHeld();},resolveTarget(){quickChatTarget=pendingTarget;render();}};
-      mount();
-    ` },
-    bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' },
+  const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'jsx', contents: `
+    import React from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { BrowserWorkbenchClient } from './src/renderer/app/client.ts';
+    import { StandaloneMini } from './src/renderer/mini/index.tsx';
+    const client=new BrowserWorkbenchClient();
+    const calls={replies:[],actions:[],opened:[]}, records=[];
+    let pending=[],bridge='connecting',root;
+    const hosts={local:{state:'connected',fresh:true,revision:'l1'},'ssh-a':{state:'connected',fresh:true,revision:'r1'}};
+    let action={id:'stop',kind:'stop',label:'Stop task',turnId:'turn-1',outcome:'ready'};
+    const same=(a,b)=>a.hostId===b.hostId&&a.id===b.id&&a.generation===b.generation;
+    function render(){const activities=[{hostId:'ssh-a',threadId:'remote',title:'Remote work',status:'waiting',
+      requests:records.filter(x=>x.request.requestRef.hostId==='ssh-a'),actions:[action]},
+      {hostId:'local',threadId:'local',title:'Local work',status:'waiting',requests:records.filter(x=>x.request.requestRef.hostId==='local')}];
+      root.render(React.createElement(StandaloneMini,{client,send:async()=>{await client.host('test-pet-state')},activities,bridgeState:bridge,
+        hostConnections:hosts,pendingRequests:pending,onOpenThread:value=>calls.opened.push(value),onExpand(){},
+        onBeforeQuickChatClose:async()=>true,onInputDraftChange:(ref,draft)=>{records.find(x=>same(x.request.requestRef,ref)).request.inputDraft=draft;render()},
+        onNotificationAction:async(identity,value)=>{calls.actions.push({identity,turnId:value.turnId,id:value.id,kind:value.kind});action={...action,outcome:'sent'};render()},
+        onRespond:async(ref,result)=>{const item=records.find(x=>same(x.request.requestRef,ref)).request;
+          if(item.outcome!=='ready'||!pending.some(value=>same(value,ref)))return;
+          item.outcome='sending';render();calls.replies.push({ref,result});
+          try{await client.reply(ref,{result});item.outcome='sent'}catch(error){item.error=error.message;
+            item.outcome=error.uncertain?'unknown':pending.some(value=>same(value,ref))?'ready':'expired'}render()}}));}
+    client.subscribe(event=>{
+      if(event.type==='connection-state'){bridge=event.state;
+        if(event.state!=='connected'){pending=[];for(const host of Object.keys(hosts))hosts[host]={...hosts[host],fresh:false}}render();}
+      if(event.type==='codex-app-server-connection-changed'){
+        hosts[event.hostId]={...hosts[event.hostId],state:event.state,fresh:false};
+        if(event.state!=='connected')pending=pending.filter(ref=>ref.hostId!==event.hostId);render();}
+      if(event.type==='fixture-expired'){pending=pending.filter(ref=>!same(ref,event.ref));render()}
+      if(event.type==='mcp-request'){
+        const ref=event.requestRef, id=String(event.request.id);if(!pending.some(value=>same(value,ref)))pending=[...pending,ref];
+        if(!records.some(item=>same(item.request.requestRef,ref))){
+          let item;
+          if(id==='question')item={kind:'question',request:{requestRef:ref,title:'Question',outcome:'ready',inputDraft:{},questions:[
+            {id:'q',header:'Target',question:'Choose target',isOther:true,isSecret:false,options:[{label:'First',description:''},{label:'Second',description:''}]}]}};
+          else if(id==='complex')item={kind:'open',request:{requestRef:ref,title:'Review complex request',outcome:'ready'}};
+          else item={kind:'approval',request:{requestRef:ref,title:id,outcome:'ready',choices:[{label:'Reply '+id,result:{decision:'accept'}}]}};
+          records.push(item);
+        }render();}
+    });
+    function mount(){root=createRoot(document.getElementById('root'));render()}
+    window.miniRequestsHarness={calls,records,ready:()=>bridge==='connected'&&pending.some(ref=>ref.id==='question'),
+      refresh(host,revision){hosts[host]={...hosts[host],state:'connected',fresh:true,revision};render()},
+      nextTurn(){action={...action,turnId:'turn-2',outcome:'ready'};render()},
+      remount(){root.unmount();mount()},close(){client.close();root.unmount()}};
+    mount();setTimeout(()=>{void client.connect()},50);
+  ` }, bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' } });
+  const server = createServer((_request, response) => { response.setHeader('Content-Type', 'text/html'); response.end('<div id="root"></div>'); });
+  const webSockets = new WebSocketServer({ server });
+  const messages: any[] = [];
+  let socket: WebSocket | undefined;
+  const refs = [
+    {hostId:'ssh-a',id:'A',generation:'generation-a'}, {hostId:'ssh-a',id:'B',generation:'generation-b'},
+    {hostId:'ssh-a',id:'known',generation:'generation-known'}, {hostId:'ssh-a',id:'expired',generation:'generation-expired'},
+    {hostId:'ssh-a',id:'unknown',generation:'generation-unknown'}, {hostId:'ssh-a',id:'question',generation:'generation-question'},
+    {hostId:'ssh-a',id:'complex',generation:'generation-complex'}, {hostId:'local',id:'local',generation:'generation-local'},
+  ];
+  const active = [...refs];
+  const same = (left: typeof refs[number], right: typeof refs[number]) => left.hostId === right.hostId && left.id === right.id && left.generation === right.generation;
+  let knownAttempts = 0;
+  function emit(value: unknown) { assert.ok(socket); socket.send(JSON.stringify(value)); }
+  webSockets.on('connection', connection => {
+    socket = connection;
+    connection.on('message', data => {
+      const message = JSON.parse(String(data)); messages.push(message);
+      if (message.type === 'ready') {
+        for (const ref of active) emit({type:'mcp-request',hostId:ref.hostId,requestRef:ref,
+          request:{id:ref.id,method:'item/commandExecution/requestApproval',params:{threadId:'fixture'}}});
+      } else if (message.type === 'fetch') {
+        const endpoint = String(message.url).split('/').at(-1);
+        emit({type:'fetch-response',requestId:message.requestId,responseType:'success',body:endpoint === 'get-settings' ? {values:{}} : {avatars:[]}});
+        if (endpoint === 'test-pet-state') emit({type:'workbench-pet-state',state:{isOpen:true,visibility:'always-visible',position:null}});
+      } else if (message.type === 'mcp-response') {
+        const ref = {hostId:message.hostId,id:message.response.id,generation:message.generation};
+        if (ref.id === 'unknown') { connection.terminate(); return; }
+        if (ref.id === 'expired') {
+          const index = active.findIndex(value => same(value, ref)); if (index >= 0) active.splice(index, 1);
+          emit({type:'fixture-expired',ref});
+          emit({type:'server-request-response',requestId:message.requestId,error:'expired ref',uncertain:false}); return;
+        }
+        if (ref.id === 'known' && knownAttempts++ === 0) {
+          emit({type:'server-request-response',requestId:message.requestId,error:'not forwarded',uncertain:false}); return;
+        }
+        const index = active.findIndex(value => same(value, ref)); if (index >= 0) active.splice(index, 1);
+        emit({type:'server-request-response',requestId:message.requestId,success:true});
+      }
+    });
   });
-  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
-    args: ['--no-sandbox', '--disable-background-networking'] });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--disable-background-networking'] });
   try {
-    const page = await browser.newPage({ viewport: { width: 1100, height: 850 } });
-    await page.route('**/*', route => route.abort());
+    const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
-    await page.setContent('<style>:root{--yard-fg:#edf3f4;--yard-bg:#101719;--yard-surface:#242c2e;--yard-muted:#b6c2c5;--yard-border:#627276;--yard-accent:#8acaff;--yard-ui-font:monospace;--yard-content-font:serif;--yard-code-font:sans-serif;--yard-font-size:18px;--yard-code-size:19px}body{background:#101719}</style><div id="root"></div>');
-    await page.addStyleTag({ content: readFileSync(new URL('../src/renderer/mini/mini.css', import.meta.url), 'utf8') });
+    await page.goto(`http://127.0.0.1:${port}/`);
+    await page.addStyleTag({ content: readFileSync('src/renderer/mini/mini.css', 'utf8') });
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
-    await page.getByText('Remote work').waitFor();
-    assert.equal(await page.locator('.yard-mini-activity').first().evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(36, 44, 46)');
-    assert.equal(await page.locator('.yard-mini-activity').first().evaluate(el => getComputedStyle(el).color), 'rgb(237, 243, 244)');
-    assert.match(await page.locator('.yard-mini').evaluate(el => getComputedStyle(el).fontFamily), /monospace/);
-    assert.equal(await page.locator('.yard-mini').evaluate(el => getComputedStyle(el).fontSize), '18px');
-    assert.match(await page.getByText('Fixture command').evaluate(el => getComputedStyle(el).fontFamily), /serif/);
+    await page.getByRole('button', { name: 'Reply A' }).waitFor();
+    await page.evaluate(() => { (window as any).miniRequestsHarness.refresh('local','l2'); (window as any).miniRequestsHarness.refresh('ssh-a','r2'); });
+    await page.waitForFunction(() => !Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Reply A')?.disabled);
+    assert.equal(await page.getByRole('button', { name: 'Reply A' }).isEnabled(), true);
+    assert.equal(await page.getByRole('button', { name: 'Reply B' }).isEnabled(), true);
 
-    await page.getByRole('button', { name: 'Quick chat', exact: true }).click();
-    assert.equal(await page.getByText('Fixture code').evaluate(el => getComputedStyle(el).fontSize), '19px');
-    assert.match(await page.getByText('Fixture code').evaluate(el => getComputedStyle(el).fontFamily), /sans-serif/);
-    assert.equal(await page.getByRole('textbox', { name: 'Quick draft' }).evaluate(element => document.activeElement === element), true);
-    await page.getByRole('textbox', { name: 'Quick draft' }).fill('retained draft');
-    await page.evaluate(() => {
-      const approval = Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Allow once')!;
-      window.miniInteractionHarness.disconnect('ssh-a'); approval.click();
-    });
-    await page.getByText('Connection lost. Activity paused.').first().waitFor();
-    assert.equal((await page.evaluate(() => window.miniInteractionHarness.calls.replies)).length, 0, 'a click in the same event turn as disconnect cannot send');
-    assert.equal(await page.getByRole('button', { name: 'Allow once' }).isDisabled(), true);
-    assert.equal(await page.locator('.yard-mini-composer [inert]').count(), 1);
-    await page.getByRole('button', { name: 'Quick chat', exact: true }).focus();
-    await page.evaluate(() => window.miniInteractionHarness.reconnect('ssh-a'));
-    await page.evaluate(() => window.miniInteractionHarness.refresh('ssh-a', 'r1'));
-    assert.equal(await page.getByRole('button', { name: 'Allow once' }).isDisabled(), true, 'old revision cannot unfreeze a reconnected host');
-    await page.evaluate(() => window.miniInteractionHarness.refresh('ssh-a', 'r2'));
-    await page.waitForFunction(() => !document.querySelector('.yard-mini-composer [inert]'));
-    assert.equal(await page.getByRole('button', { name: 'Quick chat', exact: true }).evaluate(element => document.activeElement === element), true);
-    assert.equal(await page.getByRole('button', { name: 'Allow once' }).isDisabled(), true, 'a refreshed host cannot reuse an old request generation');
-    await page.getByText('Request expired. Open the conversation to check its status.').first().waitFor();
-    await page.evaluate(() => window.miniInteractionHarness.renewRequests('ssh-a'));
-    assert.equal(await page.getByRole('button', { name: 'Allow once' }).isEnabled(), true);
-    assert.equal(await page.getByRole('textbox', { name: 'Quick draft' }).inputValue(), 'retained draft');
+    const local = active.findIndex(ref => ref.hostId === 'local'); if (local >= 0) active.splice(local, 1);
+    emit({type:'codex-app-server-connection-changed',hostId:'local',state:'disconnected'});
+    await page.waitForFunction(() => (document.querySelector('button')?.textContent ?? '') !== '');
+    await page.getByText('Connection lost. Activity paused.').waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Reply A' }).isEnabled(), true);
+    assert.equal(await page.getByRole('button', { name: 'Reply local' }).isDisabled(), true);
+    emit({type:'codex-app-server-connection-changed',hostId:'local',state:'connected'});
+    await page.evaluate(() => (window as any).miniRequestsHarness.refresh('local','l3'));
+    await page.getByText('Request expired. Open the conversation to check its status.').waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Reply A' }).isEnabled(), true);
+    await page.getByRole('button', { name: 'Reply A' }).click();
+    await page.getByRole('button', { name: 'Reply B' }).click();
+    await page.waitForFunction(() => (window as any).miniRequestsHarness.calls.replies.length === 2);
+    assert.deepEqual((await page.evaluate(() => (window as any).miniRequestsHarness.calls.replies)).map((item: any) => item.ref), refs.slice(0, 2));
 
-    const beforeLocalLoss = await page.evaluate(() => ({ messages: window.miniInteractionHarness.calls.messages.length,
-      hosts: window.miniInteractionHarness.calls.hosts.length, replies: window.miniInteractionHarness.calls.replies.length }));
-    await page.evaluate(() => window.miniInteractionHarness.disconnect('local'));
-    await page.getByText('Connection lost. Activity is paused.').waitFor();
-    assert.equal(await page.getByRole('button', { name: 'Apply changes' }).isDisabled(), true);
-    await page.keyboard.press('Meta+Alt+p');
-    await page.evaluate(() => window.miniInteractionHarness.reconnect('local'));
-    await page.evaluate(() => window.miniInteractionHarness.refresh('local', 'l2'));
-    assert.equal(await page.getByRole('button', { name: 'Allow once' }).isDisabled(), true, 'local bridge loss invalidates remote projections too');
-    await page.evaluate(() => window.miniInteractionHarness.refresh('ssh-a', 'r3'));
-    await page.waitForFunction(() => !document.querySelector('.yard-mini-composer [inert]'));
-    assert.equal(await page.getByRole('button', { name: 'Allow once' }).isDisabled(), true);
-    await page.evaluate(() => { window.miniInteractionHarness.renewRequests('local'); window.miniInteractionHarness.renewRequests('ssh-a'); });
-    await page.waitForFunction(() => !Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Allow once')?.disabled);
-    const afterLocalLoss = await page.evaluate(() => window.miniInteractionHarness.calls);
-    assert.deepEqual(afterLocalLoss.messages.slice(beforeLocalLoss.messages).map(value => value.type), ['avatar-overlay-open-state-request']);
-    assert.deepEqual(afterLocalLoss.hosts.slice(beforeLocalLoss.hosts), ['get-settings', 'custom-avatars']);
-    assert.equal(afterLocalLoss.replies.length, beforeLocalLoss.replies);
-    assert.equal(afterLocalLoss.submissions, 0);
-    assert.equal(await page.getByRole('textbox', { name: 'Quick draft' }).inputValue(), 'retained draft');
-    await page.getByRole('button', { name: 'Quick chat', exact: true }).click();
-    await page.getByRole('button', { name: 'Follow up' }).click();
-    await page.getByText('Opening conversation...').waitFor();
-    assert.equal(await page.locator('.yard-mini-composer [inert]').count(), 1);
-    assert.deepEqual(await page.evaluate(() => window.miniInteractionHarness.calls.targets), [{ hostId: 'ssh-a', threadId: 'remote' }]);
-    await page.evaluate(() => window.miniInteractionHarness.resolveTarget());
-    await page.waitForFunction(() => !document.querySelector('.yard-mini-composer [inert]'));
-    assert.equal(await page.getByRole('textbox', { name: 'Quick draft' }).inputValue(), 'retained draft');
-    assert.equal(await page.getByRole('textbox', { name: 'Quick draft' }).evaluate(element => document.activeElement === element), true);
-    await page.getByRole('button', { name: 'Close Quick chat' }).click();
-    assert.equal(await page.getByRole('button', { name: 'Quick chat', exact: true }).evaluate(element => document.activeElement === element), true);
-    assert.equal((await page.evaluate(() => window.miniInteractionHarness.calls.submissions)), 0);
+    await page.getByRole('button', { name: 'Reply known' }).click();
+    await page.getByText('Not sent: not forwarded').waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Reply known' }).isEnabled(), true);
+    await page.getByRole('button', { name: 'Reply known' }).click();
+    await page.getByRole('button', { name: 'Reply expired' }).click();
+    await page.getByText('Request expired. Open the conversation to check its status. expired ref').waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Reply expired' }).isDisabled(), true);
 
-    const allow = page.getByRole('button', { name: 'Allow once' });
-    await allow.click();
-    await page.getByRole('alert').filter({ hasText: 'Not sent: Host refused before forwarding' }).waitFor();
-    assert.equal(await allow.isEnabled(), true);
-    assert.equal((await page.evaluate(() => window.miniInteractionHarness.calls.outcomes)).length, 0);
-    await allow.click();
-    await page.getByText('Response sent').first().waitFor();
-    const retried = (await page.evaluate(() => window.miniInteractionHarness.calls.replies)).filter(value => value.ref.id === 'retry');
-    assert.equal(retried.length, 2);
-    assert.deepEqual(retried[0], retried[1]);
-    assert.deepEqual(retried[1], { ref: { hostId: 'ssh-a', generation: 'g4', id: 'retry' }, response: { result: { decision: 'accept' } } });
-
-    await page.getByRole('button', { name: 'Apply changes' }).click();
-    await page.getByRole('alert').filter({ hasText: 'Reply acknowledgement lost' }).waitFor();
-    assert.equal(await page.getByRole('button', { name: 'Apply changes' }).isDisabled(), true);
-    await page.evaluate(() => window.miniInteractionHarness.remount());
-    await page.getByText('Remote work').waitFor();
-    assert.equal(await page.getByRole('button', { name: 'Apply changes' }).isDisabled(), true);
-    assert.equal((await page.evaluate(() => window.miniInteractionHarness.calls.replies)).filter(value => value.ref.id === 'unknown').length, 1);
-
-    await page.getByRole('button', { name: 'Send held approval' }).click();
-    await page.evaluate(() => window.miniInteractionHarness.remount());
-    await page.getByText('Pending work').waitFor();
-    assert.equal(await page.getByRole('button', { name: 'Send held approval' }).isDisabled(), true);
-    await page.evaluate(() => window.miniInteractionHarness.resolveHeld());
-    await page.waitForFunction(() => window.miniInteractionHarness.calls.outcomes.some(value => JSON.stringify(value).includes('held')));
-    assert.equal((await page.evaluate(() => window.miniInteractionHarness.calls.replies)).filter(value => value.ref.id === 'held').length, 1);
-    assert.equal(await page.getByRole('button', { name: 'Send held approval' }).isDisabled(), true);
-
-    await page.getByRole('button', { name: 'Forward approval' }).click();
-    await page.getByText('Response sent: Forwarded to the daemon').waitFor();
-    assert.equal(await page.getByRole('button', { name: 'Forward approval' }).isDisabled(), true);
-    assert.ok((await page.evaluate(() => window.miniInteractionHarness.calls.outcomes)).some(value => JSON.stringify(value).includes('"id":"forwarded"') && JSON.stringify(value).includes('"outcome":"sent"')));
-
-    await page.getByRole('button', { name: 'Stop task' }).click();
-    await page.getByRole('alert').filter({ hasText: 'Not sent: Stop was not forwarded' }).waitFor();
+    await page.getByRole('radio', { name: 'Second' }).check();
+    await page.evaluate(() => (window as any).miniRequestsHarness.remount());
+    await page.getByRole('radio', { name: 'Second' }).waitFor();
+    assert.equal(await page.getByRole('radio', { name: 'Second' }).isChecked(), true);
+    await page.getByRole('button', { name: 'Open conversation' }).click();
+    assert.deepEqual(await page.evaluate(() => (window as any).miniRequestsHarness.calls.opened), [{hostId:'ssh-a',threadId:'remote'}]);
     await page.getByRole('button', { name: 'Stop task' }).click();
     assert.equal(await page.getByRole('button', { name: 'Stop task' }).isDisabled(), true);
-    const actions = await page.evaluate(() => window.miniInteractionHarness.calls.actions);
-    assert.equal(actions.length, 2);
-    assert.deepEqual(actions[0], { identity: { hostId: 'ssh-a', threadId: 'remote' }, action: { id: 'stop-1', kind: 'stop', label: 'Stop task', turnId: 'turn-r' } });
-    await page.getByRole('button', { name: 'Implement plan' }).click();
-    assert.deepEqual((await page.evaluate(() => window.miniInteractionHarness.calls.actions)).at(-1), {
-      identity: { hostId: 'ssh-a', threadId: 'remote' }, action: { id: 'plan-1', kind: 'implement-plan', label: 'Implement plan',
-        turnId: 'turn-r', planContent: '- [ ] Fixture', collaborationMode: { mode: 'default' } },
-    });
+    await page.evaluate(() => (window as any).miniRequestsHarness.nextTurn());
+    await page.getByRole('button', { name: 'Stop task' }).click();
+    assert.deepEqual((await page.evaluate(() => (window as any).miniRequestsHarness.calls.actions)).map((value: any) => value.turnId), ['turn-1', 'turn-2']);
 
-    await page.getByRole('button', { name: 'Deny access' }).click();
-    await page.getByRole('button', { name: 'Decline tool' }).click();
-    const queued = await page.evaluate(() => window.miniInteractionHarness.calls.replies.filter(value => value.ref.id === 'permission' || value.ref.id === 'elicitation'));
-    assert.deepEqual(queued, [
-      { ref: { hostId: 'ssh-a', generation: 'g4', id: 'permission' }, response: { result: { permissions: {}, scope: 'turn' } } },
-      { ref: { hostId: 'ssh-a', generation: 'g4', id: 'elicitation' }, response: { result: { action: 'decline', content: null, _meta: null } } },
-    ]);
-
-    await page.getByRole('radio', { name: /Staging/ }).check();
-    const secret = page.getByLabel('Access code? answer');
-    assert.equal(await secret.getAttribute('type'), 'password');
-    await secret.fill('fixture-code');
+    await page.getByRole('button', { name: 'Reply unknown' }).click();
+    await page.getByText('Response could not be confirmed.', { exact: false }).waitFor();
+    await page.waitForFunction(() => (window as any).miniRequestsHarness.records.some((x: any) => x.request.requestRef.id === 'unknown' && x.request.outcome === 'unknown'));
+    assert.equal(await page.getByRole('button', { name: 'Submit answer' }).isDisabled(), true);
+    await page.waitForFunction(() => (window as any).miniRequestsHarness.ready());
+    await page.evaluate(() => { (window as any).miniRequestsHarness.refresh('local','l4'); (window as any).miniRequestsHarness.refresh('ssh-a','r3'); });
+    await page.waitForFunction(() => !Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Submit answer')?.disabled);
+    assert.equal(await page.getByRole('button', { name: 'Reply unknown' }).isDisabled(), true);
     await page.getByRole('button', { name: 'Submit answer' }).click();
-    await page.waitForFunction(() => window.miniInteractionHarness.calls.replies.some(value => value.ref.id === 'question'));
-    assert.deepEqual((await page.evaluate(() => window.miniInteractionHarness.calls.replies)).find(value => value.ref.id === 'question'),
-      { ref: { hostId: 'ssh-a', generation: 'g4', id: 'question' }, response: { result: { answers: { first: { answers: ['Staging'] }, secret: { answers: ['fixture-code'] } } } } });
-
-    await page.setViewportSize({ width: 360, height: 700 });
-    await page.waitForFunction(() => { const rect = document.querySelector('[data-workbench-mini]')?.getBoundingClientRect();
-      return rect && rect.x >= 0 && rect.y >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight; });
-    const mini = await page.locator('[data-workbench-mini]').boundingBox();
-    assert.ok(mini && mini.x >= 0 && mini.y >= 0 && mini.x + mini.width <= 360 && mini.y + mini.height <= 700);
-    assert.ok((await page.getByRole('button', { name: 'Quick chat', exact: true }).boundingBox())!.height >= 40);
-    assert.equal(await page.locator('.yard-mini-content').evaluate(el => el.scrollWidth <= el.clientWidth), true);
-    if (process.env.MINI_EVIDENCE_DIR) await page.screenshot({ path: join(process.env.MINI_EVIDENCE_DIR, 'mini-dark-mobile.png') });
-    await page.evaluate(() => { document.documentElement.style.setProperty('--yard-fg', '#202123'); document.documentElement.style.setProperty('--yard-surface', '#fff');
-      document.documentElement.style.setProperty('--yard-bg', '#f4f5f6'); document.documentElement.style.setProperty('--yard-muted', '#596369'); document.documentElement.style.setProperty('--yard-border', '#aab4b7'); });
-    assert.equal(await page.locator('.yard-mini-activity').first().evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(255, 255, 255)');
-    assert.equal(await page.locator('.yard-mini-activity').first().evaluate(el => getComputedStyle(el).color), 'rgb(32, 33, 35)');
+    await page.waitForFunction(() => (window as any).miniRequestsHarness.calls.replies.some((item: any) => item.ref.id === 'question'));
+    const question = (await page.evaluate(() => (window as any).miniRequestsHarness.calls.replies)).find((item: any) => item.ref.id === 'question');
+    assert.deepEqual(question, {ref:refs[5],result:{answers:{q:{answers:['Second']}}}});
+    const wireRefs = messages.filter(value => value.type === 'mcp-response').map(value => ({hostId:value.hostId,id:value.response.id,generation:value.generation}));
+    assert.deepEqual(wireRefs.slice(0, 2), refs.slice(0, 2));
     assert.deepEqual(errors, []);
-  } finally { await browser.close(); }
+    await page.evaluate(() => (window as any).miniRequestsHarness.close());
+  } finally {
+    await browser.close();
+    webSockets.close();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 });

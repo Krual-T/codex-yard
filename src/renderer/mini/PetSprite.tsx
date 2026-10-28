@@ -1,5 +1,5 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
-import { petFrame } from './model.ts';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { petFrame, petFrameCount } from './model.ts';
 import type { PetMotion, PetOption } from './model.ts';
 
 const motionListeners = new Set<() => void>();
@@ -36,24 +36,38 @@ function subscribeMotion(listener: () => void) {
   };
 }
 
+function subscribeVisibility(listener: () => void) {
+  document.addEventListener('visibilitychange', listener);
+  return () => document.removeEventListener('visibilitychange', listener);
+}
+
 export function PetSprite({ pet, motion }: { pet: PetOption; motion: PetMotion }) {
-  const [step, setStep] = useState(0);
+  const [playback, setPlayback] = useState<{ motion: PetMotion; step: number }>({ motion, step: 0 });
+  const current = useRef(playback);
   const reducedMotion = useSyncExternalStore(subscribeMotion, reducedMotionSnapshot, () => false);
+  const visible = useSyncExternalStore(subscribeVisibility, () => document.visibilityState !== 'hidden', () => true);
   useEffect(() => {
-    setStep(0);
-    if (reducedMotion || reducedMotionSnapshot() || !pet.src) return;
-    let index = 0;
+    current.current = { motion, step: 0 };
+    setPlayback(current.current);
+  }, [motion, pet.id, pet.src]);
+  useEffect(() => {
+    if (reducedMotion || reducedMotionSnapshot() || !visible || !pet.src) return;
     let timer: ReturnType<typeof setTimeout>;
     const advance = () => { timer = setTimeout(() => {
-      if (reducedMotionSnapshot()) { setStep(0); return; }
-      setStep(++index); advance();
-    }, petFrame(motion, index).duration); };
+      if (reducedMotionSnapshot() || document.visibilityState === 'hidden') return;
+      const previous = current.current;
+      const step = previous.step + 1;
+      current.current = previous.motion !== 'idle' && step >= petFrameCount(previous.motion) * 3
+        ? { motion: 'idle', step: 0 } : { ...previous, step };
+      setPlayback(current.current);
+      advance();
+    }, petFrame(current.current.motion, current.current.step).duration); };
     advance();
     return () => clearTimeout(timer);
-  }, [motion, reducedMotion, pet.id, pet.src]);
+  }, [motion, reducedMotion, visible, pet.id, pet.src]);
   if (!pet.src) return <span className="yard-mini-missing" aria-hidden="true">{pet.name}</span>;
-  const frame = petFrame(motion, reducedMotion ? 0 : step);
-  return <span aria-hidden="true" className="yard-mini-sprite" data-codex-pet-id={pet.id} data-codex-pet-state={motion}
+  const frame = petFrame(playback.motion, reducedMotion ? 0 : playback.step);
+  return <span aria-hidden="true" className="yard-mini-sprite" data-codex-pet-id={pet.id} data-codex-pet-state={playback.motion}
     style={{ backgroundImage: `url(${JSON.stringify(pet.src)})`, backgroundSize: `800% ${pet.rows * 100}%`,
       backgroundPosition: `${frame.column / 7 * 100}% ${frame.row / (pet.rows - 1) * 100}%` }} />;
 }
