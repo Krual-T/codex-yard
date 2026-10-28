@@ -48,6 +48,7 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
     await page.getByText('Queued message').waitFor();
     await page.getByText('file.ts').waitFor();
     await page.getByRole('button', { name: '编辑待发送消息' }).click();
+    await page.getByRole('button', { name: '链接', exact: true }).click();
     for (const [theme, background, surface, foreground] of [
       ['dark', '#101419', '#20262c', '#f0f5f2'], ['light', '#ffffff', '#f2f4f6', '#202524'],
     ] as const) {
@@ -62,6 +63,8 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
           container: style('.standalone-composer__editor').backgroundColor,
           rich: style('.ProseMirror').color, richFont: style('.ProseMirror').fontFamily,
           codeFont: style('.ProseMirror code').fontFamily,
+          linkInput: style('.standalone-composer__rich-toolbar input').color,
+          linkInputBackground: style('.standalone-composer__rich-toolbar input').backgroundColor,
           controls: style('.standalone-composer select').color,
           queue: style('.standalone-queue').color, queueEditor: style('.standalone-queue textarea').color,
           attachment: style('.standalone-composer__file').color,
@@ -71,7 +74,8 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
       });
       const rgb = (hex: string) => `rgb(${[1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16)).join(', ')})`;
       assert.equal(appearance.container, rgb(surface));
-      for (const color of [appearance.rich, appearance.controls, appearance.queue, appearance.queueEditor, appearance.attachment]) assert.equal(color, rgb(foreground));
+      assert.equal(appearance.linkInputBackground, rgb(surface));
+      for (const color of [appearance.rich, appearance.linkInput, appearance.controls, appearance.queue, appearance.queueEditor, appearance.attachment]) assert.equal(color, rgb(foreground));
       assert.equal(appearance.submitColor, rgb(background));
       assert.equal(appearance.submitBackground, rgb(foreground));
       assert.match(appearance.richFont, /Georgia/);

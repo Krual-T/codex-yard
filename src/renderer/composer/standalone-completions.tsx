@@ -11,8 +11,8 @@ function record(value: unknown): Record<string, unknown> {
 }
 function queryAt(text: string, cursor: number): Query | null {
   const before = text.slice(0, cursor);
-  const inline = before.match(/(?:^|\s)([@$])([^\s@$]*)$/);
-  const slash = before.match(/(?:^|\n)[ \t]*\/([^\s/]*)$/);
+  const inline = before.match(/(?:^|\s)([@$])([^\s@$\ufffc]*)$/);
+  const slash = before.match(/(?:^|\n)[ \t]*\/([^\s/\ufffc]*)$/);
   if (!inline && !slash) return null;
   const trigger = inline?.[1] ?? '/';
   const token = inline?.[2] ?? slash?.[1] ?? '';
@@ -60,13 +60,13 @@ async function load(client: WorkbenchClient, hostId: string, cwd: string, query:
   return items.slice(0, 30);
 }
 
-export function useCompletions(client: WorkbenchClient, hostId: string, cwd: string, text: string, cursor: number, busy: boolean) {
+export function useCompletions(client: WorkbenchClient, hostId: string, cwd: string, text: string, cursor: number, busy: boolean, scope = '') {
   const listId = useId();
   const [dismissed, setDismissed] = useState('');
   const [index, setIndex] = useState(0);
   const [result, setResult] = useState<Result>({ key: '', items: [], loading: false, error: '' });
   const query = queryAt(text, cursor);
-  const queryKey = query ? JSON.stringify([hostId, cwd, query.kind, query.start, query.token, busy]) : '';
+  const queryKey = query ? JSON.stringify([hostId, cwd, scope, query.kind, query.start, query.token, busy]) : '';
   const active = queryKey && queryKey !== dismissed ? query : null;
   useEffect(() => {
     if (!active || !cwd) return;

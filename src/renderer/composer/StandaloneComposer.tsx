@@ -15,6 +15,7 @@ import { StandaloneTarget } from './standalone-target.tsx';
 import type { ComposerHost, ComposerTarget } from './standalone-target.tsx';
 import { StandaloneRichEditor } from './StandaloneRichEditor.tsx';
 import type { RichEditorHandle } from './StandaloneRichEditor.tsx';
+import type { RichCompletionContext } from './rich-editor-actions.ts';
 import { FilePenLine } from 'lucide-react';
 import './standalone-composer.css';
 
@@ -55,6 +56,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const [uploading, setUploading] = useState(false);
   const [queueVersion, setQueueVersion] = useState(0);
   const [cursor, setCursor] = useState(0);
+  const [richContext, setRichContext] = useState<RichCompletionContext | null>(null);
   const enterSetting = useEnterSetting(client);
   const followUpSetting = useFollowUpSetting(client);
   const mounted = useRef(true);
@@ -68,7 +70,11 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const editIssue = draft.document ? richEditIssue(draft) : textEditIssue(draft);
   const richActive = !!draft.document && !editIssue;
   const structuredInput = draft.input !== undefined;
-  const completions = useCompletions(client, context.hostId, context.cwd, editIssue || structuredInput || richActive ? '' : draft.text, cursor, busy);
+  const completions = useCompletions(client, context.hostId, context.cwd,
+    richActive ? richContext?.text ?? '' : editIssue || structuredInput ? '' : draft.text,
+    richActive ? richContext?.cursor ?? 0 : cursor, busy, richActive ? 'rich:' + richContext?.blockStart : 'plain');
+  const onRichContext = useCallback((next: RichCompletionContext | null) => setRichContext(previous =>
+    previous?.text === next?.text && previous?.cursor === next?.cursor && previous?.blockStart === next?.blockStart ? previous : next), []);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
     if (!appliedOptions) return;
@@ -181,6 +187,14 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const chooseCompletion = (item: Completion) => {
     const query = completions.query;
     if (!query) return;
+    if (richActive) {
+      if (!richContext || !richEditor.current?.insertCompletion(richContext, query, item, context.cwd)) {
+        completions.dismiss(); return;
+      }
+      if (item.kind === 'directory') completions.show(); else completions.dismiss();
+      requestAnimationFrame(() => { if (item.kind === 'command') modelPicker.current?.focus(); else richEditor.current?.focus(); });
+      return;
+    }
     let replacement = '';
     if (item.kind === 'directory') replacement = '@' + item.path + '/';
     else if (item.kind === 'file') {
@@ -202,7 +216,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   };
   const keyDown = (event: globalThis.KeyboardEvent): boolean => {
     if (event.isComposing || event.keyCode === 229) return false;
-    if (!richActive && completions.query) {
+    if (completions.query) {
       if (event.key === 'Escape') { event.preventDefault(); completions.dismiss(); return true; }
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         if (completions.items.length) { event.preventDefault(); completions.move(event.key === 'ArrowDown' ? 1 : -1); return true; }
@@ -255,6 +269,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       {editIssue ? <div className="standalone-composer__retained" role="status">{editIssue}<details><summary>查看保留的内容</summary><pre>{JSON.stringify({ document: draft.document, input: draft.input, hints: draft.hints, preserved: draft.preserved, pending: draft.pendingDrafts }, null, 2)}</pre></details></div> : null}
       {richActive && draft.document ? <StandaloneRichEditor ref={richEditor} document={draft.document}
         onChange={document => changeDraft(value => updateRichDraft(value, document))} onKeyDown={keyDown}
+        onCompletionContext={onRichContext} completionListId={completions.query ? completions.listId : undefined}
+        completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
         onImages={files => { if (structuredInput) setError('此结构化草稿暂不支持添加图片。'); else void addFiles(files); }}
         onInvalid={message => setError(message ?? '编辑内容包含不支持的文档结构，已保留上一次草稿。')} /> :
       <textarea ref={editor} aria-label="和 Codex 一起工作" placeholder="输入消息" value={draft.text} readOnly={!!editIssue}

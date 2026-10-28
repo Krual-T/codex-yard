@@ -1,20 +1,27 @@
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import { Bold, Code2, Italic, Link as LinkIcon } from 'lucide-react';
-import { baseKeymap, toggleMark } from 'prosemirror-commands';
-import { history, redo, undo } from 'prosemirror-history';
-import { keymap } from 'prosemirror-keymap';
+import { toggleMark } from 'prosemirror-commands';
 import { EditorState } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import type { ComposerDocument } from '../workbench-contract.ts';
 import { composerSchema, readRichDocument } from './rich-document.ts';
+import { insertRichCompletion, richCompletionContext, richEditorPlugins } from './rich-editor-actions.ts';
+import type { RichCompletionContext, RichCompletionQuery } from './rich-editor-actions.ts';
+import type { Completion } from './standalone-completions.tsx';
 
-export interface RichEditorHandle { focus(): void }
+export interface RichEditorHandle {
+  focus(): void;
+  insertCompletion(context: RichCompletionContext, query: RichCompletionQuery, item: Completion, cwd: string): boolean;
+}
 interface RichEditorProps {
   document: ComposerDocument;
   onChange(document: ComposerDocument): void;
   onKeyDown(event: KeyboardEvent): boolean;
   onImages(files: File[]): void;
   onInvalid(message?: string): void;
+  onCompletionContext(context: RichCompletionContext | null): void;
+  completionListId?: string;
+  completionSelectedId?: string;
 }
 
 function supportedClipboardHTML(html: string): boolean {
@@ -43,25 +50,38 @@ function supportedClipboardHTML(html: string): boolean {
 export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function StandaloneRichEditor(props, ref) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
+  const composing = useRef(false);
   const latest = useRef(props);
   latest.current = props;
   const [linkOpen, setLinkOpen] = useState(false);
   const [href, setHref] = useState('');
-  useImperativeHandle(ref, () => ({ focus: () => view.current?.focus() }), []);
+  useImperativeHandle(ref, () => ({
+    focus: () => view.current?.focus(),
+    insertCompletion: (context, query, item, cwd) => {
+      const editor = view.current;
+      return !!editor && !composing.current && insertRichCompletion(editor, context, query, item, cwd);
+    },
+  }), []);
 
   useLayoutEffect(() => {
     const doc = readRichDocument(latest.current.document);
     if (!host.current || !doc) return;
     const editor = new EditorView(host.current, {
-      state: EditorState.create({ doc, plugins: [history(), keymap({ 'Mod-z': undo, 'Mod-Shift-z': redo, 'Mod-y': redo,
-        'Shift-Enter': (state, dispatch) => {
-          const br = state.schema.nodes.hard_break;
-          if (!br || state.selection.$from.parent.type.spec.code) return false;
-          if (dispatch) dispatch(state.tr.replaceSelectionWith(br.create()).scrollIntoView());
-          return true;
-        } }), keymap(baseKeymap)] }),
-      attributes: { role: 'textbox', 'aria-label': '和 Codex 一起工作', 'aria-multiline': 'true' },
-      handleDOMEvents: { keydown: (editor, event) => editor.composing || event.isComposing || event.keyCode === 229 },
+      state: EditorState.create({ doc, plugins: richEditorPlugins() }),
+      attributes: { role: 'textbox', 'aria-label': '和 Codex 一起工作', 'aria-multiline': 'true', 'aria-autocomplete': 'list' },
+      handleDOMEvents: {
+        keydown: (editor, event) => editor.composing || composing.current || event.isComposing || event.keyCode === 229,
+        focus: editor => { latest.current.onCompletionContext(composing.current ? null : richCompletionContext(editor)); return false; },
+        blur: () => { latest.current.onCompletionContext(null); return false; },
+        compositionstart: () => { composing.current = true; latest.current.onCompletionContext(null); return false; },
+        compositionend: editor => {
+          requestAnimationFrame(() => {
+            composing.current = false;
+            if (view.current === editor && editor.hasFocus()) latest.current.onCompletionContext(richCompletionContext(editor));
+          });
+          return false;
+        },
+      },
       dispatchTransaction(transaction) {
         const next = editor.state.apply(transaction);
         const document = next.doc.toJSON() as ComposerDocument;
@@ -72,8 +92,9 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         }
         editor.updateState(next);
         if (transaction.docChanged) latest.current.onChange(document);
+        if (editor.hasFocus()) latest.current.onCompletionContext(composing.current ? null : richCompletionContext(editor));
       },
-      handleKeyDown: (editor, event) => editor.composing || event.isComposing || event.keyCode === 229 ? false : latest.current.onKeyDown(event),
+      handleKeyDown: (editor, event) => editor.composing || composing.current || event.isComposing || event.keyCode === 229 ? false : latest.current.onKeyDown(event),
       handlePaste: (_editor, event) => {
         const files = Array.from(event.clipboardData?.files ?? []).filter(file => file.type.startsWith('image/'));
         if (files.length && !event.clipboardData?.getData('text/plain')) {
@@ -95,6 +116,14 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     if (!editor || !doc || editor.state.doc.eq(doc)) return;
     editor.updateState(EditorState.create({ doc, plugins: editor.state.plugins }));
   }, [props.document]);
+
+  useEffect(() => {
+    view.current?.setProps({ attributes: {
+      role: 'textbox', 'aria-label': '和 Codex 一起工作', 'aria-multiline': 'true', 'aria-autocomplete': 'list',
+      ...(props.completionListId ? { 'aria-controls': props.completionListId } : {}),
+      ...(props.completionSelectedId ? { 'aria-activedescendant': props.completionSelectedId } : {}),
+    } });
+  }, [props.completionListId, props.completionSelectedId]);
 
   const mark = (name: 'strong' | 'em' | 'code') => {
     const editor = view.current, type = composerSchema.marks[name];
