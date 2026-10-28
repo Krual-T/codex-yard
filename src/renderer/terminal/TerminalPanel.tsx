@@ -22,7 +22,7 @@ export interface TerminalPanelProps {
   fontFamily?: string;
   ref?: Ref<TerminalPanelHandle>;
 }
-export interface TerminalPanelHandle { close(): Promise<boolean>; detach(): void }
+export interface TerminalPanelHandle { close(): Promise<boolean>; detach(): void; activate(): void }
 
 export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visible = true, theme = 'dark', fontSize = 13, lineHeight = 20, fontFamily, ref }: TerminalPanelProps) {
   const t = usePanelText();
@@ -31,10 +31,13 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
   const fitRef = useRef<() => void>(() => {});
   const closeRef = useRef<() => Promise<boolean>>(async () => true);
   const detachRef = useRef<() => void>(() => {});
+  const activateRef = useRef<() => void>(() => {});
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   const [attempt, setAttempt] = useState(0);
   const [status, setStatus] = useState('Starting terminal...');
   const [canRestart, setCanRestart] = useState(false);
-  useImperativeHandle(ref, () => ({ close: () => closeRef.current(), detach: () => detachRef.current() }), []);
+  useImperativeHandle(ref, () => ({ close: () => closeRef.current(), detach: () => detachRef.current(), activate: () => activateRef.current() }), []);
 
   useEffect(() => {
     if (!element.current) return;
@@ -45,7 +48,7 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(element.current);
-    let active = true, attached = false, ownsSession = true, stopped = false;
+    let active = true, attached = false, ownsSession = true, stopped = false, restartable = false, restarting = false;
     detachRef.current = () => { ownsSession = false; stopped = true; attached = false; terminal.options.disableStdin = true; };
     let writeQueue: Promise<void> = Promise.resolve();
     let lastSize = '';
@@ -53,6 +56,7 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
     const fail = (message: string, connectionLost = false) => {
       if (!active || stopped) return;
       stopped = true;
+      restartable = true;
       attached = false;
       if (connectionLost) ownsSession = false;
       terminal.options.disableStdin = true;
@@ -62,6 +66,7 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
     closeRef.current = async () => {
       if (!active || !ownsSession) return true;
       stopped = true;
+      restartable = false;
       attached = false;
       terminal.options.disableStdin = true;
       setCanRestart(false);
@@ -74,6 +79,17 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
         if (active) setStatus(`Terminal close failed: ${errorMessage(error)}. The close result may be unknown.`);
         return false;
       }
+    };
+    activateRef.current = () => {
+      if (!active) return;
+      if (!stopped) { terminal.focus(); return; }
+      if (!restartable || restarting) return;
+      restarting = true;
+      void closeRef.current().then(closed => {
+        if (!closed || !active) return;
+        if (visibleRef.current) { restartable = false; setAttempt(value => value + 1); }
+        else { restartable = true; setCanRestart(true); setStatus('The previous terminal is unavailable. Open a new terminal.'); }
+      }).finally(() => { restarting = false; });
     };
     const resize = () => {
       if (!active || !element.current || element.current.clientWidth < 20 || element.current.clientHeight < 20) return;
@@ -142,6 +158,7 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
       fitRef.current = () => {};
       closeRef.current = async () => true;
       detachRef.current = () => {};
+      activateRef.current = () => {};
       terminalRef.current = null;
       if (ownsSession) void call('close', [id]).catch(() => {});
       terminal.dispose();
@@ -169,7 +186,7 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
   useEffect(() => { if (visible) fitRef.current(); }, [visible]);
   return <div className="yard-terminal-panel">
     <div className="yard-terminal-header"><span role="status">{panelError(t, status)}</span>
-      {canRestart ? <button type="button" onClick={() => void closeRef.current().then(closed => { if (closed) setAttempt(value => value + 1); })}>{t('New terminal')}</button> : null}
+      {canRestart ? <button type="button" onClick={() => activateRef.current()}>{t('New terminal')}</button> : null}
     </div>
     <div className="yard-terminal-screen" ref={element} aria-label={t('Terminal')} />
   </div>;

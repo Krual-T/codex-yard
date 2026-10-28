@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import type { CSSProperties } from 'react';
-import { Download, PanelLeftClose, PanelLeftOpen, Plus, RotateCw, Save, X } from 'lucide-react';
+import { Download, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, RotateCw, Save, X } from 'lucide-react';
 import { BrowserFiles } from '../../native/browser-files.ts';
 import { DirectoryTree } from '../files/DirectoryTree.tsx';
 import { FileViewer } from '../files/FileViewer.tsx';
@@ -42,6 +42,7 @@ export interface WorkspacePanelsProps {
   appearance: WorkspacePanelAppearance;
   request: WorkspacePanelRequest | null;
   onRequestConsumed(id: string): void;
+  /** Hide the outer panel while keeping this component mounted; explicit close has already cleaned its tabs. */
   onClose(): void;
   /** Selected tab in the current scope, or null when none is selected. */
   onActiveKindChange?(kind: 'file' | 'diff' | 'terminal' | null): void;
@@ -99,6 +100,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
   const recoveryFailures = useRef(new Map<string, unknown>());
   const confirmedRecoveries = useRef(new Map<string, FileSaveRecovery | undefined>());
   const [selected, setSelected] = useState<string>();
+  const [terminalActivation, setTerminalActivation] = useState<{ key: string; scope: string }>();
   const selectedRef = useRef<string | undefined>(undefined);
   const [findRequest, setFindRequest] = useState<{ key: string; id: number }>();
   const [showFiles, setShowFiles] = useState(true);
@@ -233,15 +235,17 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     if (request.scopeId !== scopeId || request.hostId !== hostId || request.cwd !== cwd) return;
     if (request.kind === 'file') openFile(request.path, request.line, request.column);
     else if (request.kind === 'terminal') {
-      const key = JSON.stringify(['terminal', scopeId, hostId, cwd, request.id]);
-      setTerminals(previous => previous.some(tab => tab.key === key) ? previous : [...previous, { key, scopeId, hostId, cwd, threadId }]);
+      const existing = terminals.find(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd);
+      const key = existing?.key ?? JSON.stringify(['terminal', scopeId, hostId, cwd, request.id]);
+      if (!existing) setTerminals(previous => [...previous, { key, scopeId, hostId, cwd, threadId }]);
       select(key);
+      if (existing) setTerminalActivation({ key, scope: scopeKey });
     } else if (request.kind === 'diff') {
       const key = JSON.stringify(['diff', scopeId, hostId, cwd, request.id]);
       setDiffs(previous => previous.some(tab => tab.key === key) ? previous : [...previous, { key, scopeId, hostId, cwd, path: request.path, diff: request.diff }]);
       select(key);
     }
-  }, [closing, openFile, request, scopeId, hostId, cwd, threadId, onRequestConsumed, select]);
+  }, [closing, openFile, request, scopeId, hostId, cwd, threadId, onRequestConsumed, select, terminals, scopeKey]);
 
   async function closeTab(key: string) {
     const tab = tabsRef.current.find(item => item.key === key);
@@ -579,6 +583,13 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
   const activeDiff = visibleDiffs.find(tab => tab.key === selected);
   const activeKind = active ? 'file' : activeTerminal ? 'terminal' : activeDiff ? 'diff' : null;
   useEffect(() => {
+    if (!terminalActivation) return;
+    if (terminalActivation.scope !== scopeKey || selected !== terminalActivation.key) { setTerminalActivation(undefined); return; }
+    if (activeTerminal?.key !== terminalActivation.key) return;
+    setTerminalActivation(undefined);
+    terminalHandles.current.get(terminalActivation.key)?.activate();
+  }, [terminalActivation, activeTerminal, scopeKey, selected]);
+  useEffect(() => {
     if (selectedRef.current === selected) onActiveKindChange?.(activeKind);
   }, [activeKind, scopeKey, selected, onActiveKindChange]);
   useEffect(() => () => { activeKindCallback.current?.(null); }, []);
@@ -615,6 +626,8 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
           <button type="button" className="yard-panel-tab-close" title={t('Close diff')} aria-label={t('Close diff')} onClick={() => closeDiff(tab.key)}><X /></button>
         </div>)}
       </div>
+      {activeTerminal ? <button type="button" className="yard-panel-icon" title={t('Hide panel')} aria-label={t('Hide panel')}
+        disabled={closing} onClick={onClose}><PanelRightClose /></button> : null}
       <button type="button" className="yard-panel-icon" title={t('Close panel')} aria-label={t('Close panel')} disabled={closing || tabs.some(tab => tab.saving)} onClick={() => void closePanel()}><X /></button>
     </div>
     {panelError ? <div className="yard-file-error" role="alert">{localizeError(t, panelError)}{' '}

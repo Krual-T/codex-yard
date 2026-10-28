@@ -5,7 +5,7 @@ type Catalog = Record<string, string>;
 const simplified: Catalog = {
   'Workspace files':'工作区文件', 'Hide files':'隐藏文件', 'Show files':'显示文件', 'Files':'文件',
   'Refresh files':'刷新文件', 'Open workspace tabs':'打开的工作区标签页', 'Terminal':'终端',
-  'Close terminal':'关闭终端', 'Close diff':'关闭差异', 'Close panel':'关闭面板',
+  'Close terminal':'关闭终端', 'Close diff':'关闭差异', 'Close panel':'关闭面板', 'Hide panel':'隐藏面板',
   'Changes':'更改', '{name} changes':'{name} 的更改', 'Close {name}':'关闭 {name}',
   'Close panel here only':'仅关闭此页面的面板', 'Save file':'保存文件', 'Reload file':'重新加载文件',
   'Download file':'下载文件', 'Add file to conversation':'将文件添加到对话', 'Review recovery':'检查恢复记录',
@@ -75,7 +75,7 @@ const simplified: Catalog = {
 const traditional: Catalog = {
   'Workspace files':'工作區檔案', 'Hide files':'隱藏檔案', 'Show files':'顯示檔案', 'Files':'檔案',
   'Refresh files':'重新整理檔案', 'Open workspace tabs':'開啟的工作區分頁', 'Terminal':'終端機',
-  'Close terminal':'關閉終端機', 'Close diff':'關閉差異', 'Close panel':'關閉面板', 'Changes':'變更',
+  'Close terminal':'關閉終端機', 'Close diff':'關閉差異', 'Close panel':'關閉面板', 'Hide panel':'隱藏面板', 'Changes':'變更',
   '{name} changes':'{name} 的變更', 'Close {name}':'關閉 {name}', 'Save file':'儲存檔案', 'Reload file':'重新載入檔案',
   'Download file':'下載檔案', 'Add file to conversation':'將檔案加入對話', 'Review recovery':'檢查復原紀錄',
   'Check save result':'檢查儲存結果', 'Loading...':'正在載入...', 'Select a file':'選擇檔案',

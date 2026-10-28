@@ -60,7 +60,7 @@ test('terminal panels use the page-owned host session and never replay input aft
       import { WorkspacePanels } from './src/renderer/panels/WorkspacePanels.tsx';
       import { TerminalPanel } from './src/renderer/terminal/TerminalPanel.tsx';
       import { I18nProvider } from './src/renderer/i18n/index.tsx';
-      const state = { calls: [], events: [], failClose: false, delayClose: false, releaseClose: null }, listeners = new Set(), pending = new Map();
+      const state = { calls: [], events: [], consumed: [], hidden: false, failClose: false, delayClose: false, releaseClose: null }, listeners = new Set(), pending = new Map();
       let socket, opened, seq = 0;
       function connect() {
         const next = new WebSocket(location.origin.replace('http', 'ws') + '/native-host');
@@ -96,11 +96,16 @@ test('terminal panels use the page-owned host session and never replay input aft
       const root = createRoot(document.getElementById('root'));
       let locale = 'en-US';
       let props = {client,scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},appearance:{theme:'dark',codeFontSize:13,codeLineHeight:20},
-        request:{id:'one',scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},kind:'terminal'},onRequestConsumed:()=>{},onClose:()=>{}};
+        request:{id:'one',scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},kind:'terminal'},onRequestConsumed:id=>state.consumed.push(id),
+        onClose:()=>{state.hidden = true; window.fixture.render({});}};
       window.fixture = { state, disconnect() { socket.close(); }, reconnect: connect,
+        failCurrent() { const calls = state.calls.filter(call => call.params.operation === 'create');
+          const sessionId = calls.at(-1).params.args[0].sessionId;
+          for (const listener of listeners) listener({type:'terminal-event',event:{type:'error',sessionId,message:'fixture terminal failure'}}); },
         render(changes) { const next = {...props,...changes};
           if (changes.request) next.request = {scopeId:next.scopeId,hostId:next.hostId,cwd:next.cwd,...changes.request};
-          props = next; root.render(React.createElement(I18nProvider,{locale},React.createElement(WorkspacePanels,props))); },
+          props = next; root.render(React.createElement(I18nProvider,{locale},React.createElement('div',{hidden:state.hidden,style:{height:'100%'}},React.createElement(WorkspacePanels,props)))); },
+        reveal() { state.hidden = false; this.render({}); },
         setLocale(value) { locale = value; this.render({}); },
         async existing(id) { await client.host('terminal',{operation:'create',args:[{sessionId:id,hostId:'local',cwd:${JSON.stringify(root)}}]}); },
         attach(id) { root.render(React.createElement(TerminalPanel,{client,hostId:'local',cwd:${JSON.stringify(root)},sessionId:id})); },
@@ -140,6 +145,16 @@ test('terminal panels use the page-owned host session and never replay input aft
   await page.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent?.includes('abc'));
   const inputs = () => fake.calls('process/writeStdin').map(call => Buffer.from(String(call.params.deltaBase64), 'base64').toString()).join('');
   assert.equal(inputs(), 'abc');
+  await page.getByRole('button', { name: 'Hide panel' }).click();
+  assert.equal(await page.getByRole('tab', { name: 'Terminal' }).count(), 0);
+  await page.evaluate(() => (window as any).fixture.reveal());
+  await page.locator('.xterm-rows').getByText('READY').waitFor();
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 1);
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'show-existing',kind:'terminal'}}));
+  await page.waitForFunction(() => (window as any).fixture.state.consumed.includes('show-existing'));
+  assert.equal(await page.getByRole('tab', { name: 'Terminal' }).count(), 1);
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 1);
+  assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.params.operation === 'close').length), 0);
   await page.evaluate(() => (window as any).fixture.render({appearance:{theme:'light',codeFontSize:18,codeLineHeight:27},request:null}));
   await page.waitForFunction(() => getComputedStyle(document.querySelector('.yard-terminal-screen')!).backgroundColor === 'rgb(255, 255, 255)');
   assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 1);
@@ -161,10 +176,14 @@ test('terminal panels use the page-owned host session and never replay input aft
   await page.getByRole('status').filter({ hasText: 'Connection lost' }).waitFor();
   await page.keyboard.type('discard');
   await page.evaluate(() => (window as any).fixture.reconnect());
-  await page.getByRole('button', { name: 'New terminal' }).click();
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'explicit-reconnect',kind:'terminal'}}));
+  await page.waitForFunction(() => (window as any).fixture.state.events.filter((message: any) => message.type === 'terminal-event' && message.event?.type === 'attached').length === 2);
   await page.locator('.xterm-rows').getByText('READY').waitFor();
   assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 2);
   assert.equal(inputs(), 'abc');
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'show-reconnected',kind:'terminal'}}));
+  await page.waitForFunction(() => (window as any).fixture.state.consumed.includes('show-reconnected'));
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 2);
   await page.evaluate(() => { (window as any).fixture.state.delayClose = true; });
   await page.getByRole('button', { name: 'Close terminal' }).click();
   await page.waitForFunction(() => Boolean((window as any).fixture.state.releaseClose));
@@ -178,6 +197,22 @@ test('terminal panels use the page-owned host session and never replay input aft
   assert.equal(await page.getByRole('tab', { name: 'Terminal' }).count(), 0);
   await page.evaluate(() => (window as any).fixture.render({scopeId:'draft-b',request:null}));
   await page.getByRole('tab', { name: 'Terminal' }).waitFor();
+  await page.evaluate(() => { (window as any).fixture.failCurrent(); (window as any).fixture.state.delayClose = true; });
+  await page.getByRole('button', { name: 'New terminal' }).waitFor();
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'restart-delayed',kind:'terminal'}}));
+  await page.waitForFunction(() => Boolean((window as any).fixture.state.releaseClose));
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'restart-duplicate',kind:'terminal'}}));
+  await page.waitForFunction(() => (window as any).fixture.state.consumed.includes('restart-duplicate'));
+  await page.evaluate(() => (window as any).fixture.render({scopeId:'thread-a',request:null}));
+  await page.evaluate(() => { (window as any).fixture.state.delayClose = false; (window as any).fixture.state.releaseClose(); });
+  await page.waitForFunction(() => [...document.querySelectorAll('.yard-terminal-header [role="status"]')]
+    .some(element => element.textContent?.includes('The previous terminal is unavailable')));
+  await page.evaluate(() => (window as any).fixture.render({scopeId:'draft-b',request:null}));
+  await page.getByRole('button', { name: 'New terminal' }).waitFor();
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 3, 'A delayed restart must not create a shell in the previous scope');
+  await page.getByRole('button', { name: 'New terminal' }).click();
+  await page.waitForFunction(() => (window as any).fixture.state.events.filter((message: any) => message.type === 'terminal-event' && message.event?.type === 'attached').length === 4);
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 4);
   await page.evaluate(() => { (window as any).fixture.state.failClose = true; });
   await page.getByRole('button', { name: 'Close terminal' }).click();
   await page.getByRole('status').filter({ hasText: 'Terminal close failed' }).waitFor();
