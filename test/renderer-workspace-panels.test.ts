@@ -210,7 +210,8 @@ test('workspace file panels use the real host with a disposable synthetic daemon
     if (mode === 'unknown-applied') throw new Error('synthetic disconnect after write');
     return { outcome: 'saved' };
   });
-  await page.goto(app.url);
+  // The production root serves the owned App; this test serves its own HTML.
+  await page.goto(app.url + '/index.html');
   const videoBytes = await page.evaluate(async () => {
     if (!MediaRecorder.isTypeSupported('video/mp4')) throw new Error('Chrome cannot record the MP4 fixture');
     const canvas = document.createElement('canvas');
