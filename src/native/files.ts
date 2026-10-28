@@ -77,7 +77,7 @@ function filename(value: unknown) {
   return value;
 }
 
-export const fileEndpoints = new Set(['workspace-directory-entries', 'remote-workspace-directory-entries', 'read-file', 'read-file-metadata', 'read-file-binary', 'paths-exist', 'workspace-files', 'ensure-directory', 'visualization-read']);
+export const fileEndpoints = new Set(['workspace-directory-entries', 'remote-workspace-directory-entries', 'read-file', 'read-file-metadata', 'read-file-binary', 'paths-exist', 'workspace-files', 'workspace-file-save', 'ensure-directory', 'visualization-read']);
 export const fileMethods = new Set(['fs/readFile', 'fs/readDirectory', 'fs/getMetadata', 'fs/createDirectory', 'fs/writeFile']);
 
 export function createFiles(options: { dataDir: string; workspace: string; hosts: Map<string, SshHost>; request: FileRequest; remoteCommand?: RemoteFileCommand }) {
@@ -85,6 +85,8 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
   const uploads = new Map<string, string>();
   const attachmentDirectories = new Map<string, Set<string>>();
   const creatingAttachments = new Set<string>();
+  const fileWrites = new Map<string, Promise<void>>();
+  let closed = false;
   function host(value: unknown) {
     const hostId = value == null ? 'local' : value;
     if (typeof hostId !== 'string' || hostId !== 'local' && !options.hosts.has(hostId)) throw new Error('未登记的执行主机：' + String(hostId));
@@ -145,6 +147,51 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
   async function readDirectory(hostId: string, target: string): Promise<{ entries: DaemonEntry[] }> {
     return await options.request(hostId, 'fs/readDirectory', { path: target }) as { entries: DaemonEntry[] };
   }
+  async function saveWorkspaceFile(params: ObjectValue, hostId: string) {
+    if (closed) throw new Error('文件服务已关闭，未保存。');
+    if (typeof params.cwd !== 'string' || !posix.isAbsolute(params.cwd)
+      || typeof params.path !== 'string' || !params.path || params.path.includes('\0')
+      || typeof params.expectedContents !== 'string' || typeof params.contents !== 'string') throw new Error('文件保存需要工作目录、路径及完整原始/新内容。');
+    const expected = params.expectedContents, contents = params.contents;
+    const originalBytes = Buffer.from(expected, 'utf8'), nextBytes = Buffer.from(contents, 'utf8');
+    if (originalBytes.length > previewLimit || nextBytes.length > previewLimit) throw new Error('文件超过10 MiB保存限制。');
+    const binary = (data: Buffer) => data.some(byte => byte < 32 && ![9, 10, 12, 13].includes(byte));
+    if (originalBytes.toString('utf8') !== expected || nextBytes.toString('utf8') !== contents
+      || binary(originalBytes) || binary(nextBytes)) throw new Error('文件内容不是有效的UTF-8文本，未保存。');
+    const root = path(params.cwd, hostId);
+    const target = path(params.path.startsWith('file:') ? params.path : posix.resolve(root, params.path), hostId);
+    if (!within(root, target) || root === target) throw new Error('保存路径必须位于当前工作目录内。');
+    const [realRoot, realTarget] = await Promise.all([canonical(hostId, root), canonical(hostId, target)]);
+    if (!within(realRoot, realTarget) || realRoot === realTarget) throw new Error('保存路径超出当前工作目录。');
+    const key = JSON.stringify([hostId, realTarget]);
+    const result = (fileWrites.get(key) ?? Promise.resolve()).then(async () => {
+      if (closed) throw new Error('文件服务已关闭，未保存。');
+      const [directory, before, currentRoot, currentTarget] = await Promise.all([
+        daemonMetadata(hostId, root), daemonMetadata(hostId, target), canonical(hostId, root), canonical(hostId, target),
+      ]);
+      if (!directory.isDirectory || !before.isFile || before.isSymlink) throw new Error('只能保存当前工作目录内已存在的普通文件，符号链接不写入。');
+      if (currentRoot !== realRoot || currentTarget !== realTarget) return { outcome: 'conflict' as const };
+      const currentBytes = await bytes(hostId, target, previewLimit);
+      // Compare original bytes, including BOM and mixed line endings, before
+      // the existing daemon write. External writers are not an atomic CAS.
+      if (!currentBytes.equals(originalBytes)) return { outcome: 'conflict' as const };
+      const latest = await daemonMetadata(hostId, target);
+      if (!latest.isFile || latest.isSymlink || latest.modifiedAtMs !== before.modifiedAtMs
+        || latest.createdAtMs !== before.createdAtMs || await canonical(hostId, target) !== realTarget) return { outcome: 'conflict' as const };
+      await options.request(hostId, 'fs/writeFile', { path: target, dataBase64: nextBytes.toString('base64') }, true);
+      try {
+        if (await canonical(hostId, target) !== realTarget || (await daemonMetadata(hostId, target)).isSymlink
+          || !(await bytes(hostId, target, previewLimit)).equals(nextBytes)) throw new Error('保存后文件内容或路径已改变。');
+      } catch (error) {
+        throw Object.assign(new Error('文件保存结果待核对，勿重复写入：' + (error instanceof Error ? error.message : String(error))), { uncertain: true });
+      }
+      return { outcome: 'saved' as const };
+    });
+    const settled = result.then(() => {}, () => {});
+    fileWrites.set(key, settled);
+    void settled.then(() => { if (fileWrites.get(key) === settled) fileWrites.delete(key); });
+    return result;
+  }
   async function directory(params: ObjectValue, hostId: string, unbounded = false) {
     const root = path(unbounded ? params.directoryPath : params.workspaceRoot, hostId);
     if (!(await daemonMetadata(hostId, root)).isDirectory) throw new Error('workspaceRoot 必须是目录');
@@ -178,6 +225,7 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
   }
   async function fetchFile(endpoint: string, params: ObjectValue): Promise<unknown> {
     const hostId = host(params.hostId);
+    if (endpoint === 'workspace-file-save') return saveWorkspaceFile(params, hostId);
     if (endpoint === 'ensure-directory') {
       if (typeof params.path !== 'string' || !posix.isAbsolute(params.path)) throw new Error('需要绝对目录');
       await options.request(hostId, 'fs/createDirectory', { path: path(params.path, hostId), recursive: true }, true);
@@ -313,5 +361,5 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     if (!codexHome) throw new Error('附件主机尚未连接');
     return attachmentRequest(method, params, hostId, codexHome);
   }
-  return { fetch: fetchFile, http, rpc, attachmentRequest, close() { for (const controller of controllers) controller.abort(); uploads.clear(); attachmentDirectories.clear(); creatingAttachments.clear(); } };
+  return { fetch: fetchFile, http, rpc, attachmentRequest, close() { closed = true; for (const controller of controllers) controller.abort(); uploads.clear(); attachmentDirectories.clear(); creatingAttachments.clear(); } };
 }
