@@ -129,8 +129,11 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   };
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/'));
-    if (!files.length || event.clipboardData.getData('text/plain')) return;
+    if (!files.length) return;
     event.preventDefault();
+    if (editIssue || structuredInput || event.clipboardData.getData('text/plain')) {
+      setError('此内容不能直接粘贴，请分别输入文本并添加图片。'); return;
+    }
     void addFiles(files);
   };
   const submit = async (followUp: FollowUpAction = followUpSetting.value) => {
@@ -251,8 +254,9 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       </div> : null}
       {editIssue ? <div className="standalone-composer__retained" role="status">{editIssue}<details><summary>查看保留的内容</summary><pre>{JSON.stringify({ document: draft.document, input: draft.input, hints: draft.hints, preserved: draft.preserved, pending: draft.pendingDrafts }, null, 2)}</pre></details></div> : null}
       {richActive && draft.document ? <StandaloneRichEditor ref={richEditor} document={draft.document}
-        onChange={document => changeDraft(value => updateRichDraft(value, document))} onKeyDown={keyDown} onImages={files => void addFiles(files)}
-        onInvalid={() => setError('编辑内容包含不支持的文档结构，已保留上一次草稿。')} /> :
+        onChange={document => changeDraft(value => updateRichDraft(value, document))} onKeyDown={keyDown}
+        onImages={files => { if (structuredInput) setError('此结构化草稿暂不支持添加图片。'); else void addFiles(files); }}
+        onInvalid={message => setError(message ?? '编辑内容包含不支持的文档结构，已保留上一次草稿。')} /> :
       <textarea ref={editor} aria-label="和 Codex 一起工作" placeholder="输入消息" value={draft.text} readOnly={!!editIssue}
         aria-autocomplete="list" aria-controls={completions.query ? completions.listId : undefined}
         aria-activedescendant={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}

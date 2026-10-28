@@ -14,7 +14,30 @@ interface RichEditorProps {
   onChange(document: ComposerDocument): void;
   onKeyDown(event: KeyboardEvent): boolean;
   onImages(files: File[]): void;
-  onInvalid(): void;
+  onInvalid(message?: string): void;
+}
+
+function supportedClipboardHTML(html: string): boolean {
+  const document = new DOMParser().parseFromString(html, 'text/html');
+  const tags = new Set(['div', 'span', 'p', 'br', 'strong', 'b', 'em', 'i', 'code', 'pre', 'blockquote',
+    'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a']);
+  const attributes = new Set(['class', 'dir', 'href', 'title', 'start', 'contenteditable', 'spellcheck',
+    'data-pm-slice', 'data-mention', 'data-composer-attrs']);
+  if (document.querySelector('style, link, script')) return false;
+  return Array.from(document.body.querySelectorAll('*')).every(element => {
+    if (!tags.has(element.localName) || !Array.from(element.attributes).every(attribute => attributes.has(attribute.name))) return false;
+    const mention = element.getAttribute('data-mention');
+    if (mention !== null && (element.localName !== 'span' || mention !== 'file' && mention !== 'skill')) return false;
+    if (!element.hasAttribute('data-composer-attrs')) return mention === null;
+    const spec = mention === 'file' ? composerSchema.nodes.atMention?.spec : mention === 'skill' ? composerSchema.nodes.skillMention?.spec
+      : element.localName === 'pre' ? composerSchema.nodes.code_block?.spec : element.localName === 'a' ? composerSchema.marks.link?.spec : null;
+    if (!spec) return false;
+    try {
+      const value: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
+      return !!value && typeof value === 'object' && !Array.isArray(value)
+        && Object.keys(value).every(key => Object.hasOwn(spec.attrs ?? {}, key));
+    } catch { return false; }
+  });
 }
 
 export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function StandaloneRichEditor(props, ref) {
@@ -53,9 +76,14 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
       handleKeyDown: (editor, event) => editor.composing || event.isComposing || event.keyCode === 229 ? false : latest.current.onKeyDown(event),
       handlePaste: (_editor, event) => {
         const files = Array.from(event.clipboardData?.files ?? []).filter(file => file.type.startsWith('image/'));
-        if (!files.length || event.clipboardData?.getData('text/plain')) return false;
-        latest.current.onImages(files);
-        return true;
+        if (files.length && !event.clipboardData?.getData('text/plain')) {
+          latest.current.onImages(files);
+          return true;
+        }
+        if (files.length) { latest.current.onInvalid('无法同时粘贴文字和图片，请分别输入文本并添加图片。'); return true; }
+        const html = event.clipboardData?.getData('text/html');
+        if (html && !supportedClipboardHTML(html)) { latest.current.onInvalid(); return true; }
+        return false;
       },
     });
     view.current = editor;

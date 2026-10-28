@@ -148,6 +148,31 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
     assert.equal(imePrevented, false);
     assert.equal(await editor.locator('p').count(), 3);
     assert.equal(await page.evaluate(() => (window as any).fixture.state.submissions.length), 0);
+    await editor.evaluate(element => {
+      const clipboard = new DataTransfer();
+      clipboard.setData('text/html', '<table><tr><td>unsupported cell</td></tr></table>');
+      clipboard.setData('text/plain', 'unsupported cell');
+      element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+    });
+    await page.getByRole('alert').filter({ hasText: '不支持的文档结构' }).waitFor();
+    assert.doesNotMatch(await editor.innerText(), /unsupported cell/);
+    await editor.evaluate(element => {
+      const clipboard = new DataTransfer();
+      clipboard.items.add(new File(['image'], 'fixture.png', { type: 'image/png' }));
+      clipboard.setData('text/plain', 'mixed image text');
+      element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+    });
+    await page.getByRole('alert').filter({ hasText: '无法同时粘贴文字和图片' }).waitFor();
+    assert.doesNotMatch(await editor.innerText(), /mixed image text/);
+    await editor.locator('ul p').click();
+    await editor.press('End');
+    await editor.evaluate(element => {
+      const clipboard = new DataTransfer();
+      clipboard.setData('text/html', '<strong>pasted</strong>');
+      clipboard.setData('text/plain', 'pasted');
+      element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+    });
+    assert.equal(await editor.locator('ul strong').innerText(), 'pasted');
     await page.reload();
     await page.addStyleTag({ content: css });
     await page.addScriptTag({ content: script });
@@ -183,6 +208,12 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
     await editor.locator('[data-mention="file"]').click();
     await editor.press('Backspace');
     assert.equal(await editor.locator('[data-mention="file"]').count(), 0);
+    await editor.evaluate(element => {
+      const clipboard = new DataTransfer();
+      clipboard.items.add(new File(['image'], 'fixture.png', { type: 'image/png' }));
+      element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+    });
+    await page.getByRole('alert').filter({ hasText: '此结构化草稿暂不支持添加图片' }).waitFor();
     await page.reload();
     await page.addStyleTag({ content: css });
     await page.addScriptTag({ content: script });
