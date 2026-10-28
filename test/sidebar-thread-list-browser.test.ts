@@ -11,6 +11,8 @@ declare global {
       configure(value: Record<string, unknown>): void;
       resolve(index: number, value: unknown): void;
       reject(index: number, message: string): void;
+      emit(event: Record<string, unknown>): void;
+      listenerCount(): number;
       moreTwice(): boolean;
       refresh(): void;
       unmount(): void;
@@ -18,7 +20,7 @@ declare global {
   }
 }
 
-test('thread list isolates delayed scopes, retries, searches all pages, and detects cursor loops', {
+test('thread list isolates delayed scopes and live statuses, retries, searches all pages, and detects cursor loops', {
   skip: !existsSync('/usr/bin/google-chrome') && 'An isolated headless browser is unavailable', timeout: 60_000,
 }, async () => {
   const bundle = await build({
@@ -26,8 +28,9 @@ test('thread list isolates delayed scopes, retries, searches all pages, and dete
       import React, {useState} from 'react';
       import {createRoot} from 'react-dom/client';
       import {useThreadList} from './src/renderer/sidebar/use-thread-list.ts';
-      const calls=[], waiting=[];
-      const client={rpc:(method,params,hostId)=>{calls.push({method,params,hostId});return new Promise((resolve,reject)=>waiting.push({resolve,reject}));}};
+      const calls=[], waiting=[], listeners=new Set();
+      const client={rpc:(method,params,hostId)=>{calls.push({method,params,hostId});return new Promise((resolve,reject)=>waiting.push({resolve,reject}));},
+        subscribe:listener=>{listeners.add(listener);return()=>listeners.delete(listener);}};
       let current, configure;
       function App(){
         const [options,setOptions]=useState({hostId:'local',archived:false,search:'',refreshKey:0});
@@ -38,6 +41,7 @@ test('thread list isolates delayed scopes, retries, searches all pages, and dete
       const root=createRoot(document.getElementById('root'));
       window.sidebarListHarness={calls,configure:value=>configure(value),resolve:(index,value)=>waiting[index].resolve(value),
         reject:(index,message)=>waiting[index].reject(Error(message)),
+        emit:event=>listeners.forEach(listener=>listener(event)),listenerCount:()=>listeners.size,
         moreTwice:()=>{const a=current.loadMore(),b=current.loadMore();return a===b;},
         refresh:()=>{void current.refresh();},unmount:()=>root.unmount()};
       root.render(React.createElement(App));
@@ -163,7 +167,33 @@ test('thread list isolates delayed scopes, retries, searches all pages, and dete
     assert.deepEqual((await state()).rows.map(item => item.id), ['first', 'second']);
     assert.equal((await state()).nextCursor, null);
     assert.equal((await state()).error?.retry, 'refresh');
+
+    await page.evaluate(() => window.sidebarListHarness.configure({ hostId: 'local' }));
+    await waitCalls(19);
+    await resolve(18, [row('live', { status: { type: 'active', activeFlags: [] } })], null);
+    await waitState("value.rows[0]?.status.type === 'active' && !value.loading");
+    const notify = (hostId: string, type: string) => page.evaluate(({ hostId, type }) => window.sidebarListHarness.emit({
+      type: 'mcp-notification', hostId, method: 'thread/status/changed', params: { threadId: 'live', status: { type } },
+    }), { hostId, type });
+    await notify('ssh-a', 'idle');
+    await page.waitForTimeout(50); assert.equal(await count(), 19);
+    await notify('local', 'active'); await waitCalls(20);
+    await notify('local', 'idle'); await waitCalls(21);
+    await resolve(20, [row('live')], null);
+    await waitState("value.rows[0]?.status.type === 'idle' && !value.loading");
+    await resolve(19, [row('live', { status: { type: 'active', activeFlags: [] } })], null);
+    await page.waitForTimeout(50);
+    await waitState("value.rows[0]?.status.type === 'idle' && !value.loading");
+    await page.evaluate(() => window.sidebarListHarness.configure({ hostId: 'ssh-b' }));
+    await waitCalls(22);
+    await notify('local', 'active');
+    await page.waitForTimeout(50); assert.equal(await count(), 22);
+    await resolve(21, [row('remote-live')], null);
+    await waitState("value.rows[0]?.id === 'remote-live' && !value.loading");
     await page.evaluate(() => window.sidebarListHarness.unmount());
+    assert.equal(await page.evaluate(() => window.sidebarListHarness.listenerCount()), 0);
+    await notify('ssh-b', 'active');
+    await page.waitForTimeout(50); assert.equal(await count(), 22);
     assert.deepEqual(errors, []);
   } finally { await browser.close(); }
 });

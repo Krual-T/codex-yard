@@ -167,8 +167,8 @@ try {
     if (typeof turn.id === 'string') turnId = turn.id;
     if (message.method === 'turn/started') turnRunning = true;
     if (message.method === 'turn/completed') turnRunning = false;
-    if (message.method.startsWith('turn/') || item.type === 'commandExecution') events.push({ method: message.method,
-      status: typeof turn.status === 'string' ? turn.status : typeof item.status === 'string' ? item.status : undefined,
+    if (message.method.startsWith('turn/') || message.method === 'thread/status/changed' || item.type === 'commandExecution') events.push({ method: message.method,
+      status: typeof turn.status === 'string' ? turn.status : typeof item.status === 'string' ? item.status : typeof record(params.status).type === 'string' ? String(record(params.status).type) : undefined,
       command: typeof item.command === 'string' ? item.command : undefined });
   });
   const historyReady = waitForCompletion('Setup turn');
@@ -250,6 +250,7 @@ try {
   await until(async () => (await sampleSpinner()).animations.some(animation => animation.name === 'workbench-thread-spin' && animation.state === 'running'), 'Resumed ring');
   results.resumedSpinner = await sampleSpinner();
   await page.getByText('VISUAL_FEEDBACK_OK', { exact: true }).last().waitFor({ timeout: 90000 }); await completed;
+  results.completedThreadStatus = (await native.request('thread/read', { threadId, includeTurns: false })).thread.status;
   await spinner.waitFor({ state: 'hidden', timeout: 15000 }); assert.equal(submissions, 1); results.submissions = submissions;
   assert(events.some(event => event.command?.includes('sleep 25')), 'Actual CLI command execution must be observed');
   const history = record(await native.request('thread/turns/list', { threadId, limit: 100, sortDirection: 'asc', itemsView: 'full' }));

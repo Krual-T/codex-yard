@@ -154,10 +154,15 @@ export function useThreadList(client: WorkbenchClient, { hostId, archived, searc
         nextCursor: session.nextCursor, loading: session.loading, error: session.error }),
     };
     sessionRef.current = session;
+    const unsubscribe = client.subscribe(event => {
+      if (event.type === 'mcp-notification' && event.hostId === scope.hostId && event.method === 'thread/status/changed')
+        void request(session, true);
+    });
     void request(session, true);
     return () => {
       session.active = false;
       session.generation++;
+      unsubscribe();
       if (sessionRef.current === session) sessionRef.current = null;
     };
   }, [scope]);
