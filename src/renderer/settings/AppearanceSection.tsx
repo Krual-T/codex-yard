@@ -2,7 +2,7 @@ import { useLayoutEffect, useState } from 'react';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
 import { NumberPreference, Row, Select, Toggle, entryState } from './PreferenceControls.tsx';
 import type { PreferenceProps } from './PreferenceControls.tsx';
-import { codeThemes, defaultThemes, exportTheme, importTheme, preferenceDefinitions } from './preferences.ts';
+import { codeThemes, defaultThemes, exportTheme, importTheme, mergeImportedTheme, preferenceDefinitions } from './preferences.ts';
 import type { ChromeTheme, PreferenceKey, ThemeVariant } from './preferences.ts';
 import { ThemeFontControls } from './ThemeFontControls.tsx';
 
@@ -25,7 +25,7 @@ function ThemeEditor({ variant, onDirtyChange, ...props }: PreferenceProps & { v
   const applyImport = () => {
     try {
       const next = importTheme(text, variant);
-      props.preferences.edit(themeKey, next.theme);
+      props.preferences.edit(themeKey, mergeImportedTheme(theme, next.theme));
       props.preferences.edit(codeKey, next.codeThemeId);
       setDialog(null);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }

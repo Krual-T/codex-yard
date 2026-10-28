@@ -131,9 +131,15 @@ export const preferenceDefinitions: Definitions = {
 };
 
 export const preferenceKeys = Object.keys(preferenceDefinitions) as PreferenceKey[];
+export interface PreferenceObservation { exists: boolean; value?: unknown }
 export interface PreferenceEntry<T> {
   value: T;
   saved: T;
+  observation: PreferenceObservation | null;
+  editBase: PreferenceObservation | null;
+  baseValue: T;
+  editRevision: number;
+  conflict: boolean;
   available: boolean;
   loading: boolean;
   saving: boolean;
@@ -141,13 +147,52 @@ export interface PreferenceEntry<T> {
 }
 export type PreferenceSnapshot = { [K in PreferenceKey]: PreferenceEntry<PreferenceValues[K]> };
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
-const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 const clone = <T>(value: T): T => structuredClone(value);
+function same(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
+  const left = a as Record<string, unknown>, right = b as Record<string, unknown>;
+  return Object.keys(left).length === Object.keys(right).length &&
+    Object.keys(left).every(key => Object.hasOwn(right, key) && same(left[key], right[key]));
+}
+function observation(response: unknown): PreferenceObservation {
+  if (!record(response) || typeof response.exists !== 'boolean') throw new Error('Preference response does not identify whether the value exists');
+  return response.exists ? { exists: true, value: clone(response.value) } : { exists: false };
+}
+function mergeThemeDraft(base: unknown, current: unknown, draft: unknown): unknown {
+  if (same(base, draft)) return clone(current);
+  if (!record(base) || !record(current) || !record(draft)) return clone(draft);
+  const result: Record<string, unknown> = {};
+  for (const key of new Set([...Object.keys(base), ...Object.keys(current), ...Object.keys(draft)])) {
+    const inBase = Object.hasOwn(base, key), inDraft = Object.hasOwn(draft, key), inCurrent = Object.hasOwn(current, key);
+    if (inBase === inDraft && (!inBase || same(base[key], draft[key]))) {
+      if (inCurrent) result[key] = clone(current[key]);
+    } else if (inDraft) {
+      result[key] = inBase && inCurrent ? mergeThemeDraft(base[key], current[key], draft[key]) : clone(draft[key]);
+    }
+  }
+  return result;
+}
+export function mergeImportedTheme(current: ChromeTheme, imported: ChromeTheme): ChromeTheme {
+  const merge = (left: unknown, right: unknown): unknown => {
+    if (!record(left) || !record(right)) return clone(right);
+    const result: Record<string, unknown> = clone(left);
+    for (const [key, value] of Object.entries(right)) result[key] = key in left ? merge(left[key], value) : clone(value);
+    return result;
+  };
+  const result = merge(current, imported) as ChromeTheme;
+  for (const [family, face] of [['ui', 'uiFace'], ['content', 'contentFace'], ['code', 'codeFace']] as const) {
+    if (Object.hasOwn(imported.fonts, family) && !Object.hasOwn(imported.fonts, face) &&
+      !same(current.fonts[family], imported.fonts[family])) delete result.fonts[face];
+  }
+  return result;
+}
 
 function initialSnapshot(): PreferenceSnapshot {
   return Object.fromEntries(preferenceKeys.map(key => {
     const value = clone(preferenceDefinitions[key].defaultValue);
-    return [key, { value, saved: clone(value), available: false, loading: true, saving: false, error: null }];
+    return [key, { value, saved: clone(value), observation: null, editBase: null, baseValue: clone(value),
+      editRevision: 0, conflict: false, available: false, loading: true, saving: false, error: null }];
   })) as PreferenceSnapshot;
 }
 
@@ -202,7 +247,9 @@ export class Preferences {
           const response = await this.client.host<{ values: Record<string, unknown> }>('get-settings');
           if (!record(response?.values)) throw new Error('Settings response is invalid');
           if (lifecycle !== this.lifecycle) return;
-          for (const key of settings) if (revisions.get(key) === (this.revisions.get(key) ?? 0)) this.applyRead(key, response.values[key]);
+          for (const key of settings) if (revisions.get(key) === (this.revisions.get(key) ?? 0)) {
+            this.applyRead(key, Object.hasOwn(response.values, key) ? { exists: true, value: response.values[key] } : { exists: false });
+          }
         } catch (error) {
           if (lifecycle !== this.lifecycle) return;
           for (const key of settings) if (revisions.get(key) === (this.revisions.get(key) ?? 0)) this.update(key, { loading: false, error: errorText(error) });
@@ -211,53 +258,86 @@ export class Preferences {
       ...others.map(key => this.reload(key)),
     ]);
   }
-  private applyRead<K extends PreferenceKey>(key: K, raw: unknown): void {
+  private applyRead<K extends PreferenceKey>(key: K, raw: PreferenceObservation): void {
     const definition = preferenceDefinitions[key];
-    const value = raw === undefined ? definition.defaultValue : raw;
+    const entry = this.snapshot[key];
+    if (entry.saving) { this.pendingRefresh.add(key); return; }
+    const value = raw.exists ? raw.value : definition.defaultValue;
+    const conflict = Boolean(entry.editBase && (entry.conflict || !same(entry.editBase, raw)));
     if (!definition.valid(value)) {
-      this.update(key, { loading: false, available: false, error: 'Saved value is invalid; it has not been changed.' });
+      this.update(key, { observation: clone(raw), conflict, loading: false, available: false,
+        error: 'Saved value is invalid; it has not been changed.' });
       return;
     }
-    const entry = this.snapshot[key];
-    const dirty = !same(entry.value, entry.saved);
-    this.update(key, { saved: clone(value), value: dirty ? entry.value : clone(value), available: true, loading: false, error: null });
+    const editBase = entry.editBase && !conflict && same(entry.value, value) ? null : entry.editBase;
+    this.update(key, { observation: clone(raw), editBase, conflict, saved: clone(value),
+      value: editBase ? entry.value : clone(value), available: true, loading: false, error: null });
   }
   async reload(key: PreferenceKey): Promise<void> {
+    if (this.snapshot[key].saving) { this.pendingRefresh.add(key); return; }
     const revision = (this.revisions.get(key) ?? 0) + 1;
     const lifecycle = this.lifecycle;
     this.revisions.set(key, revision);
     const source = preferenceDefinitions[key].source;
     const endpoint = source === 'setting' ? 'get-setting' : source === 'global' ? 'get-global-state' : 'get-persisted-atom';
     try {
-      const response = await this.client.host<{ value?: unknown }>(endpoint, { key });
-      if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) this.applyRead(key, response.value);
+      const response = await this.client.host<unknown>(endpoint, { key });
+      if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) this.applyRead(key, observation(response));
     } catch (error) {
       if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) this.update(key, { loading: false, error: errorText(error) });
     }
   }
   edit<K extends PreferenceKey>(key: K, value: PreferenceValues[K]): void {
-    if (this.snapshot[key].available && preferenceDefinitions[key].valid(value)) this.update(key, { value: clone(value), error: null });
+    const entry = this.snapshot[key];
+    if (!entry.available || !entry.observation || !preferenceDefinitions[key].valid(value) || same(entry.value, value)) return;
+    const editBase = entry.editBase ?? clone(entry.observation);
+    const baseValue = entry.editBase ? entry.baseValue : clone(entry.value);
+    const cancel = !entry.saving && !entry.conflict && same(value, baseValue) && same(editBase, entry.observation);
+    this.update(key, { value: clone(value), editBase: cancel ? null : editBase, baseValue,
+      editRevision: entry.editRevision + 1, error: null });
   }
   discard(): void {
-    for (const key of preferenceKeys) this.update(key, { value: clone(this.snapshot[key].saved), error: null });
+    for (const key of preferenceKeys) if (!this.snapshot[key].saving) this.update(key,
+      { value: clone(this.snapshot[key].saved), editBase: null, conflict: false, error: null });
   }
-  get dirty(): boolean { return preferenceKeys.some(key => !same(this.snapshot[key].value, this.snapshot[key].saved)); }
+  resolveConflict(key: PreferenceKey, choice: 'current' | 'draft'): void {
+    const entry = this.snapshot[key];
+    if (!entry.conflict || entry.saving || !entry.observation) return;
+    if (choice === 'current') {
+      this.update(key, { value: clone(entry.saved), editBase: null, conflict: false,
+        error: entry.available ? null : 'Saved value is invalid; it has not been changed.' });
+      return;
+    }
+    if (!entry.available) return;
+    let draft: unknown = entry.value;
+    if ((key === 'appearanceLightChromeTheme' || key === 'appearanceDarkChromeTheme') && draft !== null) {
+      const fallback = defaultThemes[key === 'appearanceLightChromeTheme' ? 'light' : 'dark'];
+      draft = mergeThemeDraft(entry.baseValue ?? fallback, entry.saved ?? fallback, draft);
+    }
+    this.update(key, { value: clone(draft) as never, editBase: clone(entry.observation), baseValue: clone(entry.saved) as never,
+      editRevision: entry.editRevision + 1, conflict: false, error: null });
+  }
+  get dirty(): boolean { return preferenceKeys.some(key => this.snapshot[key].editBase !== null); }
   get saving(): boolean { return preferenceKeys.some(key => this.snapshot[key].saving); }
   async save(): Promise<boolean> {
-    const keys = preferenceKeys.filter(key => this.snapshot[key].available && !this.snapshot[key].saving && !same(this.snapshot[key].value, this.snapshot[key].saved));
+    const keys = preferenceKeys.filter(key => this.snapshot[key].editBase !== null);
+    if (keys.some(key => !this.snapshot[key].available || this.snapshot[key].saving || this.snapshot[key].conflict)) return false;
     const results = await Promise.all(keys.map(key => this.saveKey(key)));
     return results.every(Boolean);
   }
   async saveOne(key: PreferenceKey): Promise<boolean> {
     const entry = this.snapshot[key];
-    if (!entry.available || entry.saving || same(entry.value, entry.saved)) return false;
+    if (!entry.available || entry.saving || !entry.editBase || entry.conflict) return false;
     return this.saveKey(key);
   }
   private async saveKey(key: PreferenceKey): Promise<boolean> {
     const source = preferenceDefinitions[key].source;
     const endpoint = source === 'setting' ? 'set-setting' : source === 'global' ? 'set-global-state' : 'set-persisted-atom';
     const getEndpoint = source === 'setting' ? 'get-setting' : source === 'global' ? 'get-global-state' : 'get-persisted-atom';
-    let sent = clone(this.snapshot[key].value);
+    const initial = this.snapshot[key];
+    if (!initial.editBase || initial.conflict) return false;
+    const expected = clone(initial.editBase);
+    let sent = clone(initial.value);
     if (key === 'git-worktree-root' && typeof sent === 'string') {
       const path = sent.trim();
       const windows = this.platform === 'windows' || this.platform === 'win32';
@@ -267,25 +347,39 @@ export class Preferences {
         return false;
       }
       if (path !== sent) { this.update(key, { value: path }); sent = path; }
-      if (same(sent, this.snapshot[key].saved)) { this.update(key, { error: null }); return true; }
+      if (same(sent, initial.baseValue) && same(expected, initial.observation)) {
+        this.update(key, { value: sent, editBase: null, error: null }); return true;
+      }
     }
+    const editRevision = this.snapshot[key].editRevision;
+    const value = (key === 'appearanceLightChromeTheme' || key === 'appearanceDarkChromeTheme') && sent === null ? undefined : sent;
+    const written: PreferenceObservation = value === undefined ? { exists: false } : { exists: true, value: clone(value) };
+    let acknowledged = false;
     this.revisions.set(key, (this.revisions.get(key) ?? 0) + 1);
     this.update(key, { saving: true, error: null });
     try {
-      const value = (key === 'appearanceLightChromeTheme' || key === 'appearanceDarkChromeTheme') && sent === null ? undefined : sent;
-      const response = await this.client.host<{ success?: boolean }>(endpoint, { key, value });
+      const response = await this.client.host<{ success?: boolean }>(endpoint, { key, value, expected });
       if (response?.success !== true) throw new Error('The host did not confirm the write');
-      const read = await this.client.host<{ value?: unknown }>(getEndpoint, { key });
-      const actual = read.value === undefined ? preferenceDefinitions[key].defaultValue : read.value;
+      acknowledged = true;
+      const read = observation(await this.client.host<unknown>(getEndpoint, { key }));
+      const actual = read.exists ? read.value : preferenceDefinitions[key].defaultValue;
       if (!preferenceDefinitions[key].valid(actual)) throw new Error('The saved value could not be verified');
-      const current = this.snapshot[key].value;
-      this.update(key, { saved: clone(actual), value: current, saving: false,
-        error: same(actual, sent) ? null : 'The value changed while saving. Review and save again.' });
-      if (this.pendingRefresh.delete(key) && same(actual, sent)) void this.reload(key);
-      return same(actual, sent);
+      const current = this.snapshot[key];
+      const matches = same(read, written);
+      const newer = current.editRevision !== editRevision && !same(current.value, sent);
+      this.update(key, { observation: read, saved: clone(actual) as never, value: (matches && !newer ? clone(actual) : current.value) as never,
+        editBase: matches && !newer ? null : written, baseValue: clone(sent) as never, conflict: !matches, saving: false,
+        error: matches ? null : 'The value changed while saving. Review the current value before saving.' });
+      if (this.pendingRefresh.delete(key)) void this.reload(key);
+      return matches;
     } catch (error) {
       this.pendingRefresh.delete(key);
+      if (acknowledged) this.update(key, { observation: written, saved: clone(sent) as never, editBase: written, baseValue: clone(sent) as never });
       this.update(key, { saving: false, error: `Could not confirm save: ${errorText(error)}. Your edit is preserved.` });
+      if (!acknowledged) {
+        await this.reload(key);
+        if (!this.snapshot[key].conflict) this.update(key, { error: `Could not confirm save: ${errorText(error)}. Your edit is preserved.` });
+      }
       return false;
     }
   }

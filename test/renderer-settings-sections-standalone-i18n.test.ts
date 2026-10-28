@@ -65,7 +65,7 @@ class FixtureClient implements WorkbenchClient {
   async rpc<T>(): Promise<T> { throw new Error('Unexpected RPC'); }
   async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
     if (endpoint === 'get-settings') return { values: { localeOverride: this.value } } as T;
-    if (endpoint === 'get-setting') return { value: params?.key === 'localeOverride' ? this.value : undefined } as T;
+    if (endpoint === 'get-setting') return { value: params?.key === 'localeOverride' ? this.value : undefined, exists: params?.key === 'localeOverride' } as T;
     if (endpoint === 'set-setting') {
       if (this.fail) throw new Error('offline');
       if (params?.key === 'localeOverride') this.value = params.value as string | null;

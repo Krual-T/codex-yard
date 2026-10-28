@@ -19,6 +19,7 @@ import { PluginSection } from './PluginSection.tsx';
 import { SkillSection } from './SkillSection.tsx';
 import { Preferences, preferenceKeys } from './preferences.ts';
 import type { PreferenceProps } from './PreferenceControls.tsx';
+import { PreferenceConflicts } from './PreferenceConflicts.tsx';
 import { WorktreesSection } from './WorktreesSection.tsx';
 import { UsageSection } from './UsageSection.tsx';
 import { VoiceSection } from './VoiceSection.tsx';
@@ -271,9 +272,10 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
                   section === 'connections' ? <ConnectionsSection client={client} onSavingChange={setOtherSaving} /> :
             <><h2>{title}</h2><p className="yard-setting-error">{remainingSections[section] ?? 'This settings page cannot be displayed yet.'}</p></>}
       </div>
+      <PreferenceConflicts preferences={preferences} snapshot={snapshot} />
       {(preferences.dirty || anySaving) && <div className="yard-save-bar"><span>{t('Unsaved changes')}</span><div className="yard-actions">
         <button type="button" disabled={anySaving} onClick={() => preferences.discard()}>{t('Discard')}</button>
-        <button type="button" disabled={anySaving || !preferences.dirty} onClick={() => {
+        <button type="button" disabled={anySaving || !preferences.dirty || preferenceKeys.some(key => snapshot[key].conflict)} onClick={() => {
           setSaving(true); void preferences.save().finally(() => setSaving(false));
         }}>{saving ? t('Saving...') : t('Save')}</button>
       </div></div>}

@@ -81,3 +81,6 @@
   .yard-setting-control { width: 100%; }
   .yard-theme-preview code { display: none; }
 }
+.yard-preference-conflicts { padding: 12px 24px; border-top: 1px solid var(--yard-border, #d1d5db); }
+.yard-preference-conflict { padding: 8px 0; }
+.yard-preference-conflict pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

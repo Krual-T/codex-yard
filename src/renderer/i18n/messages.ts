@@ -3,6 +3,9 @@ import type { ComposerMessageKey } from './composer-messages.ts';
 import type { GoalQueueMessageKey } from './goal-queue-messages.ts';
 
 export const settingsMessageKeys = [
+  'The previous hook save has an unknown result. The host must confirm it has ended before another save.',
+  'The default model is unavailable or ambiguous. Refresh the model list before changing reasoning effort.',
+  'Conflicting preferences', 'The saved preference changed elsewhere. Review the current value before saving.', '(not set)', 'Review and reapply',
   'Refresh', 'Reload', 'Loading...', 'Enabled', 'Disabled', 'Unavailable', 'Available',
   'Experimental features', 'Loading experimental features...', 'Could not load experimental features:',
   'Changing experimental features is not available for this connection.', 'No beta experimental features available.',
@@ -91,6 +94,9 @@ export type MessageKey = typeof messageKeys[number] | WorkspaceMessageKey | Comp
 export type Messages = Partial<Record<MessageKey, string>>;
 
 export const simplifiedChinese: Messages = {
+  'The previous hook save has an unknown result. The host must confirm it has ended before another save.': '上次钩子保存的结果未知。主机确认该操作结束后才能再次保存。',
+  'The default model is unavailable or ambiguous. Refresh the model list before changing reasoning effort.': '默认模型不可用或不唯一。更改推理强度前请刷新模型列表。',
+  'Conflicting preferences': '偏好设置冲突', 'The saved preference changed elsewhere. Review the current value before saving.': '已保存的偏好在其他位置发生更改。保存前请核对当前值。', '(not set)': '（未设置）', 'Review and reapply': '核对并重新应用',
   'Refresh': '刷新', 'Reload': '重新加载', 'Loading...': '正在加载...', 'Enabled': '已启用', 'Disabled': '已停用', 'Unavailable': '不可用', 'Available': '可用',
   'Experimental features': '实验性功能', 'Loading experimental features...': '正在加载实验性功能...', 'Could not load experimental features:': '无法加载实验性功能：',
   'Changing experimental features is not available for this connection.': '当前连接无法更改实验性功能。', 'No beta experimental features available.': '没有可用的测试版实验性功能。',
@@ -182,6 +188,9 @@ export const simplifiedChinese: Messages = {
 };
 
 export const traditionalChinese: Messages = {
+  'The previous hook save has an unknown result. The host must confirm it has ended before another save.': '上次掛鉤儲存的結果未知。主機確認該操作結束後才能再次儲存。',
+  'The default model is unavailable or ambiguous. Refresh the model list before changing reasoning effort.': '預設模型無法使用或不唯一。更改推理強度前請重新整理模型清單。',
+  'Conflicting preferences': '偏好設定衝突', 'The saved preference changed elsewhere. Review the current value before saving.': '已儲存的偏好在其他位置發生變更。儲存前請檢查目前的值。', '(not set)': '（未設定）', 'Review and reapply': '檢查並重新套用',
   'Refresh': '重新整理', 'Reload': '重新載入', 'Loading...': '載入中...', 'Enabled': '已啟用', 'Disabled': '已停用', 'Unavailable': '無法使用', 'Available': '可用',
   'Experimental features': '實驗性功能', 'Loading experimental features...': '正在載入實驗性功能...', 'Could not load experimental features:': '無法載入實驗性功能：',
   'Changing experimental features is not available for this connection.': '目前的連線無法更改實驗性功能。', 'No beta experimental features available.': '沒有可用的測試版實驗性功能。',

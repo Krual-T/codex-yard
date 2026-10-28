@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
-import { Preferences, defaultThemes, exportTheme, importTheme } from '../src/renderer/settings/preferences.ts';
+import { Preferences, defaultThemes, exportTheme, importTheme, mergeImportedTheme } from '../src/renderer/settings/preferences.ts';
+import { assertPreferenceExpectation } from '../src/native/protocol.ts';
 
 class FakeClient implements WorkbenchClient {
   settings: Record<string, unknown> = { composerPlainTextMode: false, appearanceTheme: 'dark', unknownSetting: { keep: true } };
@@ -22,13 +23,15 @@ class FakeClient implements WorkbenchClient {
     if (endpoint === 'get-settings') return { values: { ...this.settings } } as T;
     const target = endpoint.endsWith('setting') ? this.settings : endpoint.endsWith('global-state') ? this.globals : this.atoms;
     if (endpoint.startsWith('get-')) {
-      const value = target[key];
+      const value = structuredClone(target[key]), exists = Object.hasOwn(target, key);
       await this.pauseRead?.(key);
-      return { value } as T;
+      return { value, exists } as T;
     }
     if (endpoint.startsWith('set-')) {
       await this.pauseWrite?.();
-      target[key] = params?.value;
+      assertPreferenceExpectation(target[key], Object.hasOwn(target, key), params?.expected);
+      if (params?.value === undefined) delete target[key];
+      else target[key] = structuredClone(params.value);
       return { success: true } as T;
     }
     throw new Error(`Unknown ${endpoint}`);
@@ -71,6 +74,9 @@ test('host and cross-tab notifications refresh the correct store while keeping d
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(prefs.getSnapshot().appearanceTheme.saved, 'system');
   assert.equal(prefs.getSnapshot().appearanceTheme.value, 'light');
+  assert.deepEqual(prefs.getSnapshot().appearanceTheme.editBase, { exists: true, value: 'dark' });
+  assert.equal(prefs.getSnapshot().appearanceTheme.conflict, true);
+  assert.equal(await prefs.save(), false);
   assert.equal(prefs.getSnapshot()['show-context-window-usage'].value, false);
   assert.equal(prefs.getSnapshot()['reduced-motion-preference'].value, 'on');
   stop();
@@ -226,6 +232,69 @@ test('a newer edit survives an earlier save and invalid stored values cannot be 
   assert.equal(prefs.getSnapshot().appearanceTheme.saved, 'light');
   assert.equal(prefs.getSnapshot().appearanceTheme.value, 'system');
   assert.equal(prefs.dirty, true);
+  client.pauseWrite = null;
+  assert.equal(await prefs.save(), true);
+  assert.deepEqual(client.calls.filter(call => call.endpoint === 'set-setting').at(-1)?.params?.expected, { exists: true, value: 'light' });
+  assert.equal(client.settings.appearanceTheme, 'system');
+});
+
+test('two editors use raw existence and keep drafts when conditional writes conflict', async () => {
+  const client = new FakeClient(), first = new Preferences(client), second = new Preferences(client);
+  await Promise.all([first.load(), second.load()]);
+  first.edit('appearanceTheme', 'light'); second.edit('appearanceTheme', 'system');
+  first.edit('git-branch-prefix', 'first/'); second.edit('git-branch-prefix', 'second/');
+  first.edit('primary-number-shortcut-target', 'sidebar'); second.edit('primary-number-shortcut-target', 'sidebar');
+  assert.equal(await first.save(), true);
+  for (const key of ['appearanceTheme', 'git-branch-prefix', 'primary-number-shortcut-target'] as const) {
+    assert.equal(await second.saveOne(key), false);
+    assert.equal(second.getSnapshot()[key].conflict, true);
+  }
+  assert.deepEqual(second.getSnapshot().appearanceTheme.editBase, { exists: true, value: 'dark' });
+  assert.deepEqual(second.getSnapshot()['git-branch-prefix'].editBase, { exists: false });
+  assert.deepEqual(second.getSnapshot()['primary-number-shortcut-target'].editBase, { exists: false });
+  assert.equal(second.getSnapshot()['git-branch-prefix'].value, 'second/');
+  assert.equal(second.getSnapshot()['git-branch-prefix'].saved, 'first/');
+  second.resolveConflict('appearanceTheme', 'current');
+  second.resolveConflict('git-branch-prefix', 'draft');
+  second.resolveConflict('primary-number-shortcut-target', 'current');
+  assert.equal(await second.save(), true);
+  assert.equal(client.settings.appearanceTheme, 'light');
+  assert.equal(client.globals['git-branch-prefix'], 'second/');
+  assert.deepEqual(client.calls.filter(call => call.endpoint === 'set-global-state').at(-1)?.params?.expected,
+    { exists: true, value: 'first/' });
+});
+
+test('reapplying a theme keeps external untouched and unknown fields', async () => {
+  const client = new FakeClient();
+  client.settings.appearanceLightChromeTheme = { ...structuredClone(defaultThemes.light),
+    extension: { old: true }, fonts: { ...defaultThemes.light.fonts, future: 'original' } };
+  const first = new Preferences(client), second = new Preferences(client);
+  await Promise.all([first.load(), second.load()]);
+  const original = first.getSnapshot().appearanceLightChromeTheme.value!;
+  first.edit('appearanceLightChromeTheme', { ...original, surface: '#eeeeee', extension: { old: true, added: 1 },
+    fonts: { ...original.fonts, future: 'new', another: 'kept' } });
+  second.edit('appearanceLightChromeTheme', { ...second.getSnapshot().appearanceLightChromeTheme.value!, accent: '#123456' });
+  assert.equal(await first.save(), true);
+  await second.reload('appearanceLightChromeTheme');
+  assert.equal(second.getSnapshot().appearanceLightChromeTheme.conflict, true);
+  second.resolveConflict('appearanceLightChromeTheme', 'draft');
+  assert.equal(await second.save(), true);
+  const result = client.settings.appearanceLightChromeTheme as typeof original;
+  assert.equal(result.accent, '#123456'); assert.equal(result.surface, '#eeeeee');
+  assert.deepEqual(result.extension, { old: true, added: 1 });
+  assert.equal(result.fonts.future, 'new'); assert.equal(result.fonts.another, 'kept');
+});
+
+test('a missing existence response cannot be used as a write baseline', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  const original = client.host.bind(client);
+  client.host = async <T>(endpoint: string, params?: Record<string, unknown>): Promise<T> =>
+    endpoint === 'get-persisted-atom' ? { value: true } as T : original<T>(endpoint, params);
+  await prefs.load();
+  assert.equal(prefs.getSnapshot()['show-context-window-usage'].available, false);
+  assert.match(prefs.getSnapshot()['show-context-window-usage'].error ?? '', /whether the value exists/);
+  prefs.edit('show-context-window-usage', false);
+  assert.equal(await prefs.saveOne('show-context-window-usage'), false);
 });
 
 test('missing atom service is visible and cannot fall back to another store', async () => {
@@ -247,4 +316,14 @@ test('theme sharing accepts original format, validates variants and preserves un
   assert.throws(() => importTheme(encoded, 'light'), /Invalid light/);
   assert.throws(() => importTheme(exportTheme('dark', theme, 'proof'), 'dark'), /unsupported/);
   assert.throws(() => importTheme('codex-theme-v1:{"variant":"dark"}', 'dark'), /Invalid dark/);
+  const merged = mergeImportedTheme({ ...theme, extension: { preserve: true }, fonts: { ...theme.fonts, future: 'keep' } },
+    { ...structuredClone(defaultThemes.dark), accent: '#123456' });
+  assert.equal(merged.accent, '#123456');
+  assert.deepEqual(merged.extension, { preserve: true });
+  assert.equal(merged.fonts.future, 'keep');
+  const face = { family: 'Old', fullName: 'Old Bold', postscriptName: 'Old-Bold' };
+  const updatedFont = mergeImportedTheme({ ...theme, fonts: { ...theme.fonts, ui: 'Old', uiFace: face } },
+    { ...theme, fonts: { ...theme.fonts, ui: 'New' } });
+  assert.equal(updatedFont.fonts.ui, 'New');
+  assert.equal(updatedFont.fonts.uiFace, undefined);
 });
