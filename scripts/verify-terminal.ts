@@ -1,43 +1,54 @@
 // Run under /tmp/agents-workbench-heavy.lock. All processes and data are disposable.
-// --ssh exercises a synthetic SSH host and reports real SSH as an uncovered gap.
+// --ssh uses a disposable loopback sshd and the actual CLI proxy, not a synthetic SSH peer.
 // --project selects fixture-local or, with --ssh, fixture-ssh; no user catalog is read.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { createConnection } from 'node:net';
 import { hostname } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
+import { promisify } from 'node:util';
 import { chromium } from 'playwright-core';
 import type { Browser, Page, WebSocketRoute } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { fileMethods } from '../src/native/files.ts';
+import { createSshProxyStream } from '../src/native/ssh.ts';
 import type { TerminalEvent } from '../src/native/terminal-protocol.ts';
 import { createFakeCodex } from '../test/fake-codex.ts';
 import { fileDaemonFixture } from '../test/file-daemon-fixture.ts';
+import { TerminalSshFixture } from './verify-terminal-ssh.ts';
 
+const inheritedEnv = { ...process.env };
+const requestedSsh = process.argv.includes('--ssh');
+const requestedBinary = process.env.AGENTS_TERMINAL_CODEX_BIN;
+const chromePath = process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome';
+const requestedOutput = process.env.AGENTS_TERMINAL_EVIDENCE_DIR;
 const root = await mkdtemp('/tmp/yard-terminal-ui-');
-const fixtureEnv = { PATH: '/usr/local/bin:/usr/bin:/bin', LANG: 'C.UTF-8', HOME: join(root, 'home'),
+const fixtureEnv = { PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`, LANG: 'C.UTF-8', HOME: join(root, 'home'),
   CODEX_HOME: join(root, 'codex'), XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache'),
   XDG_DATA_HOME: join(root, 'xdg-data'), TMPDIR: join(root, 'tmp') };
+for (const key of Object.keys(process.env)) delete process.env[key];
+Object.assign(process.env, fixtureEnv);
 await Promise.all([fixtureEnv.HOME, fixtureEnv.CODEX_HOME, fixtureEnv.XDG_CONFIG_HOME, fixtureEnv.XDG_CACHE_HOME,
   fixtureEnv.XDG_DATA_HOME, fixtureEnv.TMPDIR].map(path => mkdir(path, { recursive: true })));
-const output = process.env.AGENTS_TERMINAL_EVIDENCE_DIR
-  ? resolve(process.env.AGENTS_TERMINAL_EVIDENCE_DIR) : await mkdtemp('/tmp/yard-terminal-evidence-');
+const output = requestedOutput ? resolve(requestedOutput) : await mkdtemp('/tmp/yard-terminal-evidence-');
+assert.ok(output !== root && !output.startsWith(root + '/'), 'Evidence must be outside the disposable fixture');
 await mkdir(output, { recursive: true });
 const remoteRoot = join(root, 'remote-project');
 await mkdir(remoteRoot);
 const localFake = await createFakeCodex(root);
-const remoteFake = await createFakeCodex(remoteRoot);
 const remoteHost = 'remote-ssh-discovered:terminal-fixture';
 const projectFilter = process.argv.find(value => value.startsWith('--project='))?.slice('--project='.length);
 const targets = [
-  { hostId: 'local', projectId: 'fixture-local', label: 'Local terminal fixture', cwd: root, fake: localFake },
-  ...(process.argv.includes('--ssh') ? [{ hostId: remoteHost, projectId: 'fixture-ssh', label: 'SSH terminal fixture', cwd: remoteRoot, fake: remoteFake }] : []),
+  { hostId: 'local', projectId: 'fixture-local', label: 'Local terminal fixture', cwd: root },
+  ...(requestedSsh ? [{ hostId: remoteHost, projectId: 'fixture-ssh', label: 'SSH terminal fixture', cwd: remoteRoot }] : []),
 ].filter(target => !projectFilter || projectFilter === target.projectId);
+let sshFixture: TerminalSshFixture | undefined;
+let sshConnections = 0, sshPathsVerified = false;
 const processes = new Map<string, { child: ChildProcessWithoutNullStreams; owner: string; pid?: number }>();
+const ownedPids = new Set<number>();
 let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
 let browser: Browser | undefined, page: Page | undefined;
 let checks: string[] = [], gaps: string[] = [], errors: string[] = [];
@@ -47,8 +58,8 @@ let connections: { hostId: string; state: string }[] = [];
 let sockets: { page: WebSocketRoute; server: WebSocketRoute; connected: boolean }[] = [];
 const results: { hostId: string; projectId: string; cwd: string; checks: string[]; gaps: string[]; errors: string[];
   requests: typeof requests; events: typeof events; connections: typeof connections }[] = [];
-const report: Record<string, unknown> = { renderer: 'owned', peer: 'synthetic local/SSH host RPC with real disposable local PTYs',
-  realDaemonUsed: false, realSshUsed: false, results };
+const report: Record<string, unknown> = { renderer: 'owned', localPeer: 'synthetic local RPC with a real disposable local PTY',
+  requestedSsh, realDaemonUsed: false, realSshUsed: false, physicalRemoteMachine: false, realInference: false, results };
 
 async function until(predicate: () => boolean | Promise<boolean>, label: string, timeout = 30000) {
   const deadline = Date.now() + timeout;
@@ -73,10 +84,8 @@ async function capture(name: string) {
 }
 try {
   assert.ok(targets.length, 'No matching disposable fixture project; use fixture-local or --ssh --project=fixture-ssh');
-  for (const target of [
-    { hostId: 'local', cwd: root, fake: localFake },
-    { hostId: remoteHost, cwd: remoteRoot, fake: remoteFake },
-  ]) {
+  assert.ok(!requestedSsh || targets.some(target => target.hostId === remoteHost), '--ssh requires the fixture-ssh project');
+  for (const target of [{ hostId: 'local', cwd: root, fake: localFake }]) {
     const fileRpc = fileDaemonFixture(path => {
       if (path !== target.cwd && !path.startsWith(target.cwd + '/')) throw new Error('File request outside disposable fixture');
       return path;
@@ -127,29 +136,41 @@ try {
   await writeFile(join(root, 'data/native-state.json'), JSON.stringify({ globals: {
     'remote-connection-auto-connect-by-host-id': { [remoteHost]: true },
   } }));
+  if (requestedSsh) {
+    let binary = requestedBinary;
+    if (!binary) {
+      try { binary = (await promisify(execFile)('which', ['codex'], { env: { PATH: inheritedEnv.PATH ?? '' } })).stdout.trim(); }
+      catch (error) { throw new Error('--ssh requires an actual Codex CLI; set AGENTS_TERMINAL_CODEX_BIN: ' + String(error)); }
+    }
+    assert.ok(binary, '--ssh requires an actual Codex CLI; set AGENTS_TERMINAL_CODEX_BIN to its executable');
+    sshFixture = new TerminalSshFixture(root, remoteRoot, binary);
+    try { await sshFixture.start(); }
+    catch (error) { throw new Error('Actual --ssh CLI/sshd setup failed: ' + String(error)); }
+    report.cliVersion = sshFixture.version;
+    report.daemon = sshFixture.daemon;
+    process.env.PATH = `${sshFixture.bin}:${fixtureEnv.PATH}`;
+  }
   app = await createNativeWorkbench({ port: 0, workspace: root, dataDir: join(root, 'data'), codexHome: join(root, 'codex'),
     socketPath: localFake.socketPath,
-    hostCatalog: { hosts: [{ hostId: remoteHost, displayName: 'Disposable SSH fixture', sshAlias: 'fixture', sshHost: 'fixture', sshPort: null, identity: null }],
-      projects: [{ hostId: remoteHost, id: 'fixture-ssh', label: 'SSH terminal fixture', remotePath: remoteRoot }], assignments: {} },
+    hostCatalog: { hosts: sshFixture?.host ? [sshFixture.host] : [],
+      projects: sshFixture?.host ? [{ hostId: remoteHost, id: 'fixture-ssh', label: 'SSH terminal fixture', remotePath: remoteRoot }] : [], assignments: {} },
     sshStream: (host, onPaths) => {
       assert.equal(host.hostId, remoteHost);
-      onPaths?.({ homeDirectory: remoteRoot, codexHome: join(remoteRoot, 'codex') });
-      return createConnection(remoteFake.socketPath);
-    },
-    remoteFileCommand: async (_host, command) => {
-      if (command === `stat -L --printf='%s' -- '${remoteRoot}'`) return Buffer.from('0');
-      if (command === `realpath -ze -- '${remoteRoot}'`) return Buffer.from(remoteRoot + '\0');
-      throw new Error('External SSH file commands are disabled in the disposable fixture');
+      assert.ok(sshFixture);
+      sshConnections++;
+      return createSshProxyStream(host, paths => {
+        assert.deepEqual(paths, { homeDirectory: sshFixture!.home, codexHome: sshFixture!.codexHome });
+        sshPathsVerified = true;
+        onPaths?.(paths);
+      });
     },
     httpFetch: async () => new Response('External requests disabled for terminal fixture', { status: 503 }) });
-  browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome',
+  browser = await chromium.launch({ executablePath: chromePath,
     headless: true, env: fixtureEnv, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking'] });
   for (const target of targets) {
     checks = []; gaps = []; errors = []; requests = []; events = []; connections = []; sockets = [];
     results.push({ hostId: target.hostId, projectId: target.projectId, cwd: target.cwd, checks, gaps, errors, requests, events, connections });
-    if (target.hostId !== 'local') gaps.push('Real SSH transport and remote project verification remain uncovered; this host is synthetic');
-    const otherFake = target.fake === localFake ? remoteFake : localFake;
-    const otherSpawnCount = otherFake.calls('process/spawn').filter(call => call.params.tty === true).length;
+    const localSpawnCount = localFake.calls('process/spawn').filter(call => call.params.tty === true).length;
     page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
     page.on('pageerror', error => errors.push(error.message));
@@ -166,6 +187,8 @@ try {
         if (message.type === 'terminal-event') events.push({ at: Date.now(), event: message.event });
         if (message.type === 'codex-app-server-connection-changed') {
           connections.push({ hostId: String(message.hostId), state: String(message.state) });
+          // The page WebSocket reconnects through local first; the selected SSH
+          // connection is opened by the next explicit host operation.
           if (message.hostId === 'local' && message.state === 'connected') socket.connected = true;
         }
         route.send(raw);
@@ -175,8 +198,8 @@ try {
     await page.locator('[data-owned-renderer="true"]').waitFor();
     const projectAction = page.getByRole('button', { name: `New chat in ${target.label}`, exact: true });
     await projectAction.click({ timeout: 60000 });
-    await page.getByRole('textbox', { name: '和 Codex 一起工作', exact: true }).waitFor();
-    const terminal = page.locator('.yard-terminal-screen .xterm-helper-textarea');
+    await page.getByRole('textbox', { name: /^(和 Codex 一起工作|Work with Codex)$/ }).waitFor();
+    const terminal = page.locator('.yard-terminal-container:visible .xterm-helper-textarea');
     async function waitForNewTerminal(previousCount: number) {
       await until(() => requests.filter(request => request.operation === 'create').length > previousCount, 'new terminal request');
       const create = requests.filter(request => request.operation === 'create').at(-1)!;
@@ -191,7 +214,7 @@ try {
     }
     async function command(value: string) {
       await until(async () => {
-        await page!.locator('.yard-terminal-screen .xterm-screen').click();
+        await page!.locator('.yard-terminal-container:visible .xterm-screen').click();
         await delay(100);
         return terminal.evaluate(element => document.activeElement === element);
       }, 'terminal keyboard focus');
@@ -203,27 +226,41 @@ try {
     async function pid(label: string) {
       await command(`printf '${label}=%s\\n' "$$"`);
       await until(() => new RegExp(label + '=\\d+').test(text()), label);
-      return Number(new RegExp(label + '=(\\d+)').exec(text())![1]);
+      const value = Number(new RegExp(label + '=(\\d+)').exec(text())![1]);
+      assert.ok(Number.isSafeInteger(value) && value > 1); ownedPids.add(value); return value;
     }
     async function child(label: string) {
       await command(`sleep 60 & printf '${label}=%s\\n' "$!"`);
       await until(() => new RegExp(label + '=\\d+').test(text()), label);
-      return Number(new RegExp(label + '=(\\d+)').exec(text())![1]);
+      const value = Number(new RegExp(label + '=(\\d+)').exec(text())![1]);
+      assert.ok(Number.isSafeInteger(value) && value > 1); ownedPids.add(value); return value;
     }
     async function checkTarget(label: string) {
       await command(`printf '${label}_HOST=%s\\n${label}_CWD=%s\\n' "$(hostname)" "$(pwd -P)"`);
       await waitText(label + '_HOST=' + hostname());
       await waitText(label + '_CWD=' + await realpath(target.cwd));
     }
-    await open();
+    assert.equal(requests.filter(request => request.operation === 'create').length, 0, 'No terminal may start before an explicit action');
+    await page.keyboard.press('Control+Backquote');
+    await delay(1000);
+    if (!requests.some(request => request.operation === 'create')) {
+      gaps.push('Ctrl+Backquote did not explicitly open the first terminal');
+      await open();
+    } else await waitForNewTerminal(0);
     const create = requests.find(request => request.operation === 'create')!;
     assert.equal((create.args[0] as { hostId: string }).hostId, target.hostId);
     assert.equal((create.args[0] as { cwd: string }).cwd, target.cwd);
-    assert.ok(target.fake.calls('process/spawn').some(call => call.params.tty === true && call.params.cwd === target.cwd));
-    assert.equal(otherFake.calls('process/spawn').filter(call => call.params.tty === true).length, otherSpawnCount);
+    if (target.hostId === 'local') {
+      assert.ok(localFake.calls('process/spawn').some(call => call.params.tty === true && call.params.cwd === target.cwd));
+    } else {
+      assert.ok(sshConnections > 0 && sshPathsVerified, 'Actual SSH proxy must report the disposable remote homes');
+      assert.equal(localFake.calls('process/spawn').filter(call => call.params.tty === true).length, localSpawnCount);
+      report.realDaemonUsed = true; report.realSshUsed = true;
+    }
     await checkTarget('TW');
     const initialPid = await pid('TW_PID');
-    checks.push('Selected project opens a real local PTY in its cwd through the correct synthetic host peer');
+    checks.push(target.hostId === 'local' ? 'Selected project opens a real local PTY in its cwd through the synthetic local peer'
+      : 'Selected project opens a real PTY in its cwd through actual loopback SSH, production proxy and isolated CLI daemon');
     await command(`printf 'TW_LINE_A\\nTW_LINE_B\\n'; for i in 1 2 3; do printf 'TW_TICK_%s\\n' "$i"; sleep .4; done`);
     await waitText('TW_TICK_1'); await waitText('TW_TICK_3');
     assert.ok(text().includes('TW_LINE_A\r\nTW_LINE_B\r\n'));
@@ -241,18 +278,39 @@ try {
     await command(`printf 'TW_SIZE=%s\\n' "$(stty size)"`);
     await waitText(`TW_SIZE=${size.args[2]} ${size.args[1]}`);
     checks.push('Real PTY multiline and streaming output, Ctrl+C and kernel dimensions');
-    const hideTabs = page.getByRole('button', { name: /^(隐藏标签页|Hide tabs)$/ });
-    if (await hideTabs.count()) {
-      await hideTabs.click();
-      await page.getByRole('button', { name: /^(显示标签页|Show tabs)$/ }).click();
-      assert.equal(await pid('TW_HIDE_REVEAL'), initialPid);
-      assert.equal(requests.filter(request => request.operation === 'create').length, 1);
-      checks.push('Hiding and revealing tabs preserves the same shell');
-    } else gaps.push('Original hide/reveal tabs controls are unavailable');
+    await page.getByRole('button', { name: /^(隐藏面板|Hide panel)$/ }).click();
+    await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
+    assert.equal(await pid('TW_HIDE_REVEAL'), initialPid);
+    assert.equal(requests.filter(request => request.operation === 'create').length, 1);
+    checks.push('Hiding and revealing the panel preserves the same shell');
+    await page.setViewportSize({ width: 390, height: 780 });
+    const hideAtMobile = page.getByRole('button', { name: /^(隐藏面板|Hide panel)$/ });
+    const hideBox = await hideAtMobile.boundingBox();
+    assert.ok(hideBox && hideBox.x >= 0 && hideBox.x + hideBox.width <= 390, 'The hide control must remain reachable on a narrow screen');
+    await hideAtMobile.click();
+    const closeSidebar = page.getByRole('button', { name: 'Close sidebar', exact: true });
+    if (await closeSidebar.isVisible()) await closeSidebar.click();
+    await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
+    assert.equal(await pid('TW_MOBILE_REVEAL'), initialPid);
+    assert.equal(requests.filter(request => request.operation === 'create').length, 1);
+    checks.push('Narrow-screen hide and reveal controls preserve the same shell');
+    await page.setViewportSize({ width: 1100, height: 800 });
+    await page.getByRole('button', { name: 'Open terminal', exact: true }).click();
+    await waitForNewTerminal(1);
+    const secondPid = await pid('TW_SECOND');
+    assert.notEqual(secondPid, initialPid);
+    const terminalTabs = page.locator('.yard-panel-tab').filter({ has: page.getByRole('tab', { name: 'Terminal' }) });
+    await terminalTabs.first().getByRole('tab', { name: 'Terminal' }).click();
+    assert.equal(await pid('TW_FIRST_AGAIN'), initialPid);
+    await terminalTabs.last().getByRole('button', { name: 'Close terminal' }).click();
+    await stopped(secondPid);
+    await until(async () => await page!.getByRole('tab', { name: 'Terminal' }).count() === 1, 'second terminal tab closes');
+    assert.equal(requests.filter(request => request.operation === 'create').length, 2);
+    checks.push('Explicit new terminal opens another shell; switching tabs preserves the first');
     await page.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
     await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
     assert.equal(await pid('TW_SAME'), initialPid);
-    assert.equal(requests.filter(request => request.operation === 'create').length, 1);
+    assert.equal(requests.filter(request => request.operation === 'create').length, 2);
     checks.push('Switching away and back preserves the same shell');
     const backgroundPid = await child('TW_CHILD');
     await page.getByRole('button', { name: 'Close terminal', exact: true }).click();
@@ -270,6 +328,7 @@ try {
     const reloadChild = await child('TW_RELOAD_CHILD');
     await command(`printf 'TW_ONCE\\n'`); await waitText('TW_ONCE');
     await page.reload({ waitUntil: 'commit' });
+    if (!await projectAction.isVisible()) await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
     await projectAction.click({ timeout: 60000 });
     await stopped(beforeReload); await stopped(reloadChild);
     await open();
@@ -281,6 +340,7 @@ try {
     const disconnectChild = await child('TW_DISCONNECT_CHILD');
     const createCount = requests.filter(request => request.operation === 'create').length;
     const writeCount = requests.filter(request => request.operation === 'write').length;
+    const remoteConnectedCount = connections.filter(connection => connection.hostId === target.hostId && connection.state === 'connected').length;
     const socketCount = sockets.length, socket = sockets.at(-1)!;
     await Promise.all([socket.page.close({ code: 1012, reason: 'isolated terminal reconnect' }), socket.server.close()]);
     await stopped(afterReload); await stopped(disconnectChild);
@@ -294,14 +354,22 @@ try {
       await page.getByRole('button', { name: 'New terminal', exact: true }).click();
     }
     await waitForNewTerminal(createCount);
+    if (target.hostId !== 'local') assert.ok(connections.filter(connection => connection.hostId === target.hostId && connection.state === 'connected').length > remoteConnectedCount,
+      'The explicit replacement must reconnect the selected SSH host');
     const reconnectedPid = await pid('TW_AFTER_RECONNECT');
     assert.notEqual(reconnectedPid, afterReload);
     await checkTarget('TW_RECONNECT');
+    await page.getByRole('button', { name: /^(隐藏面板|Hide panel)$/ }).click();
     await page.keyboard.press('Control+Backquote');
+    try { await page.locator('.yard-terminal-container:visible .xterm-screen').waitFor({ state: 'visible', timeout: 1000 }); }
+    catch {
+      gaps.push('Ctrl+Backquote did not reveal the existing terminal');
+      await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
+    }
     assert.equal(await pid('TW_SHORTCUT_SAME'), reconnectedPid);
     assert.equal(requests.filter(request => request.operation === 'create').length, createCount + 1);
     assert.equal(text().split('TW_ONCE\r\n').length - 1, 1, 'Earlier terminal input must not be replayed after reconnect');
-    assert.equal(otherFake.calls('process/spawn').filter(call => call.params.tty === true).length, otherSpawnCount);
+    if (target.hostId !== 'local') assert.equal(localFake.calls('process/spawn').filter(call => call.params.tty === true).length, localSpawnCount);
     checks.push('Disconnect reaps processes; reconnect does not replay input or automatically create a shell');
     await capture(target.projectId + '-terminal');
     assert.deepEqual(errors, []);
@@ -310,20 +378,43 @@ try {
   }
   assert.deepEqual(results.flatMap(result => result.gaps.map(gap => result.projectId + ': ' + gap)), [],
     'Original terminal behavior and requested SSH coverage must be available for each selected project');
+  assert.ok(!requestedSsh || (report.realSshUsed === true && report.realDaemonUsed === true), '--ssh requires an actual SSH CLI session');
   report.ok = true;
 } catch (error) {
   report.ok = false; report.failure = String(error);
   await capture('failure').catch(() => {});
-  throw error;
+  process.exitCode = 1;
 } finally {
-  await browser?.close(); await app?.close(); await localFake.close(); await remoteFake.close();
-  for (const process of processes.values()) if (process.child.exitCode === null) process.child.kill('SIGTERM');
+  const cleanupErrors: string[] = [];
+  try { await browser?.close(); } catch (error) { cleanupErrors.push('browser: ' + String(error)); }
+  try { await app?.close(); } catch (error) { cleanupErrors.push('app: ' + String(error)); }
+  try { await localFake.close(); } catch (error) { cleanupErrors.push('local fixture: ' + String(error)); }
+  for (const process of processes.values()) if (process.child.exitCode === null && process.child.signalCode === null) process.child.kill('SIGTERM');
   await Promise.all([...processes.values()].map(async ({ child }) => {
     if (child.exitCode !== null || child.signalCode !== null) return;
     await Promise.race([new Promise<void>(resolve => child.once('exit', () => resolve())), delay(5000)]);
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await new Promise<void>(resolve => child.once('exit', () => resolve())); }
   }));
-  await rm(root, { recursive: true, force: true });
+  try { await sshFixture?.close(); } catch (error) { cleanupErrors.push('SSH fixture: ' + String(error)); }
+  for (const pid of ownedPids) {
+    try {
+      if (!await running(pid)) continue;
+      const env = (await readFile(`/proc/${pid}/environ`, 'utf8')).split('\0');
+      assert.ok(env.includes('HOME=' + fixtureEnv.HOME) && env.includes('CODEX_HOME=' + fixtureEnv.CODEX_HOME), 'Process no longer belongs to the disposable fixture');
+      process.kill(pid, 'SIGTERM');
+      await stopped(pid);
+    } catch (error) { cleanupErrors.push(`fixture process ${pid}: ${String(error)}`); }
+  }
+  report.sshConnections = sshConnections;
+  if (cleanupErrors.length) {
+    report.ok = false; report.cleanupErrors = cleanupErrors; report.retainedFixture = root; process.exitCode = 1;
+  } else {
+    assert.ok(root.startsWith('/tmp/yard-terminal-ui-'));
+    try { await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); report.fixtureRemoved = true; }
+    catch (error) { report.ok = false; report.cleanupErrors = [String(error)]; report.retainedFixture = root; process.exitCode = 1; }
+  }
   await writeFile(join(output, 'result.json'), JSON.stringify(report, null, 2));
+  for (const key of Object.keys(process.env)) delete process.env[key];
+  Object.assign(process.env, inheritedEnv);
   console.log('Terminal UI evidence:', output);
 }
