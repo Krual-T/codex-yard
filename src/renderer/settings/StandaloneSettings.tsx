@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { StandaloneSettingsProps } from '../workbench-contract.ts';
 import { AppearanceSection } from './AppearanceSection.tsx';
+import { ArchivedSection } from './ArchivedSection.tsx';
+import { CatalogSection } from './CatalogSection.tsx';
+import type { CatalogKind } from './catalog.ts';
+import { ConnectionsSection } from './ConnectionsSection.tsx';
 import { GeneralSection } from './GeneralSection.tsx';
 import { ModelSection } from './ModelSection.tsx';
 import { Preferences, preferenceKeys } from './preferences.ts';
@@ -83,6 +87,7 @@ export function StandaloneSettings({ client, hostId, initialSection, onClose }: 
   };
   const title = settingsSections.find(item => item.id === section)?.title ?? section;
   const groups = [...new Set(settingsSections.map(item => item.group))];
+  const isCatalog = (value: string): value is CatalogKind => ['skills-settings', 'hooks-settings', 'mcp-settings', 'plugins-settings'].includes(value);
   return <div className="yard-settings">
     <aside className="yard-settings-nav" aria-label="Settings navigation">
       <div className="yard-settings-nav-header"><strong>Settings</strong><button type="button" onClick={() => guard(onClose)} aria-label="Close settings">Close</button></div>
@@ -112,6 +117,9 @@ export function StandaloneSettings({ client, hostId, initialSection, onClose }: 
         {section === 'general-settings' ? <GeneralSection preferences={preferences} snapshot={snapshot} platform={platform} navigate={navigate} /> :
           section === 'appearance' ? <AppearanceSection preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} /> :
             section === 'models' ? <ModelSection key={selectedHost} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+              isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
+                section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving} /> :
+                  section === 'connections' ? <ConnectionsSection client={client} onSavingChange={setOtherSaving} /> :
             <><h2>{title}</h2><p className="yard-setting-error">This settings section is not yet available in the web host.</p></>}
       </div>
       {(preferences.dirty || saving) && <div className="yard-save-bar"><span>Unsaved changes</span><div className="yard-actions">
