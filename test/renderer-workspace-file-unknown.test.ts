@@ -21,6 +21,9 @@ test('file recovery retains the original pending operation and later edits acros
   await writeFile(path, original);
   const receiptPath = join(project, 'late-receipt.txt');
   await writeFile(receiptPath, 'base\n');
+  const retryPath = join(project, 'retry.txt'), legacyPath = join(project, 'legacy.txt'), unknownPath = join(project, 'unknown.txt');
+  const closeA = join(project, 'close-a.txt'), closeB = join(project, 'close-b.txt');
+  await Promise.all([retryPath, legacyPath, unknownPath, closeA, closeB].map(target => writeFile(target, 'base\n')));
   const fake = await createFakeCodex(root), daemon = fileDaemonFixture();
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -37,11 +40,20 @@ test('file recovery retains the original pending operation and later edits acros
     import { BrowserWorkbenchClient } from './src/renderer/app/client.ts';
     import { WorkspacePanels } from './src/renderer/panels/WorkspacePanels.tsx';
     import { readFileRecovery } from './src/renderer/panels/file-save-recovery.ts';
+    import { updateBrowserAtom } from './src/renderer/storage/ui-atoms.ts';
     const client = new BrowserWorkbenchClient();
     const host = client.host.bind(client);
-    let holdNext = false, releaseReceipt;
+    let holdNext = false, loseNext = false, releaseReceipt, closeMode = 'ok', releaseClose, closed = 0, releaseAtoms, sawAtomTransaction = false;
     client.host = async (...args) => {
+      if (args[0] === 'terminal') {
+        if (args[1].operation === 'close') {
+          if (closeMode === 'fail') throw new Error('fixture terminal close failure');
+          if (closeMode === 'delay') await new Promise(resolve => { releaseClose = resolve; });
+        }
+        return {};
+      }
       const result = await host(...args);
+      if (args[0] === 'workspace-file-save' && loseNext) { loseNext = false; throw new Error('fixture lost save response'); }
       if (args[0] === 'workspace-file-save' && holdNext) {
         holdNext = false;
         await new Promise(resolve => { releaseReceipt = resolve; });
@@ -53,7 +65,7 @@ test('file recovery retains the original pending operation and later edits acros
     let props = {client, scopeId:'thread-a', hostId:'local', cwd,
       appearance:{theme:'light',codeFontSize:13,codeLineHeight:20},
       request:{id:'initial',scopeId:'thread-a',hostId:'local',cwd,kind:'file',path},
-      onRequestConsumed() {}, onClose() {}, onRecoveryBarrier(value) { barrier = value; }};
+      onRequestConsumed() {}, onClose() { closed++; }, onRecoveryBarrier(value) { barrier = value; }};
     const root = createRoot(document.getElementById('root'));
     const render = () => root.render(React.createElement(WorkspacePanels, props));
     window.fixture = {
@@ -63,8 +75,49 @@ test('file recovery retains the original pending operation and later edits acros
       text() { return EditorView.findFromDOM(document.querySelector('.yard-editor-container:not([hidden]) .cm-content')).state.doc.toString(); },
       recovery(scope) { return readFileRecovery(JSON.stringify([scope,'local',cwd,path])); },
       fileRecovery(scope, target) { return readFileRecovery(JSON.stringify([scope,'local',cwd,target])); },
+      changeRecovery(scope, target, update) {
+        return updateBrowserAtom('codex-yard.file-save-recovery.v1:' + JSON.stringify([scope,'local',cwd,target]), value => ({...value,...update}));
+      },
+      failNextAtomTransaction() {
+        const original = IDBDatabase.prototype.transaction;
+        IDBDatabase.prototype.transaction = function(...args) {
+          IDBDatabase.prototype.transaction = original;
+          throw new Error('fixture storage failure');
+        };
+      },
+      async holdAtoms() {
+        const db = await new Promise((resolve, reject) => {
+          const request = indexedDB.open('codex-yard.ui-atoms.v1', 1);
+          request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+        });
+        const tx = db.transaction('atoms', 'readwrite'), store = tx.objectStore('atoms');
+        let active = true;
+        releaseAtoms = () => { active = false; };
+        await new Promise((resolve, reject) => {
+          let first = true;
+          const keep = () => {
+            const request = store.get('native-atoms');
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => { if (active) keep(); if (first) { first = false; resolve(); } };
+          };
+          keep();
+        });
+      },
+      releaseAtoms() { releaseAtoms?.(); },
+      watchAtomTransaction() {
+        sawAtomTransaction = false;
+        const original = IDBDatabase.prototype.transaction;
+        IDBDatabase.prototype.transaction = function(...args) {
+          IDBDatabase.prototype.transaction = original; sawAtomTransaction = true;
+          return original.apply(this, args);
+        };
+      },
+      sawAtomTransaction() { return sawAtomTransaction; },
+      terminalClose(mode) { closeMode = mode; releaseClose = null; },
+      terminalWaiting() { return Boolean(releaseClose); }, releaseTerminal() { releaseClose?.(); }, closed() { return closed; },
       status(id) { return client.host('workspace-file-save-status',{hostId:'local',cwd,path,operationId:id}); },
-      hold() { holdNext = true; }, held() { return Boolean(releaseReceipt); }, release() { releaseReceipt?.(); },
+      hold() { holdNext = true; releaseReceipt = null; }, held() { return Boolean(releaseReceipt); }, release() { releaseReceipt?.(); },
+      loseNextSave() { loseNext = true; },
       flush() { if (!barrier) throw new Error('Recovery barrier not registered'); return barrier(); },
     };
     render();
@@ -154,6 +207,12 @@ test('file recovery retains the original pending operation and later edits acros
     assert.equal(await page.getByRole('button', { name: 'Save file' }).isDisabled(), true);
     assert.equal(await page.evaluate(() => (window as any).fixture.text()), 'ABhello\nworld\nend\n');
     assert.equal(await newerPage.evaluate(async () => (await (window as any).fixture.recovery('thread-a')).id), newerId);
+    await page.getByRole('button', { name: 'Review recovery' }).click();
+    await page.getByRole('alert').filter({ hasText: 'Another page owns a different recovery' }).waitFor();
+    assert.equal(await page.evaluate(() => (window as any).fixture.text()), 'ABhello\nworld\nend\n');
+    await page.getByRole('button', { name: 'Close mixed.txt' }).click();
+    await page.getByRole('tab', { name: /mixed.txt/ }).waitFor({ state: 'detached' });
+    assert.equal(await newerPage.evaluate(async () => (await (window as any).fixture.recovery('thread-a')).id), newerId);
     await page.evaluate(({ cwd, path }) => (window as any).fixture.render({scopeId:'draft-b',
       request:{id:'other-again',scopeId:'draft-b',hostId:'local',cwd,kind:'file',path}}), { cwd: project, path });
     await page.waitForFunction(() => { try { return (window as any).fixture.text() === 'other hello\nworld\nend\n'; } catch { return false; } });
@@ -187,6 +246,118 @@ test('file recovery retains the original pending operation and later edits acros
     assert.equal(await page.evaluate(() => (window as any).fixture.text()), 'XYbase\n');
     assert.equal(await newerPage.evaluate(async path => (await (window as any).fixture.fileRecovery('receipt-a', path)).id, receiptPath), newReceiptId);
     assert.equal(writes, 4);
+
+    await page.getByRole('button', { name: 'Review recovery' }).click();
+    await page.getByRole('alert').filter({ hasText: 'Another page owns a different recovery' }).waitFor();
+    await page.getByRole('button', { name: 'Close late-receipt.txt' }).click();
+    await page.getByRole('tab', { name: /late-receipt.txt/ }).waitFor({ state: 'detached' });
+    assert.equal(await newerPage.evaluate(async path => (await (window as any).fixture.fileRecovery('receipt-a', path)).id, receiptPath), newReceiptId);
+
+    await page.evaluate(({ cwd, path }) => (window as any).fixture.render({scopeId:'retry',
+      request:{id:'retry',scopeId:'retry',hostId:'local',cwd,kind:'file',path}}), { cwd: project, path: retryPath });
+    await page.waitForFunction(() => { try { return (window as any).fixture.text() === 'base\n'; } catch { return false; } });
+    await page.evaluate(() => { (window as any).fixture.hold(); (window as any).fixture.edit(0, 'X'); });
+    await page.getByRole('button', { name: 'Save file' }).click();
+    await page.waitForFunction(() => (window as any).fixture.held());
+    await page.evaluate(() => { (window as any).fixture.failNextAtomTransaction(); (window as any).fixture.edit(1, 'Y'); });
+    await page.getByRole('alert').filter({ hasText: 'Could not retain file edits' }).waitFor();
+    await page.getByRole('button', { name: 'Review recovery' }).click();
+    await page.getByRole('alert').filter({ hasText: 'Save result is unknown' }).waitFor();
+    await page.evaluate(() => (window as any).fixture.flush());
+    const retried = await page.evaluate(async path => (window as any).fixture.fileRecovery('retry', path), retryPath);
+    assert.equal(retried.draft, 'XYbase\n');
+    assert.equal(Object.hasOwn(retried, 'expectedContents'), false);
+    await page.evaluate(() => (window as any).fixture.release());
+    await page.getByRole('button', { name: 'Check save result' }).waitFor({ state: 'detached' });
+    assert.equal(await page.evaluate(() => (window as any).fixture.text()), 'XYbase\n');
+
+    await page.evaluate(({ path }) => (window as any).fixture.changeRecovery('legacy', path, {
+      id:'legacy',checkId:'legacy',submitted:true,phase:'failed',expectedContents:'old field',contents:'old',
+      saved:'base\n',draft:'legacy\n',revision:1,extra:{from:'old version'},
+    }), { path: legacyPath });
+    await page.evaluate(({ cwd, path }) => (window as any).fixture.render({scopeId:'legacy',
+      request:{id:'legacy',scopeId:'legacy',hostId:'local',cwd,kind:'file',path}}), { cwd: project, path: legacyPath });
+    await page.waitForFunction(() => { try { return (window as any).fixture.text() === 'legacy\n'; } catch { return false; } });
+    await page.evaluate(() => (window as any).fixture.edit(0, 'X'));
+    await page.getByRole('button', { name: 'Save file' }).click();
+    await page.waitForFunction(() => !document.querySelector('[role="tab"][aria-selected="true"] [aria-label="Unsaved changes"]'));
+    const legacy = await page.evaluate(async path => (window as any).fixture.fileRecovery('legacy', path), legacyPath);
+    assert.equal(legacy.expectedContents, 'old field');
+    assert.deepEqual(legacy.extra, { from: 'old version' });
+    assert.equal(legacy.draft, 'Xlegacy\n');
+
+    await page.evaluate(({ cwd, path }) => (window as any).fixture.render({scopeId:'uncertain',
+      request:{id:'uncertain',scopeId:'uncertain',hostId:'local',cwd,kind:'file',path}}), { cwd: project, path: unknownPath });
+    await page.getByRole('textbox', { name: `File: ${unknownPath}` }).waitFor();
+    await page.evaluate(() => { (window as any).fixture.loseNextSave(); (window as any).fixture.edit(0, 'U'); });
+    await page.getByRole('button', { name: 'Save file' }).click();
+    await page.getByRole('alert').filter({ hasText: 'Save result is unknown' }).waitFor();
+    const unknown = await page.evaluate(async path => (window as any).fixture.fileRecovery('uncertain', path), unknownPath);
+    assert.equal(unknown.phase, 'unknown');
+
+    for (const [index, target] of [closeA, closeB].entries()) {
+      await page.evaluate(({ cwd, path, id }) => (window as any).fixture.render({scopeId:'close',
+        request:{id,scopeId:'close',hostId:'local',cwd,kind:'file',path}}), { cwd: project, path: target, id: `close-${index}` });
+      await page.getByRole('textbox', { name: `File: ${target}` }).waitFor();
+      await page.evaluate(() => (window as any).fixture.edit(0, 'X'));
+      await page.getByRole('button', { name: 'Save file' }).click();
+      await page.waitForFunction(() => !document.querySelector('[role="tab"][aria-selected="true"] [aria-label="Unsaved changes"]'));
+      assert.equal(await page.evaluate(async path => (await (window as any).fixture.fileRecovery('close', path))?.phase, target), 'saved');
+      await page.evaluate(() => (window as any).fixture.edit(1, 'Y'));
+      await page.evaluate(() => (window as any).fixture.flush());
+    }
+    const beforeA = await page.evaluate(async path => (window as any).fixture.fileRecovery('close', path), closeA);
+    const beforeB = await page.evaluate(async path => (window as any).fixture.fileRecovery('close', path), closeB);
+    await page.evaluate(({ cwd }) => (window as any).fixture.render({request:{id:'closing-terminal',scopeId:'close',hostId:'local',cwd,kind:'terminal'}}), { cwd: project });
+    await page.getByRole('tab', { name: 'Terminal' }).waitFor();
+    await page.getByRole('tab', { name: /close-a.txt/ }).click();
+    await page.evaluate(() => (window as any).fixture.terminalClose('fail'));
+    await page.getByRole('button', { name: 'Close panel', exact: true }).click();
+    await page.getByRole('alert').filter({ hasText: 'terminal could not be closed' }).waitFor();
+    assert.deepEqual(await page.evaluate(async path => (window as any).fixture.fileRecovery('close', path), closeA), beforeA);
+    assert.deepEqual(await page.evaluate(async path => (window as any).fixture.fileRecovery('close', path), closeB), beforeB);
+    assert.equal(await page.evaluate(() => (window as any).fixture.closed()), 0);
+
+    await page.getByRole('textbox', { name: `File: ${closeA}` }).focus();
+    await page.evaluate(() => (window as any).fixture.terminalClose('delay'));
+    await page.getByRole('button', { name: 'Close panel', exact: true }).click();
+    await page.waitForFunction(() => (window as any).fixture.terminalWaiting());
+    await page.evaluate(() => (document.querySelector('.yard-editor-container:not([hidden]) .cm-content') as HTMLElement | null)?.focus());
+    await page.keyboard.type('late input');
+    assert.equal(await page.evaluate(() => (window as any).fixture.text()), 'XYbase\n');
+    await newerPage.evaluate(({ path }) => (window as any).fixture.changeRecovery('close', path, { id: 'other-page-record' }), { path: closeB });
+    await newerPage.evaluate(() => (window as any).fixture.holdAtoms());
+    await page.evaluate(() => (window as any).fixture.watchAtomTransaction());
+    await page.evaluate(() => (window as any).fixture.releaseTerminal());
+    await page.waitForFunction(() => (window as any).fixture.sawAtomTransaction());
+    await page.evaluate(() => (document.querySelector('.yard-editor-container:not([hidden]) .cm-content') as HTMLElement | null)?.focus());
+    await page.keyboard.type('during transaction');
+    assert.equal(await page.evaluate(() => (window as any).fixture.text()), 'XYbase\n');
+    await newerPage.evaluate(() => (window as any).fixture.releaseAtoms());
+    await page.getByRole('alert').filter({ hasText: /atomically|another page/i }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Close panel here only' }).isVisible(), true);
+    assert.deepEqual(await page.evaluate(async path => (window as any).fixture.fileRecovery('close', path), closeA), beforeA);
+    assert.equal(await page.evaluate(async path => (await (window as any).fixture.fileRecovery('close', path)).id, closeB), 'other-page-record');
+    assert.equal(await page.evaluate(() => (window as any).fixture.closed()), 0);
+    await newerPage.evaluate(({ path, before }) => (window as any).fixture.changeRecovery('close', path, before), { path: closeB, before: beforeB });
+    await page.getByRole('button', { name: 'Close panel', exact: true }).click();
+    await page.waitForFunction(() => (window as any).fixture.closed() === 1);
+    assert.equal(await page.evaluate(async path => (window as any).fixture.fileRecovery('close', path), closeA), undefined);
+    assert.equal(await page.evaluate(async path => (window as any).fixture.fileRecovery('close', path), closeB), undefined);
+    assert.deepEqual(await page.evaluate(async path => (window as any).fixture.fileRecovery('uncertain', path), unknownPath), unknown);
+
+    await page.evaluate(({ cwd, path }) => (window as any).fixture.render({scopeId:'uncertain',
+      request:{id:'uncertain-reopen',scopeId:'uncertain',hostId:'local',cwd,kind:'file',path}}), { cwd: project, path: unknownPath });
+    await page.getByRole('textbox', { name: `File: ${unknownPath}` }).waitFor();
+    await page.evaluate(({ cwd }) => (window as any).fixture.render({request:{id:'local-only-terminal',scopeId:'uncertain',hostId:'local',cwd,kind:'terminal'}}), { cwd: project });
+    await page.getByRole('tab', { name: 'Terminal' }).waitFor();
+    await page.evaluate(() => (window as any).fixture.terminalClose('fail'));
+    await page.getByRole('button', { name: 'Close panel', exact: true }).click();
+    await page.getByRole('alert').filter({ hasText: 'terminal could not be closed' }).waitFor();
+    await page.evaluate(() => (window as any).fixture.terminalClose('ok'));
+    await page.getByRole('button', { name: 'Close panel here only' }).click();
+    await page.waitForFunction(() => (window as any).fixture.closed() === 2);
+    assert.deepEqual(await page.evaluate(async path => (window as any).fixture.fileRecovery('uncertain', path), unknownPath), unknown);
     assert.deepEqual(errors, []);
     completed = true;
   } catch (error) {

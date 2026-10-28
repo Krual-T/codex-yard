@@ -1,4 +1,4 @@
-import { readBrowserAtom, updateBrowserAtom } from '../storage/ui-atoms.ts';
+import { readBrowserAtom, updateBrowserAtom, updateBrowserAtoms } from '../storage/ui-atoms.ts';
 
 export type RecoveryPhase = 'pending' | 'unknown' | 'saved' | 'conflict' | 'failed';
 export interface FileSaveRecovery {
@@ -6,7 +6,6 @@ export interface FileSaveRecovery {
   checkId: string;
   submitted: boolean;
   phase: RecoveryPhase;
-  expectedContents: string;
   contents: string;
   saved: string;
   draft: string;
@@ -20,7 +19,7 @@ function recovery(value: unknown): FileSaveRecovery | undefined {
   if (typeof value !== 'object' || Array.isArray(value)) throw new Error('The saved file recovery record is invalid.');
   const item = value as Partial<FileSaveRecovery>;
   if (typeof item.id !== 'string' || typeof item.checkId !== 'string' || typeof item.submitted !== 'boolean'
-    || !phases.has(item.phase as RecoveryPhase) || typeof item.expectedContents !== 'string' || typeof item.contents !== 'string'
+    || !phases.has(item.phase as RecoveryPhase) || typeof item.contents !== 'string'
     || typeof item.saved !== 'string' || typeof item.draft !== 'string' || !Number.isSafeInteger(item.revision) || item.revision! < 0) {
     throw new Error('The saved file recovery record is invalid.');
   }
@@ -29,10 +28,26 @@ function recovery(value: unknown): FileSaveRecovery | undefined {
 
 export async function readFileRecovery(key: string) { return recovery(await readBrowserAtom(keyFor(key))); }
 
+function equalValue(left: unknown, right: unknown, seen = new WeakMap<object, object>()): boolean {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object'
+    || Array.isArray(left) !== Array.isArray(right)) return false;
+  if (!Array.isArray(left) && (Object.getPrototypeOf(left) !== Object.prototype || Object.getPrototypeOf(right) !== Object.prototype)) return false;
+  if (seen.has(left)) return seen.get(left) === right;
+  seen.set(left, right);
+  const keys = Object.keys(left), other = Object.keys(right);
+  return keys.length === other.length && keys.every(key => Object.hasOwn(right, key)
+    && equalValue((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key], seen));
+}
+
+export function sameFileRecovery(left: FileSaveRecovery | undefined, right: FileSaveRecovery | undefined) {
+  return equalValue(left, right);
+}
+
 export async function claimFileRecovery(key: string, previous: FileSaveRecovery | undefined, next: FileSaveRecovery) {
   await updateBrowserAtom(keyFor(key), value => {
     const current = recovery(value);
-    if (current ? !previous || current.id !== previous.id || current.revision !== previous.revision : !!previous) {
+    if (!sameFileRecovery(current, previous)) {
       throw new Error('File recovery changed in another page. Keep or copy this edit before reopening.');
     }
     return next;
@@ -48,15 +63,33 @@ export async function updateFileRecovery(key: string, id: string, update: (curre
   return recovery(result)!;
 }
 
-export async function discardFileRecovery(key: string, id: string, revision: number) {
-  let discarded = false;
-  await updateBrowserAtom(keyFor(key), value => {
+export async function reconcileFileRecovery(key: string, expected: FileSaveRecovery | undefined, draft: string, revision: number) {
+  const result = await updateBrowserAtom(keyFor(key), value => {
     const current = recovery(value);
-    if (!current || current.id === id && current.revision === revision && current.phase !== 'pending' && current.phase !== 'unknown') {
-      discarded = true;
-      return null;
-    }
-    return value;
+    if (!sameFileRecovery(current, expected)) throw new Error('File recovery changed in another page. Keep or copy this edit before closing.');
+    return current ? { ...current, draft, revision } : value;
   });
-  if (!discarded) throw new Error('File recovery changed in another page. Keep or copy this edit before reopening.');
+  return recovery(result);
+}
+
+function checkedDiscard(value: unknown, expected: FileSaveRecovery) {
+  const current = recovery(value);
+  if (!sameFileRecovery(current, expected) || current?.phase === 'pending' || current?.phase === 'unknown') {
+    throw new Error('File recovery changed in another page. Keep or copy this edit before closing.');
+  }
+  return null;
+}
+
+export async function discardFileRecovery(key: string, expected: FileSaveRecovery) {
+  await updateBrowserAtom(keyFor(key), value => checkedDiscard(value, expected));
+}
+
+export async function discardFileRecoveries(records: { key: string; expected: FileSaveRecovery }[]) {
+  if (records.length === 0) return;
+  if (records.length === 1) return discardFileRecovery(records[0]!.key, records[0]!.expected);
+  await updateBrowserAtoms(atoms => {
+    const updates: Record<string, unknown> = {};
+    for (const { key, expected } of records) updates[keyFor(key)] = checkedDiscard(atoms[keyFor(key)], expected);
+    return { value: undefined, updates };
+  });
 }

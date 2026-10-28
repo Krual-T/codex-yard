@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import type { CSSProperties } from 'react';
 import { Download, PanelLeftClose, PanelLeftOpen, Plus, RotateCw, Save, X } from 'lucide-react';
 import { BrowserFiles } from '../../native/browser-files.ts';
@@ -10,7 +11,8 @@ import { DiffViewer } from '../diff/DiffViewer.tsx';
 import { errorMessage, fileName, readWorkspaceFile, resolveFilePath } from '../files/file-service.ts';
 import type { FileContents } from '../files/file-service.ts';
 import type { ComposerDraft, WorkbenchClient } from '../workbench-contract.ts';
-import { claimFileRecovery, discardFileRecovery, readFileRecovery, updateFileRecovery } from './file-save-recovery.ts';
+import { claimFileRecovery, discardFileRecovery, discardFileRecoveries, readFileRecovery, reconcileFileRecovery,
+  sameFileRecovery, updateFileRecovery } from './file-save-recovery.ts';
 import type { FileSaveRecovery, RecoveryPhase } from './file-save-recovery.ts';
 import './workspace-panels.css';
 
@@ -74,10 +76,13 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
   const [terminals, setTerminals] = useState<TerminalTab[]>([]);
   const terminalHandles = useRef(new Map<string, TerminalPanelHandle>());
   const [closing, setClosing] = useState(false);
+  const closingRef = useRef(false);
+  const [panelError, setPanelError] = useState<string>();
   const [diffs, setDiffs] = useState<DiffTab[]>([]);
   const tabsRef = useRef<FileTab[]>([]);
   const recoveryQueues = useRef(new Map<string, Promise<void>>());
   const recoveryFailures = useRef(new Map<string, unknown>());
+  const confirmedRecoveries = useRef(new Map<string, FileSaveRecovery | undefined>());
   const [selected, setSelected] = useState<string>();
   const selectedRef = useRef<string | undefined>(undefined);
   const [findRequest, setFindRequest] = useState<{ key: string; id: number }>();
@@ -111,6 +116,19 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     void settled.then(() => { if (recoveryQueues.current.get(key) === settled) recoveryQueues.current.delete(key); });
     return result;
   }, []);
+  const storeRecovery = useCallback((key: string, id: string, update: (current: FileSaveRecovery) => FileSaveRecovery) =>
+    queueRecovery(key, async () => {
+      const stored = await updateFileRecovery(key, id, update);
+      confirmedRecoveries.current.set(key, stored);
+      return stored;
+    }), [queueRecovery]);
+  function freeze() {
+    if (closingRef.current) return false;
+    closingRef.current = true;
+    flushSync(() => setClosing(true));
+    return true;
+  }
+  function unfreeze() { closingRef.current = false; setClosing(false); }
 
   useEffect(() => {
     mounted.current = true;
@@ -142,12 +160,13 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
       try { recovery = await queueRecovery(key, async () => {
         const stored = await readFileRecovery(key);
         if (content && stored && !unresolved(stored) && stored.draft === stored.saved) {
-          await discardFileRecovery(key, stored.id, stored.revision);
+          await discardFileRecovery(key, stored);
           return undefined;
         }
         return stored;
       }); }
       catch (error) { storageError = errorMessage(error); }
+      if (!storageError && tabsRef.current.some(tab => tab.key === key && tab.loadId === loadId)) confirmedRecoveries.current.set(key, recovery);
       const disk = content;
       if (recovery && content?.kind !== 'text') content = { kind: 'text', text: recovery.saved };
       updateTabs(previous => previous.map(tab => tab.key !== key || tab.loadId !== loadId ? tab : {
@@ -206,33 +225,46 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
 
   async function closeTab(key: string) {
     const tab = tabsRef.current.find(item => item.key === key);
-    if (!tab || tab.saving || tab.storageError) return;
-    if (isDirty(tab) && !window.confirm(unresolved(tab.recovery)
+    if (!tab || tab.saving || closingRef.current) return;
+    const localOnly = !!tab.storageError || recoveryFailures.current.has(key);
+    if ((isDirty(tab) || localOnly) && !window.confirm(localOnly
+      ? `Close ${fileName(tab.path)} on this page? Local edits may be lost; stored recovery records will not be changed.` : unresolved(tab.recovery)
       ? `Close ${fileName(tab.path)}? The unknown save and retained edits will remain available.`
       : `Discard unsaved changes to ${fileName(tab.path)}?`)) return;
-    await recoveryQueues.current.get(key);
-    if (recoveryFailures.current.has(key)) return;
-    try { if (tab.recovery && !unresolved(tab.recovery)) await queueRecovery(key, () => discardFileRecovery(key, tab.recovery!.id, tab.revision)); }
-    catch (error) {
+    if (!freeze()) return;
+    try {
+      await recoveryQueues.current.get(key);
+      const current = tabsRef.current.find(item => item.key === key);
+      if (!current || current.loadId !== tab.loadId || current.revision !== tab.revision) throw new Error('File changed while closing; review the latest edit.');
+      if (!localOnly && recoveryFailures.current.has(key)) throw recoveryFailures.current.get(key);
+      if (!localOnly && current.recovery && !unresolved(current.recovery)) {
+        const confirmed = confirmedRecoveries.current.get(key);
+        if (!sameFileRecovery(confirmed, current.recovery)) throw new Error('File recovery changed while closing.');
+        await discardFileRecovery(key, confirmed!);
+      }
+      recoveryFailures.current.delete(key);
+      confirmedRecoveries.current.delete(key);
+      const remaining = tabsRef.current.filter(item => item.key !== key);
+      updateTabs(() => remaining);
+      if (selectedRef.current === key) select([...remaining, ...terminals, ...diffs].find(item => item.scopeId === scopeId && item.hostId === hostId && item.cwd === cwd)?.key);
+    } catch (error) {
       updateTabs(previous => previous.map(item => item.key === key ? { ...item, storageError: true, error: errorMessage(error) } : item));
-      return;
+    } finally {
+      unfreeze();
     }
-    const remaining = tabsRef.current.filter(item => item.key !== key);
-    updateTabs(() => remaining);
-    if (selected === key) select([...remaining, ...terminals, ...diffs].find(item => item.scopeId === scopeId && item.hostId === hostId && item.cwd === cwd)?.key);
   }
 
   async function closeTerminal(key: string) {
-    if (closing) return;
-    setClosing(true);
-    const closed = await terminalHandles.current.get(key)?.close() ?? true;
-    setClosing(false);
-    if (!closed) return;
-    const remaining = terminals.filter(tab => tab.key !== key);
-    setTerminals(previous => previous.filter(tab => tab.key !== key));
-    if (currentScope.current === scopeKey && selectedRef.current === key) {
-      select([...tabsRef.current, ...remaining, ...diffs].find(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd)?.key);
-    }
+    if (!freeze()) return;
+    try {
+      const closed = await terminalHandles.current.get(key)?.close() ?? true;
+      if (!closed) return;
+      const remaining = terminals.filter(tab => tab.key !== key);
+      setTerminals(previous => previous.filter(tab => tab.key !== key));
+      if (currentScope.current === scopeKey && selectedRef.current === key) {
+        select([...tabsRef.current, ...remaining, ...diffs].find(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd)?.key);
+      }
+    } finally { unfreeze(); }
   }
 
   function closeDiff(key: string) {
@@ -242,10 +274,10 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
   }
 
   function reload(tab: FileTab) {
-    if (tab.saving || unresolved(tab.recovery) || tab.storageError || isDirty(tab) && !window.confirm(`Discard unsaved changes to ${fileName(tab.path)}?`)) return;
+    if (closingRef.current || tab.saving || unresolved(tab.recovery) || tab.storageError || isDirty(tab) && !window.confirm(`Discard unsaved changes to ${fileName(tab.path)}?`)) return;
     const loadId = ++sequence.current;
     updateTabs(previous => previous.map(item => item.key === tab.key ? { ...item, loadId, loading: true, error: undefined } : item));
-    void queueRecovery(tab.key, async () => { if (tab.recovery) await discardFileRecovery(tab.key, tab.recovery.id, tab.revision); })
+    void queueRecovery(tab.key, async () => { if (tab.recovery) await discardFileRecovery(tab.key, tab.recovery); })
       .then(() => load(tab.key, tab.hostId, tab.path, loadId)).catch(error => {
         updateTabs(previous => previous.map(item => item.key === tab.key && item.loadId === loadId ? { ...item, loading: false, storageError: true, error: errorMessage(error) } : item));
       });
@@ -253,13 +285,13 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
 
   async function save(tab: FileTab) {
     const current = tabsRef.current.find(item => item.key === tab.key);
-    if (!current || current.loading || current.saving || unresolved(current.recovery) || current.storageError || current.content?.kind !== 'text' || !isDirty(current)) return;
+    if (closingRef.current || !current || current.loading || current.saving || unresolved(current.recovery) || current.storageError || current.content?.kind !== 'text' || !isDirty(current)) return;
     const { saved: expectedContents, draft: contents, loadId } = current;
     const id = crypto.randomUUID();
-    const recovery: FileSaveRecovery = { id, checkId: id, submitted: true, phase: 'pending', expectedContents, contents,
+    const recovery: FileSaveRecovery = { ...current.recovery, id, checkId: id, submitted: true, phase: 'pending', contents,
       saved: expectedContents, draft: contents, revision: current.revision };
     updateTabs(previous => previous.map(item => item.key === tab.key ? { ...item, saving: true, recovery, error: undefined } : item));
-    try { await queueRecovery(tab.key, () => claimFileRecovery(tab.key, current.recovery, recovery)); }
+    try { await queueRecovery(tab.key, async () => { await claimFileRecovery(tab.key, current.recovery, recovery); confirmedRecoveries.current.set(tab.key, recovery); }); }
     catch (error) {
       updateTabs(previous => previous.map(item => item.key !== tab.key || item.loadId !== loadId || item.recovery?.id !== id ? item : {
         ...item, saving: false, recovery: current.recovery, storageError: true, error: `Could not retain file recovery: ${errorMessage(error)}`,
@@ -273,9 +305,9 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
       if (!result || !['saved', 'conflict', 'blocked'].includes(result.outcome)
         || result.outcome === 'blocked' && typeof result.operationId !== 'string') throw new Error('Invalid save response');
       const phase: RecoveryPhase = result.outcome === 'blocked' ? 'unknown' : result.outcome;
-      const stored = await queueRecovery(tab.key, () => updateFileRecovery(tab.key, id, value => ({ ...value, phase,
+      const stored = await storeRecovery(tab.key, id, value => ({ ...value, phase,
         ...(result.outcome === 'saved' ? { saved: contents } : {}),
-        ...(result.outcome === 'blocked' ? { checkId: result.operationId!, submitted: false } : {}) })));
+        ...(result.outcome === 'blocked' ? { checkId: result.operationId!, submitted: false } : {}) }));
       updateTabs(previous => previous.map(item => item.key !== tab.key || item.loadId !== loadId || item.recovery?.id !== id ? item : {
         ...item, saving: false, recovery: { ...stored, draft: item.draft, revision: item.revision },
         saved: result.outcome === 'saved' ? contents : item.saved,
@@ -286,7 +318,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     } catch (error) {
       const knownFailure = typeof error === 'object' && error !== null && 'uncertain' in error && error.uncertain === false;
       try {
-        const stored = await queueRecovery(tab.key, () => updateFileRecovery(tab.key, id, value => ({ ...value, phase: knownFailure ? 'failed' : 'unknown' })));
+        const stored = await storeRecovery(tab.key, id, value => ({ ...value, phase: knownFailure ? 'failed' : 'unknown' }));
         updateTabs(previous => previous.map(item => item.key !== tab.key || item.loadId !== loadId || item.recovery?.id !== id ? item : {
           ...item, saving: false, recovery: { ...stored, draft: item.draft, revision: item.revision },
           error: knownFailure ? errorMessage(error) : `Save result is unknown: ${errorMessage(error)}. Check the original operation before saving again.`,
@@ -301,7 +333,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
 
   async function checkSave(tab: FileTab) {
     const current = tabsRef.current.find(item => item.key === tab.key);
-    if (!current?.recovery || !unresolved(current.recovery) || current.saving || current.storageError) return;
+    if (closingRef.current || !current?.recovery || !unresolved(current.recovery) || current.saving || current.storageError) return;
     const { recovery, loadId } = current;
     let updatingRecovery = false;
     updateTabs(previous => previous.map(item => item.key === tab.key ? { ...item, saving: true } : item));
@@ -321,8 +353,8 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
       const unchanged = result.text === recovery.saved;
       const phase: RecoveryPhase = saved ? 'saved' : unchanged && status.outcome === 'failed' ? 'failed' : 'conflict';
       updatingRecovery = true;
-      const stored = await queueRecovery(tab.key, () => updateFileRecovery(tab.key, recovery.id, value => ({ ...value, phase,
-        saved: saved ? recovery.contents : value.saved })));
+      const stored = await storeRecovery(tab.key, recovery.id, value => ({ ...value, phase,
+        saved: saved ? recovery.contents : value.saved }));
       updateTabs(previous => previous.map(item => item.key !== tab.key || item.loadId !== loadId || item.recovery?.id !== recovery.id ? item : {
         ...item, saving: false, recovery: { ...stored, draft: item.draft, revision: item.revision },
         saved: saved ? recovery.contents : item.saved,
@@ -339,16 +371,46 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
 
   function changeFile(key: string, text: string) {
     const tab = tabsRef.current.find(item => item.key === key);
-    if (!tab || tab.draft === text) return;
+    if (closingRef.current || !tab || tab.loading || tab.draft === text) return;
     const revision = tab.revision + 1;
     updateTabs(previous => previous.map(item => item.key === key ? { ...item, draft: text, revision,
       recovery: item.recovery ? { ...item.recovery, draft: text, revision } : undefined } : item));
-    if (tab.recovery) void queueRecovery(key, () => updateFileRecovery(key, tab.recovery!.id, value => {
+    if (tab.recovery) void storeRecovery(key, tab.recovery.id, value => {
       if (value.revision !== tab.revision) throw new Error('File recovery changed in another page. Keep or copy this edit before reopening.');
       return { ...value, draft: text, revision };
-    })).catch(error => updateTabs(previous => previous.map(item => item.key !== key || item.loadId !== tab.loadId ? item : {
+    }).catch(error => updateTabs(previous => previous.map(item => item.key !== key || item.loadId !== tab.loadId ? item : {
       ...item, storageError: true, error: `Could not retain file edits: ${errorMessage(error)}`,
     })));
+  }
+
+  async function retryRecovery(key: string) {
+    const tab = tabsRef.current.find(item => item.key === key);
+    if (!tab || !tab.storageError || !freeze()) return;
+    try {
+      await recoveryQueues.current.get(key);
+      const disk = await readWorkspaceFile(client, tab.hostId, tab.path).catch(() => undefined);
+      const current = tabsRef.current.find(item => item.key === key);
+      if (!current || current.loadId !== tab.loadId || current.revision !== tab.revision) throw new Error('File changed while checking recovery.');
+      const stored = await readFileRecovery(key);
+      const confirmed = confirmedRecoveries.current.get(key);
+      if (!sameFileRecovery(stored, confirmed) || stored && current.recovery?.id !== stored.id
+        || current.recovery && !stored || stored && current.revision < stored.revision) {
+        throw new Error('Another page owns a different recovery. Keep or copy these edits; closing this tab will leave that record untouched.');
+      }
+      const reconciled = stored ? await reconcileFileRecovery(key, stored, current.draft, current.revision) : undefined;
+      confirmedRecoveries.current.set(key, reconciled);
+      recoveryFailures.current.delete(key);
+      updateTabs(previous => previous.map(item => item.key !== key || item.loadId !== tab.loadId ? item : {
+        ...item, recovery: reconciled, storageError: false,
+        error: unresolved(reconciled) ? 'Save result is unknown. Check the original operation before saving again.'
+          : disk?.kind !== 'text' ? 'Could not reread this file. Keep or copy your edits.'
+            : disk.text !== item.saved ? 'File changed on disk. Reload or copy your changes before saving.' : undefined,
+      }));
+    } catch (error) {
+      updateTabs(previous => previous.map(item => item.key !== key || item.loadId !== tab.loadId ? item : {
+        ...item, storageError: true, error: errorMessage(error),
+      }));
+    } finally { unfreeze(); }
   }
 
   async function download(tab: FileTab) {
@@ -359,30 +421,45 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     }
   }
 
-  async function closePanel() {
-    if (closing) return;
-    if (tabsRef.current.some(tab => tab.saving || tab.storageError)) return;
-    if (tabsRef.current.some(isDirty) && !window.confirm(tabsRef.current.some(tab => unresolved(tab.recovery))
+  async function closePanel(onlyThisPage = false) {
+    if (closingRef.current || tabsRef.current.some(tab => tab.saving)) return;
+    const localOnly = onlyThisPage || tabsRef.current.some(tab => tab.storageError || recoveryFailures.current.has(tab.key));
+    if ((tabsRef.current.some(isDirty) || localOnly) && !window.confirm(localOnly
+      ? 'Close this panel on this page? Local edits may be lost; stored recovery records will not be changed.' : tabsRef.current.some(tab => unresolved(tab.recovery))
       ? 'Close the panel? Other unsaved edits will be discarded. Unknown saves and their retained edits will remain available.' : 'Discard unsaved file changes?')) return;
-    await Promise.all(recoveryQueues.current.values());
-    if (recoveryFailures.current.size) return;
+    const original = tabsRef.current.map(({ key, loadId, revision }) => ({ key, loadId, revision }));
+    setPanelError(undefined);
+    if (!freeze()) return;
     try {
-      await Promise.all(tabsRef.current.filter(tab => tab.recovery && !unresolved(tab.recovery))
-        .map(tab => queueRecovery(tab.key, () => discardFileRecovery(tab.key, tab.recovery!.id, tab.revision))));
+      while (recoveryQueues.current.size) await Promise.all(recoveryQueues.current.values());
+      const unchanged = () => original.length === tabsRef.current.length && original.every(expected =>
+        tabsRef.current.some(tab => tab.key === expected.key && tab.loadId === expected.loadId && tab.revision === expected.revision));
+      if (!unchanged()) throw new Error('Files changed while closing; review the latest edits.');
+      if (!localOnly && recoveryFailures.current.size) throw recoveryFailures.current.values().next().value;
+      const results = await Promise.all([...terminalHandles.current.values()].map(handle => handle.close()));
+      if (results.some(closed => !closed)) { setPanelError('A terminal could not be closed. File recovery records were retained.'); return; }
+      while (recoveryQueues.current.size) await Promise.all(recoveryQueues.current.values());
+      if (!unchanged()) throw new Error('Files changed while closing; review the latest edits.');
+      if (!localOnly) {
+        const records = tabsRef.current.filter(tab => tab.recovery && !unresolved(tab.recovery)).map(tab => {
+          const expected = confirmedRecoveries.current.get(tab.key);
+          if (!sameFileRecovery(expected, tab.recovery)) throw new Error('File recovery changed while closing.');
+          return { key: tab.key, expected: expected! };
+        });
+        await discardFileRecoveries(records);
+      }
+      recoveryFailures.current.clear();
+      confirmedRecoveries.current.clear();
+      updateTabs(() => []);
+      setTerminals([]);
+      setDiffs([]);
+      selections.current.clear();
+      onDirtyChange?.(false);
+      onClose();
     } catch (error) {
+      setPanelError(errorMessage(error));
       updateTabs(previous => previous.map(item => recoveryFailures.current.has(item.key) ? { ...item, storageError: true, error: errorMessage(error) } : item));
-      return;
-    }
-    setClosing(true);
-    const results = await Promise.all([...terminalHandles.current.values()].map(handle => handle.close()));
-    setClosing(false);
-    if (results.some(closed => !closed)) return;
-    updateTabs(() => []);
-    setTerminals([]);
-    setDiffs([]);
-    selections.current.clear();
-    onDirtyChange?.(false);
-    onClose();
+    } finally { unfreeze(); }
   }
 
   const visible = tabs.filter(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd);
@@ -426,6 +503,9 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
       </div>
       <button type="button" className="yard-panel-icon" title="Close panel" aria-label="Close panel" disabled={closing || tabs.some(tab => tab.saving)} onClick={() => void closePanel()}><X /></button>
     </div>
+    {panelError ? <div className="yard-file-error" role="alert">{panelError}{' '}
+      <button type="button" disabled={closing} onClick={() => void closePanel(true)}>Close panel here only</button>
+    </div> : null}
     <div className="yard-panel-body" inert={closing}>
       {showFiles ? <DirectoryTree key={scopeKey} client={client} hostId={hostId} cwd={cwd} onOpen={openFile} /> : null}
       <div className="yard-file-main">
@@ -446,6 +526,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
               onClick={() => onReference({ text: '', images: [], files: [{ path: active.path, name: fileName(active.path) }] })}><Plus /></button> : null}
           </div>
           {active.error ? <div className="yard-file-error" role="alert">{active.error}</div> : null}
+          {active.storageError ? <div className="yard-file-check"><button type="button" onClick={() => void retryRecovery(active.key)}>Review recovery</button></div> : null}
           {unresolved(active.recovery) ? <div className="yard-file-check"><button type="button" disabled={active.saving || active.storageError} onClick={() => void checkSave(active)}>Check save result</button></div> : null}
           {active.loading ? <div className="yard-file-status" role="status">Loading...</div> : active.content?.kind === 'binary' ?
             <FileViewer key={`${active.key}:${active.loadId}`} path={active.path} content={active.content} text="" theme={appearance.theme} visible readOnly
@@ -455,7 +536,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
           <FileViewer path={tab.path} content={tab.content!} text={tab.draft} location={tab.location} theme={appearance.theme} visible={tab.key === active?.key}
             findRequest={findRequest?.key === tab.key ? findRequest.id : undefined}
             onFindRequestConsumed={id => setFindRequest(previous => previous?.id === id ? undefined : previous)}
-            readOnly={false}
+            readOnly={closing}
             onChange={text => changeFile(tab.key, text)}
             onSave={() => void save(tab)} />
         </div>)}
