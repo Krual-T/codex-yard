@@ -38,6 +38,10 @@
 .yard-setting-control input[type="color"] { width: 36px; height: 30px; padding: 1px; border: 1px solid var(--yard-border, #d8dde1); border-radius: 4px; background: var(--yard-surface, var(--yard-bg, #fff)); }
 .yard-setting-control input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--yard-accent, #1769b0); }
 .yard-settings code, .yard-settings pre, .yard-color-value { font-family: var(--yard-code-font, monospace); font-size: var(--yard-code-size, 12px); }
+.yard-font-controls { display: grid; gap: 8px; min-width: 0; }
+.yard-font-face, .yard-font-selects, .yard-font-browse { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.yard-font-selects select { min-width: 0; max-width: 100%; }
+.yard-font-browse { padding: 10px 0; color: var(--yard-muted, #666); }
 .yard-setting-error { color: var(--yard-danger, #a02d2a); font-size: 13px; overflow-wrap: anywhere; }
 .yard-settings .yard-link { color: inherit; border: 0; padding: 0; text-decoration: underline; }
 .yard-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

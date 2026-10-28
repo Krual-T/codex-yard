@@ -4,6 +4,7 @@ import { NumberPreference, Row, Select, Toggle, entryState } from './PreferenceC
 import type { PreferenceProps } from './PreferenceControls.tsx';
 import { codeThemes, defaultThemes, exportTheme, importTheme, preferenceDefinitions } from './preferences.ts';
 import type { ChromeTheme, PreferenceKey, ThemeVariant } from './preferences.ts';
+import { ThemeFontControls } from './ThemeFontControls.tsx';
 
 function ThemeEditor({ variant, onDirtyChange, ...props }: PreferenceProps & { variant: ThemeVariant; backdropSupported: boolean; onDirtyChange: (dirty: boolean) => void }) {
   const { t, locale } = useI18n();
@@ -20,11 +21,6 @@ function ThemeEditor({ variant, onDirtyChange, ...props }: PreferenceProps & { v
   useLayoutEffect(() => { onDirtyChange(dialog === 'import' && text.trim().length > 0); }, [dialog, text, onDirtyChange]);
   const disabled = entryState(entry).disabled;
   const update = (patch: Partial<ChromeTheme>) => props.preferences.edit(themeKey, { ...theme, ...patch });
-  const font = (key: 'ui' | 'content' | 'code', value: string) => {
-    const fonts = { ...theme.fonts, [key]: value || null };
-    delete fonts[`${key}Face`];
-    update({ fonts });
-  };
   const openExport = () => { setText(exportTheme(variant, theme, codeEntry.value)); setError(''); setDialog('export'); };
   const applyImport = () => {
     try {
@@ -57,12 +53,7 @@ function ThemeEditor({ variant, onDirtyChange, ...props }: PreferenceProps & { v
         onChange={event => update({ contrast: Number(event.target.value) })} /><output>{theme.contrast}</output></Row>
       {props.backdropSupported && <Row label="Transparent window"><input type="checkbox" role="switch" aria-label={`${variantLabel} ${t('Transparent window').toLocaleLowerCase(locale)}`}
         checked={!theme.opaqueWindows} disabled={disabled} onChange={event => update({ opaqueWindows: !event.target.checked })} /></Row>}
-      {entry.available && <>
-        {(['ui', 'content', 'code'] as const).map(key => <Row key={key} label={`${key === 'ui' ? 'Interface' : key === 'content' ? 'Content' : 'Code'} font`} description="Leave blank to use the default.">
-          <input type="text" aria-label={`${variantLabel} ${t(key === 'ui' ? 'Interface font' : key === 'content' ? 'Content font' : 'Code font').toLocaleLowerCase(locale)}`} value={theme.fonts[key] ?? ''} disabled={disabled}
-            onChange={event => font(key, event.target.value)} />
-        </Row>)}
-      </>}
+      {entry.available && <ThemeFontControls fonts={theme.fonts} variantLabel={variantLabel} disabled={disabled} onChange={fonts => update({ fonts })} />}
       <Select {...props} setting={codeKey} label="Code theme" options={
         [...(codeThemes[variant].includes(codeEntry.value) ? [] : [codeEntry.value]), ...codeThemes[variant]].map(value => ({ value, label: value }))
       } />
