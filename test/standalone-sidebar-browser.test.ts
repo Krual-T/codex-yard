@@ -34,7 +34,7 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
         row('two','Assigned second','/repo',{type:'active',activeFlags:['waitingOnApproval']}),row('recent','Recent task','/other')];
       const archived=[row('archive','Archived task','/other')];
       const projectState={catalog:{local:{one:{id:'one',name:'Project One',rootPaths:['/repo']},
-        two:{id:'two',name:'Project Two',rootPaths:['/repo']}},remote:[]},
+        two:{id:'two',name:'Project Two',rootPaths:['/repo']},three:{id:'three',name:'Project Three',rootPaths:['/third']}},remote:[]},
         inventory:{complete:true,errors:{}},memberships:[{hostId:'local',threadId:'two',
           assignment:{projectKind:'local',projectId:'two'},projectless:false}],
         unresolved:{assignments:{},projectless:[],qualified:[],outputDirectories:{},workspaceRoots:{},unreadable:{}},
@@ -52,7 +52,7 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
           setTabs(old=>old.some(item=>item.id===tab.id&&item.hostId===tab.hostId)?old:[...old,tab]);setCurrent(tab);};
         return React.createElement(I18nProvider,{locale},React.createElement('div',{className:'yard-app','data-sidebar-open':'true'},
           React.createElement(StandaloneSidebar,{hostId:'local',currentThread:current&&{hostId:current.hostId,threadId:current.id},
-            projectState,rows:list.rows,nextCursor:list.nextCursor,loading:list.loading,error:list.error,search,archived:showArchived,
+            projectState,rows:[...list.rows,{...row('foreign','Remote task','/third',{type:'active',activeFlags:[]}),hostId:'remote',archived:false}],nextCursor:list.nextCursor,loading:list.loading,error:list.error,search,archived:showArchived,
             onSearchChange:setSearch,onArchivedChange:setArchived,onOpenThread:open,onNewChat:project=>calls.projects.push(project),
             onAddProject:()=>calls.add++,onOpenSettings:()=>calls.settings++,onClose:()=>calls.close++,
             onRefresh:()=>void list.refresh(),onLoadMore:()=>void list.loadMore()}),
@@ -108,8 +108,26 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
     assert.equal(await projectOne.getAttribute('aria-expanded'), 'true');
     await projectOne.click();
     assert.equal(await projectOne.getAttribute('aria-expanded'), 'false');
+    const headingOne = projectOne.locator('..');
+    await headingOne.getByRole('img', { name: 'In progress', exact: true }).waitFor();
     assert.equal(await sidebar.getByRole('button', { name: /Running task/ }).isVisible(), false);
     assert.equal(await sidebar.getByRole('button', { name: /Assigned second/ }).isVisible(), true);
+    await projectTwo.click();
+    await projectTwo.locator('..').getByRole('img', { name: 'Waiting for approval', exact: true }).waitFor();
+    const projectThree = sidebar.getByRole('button', { name: 'Project Three', exact: true });
+    await projectThree.click();
+    assert.equal(await projectThree.locator('..').getByRole('img').count(), 0);
+    await page.evaluate(() => window.sidebarUIHarness.setLocale('zh-CN'));
+    await page.getByRole('img', { name: '进行中', exact: true }).waitFor();
+    await page.getByRole('img', { name: '等待审批', exact: true }).waitFor();
+    await page.evaluate(() => window.sidebarUIHarness.setLocale('en-US'));
+    for (const width of [1280, 800]) {
+      await page.setViewportSize({ width, height: 800 });
+      const indicator = await headingOne.getByRole('img', { name: 'In progress', exact: true }).boundingBox();
+      const action = await sidebar.getByRole('button', { name: 'New chat in Project One' }).boundingBox();
+      assert.ok(indicator && action && indicator.x + indicator.width <= action.x);
+    }
+    await projectTwo.click();
     await projectOne.click();
     await sidebar.getByRole('button', { name: 'New chat in Project Two' }).click();
     await sidebar.getByRole('button', { name: 'New chat', exact: true }).click();

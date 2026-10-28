@@ -29,6 +29,7 @@
 .yard-owned-sidebar-section-toggle svg { width: 14px; height: 14px; }
 .yard-owned-sidebar-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; touch-action: pan-y; }
 .yard-owned-sidebar-project-heading { display: flex; align-items: center; }
+.yard-owned-sidebar-project-heading > .yard-owned-sidebar-thread-status { margin-left: 4px; }
 .yard-owned-sidebar-project-toggle { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; min-height: 34px; padding: 6px; text-align: left; }
 .yard-owned-sidebar-project-toggle span, .yard-owned-sidebar-thread-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .yard-owned-sidebar-thread { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; min-height: 34px; padding: 6px 8px 6px 27px; text-align: left; }

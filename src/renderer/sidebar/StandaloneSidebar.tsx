@@ -37,18 +37,29 @@ function useExpansion(query: string): [boolean, () => void] {
   return query ? [searchExpanded, () => setSearchExpanded(value => !value)] : [expanded, () => setExpanded(value => !value)];
 }
 
+type StatusKey = 'Waiting for approval' | 'Waiting for input' | 'In progress' | 'System error';
+function threadStatus(row: ThreadListRow): StatusKey | null {
+  const status = row.status;
+  return status?.type === 'active'
+    ? status.activeFlags?.includes('waitingOnApproval') ? 'Waiting for approval'
+      : status.activeFlags?.includes('waitingOnUserInput') ? 'Waiting for input' : 'In progress'
+    : status?.type === 'systemError' ? 'System error' : null;
+}
+function StatusIndicator({ status }: { status: StatusKey }) {
+  const { t } = useI18n();
+  const label = t(status);
+  return <span className="yard-owned-sidebar-thread-status" role="img" aria-label={label} title={label}>
+    {status === 'System error' ? <CircleAlert aria-hidden="true" /> : status === 'In progress' ? <LoaderCircle aria-hidden="true" /> : <Clock3 aria-hidden="true" />}
+  </span>;
+}
+
 function ThreadRow({ row, currentThread, onOpenThread }: {
   row: ThreadListRow;
   currentThread: StandaloneSidebarProps['currentThread'];
   onOpenThread: StandaloneSidebarProps['onOpenThread'];
 }) {
   const { t, formatDate } = useI18n();
-  const status = row.status;
-  const statusKey = status?.type === 'active'
-    ? status.activeFlags?.includes('waitingOnApproval') ? 'Waiting for approval'
-      : status.activeFlags?.includes('waitingOnUserInput') ? 'Waiting for input' : 'In progress'
-    : status?.type === 'systemError' ? 'System error' : null;
-  const label = statusKey ? t(statusKey) : null;
+  const statusKey = threadStatus(row);
   const title = row.name || row.preview || t('New conversation');
   const updated = typeof row.updatedAt === 'number' ? new Date(row.updatedAt * 1000) : null;
   const tooltip = updated && Number.isFinite(updated.getTime())
@@ -57,9 +68,7 @@ function ThreadRow({ row, currentThread, onOpenThread }: {
     aria-current={currentThread?.hostId === row.hostId && currentThread.threadId === row.id ? 'page' : undefined}
     onClick={() => onOpenThread(row)}>
     <span className="yard-owned-sidebar-thread-title">{title}</span>
-    {label && <span className="yard-owned-sidebar-thread-status" role="img" aria-label={label} title={label}>
-      {status?.type === 'systemError' ? <CircleAlert /> : statusKey === 'In progress' ? <LoaderCircle /> : <Clock3 />}
-    </span>}
+    {statusKey && <StatusIndicator status={statusKey} />}
   </button>;
 }
 
@@ -76,6 +85,9 @@ function ProjectGroup({ project, fallback, rows, query, currentThread, onOpenThr
   const [expanded, toggle] = useExpansion(query);
   const id = useId();
   const newChatLabel = `${t('New chat in')} ${project.name}`;
+  const statuses = expanded ? [] : rows.map(threadStatus);
+  const projectStatus = (['Waiting for approval', 'Waiting for input', 'System error', 'In progress'] as const)
+    .find(status => statuses.includes(status));
   return <section className="yard-owned-sidebar-project">
     <div className="yard-owned-sidebar-project-heading">
       <button type="button" className="yard-owned-sidebar-project-toggle" aria-expanded={expanded} aria-controls={id}
@@ -83,6 +95,7 @@ function ProjectGroup({ project, fallback, rows, query, currentThread, onOpenThr
         {expanded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
         <span>{project.name}</span>
       </button>
+      {projectStatus && <StatusIndicator status={projectStatus} />}
       <button type="button" className="yard-owned-sidebar-icon" aria-label={newChatLabel}
         title={newChatLabel} onClick={() => onNewChat(project, fallback)}><Plus aria-hidden="true" /></button>
     </div>
