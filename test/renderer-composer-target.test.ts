@@ -17,7 +17,7 @@ test('composer chooses real host roots through its parent and keeps drafts parti
       async host(endpoint,params={}){
         state.calls.push({endpoint,params});
         if(endpoint==='workspace-root-options')return {roots:params.hostId==='local'?['/work/one','/work/two']:['/remote/project'],canonicalPathByRoot:{}};
-        if(endpoint==='get-setting')return {value:'enter'};
+        if(endpoint==='get-setting')return {value:params.key==='composerEnterBehavior'?'enter':undefined};
         throw Error('unexpected host');
       },
       async rpc(method,params,hostId){

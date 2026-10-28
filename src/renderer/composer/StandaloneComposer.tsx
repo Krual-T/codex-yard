@@ -9,6 +9,8 @@ import type { Completion } from './standalone-completions.tsx';
 import { StandaloneOptions } from './standalone-options.tsx';
 import { StandaloneQueue } from './standalone-queue.tsx';
 import { useEnterSetting } from './standalone-enter-setting.ts';
+import { useFollowUpSetting } from './standalone-follow-up.ts';
+import type { FollowUpAction } from './standalone-follow-up.ts';
 import { StandaloneTarget } from './standalone-target.tsx';
 import type { ComposerHost, ComposerTarget } from './standalone-target.tsx';
 import './standalone-composer.css';
@@ -48,6 +50,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const [queueVersion, setQueueVersion] = useState(0);
   const [cursor, setCursor] = useState(0);
   const enterSetting = useEnterSetting(client);
+  const followUpSetting = useFollowUpSetting(client);
   const mounted = useRef(true);
   const submitInFlight = useRef(false);
   const interruptInFlight = useRef(false);
@@ -91,7 +94,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     event.preventDefault();
     void addFiles(files);
   };
-  const submit = async (followUp: 'queue' | 'steer' = 'queue') => {
+  const submit = async (followUp: FollowUpAction = followUpSetting.value) => {
     if (submitInFlight.current || uploadInFlight.current || !hasContent(current.current.draft)) return;
     if (current.current.draft.blocked
       || current.current.draft.document && textEditIssue(current.current.draft) && !current.current.draft.input) {
@@ -162,8 +165,13 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         if (event.key === 'Enter' && completions.loading) { event.preventDefault(); return; }
       }
     }
-    if (event.key !== 'Enter' || event.shiftKey || event.altKey || enterSetting.pending || enterSetting.error) return;
+    if (event.key !== 'Enter' || event.altKey || event.repeat || enterSetting.pending || enterSetting.error) return;
     const modifier = event.ctrlKey || event.metaKey;
+    if (busy && modifier && (enterSetting.value === 'enter' ? !event.shiftKey : event.shiftKey)) {
+      if (followUpSetting.pending || followUpSetting.error) return;
+      event.preventDefault(); void submit(followUpSetting.value === 'queue' ? 'steer' : 'queue'); return;
+    }
+    if (event.shiftKey || busy && (followUpSetting.pending || followUpSetting.error)) return;
     const needsModifier = enterSetting.value === 'cmdAlways' || enterSetting.value === 'cmdIfMultiline' && draft.text.includes('\n');
     if (needsModifier ? modifier : !modifier) { event.preventDefault(); void submit(); }
   };
@@ -221,13 +229,20 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           if (value === 'enter' || value === 'cmdIfMultiline' || value === 'cmdAlways') void enterSetting.update(value);
         }}><option value="enter">Enter</option><option value="cmdIfMultiline">多行时 Ctrl/⌘ + Enter</option><option value="cmdAlways">Ctrl/⌘ + Enter</option></select></label>
         {busy ? <button type="button" onClick={() => void interrupt()} disabled={interrupting} title="停止当前任务">停止</button> : null}
-        {busy && activeTurnId ? <button type="button" onClick={() => void submit('steer')} disabled={sending || uploading || !hasContent(draft)}>发送到当前任务</button> : null}
-        <button className="standalone-composer__submit" type="button" onClick={() => void submit()} disabled={sending || uploading || !hasContent(draft)}>{sending ? '发送中' : busy ? '排队' : '发送'}</button>
+        {busy ? <button type="button" onClick={() => void submit(followUpSetting.value === 'queue' ? 'steer' : 'queue')}
+          title={followUpSetting.value === 'queue' && !activeTurnId ? '当前任务尚无可确认的 turn ID' : undefined}
+          disabled={sending || uploading || !hasContent(draft) || followUpSetting.value === 'queue' && !activeTurnId}>
+          {followUpSetting.value === 'queue' ? '发送到当前任务' : '排队'}</button> : null}
+        <button className="standalone-composer__submit" type="button" onClick={() => void submit()}
+          title={busy && followUpSetting.value === 'steer' && !activeTurnId ? '当前任务尚无可确认的 turn ID' : undefined}
+          disabled={sending || uploading || !hasContent(draft) || busy && (followUpSetting.pending || followUpSetting.value === 'steer' && !activeTurnId)}>
+          {sending ? '发送中' : busy ? followUpSetting.value === 'queue' ? '排队' : '发送到当前任务' : '发送'}</button>
       </div>
     </div>
     {uploading ? <div role="status">正在上传附件…</div> : null}
     {storageError ? <div role="alert">草稿未能保存到浏览器，刷新前请检查浏览器存储空间。</div> : null}
     {enterSetting.error ? <div role="alert">{enterSetting.error}</div> : null}
+    {busy && followUpSetting.error ? <div role="alert">{followUpSetting.error}</div> : null}
     {error ? <div role="alert">{error}</div> : null}
   </div>;
 }

@@ -25,7 +25,7 @@ test('workspace and skill completions use the selected host and produce real sub
         },
         async host(endpoint,params={}) {
           state.calls.push({endpoint,params});
-          if(endpoint==='get-setting') return {value:'enter'};
+          if(endpoint==='get-setting') return {value:params.key==='composerEnterBehavior'?'enter':undefined};
           if(endpoint==='workspace-directory-entries') {
             if(state.blockLocal && params.hostId==='local') return new Promise(resolve=>{state.release=()=>resolve({entries:[{name:'stale.txt',path:'stale.txt',type:'file'}]});});
             if(params.hostId==='ssh-fixture') return {entries:[{name:'remote.ts',path:'remote.ts',type:'file'}]};

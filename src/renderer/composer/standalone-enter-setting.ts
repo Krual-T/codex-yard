@@ -13,6 +13,7 @@ export function useEnterSetting(client: WorkbenchClient) {
   const mounted = useRef(false);
   const reload = useCallback(async () => {
     const current = ++generation.current;
+    if (mounted.current) setPending(true);
     try {
       const result = await client.host<{ value?: unknown }>('get-setting', { key: 'composerEnterBehavior' });
       const next = result.value === undefined ? 'enter' : result.value;
