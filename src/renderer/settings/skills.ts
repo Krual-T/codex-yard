@@ -1,6 +1,7 @@
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { validScopePath } from './scope.ts';
 import { createSettingsWriteId, latestSettingsDraft, SettingsConfigOperations, SettingsWriteError, settingsConfigOperations } from './config-operations.ts';
+import type { WriteStatus } from './config-operations.ts';
 
 export interface SkillEntry {
   id: string; name: string; displayName: string; description: string; path: string;
@@ -58,6 +59,9 @@ export class SkillSettings {
   private readonly cwds: readonly string[];
   private readonly operations: SettingsConfigOperations;
   private restored = false;
+  private originalId: string | null = null;
+  private resolvedOriginalId: string | null = null;
+  private originalBlocker: WriteStatus | null = null;
   private readonly editorId = createSettingsWriteId();
   private draftWrites: Promise<void> = Promise.resolve();
   private draftWriteCount = 0;
@@ -114,6 +118,16 @@ export class SkillSettings {
       const previous = await this.operations.find(this.hostId, 'skills-settings', this.cwds);
       if (generation !== this.generation) return;
       const unresolved = !!previous && (previous.phase === 'pending' || previous.phase === 'unknown' || previous.phase === 'blocked' || !!previous.operation?.storageError);
+      if (!this.originalId && previous) this.originalId = previous.operationId;
+      if (previous?.operationId === this.originalId && previous.blocker) this.originalBlocker = previous.blocker;
+      let resolved = !!previous && previous.operationId === this.originalId && !unresolved;
+      if (this.snapshot.writeUncertain && this.originalId && !resolved && previous?.operationId !== this.originalId) {
+        const blocker = this.originalBlocker;
+        resolved = this.resolvedOriginalId === this.originalId
+          || !!(blocker?.method && await this.operations.originalFinished(blocker.hostId, blocker.operationId, blocker.method))
+          || !blocker && await this.operations.originalFinished(this.hostId, this.originalId, 'skills/config/write');
+        if (generation !== this.generation) return;
+      }
       const savedDraft = previous && latestSettingsDraft(previous);
       if (!this.restored && previous && record(savedDraft) && Array.isArray(savedDraft.drafts)) {
         const drafts = savedDraft.drafts;
@@ -122,7 +136,7 @@ export class SkillSettings {
         } else throw new Error('The saved skill edits cannot be read.');
       } else if (!this.restored && previous) {
         throw new Error('The saved skill edits cannot be read.');
-      } else if (this.snapshot.writeUncertain && previous && !unresolved) {
+      } else if (this.snapshot.writeUncertain && resolved) {
         this.snapshot = { ...this.snapshot, writeUncertain: false, needsRefresh: true };
       }
       this.restored = true;
@@ -196,7 +210,9 @@ export class SkillSettings {
         let result: { effectiveEnabled?: unknown };
         try {
           const submitted = await this.operations.submit(this.hostId, 'skills/config/write', { ...selector(skill), enabled: draft.enabled },
-            { section: 'skills-settings', scope: this.cwds, draft: { drafts } }, () => generation === this.generation);
+            { section: 'skills-settings', scope: this.cwds, draft: { drafts } }, () => generation === this.generation,
+            id => { this.originalId = id; this.resolvedOriginalId = null; this.originalBlocker = null; });
+          if (this.originalId === submitted.operationId) this.resolvedOriginalId = submitted.operationId;
           result = submitted.result as { effectiveEnabled?: unknown };
           completed.push(submitted.operationId);
         }
@@ -222,6 +238,10 @@ export class SkillSettings {
       this.update({ saving: false, skills: after.skills, warnings: after.warnings, drafts: [], latest: null, needsRefresh: false, error: null });
       return true;
     } catch (error) {
+      if (error instanceof SettingsWriteError && error.operationId && this.originalId === error.operationId) {
+        this.resolvedOriginalId = error.uncertain ? null : error.operationId;
+        this.originalBlocker = error.blocker ?? null;
+      }
       const uncertain = error instanceof SettingsWriteError ? error.uncertain : writeInFlight;
       if (generation === this.generation) this.update({ saving: false, needsRefresh: true, writeUncertain: uncertain,
         error: uncertain ? `Could not confirm save: ${errorText(error)}. Your edits are preserved; the host must confirm the previous operation has ended before another save.` :

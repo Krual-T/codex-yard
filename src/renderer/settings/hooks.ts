@@ -3,6 +3,7 @@ import { userConfigTarget } from './config-target.ts';
 import type { ConfigTarget } from './config-target.ts';
 import { validScopePath } from './scope.ts';
 import { createSettingsWriteId, latestSettingsDraft, SettingsConfigOperations, SettingsWriteError, settingsConfigOperations } from './config-operations.ts';
+import type { WriteStatus } from './config-operations.ts';
 
 type Handler = { type: 'command'; command: string; async: boolean } | { type: 'mcpTool'; server: string; tool: string }
   | { type: 'prompt' | 'agent' } | { type: 'unknown'; label: string };
@@ -71,6 +72,9 @@ export class HookSettings {
   private readonly cwds: readonly string[];
   private readonly operations: SettingsConfigOperations;
   private restored = false;
+  private originalId: string | null = null;
+  private resolvedOriginalId: string | null = null;
+  private originalBlocker: WriteStatus | null = null;
   private readonly editorId = createSettingsWriteId();
   private draftWrites: Promise<void> = Promise.resolve();
   private draftWriteCount = 0;
@@ -138,6 +142,16 @@ export class HookSettings {
       const previous = await this.operations.find(this.hostId, 'hooks-settings', this.cwds);
       if (generation !== this.generation) return;
       const unresolved = !!previous && (previous.phase === 'pending' || previous.phase === 'unknown' || previous.phase === 'blocked' || !!previous.operation?.storageError);
+      if (!this.originalId && previous) this.originalId = previous.operationId;
+      if (previous?.operationId === this.originalId && previous.blocker) this.originalBlocker = previous.blocker;
+      let resolved = !!previous && previous.operationId === this.originalId && !unresolved;
+      if (this.snapshot.writeUncertain && this.originalId && !resolved && previous?.operationId !== this.originalId) {
+        const blocker = this.originalBlocker;
+        resolved = this.resolvedOriginalId === this.originalId
+          || !!(blocker?.method && await this.operations.originalFinished(blocker.hostId, blocker.operationId, blocker.method))
+          || !blocker && await this.operations.originalFinished(this.hostId, this.originalId, 'config/batchWrite');
+        if (generation !== this.generation) return;
+      }
       const savedDraft = previous && latestSettingsDraft(previous);
       if (!this.restored && previous && record(savedDraft) && Array.isArray(savedDraft.drafts)) {
         const drafts = savedDraft.drafts;
@@ -146,7 +160,7 @@ export class HookSettings {
         } else throw new Error('The saved hook edits cannot be read.');
       } else if (!this.restored && previous) {
         throw new Error('The saved hook edits cannot be read.');
-      } else if (this.snapshot.writeUncertain && previous && !unresolved) {
+      } else if (this.snapshot.writeUncertain && resolved) {
         this.snapshot = { ...this.snapshot, writeUncertain: false, needsRefresh: true };
       }
       this.restored = true;
@@ -220,7 +234,9 @@ export class HookSettings {
       try {
         const submitted = await this.operations.submit(this.hostId, 'config/batchWrite',
           { edits, filePath: null, expectedVersion: target.version, reloadUserConfig: true },
-          { section: 'hooks-settings', scope: this.cwds, draft: { drafts } }, () => generation === this.generation);
+          { section: 'hooks-settings', scope: this.cwds, draft: { drafts } }, () => generation === this.generation,
+          id => { this.originalId = id; this.resolvedOriginalId = null; this.originalBlocker = null; });
+        if (this.originalId === submitted.operationId) this.resolvedOriginalId = submitted.operationId;
         result = submitted.result as { status: 'ok' | 'okOverridden' };
         operationId = submitted.operationId;
       } finally { this.writeInFlight = false; }
@@ -242,6 +258,10 @@ export class HookSettings {
         drafts: [], latest: null, needsRefresh: false, error: null });
       return true;
     } catch (error) {
+      if (error instanceof SettingsWriteError && error.operationId && this.originalId === error.operationId) {
+        this.resolvedOriginalId = error.uncertain ? null : error.operationId;
+        this.originalBlocker = error.blocker ?? null;
+      }
       if (generation === this.generation) {
         const writeUncertain = error instanceof SettingsWriteError ? error.uncertain : writeStarted && !writeFinished;
         this.update({ saving: false, needsRefresh: true, writeUncertain,

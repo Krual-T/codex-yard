@@ -95,7 +95,11 @@ function terminalResult(operation: WriteStatus): unknown {
 
 export class SettingsWriteError extends Error {
   readonly uncertain: boolean;
-  constructor(message: string, uncertain: boolean) { super(message); this.name = 'SettingsWriteError'; this.uncertain = uncertain; }
+  readonly operationId?: string;
+  readonly blocker?: WriteStatus;
+  constructor(message: string, uncertain: boolean, operationId?: string, blocker?: WriteStatus) {
+    super(message); this.name = 'SettingsWriteError'; this.uncertain = uncertain; this.operationId = operationId; this.blocker = blocker;
+  }
 }
 export interface SettingsWriteSnapshot { records: SettingsWriteRecord[]; loading: boolean; error: string | null; localRetry: string[]; draftRetry: string[]; draftPending: number }
 interface PendingDraft { hostId: string; section: SettingsWriteSection; scope?: readonly string[]; draft: unknown; record: SettingsWriteRecord | null }
@@ -194,7 +198,7 @@ export class SettingsConfigOperations {
     catch (error) {
       this.localPending.set(id, { patch, record: fallback ?? this.localPending.get(id)?.record });
       this.publish({ error: `The browser could not save the original receipt: ${message(error)}. Retry saving the receipt.` });
-      throw new SettingsWriteError('The browser could not save the original receipt. Your edit is preserved.', true);
+      throw new SettingsWriteError('The browser could not save the original receipt. Your edit is preserved.', true, id);
     }
   }
   async retryLocal(id: string): Promise<void> {
@@ -203,9 +207,10 @@ export class SettingsConfigOperations {
     await this.saveObservation(id, pending.patch, pending.record);
   }
   async submit(hostId: string, method: SettingsWriteMethod, params: Record<string, unknown>, origin: SettingsWriteOrigin,
-    canDispatch: () => boolean = () => true): Promise<{ operationId: string; result: unknown }> {
+    canDispatch: () => boolean = () => true, onPrepared: (id: string) => void = () => {}): Promise<{ operationId: string; result: unknown }> {
     const operationId = this.newId();
     if (!operationId) throw new SettingsWriteError('Cannot create a configuration operation ID.', false);
+    onPrepared(operationId);
     const entry: SettingsWriteRecord = structuredClone({ operationId, hostId, method, params, origin, phase: 'pending' as const });
     try {
       await this.storage.update(value => {
@@ -215,16 +220,16 @@ export class SettingsConfigOperations {
         return [...list, entry];
       });
       await this.refresh();
-    } catch (error) { throw new SettingsWriteError(`Could not save the original operation in the browser: ${message(error)}`, false); }
+    } catch (error) { throw new SettingsWriteError(`Could not save the original operation in the browser: ${message(error)}`, false, operationId); }
     if (!canDispatch()) {
       await this.saveObservation(operationId, { phase: 'not-started', error: 'The save was interrupted before it was sent.' }, entry);
-      throw new SettingsWriteError('The save was interrupted before it was sent.', false);
+      throw new SettingsWriteError('The save was interrupted before it was sent.', false, operationId);
     }
     let response: unknown;
     try { response = await this.client.host('configuration-write', { hostId, action: 'submit', operationId, method, params: entry.params }); }
     catch (error) {
       await this.saveObservation(operationId, { phase: 'unknown', error: `The original save could not be confirmed: ${message(error)}` }, entry);
-      throw new SettingsWriteError(`The original save could not be confirmed: ${message(error)}`, true);
+      throw new SettingsWriteError(`The original save could not be confirmed: ${message(error)}`, true, operationId);
     }
     const outcome = object(response) ? response.outcome : undefined;
     if (outcome === 'blocked' && object(response) && object(response.operation)) {
@@ -232,14 +237,14 @@ export class SettingsConfigOperations {
       const blocker = typeof raw.operationId === 'string' && typeof raw.hostId === 'string' ? status(raw, raw.operationId, raw.hostId, raw.method as SettingsWriteMethod | undefined) : null;
       if (blocker && blocker.operationId !== operationId) {
         await this.saveObservation(operationId, { phase: 'blocked', blocker, error: 'Another configuration save is still unresolved.' }, entry);
-        throw new SettingsWriteError('Another configuration save is still unresolved. Check the blocking operation.', true);
+        throw new SettingsWriteError('Another configuration save is still unresolved. Check the blocking operation.', true, operationId, blocker);
       }
     }
     if (outcome === 'not-started' && object(response) && response.operation === undefined
       && object(response.error) && response.error.uncertain === false && typeof response.error.message === 'string') {
       const detail = response.error.message;
       await this.saveObservation(operationId, { phase: 'not-started', error: detail }, entry);
-      throw new SettingsWriteError(detail, false);
+      throw new SettingsWriteError(detail, false, operationId);
     }
     const operation = object(response) ? status(response.operation, operationId, hostId, method) : null;
     if (operation) {
@@ -252,14 +257,19 @@ export class SettingsConfigOperations {
           : operation.terminal?.kind === 'effectiveEnabled' && result.effectiveEnabled === operation.terminal.value);
       const phase = completed(operation) && compatibleOutcome && validResult ? 'finished' : 'unknown';
       await this.saveObservation(operationId, { phase, operation, ...(result !== undefined ? { result } : {}), ...(detail ? { error: detail } : {}) }, entry);
-      if (operation.storageError) throw new SettingsWriteError('The host observed a result but could not save its receipt. Retry saving the host receipt.', true);
+      if (operation.storageError) throw new SettingsWriteError('The host observed a result but could not save its receipt. Retry saving the host receipt.', true, operationId);
       if (phase === 'finished' && operation.state === 'succeeded') {
         const effectiveResult = result ?? terminalResult(operation);
         if (effectiveResult !== undefined) return { operationId, result: effectiveResult };
       }
-      if (phase === 'finished' && operation.state === 'failed') throw new SettingsWriteError(detail ?? 'The original save was rejected or not sent.', false);
+      if (phase === 'finished' && operation.state === 'failed') throw new SettingsWriteError(detail ?? 'The original save was rejected or not sent.', false, operationId);
     } else await this.saveObservation(operationId, { phase: 'unknown', error: 'The host did not return the original operation identity.' }, entry);
-    throw new SettingsWriteError('The original save has an unknown result. Check the original operation before saving again.', true);
+    throw new SettingsWriteError('The original save has an unknown result. Check the original operation before saving again.', true, operationId);
+  }
+  async originalFinished(hostId: string, operationId: string, method: SettingsWriteMethod): Promise<boolean> {
+    const response = await this.client.host<unknown>('configuration-write', { hostId, action: 'status', operationId });
+    const operation = object(response) ? status(response.operation, operationId, hostId, method) : null;
+    return !!operation && completed(operation);
   }
   async check(id: string, retryPersistence = false): Promise<void> {
     const list = records(await this.storage.read()), entry = list.find(item => item.operationId === id);

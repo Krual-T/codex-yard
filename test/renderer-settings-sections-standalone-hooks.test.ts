@@ -169,6 +169,47 @@ test('a newer hook edit survives controller replacement without changing the ori
   assert.equal(client.writes.length, 1);
 });
 
+test('a retained hook controller checks its own original ID after the saved copy is closed', async () => {
+  const { client, settings } = await setup(); client.lost = true;
+  settings.edit(trusted.key, false); assert.equal(await settings.save(), false);
+  const original = await client.operations.find('ssh:one', 'hooks-settings', ['/project']); assert.ok(original);
+  const host = client.host.bind(client); let present = true;
+  const checked: unknown[] = [];
+  client.host = async <T>(endpoint: string, params?: Record<string, unknown>): Promise<T> => {
+    if (endpoint === 'configuration-write' && params?.action === 'status') {
+      checked.push(params.operationId);
+      return { operation: present ? { operationId: original.operationId, hostId: 'ssh:one', method: 'config/batchWrite', state: 'succeeded', terminal: { kind: 'ok' } } : null } as T;
+    }
+    return host<T>(endpoint, params);
+  };
+  await client.operations.check(original.operationId); await client.operations.finish(original.operationId, true);
+  present = false; await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, true);
+  present = true; await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, false);
+  settings.useLatest(); assert.equal(settings.dirty, false); assert.equal(client.writes.length, 1);
+  assert.deepEqual(checked, [original.operationId, original.operationId, original.operationId]);
+});
+
+test('a closed blocked hook request is reconciled using its distinct blocker identity', async () => {
+  const { client, settings } = await setup();
+  const host = client.host.bind(client), checked: unknown[] = [];
+  client.host = async <T>(endpoint: string, params?: Record<string, unknown>): Promise<T> => {
+    if (endpoint === 'configuration-write' && params?.action === 'submit') {
+      return { outcome: 'blocked', operation: { operationId: 'other-id', hostId: 'other-host', method: 'skills/config/write', state: 'unknown' } } as T;
+    }
+    if (endpoint === 'configuration-write' && params?.action === 'status') {
+      checked.push([params.hostId, params.operationId]);
+      return { operation: { operationId: 'other-id', hostId: 'other-host', method: 'skills/config/write', state: 'succeeded', terminal: { kind: 'effectiveEnabled', value: true } } } as T;
+    }
+    return host<T>(endpoint, params);
+  };
+  settings.edit(trusted.key, false); assert.equal(await settings.save(), false);
+  const original = await client.operations.find('ssh:one', 'hooks-settings', ['/project']); assert.ok(original);
+  await client.operations.check(original.operationId); await client.operations.finish(original.operationId, true);
+  await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, false);
+  settings.useLatest(); assert.equal(settings.dirty, true); assert.equal(client.writes.length, 0);
+  assert.deepEqual(checked, [['other-host', 'other-id'], ['other-host', 'other-id']]);
+});
+
 test('a changed trust state or override cannot silently apply a pending edit', async () => {
   const { client, settings } = await setup(); settings.edit(trusted.key, false); client.hooks[0].trustStatus = 'modified';
   assert.equal(await settings.save(), false); settings.useLatest();

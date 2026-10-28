@@ -179,3 +179,41 @@ test('a newer skill edit survives controller replacement without changing the or
   assert.deepEqual(resumed.getSnapshot().drafts, [{ id: id(local.name, local.path), enabled: true }]);
   assert.equal(client.writes.length, 1);
 });
+
+test('an older skill receipt cannot release a later unknown operation after its copy is closed', async () => {
+  const { client, settings } = await setup(); client.lostWriteAt = 2;
+  settings.edit(id(local.name, local.path), false); settings.edit(id(plugin.name, plugin.path), false);
+  assert.equal(await settings.save(), false);
+  const original = await client.operations.find('ssh:one', 'skills-settings', ['/project']); assert.ok(original);
+  const host = client.host.bind(client); let present = true;
+  const checked: unknown[] = [];
+  client.host = async <T>(endpoint: string, params?: Record<string, unknown>): Promise<T> => {
+    if (endpoint === 'configuration-write' && params?.action === 'status') {
+      checked.push(params.operationId);
+      return { operation: present ? { operationId: original.operationId, hostId: 'ssh:one', method: 'skills/config/write', state: 'succeeded', terminal: { kind: 'effectiveEnabled', value: false } } : null } as T;
+    }
+    return host<T>(endpoint, params);
+  };
+  await client.operations.check(original.operationId); await client.operations.finish(original.operationId, true);
+  const older = await client.operations.find('ssh:one', 'skills-settings', ['/project']); assert.ok(older);
+  assert.notEqual(older.operationId, original.operationId); assert.equal(older.phase, 'finished');
+  present = false; await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, true);
+  present = true; await settings.load(); assert.equal(settings.getSnapshot().writeUncertain, false);
+  settings.useLatest(); assert.equal(settings.dirty, false); assert.equal(client.writes.length, 2);
+  assert.deepEqual(checked, [original.operationId, original.operationId, original.operationId]);
+});
+
+test('a completed first skill cannot release a suspended second in-flight write', async () => {
+  const { client, settings } = await setup();
+  let release = () => {}, entered = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  client.beforeWrite = async () => { if (client.writes.length === 2) { entered(); await gate; } };
+  settings.edit(id(local.name, local.path), false); settings.edit(id(plugin.name, plugin.path), false);
+  const saving = settings.save(); await waiting; settings.dispose(); await settings.load();
+  assert.equal(settings.getSnapshot().writeUncertain, true);
+  settings.useLatest(); assert.equal(settings.getSnapshot().drafts.length, 2);
+  release(); assert.equal(await saving, false); await settings.load();
+  assert.equal(settings.getSnapshot().writeUncertain, false);
+  settings.useLatest(); assert.equal(settings.dirty, false); assert.equal(client.writes.length, 2);
+});
