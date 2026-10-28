@@ -6,15 +6,11 @@
 
 A self-hosted browser workspace for Codex. Continue local and SSH-hosted conversations, inspect files, use terminals, and work with Chrome from one interface.
 
-Install Node.js and Codex CLI, sign in, and start the workspace. The fixed web interface and Node tool adapter are checked into Git under `vendor/codex-app/26.1013.40934/`. A normal clone contains the runtime resources, with no desktop App installation or App package download during build or startup.
+The browser entry, React components, state, TypeScript host and Node tool adapter are maintained in this repository. React, editors and other libraries are installed through npm; Codex CLI/daemon provides the external conversation and tool backend. Running the workspace requires Node.js and Codex CLI.
 
-This is an experimental, independent project with a TypeScript host and React extensions. Its current interface is based on **Codex App 26.1013.40934**. The vendored interface is compiled upstream JavaScript, CSS, fonts and assets; the App's original TypeScript/TSX source is not included. See [third-party components](THIRD_PARTY.md).
+This is an experimental, independent project. **Codex App 26.1013.40934** is its historical UI behavior reference. Retained third-party pet images have their own [notice](public/pets/NOTICE.md); package dependencies keep their distributed licenses. See [third-party components](THIRD_PARTY.md).
 
-Authored React + TypeScript modules handle shared rows and timestamps, user
-and assistant messages, attachments, adaptive Markdown and code blocks, composer view/controller/draft and queue
-editing boundaries, settings navigation and General/Appearance composition and
-theme and preference controls inside the existing page. The
-full frontend migration is ongoing; see the [migration boundaries](docs/react-typescript-migration.md).
+This branch is completing the React + TypeScript migration. The default renderer is project-authored; final integration, removal of the remaining reference snapshot and validation from a clean checkout are still in progress. See the [current implementation design](docs/standalone-renderer-design.md).
 
 ## Current capabilities
 
@@ -30,12 +26,12 @@ The next product direction is a task dashboard: clarify and assign work, see whi
 
 | Component | Version | Role |
 | --- | --- | --- |
-| Codex | `0.164.0` | Verified deployment without the desktop App: automatic backend startup, web interface, and a real model reply |
-| Codex | `0.163.0` | Verified local and SSH conversations, files, terminals, and browser integration |
-| Codex App interface | `26.1013.40934` | Fixed UI reference and resource snapshot tracked in Git |
+| Codex CLI/daemon | `0.164.0` | Isolated protocol and UI checks, including a disposable CLI-managed daemon |
+| Codex CLI | `0.163.0-alpha.10.2` | Isolated protocol, UI and local/SSH file checks through a Unix listener |
+| Codex App interface | `26.1013.40934` | Historical behavior reference, recorded separately from backend versions |
 | Node.js | `>=24.5` | Tested with `24.16.0`; server platform currently validated on Linux x64 |
 
-The table records tested versions and their validation scope. Other Codex versions have not yet been validated.
+These are tested backend versions. Current migration checks use disposable configuration and, where responses are needed, a local scripted provider. Final validation of the complete migrated application remains in progress; other backend versions have not been validated.
 
 ## Run from source
 
@@ -55,15 +51,13 @@ npm ci
 npm start
 ```
 
-`npm start` builds this project's host, reads the checked-in resources, then asks Codex CLI to start or reuse its daemon. Closing the web server leaves that shared daemon running. The resource snapshot occupies about **531 MiB** in the checkout and uses ordinary Git files, so Git LFS and a separate App resource download are unnecessary.
+`npm start` runs the project build, serves the browser entry and local assets, and asks Codex CLI to start or reuse its daemon. Closing the web server leaves that shared daemon running. Frontend changes are built from this repository's source and locked npm dependencies. Package installation and model requests use their normal network connections.
 
-The interface and tool adapter change only when their Git snapshot is updated; local Codex App updates do not replace them. Codex backend compatibility is validated separately from the UI snapshot. Package installation and model requests still need their normal network access.
-
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765). To customize the server, copy `.env.example` to `.env`. `AGENTS_CODEX_BIN` selects a CLI executable; `AGENTS_CODEX_SOCKET` connects directly to an existing backend and skips automatic daemon startup. `AGENTS_APP_TOOLS_ADAPTER` overrides the vendored adapter if needed. Use a short private `AGENTS_DATA_DIR` when necessary: the complete Unix socket path must fit within 107 bytes.
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765). To customize the server, copy `.env.example` to `.env`. `AGENTS_CODEX_BIN` selects a CLI executable; `AGENTS_CODEX_SOCKET` connects directly to an existing backend and skips automatic daemon startup. `AGENTS_APP_TOOLS_ADAPTER` selects an optional compatible custom Node adapter; the default comes from this project's source. Use a short private `AGENTS_DATA_DIR` when necessary: the complete Unix socket path must fit within 107 bytes.
 
 For remote access, set `AGENTS_PUBLIC_ORIGIN` to the exact HTTPS origin and use a private tunnel or an authenticated reverse proxy. The server listens on loopback. It exposes file access and command execution with the connected account's permissions; it does not provide a multi-user login system. See [deployment boundaries](SECURITY.md).
 
-The original interface contacts external configuration and event services. Normal Codex requests also use your configured model provider. A private network does not make model execution offline. Set standard proxy variables only if your network requires them.
+Codex requests use your configured model provider. Features that read remote catalogs or work with Chrome also depend on their corresponding services. Set standard proxy variables only if your network requires them.
 
 ## Development
 
@@ -73,29 +67,30 @@ npm run typecheck
 npm test
 ```
 
-`npm test` builds this project's host bundles and uses disposable backends. It checks that the vendored interface is served and runs the official MCP adapter integration tests using the checked-in adapter. To run just the adapter tests:
+`npm test` runs the build and checks project-authored modules with disposable data and backend fixtures. To run just the Node tool adapter tests:
 
 ```bash
 npm run test:app-tools
 ```
 
-Full UI validation scripts in `scripts/verify-*.ts` use a configured CLI backend and may create real test conversations or execute commands. Inspect a script's configuration before running it against your own account. GitHub CI runs the portable tests, not these live checks.
+UI checks cover the actual browser entry, interactions and host requests. A scripted backend or provider makes these checks reproducible without a personal account. Some optional `scripts/verify-*.ts` modes use a configured CLI backend and may create conversations or execute commands; inspect their configuration and use disposable test data. Record the source commit, actual CLI/daemon version and fixture scope with each result. GitHub CI runs the portable tests.
 
 | Directory | Purpose |
 | --- | --- |
 | `src/native/` | Browser bridge, HTTP/WebSocket host, files, terminals, preferences, visualizations |
 | `src/browser-reuse/` | Chrome pairing, panel integration, element references |
-| `src/renderer/` | Authored React UI using the pinned renderer's React, state and services |
+| `src/renderer/` | React + TypeScript components, application state, drafts, settings and product pages |
 | `lib/` | Codex transport, host tools, permissions, protocol types |
 | `scripts/` | Build and optional live validation |
-| `test/` | Portable tests, including the vendored official adapter |
-| `vendor/codex-app/` | Fixed upstream compiled interface, assets, notices, and Node tool adapter |
+| `test/` | Module, host and browser tests with disposable fixtures |
+| `public/` | Project HTML, branding and retained pet images with their notice |
 
-Runtime state, host build output, and generated Chrome companion packages live in ignored `.local/`. Conversations remain in Codex; browser drafts remain in the browser's storage. No account data or configuration snapshot is supplied with this repository.
+Runtime state, build output and generated Chrome companion packages live in ignored `.local/` unless configured otherwise. Codex stores persisted conversation history; drafts and recovery data use browser storage and the private host data directory. Account data and machine-specific configuration stay outside Git.
 
 ## Known limits
 
-- Compatibility depends on private desktop interfaces and the pinned renderer version.
+- Backend compatibility depends on the Codex protocol version.
+- Temporary side chats use ephemeral backend sessions. Their history and reconnect capabilities differ from persisted conversations; a failed resume must not trigger an automatic resend.
 - Full desktop parity, Git/worktree operations, and general automation are incomplete.
 - Existing sessions owned by a separate stdio backend may require coordination before another client can continue them.
 - Physical iPhone behavior and Windows Chrome pairing still need dedicated validation.
@@ -103,4 +98,4 @@ Runtime state, host build output, and generated Chrome companion packages live i
 
 ## License
 
-Project-authored source is supplied under the [MIT license](LICENSE). Files under `vendor/codex-app/` are third-party compiled resources and are excluded from that MIT grant; their existing copyrights, notices and terms remain applicable. See the [vendor notice](vendor/codex-app/LICENSE). This project is not affiliated with or endorsed by OpenAI.
+Project-authored source is supplied under the [MIT license](LICENSE). Third-party packages and the retained [pet images](public/pets/NOTICE.md) keep their existing copyrights and terms; this project's MIT grant does not relicense them. See [third-party components](THIRD_PARTY.md). This project is not affiliated with or endorsed by OpenAI.

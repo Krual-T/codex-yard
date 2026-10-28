@@ -6,11 +6,11 @@
 
 通过浏览器继续使用本机和 SSH 主机上的 Codex 会话，在同一工作台查看文件、使用终端、操作 Chrome 和查看交互可视化。
 
-部署机准备好 Node.js 和 Codex CLI，完成登录后即可启动。固定版本的网页界面与 Node 工具适配器已纳入 Git，位于 `vendor/codex-app/26.1013.40934/`；普通 clone 即可取得，构建和启动无需安装桌面 App 或另行下载 App 资源包。
+网页入口、React 组件、应用状态、TypeScript 宿主和 Node 工具适配器由本仓库源码维护。React、编辑器等通用库通过 npm 安装，Codex CLI/daemon 通过协议提供会话与工具后端。运行环境需要 Node.js 和 Codex CLI。
 
-这是一个实验阶段的独立项目。当前界面对标 **Codex App 26.1013.40934**，自有宿主和扩展采用 TypeScript + React。仓库内的原版界面是编译后的 JS、CSS、字体和其他资源，不包含 App 原始 TypeScript / TSX 源码。[第三方组件说明](THIRD_PARTY.md)
+这是一个实验阶段的独立项目，以 **Codex App 26.1013.40934** 为历史交互参考。保留的第三方宠物图片附有[来源与声明](public/pets/NOTICE.md)，npm 依赖保留各自随包分发的许可证。[第三方组件说明](THIRD_PARTY.md)
 
-自有 React + TypeScript 模块已接入现有页面，负责共享会话行与时间、用户和助手消息、附件、自适应 Markdown 与代码块、主输入区视图/controller/草稿与队列编辑边界、设置导航及 General/Appearance 组合和主题/偏好控件。完整前端迁移仍在推进；[迁移边界与文件归属](docs/react-typescript-migration.md)说明实际接管范围、保留的上游依赖及验证入口。
+本分支仍在完成 React + TypeScript 迁移。默认页面已使用自有源码；最终功能集成、剩余参考快照删除及干净检出验收正在进行。[当前实现设计](docs/standalone-renderer-design.md)记录具体契约与验证边界。
 
 ## 当前功能与后续方向
 
@@ -22,12 +22,12 @@
 
 | 组件 | 版本 | 用途与验证范围 |
 | --- | --- | --- |
-| Codex | `0.164.0` | 已验证无需桌面 App 的部署：自动启动后端、网页加载与真实模型回复 |
-| Codex | `0.163.0` | 已验证本机和 SSH 对话、文件、终端与浏览器接入 |
-| Codex App 界面 | `26.1013.40934` | 对标复刻基准，也是 Git 跟踪的固定资源版本 |
+| Codex CLI/daemon | `0.164.0` | 隔离协议与界面检查，包含 CLI 管理的一次性 daemon |
+| Codex CLI | `0.163.0-alpha.10.2` | 经 Unix listener 验证协议、界面及本地/SSH 文件操作 |
+| Codex App 界面 | `26.1013.40934` | 历史行为参考，与后端版本分别记录 |
 | Node.js | `>=24.5` | 使用 `24.16.0` 验证；当前已验证的服务端平台为 Linux x64 |
 
-上表记录已验证的版本和对应范围，其他 Codex 版本暂未验证。
+当前迁移验证使用可丢弃配置，需要模型响应时使用本地脚本 provider。整套迁移应用的最终验收仍在进行，其他后端版本尚未验证。
 
 ## 运行
 
@@ -47,15 +47,13 @@ npm ci
 npm start
 ```
 
-`npm start` 构建自有宿主、读取仓库内资源后，调用 Codex CLI 启动或复用 daemon；退出网页服务会保留共享 daemon。资源快照在检出目录中约占 **531 MiB**，以普通 Git 文件保存，无需 Git LFS 或单独下载 App 资源。
+`npm start` 执行项目构建，提供网页入口与本地资源，并调用 Codex CLI 启动或复用 daemon；退出网页服务会保留共享 daemon。前端根据本仓库源码和锁定的 npm 依赖构建。安装依赖与调用模型仍使用相应网络连接。
 
-界面与工具适配器随 Git 提交固定，桌面 App 更新不会替换它们；Codex 后端的兼容性与界面快照分开验证。安装 npm 依赖与调用模型仍需要相应网络连接。
-
-打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。将 `.env.example` 复制为 `.env` 后可设置端口、数据目录、工作目录和连接地址。`AGENTS_CODEX_BIN` 指定 CLI 可执行文件；`AGENTS_CODEX_SOCKET` 直接连接已有后端并跳过自动启动；`AGENTS_APP_TOOLS_ADAPTER` 可覆盖仓库内的工具适配器路径。Unix socket 的完整路径上限为 107 字节，隔离工作树宜设置较短的私有数据目录。
+打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。将 `.env.example` 复制为 `.env` 后可设置端口、数据目录、工作目录和连接地址。`AGENTS_CODEX_BIN` 指定 CLI 可执行文件；`AGENTS_CODEX_SOCKET` 直接连接已有后端并跳过自动启动；`AGENTS_APP_TOOLS_ADAPTER` 可指定兼容的自定义 Node 适配器，默认使用本项目源码。Unix socket 的完整路径上限为 107 字节，必要时设置较短的私有 `AGENTS_DATA_DIR`。
 
 跨设备访问时，用私有隧道或带身份认证的 HTTPS 反向代理，并将 `AGENTS_PUBLIC_ORIGIN` 设为完整且精确的 HTTPS 来源。服务只监听回环地址；它可以访问文件和执行命令，没有多用户登录系统。[部署边界](SECURITY.md)
 
-原版界面会访问外部配置和事件服务，模型请求仍使用 Codex 中配置的提供方。网络需要代理时，可设置标准 `HTTPS_PROXY` 与 `NO_PROXY`。
+模型请求使用 Codex 中配置的提供方；远程目录读取、Chrome 等功能使用其对应服务。网络需要代理时，可设置标准 `HTTPS_PROXY` 与 `NO_PROXY`。
 
 ## 开发验证
 
@@ -65,16 +63,25 @@ npm run typecheck
 npm test
 ```
 
-普通测试会构建自有宿主，使用临时后端，检查仓库内界面的资源服务，并执行官方 MCP 适配器集成测试，无需 Codex App。只运行适配器测试时执行：
+`npm test` 先构建项目，再用可丢弃数据和后端夹具检查自有模块。只运行 Node 工具适配器测试时执行：
 
 ```bash
 npm run test:app-tools
 ```
 
-`scripts/verify-*.ts` 中的完整界面验收脚本需要 CLI 后端，部分会创建真实测试对话或执行命令，运行前应检查其配置。CI 只执行普通测试。
+界面检查覆盖实际网页入口、交互和宿主请求，合成后端或脚本 provider 可用于不依赖个人账号的可重复验证。部分可选 `scripts/verify-*.ts` 模式连接配置的 CLI，可能创建对话或执行命令，运行前应检查配置并使用可丢弃测试数据。验证结果分别记录源码提交、实际 CLI/daemon 版本及夹具范围。CI 执行普通测试。
 
-会话历史由 Codex 保存；网页草稿保存在浏览器；运行状态与自有宿主的构建产物位于 Git 忽略的 `.local/`。固定 App 资源位于 Git 跟踪的 `vendor/codex-app/`。仓库不附带个人账号数据或功能配置快照。
+| 目录 | 内容 |
+| --- | --- |
+| `src/renderer/` | React + TypeScript 组件、应用状态、草稿、设置和产品页面 |
+| `src/native/` | 网页桥接、HTTP/WebSocket 宿主、文件、终端、偏好与可视化 |
+| `src/browser-reuse/` | Chrome 配对、面板和元素引用 |
+| `lib/` | Codex 传输、工具、权限和协议类型 |
+| `public/` | HTML、项目图标和附带声明的宠物图片 |
+| `scripts/`、`test/` | 构建、验证入口及模块/宿主/浏览器测试 |
 
-当前仍受指定界面版本约束，Git/工作树操作与通用自动化尚未完整接通；两台实体 iPhone、Windows Chrome 配对和 2 秒启动目标仍需继续验证或实现。
+持久会话历史由 Codex 保存；草稿和恢复数据保存在浏览器存储及私有宿主数据目录。运行状态、构建产物和生成的 Chrome companion 默认位于 Git 忽略的 `.local/`。账号数据与机器配置不进入 Git。
 
-自有项目源码采用 [MIT](LICENSE)。`vendor/codex-app/` 下的第三方编译资源不在此 MIT 授权范围内，保留原有版权、声明与适用条款，详见[资源声明](vendor/codex-app/LICENSE)。本项目与 OpenAI 无隶属或背书关系。
+后端兼容性随 Codex 协议版本变化。临时侧聊使用 ephemeral 会话，其历史和重连能力与持久对话不同；恢复失败时保留状态，不自动重发。Git/工作树操作与通用自动化尚未完整接通；实体 iPhone、Windows Chrome 配对和 2 秒启动目标仍需继续验证或实现。
+
+自有项目源码采用 [MIT](LICENSE)。第三方包和保留的[宠物图片](public/pets/NOTICE.md)保留原有版权与条款，本项目的 MIT 授权不重新许可这些内容；详见[第三方组件说明](THIRD_PARTY.md)。本项目与 OpenAI 无隶属或背书关系。

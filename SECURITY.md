@@ -4,7 +4,7 @@ This is a personal development workspace with access to the connected user's fil
 
 The HTTP server binds to loopback and validates Host, Origin, and WebSocket requests. Those checks protect request boundaries; they do not provide user authentication. Remote access requires a private network or an authenticated HTTPS reverse proxy. Set `AGENTS_PUBLIC_ORIGIN` to that exact origin. Do not put an unauthenticated public proxy in front of the server.
 
-Keep `.local/`, `.env`, Codex state, SSH identities, browser pairing tokens, runtime logs, and screenshots containing real conversations outside version control. Only the fixed upstream App resources under `vendor/codex-app/` are tracked; personal configuration and cached service responses must not be added there. Data directories and tool sockets are private to the running user.
+Keep `.local/`, `.env`, Codex state, SSH identities, browser pairing tokens, runtime logs and screenshots containing real conversations outside version control. This repository contains application source and static assets with their notices. Account data, machine configuration and cached private responses do not belong in the checkout. Data directories and tool sockets are private to the running user.
 
 Chrome pairing grants access to the selected browser session. Pair only a browser you intend to use with the workspace, approve its native debugging prompt, and disconnect the companion when finished.
 
