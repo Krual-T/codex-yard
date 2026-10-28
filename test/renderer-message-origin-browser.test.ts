@@ -79,7 +79,7 @@ test('message context, edit qualification, IME, literal tool paths and app conte
     await page.evaluate(() => window.messageOriginHarness.reverseTimestamps(false));
     await message.getByRole('button', { name: 'Notes' }).click();
     assert.deepEqual((await page.evaluate(() => window.messageOriginHarness.calls.locations)).at(-1),
-      { path: '/work/a%20b#L12.md', hostId: 'ssh', cwd: '/work', line: 4 });
+      { path: '/work/a%20b#L12.md', hostId: 'ssh', cwd: '/work', line: 4, column: 1 });
     await edit.click();
     const field = message.getByRole('textbox', { name: 'Edit message text' });
     assert.equal(await field.inputValue(), 'Original request\n');

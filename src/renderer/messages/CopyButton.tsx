@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Check, Clipboard } from 'lucide-react';
 import { writeClipboardText } from '../../native/browser-clipboard.ts';
+import { writeMessageClipboard } from './message-copy.ts';
+import type { MessageCopyContent } from './message-copy.ts';
 
-export function CopyButton({ text, label }: { text: string; label: string }) {
+export function CopyButton({ text, label, content }: { text: string; label: string; content?: () => MessageCopyContent }) {
   const [state, setState] = useState<'idle' | 'copied' | 'error'>('idle');
   useEffect(() => {
     if (state === 'idle') return;
@@ -11,7 +13,8 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
   }, [state]);
   async function copy() {
     try {
-      await writeClipboardText(text);
+      if (content) await writeMessageClipboard(content());
+      else await writeClipboardText(text);
       setState('copied');
     } catch {
       setState('error');

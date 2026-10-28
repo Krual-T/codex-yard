@@ -90,6 +90,9 @@ export function ToolItem({ item, client, hostId, threadId, cwd, onOpenFile, onOp
     const owner = asString(item.server) || asString(item.namespace);
     const title = [owner, asString(item.tool)].filter(Boolean).join(' / ') || 'Tool call';
     const result = asRecord(item.result);
+    const appUi = asRecord(item.mcpAppUi);
+    const appResource = asString(appUi.resourceUri) || asString(item.mcpAppResourceUri);
+    const appMode = asString(appUi.preferredModelDisplayMode);
     return <ToolFrame icon={<Wrench size={16} />} title={title} status={status}>
       <DataBlock label="Arguments" value={item.arguments} />
       {asArray(result.content).map((value, index) => {
@@ -103,7 +106,8 @@ export function ToolItem({ item, client, hostId, threadId, cwd, onOpenFile, onOp
       })}
       <DataBlock label="Structured result" value={result.structuredContent} /><DataBlock label="Result metadata" value={result._meta} />
       <DataBlock label="Error" value={asString(asRecord(item.error).message) || item.error} />
-      {asString(asRecord(item.mcpAppUi).resourceUri) && <div>Interactive tool view unavailable: {asString(asRecord(item.mcpAppUi).resourceUri)}</div>}
+      {appResource && <div>Interactive tool view unavailable: {appResource}
+        {(appMode === 'inline' || appMode === 'fullscreen') && <> ({appMode})</>}</div>}
       {asArray(item.contentItems).map((value, index) => {
         const content = asRecord(value);
         if (content.type === 'inputText') return <DataBlock key={index} label="Output" value={content.text} />;

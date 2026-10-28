@@ -46,6 +46,7 @@ export type SerializedMessageContext = {
   prefix: string;
   body: string;
   files: { path: string; name: string; startLine?: number; endLine?: number }[];
+  fileSpans: { start: number; end: number; removable: boolean }[];
   unresolved: boolean;
 };
 
@@ -55,21 +56,36 @@ export function serializedMessageContext(text: string): SerializedMessageContext
   const heading = headings.at(-1);
   const hasFileHeader = /^# Files (?:mentioned|pasted) by the user:\s*$/m.test(text);
   if (!heading || heading.index === 0 || !text.slice(0, heading.index).trim()) {
-    return { prefix: '', body: text, files: [], unresolved: hasFileHeader };
+    return { prefix: '', body: text, files: [], fileSpans: [], unresolved: hasFileHeader };
   }
   let boundary = heading.index + heading[0].length;
   if (text.startsWith('\r\n', boundary)) boundary += 2;
   else if (text.startsWith('\n', boundary)) boundary++;
   const prefix = text.slice(0, boundary);
   const files: SerializedMessageContext['files'] = [];
+  const fileSpans: SerializedMessageContext['fileSpans'] = [];
   let section: 'mentioned' | 'pasted' | null = null;
-  for (const line of prefix.split(/\r?\n/)) {
-    if (line === '# Files mentioned by the user:') { section = 'mentioned'; continue; }
-    if (line === '# Files pasted by the user:') { section = 'pasted'; continue; }
+  let currentSpan: SerializedMessageContext['fileSpans'][number] | null = null;
+  for (const matchLine of prefix.matchAll(/[^\r\n]*(?:\r\n|\n|$)/g)) {
+    if (!matchLine[0]) continue;
+    const line = matchLine[0].replace(/\r?\n$/, '');
+    const start = matchLine.index;
+    const end = start + matchLine[0].length;
+    if (line === '# Files mentioned by the user:') { section = 'mentioned'; currentSpan = null; continue; }
+    if (line === '# Files pasted by the user:') { section = 'pasted'; currentSpan = null; continue; }
     if (!section) continue;
+    if (!line.trim()) continue;
+    if (line.startsWith('# ') || /^## My request(?: for Codex)?:/.test(line)) { section = null; currentSpan = null; continue; }
     const match = /^##\s+(.+)$/.exec(line.trimStart());
-    if (!match) continue;
+    if (!match) {
+      const metadata = section === 'mentioned' && (line.trimStart() === 'Image attachment: true'
+        || line.trimStart().startsWith('Library file metadata: ') || line.trimStart().startsWith('Shared thread metadata: '));
+      if (currentSpan && metadata) currentSpan.end = end;
+      else { if (currentSpan) currentSpan.removable = false; section = null; currentSpan = null; }
+      continue;
+    }
     const entry = match[1]!;
+    let found = false;
     for (let separator = entry.lastIndexOf(': '); separator > 0; separator = entry.lastIndexOf(': ', separator - 1)) {
       const raw = entry.slice(separator + 2).trim();
       const lines = /\s+\((?:lines\s+(\d+)-(\d+)|line\s+(\d+))\)\s*$/.exec(raw);
@@ -80,11 +96,18 @@ export function serializedMessageContext(text: string): SerializedMessageContext
         try { const parsed: unknown = JSON.parse(name); if (typeof parsed !== 'string') break; name = parsed; }
         catch { break; }
       }
-      if (name) files.push({ name, path, ...(lines ? { startLine: Number(lines[1] ?? lines[3]), endLine: Number(lines[2] ?? lines[3]) } : {}) });
+      if (name) {
+        files.push({ name, path, ...(lines ? { startLine: Number(lines[1] ?? lines[3]), endLine: Number(lines[2] ?? lines[3]) } : {}) });
+        currentSpan = { start, end, removable: true };
+        fileSpans.push(currentSpan);
+        found = true;
+      }
       break;
     }
+    if (!found) { if (currentSpan) currentSpan.removable = false; section = null; currentSpan = null; }
   }
-  return { prefix, body: text.slice(boundary), files, unresolved: /^# Files (?:mentioned|pasted) by the user:\s*$/m.test(text.slice(boundary)) };
+  return { prefix, body: text.slice(boundary), files, fileSpans,
+    unresolved: /^# Files (?:mentioned|pasted) by the user:\s*$/m.test(text.slice(boundary)) };
 }
 
 function appMessage(input: Record<string, unknown>): UserContentPart | null {

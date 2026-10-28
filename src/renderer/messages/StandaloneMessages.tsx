@@ -1,16 +1,17 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowDown, ChevronDown, ChevronLeft, ChevronRight, GitFork, Pencil, Search, X } from 'lucide-react';
+import { ArrowDown, ChevronDown, ChevronLeft, ChevronRight, GitFork, Pencil, Search, Undo2, X } from 'lucide-react';
 import type { ThreadItemSummary, TurnSummary } from '../../../lib/codex-protocol.ts';
 import type { StandaloneMessagesProps, WorkbenchClient } from '../workbench-contract.ts';
 import { StandaloneMarkdown } from '../markdown/StandaloneMarkdown.tsx';
 import { ToolItem } from '../tools/ToolItem.tsx';
 import { CopyButton } from './CopyButton.tsx';
+import { messageCopyContent } from './message-copy.ts';
 import { ImageViewer, MessageImage } from './MessageImage.tsx';
 import { asArray, asRecord, asString, displayJson, editableDraft, parseUserContent, resolveToolFileLocation, serializedMessageContext } from './message-data.ts';
 import type { ImageSource, SerializedMessageContext } from './message-data.ts';
-import { editSourceSignature, latestEditTarget } from './message-edit.ts';
-import type { MessageEditHistory } from './message-edit.ts';
+import { canRemoveImageAttachment, editSourceSignature, latestEditTarget } from './message-edit.ts';
+import type { MessageEditHistory, RemovedMessageAttachment } from './message-edit.ts';
 import { useMessageEditing } from './use-message-editing.ts';
 import type { EditingSession, StandaloneMessagesRecoveryProps, StartEdit, UpdateEdit } from './use-message-editing.ts';
 import './standalone-messages.css';
@@ -55,7 +56,11 @@ type UserMessageEditorProps = {
   onSubmitEdit: RenderItemProps['onSubmitEdit'];
   recoveryNote: string | null;
   renderPart: (index: number) => ReactNode;
-  renderContext: (context: SerializedMessageContext) => ReactNode;
+  renderContext: (context: SerializedMessageContext, controls?: {
+    isRemoved: (fileIndex: number) => boolean;
+    toggle: (fileIndex: number) => void;
+    disabled: boolean;
+  }) => ReactNode;
 };
 
 const unavailableEdit: NonNullable<StandaloneMessagesProps['onEdit']> = async () => {
@@ -63,16 +68,23 @@ const unavailableEdit: NonNullable<StandaloneMessagesProps['onEdit']> = async ()
 };
 
 function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, onCancel, onSubmitEdit, recoveryNote, renderPart, renderContext }: UserMessageEditorProps) {
-  const { id, draft, signature, edits, addedText, error, saveError, pending, sent } = editing;
+  const { id, draft, signature, edits, addedText, removedAttachments, error, saveError, pending, sent } = editing;
   const composing = useRef(false);
   const currentSignature = useMemo(() => editSourceSignature(item), [item]);
   const changedSource = signature !== currentSignature;
-  const blocked = restriction ?? (changedSource ? 'This message changed while editing. Cancel and reopen the editor.' : null);
+  const blocked = restriction ?? (changedSource ? 'This message changed while editing. Cancel and reopen the editor.' : null)
+    ?? (editing.attachmentRecoveryInvalid ? 'The saved attachment changes are unrecognized. The original edit has been preserved.' : null);
   const rows = new Map(edits.map((edit, position) => [edit.index, { edit, position }]));
+  const sameAttachment = (left: RemovedMessageAttachment, right: RemovedMessageAttachment) => left.kind === right.kind
+    && left.inputIndex === right.inputIndex && (left.kind !== 'file' || (right.kind === 'file' && left.fileIndex === right.fileIndex));
+  const isRemoved = (attachment: RemovedMessageAttachment) => removedAttachments.some((value) => sameAttachment(value, attachment));
+  const toggleAttachment = (attachment: RemovedMessageAttachment) => onUpdateEdit(id, (current) => ({ ...current, error: '',
+    removedAttachments: current.removedAttachments.some((value) => sameAttachment(value, attachment))
+      ? current.removedAttachments.filter((value) => !sameAttachment(value, attachment)) : [...current.removedAttachments, attachment] }));
   const textarea = (value: string, onChange: (value: string) => void, label: string, autoFocus: boolean) =>
     <label className="yard-edit-text"><span className="yard-screen-reader">{label}</span>
       <textarea aria-label={label} autoFocus={autoFocus} rows={Math.max(3, Math.min(12, value.split('\n').length + 1))}
-        value={value} disabled={pending || sent} onChange={(event) => { onChange(event.target.value); }} />
+        value={value} disabled={pending || sent || editing.attachmentRecoveryInvalid} onChange={(event) => { onChange(event.target.value); }} />
       <span className="yard-edit-print-text" aria-hidden="true">{value}</span></label>;
   return <form className="yard-message-edit" onCompositionStart={() => { composing.current = true; }}
     onCompositionEnd={() => { composing.current = false; }} onKeyDown={(event) => {
@@ -87,13 +99,28 @@ function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, o
     {!edits.length && textarea(addedText, (text) => onUpdateEdit(id, (current) => ({ ...current, addedText: text, error: '' })), 'Edit message text', true)}
     {draft.input?.map((_, index) => {
       const row = rows.get(index);
-      if (!row) return <div key={index}>{renderPart(index)}</div>;
       const part = parseUserContent({ ...item, content: [_] })[0];
+      if (!row) {
+        if (part?.kind !== 'image') return <div key={index}>{renderPart(index)}</div>;
+        const attachment = { kind: 'image', inputIndex: index } as const;
+        const removed = isRemoved(attachment);
+        const canRemove = canRemoveImageAttachment(draft, index);
+        const label = `${removed ? 'Restore' : 'Remove'} image ${index + 1}`;
+        return <div className="yard-edit-attachment" key={index}>
+          {removed ? <span className="yard-attachment-removed">Image removed</span> : renderPart(index)}
+          <button type="button" className="yard-icon-button" title={canRemove ? label : 'Image cannot be safely removed'}
+            aria-label={label} disabled={pending || sent || editing.attachmentRecoveryInvalid || !canRemove} onClick={() => toggleAttachment(attachment)}>
+            {removed ? <Undo2 size={16} /> : <X size={16} />}</button>
+        </div>;
+      }
       if (part?.kind === 'appMessage' || part?.kind === 'unsupported') return <div key={index}>{renderPart(index)}</div>;
       const original = draft.input?.[index]?.text;
       const context = typeof original === 'string' ? serializedMessageContext(original) : null;
       const value = context?.prefix && row.edit.text.startsWith(context.prefix) ? row.edit.text.slice(context.prefix.length) : row.edit.text;
-      return <div key={index}>{context?.prefix && renderContext(context)}
+      return <div key={index}>{context?.prefix && renderContext(context, {
+        isRemoved: (fileIndex) => isRemoved({ kind: 'file', inputIndex: index, fileIndex }),
+        toggle: (fileIndex) => toggleAttachment({ kind: 'file', inputIndex: index, fileIndex }), disabled: pending || sent || editing.attachmentRecoveryInvalid,
+      })}
         {textarea(value, (text) => onUpdateEdit(id, (current) => ({ ...current, error: '',
         edits: current.edits.map((edit) => edit.index === index ? { ...edit, text: (context?.prefix ?? '') + text } : edit) })),
         edits.length === 1 ? 'Edit message text' : `Edit message text ${row.position + 1} of ${edits.length}`, row.position === 0)}</div>;
@@ -112,10 +139,12 @@ function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFo
   const [expanded, setExpanded] = useState(false);
   const [actionError, setActionError] = useState('');
   const editButton = useRef<HTMLButtonElement>(null);
+  const body = useRef<HTMLDivElement>(null);
   const restoreFocus = useRef(false);
   const parts = useMemo(() => parseUserContent(editing ? { ...item, content: editing.draft.input } : item), [item, editing]);
   const openSingleImage = useCallback((image: ImageSource) => onOpenImages([image], 0), [onOpenImages]);
-  const images = parts.flatMap((part) => part.kind === 'image' ? [part.image] : part.kind === 'appMessage' ? part.images : []);
+  const imageRemoved = (index: number) => editing?.removedAttachments.some((attachment) => attachment.kind === 'image' && attachment.inputIndex === index) ?? false;
+  const images = parts.flatMap((part, index) => part.kind === 'image' ? (imageRemoved(index) ? [] : [part.image]) : part.kind === 'appMessage' ? part.images : []);
   const draft = useMemo(() => onEdit && !editRestriction ? editableDraft(item) : null, [item, onEdit, editRestriction]);
   const text = parts.flatMap((part) => part.kind === 'text' || part.kind === 'appMessage' ? [part.text] : []).join('\n');
   const long = text.length > 1200;
@@ -125,20 +154,27 @@ function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFo
     if (!editing && restoreFocus.current) { editButton.current?.focus(); restoreFocus.current = false; }
   }, [editing]);
   let imageIndex = 0;
-  const renderContext = (context: SerializedMessageContext) => <div className="yard-reference">
-    {context.files.map((file, index) => <div key={`${file.path}-${index}`}>
+  const renderContext: UserMessageEditorProps['renderContext'] = (context, controls) => <div className="yard-reference">
+    {context.files.map((file, index) => <div className="yard-edit-attachment" key={`${file.path}-${index}`}>
+      <span className={controls?.isRemoved(index) ? 'yard-attachment-removed' : undefined}>
       {onOpenFileAt || onOpenFile ? <button type="button" className="yard-file-link" onClick={() => {
         const location = resolveToolFileLocation(file.path, cwd, hostId);
-        if (onOpenFileAt) onOpenFileAt({ ...location, ...(file.startLine ? { line: file.startLine } : {}) });
+        if (onOpenFileAt) onOpenFileAt({ ...location, ...(file.startLine !== undefined ? { line: file.startLine, column: 1 } : {}) });
         else onOpenFile?.(location.path);
       }}>{file.name}</button> : <strong>{file.name}</strong>} <span>{file.path}</span>
-      {file.startLine && <span> ({file.endLine !== file.startLine ? `lines ${file.startLine}-${file.endLine}` : `line ${file.startLine}`})</span>}
+      {file.startLine !== undefined && <span> ({file.endLine !== file.startLine ? `lines ${file.startLine}-${file.endLine}` : `line ${file.startLine}`})</span>}
+      </span>
+      {controls && <button type="button" className="yard-icon-button"
+        title={context.fileSpans[index]?.removable ? `${controls.isRemoved(index) ? 'Restore' : 'Remove'} ${file.name}` : 'File context cannot be safely removed'}
+        aria-label={`${controls.isRemoved(index) ? 'Restore' : 'Remove'} ${file.name}`}
+        disabled={controls.disabled || !context.fileSpans[index]?.removable} onClick={() => controls.toggle(index)}>
+        {controls.isRemoved(index) ? <Undo2 size={16} /> : <X size={16} />}</button>}
     </div>)}
     <details><summary>Message context</summary><pre>{context.prefix}</pre></details>
   </div>;
   const renderedParts = parts.map((part, index) => {
     if (part.kind === 'text') return <div key={index}>{part.context && renderContext(part.context)}
-      <div className={long && !expanded && !searchMatch ? 'yard-user-text is-collapsed' : 'yard-user-text'}>
+      <div data-user-copy-part className={long && !expanded && !searchMatch ? 'yard-user-text is-collapsed' : 'yard-user-text'}>
         <StandaloneMarkdown text={part.text} client={client} hostId={hostId} threadId={threadId} cwd={cwd} onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenImage={openSingleImage} /></div>
       {part.hasElements && <details className="yard-unsupported-input"><summary>Message references</summary><pre>{displayJson(part.textElements)}</pre></details>}
     </div>;
@@ -146,14 +182,15 @@ function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFo
       const first = imageIndex;
       imageIndex += part.images.length;
       return <div key={index}>
-        <StandaloneMarkdown text={part.text} client={client} hostId={hostId} threadId={threadId} cwd={cwd} onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenImage={openSingleImage} />
+        <div data-user-copy-part><StandaloneMarkdown text={part.text} client={client} hostId={hostId} threadId={threadId} cwd={cwd} onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenImage={openSingleImage} /></div>
         {part.images.map((image, offset) => <MessageImage key={offset} source={image} client={client} hostId={hostId} cwd={cwd}
           onOpen={() => onOpenImages(images, first + offset)} />)}
         <details className="yard-unsupported-input"><summary>App message data</summary><pre>{displayJson(part.original)}</pre></details>
       </div>;
     }
     if (part.kind === 'image') {
-      const current = imageIndex++;
+      const current = imageIndex;
+      if (!imageRemoved(index)) imageIndex++;
       return <MessageImage key={index} source={part.image} client={client} hostId={hostId} cwd={cwd} onOpen={() => onOpenImages(images, current)} />;
     }
     if (part.kind === 'reference') return <div className="yard-reference" data-reference-type={part.referenceType} key={index}>{part.referenceType}: {part.name} <span>{part.path}</span></div>;
@@ -164,9 +201,9 @@ function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFo
       restriction={onEdit ? editRestriction : 'Message editing is unavailable.'} onEdit={onEdit ?? unavailableEdit}
       onCancel={() => { restoreFocus.current = true; onEndEdit(editing.id); }} onSubmitEdit={onSubmitEdit}
       recoveryNote={recoveryNote} renderPart={(index) => renderedParts[index]} renderContext={renderContext} /> : <>
-      <div className="yard-user-body">{renderedParts}</div>{long && !searchMatch && <button className="yard-expand" type="button" onClick={() => setExpanded(!expanded)}
+      <div ref={body} className="yard-user-body">{renderedParts}</div>{long && !searchMatch && <button className="yard-expand" type="button" onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}>{expanded ? 'Show less' : 'Show more'} <ChevronDown size={15} /></button>}</>}</div>
-    {!editing && <div className="yard-message-actions"><CopyButton text={text} label="Copy message" />
+    {!editing && <div className="yard-message-actions">{text.trim() && <CopyButton text={text} label="Copy message" content={() => body.current ? messageCopyContent(body.current) : { plainText: text, htmlText: '' }} />}
       {onEdit && <button ref={editButton} type="button" className="yard-icon-button" title={editRestriction ?? (draft ? 'Edit message' : 'This message cannot be edited without losing content')}
         aria-label="Edit message" disabled={!draft || Boolean(editRestriction)} onClick={() => {
           if (!draft || editRestriction) return;

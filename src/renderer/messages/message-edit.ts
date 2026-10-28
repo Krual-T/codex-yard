@@ -4,7 +4,19 @@ import { asRecord, serializedMessageContext } from './message-data.ts';
 
 export type EditTarget = { turnId: string; itemId: string; restriction: string | null };
 export type TextEdit = { index: number; text: string };
+export type RemovedMessageAttachment = { kind: 'image'; inputIndex: number } | { kind: 'file'; inputIndex: number; fileIndex: number };
 type EditResult = { draft: ComposerDraft; error?: never } | { draft?: never; error: string };
+
+export function isRemovedMessageAttachments(value: unknown): value is RemovedMessageAttachment[] {
+  return Array.isArray(value) && value.every((item: unknown) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+    const entry = item as Record<string, unknown>;
+    const allowed = entry.kind === 'image' ? ['kind', 'inputIndex'] : entry.kind === 'file' ? ['kind', 'inputIndex', 'fileIndex'] : [];
+    return allowed.length > 0 && Object.keys(entry).every((key) => allowed.includes(key))
+      && Number.isSafeInteger(entry.inputIndex) && Number(entry.inputIndex) >= 0
+      && (entry.kind !== 'file' || (Number.isSafeInteger(entry.fileIndex) && Number(entry.fileIndex) >= 0));
+  });
+}
 
 export type MessageEditHistory = { order: 'ascending' | 'descending'; tailComplete: boolean };
 
@@ -49,6 +61,17 @@ export function editSourceSignature(item: ThreadItemSummary): string {
 export function textEdits(draft: ComposerDraft): TextEdit[] {
   return (draft.input ?? []).flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
     ? [{ index, text: entry.text }] : []);
+}
+
+export function canRemoveImageAttachment(draft: ComposerDraft, inputIndex: number): boolean {
+  const entry = draft.input?.[inputIndex];
+  const matches = draft.images.filter((image) => image.id === `image-${inputIndex}`);
+  if (!entry || matches.length !== 1) return false;
+  const image = matches[0]!;
+  if (entry.type === 'localImage') return typeof entry.path === 'string' && image.path === entry.path;
+  if (entry.type !== 'image') return false;
+  if (typeof entry.url === 'string') return image.src === entry.url;
+  return typeof entry.fileId === 'string' && image.fileId === entry.fileId;
 }
 
 type TextChange = { start: number; oldEnd: number; newEnd: number };
@@ -235,7 +258,9 @@ function knownInput(entry: Record<string, unknown>): boolean {
   }
 }
 
-export function applyTextEdits(original: ComposerDraft, edits: TextEdit[], addedText: string): EditResult {
+export function applyTextEdits(original: ComposerDraft, edits: TextEdit[], addedText: string,
+  removedAttachments: RemovedMessageAttachment[] = []): EditResult {
+  if (!isRemovedMessageAttachments(removedAttachments)) return { error: 'The saved attachment changes are unrecognized. The original edit has been preserved.' };
   const draft = structuredClone(original);
   const input = draft.input;
   if (!input) return { error: 'The original message input is unavailable.' };
@@ -243,7 +268,7 @@ export function applyTextEdits(original: ComposerDraft, edits: TextEdit[], added
   if (expected.length !== edits.length || expected.some((entry, index) => entry.index !== edits[index]?.index)) {
     return { error: 'The original message text changed. Cancel and reopen the editor.' };
   }
-  const changed = expected.some((entry, index) => entry.text !== edits[index]!.text) || (!expected.length && addedText !== '');
+  const changed = expected.some((entry, index) => entry.text !== edits[index]!.text) || (!expected.length && addedText !== '') || removedAttachments.length > 0;
   if (changed && input.some((entry) => !knownInput(entry))) {
     return { error: 'This message contains unrecognized input. Its original content has been preserved.' };
   }
@@ -262,8 +287,59 @@ export function applyTextEdits(original: ComposerDraft, edits: TextEdit[], added
     if (error) return { error };
     input[entry.index]!.text = updatedText;
   }
-  if (!expected.length && addedText) input.unshift({ type: 'text', text: addedText, text_elements: [] });
-  const text = input.flatMap((entry) => entry.type === 'text' && typeof entry.text === 'string' ? [entry.text] : []).join('\n');
+  const removedImages = new Set<number>();
+  const removedFiles = new Map<number, Set<number>>();
+  for (const attachment of removedAttachments) {
+    if (!Number.isSafeInteger(attachment.inputIndex) || attachment.inputIndex < 0 || attachment.inputIndex >= input.length) {
+      return { error: 'An attachment no longer matches the original message. Its original content has been preserved.' };
+    }
+    const entry = input[attachment.inputIndex]!;
+    if (attachment.kind === 'image') {
+      if (!canRemoveImageAttachment(draft, attachment.inputIndex) || removedImages.has(attachment.inputIndex)) {
+        return { error: 'An image no longer matches the original message. Its original content has been preserved.' };
+      }
+      removedImages.add(attachment.inputIndex);
+    } else if (attachment.kind === 'file') {
+      if (entry.type !== 'text' || typeof entry.text !== 'string' || !Number.isSafeInteger(attachment.fileIndex) || attachment.fileIndex < 0) {
+        return { error: 'A file no longer matches the original message. Its original content has been preserved.' };
+      }
+      const files = removedFiles.get(attachment.inputIndex) ?? new Set<number>();
+      if (files.has(attachment.fileIndex)) return { error: 'A file was selected more than once. Its original content has been preserved.' };
+      files.add(attachment.fileIndex);
+      removedFiles.set(attachment.inputIndex, files);
+    } else return { error: 'An unrecognized attachment change was preserved without sending.' };
+  }
+  for (const [inputIndex, indices] of removedFiles) {
+    const entry = input[inputIndex]!;
+    const before = entry.text as string;
+    const originalText = original.input?.[inputIndex]?.text;
+    if (typeof originalText !== 'string') return { error: 'The original file context is unavailable.' };
+    const context = serializedMessageContext(originalText);
+    if (context.unresolved || !context.prefix || !before.startsWith(context.prefix)) {
+      return { error: 'The file context cannot be changed safely. Its original content has been preserved.' };
+    }
+    let after = before;
+    for (const fileIndex of [...indices].sort((a, b) => b - a)) {
+      const span = context.fileSpans[fileIndex];
+      if (!span?.removable) return { error: 'The file has unrecognized context and cannot be removed safely.' };
+      after = after.slice(0, span.start) + after.slice(span.end);
+    }
+    const remainingContext = serializedMessageContext(after);
+    if (!remainingContext.files.length && /^(?:# Files (?:mentioned|pasted) by the user:\r?\n[\r\n]*)+## My request(?: for Codex)?:\r?\n?$/.test(remainingContext.prefix)) {
+      after = remainingContext.body;
+    }
+    const error = adjustTextElements(entry, before, after);
+    if (error) return { error };
+    entry.text = after;
+  }
+  if (removedImages.size) {
+    const removedIds = new Set([...removedImages].map((index) => `image-${index}`));
+    draft.input = input.filter((_, index) => !removedImages.has(index));
+    draft.images = draft.images.filter((image) => !removedIds.has(image.id));
+  }
+  const remaining = draft.input ?? input;
+  if (!expected.length && addedText) remaining.unshift({ type: 'text', text: addedText, text_elements: [] });
+  const text = remaining.flatMap((entry) => entry.type === 'text' && typeof entry.text === 'string' ? [entry.text] : []).join('\n');
   if (draft.document) {
     const error = updateDocument(draft.document, draft.text, text);
     if (error) return { error };

@@ -67,7 +67,8 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   const code = Children.toArray(children).find((child) => isValidElement<{ className?: string }>(child));
   const className = isValidElement<{ className?: string }>(code) ? code.props.className ?? '' : '';
   const language = /(?:^|\s)language-([^\s]+)/.exec(className)?.[1] ?? '';
-  const source = textContent(children).replace(/\n$/, '');
+  const renderedSource = textContent(children);
+  const source = renderedSource.replace(/\n$/, '');
   const isDiagram = language.toLowerCase() === 'mermaid';
   async function copy() {
     try {
@@ -83,7 +84,7 @@ function CodeBlock({ children }: { children?: ReactNode }) {
     const timer = window.setTimeout(() => setCopied(false), 2000);
     return () => window.clearTimeout(timer);
   }, [copied]);
-  return <div className="yard-code-block" data-markdown-copy="code-block" data-markdown-copy-text={source}>
+  return <div className="yard-code-block" data-markdown-copy="code-block" data-markdown-copy-text={renderedSource} data-markdown-copy-language={language}>
     <div className="yard-code-toolbar" data-markdown-copy="exclude"><span>{language || 'Code'}</span><div>
       {isDiagram && <button type="button" className="yard-icon-button" title={showSource ? 'Show diagram' : 'Show source'}
         aria-label={showSource ? 'Show diagram' : 'Show source'} onClick={() => setShowSource((value) => !value)}>

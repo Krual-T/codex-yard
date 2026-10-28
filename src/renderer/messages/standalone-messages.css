@@ -37,6 +37,9 @@
 .yard-message-actions { display: flex; gap: 2px; margin-top: 4px; }
 .yard-user-message .yard-message-actions { justify-content: flex-end; }
 .yard-message-edit { display: flex; flex-direction: column; gap: 8px; }
+.yard-edit-attachment { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.yard-edit-attachment > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.yard-attachment-removed { color: var(--yard-muted, #626c69); text-decoration: line-through; }
 .yard-edit-text, .yard-edit-text textarea { display: block; width: 100%; }
 .yard-edit-print-text { display: none; }
 .yard-edit-text textarea { min-width: 0; resize: vertical; padding: 8px; border: 1px solid var(--yard-border, #d7dfdc); border-radius: 4px; background: var(--yard-bg, #fff); color: var(--yard-fg, #202524); font: inherit; }

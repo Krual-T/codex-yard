@@ -78,7 +78,9 @@ test('standalone messages render CLI items and retain interactions while streami
           { id: 'command', type: 'commandExecution', command: 'npm test', cwd: '/work/sub', status: 'inProgress', aggregatedOutput: 'needle-output', exitCode: null,
             commandActions:[{type:'read',command:'cat test.ts',name:'test.ts',path:'test.ts'}] },
           { id: 'change', type: 'fileChange', status: 'completed', changes: [{ path: 'src/main.ts', kind: {type:'update', move_path:null}, diff: '+line' }] },
-          { id: 'mcp', type: 'mcpToolCall', server: 'tools', tool: 'inspect', status: 'completed', arguments: {a:1}, result: {content:[{type:'text',text:'result'}]} },
+          { id: 'mcp', type: 'mcpToolCall', server: 'tools', tool: 'inspect', status: 'completed', arguments: {a:1},
+            mcpAppUi:{resourceUri:'ui://fixture/panel',preferredModelDisplayMode:'inline'}, result: {content:[{type:'text',text:'result'}]} },
+          { id: 'mcp-legacy', type: 'mcpToolCall', server: 'tools', tool: 'legacy', status: 'completed', mcpAppResourceUri:'ui://fixture/old' },
           { id: 'dynamic', type: 'dynamicToolCall', namespace: 'custom', tool: 'show', status: 'completed', arguments: {}, contentItems: [{type:'inputText',text:'dynamic result'}], success:true },
           { id: 'function', type: 'functionCallOutput', name: 'result', namespace: 'custom', output:[
             {type:'input_text',text:'Function result'}, {type:'input_image',file_id:'function-file'}] },
@@ -277,6 +279,12 @@ test('standalone messages render CLI items and retain interactions while streami
     await command.getByRole('button', { name: 'test.ts' }).click();
     assert.deepEqual((await page.evaluate(() => window.standaloneHarness.calls.locations)).at(-1),
       { hostId: 'ssh-test', cwd: '/work/sub', path: '/work/sub/test.ts' });
+    const mcp = page.locator('[data-message-id="mcp"] details');
+    await mcp.locator('summary').click();
+    await mcp.getByText('Interactive tool view unavailable: ui://fixture/panel (inline)').waitFor();
+    const legacyMcp = page.locator('[data-message-id="mcp-legacy"] details');
+    await legacyMcp.locator('summary').click();
+    await legacyMcp.getByText('Interactive tool view unavailable: ui://fixture/old').waitFor();
     await page.evaluate(() => {
       const scroller = document.querySelector('.yard-message-scroll')!;
       scroller.scrollTop = 0;

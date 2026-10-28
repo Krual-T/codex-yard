@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ThreadItemSummary, ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { ComposerDraft, MessageEditOrigin, StandaloneMessagesProps } from '../workbench-contract.ts';
-import { applyTextEdits, editSourceSignature, textEdits } from './message-edit.ts';
-import type { TextEdit } from './message-edit.ts';
+import { applyTextEdits, editSourceSignature, isRemovedMessageAttachments, textEdits } from './message-edit.ts';
+import { serializedMessageContext } from './message-data.ts';
+import type { RemovedMessageAttachment, TextEdit } from './message-edit.ts';
 
 export type MessageEditRecoveryVersion = { sessionId: string; revision: number };
 
@@ -16,6 +17,7 @@ export type MessageEditRecovery = {
     baseDraft: ComposerDraft;
     edits: TextEdit[];
     addedText: string;
+    removedAttachments?: RemovedMessageAttachment[];
     sourceSignature: string;
     snapshot: ThreadItemSummary;
     turnIndex: number;
@@ -43,21 +45,24 @@ export type EditingSession = {
   signature: string;
   edits: TextEdit[];
   addedText: string;
+  removedAttachments: RemovedMessageAttachment[];
+  attachmentRecoveryInvalid: boolean;
   error: string;
   saveError: string;
   pending: boolean;
   sent: boolean;
   revision: number;
 };
-export type StartEdit = Omit<EditingSession, 'id' | 'sessionId' | 'edits' | 'addedText' | 'error' | 'saveError' | 'pending' | 'sent' | 'revision'>;
+export type StartEdit = Omit<EditingSession, 'id' | 'sessionId' | 'edits' | 'addedText' | 'removedAttachments' | 'attachmentRecoveryInvalid' | 'error' | 'saveError' | 'pending' | 'sent' | 'revision'>;
 export type UpdateEdit = (id: number, update: (session: EditingSession) => EditingSession) => void;
 
 function recoveryFor(session: EditingSession, draft?: ComposerDraft): MessageEditRecovery {
-  const converted = applyTextEdits(session.draft, session.edits, session.addedText);
+  const converted = applyTextEdits(session.draft, session.edits, session.addedText, session.removedAttachments);
   return structuredClone({
     draft: draft ?? converted.draft ?? session.draft,
     origin: session.origin,
     editor: { sessionId: session.sessionId, revision: session.revision, baseDraft: session.draft, edits: session.edits, addedText: session.addedText,
+      removedAttachments: session.removedAttachments,
       sourceSignature: session.signature, snapshot: session.snapshot, turnIndex: session.turnIndex, itemIndex: session.itemIndex },
   });
 }
@@ -123,16 +128,17 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
   const startEdit = useCallback((session: StartEdit) => {
     if (sessionsRef.current.has(session.identity)) return;
     const id = ++nextEditId.current;
-    const next = { ...session, id, sessionId: newRecoveryId(), edits: textEdits(session.draft), addedText: '', error: '', saveError: '', pending: false, sent: false, revision: 0 };
+    const next = { ...session, id, sessionId: newRecoveryId(), edits: textEdits(session.draft), addedText: '', removedAttachments: [], attachmentRecoveryInvalid: false,
+      error: '', saveError: '', pending: false, sent: false, revision: 0 };
     dismissedRecovery.current.delete(next.identity);
     putSession(next.identity, next);
     publishSession(next);
   }, [publishSession, putSession]);
   const updateEdit = useCallback<UpdateEdit>((id, update) => {
     const current = findSession(id);
-    if (!current) return;
+    if (!current || current.attachmentRecoveryInvalid) return;
     const result = update(current);
-    const changed = result.edits !== current.edits || result.addedText !== current.addedText;
+    const changed = result.edits !== current.edits || result.addedText !== current.addedText || result.removedAttachments !== current.removedAttachments;
     const next = changed ? { ...result, revision: current.revision + 1 } : result;
     putSession(current.identity, next);
     if (changed) publishSession(next);
@@ -154,11 +160,17 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
   }, [findSession, notifyRecovery, putSession]);
   const submitEdit = useCallback((id: number, submit: NonNullable<StandaloneMessagesProps['onEdit']>) => {
     const current = findSession(id);
-    if (!current || current.pending || current.sent) return;
-    const result = applyTextEdits(current.draft, current.edits, current.addedText);
+    if (!current || current.pending || current.sent || current.attachmentRecoveryInvalid) return;
+    const result = applyTextEdits(current.draft, current.edits, current.addedText, current.removedAttachments);
     const draft = result.draft;
     if (!draft) { putSession(current.identity, { ...current, error: result.error }); return; }
-    if (!draft.text.trim() && !draft.input?.some((entry) => entry.type !== 'text')) {
+    const meaningfulInput = draft.input?.some((entry) => {
+      if (entry.type !== 'text') return true;
+      if (typeof entry.text !== 'string') return false;
+      const context = serializedMessageContext(entry.text);
+      return Boolean(context.body.trim() || context.files.length || (context.unresolved && entry.text.trim()));
+    });
+    if (!meaningfulInput) {
       putSession(current.identity, { ...current, error: 'Enter a message before sending.' });
       return;
     }
@@ -183,13 +195,16 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
       ...(baseDraft.document !== undefined ? { document: baseDraft.document } : {}),
       ...(origin.format !== undefined ? { format: origin.format } : {}), ...(origin.hints !== undefined ? { hints: origin.hints } : {}) });
     const hasVersion = Boolean(editor?.sessionId && Number.isSafeInteger(editor.revision) && editor.revision >= 0);
+    const attachmentRecoveryInvalid = editor?.removedAttachments !== undefined && !isRemovedMessageAttachments(editor.removedAttachments);
     const session: EditingSession = { id: ++nextEditId.current, sessionId: hasVersion ? editor!.sessionId : newRecoveryId(), identity: threadIdentity, turnId: origin.turnId, itemId: origin.itemId,
       turnIndex: editor?.turnIndex ?? (turnIndex < 0 ? thread.turns.length : turnIndex), itemIndex: editor?.itemIndex ?? Math.max(0, itemIndex),
       snapshot, draft: baseDraft, origin: structuredClone(origin), signature: editor?.sourceSignature ?? editSourceSignature(snapshot),
-      edits: structuredClone(editor?.edits ?? textEdits(baseDraft)), addedText: editor?.addedText ?? '', error: '', saveError: '',
+      edits: structuredClone(editor?.edits ?? textEdits(baseDraft)), addedText: editor?.addedText ?? '',
+      removedAttachments: attachmentRecoveryInvalid ? [] : structuredClone(editor?.removedAttachments ?? []), attachmentRecoveryInvalid,
+      error: '', saveError: '',
       pending: false, sent: false, revision: hasVersion ? editor!.revision : 0 };
     putSession(threadIdentity, session);
-    if (!hasVersion) publishSession(session);
+    if (!hasVersion && !attachmentRecoveryInvalid) publishSession(session);
   }, [editRecovery, hostId, publishSession, putSession, thread, threadIdentity]);
   const editingHere = sessions.get(threadIdentity) ?? null;
   const recoveryAvailable = Boolean(editingHere && (onEditDraftChange

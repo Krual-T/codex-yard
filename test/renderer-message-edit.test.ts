@@ -57,6 +57,64 @@ test('serialized file context survives replacing the complete request', () => {
   assert.deepEqual(unc[0]?.kind === 'text' ? unc[0].context?.files : null, [{ name: 'Notes', path: '\\\\server\\share\\note.txt' }]);
 });
 
+test('explicit attachment removals preserve ordered input, file metadata and reference offsets', () => {
+  const first = '## Notes: /work/a%20b#L12.md (line 4)\nLibrary file metadata: {"fileId":"f","libraryFileId":"l"}\n';
+  const second = '## Diagram: /work/diagram.png\nImage attachment: true\n';
+  const prefix = `# Files mentioned by the user:\n\n${first}\n${second}\n## My request:\n`;
+  const text = `${prefix}Please review @file\n`;
+  const start = new TextEncoder().encode(`${prefix}Please review `).length;
+  const item = { id: 'user', type: 'userMessage', hints: ['search'], content: [
+    { type: 'text', text, text_elements: [{ byteRange: { start, end: start + 5 }, placeholder: '@file', context: { id: 'reference' } }] },
+    { type: 'image', fileId: 'opaque', detail: 'high' },
+    { type: 'localImage', path: '/work/keep.png', detail: 'low' },
+    { type: 'mention', name: 'project', path: '/work' },
+  ] };
+  const draft = editableDraft(item)!;
+  const updated = applyTextEdits(draft, [{ index: 0, text: `${prefix}Please review @file now\n` }], '', [
+    { kind: 'file', inputIndex: 0, fileIndex: 0 }, { kind: 'image', inputIndex: 1 },
+  ]);
+  assert.ok(updated.draft);
+  const remainingText = `# Files mentioned by the user:\n\n\n${second}\n## My request:\nPlease review @file now\n`;
+  const nextStart = new TextEncoder().encode(remainingText.slice(0, remainingText.indexOf('@file'))).length;
+  assert.deepEqual(updated.draft.input, [
+    { type: 'text', text: remainingText, text_elements: [{ byteRange: { start: nextStart, end: nextStart + 5 }, placeholder: '@file', context: { id: 'reference' } }] },
+    item.content[2], item.content[3],
+  ]);
+  assert.deepEqual(updated.draft.images, [{ id: 'image-2', src: '/work/keep.png', path: '/work/keep.png', name: 'keep.png' }]);
+  assert.deepEqual(updated.draft.hints, item.hints);
+  assert.deepEqual(draft.input, item.content);
+  assert.match(applyTextEdits(draft, textEdits(draft), '', [
+    { kind: 'file', inputIndex: 0, fileIndex: 0 }, { kind: 'file', inputIndex: 0, fileIndex: 0 },
+  ]).error!, /selected more than once/);
+  assert.match(applyTextEdits(draft, textEdits(draft), '', [{ kind: 'image', inputIndex: 3 }]).error!, /image no longer matches/i);
+  const mismatched = structuredClone(draft);
+  mismatched.images[0]!.fileId = 'different-file';
+  assert.match(applyTextEdits(mismatched, textEdits(mismatched), '', [{ kind: 'image', inputIndex: 1 }]).error!, /image no longer matches/i);
+  const duplicate = structuredClone(draft);
+  duplicate.images.push(structuredClone(duplicate.images[0]!));
+  assert.match(applyTextEdits(duplicate, textEdits(duplicate), '', [{ kind: 'image', inputIndex: 1 }]).error!, /image no longer matches/i);
+});
+
+test('file removals reject unknown metadata and keep CRLF context intact', () => {
+  const prefix = '# Files mentioned by the user:\r\n\r\n## Notes: /work/a.txt\r\nFuture metadata: keep\r\n\r\n## My request:\r\n';
+  const draft = editableDraft({ id: 'file', type: 'userMessage', content: [{ type: 'text', text: prefix + 'request', text_elements: [] }] })!;
+  const context = parseUserContent({ id: 'file', type: 'userMessage', content: draft.input })[0];
+  assert.equal(context?.kind === 'text' && context.context?.fileSpans[0]?.removable, false);
+  assert.match(applyTextEdits(draft, textEdits(draft), '', [{ kind: 'file', inputIndex: 0, fileIndex: 0 }]).error!, /unrecognized context/);
+  assert.equal(draft.input?.[0]?.text, prefix + 'request');
+  assert.match(applyTextEdits(draft, textEdits(draft), '', [{ kind: 'image', inputIndex: -1 }]).error!, /unrecognized/);
+});
+
+test('removing the last file removes only an otherwise empty file envelope', () => {
+  const prefix = '# Files mentioned by the user:\n\n## Notes: /work/a.txt\n\n## My request:\n';
+  const draft = editableDraft({ id: 'file', type: 'userMessage', content: [{ type: 'text', text: prefix + 'request', text_elements: [] }] })!;
+  assert.equal(applyTextEdits(draft, textEdits(draft), '', [{ kind: 'file', inputIndex: 0, fileIndex: 0 }]).draft?.input?.[0]?.text, 'request');
+  const extra = '# Worktree instructions:\nKeep this context.\n\n' + prefix;
+  const withContext = editableDraft({ id: 'file', type: 'userMessage', content: [{ type: 'text', text: extra + 'request', text_elements: [] }] })!;
+  const result = applyTextEdits(withContext, textEdits(withContext), '', [{ kind: 'file', inputIndex: 0, fileIndex: 0 }]);
+  assert.match(String(result.draft?.input?.[0]?.text), /^# Worktree instructions:\nKeep this context\./);
+});
+
 test('independent edits on both sides preserve the same UTF-8 reference', () => {
   const original = { id: 'ref', type: 'userMessage', content: [{ type: 'text', text: 'a @foo b', text_elements: [
     { byteRange: { start: 2, end: 6 }, placeholder: '@foo', context: { id: 'browser' } },
