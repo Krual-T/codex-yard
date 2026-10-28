@@ -105,6 +105,8 @@ try {
   const modelPicker = page.getByLabel('模型', { exact: true });
   await modelPicker.locator('option[value="gpt-6.1-sol"]').waitFor({ state: 'attached', timeout: 60000 });
   await modelPicker.locator('option[value="gpt-6.1-terra"]').waitFor({ state: 'attached' });
+  assert.equal(await modelPicker.locator('option[value="gpt-6.1-sol"]').isDisabled(), false);
+  assert.equal(await modelPicker.locator('option[value="gpt-6.1-terra"]').isDisabled(), false);
   assert.equal(await modelPicker.locator('option[value="hidden-fixture"]').count(), 0);
   await modelPicker.screenshot({ path: join(output, 'models.png') });
   await modelPicker.selectOption('gpt-6.1-sol');
