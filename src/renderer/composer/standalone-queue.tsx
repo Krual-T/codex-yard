@@ -4,11 +4,14 @@ import type { I18n } from '../i18n/index.tsx';
 import { subscribeBrowserAtoms } from '../storage/ui-atoms.ts';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { createId } from './standalone-draft.ts';
-import { addUnknownQueueStart, queueUnknownAtomKey, readUnknownQueueStarts, removeUnknownQueueStart } from './standalone-queue-storage.ts';
-import type { UnknownQueueStart } from './standalone-queue-storage.ts';
+import { addUnknownQueueStart, prepareUnknownQueueRelease, queueUnknownAtomKey, readUnknownQueueRecovery, removeUnknownQueueStart } from './standalone-queue-storage.ts';
+import type { QueueReleaseIntent, UnknownQueueStart } from './standalone-queue-storage.ts';
+import type { FinishComposerOperation } from './use-composer-draft.ts';
 
 interface QueueEntry { id: string; clientUserMessageId: string; input: Record<string, unknown>[] }
-interface QueueProps { client: WorkbenchClient; hostId: string; threadId: string; busy: boolean; refreshVersion: number; onStartQueued?: (id: string) => Promise<void> }
+interface QueueProps { client: WorkbenchClient; hostId: string; threadId: string; busy: boolean; refreshVersion: number; onStartQueued?: (id: string) => Promise<void>;
+  beginOperation?: () => FinishComposerOperation | null; onEditStateChange?: (editing: boolean, pending: boolean) => void;
+  onCompositionChange?: (composing: boolean) => void; frozen?: boolean }
 function record(value: unknown): Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -62,13 +65,14 @@ async function historyClientIds(client: WorkbenchClient, hostId: string, threadI
   }
   return found;
 }
-export function StandaloneQueue({ client, hostId, threadId, busy, refreshVersion, onStartQueued }: QueueProps) {
-  return <QueueSession key={JSON.stringify([hostId, threadId])} {...{ client, hostId, threadId, busy, refreshVersion, onStartQueued }} />;
+export function StandaloneQueue({ client, hostId, threadId, busy, refreshVersion, onStartQueued, beginOperation, onEditStateChange, onCompositionChange, frozen }: QueueProps) {
+  return <QueueSession key={JSON.stringify([hostId, threadId])} {...{ client, hostId, threadId, busy, refreshVersion, onStartQueued, beginOperation, onEditStateChange, onCompositionChange, frozen }} />;
 }
-function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQueued }: QueueProps) {
+function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQueued, beginOperation, onEditStateChange, onCompositionChange, frozen }: QueueProps) {
   const { t, locale } = useI18n('zh-CN');
   const [unknown, setUnknown] = useState<UnknownQueueStart[]>([]);
   const unknownRef = useRef<UnknownQueueStart[]>([]);
+  const releaseRef = useRef<QueueReleaseIntent[]>([]);
   const [storageState, setStorageState] = useState<'loading' | 'ready' | 'error'>('loading');
   const storageReady = useRef(false);
   const [entries, setEntries] = useState<QueueEntry[]>([]);
@@ -79,18 +83,30 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
   const storageGeneration = useRef(0);
   const mounted = useRef(false);
   const mutation = useRef(false);
-  const loadUnknown = useCallback(async (): Promise<boolean> => {
+  const editing = useRef(false);
+  const releases = useRef(new Map<string, { sent: boolean; pending: Promise<void> }>());
+  const changeEdit = (next: typeof edit) => {
+    editing.current = next !== null;
+    onEditStateChange?.(editing.current, mutation.current);
+    setEdit(next);
+  };
+  const loadUnknown = useCallback(async (fromOperation = false): Promise<boolean> => {
+    const finish = fromOperation ? undefined : beginOperation?.();
+    if (beginOperation && !fromOperation && !finish) return false;
     const current = ++storageGeneration.current;
+    let success = false;
     try {
-      const next = await readUnknownQueueStarts(hostId, threadId);
-      if (!mounted.current || current !== storageGeneration.current) return false;
-      unknownRef.current = next; setUnknown(next); storageReady.current = true; setStorageState('ready');
-      return true;
+      const next = await readUnknownQueueRecovery(hostId, threadId);
+      if (!mounted.current) { success = true; return false; }
+      if (current !== storageGeneration.current) { success = true; return true; }
+      unknownRef.current = next.markers; releaseRef.current = next.releases; setUnknown(next.markers); storageReady.current = true; setStorageState('ready');
+      success = true; return true;
     } catch {
-      if (mounted.current && current === storageGeneration.current) { storageReady.current = false; setStorageState('error'); }
+      if (mounted.current) { storageReady.current = false; setStorageState('error'); }
       return false;
     }
-  }, [hostId, threadId]);
+    finally { finish?.(success); }
+  }, [beginOperation, hostId, threadId]);
   const removeMarker = useCallback(async (marker: UnknownQueueStart) => {
     try { return await removeUnknownQueueStart(hostId, threadId, marker); }
     catch (reason) {
@@ -98,29 +114,69 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
       throw reason;
     }
   }, [hostId, threadId]);
-  const refresh = useCallback(async () => {
+  const releaseMarker = useCallback((marker: UnknownQueueStart, sent: boolean): Promise<void> => {
+    const key = JSON.stringify([marker.id, marker.clientUserMessageId, marker.lockId]);
+    const existing = releases.current.get(key);
+    if (existing) return existing.sent === sent ? existing.pending : Promise.reject(new Error('队列锁释放状态不一致。'));
+    const pending = (async () => {
+      let prepared: boolean;
+      try { prepared = await prepareUnknownQueueRelease(hostId, threadId, marker, sent); }
+      catch (reason) {
+        if (mounted.current) { storageReady.current = false; setStorageState('error'); }
+        throw reason;
+      }
+      if (!prepared) return;
+      await client.host('queued-follow-up-send-lock-release', {
+        hostId, conversationId: threadId, messageId: marker.id, lockId: marker.lockId, sent,
+      });
+      const result = await removeMarker(marker);
+      if (mounted.current) {
+        storageGeneration.current++;
+        unknownRef.current = result.markers; setUnknown(result.markers);
+        releaseRef.current = releaseRef.current.filter(item => item.marker.id !== marker.id
+          || item.marker.clientUserMessageId !== marker.clientUserMessageId || item.marker.lockId !== marker.lockId);
+        storageReady.current = true; setStorageState('ready');
+      }
+    })();
+    releases.current.set(key, { sent, pending });
+    void pending.then(() => { if (releases.current.get(key)?.pending === pending) releases.current.delete(key); },
+      () => { if (releases.current.get(key)?.pending === pending) releases.current.delete(key); });
+    return pending;
+  }, [client, hostId, threadId, removeMarker]);
+  const refresh = useCallback(async (fromOperation = false) => {
+    const finish = fromOperation ? undefined : beginOperation?.();
+    if (beginOperation && !fromOperation && !finish) return false;
     const current = ++generation.current;
+    let success = false;
     try {
       const next = await list(client, hostId, threadId);
-      if (current !== generation.current) return;
+      if (current !== generation.current) { success = true; return true; }
       setEntries(next);
+      for (const item of releaseRef.current) {
+        await releaseMarker(item.marker, item.sent);
+      }
       const unresolved = unknownRef.current.filter(marker => !next.some(entry => entry.id === marker.id));
       if (unresolved.length) {
         try {
           const found = await historyClientIds(client, hostId, threadId, new Set(unresolved.map(item => item.clientUserMessageId)));
-          if (current !== generation.current) return;
+          if (current !== generation.current) { success = true; return true; }
           const confirmed = unresolved.filter(item => found.has(item.clientUserMessageId));
           for (const item of confirmed) {
-            const result = await removeMarker(item);
-            if (result.removed) void client.host('queued-follow-up-send-lock-release', {
-              hostId, conversationId: threadId, messageId: item.id, lockId: item.lockId, sent: true,
-            }).catch(() => {});
+            await releaseMarker(item, true);
           }
-          if (confirmed.length) void loadUnknown();
-        } catch { /* A missing or unavailable history cannot prove the outcome. */ }
+        } catch (reason) {
+          if (mounted.current) setError(t('Could not read queue:') + message(reason));
+          return false;
+        }
       }
-    } catch (reason) { if (current === generation.current) setError(t('Could not read queue:') + message(reason)); }
-  }, [client, hostId, threadId, loadUnknown, removeMarker, t]);
+      success = true;
+      return true;
+    } catch (reason) {
+      if (mounted.current) setError(t('Could not read queue:') + message(reason));
+      return false;
+    }
+    finally { finish?.(success); }
+  }, [beginOperation, client, hostId, threadId, releaseMarker, t]);
   useEffect(() => {
     mounted.current = true;
     void loadUnknown().then(ready => { if (ready) void refresh(); });
@@ -135,12 +191,17 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
     });
     return () => { mounted.current = false; generation.current++; storageGeneration.current++; unsubscribe(); unsubscribeAtoms(); };
   }, [client, hostId, threadId, loadUnknown, refresh, refreshVersion]);
+  useEffect(() => { if (!frozen) void loadUnknown().then(ready => { if (ready) void refresh(); }); }, [frozen, loadUnknown, refresh]);
   const run = async (action: () => Promise<void>) => {
     if (mutation.current) return;
+    const finish = beginOperation?.();
+    if (beginOperation && !finish) return;
     mutation.current = true; setPending(true); setError('');
-    try { await action(); await refresh(); }
-    catch (reason) { await refresh(); setError(t('Action unconfirmed; check the queue before retrying:') + message(reason)); }
-    finally { mutation.current = false; setPending(false); }
+    onEditStateChange?.(editing.current, true);
+    let success = false;
+    try { await action(); success = await refresh(true); }
+    catch (reason) { await refresh(true); setError(t('Action unconfirmed; check the queue before retrying:') + message(reason)); }
+    finally { mutation.current = false; onEditStateChange?.(editing.current, false); setPending(false); finish?.(success); }
   };
   const start = (entry: QueueEntry) => run(async () => {
     if (!onStartQueued) throw new Error('会话控制器尚未提供队列发送');
@@ -152,7 +213,7 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
     if (!mounted.current) { await client.host('queued-follow-up-send-lock-release', { ...request, sent: false }); return; }
     try {
       await addUnknownQueueStart(hostId, threadId, marker);
-      void loadUnknown();
+      if (!await loadUnknown(true)) throw new Error('无法读取发送状态');
     } catch {
       if (mounted.current) { storageReady.current = false; setStorageState('error'); }
       await client.host('queued-follow-up-send-lock-release', { ...request, sent: false });
@@ -175,9 +236,7 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
       throw reason;
     } finally {
       if (release) {
-        await removeMarker(marker);
-        void loadUnknown();
-        await client.host('queued-follow-up-send-lock-release', { ...request, sent });
+        await releaseMarker(marker, sent);
       }
     }
   });
@@ -193,18 +252,19 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
       const editConflict = edit?.id === entry.id && (edit.clientUserMessageId !== entry.clientUserMessageId || edit.baseInput !== JSON.stringify(entry.input));
       return <div className="standalone-queue__row" key={entry.id}>
       {edit?.id === entry.id ? <div className="standalone-queue__edit">
-        <textarea aria-label={t('Edit queued message')} value={edit.text} onChange={event => setEdit({ ...edit, text: event.target.value })} />
+        <textarea aria-label={t('Edit queued message')} value={edit.text} onChange={event => changeEdit({ ...edit, text: event.target.value })}
+          onCompositionStart={() => onCompositionChange?.(true)} onCompositionEnd={() => { requestAnimationFrame(() => onCompositionChange?.(false)); }} />
         {editConflict ? <div role="alert">{t('The queued message changed; cancel and edit again. Your edits are retained.')}</div> : null}
         <button type="button" disabled={pending || storageState !== 'ready' || unknown.some(item => item.id === entry.id) || editConflict || !edit.text.trim()} onClick={() => void run(async () => {
           const input = entry.input.map(item => item === entry.input.find(part => part.type === 'text') ? { ...item, text: edit.text } : item);
           await client.rpc('thread/queue/update', { threadId, queuedSubmissionId: entry.id, input }, hostId);
-          setEdit(null);
-        })}>{t('Save')}</button><button type="button" disabled={pending} onClick={() => setEdit(null)}>{t('Cancel')}</button>
+          changeEdit(null);
+        })}>{t('Save')}</button><button type="button" disabled={pending} onClick={() => changeEdit(null)}>{t('Cancel')}</button>
       </div> : <span className="standalone-queue__text">{summary(entry, t)}</span>}
       <div className="standalone-queue__actions">
         <button type="button" title={t('Move up')} aria-label={t('Move queued message up')} disabled={pending || storageState !== 'ready' || !!unknown.length || index === 0} onClick={() => void reorder(index, index - 1)}>↑</button>
         <button type="button" title={t('Move down')} aria-label={t('Move queued message down')} disabled={pending || storageState !== 'ready' || !!unknown.length || index === entries.length - 1} onClick={() => void reorder(index, index + 1)}>↓</button>
-        <button type="button" title={t('Edit')} aria-label={t('Edit queued message')} disabled={pending || storageState !== 'ready' || unknown.some(item => item.id === entry.id) || editableText(entry) == null} onClick={() => setEdit({ id: entry.id, clientUserMessageId: entry.clientUserMessageId, baseInput: JSON.stringify(entry.input), text: editableText(entry) ?? '' })}>{t('Edit')}</button>
+        <button type="button" title={t('Edit')} aria-label={t('Edit queued message')} disabled={pending || storageState !== 'ready' || unknown.some(item => item.id === entry.id) || editableText(entry) == null} onClick={() => changeEdit({ id: entry.id, clientUserMessageId: entry.clientUserMessageId, baseInput: JSON.stringify(entry.input), text: editableText(entry) ?? '' })}>{t('Edit')}</button>
         <button type="button" title={t('Delete')} aria-label={t('Delete queued message')} disabled={pending || storageState !== 'ready' || unknown.some(item => item.id === entry.id)} onClick={() => void run(async () => {
           const result = await client.rpc<{ deleted: boolean }>('thread/queue/delete', { threadId, queuedSubmissionId: entry.id }, hostId);
           if (!result.deleted) throw new Error('消息已不存在');
@@ -214,8 +274,9 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
     </div>; })}
     {edit && !entries.some(entry => entry.id === edit.id) ? <div className="standalone-queue__edit" role="status">
       {t('This message is no longer in the queue; your unsaved edits are retained.')}
-      <textarea aria-label={t('Edit queued message')} value={edit.text} onChange={event => setEdit({ ...edit, text: event.target.value })} />
-      <button type="button" onClick={() => setEdit(null)}>{t('Close editing')}</button>
+      <textarea aria-label={t('Edit queued message')} value={edit.text} onChange={event => changeEdit({ ...edit, text: event.target.value })}
+        onCompositionStart={() => onCompositionChange?.(true)} onCompositionEnd={() => { requestAnimationFrame(() => onCompositionChange?.(false)); }} />
+      <button type="button" onClick={() => changeEdit(null)}>{t('Close editing')}</button>
     </div> : null}
     {unknown.length ? <div role="status">{t('{count} messages have an unknown send outcome. Check the conversation; they will not be resent automatically.').replace('{count}', new Intl.NumberFormat(locale).format(unknown.length))}<button type="button" onClick={() => void refresh()}>{t('Check again')}</button></div> : null}
     {storageState === 'loading' ? <div role="status">{t('Loading queue send status...')}</div> : null}

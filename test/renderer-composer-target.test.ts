@@ -11,7 +11,7 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     import * as React from 'react';
     import { createRoot } from 'react-dom/client';
     import { StandaloneComposer } from './src/renderer/composer/StandaloneComposer.tsx';
-    const state={calls:[],changes:[],submissions:[],consumed:[],fail:false,failStorage:false,deferTarget:false,resolveTarget:null,setThread:null,setPrefill:null};
+    const state={calls:[],changes:[],leases:[],commitFrozen:[],submissions:[],consumed:[],fail:false,failStorage:false,deferTarget:false,resolveTarget:null,setThread:null,setPrefill:null};
     const originalPut=IDBObjectStore.prototype.put;
     IDBObjectStore.prototype.put=function(...args){if(state.failStorage && this.name==='atoms')throw Error('fixture storage failure');return originalPut.apply(this,args);};
     const hosts=[{hostId:'local',displayName:'Local'},{hostId:'ssh-fixture',displayName:'SSH fixture'}];
@@ -19,7 +19,7 @@ test('composer chooses real host roots through its parent and keeps drafts parti
       async host(endpoint,params={}){
         state.calls.push({endpoint,params});
         if(endpoint==='workspace-root-options')return {roots:params.hostId==='local'?['/work/one','/work/two']:['/remote/project'],canonicalPathByRoot:{}};
-        if(endpoint==='get-setting')return {value:params.key==='composerEnterBehavior'?'enter':undefined};
+        if(endpoint==='get-setting'){const value=params.key==='composerEnterBehavior'?'enter':undefined;return {exists:value!==undefined,value};}
         throw Error('unexpected host');
       },
       async rpc(method,params,hostId){
@@ -33,10 +33,18 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     function App(){
       const [context,setContext]=React.useState({hostId:'local',cwd:'/work/one',threadId:null,draftId:'new-draft'});
       const [prefill,setPrefill]=React.useState(null);state.setPrefill=setPrefill;
+      const pending=React.useRef(null);
+      React.useLayoutEffect(()=>{
+        const change=pending.current;
+        if(change&&change.target.hostId===context.hostId&&change.target.cwd===context.cwd){
+          state.commitFrozen.push(!change.root.isConnected||change.root.inert);pending.current=null;change.resolve();
+        }
+      },[context.hostId,context.cwd]);
       state.setThread=id=>setContext(value=>({...value,threadId:id}));
       return React.createElement(StandaloneComposer,{client,context,hosts,prefill,busy:false,
         onPrefillConsumed(id){state.consumed.push(id);setPrefill(value=>value?.id===id?null:value);},
-        async onTargetChange(target){if(state.fail)throw Error('fixture rejected');if(state.deferTarget)await new Promise(resolve=>{state.resolveTarget=resolve;});state.changes.push(target);setContext(value=>({...value,...target}));},
+        async onTargetChange(target,lease){state.leases.push(await lease.flush());if(state.fail)throw Error('fixture rejected');if(state.deferTarget)await new Promise(resolve=>{state.resolveTarget=resolve;});state.changes.push(target);
+          await new Promise(resolve=>{pending.current={target,resolve,root:document.querySelector('.standalone-composer > div')};setContext(value=>({...value,...target}));});},
         async onSubmit(draft,options,action){state.submissions.push({context,draft,action});},async onInterrupt(){}});
     }
     window.fixture=state;createRoot(document.getElementById('root')).render(React.createElement(App));
@@ -92,6 +100,8 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     await page.evaluate(() => (window as any).fixture.setThread('existing-thread'));
     await page.waitForFunction(() => (document.querySelector('select[aria-label="运行位置"]') as HTMLSelectElement)?.disabled);
     const calls = await page.evaluate(() => (window as any).fixture.calls);
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.leases), [true, true, true, true]);
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.commitFrozen), [true, true, true]);
     assert.ok(calls.some((call: any) => call.endpoint === 'workspace-root-options' && call.params.hostId === 'local'));
     assert.ok(calls.some((call: any) => call.endpoint === 'workspace-root-options' && call.params.hostId === 'ssh-fixture'));
   } finally { await context.close(); await browser.close(); }

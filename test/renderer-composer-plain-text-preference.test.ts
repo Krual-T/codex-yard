@@ -15,7 +15,7 @@ test('plain text preference updates both pages without losing a rich draft or un
     const state={controller:null,snapshot:null,submissions:[],listeners:new Set()};
     const client={async rpc(method){if(method==='model/list'||method==='thread/queue/list')return {data:[],nextCursor:null};
       if(method==='config/read')return {config:{}};throw Error('unexpected RPC '+method)},
-      async host(method,params){if(method==='get-setting')return {value:params.key==='composerPlainTextMode'
+      async host(method,params){if(method==='get-setting')return {exists:true,value:params.key==='composerPlainTextMode'
         ? localStorage.getItem('fixture-plain')==='true' : params.key==='composerEnterBehavior'?'cmdAlways':'queue'};
         throw Error('unexpected host '+method)},
       subscribe(listener){state.listeners.add(listener);return ()=>state.listeners.delete(listener)},async reply(){throw Error('unexpected approval')}};
@@ -57,6 +57,20 @@ test('plain text preference updates both pages without losing a rich draft or un
     assert.equal(await a.page.evaluate(() => (window as any).fixture.seed()), true);
     const editor = a.page.locator('[contenteditable="true"][aria-label="和 Codex 一起工作"]');
     await editor.waitFor();
+    await a.page.getByRole('toolbar', { name: '文本格式' }).waitFor();
+    await a.page.getByRole('button', { name: '链接', exact: true }).click();
+    const linkAddress = a.page.getByRole('textbox', { name: '链接地址' });
+    await linkAddress.fill('https://fixture.test');
+    await b.page.evaluate(() => (window as any).fixture.setPlain(true));
+    await a.page.getByText('已开启纯文本模式，现有格式会保留。').waitFor();
+    assert.equal(await linkAddress.inputValue(), 'https://fixture.test');
+    assert.equal(await a.page.evaluate(() => {
+      const controller = (window as any).fixture.state.controller;
+      return controller.freeze(controller.snapshot().owner);
+    }), null);
+    await a.page.getByRole('button', { name: '链接', exact: true }).click();
+    await a.page.getByRole('toolbar', { name: '文本格式' }).waitFor({ state: 'detached' });
+    await b.page.evaluate(() => (window as any).fixture.setPlain(false));
     await a.page.getByRole('toolbar', { name: '文本格式' }).waitFor();
     await editor.focus();
     await editor.evaluate(element => element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })));

@@ -5,7 +5,7 @@ import { useI18n } from '../i18n/index.tsx';
 import { activatePending, documentFromText, draftToInput, hasContent, mergePrefill, richEditIssue, textEditIssue, updateDraftText, updateRichDraft } from './standalone-draft.ts';
 import { localizeDraftIssue } from './standalone-draft-issues.ts';
 import { useComposerDraft } from './use-composer-draft.ts';
-import type { ComposerDraftController } from './use-composer-draft.ts';
+import type { ComposerDraftController, ComposerDraftLease } from './use-composer-draft.ts';
 import type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescription } from './composer-draft-store.ts';
 import { importAttachments } from './standalone-files.ts';
 import { useCompletions } from './standalone-completions.tsx';
@@ -28,7 +28,7 @@ export { draftToInput } from './standalone-draft.ts';
 export { bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from './composer-draft-store.ts';
 export type { DraftSkill } from './standalone-draft.ts';
 export type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescription } from './composer-draft-store.ts';
-export type { ComposerDraftController } from './use-composer-draft.ts';
+export type { ComposerDraftController, ComposerDraftLease } from './use-composer-draft.ts';
 export type ComposerReference = NonNullable<ComposerDraft['references']>[number];
 export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSubmit'> & {
   onSubmit(draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, description?: ComposerSubmissionDescription): Promise<void>;
@@ -36,7 +36,8 @@ export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSu
   activeTurnId?: string | null;
   initialOptions?: SubmitOptions;
   hosts?: ComposerHost[];
-  onTargetChange?: (target: ComposerTarget) => void | Promise<void>;
+  /** Reuse the borrowed lease in navigation guards; resolve after committing the requested owner. */
+  onTargetChange?: (target: ComposerTarget, lease: ComposerDraftLease) => Promise<void>;
   onPrefillConsumed?: (id: string) => void;
   onDraftController?: (controller: ComposerDraftController | null) => void;
   onDraftChange?: (snapshot: ComposerDraftSnapshot) => void;
@@ -65,8 +66,20 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
 
 function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
   const { t, locale } = useI18n('zh-CN');
-  const { owner, controller, current, stored, changeDraft, retain, clear, selectVersion, conflicts, storageError, saving, loaded, retry, lastWrite }
-    = useComposerDraft(context, onDraftController, onDraftChange);
+  const inputRoot = useRef<HTMLDivElement>(null);
+  const freezeGuard = useRef<(afterDrain: boolean) => boolean>(() => false);
+  const frozenRef = useRef(false);
+  const thawWaiters = useRef(new Set<() => void>());
+  const [frozen, setFrozen] = useState(false);
+  const setInputFrozen = useCallback((value: boolean) => {
+    frozenRef.current = value;
+    if (inputRoot.current) inputRoot.current.inert = value;
+    setFrozen(value);
+    if (!value) { for (const resolve of thawWaiters.current) resolve(); thawWaiters.current.clear(); }
+  }, []);
+  const { owner, controller, current, stored, changeDraft, changeDraftFromOperation, updateDraftFromOperation, beginOperation,
+    retain, clear, selectVersion, conflicts, storageError, saving, loaded, retry, lastWrite }
+    = useComposerDraft(context, onDraftController, onDraftChange, freezeGuard, setInputFrozen);
   const draft = stored.draft;
   const [overrides, setOverrides] = useState<Partial<SubmitOptions>>({});
   const [appliedOptions, setAppliedOptions] = useState<{ changes: Partial<SubmitOptions>; baseline: SubmitOptions } | null>(null);
@@ -90,10 +103,32 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const submitInFlight = useRef(false);
   const interruptInFlight = useRef(false);
   const uploadInFlight = useRef(false);
+  const pickerOpen = useRef(false);
+  const compositions = useRef(new Set<'editor' | 'queue'>());
+  const setComposition = (source: 'editor' | 'queue', value: boolean) => {
+    if (value) compositions.current.add(source); else compositions.current.delete(source);
+  };
+  const pendingLink = useRef(false);
+  const queueEditState = useRef({ editing: false, pending: false });
+  const defaultPendingRef = useRef(false);
+  const notifyDefaultPending = useCallback((value: boolean) => { defaultPendingRef.current = value; setDefaultPending(value); }, []);
   const editor = useRef<HTMLTextAreaElement>(null);
   const richEditor = useRef<RichEditorHandle>(null);
   const picker = useRef<HTMLInputElement>(null);
   const modelPicker = useRef<HTMLSelectElement>(null);
+  freezeGuard.current = afterDrain => {
+    const reason = !loaded || prefill && !current.current.prefills.includes(prefill.id) ? 'loading'
+      : compositions.current.size ? 'composition' : pickerOpen.current ? 'picker'
+      : pendingLink.current ? 'link'
+      : queueEditState.current.editing && (!queueEditState.current.pending || afterDrain) ? 'queue'
+      : interruptInFlight.current || defaultPendingRef.current ? 'pending' : '';
+    if (!reason) return true;
+    const explanation = locale.toLowerCase().startsWith('zh')
+      ? { loading: '请等待草稿和预填恢复。', composition: '请先完成输入法输入。', picker: '请先完成或取消文件选择。', link: '请先应用或关闭链接编辑。', queue: '请先保存或取消队列编辑。', pending: '请先完成当前停止或设置操作。' }[reason]
+      : { loading: 'Wait for the draft and prefill to load.', composition: 'Finish text composition first.', picker: 'Finish or cancel file selection first.', link: 'Apply or close the link editor first.', queue: 'Save or cancel the queued message edit first.', pending: 'Finish the current stop or settings operation first.' }[reason];
+    setError(t('Could not switch drafts:') + explanation);
+    return false;
+  };
   const editIssue = draft.document ? richEditIssue(draft) : textEditIssue(draft);
   const richActive = !!draft.document && !editIssue;
   const structuredInput = draft.input !== undefined;
@@ -131,18 +166,33 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   useLayoutEffect(() => {
     mounted.current = true;
     activeController.current = controller;
-    return () => { if (activeController.current === controller) activeController.current = null; mounted.current = false; };
+    return () => {
+      if (activeController.current === controller) activeController.current = null;
+      mounted.current = false;
+      for (const resolve of thawWaiters.current) resolve();
+      thawWaiters.current.clear();
+    };
   }, [controller]);
+  useLayoutEffect(() => {
+    const input = picker.current;
+    const cancel = () => { pickerOpen.current = false; };
+    input?.addEventListener('cancel', cancel);
+    return () => input?.removeEventListener('cancel', cancel);
+  }, []);
 
   const removeReference = async (reference: ComposerReference) => {
     if (pendingReferences.current.get(reference.id) === controller) return;
+    const finish = beginOperation();
+    if (!finish) return;
+    let success = false;
     pendingReferences.current.set(reference.id, controller);
     setRemoving(previous => ({ controller, ids: new Set([...(previous?.controller === controller ? previous.ids : []), reference.id]) }));
     setError('');
     try {
       await onRemoveReference?.(structuredClone(owner), structuredClone(reference));
-      await controller.update(owner, value => ({ ...value, references: (value.references ?? []).filter(item =>
-        item.id !== reference.id || JSON.stringify(item) !== JSON.stringify(reference)) }));
+      if (!await updateDraftFromOperation(owner, value => ({ ...value, references: (value.references ?? []).filter(item =>
+        item.id !== reference.id || JSON.stringify(item) !== JSON.stringify(reference)) }))) throw new Error('Draft owner changed');
+      success = true;
     } catch (reason) {
       if (activeController.current === controller) setError(t('Could not remove reference; draft retained:') + message(reason));
     } finally {
@@ -152,10 +202,11 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         const ids = new Set(previous.ids); ids.delete(reference.id);
         return ids.size ? { controller, ids } : null;
       });
+      finish(success);
     }
   };
   useEffect(() => {
-    if (!prefill || !loaded) return;
+    if (!prefill || !loaded || frozen) return;
     if (current.current.prefills.includes(prefill.id)) {
       void lastWrite.current.then(saved => { if (saved && activeController.current === controller) onPrefillConsumed?.(prefill.id); });
       return;
@@ -163,19 +214,25 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     void changeDraft(value => mergePrefill(value, prefill.draft), prefill.id)
       .then(saved => { if (saved && activeController.current === controller) onPrefillConsumed?.(prefill.id); });
     requestAnimationFrame(() => { if (richEditor.current) richEditor.current.focus(); else editor.current?.focus(); });
-  }, [prefill, changeDraft, onPrefillConsumed, storageError, controller, current, lastWrite, loaded]);
+  }, [prefill, changeDraft, onPrefillConsumed, storageError, controller, current, lastWrite, loaded, frozen]);
 
   const addFiles = async (files: File[]) => {
     if (!files.length || uploadInFlight.current || editIssue || structuredInput) return;
+    const finish = beginOperation();
+    if (!finish) return;
+    let success = false;
     uploadInFlight.current = true; setUploading(true); setError('');
     try {
       for (const file of files) {
         const added = await importAttachments(client, context.hostId, [file]);
         if (activeController.current !== controller) return;
-        changeDraft(previous => ({ ...previous, images: [...previous.images, ...added.images], files: [...previous.files, ...added.files] }));
+        if (!await changeDraftFromOperation(previous => ({ ...previous, images: [...previous.images, ...added.images], files: [...previous.files, ...added.files] }))) {
+          throw new Error('Draft could not be saved');
+        }
       }
+      success = true;
     } catch (reason) { if (activeController.current === controller) setError(t('Image upload failed:') + message(reason)); }
-    finally { uploadInFlight.current = false; if (mounted.current) setUploading(false); }
+    finally { uploadInFlight.current = false; if (mounted.current) setUploading(false); finish(success); }
   };
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/'));
@@ -208,20 +265,31 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     catch (reason) { setError(message(reason)); return; }
     const captured = structuredClone(current.current);
     const submittedOptions = structuredClone(options), submittedOverrides = structuredClone(overrides);
+    const finishPreparation = beginOperation();
+    if (!finishPreparation) return;
     submitInFlight.current = true; setSending(true); setError('');
     let confirmed = false;
     try {
       const submitted: ComposerDraft = captured.draft;
-      if (!await retain(captured)) throw new Error(t('Could not persist the submitted version.'));
+      let retained = false;
+      try { retained = await retain(captured); } finally { finishPreparation(retained); }
+      if (!retained) throw new Error(t('Could not persist the submitted version.'));
       if (activeController.current !== controller) return;
       await onSubmit(submitted, submittedOptions, action, { owner: structuredClone(owner), revision: captured.revision, overrides: submittedOverrides });
       confirmed = true;
+      while (frozenRef.current && activeController.current === controller) {
+        await new Promise<void>(resolve => thawWaiters.current.add(resolve));
+      }
       if (activeController.current !== controller) return;
       if (mounted.current && action.type === 'send' && Object.keys(submittedOverrides).length) {
         setAppliedOptions({ changes: submittedOverrides, baseline: { ...initialOptions } });
       }
       if (busy && followUp === 'queue' && mounted.current) setQueueVersion(value => value + 1);
-      await clear(captured.revision);
+      const finishCleanup = beginOperation();
+      if (!finishCleanup) return;
+      let cleaned = false;
+      try { await clear(captured.revision); cleaned = true; }
+      finally { finishCleanup(cleaned); }
       if (mounted.current) requestAnimationFrame(() => { if (richEditor.current) richEditor.current.focus(); else editor.current?.focus(); });
     } catch (reason) {
       if (activeController.current === controller) {
@@ -261,6 +329,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     });
   };
   const keyDown = (event: globalThis.KeyboardEvent): boolean => {
+    if (frozenRef.current) { event.preventDefault(); return true; }
     if (event.isComposing || event.keyCode === 229) return false;
     if (completions.query) {
       if (event.key === 'Escape') { event.preventDefault(); completions.dismiss(); return true; }
@@ -293,7 +362,10 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     finally { interruptInFlight.current = false; if (mounted.current) setInterrupting(false); }
   };
   return <div className="standalone-composer">
-    {context.threadId ? <StandaloneQueue key={JSON.stringify([context.hostId, context.threadId])} client={client} hostId={context.hostId} threadId={context.threadId} busy={busy} refreshVersion={queueVersion} onStartQueued={onStartQueued} /> : null}
+    <div ref={inputRoot} inert={frozen} aria-busy={frozen || undefined}>
+    {context.threadId ? <StandaloneQueue key={JSON.stringify([context.hostId, context.threadId])} client={client} hostId={context.hostId} threadId={context.threadId} busy={busy} refreshVersion={queueVersion} onStartQueued={onStartQueued} frozen={frozen}
+      beginOperation={beginOperation} onEditStateChange={(editing, pending) => { queueEditState.current = { editing, pending }; }}
+      onCompositionChange={value => setComposition('queue', value)} /> : null}
     <div className="standalone-composer__editor" inert={switchingTarget} aria-busy={switchingTarget || undefined}>
       {conflicts.length ? <div role="status">{t('Other pages or legacy data contain {count} independent drafts.').replace('{count}', new Intl.NumberFormat(locale).format(conflicts.length))}<details><summary>{t('Select draft version')}</summary>
         {conflicts.map(version => <button type="button" key={version.revision} onClick={() => void selectVersion(version.revision)
@@ -322,7 +394,9 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       {plainTextSetting.value && richActive && textEditIssue(draft) ? <div role="status">{t('Existing formatting is retained while plain text mode is on.')}</div> : null}
       {richActive && draft.document ? <StandaloneRichEditor ref={richEditor} document={draft.document} currentDocument={() => current.current.draft.document}
         plainTextMode={plainTextSetting.value}
-        onChange={document => changeDraft(value => updateRichDraft(value, document))} onKeyDown={keyDown}
+        onChange={document => changeDraftFromOperation(value => updateRichDraft(value, document))} onKeyDown={keyDown}
+        onCompositionChange={value => setComposition('editor', value)}
+        onPendingLinkChange={value => { pendingLink.current = value; }}
         onCompletionContext={onRichContext} completionListId={completions.query ? completions.listId : undefined}
         completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
         onImages={files => { if (structuredInput) setError(t('Images are not supported for this structured draft.')); else void addFiles(files); }}
@@ -331,6 +405,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         aria-autocomplete="list" aria-controls={completions.query ? completions.listId : undefined}
         aria-activedescendant={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
         onChange={event => { const text = event.target.value; setCursor(event.target.selectionStart); changeDraft(value => updateDraftText(value, text)); }}
+        onCompositionStart={() => setComposition('editor', true)}
+        onCompositionEnd={() => { requestAnimationFrame(() => { if (mounted.current) setComposition('editor', false); }); }}
         onSelect={event => setCursor(event.currentTarget.selectionStart)} onKeyDown={event => { keyDown(event.nativeEvent); }} onPaste={paste} />}
       {completions.query ? <div className="standalone-composer__completions" id={completions.listId} role="listbox" aria-label={t(completions.query.kind === 'file' ? 'Workspace files' : 'Skill')}>
         {completions.items.map((item, index) => <button type="button" role="option" id={completions.listId + '-' + index} key={item.kind + ':' + (item.kind === 'command' ? item.name : item.path)}
@@ -343,20 +419,28 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       </div> : null}
       <div className="standalone-composer__footer">
         <input ref={picker} type="file" multiple hidden onChange={event => {
-          const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ''; void addFiles(files);
+          pickerOpen.current = false; const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ''; void addFiles(files);
         }} />
-        <button type="button" aria-label={t('Add attachment')} title={t('Add attachment')} disabled={uploading || !!editIssue || structuredInput} onClick={() => picker.current?.click()}>＋</button>
+        <button type="button" aria-label={t('Add attachment')} title={t('Add attachment')} disabled={uploading || !!editIssue || structuredInput} onClick={() => {
+          if (!picker.current || frozenRef.current) return;
+          pickerOpen.current = true;
+          try { picker.current.click(); } catch (reason) { pickerOpen.current = false; setError(t('Image upload failed:') + message(reason)); }
+        }}>＋</button>
         {!draft.document && !plainTextSetting.value ? <button type="button" aria-label={t('Rich text editor')} title={t('Rich text editor')} disabled={!!editIssue}
           onClick={() => { changeDraft(value => ({ ...value, document: documentFromText(value.text) }));
             requestAnimationFrame(() => richEditor.current?.focus()); }}><FilePenLine size={16} /></button> : null}
         {onTargetChange ? <StandaloneTarget client={client} context={context} hosts={hosts} disabled={busy || sending || uploading || !!removing || switchingTarget}
           onTargetChange={async target => {
+            const lease = controller.freeze(owner);
+            if (!lease) throw new Error('Draft input is not ready to switch.');
             setSwitchingTarget(true);
-            try { if (await controller.flush(owner)) await onTargetChange(target); }
-            finally { if (mounted.current) setSwitchingTarget(false); }
+            try {
+              if (!await lease.flush()) throw new Error('Draft input could not be saved.');
+              await onTargetChange(target, lease);
+            } finally { lease.release(); if (mounted.current) setSwitchingTarget(false); }
           }} /> : null}
         <StandaloneOptions client={client} hostId={context.hostId} cwd={context.cwd} threadId={context.threadId} busy={busy} modelRef={modelPicker} value={options}
-          onDefaultPendingChange={setDefaultPending}
+          onDefaultPendingChange={notifyDefaultPending}
           onChange={patch => setOverrides(previous => ({ ...previous, ...patch }))} />
         <label className="standalone-composer__enter">{t('Send method')} <select aria-label={t('Send method')} value={enterSetting.value} disabled={enterSetting.pending} onChange={event => {
           const value = event.target.value;
@@ -373,10 +457,11 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           {t(sending ? 'Sending...' : busy ? followUpSetting.value === 'queue' ? 'Queue message' : 'Send to current task' : 'Send')}</button>
       </div>
     </div>
+    </div>
     {uploading ? <div role="status">{t('Uploading attachments...')}</div> : null}
     {plainTextSetting.error ? <div role="status">{t('Could not read plain text preference:')} {plainTextSetting.error}</div> : null}
     {saving ? <div role="status">{t('Saving draft...')}</div> : null}
-    {storageError ? <div role="alert">{storageError} <button type="button" onClick={retry}>{t('Retry saving')}</button></div> : null}
+    {storageError ? <div role="alert">{storageError} <button type="button" disabled={frozen} onClick={retry}>{t('Retry saving')}</button></div> : null}
     {enterSetting.error ? <div role="alert">{enterSetting.error}</div> : null}
     {busy && followUpSetting.error ? <div role="alert">{followUpSetting.error}</div> : null}
     {error ? <div role="alert">{error}</div> : null}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { RefObject } from 'react';
 import { readBrowserAtoms, subscribeBrowserAtoms } from '../storage/ui-atoms.ts';
 import type { ComposerContext, ComposerDraft } from '../workbench-contract.ts';
 import { clearComposerDraftRevision, composerDraftAtomKey, openComposerDraft, readComposerDraftVersions,
@@ -10,9 +11,16 @@ import type { Draft, StoredDraft } from './standalone-draft.ts';
 export interface ComposerDraftController {
   snapshot(): ComposerDraftSnapshot | null;
   update(owner: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft): Promise<boolean>;
-  /** Wait for the current editing projection before changing owner or leaving the page. */
+  /** Wait for queued draft writes; this alone does not freeze or drain input. */
   flush(owner: ComposerDraftOwner): Promise<boolean>;
+  /** Freeze this owner before a parent changes or unmounts it. */
+  freeze(owner: ComposerDraftOwner): ComposerDraftLease | null;
 }
+export interface ComposerDraftLease {
+  flush(): Promise<boolean>;
+  release(): void;
+}
+export type FinishComposerOperation = (success: boolean) => void;
 const legacyKeys = new Set(['composer-prompt-drafts-v2', 'composer-prompt-drafts-v1', 'composer-retained-documents-v1',
   'client-thread-bindings-v1', 'draft-thread-identities-v1']);
 const sameOwner = (left: ComposerDraftOwner, right: ComposerDraftOwner) => left.hostId === right.hostId
@@ -21,7 +29,8 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 interface Mutation { saved: Promise<boolean> }
 
 export function useComposerDraft(context: ComposerContext, onController?: (controller: ComposerDraftController | null) => void,
-  onChange?: (snapshot: ComposerDraftSnapshot) => void) {
+  onChange?: (snapshot: ComposerDraftSnapshot) => void, freezeGuard?: RefObject<((afterDrain: boolean) => boolean)>,
+  onFreeze?: (frozen: boolean) => void) {
   const owner = useMemo<ComposerDraftOwner>(() => ({ hostId: context.hostId, threadId: context.threadId, draftId: context.draftId }),
     [context.hostId, context.threadId, context.draftId]);
   const [initial] = useState<StoredDraft>(() => ({ revision: createId(), draft: emptyDraft(), prefills: [] }));
@@ -34,8 +43,13 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   const [retry, setRetry] = useState(0);
   const mounted = useRef(false);
   const active = useRef<ComposerDraftController | null>(null);
+  const frozen = useRef<ComposerDraftLease | null>(null);
+  const cancelFrozen = useRef<(() => void) | null>(null);
+  const operations = useRef(new Set<Promise<boolean>>());
+  const operationUpdate = useRef<((owner: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft) => Promise<boolean>) | null>(null);
   const generation = useRef(0);
   const ready = useRef<Promise<ComposerDraftVersions> | null>(null);
+  const initializing = useRef(true);
   const queue = useRef<Promise<void>>(Promise.resolve());
   const lastWrite = useRef<Promise<boolean>>(Promise.resolve(true));
   const dirty = useRef(false);
@@ -45,6 +59,17 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   const refreshVersions = useRef<(() => void) | null>(null);
   const changeCallback = useRef(onChange);
   changeCallback.current = onChange;
+  const freezeCallback = useRef(onFreeze);
+  freezeCallback.current = onFreeze;
+  const beginOperation = useCallback((): FinishComposerOperation | null => {
+    if (!mounted.current || !active.current || frozen.current) return null;
+    let resolve!: (success: boolean) => void;
+    const pending = new Promise<boolean>(done => { resolve = done; });
+    operations.current.add(pending);
+    void pending.then(() => operations.current.delete(pending));
+    let finished = false;
+    return success => { if (!finished) { finished = true; resolve(success); } };
+  }, []);
   const enqueue = useCallback(<T,>(operation: () => Promise<T>): Promise<T> => {
     const result = queue.current.then(operation);
     queue.current = result.then(() => undefined, () => undefined);
@@ -77,9 +102,9 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     lastWrite.current = operation;
     return operation;
   }, [enqueue, owner, publish]);
-  const apply = useCallback((update: (draft: Draft) => Draft, prefillId?: string): Mutation | null => {
+  const apply = useCallback((update: (draft: Draft) => Draft, prefillId?: string, fromOperation = false): Mutation | null => {
     const controller = active.current;
-    if (!mounted.current || !controller) return null;
+    if (!mounted.current || !controller || frozen.current && !fromOperation) return null;
     const previous = current.current;
     const next = { ...previous, revision: createId(), draft: update(previous.draft),
       prefills: prefillId ? [...previous.prefills, prefillId] : previous.prefills };
@@ -92,6 +117,10 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   }, [persist]);
   const changeDraft = useCallback((update: (draft: Draft) => Draft, prefillId?: string): Promise<boolean> =>
     apply(update, prefillId)?.saved ?? Promise.resolve(false), [apply]);
+  const changeDraftFromOperation = useCallback((update: (draft: Draft) => Draft): Promise<boolean> =>
+    apply(update, undefined, true)?.saved ?? Promise.resolve(false), [apply]);
+  const updateDraftFromOperation = useCallback((expected: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft) =>
+    operationUpdate.current?.(expected, update) ?? Promise.resolve(false), []);
 
   const controller = useMemo<ComposerDraftController>(() => {
     const result: ComposerDraftController = {
@@ -111,7 +140,47 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
           if (revision === current.current.revision && saved === lastWrite.current) return true;
         }
       },
+      freeze(expected) {
+        if (active.current !== result || !sameOwner(owner, expected) || frozen.current) return null;
+        if (initializing.current) { setStorageError(value => value || '草稿正在恢复，请稍后再切换。'); return null; }
+        if (!freezeGuard?.current?.(false)) return null;
+        const pending = [...operations.current];
+        let cancelDrain!: () => void;
+        const cancelled = new Promise<false>(resolve => { cancelDrain = () => resolve(false); });
+        const lease: ComposerDraftLease = {
+          async flush() {
+            // Deliver pending DOM mutations (including ProseMirror's observer) before checking the write queue.
+            await Promise.resolve();
+            const completed = await Promise.race([Promise.all(pending).then(values => values.every(Boolean)), cancelled]);
+            if (frozen.current !== lease || active.current !== result || !completed
+              || !freezeGuard?.current?.(true)) return false;
+            if (!await Promise.race([result.flush(expected).catch(() => false), cancelled])) return false;
+            return frozen.current === lease && active.current === result && !!freezeGuard?.current?.(true);
+          },
+          release() {
+            if (frozen.current !== lease || active.current !== result) return;
+            frozen.current = null;
+            cancelDrain();
+            cancelFrozen.current = null;
+            freezeCallback.current?.(false);
+            refreshVersions.current?.();
+          },
+        };
+        frozen.current = lease;
+        cancelFrozen.current = cancelDrain;
+        freezeCallback.current?.(true);
+        return lease;
+      },
       async update(expected, update) {
+        if (active.current !== result || !sameOwner(owner, expected)) return false;
+        const finish = beginOperation();
+        if (!finish) return false;
+        let success = false;
+        try { success = await updateFromOperation(expected, update); return success; }
+        finally { finish(success); }
+      },
+    };
+    async function updateFromOperation(expected: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft): Promise<boolean> {
         if (active.current !== result || !sameOwner(owner, expected)) return false;
         for (;;) {
           await queue.current;
@@ -141,26 +210,29 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
             throw new Error('草稿未能保存，当前内容已保留。');
           }
         }
-      },
-    };
+    }
+    operationUpdate.current = updateFromOperation;
     return result;
-  }, [enqueue, owner, publish]);
+  }, [beginOperation, enqueue, freezeGuard, owner, publish]);
 
   const legacyIdentity = JSON.stringify([context.hostId, context.threadId, context.draftId, context.placement ?? null, context.legacyDraftKey ?? null]);
   useLayoutEffect(() => {
     mounted.current = true; active.current = controller;
-    return () => { if (active.current === controller) active.current = null; mounted.current = false; };
+    return () => { if (active.current === controller) { active.current = null; frozen.current = null; cancelFrozen.current?.(); cancelFrozen.current = null; } mounted.current = false; };
   }, [controller]);
   useLayoutEffect(() => {
     const serial = ++generation.current;
     let disposed = false, finished = false, versionRead = 0;
     const valid = () => !disposed && generation.current === serial && active.current === controller;
+    initializing.current = true;
     setStorageError(''); setLoaded(false);
     const loading = readBrowserAtoms().then(atoms => openComposerDraft(context, atoms, valid));
     ready.current = loading;
     void loading.then(view => {
       if (!valid()) return;
       finished = true;
+      initializing.current = false;
+      setStorageError(value => value === '草稿正在恢复，请稍后再切换。' ? '' : value);
       const first = view.versions[0];
       if (!first) throw new Error('草稿初始化未完成。');
       setVersions(view.versions);
@@ -179,7 +251,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       void readComposerDraftVersions(owner).then(view => {
         if (!valid() || serial !== versionRead || dirty.current || current.current !== observed) return;
         setVersions(view.versions);
-        if (finished && !view.versions.some(value => value.revision === observed.revision) && view.versions.length === 1) {
+        if (!frozen.current && finished && !view.versions.some(value => value.revision === observed.revision) && view.versions.length === 1) {
           const next = view.versions[0]!;
           current.current = next; setStored(next); durableRevision.current = next.revision;
           lastWrite.current = Promise.resolve(true); publish(controller, next);
@@ -218,24 +290,29 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     }
   }, [controller, owner, publish]);
   const selectVersion = useCallback(async (revision: string): Promise<void> => {
-    await queue.current;
-    if (!await lastWrite.current) { setStorageError('当前草稿尚未保存，不能切换版本。'); return; }
-    const previous = current.current;
-    const view = await readComposerDraftVersions(owner);
-    if (active.current !== controller || current.current !== previous) return;
-    const selected = view.versions.find(value => value.revision === revision);
-    if (!selected) { setStorageError('该草稿版本已变化，请重新选择。'); setVersions(view.versions); return; }
-    current.current = selected; setStored(selected); setVersions(view.versions); lastWrite.current = Promise.resolve(true);
-    durableRevision.current = selected.revision; dirty.current = false; setSaving(false);
-    setStorageError(''); publish(controller, selected);
-  }, [controller, owner, publish]);
+    const finish = beginOperation();
+    if (!finish) return;
+    let success = false;
+    try {
+      await queue.current;
+      if (!await lastWrite.current) { setStorageError('当前草稿尚未保存，不能切换版本。'); return; }
+      const previous = current.current;
+      const view = await readComposerDraftVersions(owner);
+      if (active.current !== controller || current.current !== previous) return;
+      const selected = view.versions.find(value => value.revision === revision);
+      if (!selected) { setStorageError('该草稿版本已变化，请重新选择。'); setVersions(view.versions); return; }
+      current.current = selected; setStored(selected); setVersions(view.versions); lastWrite.current = Promise.resolve(true);
+      durableRevision.current = selected.revision; dirty.current = false; setSaving(false);
+      setStorageError(''); publish(controller, selected); success = true;
+    } finally { finish(success); }
+  }, [beginOperation, controller, owner, publish]);
   useEffect(() => () => { generation.current += 1; }, []);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => { if (dirty.current) event.preventDefault(); };
     window.addEventListener('beforeunload', beforeUnload);
     return () => window.removeEventListener('beforeunload', beforeUnload);
   }, []);
-  return { owner, controller, current, stored, changeDraft, retain, clear, selectVersion,
+  return { owner, controller, current, stored, changeDraft, changeDraftFromOperation, updateDraftFromOperation, beginOperation, retain, clear, selectVersion,
     conflicts: versions.filter(value => value.revision !== stored.revision && !pendingAncestors.current.has(value.revision)),
-    storageError, saving, loaded, retry: () => setRetry(value => value + 1), lastWrite };
+    storageError, saving, loaded, retry: () => { initializing.current = true; setRetry(value => value + 1); }, lastWrite };
 }

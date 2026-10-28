@@ -23,6 +23,8 @@ interface RichEditorProps {
   onImages(files: File[]): void;
   onInvalid(message?: string): void;
   onCompletionContext(context: RichCompletionContext | null): void;
+  onCompositionChange?(composing: boolean): void;
+  onPendingLinkChange?(pending: boolean): void;
   completionListId?: string;
   completionSelectedId?: string;
   ariaLabel?: string;
@@ -95,12 +97,14 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         paste: editor => { if (!composing.current) syncRichSelection(editor); return false; },
         focus: editor => { latest.current.onCompletionContext(composing.current ? null : richCompletionContext(editor)); return false; },
         blur: () => { latest.current.onCompletionContext(null); return false; },
-        compositionstart: () => { composing.current = true; latest.current.onCompletionContext(null); return false; },
+        compositionstart: () => { composing.current = true; latest.current.onCompositionChange?.(true); latest.current.onCompletionContext(null); return false; },
         compositionend: editor => {
           requestAnimationFrame(() => {
+            if (view.current !== editor || editor.isDestroyed) return;
             composing.current = false;
             applyMode.current?.();
-            if (view.current === editor && editor.hasFocus()) latest.current.onCompletionContext(richCompletionContext(editor));
+            latest.current.onCompositionChange?.(false);
+            if (editor.hasFocus()) latest.current.onCompletionContext(richCompletionContext(editor));
           });
           return false;
         },
@@ -150,7 +154,10 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
       plain = next;
       editor.updateState(editor.state.reconfigure({ plugins: plain ? plugins.plain : plugins.rich }));
     };
-    return () => { applyMode.current = null; view.current = null; editor.destroy(); };
+    return () => {
+      applyMode.current = null; view.current = null; editor.destroy();
+      latest.current.onCompositionChange?.(false); latest.current.onPendingLinkChange?.(false);
+    };
   }, []);
 
   useLayoutEffect(() => { applyMode.current?.(); }, [props.plainTextMode]);
@@ -176,18 +183,22 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     if (editor && type && !props.readOnly) { syncRichSelection(editor); toggleMark(type)(editor.state, editor.dispatch, editor); editor.focus(); }
   };
   return <>
-    {!props.plainTextMode && <div className="standalone-composer__rich-toolbar" role="toolbar" aria-label={t('Text formatting')}>
-      <button type="button" title={t('Bold')} aria-label={t('Bold')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('strong')}><Bold size={16} /></button>
-      <button type="button" title={t('Italic')} aria-label={t('Italic')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('em')}><Italic size={16} /></button>
-      <button type="button" title={t('Inline code')} aria-label={t('Inline code')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('code')}><Code2 size={16} /></button>
-      <button type="button" title={t('Link')} aria-label={t('Link')} disabled={props.readOnly} onMouseDown={event => { event.preventDefault(); if (view.current) syncRichSelection(view.current); }} onClick={() => setLinkOpen(open => !open)}><LinkIcon size={16} /></button>
+    {(!props.plainTextMode || linkOpen) && <div className="standalone-composer__rich-toolbar" role="toolbar" aria-label={t('Text formatting')}>
+      {!props.plainTextMode && <>
+        <button type="button" title={t('Bold')} aria-label={t('Bold')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('strong')}><Bold size={16} /></button>
+        <button type="button" title={t('Italic')} aria-label={t('Italic')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('em')}><Italic size={16} /></button>
+        <button type="button" title={t('Inline code')} aria-label={t('Inline code')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('code')}><Code2 size={16} /></button>
+      </>}
+      <button type="button" title={t('Link')} aria-label={t('Link')} disabled={props.readOnly} onMouseDown={event => { event.preventDefault(); if (view.current) syncRichSelection(view.current); }} onClick={() => {
+        props.onPendingLinkChange?.(!linkOpen); setLinkOpen(!linkOpen);
+      }}><LinkIcon size={16} /></button>
       {linkOpen ? <form onSubmit={event => {
         event.preventDefault();
         const editor = view.current, type = composerSchema.marks.link;
         if (editor && type && !props.readOnly && href.trim() && !editor.state.selection.empty) {
           const { from, to } = editor.state.selection;
           editor.dispatch(editor.state.tr.addMark(from, to, type.create({ href: href.trim() })));
-          setLinkOpen(false); setHref(''); editor.focus();
+          props.onPendingLinkChange?.(false); setLinkOpen(false); setHref(''); editor.focus();
         }
       }}><input aria-label={t('Link address')} value={href} disabled={props.readOnly} onChange={event => setHref(event.target.value)} /><button type="submit" disabled={props.readOnly}>{t('Apply')}</button></form> : null}
     </div>}
