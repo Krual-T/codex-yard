@@ -13,6 +13,7 @@ declare global {
       checks(): number;
       saved(): { recovery: { origin: { turnId: string; itemId: string }; editor: { revision: number; edits: { text: string }[] } }; submission?: { stage: string } } | null;
       entered(): boolean;
+      rejectStart(): void;
       refresh(): void;
       hideSource(): void;
       hide(): void;
@@ -28,7 +29,7 @@ declare global {
 }
 
 const require = createRequire(import.meta.url), chromePath = '/usr/bin/google-chrome';
-test('real inline editor explicitly rebases a preserved draft after confirming A', {
+test('real inline editor rebases a preserved draft and retries a known rejected start', {
   skip: !existsSync(chromePath) && 'An isolated headless browser is unavailable', timeout: 90_000,
 }, async () => {
   const bundle = await build({ entryPoints: ['test/renderer-message-edit-rebase-fixture.ts'], bundle: true, write: false, format: 'iife',
@@ -155,5 +156,33 @@ test('real inline editor explicitly rebases a preserved draft after confirming A
     assert.deepEqual(input[2], { type: 'mention', name: 'workspace', path: '/work' });
     assert.deepEqual(input[0]!.text_elements, [{ byteRange: { start: 2, end: 7 }, placeholder: '@item', context: { browser: 'synthetic' } }]);
     assert.deepEqual(errors, []);
+
+    const retryPage = await browser.newPage();
+    await retryPage.route('**/*', route => route.request().url() === 'https://edit-rebase.invalid/'
+      ? route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="root"></div>' }) : route.abort());
+    const retryErrors: string[] = [];
+    retryPage.on('pageerror', error => retryErrors.push(error.message));
+    await retryPage.goto('https://edit-rebase.invalid/');
+    await retryPage.addScriptTag({ content: bundle.outputFiles[0]!.text });
+    await retryPage.evaluate(() => window.editRebaseHarness.rejectStart());
+    const retryUser = retryPage.locator('[data-message-id="user-original"]');
+    await retryUser.getByRole('button', { name: 'Edit message' }).click();
+    await retryUser.getByRole('textbox', { name: 'Edit message text' }).fill('A @item');
+    await retryUser.getByRole('button', { name: 'Send', exact: true }).click();
+    await retryUser.getByText('Synthetic start rejected').waitFor();
+    await retryPage.evaluate(() => window.editRebaseHarness.refresh());
+    await retryUser.getByRole('textbox', { name: 'Edit message text' }).fill('B @item');
+    await retryPage.waitForFunction(() => window.editRebaseHarness.saved()?.recovery.editor.edits[0]?.text === 'B @item');
+    await retryUser.getByRole('button', { name: 'Send', exact: true }).click();
+    await retryPage.waitForFunction(() => window.editRebaseHarness.calls.length === 2);
+    await retryPage.waitForFunction(() => window.editRebaseHarness.saved() === null);
+    const retryCalls = await retryPage.evaluate(() => window.editRebaseHarness.calls);
+    assert.deepEqual(retryCalls.map(call => call.operation), ['submit', 'retry-start']);
+    assert.notEqual(retryCalls[0]!.clientUserMessageId, retryCalls[1]!.clientUserMessageId);
+    const retryInput = (retryCalls[1]!.turnParams as { input: Record<string, unknown>[] }).input;
+    assert.equal(retryInput[0]!.text, 'B @item');
+    assert.deepEqual(retryInput[1], { type: 'image', fileId: 'fixture-file', detail: 'high' });
+    assert.deepEqual(retryInput[2], { type: 'mention', name: 'workspace', path: '/work' });
+    assert.deepEqual(retryErrors, []);
   } finally { await browser.close(); }
 });

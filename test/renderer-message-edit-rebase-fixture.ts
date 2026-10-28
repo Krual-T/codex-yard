@@ -21,7 +21,7 @@ let backend = structuredClone(initial), projection = structuredClone(initial), h
 let unchangedBackend: ThreadSummary | null = null;
 let saved: unknown, state: StoredMessageEdit | null = null, controller: MessageEditNavigationController | null = null;
 let gate: Promise<void> | null = null, releaseGate: (() => void) | null = null, entered = false;
-let submits = 0, commits = 0, completedChecks = 0;
+let submits = 0, commits = 0, completedChecks = 0, rejectFirstStart = false;
 const calls: Record<string, unknown>[] = [];
 const storage: EditRecoveryStorage = { read: () => structuredClone(saved), update: async change => {
   saved = structuredClone(change(structuredClone(saved))); return saved;
@@ -40,6 +40,10 @@ const client: WorkbenchClient = {
     if (endpoint !== 'message-edit') throw new Error(`unexpected host ${endpoint}`);
     calls.push(structuredClone(params));
     if (params.operation === 'submit' && ++submits === 1) {
+      if (rejectFirstStart) {
+        backend = { ...backend, turns: [backend.turns[0]!] };
+        return { stage: 'reverted', error: 'Synthetic start rejected' } as T;
+      }
       const turnParams = params.turnParams as { input: Record<string, unknown>[] };
       backend = { ...backend, turns: [backend.turns[0]!, { id: 'sent-a', status: 'completed', itemsView: 'full', items: [
         { id: 'user-a', type: 'userMessage', clientId: params.clientUserMessageId, content: structuredClone(turnParams.input) },
@@ -74,6 +78,7 @@ function render() {
 }
 Object.assign(window, { editRebaseHarness: {
   calls, commits: () => commits, checks: () => completedChecks, saved: () => structuredClone(state), entered: () => entered,
+  rejectStart: () => { rejectFirstStart = true; },
   refresh: () => { projection = structuredClone(backend); render(); },
   hideSource: () => { projection = { ...projection, turns: projection.turns.slice(0, 1) }; render(); },
   hide: () => { visible = false; render(); }, show: () => { visible = true; void sync(); },
