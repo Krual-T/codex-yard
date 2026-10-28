@@ -1,3 +1,6 @@
+import { installTweak } from '../renderer/visualizations/tweak-runtime.ts';
+import type { AnnotationChange } from '../renderer/visualizations/annotations.ts';
+
 // Browser transport for the pinned renderer's mcp-sandbox-rpc MessagePort API.
 // The official HTML kit supplies styling, ready/height/error notifications,
 // annotations and downloads. This frame owns no files, credentials or app RPC.
@@ -144,6 +147,9 @@ function startOwnedVisualization(initId: string) {
   let annotating = false;
   let globals: Value = {};
   let themeSheet: CSSStyleSheet | null = null;
+  let tweak: ReturnType<typeof installTweak> | null = null;
+  let variables: Value = {};
+  let locale: string | undefined;
 
   function send(value: Value) {
     if (!disposed) port.postMessage(value);
@@ -171,8 +177,10 @@ function startOwnedVisualization(initId: string) {
     if (sandboxWindow.openai) Object.assign(sandboxWindow.openai, values);
     window.dispatchEvent(new CustomEvent('openai:set_globals', { detail: { globals: { ...globals } } }));
   }
-  function setTheme(value: unknown) {
+  function setTheme(value: unknown, nextVariables?: unknown, nextLocale?: unknown) {
     if (value !== 'dark' && value !== 'light') return;
+    if (nextVariables !== undefined) variables = object(nextVariables);
+    if (typeof nextLocale === 'string' && nextLocale.length <= 100) locale = nextLocale;
     if (!themeSheet) {
       themeSheet = new CSSStyleSheet();
       document.adoptedStyleSheets = [...document.adoptedStyleSheets, themeSheet];
@@ -207,11 +215,19 @@ function startOwnedVisualization(initId: string) {
       --color-background-primary: var(--background); --color-text-primary: var(--foreground);
       --color-border-secondary: var(--border);
     }`);
-    if (document.documentElement) document.documentElement.style.colorScheme = value;
-    updateGlobals({ theme: value, visualizationTheme: value });
+    const rule = themeSheet.cssRules[0] as CSSStyleRule;
+    for (const [name, entry] of Object.entries(variables).slice(0, 128)) {
+      if (/^--[a-z0-9_-]{1,100}$/i.test(name) && typeof entry === 'string' && entry.length <= 4096) rule.style.setProperty(name, entry);
+    }
+    if (document.documentElement) {
+      document.documentElement.style.colorScheme = value;
+      if (locale) document.documentElement.lang = locale;
+    }
+    updateGlobals({ theme: value, visualizationTheme: value, visualizationStyleVariables: variables, locale });
   }
   function dispose() {
     if (disposed) return;
+    tweak?.cleanup();
     disposed = true;
     port.close();
     for (const item of pending.values()) {
@@ -232,6 +248,7 @@ function startOwnedVisualization(initId: string) {
     globals = { theme: message.theme, visualizationTheme: message.theme, displayMode: 'inline',
       widgetState: message.widgetState, maxHeight: 10_000, maxWidth: null,
       safeArea: { top: 0, right: 0, bottom: 0, left: 0 } };
+    tweak = installTweak({ request: value => request('annotations', value) });
     sandboxWindow.openai = {
       ...globals,
       callTool: (name: unknown, args: unknown) => {
@@ -244,17 +261,18 @@ function startOwnedVisualization(initId: string) {
           return Promise.resolve();
         }
         if (name === '__codex_inline_visualization_download__') return request('download', args);
+        if (name === '__codex_visualization_annotations__') return request('annotations', args);
         return Promise.reject(new Error('Visualization tool is not available'));
       },
       sendFollowUpMessage: (value: unknown) => request('follow-up', value),
       requestDisplayMode: (value: unknown) => request('display-mode', value),
       openExternal: (value: unknown) => request('open-external', value),
-      setWidgetState: (value: unknown) => {
-        updateGlobals({ widgetState: value });
-        return request('widget-state', value);
+      setWidgetState: async (value: unknown) => {
+        const saved = await request('widget-state', value);
+        updateGlobals({ widgetState: saved ?? value });
       },
     };
-    setTheme(message.theme);
+    setTheme(message.theme, message.themeVariables, message.locale);
     document.open();
     window.addEventListener('pagehide', () => { send({ type: 'leaving' }); dispose(); }, { once: true });
     window.addEventListener('error', event => send({ type: 'error', message: String(event.message || 'Visualization error').slice(0, 1000) }));
@@ -268,7 +286,7 @@ function startOwnedVisualization(initId: string) {
         annotating = false;
         const selection = window.getSelection()?.toString().trim();
         const excerpt = (selection || target.getAttribute('aria-label') || target.textContent || target.tagName).trim().slice(0, 500);
-        send({ type: 'annotation-target', excerpt });
+        send({ type: 'annotation-target', excerpt, ...tweak?.select(event.composedPath()) });
         return;
       }
       const anchor = event.composedPath().find(node => node instanceof HTMLAnchorElement && node.hasAttribute('download'));
@@ -281,7 +299,8 @@ function startOwnedVisualization(initId: string) {
     }, true);
     document.write(message.html);
     document.close();
-    setTheme(message.theme);
+    tweak.observe();
+    setTheme(message.theme, message.themeVariables, message.locale);
     const observer = new ResizeObserver(measure);
     if (document.body) observer.observe(document.body);
     new MutationObserver(measure).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
@@ -299,9 +318,15 @@ function startOwnedVisualization(initId: string) {
       else item.reject(new Error(typeof message.error === 'string' ? message.error : 'Visualization request failed'));
     } else if (message.type === 'render') {
       try { render(message); } catch (error) { send({ type: 'error', message: error instanceof Error ? error.message : String(error) }); }
-    } else if (message.type === 'theme') setTheme(message.theme);
+    } else if (message.type === 'theme') setTheme(message.theme, message.themeVariables, message.locale);
     else if (message.type === 'display-mode') updateGlobals({ displayMode: message.mode });
-    else if (message.type === 'annotate') annotating = message.enabled === true;
+    else if (message.type === 'widget-state') updateGlobals({ widgetState: message.state });
+    else if (message.type === 'annotate') {
+      annotating = message.enabled === true;
+      const changes = Array.isArray(message.changes) ? message.changes as AnnotationChange[] : [];
+      tweak?.update(changes);
+      updateGlobals({ visualizationAnnotation: { active: annotating, selection: message.selection ?? null, changes } });
+    }
     else if (message.type === 'dispose') dispose();
   };
   port.start();
