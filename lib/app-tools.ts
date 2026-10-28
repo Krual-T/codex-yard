@@ -12,11 +12,13 @@ const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const MAX_PENDING_CALLS = 128;
 
 export interface ToolArgumentSchema {
-  type: 'string' | 'integer' | 'boolean'; description?: string; default?: boolean;
+  type?: 'string' | 'integer' | 'number' | 'boolean' | 'array' | 'object'; description?: string; default?: boolean;
   minLength?: number; maxLength?: number; minimum?: number; maximum?: number; enum?: readonly string[];
+  [key: string]: unknown;
 }
 export interface AppToolDescriptor {
   namespace: string; name: string; description: string;
+  annotations?: { destructiveHint?: boolean };
   inputSchema: { type: 'object'; properties: Record<string, ToolArgumentSchema>;
     required?: readonly string[]; additionalProperties: false };
 }
@@ -26,7 +28,8 @@ export interface AppToolCall {
 }
 export type AppToolHandler = (params: AppToolCall, context: { signal: AbortSignal }) => unknown | Promise<unknown>;
 export interface AppToolsOptions {
-  tools: readonly AppToolDescriptor[]; callTool: AppToolHandler; adapterPath?: string; socketPath?: string;
+  tools: readonly AppToolDescriptor[];
+  callTool: AppToolHandler; adapterPath?: string; socketPath?: string;
 }
 type ToolReply = { result: unknown } | { error: { code: number; message: string } };
 
@@ -135,12 +138,15 @@ export async function createAppTools({ tools, callTool, adapterPath = process.en
         controller?.abort();
         return;
       }
-      if (message.method === 'tools/list') { respond(id, { result: { tools } }); return; }
+      if (message.method === 'tools/list') {
+        respond(id, { result: { tools } });
+        return;
+      }
       if (message.method !== 'tools/call') {
         respond(id, { error: { code: -32601, message: '不支持的工具宿主方法。' } }); return;
       }
       const params = message.params;
-      if (!isCall(params) || !tools.some(tool => tool.namespace === params.namespace && tool.name === params.tool)) {
+      if (!isCall(params)) {
         respond(id, { error: { code: -32602, message: '工具或调用上下文无效。' } }); return;
       }
       if (pending.has(id) || pending.size >= MAX_PENDING_CALLS) {
@@ -150,6 +156,9 @@ export async function createAppTools({ tools, callTool, adapterPath = process.en
       pending.set(id, controller);
       Promise.resolve().then(() => {
         controller.signal.throwIfAborted();
+        if (!tools.some(tool => tool.namespace === params.namespace && tool.name === params.tool)) {
+          throw Object.assign(new Error('工具或调用上下文无效。'), { code: -32602 });
+        }
         return callTool(params, { signal: controller.signal });
       }).then(result => {
         if (pending.get(id) === controller && !controller.signal.aborted) respond(id, { result });

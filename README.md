@@ -17,6 +17,9 @@ This is an experimental, independent project with a TypeScript host and React ex
 - Browse files and use terminals through Codex's existing host interfaces.
 - Pair an existing Chrome browser, navigate pages, and attach selected elements to a conversation.
 - Display interactive HTML visualizations and the app's Mini interface.
+- Use twelve native conversation tools through a permanent host, with the original
+  argument schemas, history projection and passive wait behavior. See
+  [tool behavior and migration limits](docs/native-app-tools.md).
 
 The next product direction is a task dashboard: clarify and assign work, see which Agent is doing what, and distribute queued tasks to available workers. That scheduler and dashboard are planned features. The current source provides the conversation workspace.
 
@@ -96,4 +99,4 @@ Runtime state, host build output, and generated Chrome companion packages live i
 
 ## License
 
-Project-authored source is supplied under the [MIT license](LICENSE). Files under `vendor/codex-app/` are third-party compiled resources and are excluded from that MIT grant; their existing copyrights, notices and terms remain applicable. See the [vendor notice](vendor/codex-app/LICENSE). This project is not affiliated with or endorsed by OpenAI.
+Project-authored source is supplied under the [MIT license](LICENSE). Files under `vendor/codex-app/` and `vendor/native-app-tools/` are third-party compiled resources and are excluded from that MIT grant; their existing copyrights, notices and terms remain applicable. See [third-party components](THIRD_PARTY.md). This project is not affiliated with or endorsed by OpenAI.

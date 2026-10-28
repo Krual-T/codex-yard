@@ -18,6 +18,8 @@
 
 ## 版本与运行条件
 
+对话工具由常驻宿主提供，包含创建、分叉、发送、等待、历史、标题、归档、置顶和已读等十二项；复用原版参数校验、历史投影和等待逻辑，关闭 Yard 页面后仍可执行。已加载旧对话的迁移、桌面与云端能力边界见[工具说明](docs/native-app-tools.md)。
+
 | 组件 | 版本 | 用途与验证范围 |
 | --- | --- | --- |
 | Codex | `0.164.0` | 已验证无需桌面 App 的部署：自动启动后端、网页加载与真实模型回复 |
@@ -75,4 +77,4 @@ npm run test:app-tools
 
 当前仍受指定界面版本约束，Git/工作树操作与通用自动化尚未完整接通；两台实体 iPhone、Windows Chrome 配对和 2 秒启动目标仍需继续验证或实现。
 
-自有项目源码采用 [MIT](LICENSE)。`vendor/codex-app/` 下的第三方编译资源不在此 MIT 授权范围内，保留原有版权、声明与适用条款，详见[资源声明](vendor/codex-app/LICENSE)。本项目与 OpenAI 无隶属或背书关系。
+自有项目源码采用 [MIT](LICENSE)。`vendor/codex-app/` 和 `vendor/native-app-tools/` 下的第三方编译资源不在此 MIT 授权范围内，保留原有版权、声明与适用条款，详见[第三方组件说明](THIRD_PARTY.md)。本项目与 OpenAI 无隶属或背书关系。
