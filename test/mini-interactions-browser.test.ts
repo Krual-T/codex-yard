@@ -17,7 +17,7 @@ test('Mini consumes real browser-client requests and distinguishes daemon loss, 
     import { BrowserWorkbenchClient } from './src/renderer/app/client.ts';
     import { StandaloneMini } from './src/renderer/mini/index.tsx';
     const client=new BrowserWorkbenchClient();
-    const calls={replies:[],actions:[],opened:[]}, records=[];
+    const calls={replies:[],actions:[],opened:[],openedRequests:[]}, records=[];
     let pending=[],bridge='connecting',root;
     const hosts={local:{state:'connected',fresh:true,revision:'l1'},'ssh-a':{state:'connected',fresh:true,revision:'r1'}};
     let action={id:'stop',kind:'stop',label:'Stop task',turnId:'turn-1',outcome:'ready'};
@@ -26,14 +26,20 @@ test('Mini consumes real browser-client requests and distinguishes daemon loss, 
       requests:records.filter(x=>x.request.requestRef.hostId==='ssh-a'),actions:[action]},
       {hostId:'local',threadId:'local',title:'Local work',status:'waiting',requests:records.filter(x=>x.request.requestRef.hostId==='local')}];
       root.render(React.createElement(StandaloneMini,{client,send:async()=>{await client.host('test-pet-state')},activities,bridgeState:bridge,
-        hostConnections:hosts,pendingRequests:pending,onOpenThread:value=>calls.opened.push(value),onExpand(){},
+        hostConnections:hosts,pendingRequests:pending,onOpenThread:value=>calls.opened.push(value),
+        onOpenRequest:(identity,ref)=>calls.openedRequests.push({identity,ref}),onExpand(){},
         onBeforeQuickChatClose:async()=>true,onInputDraftChange:(ref,draft)=>{records.find(x=>same(x.request.requestRef,ref)).request.inputDraft=draft;render()},
         onNotificationAction:async(identity,value)=>{calls.actions.push({identity,turnId:value.turnId,id:value.id,kind:value.kind});action={...action,outcome:'sent'};render()},
         onRespond:async(ref,result)=>{const item=records.find(x=>same(x.request.requestRef,ref)).request;
           if(item.outcome!=='ready'||!pending.some(value=>same(value,ref)))return;
           item.outcome='sending';render();calls.replies.push({ref,result});
           try{await client.reply(ref,{result});item.outcome='sent'}catch(error){item.error=error.message;
-            item.outcome=error.uncertain?'unknown':pending.some(value=>same(value,ref))?'ready':'expired'}render()}}));}
+            if(error.uncertain)item.outcome='unknown';
+            else if(!pending.some(value=>same(value,ref)))item.outcome='expired';
+            else{item.outcome='unknown';render();
+              const verified=await client.host('test-verify-request',{ref}).catch(()=>({pending:false}));
+              if(item.outcome==='unknown'&&bridge==='connected'&&pending.some(value=>same(value,ref))&&verified.pending===true)item.outcome='ready';
+            }}render()}}));}
     client.subscribe(event=>{
       if(event.type==='connection-state'){bridge=event.state;
         if(event.state!=='connected'){pending=[];for(const host of Object.keys(hosts))hosts[host]={...hosts[host],fresh:false}}render();}
@@ -68,6 +74,7 @@ test('Mini consumes real browser-client requests and distinguishes daemon loss, 
     {hostId:'ssh-a',id:'known',generation:'generation-known'}, {hostId:'ssh-a',id:'expired',generation:'generation-expired'},
     {hostId:'ssh-a',id:'unknown',generation:'generation-unknown'}, {hostId:'ssh-a',id:'question',generation:'generation-question'},
     {hostId:'ssh-a',id:'complex',generation:'generation-complex'}, {hostId:'local',id:'local',generation:'generation-local'},
+    {hostId:'ssh-a',id:'unverified',generation:'generation-unverified'},
   ];
   const active = [...refs];
   const same = (left: typeof refs[number], right: typeof refs[number]) => left.hostId === right.hostId && left.id === right.id && left.generation === right.generation;
@@ -82,7 +89,10 @@ test('Mini consumes real browser-client requests and distinguishes daemon loss, 
           request:{id:ref.id,method:'item/commandExecution/requestApproval',params:{threadId:'fixture'}}});
       } else if (message.type === 'fetch') {
         const endpoint = String(message.url).split('/').at(-1);
-        emit({type:'fetch-response',requestId:message.requestId,responseType:'success',body:endpoint === 'get-settings' ? {values:{}} : {avatars:[]}});
+        const body = endpoint === 'get-settings' ? {values:{}} : endpoint === 'test-verify-request'
+          ? {pending: JSON.parse(message.body).ref.id !== 'unverified' && active.some(value => same(value, JSON.parse(message.body).ref))}
+          : {avatars:[]};
+        emit({type:'fetch-response',requestId:message.requestId,responseType:'success',body});
         if (endpoint === 'test-pet-state') emit({type:'workbench-pet-state',state:{isOpen:true,visibility:'always-visible',position:null}});
       } else if (message.type === 'mcp-response') {
         const ref = {hostId:message.hostId,id:message.response.id,generation:message.generation};
@@ -94,6 +104,9 @@ test('Mini consumes real browser-client requests and distinguishes daemon loss, 
         }
         if (ref.id === 'known' && knownAttempts++ === 0) {
           emit({type:'server-request-response',requestId:message.requestId,error:'not forwarded',uncertain:false}); return;
+        }
+        if (ref.id === 'unverified') {
+          emit({type:'server-request-response',requestId:message.requestId,error:'cannot verify original request',uncertain:false}); return;
         }
         const index = active.findIndex(value => same(value, ref)); if (index >= 0) active.splice(index, 1);
         emit({type:'server-request-response',requestId:message.requestId,success:true});
@@ -138,13 +151,20 @@ test('Mini consumes real browser-client requests and distinguishes daemon loss, 
     await page.getByRole('button', { name: 'Reply expired' }).click();
     await page.getByText('Request expired. Open the conversation to check its status. expired ref').waitFor();
     assert.equal(await page.getByRole('button', { name: 'Reply expired' }).isDisabled(), true);
+    await page.getByRole('button', { name: 'Reply unverified' }).click();
+    const unverified = page.locator('.yard-mini-request').filter({ has: page.getByText('unverified', { exact: true }) });
+    await unverified.getByText('Response could not be confirmed.', { exact: false }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Reply unverified' }).isDisabled(), true);
 
     await page.getByRole('radio', { name: 'Second' }).check();
     await page.evaluate(() => (window as any).miniRequestsHarness.remount());
     await page.getByRole('radio', { name: 'Second' }).waitFor();
     assert.equal(await page.getByRole('radio', { name: 'Second' }).isChecked(), true);
     await page.getByRole('button', { name: 'Open conversation' }).click();
-    assert.deepEqual(await page.evaluate(() => (window as any).miniRequestsHarness.calls.opened), [{hostId:'ssh-a',threadId:'remote'}]);
+    assert.deepEqual(await page.evaluate(() => (window as any).miniRequestsHarness.calls.openedRequests), [
+      {identity:{hostId:'ssh-a',threadId:'remote'},ref:refs[6]},
+    ]);
+    assert.deepEqual(await page.evaluate(() => (window as any).miniRequestsHarness.calls.opened), []);
     await page.getByRole('button', { name: 'Stop task' }).click();
     assert.equal(await page.getByRole('button', { name: 'Stop task' }).isDisabled(), true);
     await page.evaluate(() => (window as any).miniRequestsHarness.nextTurn());
@@ -152,7 +172,8 @@ test('Mini consumes real browser-client requests and distinguishes daemon loss, 
     assert.deepEqual((await page.evaluate(() => (window as any).miniRequestsHarness.calls.actions)).map((value: any) => value.turnId), ['turn-1', 'turn-2']);
 
     await page.getByRole('button', { name: 'Reply unknown' }).click();
-    await page.getByText('Response could not be confirmed.', { exact: false }).waitFor();
+    const unknown = page.locator('.yard-mini-request').filter({ has: page.getByText('unknown', { exact: true }) });
+    await unknown.getByText('Response could not be confirmed.', { exact: false }).waitFor();
     await page.waitForFunction(() => (window as any).miniRequestsHarness.records.some((x: any) => x.request.requestRef.id === 'unknown' && x.request.outcome === 'unknown'));
     assert.equal(await page.getByRole('button', { name: 'Submit answer' }).isDisabled(), true);
     await page.waitForFunction(() => (window as any).miniRequestsHarness.ready());
@@ -165,6 +186,9 @@ test('Mini consumes real browser-client requests and distinguishes daemon loss, 
     assert.deepEqual(question, {ref:refs[5],result:{answers:{q:{answers:['Second']}}}});
     const wireRefs = messages.filter(value => value.type === 'mcp-response').map(value => ({hostId:value.hostId,id:value.response.id,generation:value.generation}));
     assert.deepEqual(wireRefs.slice(0, 2), refs.slice(0, 2));
+    assert.deepEqual(messages.filter(value => value.type === 'fetch' && String(value.url).endsWith('/test-verify-request'))
+      .map(value => JSON.parse(value.body).ref), [refs[2], refs[8]]);
+    assert.equal(wireRefs.filter(ref => ref.id === 'unverified').length, 1);
     assert.deepEqual(errors, []);
     await page.evaluate(() => (window as any).miniRequestsHarness.close());
   } finally {

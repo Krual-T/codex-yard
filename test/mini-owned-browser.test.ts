@@ -49,7 +49,7 @@ test('Mini preserves the actual composer after failed close, target switch and e
       return !!snapshot && await current.flush(snapshot.owner);}
     const root=createRoot(document.getElementById('root'));
     function render(){root.render(React.createElement(StandaloneMini,{client,send,activities,bridgeState:'connected',hostConnections:connections,
-      pendingRequests:[],quickChatTarget:{hostId:context.hostId,threadId:context.threadId},onOpenThread:x=>calls.opened.push(x),onExpand(){},
+      pendingRequests:[],quickChatTarget:{hostId:context.hostId,threadId:context.threadId},onOpenThread:x=>calls.opened.push(x),onOpenRequest(){},onExpand(){},
       onRespond:async()=>{},onInputDraftChange(){},onBeforeQuickChatClose:flush,
       onQuickChatTarget:async target=>{calls.targets.push(target);if(!await flush())return false;
         context={hostId:target.hostId,threadId:target.threadId,draftId:target.threadId==='thread-a'?'draft-a':'draft-b',cwd:'/fixture',placement:'mini'};

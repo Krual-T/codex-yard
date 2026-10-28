@@ -43,6 +43,8 @@ export interface StandaloneMiniProps {
   hostConnections: Readonly<Record<string, MiniHostConnection | undefined>>;
   pendingRequests: readonly ServerRequestRef[];
   onOpenThread(identity: MiniIdentity): void;
+  /** Select this exact request in the parent, including when its response is unavailable. */
+  onOpenRequest(identity: MiniIdentity, ref: ServerRequestRef): void;
   onExpand(): void;
   onRespond: MiniResponder;
   onInputDraftChange(ref: ServerRequestRef, draft: MiniInputDraft): void;
@@ -75,7 +77,7 @@ function motionFor(activities: readonly MiniActivity[]): PetMotion {
   return 'idle';
 }
 
-export function StandaloneMini({ client, send, activities, bridgeState, hostConnections, pendingRequests, onOpenThread, onExpand, onRespond,
+export function StandaloneMini({ client, send, activities, bridgeState, hostConnections, pendingRequests, onOpenThread, onOpenRequest, onExpand, onRespond,
   onInputDraftChange, onNotificationAction, onOpenSettings, children, quickChatTarget, onBeforeQuickChatClose,
   onQuickChatTarget, shortcut = true }: StandaloneMiniProps) {
   const [state, setState] = useState<WebPetState | null>(null);
@@ -504,7 +506,7 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
                   ? <Question question={ready && !requestReady(request.requestRef, activity.hostId) && request.outcome === 'ready' ? { ...request, outcome: 'expired' } : request}
                     enabled={requestReady(request.requestRef, activity.hostId)} canWrite={() => requestReady(request.requestRef, activity.hostId)}
                     onRespond={onRespond} onInputDraftChange={onInputDraftChange} />
-                  : <OpenRequest request={request} identity={identity} onOpen={onOpenThread} />}
+                  : <OpenRequest request={request} identity={identity} onOpen={onOpenRequest} />}
             </div>)}
             {activity.actions?.length ? <div className="yard-mini-request-actions yard-mini-activity-actions">{activity.actions.map(action => <NotificationAction
               key={JSON.stringify([identity.hostId, identity.threadId, 'turnId' in action ? action.turnId : null, action.kind, action.id])}

@@ -124,9 +124,11 @@ export function Question({ question, enabled, canWrite, onRespond, onInputDraftC
   </form>;
 }
 
-export function OpenRequest({ request, identity, onOpen }: { request: MiniOpenRequest; identity: MiniIdentity; onOpen(identity: MiniIdentity): void }) {
+export function OpenRequest({ request, identity, onOpen }: {
+  request: MiniOpenRequest; identity: MiniIdentity; onOpen(identity: MiniIdentity, ref: ServerRequestRef): void;
+}) {
   return <div className="yard-mini-request"><strong>{request.title}</strong>{request.detail && <p>{request.detail}</p>}
-    <div className="yard-mini-request-actions"><button type="button" onClick={() => onOpen(identity)}>Open conversation</button></div>
+    <div className="yard-mini-request-actions"><button type="button" onClick={() => onOpen(identity, request.requestRef)}>Open conversation</button></div>
     <WriteStatus state={request.outcome} error={request.error} />
   </div>;
 }

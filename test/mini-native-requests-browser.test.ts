@@ -25,7 +25,7 @@ test('Mini replies with native-host request references from the disposable daemo
     function render(){root.render(React.createElement(StandaloneMini,{client,send,bridgeState:bridge,
       hostConnections:{local:host},pendingRequests:pending,
       activities:[{hostId:'local',threadId:'fixture-thread',title:'Fixture',status:'waiting',requests:records}],
-      onOpenThread(){},onExpand(){},onInputDraftChange(){},onBeforeQuickChatClose:async()=>true,
+      onOpenThread(){},onOpenRequest(){},onExpand(){},onInputDraftChange(){},onBeforeQuickChatClose:async()=>true,
       onRespond:async(ref,result)=>{const item=records.find(value=>same(value.request.requestRef,ref));
         if(!item||item.request.outcome!=='ready'||!pending.some(value=>same(value,ref)))return;
         item.request.outcome='sending';replies.push(ref);render();
