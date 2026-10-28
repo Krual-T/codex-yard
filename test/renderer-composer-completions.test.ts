@@ -20,11 +20,12 @@ test('workspace and skill completions use the selected host and produce real sub
           if(method==='config/read') return {config:{}};
           if(method==='skills/list') return {data:[{cwd:params.cwds[0],skills:[{name:'review-helper',path:'/fixture/skills/review/SKILL.md',enabled:true,shortDescription:'Review changes'}, {name:'disabled-skill',path:'/fixture/disabled',enabled:false}]}]};
           if(method==='thread/queue/list') return {data:state.queue,nextCursor:null};
-          if(method==='thread/queue/add') {state.queue.push({id:'q',input:params.input});return {queuedSubmission:state.queue[0]};}
+          if(method==='thread/queue/add') {state.queue.push({id:'q',input:params.input,clientUserMessageId:params.clientUserMessageId});return {queuedSubmission:state.queue[0]};}
           throw Error('unexpected RPC ' + method);
         },
         async host(endpoint,params={}) {
           state.calls.push({endpoint,params});
+          if(endpoint==='get-setting') return {value:'enter'};
           if(endpoint==='workspace-directory-entries') {
             if(state.blockLocal && params.hostId==='local') return new Promise(resolve=>{state.release=()=>resolve({entries:[{name:'stale.txt',path:'stale.txt',type:'file'}]});});
             if(params.hostId==='ssh-fixture') return {entries:[{name:'remote.ts',path:'remote.ts',type:'file'}]};
@@ -35,7 +36,7 @@ test('workspace and skill completions use the selected host and produce real sub
         subscribe(){return ()=>{};}
       };
       let props={client,context:{hostId:'local',threadId:'t',cwd:'/workspace'},busy:true,
-        async onSubmit(draft,options){state.submitted.push({draft,options,input:draftToInput(draft,props.context.hostId)});}, async onInterrupt(){}};
+        async onSubmit(draft,options,action){if(action.type==='queue') return client.rpc('thread/queue/add',{threadId:props.context.threadId,input:draftToInput(draft,props.context.hostId),clientUserMessageId:'fixture'},props.context.hostId);state.submitted.push({draft,options,input:draftToInput(draft,props.context.hostId)});}, async onInterrupt(){}};
       const root=createRoot(document.getElementById('root'));
       window.fixture={state,render(changes={}){props={...props,...changes,context:{...props.context,...changes.context}};root.render(React.createElement(StandaloneComposer,props));}};
       window.fixture.render();

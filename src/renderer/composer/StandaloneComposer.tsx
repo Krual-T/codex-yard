@@ -1,17 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ClipboardEvent, KeyboardEvent } from 'react';
 import type { ComposerDraft, StandaloneComposerProps, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
-import { createId, draftKey, draftToInput, emptyDraft, hasContent, mergePrefill, readDraft, writeDraft } from './standalone-draft.ts';
+import { activatePending, createId, draftKey, draftToInput, hasContent, loadDraft, mergePrefill, readDraft, textEditIssue, updateDraftText, writeDraft } from './standalone-draft.ts';
 import type { Draft } from './standalone-draft.ts';
 import { importAttachments } from './standalone-files.ts';
 import { useCompletions } from './standalone-completions.tsx';
 import type { Completion } from './standalone-completions.tsx';
 import { StandaloneOptions } from './standalone-options.tsx';
 import { StandaloneQueue } from './standalone-queue.tsx';
+import { useEnterSetting } from './standalone-enter-setting.ts';
 import './standalone-composer.css';
 
 export { draftToInput } from './standalone-draft.ts';
 export type { DraftSkill } from './standalone-draft.ts';
+export type StandaloneComposerRuntimeProps = StandaloneComposerProps & {
+  /** The app's authoritative active turn, used as the steer precondition. */
+  activeTurnId?: string | null;
+  initialOptions?: SubmitOptions;
+};
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; hostId: string; path: string; name: string }) {
@@ -24,12 +30,12 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
   }}><summary>{name}</summary>{preview == null ? '正在读取…' : <pre>{preview}</pre>}</details>;
 }
 
-function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill }: StandaloneComposerProps) {
+function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, prefill, activeTurnId, initialOptions }: StandaloneComposerRuntimeProps) {
   const key = draftKey(context);
-  const [initial] = useState(() => readDraft(key) ?? { revision: createId(), draft: emptyDraft(), prefills: [] });
+  const [initial] = useState(() => loadDraft(context));
   const current = useRef(initial);
   const [draft, setDraft] = useState<Draft>(initial.draft);
-  const [options, setOptions] = useState<SubmitOptions>({});
+  const [options, setOptions] = useState<SubmitOptions>(() => ({ ...initialOptions }));
   const [error, setError] = useState('');
   const [storageError, setStorageError] = useState(false);
   const [sending, setSending] = useState(false);
@@ -37,9 +43,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill
   const [uploading, setUploading] = useState(false);
   const [queueVersion, setQueueVersion] = useState(0);
   const [cursor, setCursor] = useState(0);
-  const [enterBehavior, setEnterBehavior] = useState(() => {
-    try { return localStorage.getItem('codex-yard.composer.enter.v1') === 'mod' ? 'mod' : 'enter'; } catch { return 'enter'; }
-  });
+  const enterSetting = useEnterSetting(client);
   const mounted = useRef(true);
   const submitInFlight = useRef(false);
   const interruptInFlight = useRef(false);
@@ -47,7 +51,9 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill
   const editor = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
   const modelPicker = useRef<HTMLSelectElement>(null);
-  const completions = useCompletions(client, context.hostId, context.cwd, draft.text, cursor, busy);
+  const editIssue = textEditIssue(draft);
+  const structuredInput = draft.input !== undefined;
+  const completions = useCompletions(client, context.hostId, context.cwd, editIssue || structuredInput ? '' : draft.text, cursor, busy);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   const changeDraft = useCallback((update: (draft: Draft) => Draft, prefillId?: string) => {
@@ -65,7 +71,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill
   }, [prefill, changeDraft]);
 
   const addFiles = async (files: File[]) => {
-    if (!files.length || uploadInFlight.current) return;
+    if (!files.length || uploadInFlight.current || editIssue || structuredInput) return;
     uploadInFlight.current = true; setUploading(true); setError('');
     try {
       for (const file of files) {
@@ -81,23 +87,30 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill
     event.preventDefault();
     void addFiles(files);
   };
-  const submit = async () => {
+  const submit = async (followUp: 'queue' | 'steer' = 'queue') => {
     if (submitInFlight.current || uploadInFlight.current || !hasContent(current.current.draft)) return;
+    if (current.current.draft.blocked
+      || current.current.draft.document && textEditIssue(current.current.draft) && !current.current.draft.input) {
+      setError('当前内容无法无损发送，已保留原始草稿。'); return;
+    }
+    if (busy && followUp === 'queue' && (current.current.draft.hints?.length || current.current.draft.references.some(reference => reference.context || reference.original))) {
+      setError('此草稿包含队列协议无法保存的上下文，已保留草稿。'); return;
+    }
     if (busy && !context.threadId) { setError('会话尚未创建，请稍后再排队。'); return; }
+    if (busy && followUp === 'steer' && !activeTurnId) { setError('当前任务尚无可确认的 turn ID。'); return; }
+    try { draftToInput(current.current.draft, context.hostId); }
+    catch (reason) { setError(message(reason)); return; }
     const captured = current.current;
     submitInFlight.current = true; setSending(true); setError('');
     try {
-      if (busy && context.threadId) {
-        await client.rpc('thread/queue/add', { threadId: context.threadId, input: draftToInput(captured.draft, context.hostId),
-          clientUserMessageId: createId() }, context.hostId);
-        if (mounted.current) setQueueVersion(value => value + 1);
-      } else {
-        const submitted: ComposerDraft = captured.draft;
-        await onSubmit(submitted, options);
-      }
+      const submitted: ComposerDraft = captured.draft;
+      await onSubmit(submitted, options, busy
+        ? followUp === 'steer' ? { type: 'steer', turnId: activeTurnId ?? undefined } : { type: 'queue' }
+        : { type: 'send' });
+      if (busy && followUp === 'queue' && mounted.current) setQueueVersion(value => value + 1);
       const persisted = readDraft(key);
       if (current.current.revision === captured.revision && (!persisted || persisted.revision === captured.revision)) {
-        changeDraft(() => emptyDraft());
+        changeDraft(value => activatePending(value, false));
       } else if (current.current.revision === captured.revision && mounted.current) {
         setError('发送已确认，但草稿已在其他页面修改，已保留。');
       }
@@ -145,9 +158,10 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill
         if (event.key === 'Enter' && completions.loading) { event.preventDefault(); return; }
       }
     }
-    if (event.key !== 'Enter' || event.shiftKey || event.altKey) return;
+    if (event.key !== 'Enter' || event.shiftKey || event.altKey || enterSetting.pending || enterSetting.error) return;
     const modifier = event.ctrlKey || event.metaKey;
-    if (enterBehavior === 'enter' ? !modifier : modifier) { event.preventDefault(); void submit(); }
+    const needsModifier = enterSetting.value === 'cmdAlways' || enterSetting.value === 'cmdIfMultiline' && draft.text.includes('\n');
+    if (needsModifier ? modifier : !modifier) { event.preventDefault(); void submit(); }
   };
   const interrupt = async () => {
     if (interruptInFlight.current) return;
@@ -157,28 +171,30 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill
     finally { interruptInFlight.current = false; if (mounted.current) setInterrupting(false); }
   };
   return <div className="standalone-composer">
-    {context.threadId ? <StandaloneQueue client={client} hostId={context.hostId} threadId={context.threadId} busy={busy} refreshVersion={queueVersion} /> : null}
+    {context.threadId ? <StandaloneQueue key={JSON.stringify([context.hostId, context.threadId])} client={client} hostId={context.hostId} threadId={context.threadId} busy={busy} refreshVersion={queueVersion} onStartQueued={onStartQueued} /> : null}
     <div className="standalone-composer__editor">
+      {draft.pendingDrafts?.length ? <div role="status">{draft.pendingDrafts.length} 份内容已单独保留，避免合并时丢失格式。 <button type="button" onClick={() => changeDraft(value => activatePending(value, true))}>切换草稿</button></div> : null}
       {draft.images.length || draft.files.length || draft.references.length || draft.skills.length ? <div className="standalone-composer__attachments">
         {draft.images.map(image => <div className="standalone-composer__image" key={image.id}>
-          <img src={image.previewSrc} alt={image.name ?? '图片附件'} />
-          <button type="button" title="移除图片" aria-label={'移除图片 ' + (image.name ?? '')} onClick={() => changeDraft(value => ({ ...value, images: value.images.filter(item => item.id !== image.id) }))}>×</button>
+          {image.previewSrc ? <img src={image.previewSrc} alt={image.name ?? '图片附件'} /> : <span>图片预览不可用</span>}
+          <button type="button" title="移除图片" aria-label={'移除图片 ' + (image.name ?? '')} disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, images: value.images.filter(item => item.id !== image.id) }))}>×</button>
         </div>)}
         {draft.files.map(file => <div className="standalone-composer__file" key={file.path}>
           <FilePreview client={client} hostId={context.hostId} path={file.path} name={file.name} />
-          <button type="button" title="移除文件" aria-label={'移除文件 ' + file.name} onClick={() => changeDraft(value => ({ ...value, files: value.files.filter(item => item.path !== file.path) }))}>×</button>
+          <button type="button" title="移除文件" aria-label={'移除文件 ' + file.name} disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, files: value.files.filter(item => item.path !== file.path) }))}>×</button>
         </div>)}
         {draft.references.map(reference => <div className="standalone-composer__reference" key={reference.id}>
-          <span>{reference.text}</span><button type="button" title="移除引用" aria-label="移除引用" onClick={() => changeDraft(value => ({ ...value, references: value.references.filter(item => item.id !== reference.id) }))}>×</button>
+          <span>{reference.text}</span><button type="button" title="移除引用" aria-label="移除引用" disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, references: value.references.filter(item => item.id !== reference.id) }))}>×</button>
         </div>)}
         {draft.skills.map(skill => <div className="standalone-composer__reference" key={skill.path}>
-          <span>技能：{skill.name}</span><button type="button" title="移除技能" aria-label={'移除技能 ' + skill.name} onClick={() => changeDraft(value => ({ ...value, skills: value.skills.filter(item => item.path !== skill.path) }))}>×</button>
+          <span>技能：{skill.name}</span><button type="button" title="移除技能" aria-label={'移除技能 ' + skill.name} disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, skills: value.skills.filter(item => item.path !== skill.path) }))}>×</button>
         </div>)}
       </div> : null}
-      <textarea ref={editor} aria-label="和 Codex 一起工作" placeholder="输入消息" value={draft.text}
+      {editIssue ? <div className="standalone-composer__retained" role="status">{editIssue}<details><summary>查看保留的内容</summary><pre>{JSON.stringify({ document: draft.document, input: draft.input, hints: draft.hints, preserved: draft.preserved, pending: draft.pendingDrafts }, null, 2)}</pre></details></div> : null}
+      <textarea ref={editor} aria-label="和 Codex 一起工作" placeholder="输入消息" value={draft.text} readOnly={!!editIssue}
         aria-autocomplete="list" aria-controls={completions.query ? completions.listId : undefined}
         aria-activedescendant={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
-        onChange={event => { const text = event.target.value; setCursor(event.target.selectionStart); changeDraft(value => ({ ...value, text })); }}
+        onChange={event => { const text = event.target.value; setCursor(event.target.selectionStart); changeDraft(value => updateDraftText(value, text)); }}
         onSelect={event => setCursor(event.currentTarget.selectionStart)} onKeyDown={keyDown} onPaste={paste} />
       {completions.query ? <div className="standalone-composer__completions" id={completions.listId} role="listbox" aria-label={completions.query.kind === 'file' ? '工作区文件' : '技能'}>
         {completions.items.map((item, index) => <button type="button" role="option" id={completions.listId + '-' + index} key={item.kind + ':' + (item.kind === 'command' ? item.name : item.path)}
@@ -193,21 +209,24 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, prefill
         <input ref={picker} type="file" multiple hidden onChange={event => {
           const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ''; void addFiles(files);
         }} />
-        <button type="button" aria-label="添加附件" title="添加附件" disabled={uploading} onClick={() => picker.current?.click()}>＋</button>
+        <button type="button" aria-label="添加附件" title="添加附件" disabled={uploading || !!editIssue || structuredInput} onClick={() => picker.current?.click()}>＋</button>
         <StandaloneOptions client={client} hostId={context.hostId} cwd={context.cwd} threadId={context.threadId} busy={busy} modelRef={modelPicker} value={options} onChange={setOptions} />
-        <label className="standalone-composer__enter">发送方式 <select aria-label="发送方式" value={enterBehavior} onChange={event => {
-          setEnterBehavior(event.target.value); try { localStorage.setItem('codex-yard.composer.enter.v1', event.target.value); } catch { setStorageError(true); }
-        }}><option value="enter">Enter</option><option value="mod">Ctrl/⌘ + Enter</option></select></label>
+        <label className="standalone-composer__enter">发送方式 <select aria-label="发送方式" value={enterSetting.value} disabled={enterSetting.pending} onChange={event => {
+          const value = event.target.value;
+          if (value === 'enter' || value === 'cmdIfMultiline' || value === 'cmdAlways') void enterSetting.update(value);
+        }}><option value="enter">Enter</option><option value="cmdIfMultiline">多行时 Ctrl/⌘ + Enter</option><option value="cmdAlways">Ctrl/⌘ + Enter</option></select></label>
         {busy ? <button type="button" onClick={() => void interrupt()} disabled={interrupting} title="停止当前任务">停止</button> : null}
+        {busy && activeTurnId ? <button type="button" onClick={() => void submit('steer')} disabled={sending || uploading || !hasContent(draft)}>发送到当前任务</button> : null}
         <button className="standalone-composer__submit" type="button" onClick={() => void submit()} disabled={sending || uploading || !hasContent(draft)}>{sending ? '发送中' : busy ? '排队' : '发送'}</button>
       </div>
     </div>
     {uploading ? <div role="status">正在上传附件…</div> : null}
     {storageError ? <div role="alert">草稿未能保存到浏览器，刷新前请检查浏览器存储空间。</div> : null}
+    {enterSetting.error ? <div role="alert">{enterSetting.error}</div> : null}
     {error ? <div role="alert">{error}</div> : null}
   </div>;
 }
 
-export function StandaloneComposer(props: StandaloneComposerProps) {
+export function StandaloneComposer(props: StandaloneComposerRuntimeProps) {
   return <ComposerSession key={draftKey(props.context)} {...props} />;
 }

@@ -13,8 +13,8 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     stdin: { resolveDir: process.cwd(), loader: 'js', contents: `
       import * as React from 'react';
       import { createRoot } from 'react-dom/client';
-      import { StandaloneComposer } from './src/renderer/composer/StandaloneComposer.tsx';
-      const state = { calls: [], submissions: [], queues: {}, subscribers: new Set(), lock: true, failAdd: false, failStart: false, interruptFail: false };
+      import { StandaloneComposer, draftToInput } from './src/renderer/composer/StandaloneComposer.tsx';
+      const state = { calls: [], submissions: [], queues: {}, subscribers: new Set(), settings:{composerEnterBehavior:'enter'}, history:[], lock: true, failAdd: false, failStart: false, interruptFail: false };
       let seq = 0, resolveSubmit, rejectSubmit;
       const key = (host, thread) => host + ':' + thread;
       const notify = (host, thread) => { for (const listener of state.subscribers) listener({type:'mcp-notification', hostId:host, method:'thread/queue/changed', params:{threadId:thread}}); };
@@ -23,6 +23,8 @@ test('standalone composer preserves drafts, routes settings and controls the aut
           state.calls.push({method, params:structuredClone(params), host});
           if (method === 'model/list') return {data:[{id:'model-a',model:'model-a',displayName:'Model A',isDefault:true,defaultReasoningEffort:'high',supportedReasoningEfforts:[{reasoningEffort:'low'},{reasoningEffort:'high'}]},{id:'model-b',model:'model-b',displayName:'Model B',supportedReasoningEfforts:[{reasoningEffort:'low'}]}],nextCursor:null};
           if (method === 'config/read') return {config:{model:'model-a',model_reasoning_effort:'high',approval_policy:'on-request',sandbox_mode:'workspace-write',service_tier:null}};
+          if (method === 'thread/items/list') return {data:state.history.map(item=>({item})),nextCursor:null};
+          if (method === 'thread/resume') return {};
           if (method === 'fs/createDirectory' || method === 'fs/writeFile') return {};
           const queue = state.queues[key(host, params.threadId)] ||= [];
           if (method === 'thread/queue/list') return {data:structuredClone(queue), nextCursor:null};
@@ -42,14 +44,18 @@ test('standalone composer preserves drafts, routes settings and controls the aut
           state.calls.push({endpoint, params:structuredClone(params)});
           if (endpoint === 'queued-follow-up-send-lock-acquire') return {acquired:state.lock};
           if (endpoint === 'queued-follow-up-send-lock-release') return null;
+          if (endpoint === 'get-setting') return {value:state.settings[params.key]};
+          if (endpoint === 'set-setting') {state.settings[params.key]=params.value;for(const listener of state.subscribers)listener({type:'settings-changed',keys:[params.key]});return {success:true};}
           if (endpoint === 'codex-home') return {codexHome:'/fixture/codex'};
           if (endpoint === 'workspace-files') return {text:'fixture file preview'};
           throw Error('Unexpected fixture host operation: ' + endpoint);
         },
         subscribe(listener) { state.subscribers.add(listener); return () => state.subscribers.delete(listener); }
       };
-      let props = {client,context:{hostId:'local',threadId:'thread-a',cwd:'/fixture/a'},busy:false,
-        onSubmit(draft,options) { state.submissions.push({draft:structuredClone(draft),options:structuredClone(options)}); return new Promise((resolve,reject)=>{resolveSubmit=resolve;rejectSubmit=reject;}); },
+      let props = {client,context:{hostId:'local',threadId:'thread-a',cwd:'/fixture/a'},busy:false,activeTurnId:'turn-active',
+        initialOptions:{approvalPolicy:{granular:{sandbox_approval:true,rules:false,skill_approval:true,request_permissions:false,mcp_elicitations:true}},approvalsReviewer:'guardian_subagent',permissionProfileId:'fixture-profile'},
+        onSubmit(draft,options,action) { if(action.type==='queue') return client.rpc('thread/queue/add',{threadId:props.context.threadId,input:draftToInput(draft,props.context.hostId),clientUserMessageId:crypto.randomUUID()},props.context.hostId); state.submissions.push({draft:structuredClone(draft),options:structuredClone(options),action}); return new Promise((resolve,reject)=>{resolveSubmit=resolve;rejectSubmit=reject;}); },
+        async onStartQueued(id) { await client.rpc('thread/resume',{threadId:props.context.threadId},props.context.hostId); await client.rpc('thread/queue/start',{threadId:props.context.threadId,queuedSubmissionId:id},props.context.hostId); },
         async onInterrupt() { if(state.interruptFail) throw Error('fixture stop failure'); }};
       const root = createRoot(document.getElementById('root'));
       window.fixture = {state, render(changes={}) {props={...props,...changes,context:{...props.context,...changes.context}};root.render(React.createElement(StandaloneComposer,props));},
@@ -76,9 +82,9 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' });
     await page.locator('select[aria-label="模型"] option[value="model-b"]').waitFor({ state: 'attached' });
+    assert.equal(await page.getByLabel('审批策略').inputValue(), '__granular__');
     await page.getByLabel('模型').selectOption('model-b');
     await page.getByLabel('推理强度').selectOption('low');
-    await page.getByLabel('审批策略').selectOption('never');
     await page.getByLabel('沙箱权限').selectOption('read-only');
     await page.getByLabel('快速').check();
     await page.getByLabel('计划').check();
@@ -92,7 +98,8 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);
     const submitted = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
     assert.equal(submitted.draft.text, 'first draft');
-    assert.deepEqual(submitted.options, { model: 'model-b', effort: 'low', approvalPolicy: 'never', sandboxMode: 'read-only', serviceTier: 'fast', mode: 'plan' });
+    assert.deepEqual(submitted.action, { type: 'send' });
+    assert.deepEqual(submitted.options, { model: 'model-b', effort: 'low', approvalPolicy: { granular: { sandbox_approval: true, rules: false, skill_approval: true, request_permissions: false, mcp_elicitations: true } }, sandboxMode: 'read-only', serviceTier: 'fast', mode: 'plan', approvalsReviewer: 'guardian_subagent', permissionProfileId: 'fixture-profile' });
     await editor.fill('newer edit');
     await page.evaluate(() => (window as any).fixture.resolveSubmit());
     await page.getByRole('button', { name: '发送', exact: true }).waitFor();
@@ -108,7 +115,8 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.getByText('fixture reference').waitFor();
     assert.equal(await page.getByText('fixture reference').count(), 1);
     await page.getByRole('button', { name: '移除引用' }).click();
-    await page.getByLabel('发送方式').selectOption('mod');
+    await page.getByLabel('发送方式').selectOption('cmdAlways');
+    await page.waitForFunction(() => (window as any).fixture.state.settings.composerEnterBehavior === 'cmdAlways');
     await editor.press('Enter');
     assert.equal(await page.evaluate(() => (window as any).fixture.state.submissions.length), 1);
     await editor.press('Control+Enter');
@@ -116,8 +124,26 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.evaluate(() => (window as any).fixture.rejectSubmit());
     await page.getByRole('alert').filter({ hasText: 'fixture submit failure' }).waitFor();
     assert.match(await editor.inputValue(), /newer edit/);
+    await page.evaluate(() => {
+      const state = (window as any).fixture.state;
+      state.settings.composerEnterBehavior = 'cmdIfMultiline';
+      for (const listener of state.subscribers) listener({ type: 'settings-changed', keys: ['composerEnterBehavior'] });
+    });
+    await page.waitForFunction(() => (document.querySelector('select[aria-label="发送方式"]') as HTMLSelectElement)?.value === 'cmdIfMultiline');
+    await editor.fill('first line\nsecond line');
+    await editor.press('Enter');
+    assert.equal(await page.evaluate(() => (window as any).fixture.state.submissions.length), 2);
+    await editor.press('Control+Enter');
+    await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 3);
+    await page.evaluate(() => (window as any).fixture.rejectSubmit());
 
     await page.evaluate(() => (window as any).fixture.render({busy:true,prefill:null}));
+    await editor.fill('steer the active turn');
+    await page.getByRole('button', { name: '发送到当前任务' }).click();
+    await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 4);
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.submissions[3].action), { type: 'steer', turnId: 'turn-active' });
+    await page.evaluate(() => (window as any).fixture.resolveSubmit());
+    await page.getByRole('button', { name: '排队' }).waitFor();
     await editor.fill('queued one');
     await page.getByRole('button', { name: '排队' }).click();
     await page.getByText('queued one', { exact: true }).waitFor();
@@ -151,10 +177,13 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.getByText('changed queue', { exact: true }).waitFor({ state: 'detached' });
     const release = await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.endpoint === 'queued-follow-up-send-lock-release').at(-1));
     assert.equal(release.params.sent, true);
+    assert.equal(release.params.hostId, 'local');
+    assert.ok(await page.evaluate(() => (window as any).fixture.state.calls.some((call: any) => call.method === 'thread/resume')));
     await page.evaluate(() => { (window as any).fixture.state.failStart = true; });
     await page.getByRole('button', { name: '立即发送待发送消息' }).first().click();
     await page.getByRole('alert').filter({ hasText: '发送结果未知' }).waitFor();
     assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.endpoint === 'queued-follow-up-send-lock-release').length), 1);
+    await page.getByRole('status').filter({ hasText: '发送结果未知' }).waitFor();
 
     await page.locator('input[type=file]').setInputFiles([{ name: 'fixture.txt', mimeType: 'text/plain', buffer: Buffer.from('fixture file') }]);
     await page.getByText('fixture.txt').waitFor();

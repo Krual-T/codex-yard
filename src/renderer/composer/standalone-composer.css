@@ -19,7 +19,10 @@
 .standalone-composer .standalone-composer__submit { color: white; background: #25675a; }
 .standalone-composer .standalone-composer__submit:hover:not(:disabled) { background: #1f594d; }
 .standalone-composer__attachments { align-items: flex-start; padding: 8px 8px 0; }
+.standalone-composer__retained { padding: 8px 12px; overflow-wrap: anywhere; }
+.standalone-composer__retained pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .standalone-composer__image { position: relative; width: 64px; height: 64px; }
+.standalone-composer__image span { display: block; padding: 4px 16px 4px 4px; font-size: 11px; overflow-wrap: anywhere; }
 .standalone-composer__image img { width: 64px; height: 64px; border-radius: 4px; object-fit: cover; }
 .standalone-composer__image button { position: absolute; top: 0; right: 0; color: white; background: #222b; padding: 1px 4px; }
 .standalone-composer__file, .standalone-composer__reference { display: flex; align-items: flex-start; min-width: 0; max-width: 100%; background: #8881; border-radius: 4px; padding: 3px 5px; }

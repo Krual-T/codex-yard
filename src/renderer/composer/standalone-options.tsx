@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Ref } from 'react';
 import type { SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
+import type { ApprovalPolicy, ApprovalsReviewer, SandboxMode } from '../../../lib/codex-protocol.ts';
 
 interface Model { value: string; label: string; default: boolean; defaultEffort: string | null; efforts: string[] }
 interface OptionsProps {
@@ -17,6 +18,25 @@ function record(value: unknown): Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 function string(value: unknown): string | undefined { return typeof value === 'string' ? value : undefined; }
+function approval(value: unknown): ApprovalPolicy | undefined {
+  if (value === 'untrusted' || value === 'on-request' || value === 'never') return value;
+  const granular = record(record(value).granular);
+  if (['sandbox_approval', 'rules', 'skill_approval', 'request_permissions', 'mcp_elicitations'].every(key => typeof granular[key] === 'boolean')) {
+    return { granular: { sandbox_approval: granular.sandbox_approval === true, rules: granular.rules === true,
+      skill_approval: granular.skill_approval === true, request_permissions: granular.request_permissions === true,
+      mcp_elicitations: granular.mcp_elicitations === true } };
+  }
+  return undefined;
+}
+function sandbox(value: unknown): SandboxMode | undefined {
+  return value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access' ? value : undefined;
+}
+function reviewer(value: unknown): ApprovalsReviewer | undefined {
+  return value === 'user' || value === 'auto_review' || value === 'guardian_subagent' ? value : undefined;
+}
+function approvalLabel(value: ApprovalPolicy | undefined): string | undefined {
+  return value && typeof value === 'object' ? '自定义审批' : value;
+}
 async function models(client: WorkbenchClient, hostId: string): Promise<Model[]> {
   const result: Model[] = [], seen = new Set<string>();
   let cursor: string | null = null;
@@ -55,7 +75,8 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRe
         const selected = list.find(item => item.value === model);
         setAvailable(list);
         setDefaults({ model, effort: string(config.model_reasoning_effort) ?? selected?.defaultEffort ?? null,
-          approvalPolicy: string(config.approval_policy), sandboxMode: string(config.sandbox_mode),
+          approvalPolicy: approval(config.approval_policy), sandboxMode: sandbox(config.sandbox_mode),
+          approvalsReviewer: reviewer(config.approvals_reviewer), permissionProfileId: string(config.default_permissions),
           serviceTier: string(config.service_tier) ?? null });
         setError('');
       }).catch(reason => { if (active) setError('无法读取模型或配置：' + String(reason instanceof Error ? reason.message : reason)); })
@@ -81,10 +102,11 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRe
       {value.effort && !selected?.efforts.includes(value.effort) ? <option value={value.effort}>{value.effort}</option> : null}
       {selected?.efforts.map(effort => <option key={effort} value={effort}>{effort}</option>)}
     </select></label>
-    <label>审批 <select aria-label="审批策略" value={value.approvalPolicy ?? ''} onChange={event => change({ approvalPolicy: event.target.value || undefined })}>
-      <option value="">{configured.approvalPolicy ? '配置默认 (' + configured.approvalPolicy + ')' : '会话默认'}</option><option value="untrusted">不受信任时</option><option value="on-request">按请求</option><option value="never">从不</option>
+    <label>审批 <select aria-label="审批策略" value={typeof value.approvalPolicy === 'object' ? '__granular__' : value.approvalPolicy ?? ''} onChange={event => change({ approvalPolicy: approval(event.target.value) })}>
+      {typeof value.approvalPolicy === 'object' ? <option value="__granular__">自定义审批</option> : null}
+      <option value="">{configured.approvalPolicy ? '配置默认 (' + approvalLabel(configured.approvalPolicy) + ')' : '会话默认'}</option><option value="untrusted">不受信任时</option><option value="on-request">按请求</option><option value="never">从不</option>
     </select></label>
-    <label>权限 <select aria-label="沙箱权限" value={value.sandboxMode ?? ''} onChange={event => change({ sandboxMode: event.target.value || undefined })}>
+    <label>权限 <select aria-label="沙箱权限" value={value.sandboxMode ?? ''} onChange={event => change({ sandboxMode: sandbox(event.target.value) })}>
       <option value="">{configured.sandboxMode ? '配置默认 (' + configured.sandboxMode + ')' : '会话默认'}</option><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option>
     </select></label>
     <label><input type="checkbox" checked={(value.serviceTier === undefined ? configured.serviceTier : value.serviceTier) === 'fast'} onChange={event => change({ serviceTier: event.target.checked ? 'fast' : null })} />快速</label>
