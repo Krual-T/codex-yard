@@ -206,6 +206,46 @@ test('a null parent effort omits an inherited config override instead of sending
   assert.deepEqual((f.calls.find(call => call.method === 'thread/fork')!.params.config), { 'fixture.extra': { retained: true } });
 });
 
+test('previous frozen null-effort requests stay readable and closable without dispatching them again', async () => {
+  for (const status of ['waiting', 'not-sent'] as const) {
+    const pending = fixture();
+    pending.setParent({ effort: null, forkConfig: { model_reasoning_effort: null, keep: 'original' } });
+    const prepared = await pending.host.prepare({ hostId: 'local', threadId: 'parent' });
+    const oldPending = pending.store.values.get(prepared.operationId)!;
+    oldPending.forkParams.config = { model_reasoning_effort: null, keep: 'original' };
+    if (status === 'not-sent') oldPending.fork = { status, attemptId: 'original-attempt' };
+    assert.deepEqual((await pending.host.read(prepared.operationId)).forkParams.config, oldPending.forkParams.config);
+    await assert.rejects(() => status === 'waiting' ? pending.host.start(prepared.operationId)
+      : pending.host.retry(prepared.operationId), /不兼容的 effort 配置/);
+    assert.equal((await pending.host.close(prepared.operationId)).close.status, 'closed');
+    assert.equal(pending.calls.filter(call => call.method === 'thread/fork').length, 0);
+  }
+
+  const uncertain = fixture();
+  uncertain.setParent({ effort: null, forkConfig: { model_reasoning_effort: null, keep: 'original' } });
+  const unknown = await uncertain.host.prepare({ hostId: 'local', threadId: 'parent' });
+  const oldUnknown = uncertain.store.values.get(unknown.operationId)!;
+  oldUnknown.forkParams.config = { model_reasoning_effort: null, keep: 'original' };
+  oldUnknown.fork = { status: 'unknown', attemptId: 'original-attempt', error: 'connection lost' };
+  assert.equal((await uncertain.host.retry(unknown.operationId)).fork.status, 'unknown');
+  assert.equal((await uncertain.host.close(unknown.operationId)).fork.status, 'unknown');
+  assert.equal(uncertain.calls.filter(call => call.method === 'thread/fork').length, 0);
+
+  // A synthetic peer may have accepted a previously frozen request; its receipt still permits cleanup.
+  const accepted = fixture();
+  accepted.setParent({ effort: null, forkConfig: { model_reasoning_effort: null, keep: 'original' } });
+  const op = await accepted.host.prepare({ hostId: 'local', threadId: 'parent' });
+  await accepted.host.start(op.operationId);
+  const oldAccepted = accepted.store.values.get(op.operationId)!;
+  oldAccepted.forkParams.config = { model_reasoning_effort: null, keep: 'original' };
+  const recovered = await createSideChatHost(accepted.deps).read(op.operationId);
+  assert.equal(recovered.childId, 'child');
+  assert.deepEqual(recovered.forkParams.config, oldAccepted.forkParams.config);
+  assert.equal((await createSideChatHost(accepted.deps).close(op.operationId)).close.status, 'closed');
+  assert.equal(accepted.calls.filter(call => call.method === 'thread/fork').length, 1);
+  assert.equal(accepted.calls.filter(call => call.method === 'thread/unsubscribe').length, 1);
+});
+
 test('serial claims prevent duplicate fork and close a late child on its original host without injecting', async () => {
   const f = fixture(), gate = deferred<unknown>(), started = deferred<void>();
   f.setParent({ hostId: 'ssh', threadId: 'remote-parent', connectionGeneration: 'ssh-1' });

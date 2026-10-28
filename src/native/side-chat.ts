@@ -169,6 +169,7 @@ function validateOperation(value: SideChatOperation | null): SideChatOperation {
   const developer = [op.parent.developerOverride?.value ?? op.configuredInstructions, instructions]
     .filter(part => typeof part === 'string' && part.length > 0).join('\n\n');
   const expectedConfig = forkConfiguration(op.parent);
+  const previousConfig = op.parent.effort === null ? { ...(op.parent.forkConfig ?? {}) } : expectedConfig;
   const expectedPermissions = forkPermissions(op.parent.submitOptions);
   const expectedItems = [
     { type: 'message', role: 'developer', content: [{ type: 'input_text', text: developer }] },
@@ -179,7 +180,8 @@ function validateOperation(value: SideChatOperation | null): SideChatOperation {
     || op.forkParams.model !== op.parent.model || op.forkParams.modelProvider !== op.parent.modelProvider
     || op.forkParams.serviceTier !== op.parent.serviceTier || op.forkParams.ephemeral !== true
     || op.forkParams.excludeTurns !== true || op.forkParams.threadSource !== 'user'
-    || op.forkParams.developerInstructions !== developer || !isDeepStrictEqual(op.forkParams.config, expectedConfig)
+    || op.forkParams.developerInstructions !== developer
+    || (!isDeepStrictEqual(op.forkParams.config, expectedConfig) && !isDeepStrictEqual(op.forkParams.config, previousConfig))
     || ['approvalPolicy', 'approvalsReviewer', 'permissions', 'sandbox'].some(key =>
       !isDeepStrictEqual(op.forkParams[key], expectedPermissions[key]))
     || !isDeepStrictEqual(op.boundaryItems, expectedItems)
@@ -343,6 +345,9 @@ export function createSideChatHost(deps: SideChatDependencies) {
     const attemptId = randomUUID(); let claimed = false;
     const op = await update(id, current => {
       if (current.close.requested || !(current.fork.status === 'waiting' || (retry && current.fork.status === 'not-sent'))) return current;
+      if (!isDeepStrictEqual(current.forkParams.config, forkConfiguration(current.parent))) {
+        throw new Error('侧聊原冻结请求包含不兼容的 effort 配置，未派发；请关闭并新建。');
+      }
       claimed = true;
       return { ...current, fork: { status: 'inflight', attemptId } };
     });
