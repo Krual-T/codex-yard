@@ -125,8 +125,8 @@ function focusable(root: HTMLElement): HTMLElement[] {
     .filter((element) => element.getClientRects().length > 0);
 }
 
-export function ApprovalDialog({ request, onRespond, onUnsupported }: { request: ServerRequest;
-  onRespond(result: unknown): Promise<void>; onUnsupported(): Promise<void> }) {
+export function ApprovalDialog({ request, onRespond, onUnsupported, onInputEscape }: { request: ServerRequest;
+  onRespond(result: unknown): Promise<void>; onUnsupported(): Promise<void>; onInputEscape?(): Promise<void> }) {
   const dialog = useRef<HTMLElement>(null);
   const inFlight = useRef(false);
   const formId = useId();
@@ -223,7 +223,10 @@ export function ApprovalDialog({ request, onRespond, onUnsupported }: { request:
   return <div className="yard-dialog-backdrop"><section ref={dialog} tabIndex={-1} role="dialog" aria-modal="true"
     aria-labelledby="yard-request-title" className="yard-dialog" style={{ minWidth: 0, width: 'min(100%, 680px)', overflowWrap: 'anywhere' }} onKeyDown={(event) => {
       if (event.key === 'Escape' && !busy && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
-        event.preventDefault(); cancel(); return;
+        event.preventDefault();
+        if (input && onInputEscape) void send(onInputEscape);
+        else cancel();
+        return;
       }
       if (event.key !== 'Tab' || !dialog.current) return;
       const items = focusable(dialog.current), first = items[0], last = items.at(-1);

@@ -8,9 +8,9 @@ import { chromium } from 'playwright-core';
 declare global {
   interface Window {
     approvalHarness: {
-      show(method: string, params: Record<string, unknown>): void;
+      show(method: string, params: Record<string, unknown>, useInputEscape?: boolean): void;
       failNext(): void;
-      calls: { ref: { hostId: string; generation: string; id: number }; result?: unknown; unsupported?: boolean }[];
+      calls: { ref: { hostId: string; generation: string; id: number }; result?: unknown; unsupported?: boolean; inputEscape?: boolean }[];
     };
   }
 }
@@ -29,7 +29,7 @@ test('approval dialog follows request modes and preserves failed input and reque
       'window.approvalHarness = {',
       '  calls,',
       '  failNext() { fail = true; },',
-      '  show(method, params) {',
+      '  show(method, params, useInputEscape) {',
       '    const id = ++next;',
       "    const ref = { hostId:'ssh-test', generation:'generation-' + id, id };",
       '    const request = { hostId:ref.hostId, id, ref, method, params };',
@@ -39,7 +39,12 @@ test('approval dialog follows request modes and preserves failed input and reque
       "        if (fail) { fail = false; throw Error('Synthetic reply failure'); }",
       '        root.render(null);',
       '      },',
-      '      onUnsupported: async () => { calls.push({ref, unsupported:true}); root.render(null); }',
+      '      onUnsupported: async () => { calls.push({ref, unsupported:true}); root.render(null); },',
+      '      onInputEscape: !useInputEscape ? undefined : async () => {',
+      '        calls.push({ref, inputEscape:true});',
+      "        if (fail) { fail = false; throw Error('Synthetic reply failure'); }",
+      '        root.render(null);',
+      '      }',
       '    }));',
       '  }',
       '};',
@@ -210,6 +215,23 @@ test('approval dialog follows request modes and preserves failed input and reque
     await dialog.getByRole('button', { name:'Submit' }).click();
     await dialog.waitFor({ state:'detached' });
     assert.deepEqual((await calls()).at(-1)?.result, {answers:{choice:{answers:['Only option']},free:{answers:['Custom answer']}}});
+
+    await page.evaluate(() => window.approvalHarness.show('item/tool/requestUserInput',
+      {questions:[{id:'escape',header:'Question',question:'Preserve this',isOther:false,isSecret:false,options:null}]}, true));
+    await dialog.getByLabel('Preserve this').fill('Draft answer');
+    const beforeComposingEscape = (await calls()).length;
+    await dialog.getByLabel('Preserve this').evaluate((element) => element.dispatchEvent(
+      new KeyboardEvent('keydown', { key:'Escape', isComposing:true, bubbles:true })));
+    assert.equal((await calls()).length, beforeComposingEscape);
+    await page.evaluate(() => window.approvalHarness.failNext());
+    await page.keyboard.press('Escape');
+    await dialog.getByText('Synthetic reply failure').waitFor();
+    assert.equal(await dialog.getByLabel('Preserve this').inputValue(), 'Draft answer');
+    const failedEscape = (await calls()).at(-1);
+    assert.equal(failedEscape?.inputEscape, true);
+    await page.keyboard.press('Escape');
+    await dialog.waitFor({ state:'detached' });
+    assert.deepEqual((await calls()).at(-1), failedEscape);
 
     await page.evaluate(() => window.approvalHarness.show('execCommandApproval', {command:['echo','fixture']}));
     await dialog.getByRole('button', { name:'Decline' }).click();
