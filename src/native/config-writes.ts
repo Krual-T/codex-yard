@@ -1,32 +1,10 @@
 import { posix, win32 } from 'node:path';
 import { RpcError } from '../../lib/codex.ts';
 import type { LateRpcTerminal, RequestOptions, RpcResult } from '../../lib/codex-protocol.ts';
+import type { ConfigWriteMethod, ConfigWriteRecord, ConfigWriteState, ConfigWriteStatus, ConfigWriteTerminal } from '../../lib/config-write-protocol.ts';
 import type { StateMutations } from './state-mutations.ts';
 
-export type ConfigWriteMethod = 'config/batchWrite' | 'skills/config/write';
-export type ConfigWriteState = 'pending' | 'unknown' | 'succeeded' | 'failed';
-export type ConfigWriteTerminal =
-  | { kind: 'ok' | 'okOverridden' }
-  | { kind: 'effectiveEnabled'; value: boolean }
-  | { kind: 'rejected'; code?: number }
-  | { kind: 'not-sent'; code?: 'OBSERVER_LIMIT' };
-
-export interface ConfigWriteRecord {
-  operationId: string;
-  hostId: string;
-  hostKey: string;
-  target: string;
-  binding: string;
-  scope?: 'global';
-  method?: ConfigWriteMethod;
-  state: ConfigWriteState;
-  terminal?: ConfigWriteTerminal;
-}
-
-export interface ConfigWriteStatus extends ConfigWriteRecord {
-  observedTerminal?: ConfigWriteTerminal;
-  storageError?: true;
-}
+export type { ConfigWriteMethod, ConfigWriteRecord, ConfigWriteState, ConfigWriteStatus, ConfigWriteTerminal } from '../../lib/config-write-protocol.ts';
 
 export interface ConfigWriteConnection {
   readonly connected: boolean;
@@ -35,10 +13,13 @@ export interface ConfigWriteConnection {
   requestWithCursor(method: string, params?: unknown, options?: RequestOptions): Promise<RpcResult<unknown>>;
 }
 
-export interface ConfigWriteInput {
+export interface ConfigWriteIdentity {
   operationId: string;
   hostId: string;
   method: ConfigWriteMethod;
+}
+
+export interface ConfigWriteInput extends ConfigWriteIdentity {
   params: Record<string, unknown>;
   connection: ConfigWriteConnection;
 }
@@ -67,6 +48,7 @@ export type ConfigWriteCompletion =
 export type ConfigWriteSubmission =
   | { outcome: 'blocked' | 'existing'; operation: ConfigWriteStatus }
   | { outcome: 'started'; operation: ConfigWriteStatus; completion: Promise<ConfigWriteCompletion> };
+export type ConfigWritePreflight = { outcome: 'blocked' | 'existing'; operation: ConfigWriteStatus } | null;
 
 const stateKey = 'configWriteOperations';
 type Observation = { state: 'unknown' } | { state: 'succeeded' | 'failed'; terminal: ConfigWriteTerminal };
@@ -221,7 +203,7 @@ export function createConfigWrites(options: ConfigWritesOptions) {
     });
   }
 
-  function original(current: ConfigWriteRecord[], input: ConfigWriteInput): ConfigWriteRecord | undefined {
+  function original(current: ConfigWriteRecord[], input: ConfigWriteIdentity): ConfigWriteRecord | undefined {
     const value = current.find(item => item.operationId === input.operationId);
     if (value && (value.hostId !== input.hostId || value.method !== input.method)) {
       throw new Error('The configuration operation belongs to another host or method, or its original method is unavailable.');
@@ -229,15 +211,22 @@ export function createConfigWrites(options: ConfigWritesOptions) {
     return value;
   }
 
-  async function prepare(input: ConfigWriteInput, params: Record<string, unknown>, originalSocket: unknown): Promise<ConfigWriteSubmission> {
-    const { operationId, hostId, method, connection } = input;
-    const prior = await options.mutations.run(() => {
+  async function preflight(input: ConfigWriteIdentity): Promise<ConfigWritePreflight> {
+    if (!input || !validId(input.operationId) || !validId(input.hostId) || !methods.has(input.method)) {
+      throw new Error('Invalid configuration write request.');
+    }
+    return options.mutations.run(() => {
       const current = records(), existing = original(current, input);
       if (existing) return { outcome: 'existing' as const, operation: project(existing) };
       // Legacy records may have lost an unstable alias when their binding was normalized.
       const blocker = current.find(value => active(value) && (value.scope === 'global' || value.method === undefined));
       return blocker ? { outcome: 'blocked' as const, operation: project(blocker) } : null;
     });
+  }
+
+  async function prepare(input: ConfigWriteInput, params: Record<string, unknown>, originalSocket: unknown): Promise<ConfigWriteSubmission> {
+    const { operationId, hostId, method, connection } = input;
+    const prior = await preflight(input);
     if (prior) return prior;
     if (!connection.connected || !originalSocket || connection.socket !== originalSocket) throw new Error('The original configuration connection is unavailable.');
     const resolved = await options.resolveTarget({ hostId, method, params: structuredClone(params), connection });
@@ -315,5 +304,5 @@ export function createConfigWrites(options: ConfigWritesOptions) {
     });
   }
 
-  return { submit, status, retryTerminalSave };
+  return { preflight, submit, status, retryTerminalSave };
 }
