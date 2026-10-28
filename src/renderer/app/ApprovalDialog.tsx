@@ -2,8 +2,8 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ServerRequestRef, WorkbenchClient } from '../workbench-contract.ts';
 import { useCompletions } from '../composer/standalone-completions.tsx';
 import type { Completion } from '../composer/standalone-completions.tsx';
-import { initialApprovalValues, validateApprovalForm } from './approval-schema.ts';
-import type { ApprovalField, ApprovalFormValues } from './approval-schema.ts';
+import { initialApprovalValues, isApprovalFileUri, validateApprovalForm } from './approval-schema.ts';
+import type { ApprovalField, ApprovalFormValues, ApprovalResourceOption } from './approval-schema.ts';
 import { classifyElicitation, displayApprovalParameters } from './approval-elicitation.ts';
 import type { ApprovalPersistence } from './approval-elicitation.ts';
 
@@ -25,6 +25,10 @@ export interface ApprovalConnectorAuthorization {
   ref: ServerRequestRef; hostId: string; threadId: string; connectorId: string; url: string;
   linkId?: string; reason?: string; scopes: string[];
 }
+export interface ApprovalFilePickRequest {
+  ref: ServerRequestRef; hostId: string; threadId: string | null; serverName: string;
+  field: string; kind: 'file' | 'directory'; accept: string[]; multiple: boolean;
+}
 export interface ApprovalDialogProps {
   request: ServerRequest;
   onRespond(result: unknown): Promise<void>;
@@ -42,6 +46,8 @@ export interface ApprovalDialogProps {
   onFormDraftChange?(ref: ServerRequestRef, draft: ApprovalFormValues): void;
   /** Return true only while this exact original request is still pending at its original host. */
   onCheckRequestValidity?(ref: ServerRequestRef): Promise<boolean>;
+  /** Select resources in the original host namespace and return their file URIs. */
+  onPickApprovalFiles?(request: ApprovalFilePickRequest): Promise<string[]>;
   completionContext?: ApprovalCompletionContext;
   /** Resolve true only after the original host confirms that the connector is accessible. */
   onCheckConnectorAuthorization?(request: ApprovalConnectorAuthorization): Promise<boolean>;
@@ -126,8 +132,9 @@ function questionsFrom(value: unknown): Question[] | null {
   return questions;
 }
 
-function ElicitationField({ field, value, error, disabled, onChange }: {
+function ElicitationField({ field, value, error, disabled, picking, onPick, onChange }: {
   field: ApprovalField; value: string | string[] | undefined; error?: string; disabled: boolean;
+  picking: boolean; onPick?: () => void;
   onChange(value: string | string[] | undefined): void;
 }) {
   const id = useId();
@@ -137,6 +144,37 @@ function ElicitationField({ field, value, error, disabled, onChange }: {
   const label = <>{field.title}{field.required && ' (required)'}</>;
   const footnotes = <>{field.description && <small id={description} style={{ display: 'block' }}>{field.description}</small>}
     {error && <small id={errorId} style={{ display: 'block', color: 'var(--yard-danger, #b33)' }}>{error}</small>}</>;
+  if (field.kind === 'image') return <fieldset style={{ margin: '10px 0', minWidth: 0 }} aria-describedby={describedBy}>
+    <legend>{label}</legend>
+    <div style={{ display: 'flex', gap: 8, overflowX: 'auto', padding: '4px 0' }}>
+      {field.items.map(item => <label key={item.id} style={{ display: 'grid', gap: 4, minWidth: 120, maxWidth: 160 }}>
+        <img src={item.image} alt="" style={{ width: '100%', height: 96, objectFit: 'contain' }} />
+        <span><input type="radio" name={id} disabled={disabled} checked={value === item.id} onChange={() => onChange(item.id)} /> {item.title}</span>
+      </label>)}
+    </div>
+    {field.file && <><button type="button" disabled={disabled || picking || !onPick} onClick={onPick}>{field.file.title || 'Choose a file'}</button>
+      {typeof value === 'string' && isApprovalFileUri(value) && <p>{value}</p>}
+      {!onPick && <small>File selection is unavailable on this host.</small>}</>}
+    {!field.required && value !== undefined && <button type="button" disabled={disabled} onClick={() => onChange(undefined)}>Clear</button>}
+    {footnotes}</fieldset>;
+  if (field.kind === 'resource' || field.kind === 'resources') {
+    const multiple = field.kind === 'resources';
+    const selected = Array.isArray(value) ? value : typeof value === 'string' ? [value] : [];
+    const extra = selected.filter(uri => !field.options.some(option => option.uri === uri));
+    const options: ApprovalResourceOption[] = [...field.options, ...extra.map(uri => ({ uri, name: uri }))];
+    return <fieldset style={{ margin: '10px 0', minWidth: 0, overflowWrap: 'anywhere' }} aria-describedby={describedBy}>
+      <legend>{label}</legend>
+      {options.map(option => <label key={option.uri} style={{ display: 'block', padding: '4px 0' }}>
+        <input type={multiple ? 'checkbox' : 'radio'} name={id} disabled={disabled} checked={selected.includes(option.uri)}
+          onChange={event => onChange(multiple ? event.target.checked ? [...selected, option.uri] : selected.filter(uri => uri !== option.uri) : option.uri)} />
+        {' '}{option.title || option.name}{option.description && <small style={{ display: 'block', marginLeft: 24 }}>{option.description}</small>}
+      </label>)}
+      {field.userOptions && <><button type="button" disabled={disabled || picking || !onPick} onClick={onPick}>
+        {field.userOptions.kind === 'directory' ? 'Choose a directory' : 'Choose files'}</button>
+        {!onPick && <small> File selection is unavailable on this host.</small>}</>}
+      {!multiple && !field.required && selected.length > 0 && <button type="button" disabled={disabled} onClick={() => onChange(undefined)}>Clear</button>}
+      {footnotes}</fieldset>;
+  }
   if (field.kind === 'multi') {
     const selected = Array.isArray(value) ? value : [];
     return <fieldset style={{ margin: '10px 0', minWidth: 0, overflowWrap: 'anywhere' }} aria-describedby={describedBy}><legend>{label}</legend>
@@ -240,7 +278,7 @@ export function ApprovalDialog(props: ApprovalDialogProps) {
 }
 
 function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscape, inputDismissMode = 'interrupt', stateRef, outcome, onOutcome,
-  inputDraft, onInputDraftChange, formDraft, onFormDraftChange, onCheckRequestValidity, completionContext, onCheckConnectorAuthorization }: ApprovalDialogProps) {
+  inputDraft, onInputDraftChange, formDraft, onFormDraftChange, onCheckRequestValidity, onPickApprovalFiles, completionContext, onCheckConnectorAuthorization }: ApprovalDialogProps) {
   const dialog = useRef<HTMLElement>(null);
   const inFlight = useRef(false);
   const checkingAuth = useRef(false);
@@ -248,6 +286,7 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   const formId = useId();
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [picking, setPicking] = useState<string | null>(null);
   const [localOutcome, setLocalOutcome] = useState<ApprovalOutcome>();
   const [error, setError] = useState('');
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -261,6 +300,10 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   const view = useMemo(() => elicitation ? classifyElicitation(request.params) : null, [elicitation, request.params]);
   const form = view?.kind === 'form' ? view.form : null;
   const [values, setValues] = useState<ApprovalFormValues>(() => formDraft ?? (form ? initialApprovalValues(form) : {}));
+  const valuesRef = useRef(values);
+  valuesRef.current = values;
+  const formRef = useRef(form);
+  formRef.current = form;
   const questions = input ? questionsFrom(request.params.questions) : null;
   const [answers, setAnswers] = useState<ApprovalInputDraft>(() => initialInputDraft(questions, inputDraft));
   const decisions = command ? commandChoices(request.params.availableDecisions, request.params) : null;
@@ -392,12 +435,36 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
     respond({ answers: Object.fromEntries(result) });
   };
   const setValue = (key: string, value: string | string[] | undefined) => {
-    const next = Object.assign(Object.create(null) as ApprovalFormValues, values);
+    const next = Object.assign(Object.create(null) as ApprovalFormValues, valuesRef.current);
     if (value === undefined) delete next[key]; else next[key] = value;
+    valuesRef.current = next;
     setValues(next);
     onFormDraftChange?.(request.ref, next);
     setFieldErrors((current) => { const next = { ...current }; delete next[key]; return next; });
     setError('');
+  };
+  const pickFiles = async (field: ApprovalField) => {
+    if (!onPickApprovalFiles || lockedRef.current || picking || !form || field.kind !== 'image'
+      && field.kind !== 'resource' && field.kind !== 'resources') return;
+    const picker = field.kind === 'image' ? field.file : field.userOptions;
+    if (!picker) return;
+    setPicking(field.key); setError('');
+    try {
+      const result = await onPickApprovalFiles({ ref: request.ref, hostId: request.ref.hostId, threadId: threadId || null,
+        serverName: typeof request.params.serverName === 'string' ? request.params.serverName : '', field: field.key,
+        kind: field.kind === 'image' ? 'file' : field.userOptions?.kind ?? 'file',
+        accept: picker.accept ?? [], multiple: field.kind === 'resources' });
+      if (!mounted.current || formRef.current !== form || lockedRef.current) return;
+      if (!Array.isArray(result) || result.some(uri => typeof uri !== 'string' || !isApprovalFileUri(uri)))
+        throw new Error('The host returned an invalid file URI.');
+      if (!result.length) return;
+      if (field.kind === 'resources') {
+        const current = own(valuesRef.current, field.key);
+        setValue(field.key, [...new Set([...(Array.isArray(current) ? current : []), ...result])]);
+      } else setValue(field.key, result[0]);
+    } catch (cause) {
+      if (mounted.current && formRef.current === form) setError('Unable to choose a file: ' + (cause instanceof Error ? cause.message : String(cause)));
+    } finally { if (mounted.current) setPicking(null); }
   };
   const setAnswer = (key: string, value: { selected: string | null; other: string }) => {
     const next = { ...answers, [key]: value };
@@ -451,7 +518,9 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
           </section>) : view.confirmation.fields.map((field, index) => <p key={index}><strong>{field.label}: </strong>{field.value}</p>)}
         </div>}
         {form.fields.map((field) => <ElicitationField key={field.key} field={field} value={own(values, field.key)}
-          error={own(fieldErrors, field.key)} disabled={locked} onChange={(value) => setValue(field.key, value)} />)}</form>}</>}
+          error={own(fieldErrors, field.key)} disabled={locked} picking={picking === field.key}
+          onPick={onPickApprovalFiles ? () => { void pickFiles(field); } : undefined}
+          onChange={(value) => setValue(field.key, value)} />)}</form>}</>}
     {input && questions?.map((question) => <fieldset key={question.id} style={{ minWidth: 0 }}><legend>{question.header || question.question}</legend>
       {question.header && <p>{question.question}</p>}
       {(() => { const answer = own(answers, question.id) ?? { selected: null, other: '' };

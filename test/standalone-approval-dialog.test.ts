@@ -9,17 +9,19 @@ declare global {
     approvalHarness: {
       show(method: string, params: Record<string, unknown>, options?: {
         completion?: boolean; wrongHost?: boolean; noInterrupt?: boolean; dismissEmpty?: boolean; completionHost?: string; authCheck?: boolean | 'delayed';
-        unmanaged?: boolean; wrongState?: boolean; validity?: boolean;
+        unmanaged?: boolean; wrongState?: boolean; validity?: boolean; picker?: boolean | 'delayed' | 'invalid';
       }): void;
       update(params: Record<string, unknown>): void;
       hide(): void;
       reopen(): void;
       failNext(kind?: 'known' | 'unknown'): void;
       releaseAuth(): void;
+      releasePick(): void;
       calls: { ref: { hostId: string; generation: string; id: number }; result?: unknown; interrupt?: unknown; unsupported?: boolean }[];
       searches: { kind: string; params: Record<string, unknown>; hostId?: string }[];
       authChecks: unknown[];
       validityChecks: unknown[];
+      filePicks: unknown[];
     };
   }
 }
@@ -32,8 +34,8 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     "import { createRoot } from 'react-dom/client';",
     "import { ApprovalDialog } from './src/renderer/app/ApprovalDialog.tsx';",
     "const root = createRoot(document.getElementById('root'));",
-    'const calls = [], searches = [], authChecks = [], validityChecks = [], outcomes = new Map(), inputDrafts = new Map(), formDrafts = new Map();',
-    'let next = 0, current, fail = false, releaseAuth;',
+    'const calls = [], searches = [], authChecks = [], validityChecks = [], filePicks = [], outcomes = new Map(), inputDrafts = new Map(), formDrafts = new Map();',
+    'let next = 0, current, fail = false, releaseAuth, releasePick;',
     'const client = {',
     "  host: async (kind, params) => { searches.push({kind, params}); return {entries:[{type:'file', name:'readme.md', path:'readme.md'}]}; },",
     "  rpc: async (kind, params, hostId) => { searches.push({kind, params, hostId}); return {data:[{skills:[{enabled:true,name:'review',path:'/skills/review',description:'Review'}]}]}; },",
@@ -48,6 +50,7 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     '    onInputDraftChange:options.unmanaged ? undefined : (_ref, value) => inputDrafts.set(key, structuredClone(value)),',
     '    onFormDraftChange:options.unmanaged ? undefined : (_ref, value) => formDrafts.set(key, structuredClone(value)),',
     '    onCheckRequestValidity:options.validity === undefined ? undefined : async ref => { validityChecks.push(structuredClone(ref)); return options.validity; },',
+    "    onPickApprovalFiles:options.picker ? async request => { filePicks.push(structuredClone(request)); if (options.picker === 'delayed') return await new Promise(resolve => {releasePick=resolve;}); return [options.picker === 'invalid' ? 'https://bad.test/a' : 'file:///workspace/picked.png']; } : undefined,",
     "    completionContext:options.completion ? {client, hostId:options.completionHost ?? 'ssh-test',threadId:'thread-a',cwd:'/source-work'} : undefined,",
     "    inputDismissMode:options.dismissEmpty ? 'reply-empty' : 'interrupt',",
     "    onCheckConnectorAuthorization:options.authCheck ? async value => { authChecks.push(structuredClone(value)); if (options.authCheck === 'delayed') return await new Promise(resolve => {releaseAuth=resolve;}); return true; } : undefined,",
@@ -58,7 +61,7 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     "      if (fail) { const kind=fail; fail=false; throw Object.assign(Error('Synthetic interrupt failure'), {uncertain:kind !== 'known'}); } root.render(null); }",
     '  }));',
     '}',
-    "window.approvalHarness = { calls, searches, authChecks, validityChecks, failNext(kind='unknown') {fail=kind;}, releaseAuth() {releaseAuth(true);}, hide() {root.render(null);}, reopen() {render();},",
+    "window.approvalHarness = { calls, searches, authChecks, validityChecks, filePicks, failNext(kind='unknown') {fail=kind;}, releaseAuth() {releaseAuth(true);}, releasePick() {releasePick(['file:///workspace/late.png']);}, hide() {root.render(null);}, reopen() {render();},",
     '  update(params) {current.request.params={...current.request.params,...params}; render();},',
     '  show(method, params, options={}) { const id=++next, ref={hostId:"ssh-test",generation:"generation-"+id,id};',
     "    current={request:{ref,hostId:options.wrongHost?'wrong-host':ref.hostId,id,method,params:{threadId:'thread-a',turnId:'turn-a',...params}},options}; render(); } };",
@@ -74,7 +77,7 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     const dialog = page.getByRole('dialog');
     const show = (method: string, params: Record<string, unknown>, options?: {
       completion?: boolean; wrongHost?: boolean; noInterrupt?: boolean; dismissEmpty?: boolean; completionHost?: string; authCheck?: boolean | 'delayed';
-      unmanaged?: boolean; wrongState?: boolean; validity?: boolean;
+      unmanaged?: boolean; wrongState?: boolean; validity?: boolean; picker?: boolean | 'delayed' | 'invalid';
     }) =>
       page.evaluate(([m, p, o]) => window.approvalHarness.show(m, p, o), [method, params, options] as const);
     const calls = () => page.evaluate(() => window.approvalHarness.calls);
@@ -198,6 +201,40 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
       text:{type:'string'},choices:{type:'array',items:{type:'string',enum:['a']}}}}});
     await dialog.getByRole('button', {name:'Submit'}).click();
     assert.deepEqual((await calls()).at(-1)?.result, {action:'accept',content:{text:'',choices:[]},_meta:null});
+
+    const imageSchema = {type:'object',required:['image'],properties:{image:{type:'openai/imagePicker',title:'Artwork',
+      items:[{id:'cover',title:'Cover',image:'data:image/png;base64,aGVsbG8='}],file:{accept:['image/png'],title:'Choose image'}}}};
+    await show('mcpServer/elicitation/request', {mode:'openai/form',serverName:'images',requestedSchema:imageSchema});
+    assert.equal(await dialog.getByRole('button', {name:'Choose image'}).isDisabled(), true);
+    await dialog.getByLabel('Cover').check();
+    await dialog.getByRole('button', {name:'Submit'}).click();
+    assert.deepEqual((await calls()).at(-1)?.result, {action:'accept',content:{image:'cover'},_meta:null});
+    await show('mcpServer/elicitation/request', {mode:'openai/form',serverName:'images',requestedSchema:imageSchema}, {picker:true});
+    await dialog.getByRole('button', {name:'Choose image'}).click();
+    await dialog.getByText('file:///workspace/picked.png').waitFor();
+    const pick = (await page.evaluate(() => window.approvalHarness.filePicks)).at(-1) as Record<string, unknown>;
+    assert.deepEqual({hostId:pick.hostId,threadId:pick.threadId,serverName:pick.serverName,field:pick.field,accept:pick.accept},
+      {hostId:'ssh-test',threadId:'thread-a',serverName:'images',field:'image',accept:['image/png']});
+    await dialog.getByRole('button', {name:'Submit'}).click();
+    assert.deepEqual((await calls()).at(-1)?.result, {action:'accept',content:{image:'file:///workspace/picked.png'},_meta:null});
+    await show('mcpServer/elicitation/request', {mode:'openai/form',serverName:'images',requestedSchema:imageSchema}, {picker:'invalid'});
+    await dialog.getByRole('button', {name:'Choose image'}).click();
+    await dialog.getByText(/host returned an invalid file URI/).waitFor();
+    await show('mcpServer/elicitation/request', {mode:'openai/form',serverName:'images',requestedSchema:imageSchema}, {picker:'delayed'});
+    await dialog.getByRole('button', {name:'Choose image'}).click();
+    await hide(); await reopen();
+    await page.evaluate(() => window.approvalHarness.releasePick());
+    await page.waitForTimeout(50);
+    assert.equal(await dialog.getByText('file:///workspace/late.png').count(), 0);
+
+    const resourceSchema = {type:'object',required:['documents'],properties:{documents:{type:'array',items:{type:'string',format:'uri'},
+      'x-openai-input':{type:'resource',selection:'implicit',options:[{name:'First',uri:'resource://host/a'},{name:'Second',uri:'resource://host/b'}]}}}};
+    await show('mcpServer/elicitation/request', {mode:'openaiForm',requestedSchema:resourceSchema});
+    assert.equal(await dialog.getByLabel('First').isChecked(), true);
+    assert.equal(await dialog.getByLabel('Second').isChecked(), true);
+    await dialog.getByLabel('Second').uncheck();
+    await dialog.getByRole('button', {name:'Submit'}).click();
+    assert.deepEqual((await calls()).at(-1)?.result, {action:'accept',content:{documents:['resource://host/a']},_meta:null});
     await page.evaluate(() => window.approvalHarness.show('mcpServer/elicitation/request', {mode:'form', requestedSchema:JSON.parse(
       '{"type":"object","required":["constructor","__proto__"],"properties":{"constructor":{"type":"string"},"__proto__":{"type":"string"}}}')}));
     await dialog.getByLabel('constructor (required)').fill('first');

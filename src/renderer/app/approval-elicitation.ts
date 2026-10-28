@@ -211,7 +211,9 @@ export function classifyElicitation(params: Record<string, unknown>): Elicitatio
     return { kind: 'unsupported', reason: 'This browser approval cannot be represented safely.' };
   const schema = mode === 'form' && Object.hasOwn(meta, 'openai/elicitation')
     ? record(meta['openai/elicitation']) ? meta['openai/elicitation'].requestedSchema : undefined : params.requestedSchema;
-  const parsed = parseApprovalForm(schema);
+  const formMode = mode === 'openai/form' ? 'legacy-openai'
+    : mode === 'openaiForm' || Object.hasOwn(meta, 'openai/elicitation') ? 'openai' : 'mcp';
+  const parsed = parseApprovalForm(schema, formMode);
   if (!parsed.form) return { kind: 'unsupported', reason: parsed.error };
   if (Object.hasOwn(meta, 'openai/confirmation')) {
     const confirmed = confirmation(meta['openai/confirmation'], parsed.form, params.message);

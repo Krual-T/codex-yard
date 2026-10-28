@@ -84,3 +84,37 @@ test('required empty strings and arrays are submitted without editing when const
   assert.deepEqual(initial, { text: '', items: [] });
   assert.deepEqual({ ...validateApprovalForm(parsed.form, initial).content }, { text: '', items: [] });
 });
+
+test('legacy image candidates preserve IDs and only allow declared choices or host file URIs', () => {
+  const schema = { type:'object', required:['image'], properties:{image:{type:'openai/imagePicker', title:'Image',
+    items:[{id:'hero',title:'Hero',image:'data:image/png;base64,aGVsbG8='}],file:{accept:['image/png']}}} };
+  const parsed = parseApprovalForm(schema, 'legacy-openai');
+  assert.ok(parsed.form);
+  assert.ok(validateApprovalForm(parsed.form, {}).errors?.image);
+  assert.deepEqual({ ...validateApprovalForm(parsed.form, {image:'hero'}).content }, {image:'hero'});
+  assert.deepEqual({ ...validateApprovalForm(parsed.form, {image:'file:///tmp/host.png'}).content }, {image:'file:///tmp/host.png'});
+  assert.ok(validateApprovalForm(parsed.form, {image:'https://example.test/image.png'}).errors?.image);
+  assert.ok(parseApprovalForm(schema, 'mcp').error);
+  assert.ok(parseApprovalForm({type:'object',properties:{image:{...schema.properties.image,items:[]}}}, 'legacy-openai').form);
+  assert.ok(parseApprovalForm({type:'object',properties:{image:{type:'openai/imagePicker',items:[]}}}, 'legacy-openai').error);
+  assert.ok(parseApprovalForm({type:'object',properties:{image:{...schema.properties.image,
+    items:[...schema.properties.image.items,...schema.properties.image.items]}}}, 'legacy-openai').error);
+});
+
+test('OpenAI resource fields validate explicit and implicit selections and exact URIs', () => {
+  const options = [{uri:'file:///workspace/a.txt',name:'A'}, {uri:'resource://server/b',name:'B',title:'Document B'}];
+  const input = {type:'resource',options,userOptions:{kind:'file',accept:['.txt']}};
+  const schema = {type:'object',required:['single','many'],properties:{
+    single:{type:'string',format:'uri','x-openai-input':input},
+    many:{type:'array',items:{type:'string',format:'uri'},minItems:1,'x-openai-input':{...input,selection:'implicit'}},
+  }};
+  const parsed = parseApprovalForm(schema, 'openai');
+  assert.ok(parsed.form);
+  assert.deepEqual(initialApprovalValues(parsed.form), {many:options.map(option => option.uri)});
+  const result = validateApprovalForm(parsed.form, {...initialApprovalValues(parsed.form),single:'resource://server/b'});
+  assert.deepEqual({ ...result.content }, {single:'resource://server/b',many:options.map(option => option.uri)});
+  assert.ok(validateApprovalForm(parsed.form, {single:'https://attacker.test',many:[]}).errors?.single);
+  assert.ok(validateApprovalForm(parsed.form, {single:options[0]!.uri,many:[]}).errors?.many);
+  assert.ok(validateApprovalForm(parsed.form, {single:'file:///tmp/picked',many:[options[0]!.uri]}).content);
+  assert.ok(parseApprovalForm({...schema,properties:{many:{...schema.properties.many,default:[options[0]!.uri]}}}, 'openai').error);
+});
