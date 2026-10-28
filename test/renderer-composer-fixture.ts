@@ -1,12 +1,46 @@
 import type { ComposerController, ComposerDocument, ComposerTransaction } from '../src/renderer/composer/composer-types.ts';
+import type {
+  ComposerAtomGetter,
+  ComposerAtomSetter,
+  ComposerDraftScope,
+  ComposerWritableScopeAtom,
+} from '../src/renderer/composer/composer-draft-scope.tsx';
+
+export function createComposerScopeSignal<Value>(initial: Value): ComposerWritableScopeAtom<Value> {
+  let current = initial;
+  const scope = { __scopeBrand: 'ComposerScope', id: Symbol('scope') };
+  return {
+    scope,
+    resolve: () => ({
+      read: () => current,
+      write: (_get, _set, value) => { current = value; },
+    }),
+  };
+}
+
+export function createComposerScopeFixture(value: ComposerDraftScope['value']): ComposerDraftScope {
+  const read: ComposerAtomGetter = atom => atom.read(read);
+  const write: ComposerAtomSetter = (atom, next) => { atom.write(read, write, next); };
+  return {
+    value,
+    get: atom => read(atom.resolve(undefined, undefined)),
+    set: (atom, next) => { write(atom.resolve(undefined, undefined), next); },
+  };
+}
+
+export function createComposerDocumentFixture(text: string): ComposerDocument {
+  return {
+    content: { size: text.length },
+    type: { schema: { nodes: {}, marks: {} } },
+    textBetween: () => text,
+    descendants: () => {},
+    toJSON: () => ({ type: 'doc', content: text ? [{ type: 'text', text }] : [] }),
+  };
+}
 
 export function createComposerControllerFixture(): ComposerController {
   let text = 'fixture';
-  const document: ComposerDocument = {
-    content: { size: text.length },
-    textBetween: () => text,
-    descendants: () => {},
-  };
+  const document = createComposerDocumentFixture(text);
   const transaction: ComposerTransaction = {
     doc: document,
     replaceWith() { return this; },

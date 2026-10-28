@@ -12,7 +12,12 @@ import type {
   ComposerDraftScopeProps,
 } from '../src/renderer/composer/composer-draft-scope.tsx';
 import type { ComposerControllerProviderProps, ComposerDocument } from '../src/renderer/composer/composer-types.ts';
-import { createComposerControllerFixture } from './renderer-composer-fixture.ts';
+import {
+  createComposerControllerFixture,
+  createComposerDocumentFixture,
+  createComposerScopeFixture,
+  createComposerScopeSignal,
+} from './renderer-composer-fixture.ts';
 
 async function loadFactory(): Promise<typeof import('../src/renderer/composer/composer-draft-scope.tsx').createComposerDraftScopeComponent> {
   const result = await build({
@@ -51,11 +56,12 @@ test('the fixed Mpt draft and rendering boundaries can be replaced without break
 
 test('draft scope preserves saved documents, callbacks, and the local portal', async () => {
   const create = await loadFactory();
-  const document: ComposerDocument = { content: { size: 5 }, textBetween: () => 'draft', descendants: () => {} };
+  const document: ComposerDocument = createComposerDocumentFixture('draft');
   const controller = createComposerControllerFixture();
   const calls: Array<unknown[]> = [];
-  let savedText = 'draft';
-  let protectedDraft = false;
+  const savedText = createComposerScopeSignal('draft');
+  const protectedDraft = createComposerScopeSignal(false);
+  const retainedDocument = createComposerScopeSignal<ComposerDraftDocument | undefined>(undefined);
   let directDocument: ComposerDraftDocument | undefined;
   let documentReads = 0;
   let providerProps: ComposerControllerProviderProps | undefined;
@@ -70,17 +76,17 @@ test('draft scope preserves saved documents, callbacks, and the local portal', a
     WorkspaceFooter: () => React.createElement('b', null, 'footer'),
     SettingsError: ({ onReload }) => React.createElement('button', { onClick: onReload }, 'reload'),
     isClientThreadId: id => id === 'client-thread',
-    hasProtectedDraft: () => protectedDraft,
+    hasProtectedDraft: scope => scope.get(protectedDraft),
     getSnapshot: () => ({ prompt: 'draft', document, plainTextMode: false }),
     getDocument: () => { documentReads++; return directDocument; },
-    getPersistedText: () => savedText,
+    getPersistedText: scope => scope.get(savedText),
     serializeDocument: (_document, options) => { calls.push(['serialize', options]); return { content: 'serialized' }; },
     isPrompt: text => text.startsWith('prompt:'),
-    writeDocument: (scope, next, mode) => calls.push(['write', scope, next, mode]),
-    preserveDocument: (scope, next) => calls.push(['preserve', scope, next]),
+    writeDocument: (scope, next, mode) => calls.push(['write', scope, next.toJSON(), mode]),
+    preserveDocument: (scope, next) => { scope.set(retainedDocument, next); calls.push(['preserve', scope, next]); },
   };
   const Component = create(React, dependencies);
-  const scope: ComposerDraftScope = { value: { kind: 'local', placement: 'main', conversationId: null, clientThreadId: 'client-thread' } };
+  const scope: ComposerDraftScope = createComposerScopeFixture({ kind: 'local', placement: 'main', conversationId: null, clientThreadId: 'client-thread' });
   const base: ComposerDraftScopeProps = {
     scope, draftKey: 'client-thread', conversationId: null, isWorkspaceStarter: true,
     rootClassName: 'min-w-0 fixture', surfacePlacement: { kind: 'thread' }, showSurface: true,
@@ -102,14 +108,16 @@ test('draft scope preserves saved documents, callbacks, and the local portal', a
   assert.equal(provider.defaultText, 'draft');
   assert.equal(provider.defaultTextKind, 'plain');
   assert.equal(provider.initialDocument, document);
+  assert.equal(provider.initialDocument.type.schema, document.type.schema);
   provider.onDocumentChange?.(document, false);
   provider.onDocumentDispose?.(document, false);
   assert.deepEqual(calls, [
-    ['write', scope, document, false],
+    ['write', scope, { type: 'doc', content: [{ type: 'text', text: 'draft' }] }, false],
     ['serialize', { preserveTextLinkMarks: true }],
     ['text', 'serialized'],
     ['preserve', scope, { document, plainTextMode: false }],
   ]);
+  assert.equal(scope.get(retainedDocument)?.document, document);
 
   calls.length = 0;
   ({ provider } = render({ ...base, plainTextMode: true }));
@@ -118,7 +126,7 @@ test('draft scope preserves saved documents, callbacks, and the local portal', a
   assert.deepEqual(calls, [['serialize', { preserveTextLinkMarks: true, preserveUnresolvedSkillMentions: true }]]);
 
   calls.length = 0;
-  savedText = 'changed';
+  scope.set(savedText, 'changed');
   ({ provider } = render({ ...base, showSurface: false }));
   assert.equal(provider.defaultText, 'changed');
   assert.equal(provider.initialDocument, undefined);
@@ -131,19 +139,19 @@ test('draft scope preserves saved documents, callbacks, and the local portal', a
   assert.equal(provider.defaultText, 'changed');
   assert.equal(provider.initialDocument, document);
   directDocument = undefined;
-  savedText = '';
+  scope.set(savedText, '');
   ({ provider } = render(base));
   provider.onDocumentDispose?.(document, false);
   assert.deepEqual(calls, []);
 
-  savedText = 'draft';
-  protectedDraft = true;
+  scope.set(savedText, 'draft');
+  scope.set(protectedDraft, true);
   ({ provider } = render(base));
   assert.equal(provider.initialDocument, undefined);
   const previousDocumentReads = documentReads;
   ({ markup, provider } = render({
     ...base, defaultPrompt: 'prompt:example', aboveComposerContentLayout: 'header',
-    scope: { value: { kind: 'new' } }, workSettingsQuery: { isError: true, refetch() {} },
+    scope: createComposerScopeFixture({ kind: 'new' }), workSettingsQuery: { isError: true, refetch() {} },
   }));
   assert.equal(provider.defaultText, 'prompt:example');
   assert.equal(provider.defaultTextKind, 'prompt');
@@ -166,8 +174,8 @@ test('changing the upstream draft key remounts the provider and retains the exte
         import { createComposerDraftScopeComponent } from './src/renderer/composer/composer-draft-scope.tsx';
         window.runScopeFixture = () => {
           const trace = [], external = {id:'external'};
-          const first = {value:{kind:'new'}, text:'first'};
-          const second = {value:{kind:'new'}, text:'second'};
+          const first = {value:{kind:'new'}, text:'first', get: () => {}, set: () => {}};
+          const second = {value:{kind:'new'}, text:'second', get: () => {}, set: () => {}};
           let nextInstance = 0;
           function Provider(props) {
             const [instance] = React.useState(() => ++nextInstance);

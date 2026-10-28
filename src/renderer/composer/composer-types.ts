@@ -1,9 +1,26 @@
 import type * as React from 'react';
 
+export type ComposerJsonValue = string | number | boolean | null | ComposerJsonValue[] | { [key: string]: ComposerJsonValue };
+
+export interface ComposerDocumentJson {
+  type: string;
+  attrs?: { [key: string]: ComposerJsonValue };
+  content?: ComposerDocumentJson[];
+  marks?: { type: string; attrs?: { [key: string]: ComposerJsonValue } }[];
+  text?: string;
+}
+
+export interface ComposerSchema {
+  readonly nodes: Readonly<Record<string, { readonly name: string }>>;
+  readonly marks: Readonly<Record<string, { readonly name: string }>>;
+}
+
 export interface ComposerDocument {
   content: { size: number };
+  type: { schema: ComposerSchema };
   textBetween(from: number, to: number, separator: string): string;
   descendants(visitor: (node: { isTextblock: boolean }, position: number) => boolean | void): void;
+  toJSON(): ComposerDocumentJson;
 }
 
 export interface ComposerTransaction {

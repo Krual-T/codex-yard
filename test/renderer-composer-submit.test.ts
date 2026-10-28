@@ -11,6 +11,7 @@ import type {
   ComposerSubmitHandler,
 } from '../src/renderer/composer/composer-submit-controls.ts';
 import type { ComposerDocument } from '../src/renderer/composer/composer-types.ts';
+import { createComposerDocumentFixture } from './renderer-composer-fixture.ts';
 
 interface RegisteredShortcut {
   handler: ComposerSubmitHandler;
@@ -20,7 +21,7 @@ interface RegisteredShortcut {
 test('submit controls preserve shortcut routing, queue, dictation and keyboard priority', () => {
   const events: Array<unknown[]> = [];
   const registry = new Map<ComposerShortcut, RegisteredShortcut>();
-  const document: ComposerDocument = { content: { size: 1 }, textBetween: () => 'x', descendants: () => {} };
+  const document: ComposerDocument = createComposerDocumentFixture('x');
   let focused = true;
   let multiline = false;
   let shouldSteer = false;

@@ -9,6 +9,26 @@ import type {
   ComposerSurfacePlacement,
 } from './composer-types.ts';
 
+export interface ComposerResolvedAtom<Value> {
+  read(get: ComposerAtomGetter): Value;
+}
+
+export interface ComposerResolvedWritableAtom<Value> extends ComposerResolvedAtom<Value> {
+  write(get: ComposerAtomGetter, set: ComposerAtomSetter, value: Value): unknown;
+}
+
+export type ComposerAtomGetter = <Value>(atom: ComposerResolvedAtom<Value>) => Value;
+export type ComposerAtomSetter = <Value>(atom: ComposerResolvedWritableAtom<Value>, value: NoInfer<Value>) => void;
+
+export interface ComposerScopeAtom<Value> {
+  readonly scope: { readonly __scopeBrand: string; readonly id: symbol };
+  resolve(node: unknown, chain: unknown): ComposerResolvedAtom<Value>;
+}
+
+export interface ComposerWritableScopeAtom<Value> extends ComposerScopeAtom<Value> {
+  resolve(node: unknown, chain: unknown): ComposerResolvedWritableAtom<Value>;
+}
+
 export interface ComposerDraftScope {
   value: {
     kind: 'new' | 'local' | 'cloud' | 'chatgpt' | 'other';
@@ -16,6 +36,8 @@ export interface ComposerDraftScope {
     conversationId?: string | null;
     clientThreadId?: string | null;
   };
+  get<Value>(atom: ComposerScopeAtom<Value>): Value;
+  set<Value>(atom: ComposerWritableScopeAtom<Value>, value: NoInfer<Value>): void;
 }
 
 export interface ComposerDraftDocument {

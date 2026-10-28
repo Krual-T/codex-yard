@@ -119,7 +119,8 @@ test('pending input transfers text, IME, focus and selection without taking owne
           const trace = [];
           const settings = { enter: 'enter', plain: false };
           const context = React.createContext(null);
-          const doc = text => ({ text, content: { size: text.length }, textBetween: () => text });
+          const doc = text => ({ text, content: { size: text.length }, type: {schema: {nodes: {}, marks: {}}},
+            textBetween: () => text, descendants: () => {}, toJSON: () => ({type:'doc', content:[]}) });
           const makeController = (name, initialText) => {
             const state = { doc: doc(initialText), schema: {} };
             Object.defineProperty(state, 'tr', { get() {
