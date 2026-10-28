@@ -1,4 +1,5 @@
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
+import type { KeyObject } from 'node:crypto';
 import { posix, win32 } from 'node:path';
 import { RpcError } from '../../lib/codex.ts';
 import type { LateRpcTerminal, RequestOptions, RpcResult } from '../../lib/codex-protocol.ts';
@@ -29,8 +30,6 @@ interface ConfigWritesOptions {
   resolveTarget(input: ConfigWriteTargetInput): Promise<ConfigWriteTarget>;
   /** Called under mutations; must not reacquire that lock. */
   findFileBlocker(target: ConfigWriteTarget): boolean | Promise<boolean>;
-  /** Only enable after native state and its aliases are inaccessible to browser file APIs. */
-  issueRecoveryReceipts?: boolean;
 }
 
 export type ConfigWriteCompletion =
@@ -45,7 +44,8 @@ export type ConfigWritePreflight =
   | { outcome: 'blocked'; operation: ConfigWriteStatus }
   | { outcome: 'existing'; operation: ConfigWriteStatus }
   | null;
-type StoredRecord = ConfigWriteRecord & { receiptKey?: string };
+type StoredRecord = ConfigWriteRecord & { receiptKey?: string; receiptPublicKey?: string };
+type ReceiptSigner = ConfigWriteIdentity & { publicKey: string; privateKey: KeyObject };
 type Observation = { state: 'unknown' } | { state: 'succeeded' | 'failed'; terminal: ConfigWriteTerminal };
 type Prepared = { outcome: 'prepared'; operation: ConfigWriteStatus;
   start(params: Record<string, unknown>, connection: ConfigWriteConnection): Promise<ConfigWriteSubmission>;
@@ -59,6 +59,11 @@ const record = (value: unknown): value is Record<string, unknown> => value !== n
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
 const active = (value: ConfigWriteRecord) => value.state === 'preparing' || value.state === 'pending' || value.state === 'unknown';
 const validKey = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
+function validEncoded(value: unknown, size: number): value is string {
+  if (typeof value !== 'string' || value.length !== Math.ceil(size * 8 / 6) || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
+  const bytes = Buffer.from(value, 'base64url');
+  return bytes.length === size && bytes.toString('base64url') === value;
+}
 
 function absoluteTarget(value: unknown): string {
   if (validId(value) && (/^[a-z]:[\\/]|^\\\\/i.test(value) ? win32.isAbsolute(value) : posix.isAbsolute(value))) return value;
@@ -106,25 +111,31 @@ function canonicalTerminal(value: ConfigWriteTerminal): ConfigWriteTerminal {
 function terminalState(terminal: ConfigWriteTerminal): 'succeeded' | 'failed' {
   return terminal.kind === 'rejected' || terminal.kind === 'not-sent' ? 'failed' : 'succeeded';
 }
-function signature(value: StoredRecord, terminal: ConfigWriteTerminal): string {
-  return createHmac('sha256', Buffer.from(value.receiptKey!, 'base64url')).update(JSON.stringify([
-    'config-write-receipt-v1', value.operationId, value.hostId, value.method, canonicalTerminal(terminal),
-  ])).digest('base64url');
+function receiptPayload(value: StoredRecord, terminal: ConfigWriteTerminal): Buffer {
+  return Buffer.from(JSON.stringify([
+    'config-write-receipt-v2-ed25519', value.operationId, value.hostId, value.method, canonicalTerminal(terminal),
+  ]));
 }
-function makeReceipt(value: StoredRecord, terminal: ConfigWriteTerminal): ConfigWriteReceipt | undefined {
-  if (!validKey(value.receiptKey) || !value.method) return undefined;
-  return { operationId: value.operationId, hostId: value.hostId, method: value.method,
-    terminal: canonicalTerminal(terminal), signature: signature(value, terminal) };
+function makeReceipt(value: StoredRecord, terminal: ConfigWriteTerminal, signer: ReceiptSigner | undefined): ConfigWriteReceipt | undefined {
+  if (!signer || signer.operationId !== value.operationId || signer.hostId !== value.hostId || signer.method !== value.method
+    || signer.publicKey !== value.receiptPublicKey) return undefined;
+  try {
+    return { operationId: value.operationId, hostId: value.hostId, method: signer.method,
+      terminal: canonicalTerminal(terminal), signature: sign(null, receiptPayload(value, terminal), signer.privateKey).toString('base64url') };
+  } catch { return undefined; }
 }
 function verifyReceipt(value: StoredRecord, receipt: unknown): ConfigWriteTerminal {
   if (!record(receipt) || receipt.operationId !== value.operationId || receipt.hostId !== value.hostId
-    || receipt.method !== value.method || !value.method || !validKey(value.receiptKey) || !validKey(receipt.signature)
+    || receipt.method !== value.method || !value.method || !validEncoded(value.receiptPublicKey, 44) || !validEncoded(receipt.signature, 64)
     || !record(receipt.terminal)) throw new Error('The original configuration receipt cannot be verified.');
   const state = receipt.terminal.kind === 'ok' || receipt.terminal.kind === 'okOverridden' || receipt.terminal.kind === 'effectiveEnabled' ? 'succeeded' : 'failed';
   if (!validTerminal(receipt.terminal, value.method, state)) throw new Error('The original configuration receipt cannot be verified.');
-  const terminal = canonicalTerminal(receipt.terminal), expected = Buffer.from(signature(value, terminal), 'base64url');
-  const received = Buffer.from(receipt.signature, 'base64url');
-  if (expected.length !== received.length || !timingSafeEqual(expected, received)) throw new Error('The original configuration receipt cannot be verified.');
+  const terminal = canonicalTerminal(receipt.terminal);
+  try {
+    const publicKey = createPublicKey({ key: Buffer.from(value.receiptPublicKey, 'base64url'), format: 'der', type: 'spki' });
+    if (publicKey.asymmetricKeyType !== 'ed25519' || !verify(null, receiptPayload(value, terminal), publicKey,
+      Buffer.from(receipt.signature, 'base64url'))) throw new Error();
+  } catch { throw new Error('The original configuration receipt cannot be verified.'); }
   return terminal;
 }
 
@@ -132,6 +143,7 @@ function verifyReceipt(value: StoredRecord, receipt: unknown): ConfigWriteTermin
 export function createConfigWrites(options: ConfigWritesOptions) {
   const live = new Set<string>();
   const observed = new Map<string, Observation>();
+  const signers = new Map<string, ReceiptSigner>();
 
   function records(): StoredRecord[] {
     const raw = options.state[stateKey];
@@ -143,7 +155,8 @@ export function createConfigWrites(options: ConfigWritesOptions) {
     for (const value of raw) {
       if (!record(value) || !validId(value.operationId) || !validId(value.hostId) || !states.has(value.state as ConfigWriteState)
         || value.scope !== undefined && value.scope !== 'global' || value.method !== undefined && !methods.has(value.method as ConfigWriteMethod)
-        || value.receiptKey !== undefined && !validKey(value.receiptKey)) throw new Error('Configuration write records cannot be read; writes are blocked.');
+        || value.receiptKey !== undefined && !validKey(value.receiptKey)
+        || value.receiptPublicKey !== undefined && !validEncoded(value.receiptPublicKey, 44)) throw new Error('Configuration write records cannot be read; writes are blocked.');
       const state = value.state as ConfigWriteState, method = value.method as ConfigWriteMethod | undefined;
       if (state === 'preparing' && (!method || value.terminal !== undefined)) {
         throw new Error('Configuration write records cannot be read; writes are blocked.');
@@ -182,7 +195,7 @@ export function createConfigWrites(options: ConfigWritesOptions) {
   }
   function project(value: StoredRecord): ConfigWriteStatus {
     const observation = observed.get(value.operationId), terminal = observation && 'terminal' in observation ? observation.terminal : undefined;
-    const receipt = options.issueRecoveryReceipts && terminal ? makeReceipt(value, terminal) : undefined;
+    const receipt = terminal ? makeReceipt(value, terminal, signers.get(value.operationId)) : undefined;
     return { operationId: value.operationId, hostId: value.hostId,
       ...(value.hostKey === undefined ? {} : { hostKey: value.hostKey }), ...(value.target === undefined ? {} : { target: value.target }),
       ...(value.binding === undefined ? {} : { binding: value.binding }), ...(value.scope ? { scope: value.scope } : {}),
@@ -205,7 +218,9 @@ export function createConfigWrites(options: ConfigWritesOptions) {
     if (index < 0 || !active(current[index]!)) throw new Error('The original configuration write record is unavailable.');
     const next = [...current]; next[index] = { ...next[index]!, ...observation };
     try { await save(next); } catch (error) { observed.set(operationId, observation); throw error; }
-    observed.delete(operationId); return project(next[index]!);
+    observed.delete(operationId);
+    if ('terminal' in observation) signers.delete(operationId);
+    return project(next[index]!);
   }
   async function saveObservation(operationId: string, observation: Observation) {
     return options.mutations.run(async () => {
@@ -224,7 +239,6 @@ export function createConfigWrites(options: ConfigWritesOptions) {
       if (!value) throw new Error('The original configuration write record is unavailable.');
       let observation = observed.get(operationId);
       if (receipt !== undefined) {
-        if (!options.issueRecoveryReceipts) throw new Error('Configuration receipt verification is unavailable.');
         const terminal = verifyReceipt(value, receipt);
         if (value.terminal) {
           if (JSON.stringify(canonicalTerminal(value.terminal)) !== JSON.stringify(terminal)) throw new Error('The original configuration receipt cannot be verified.');
@@ -265,8 +279,11 @@ export function createConfigWrites(options: ConfigWritesOptions) {
     return options.mutations.run(async () => {
       const current = records(), previous = prior(current, input);
       if (previous) return previous;
+      const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+      const receiptPublicKey = publicKey.export({ format: 'der', type: 'spki' }).toString('base64url');
       const value: StoredRecord = { operationId: input.operationId, hostId: input.hostId, method: input.method,
-        state: 'preparing', ...(options.issueRecoveryReceipts ? { receiptKey: randomBytes(32).toString('base64url') } : {}) };
+        state: 'preparing', receiptPublicKey };
+      signers.set(input.operationId, { ...input, publicKey: receiptPublicKey, privateKey });
       try { await save([...current, value]); }
       catch {
         options.state[stateKey] = [...current, value];

@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { createHmac, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
+import { promisify } from 'node:util';
 import { CodexConnection, RpcError } from '../lib/codex.ts';
 import type { ConfigurationWriteRequest, ConfigurationWriteSubmitResponse, ConfigWriteStatus } from '../lib/config-write-protocol.ts';
 import { createConfigWriteHost } from '../src/native/config-write-host.ts';
@@ -14,6 +17,7 @@ import { createFakeCodex, NO_REPLY } from './fake-codex.ts';
 
 type Context = { allowed: boolean };
 const context: Context = { allowed: true };
+const execFileAsync = promisify(execFile);
 const batchParams = () => ({ filePath: null, expectedVersion: 'fixture-v1', reloadUserConfig: true,
   edits: [{ keyPath: 'hooks.state.fixture.enabled', value: false, mergeStrategy: 'upsert' }] });
 const batch = (operationId: string, hostId = 'local') => ({ hostId, action: 'submit' as const, operationId,
@@ -37,7 +41,7 @@ async function fixture(t: TestContext) {
     await rename(statePath + '.tmp', statePath);
   };
   const resolveTarget = createConfigWriteTargets({ getConnectionSnapshot: () => ({ paths: { homeDirectory: root, codexHome: home } }) });
-  const options = { state, persist, mutations: createStateMutations(), resolveTarget, findFileBlocker: () => false, issueRecoveryReceipts: true };
+  const options = { state, persist, mutations: createStateMutations(), resolveTarget, findFileBlocker: () => false };
   const writes = createConfigWrites(options), connectCalls: string[] = [];
   async function openConnection() {
     const connection = new CodexConnection(peer.socketPath, { timeout: 180 });
@@ -387,10 +391,18 @@ test('a signed observed terminal survives restart without trusting a forged brow
   if (result.outcome !== 'success') return;
   const receipt = result.operation.recoveryReceipt;
   assert.ok(receipt);
-  const disk = JSON.parse(await readFile(h.statePath, 'utf8')) as { configWriteOperations: { receiptKey: string }[] };
-  const secret = disk.configWriteOperations[0]!.receiptKey;
-  assert.ok(secret);
-  assert.doesNotMatch(JSON.stringify(result), new RegExp(secret));
+  const disk = JSON.parse(await readFile(h.statePath, 'utf8')) as { configWriteOperations: { receiptPublicKey: string }[] };
+  const stored = disk.configWriteOperations[0]!, publicKey = stored.receiptPublicKey;
+  assert.equal(typeof publicKey, 'string');
+  assert.deepEqual(Object.keys(stored).sort(), ['binding', 'hostId', 'hostKey', 'method', 'operationId', 'receiptPublicKey', 'scope', 'state', 'target'].sort());
+  assert.doesNotMatch(JSON.stringify(disk), /receiptKey|privateKey|PRIVATE KEY|pkcs8/);
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(publicKey));
+  const verifier = createPublicKey({ key: Buffer.from(publicKey, 'base64url'), format: 'der', type: 'spki' });
+  assert.equal(verifier.asymmetricKeyType, 'ed25519');
+  const payload = (terminal: unknown) => Buffer.from(JSON.stringify(['config-write-receipt-v2-ed25519',
+    'receipt-id', 'local', 'config/batchWrite', terminal]));
+  assert.equal(verify(null, payload(receipt.terminal), verifier, Buffer.from(receipt.signature, 'base64url')), true);
+  assert.throws(() => sign(null, payload(receipt.terminal), verifier));
   let durable: Record<string, unknown> = structuredClone(disk);
   const state = structuredClone(durable);
   const writes = createConfigWrites({ ...h.options, state, mutations: createStateMutations(), persist: async () => { durable = structuredClone(state); } });
@@ -399,6 +411,11 @@ test('a signed observed terminal survives restart without trusting a forged brow
   const query = (hostId = 'local') => host.handle({ hostId, action: 'status', operationId: 'receipt-id' }, context);
   const retry = (value: unknown) => host.handle({ hostId: 'local', action: 'retry-persistence', operationId: 'receipt-id', receipt: value }, context);
   const before = await query(); assert.ok(!('outcome' in before)); assert.equal(before.operation?.state, 'unknown');
+  assert.doesNotMatch(JSON.stringify(before), new RegExp(publicKey));
+  assert.equal(before.operation?.recoveryReceipt, undefined);
+  const duplicate = await writes.begin({ operationId: 'receipt-id', hostId: 'local', method: 'config/batchWrite' });
+  assert.equal(duplicate.outcome, 'existing');
+  assert.equal(duplicate.operation.recoveryReceipt, undefined);
   const noReceipt = await host.handle({ hostId: 'local', action: 'retry-persistence', operationId: 'receipt-id' }, context);
   assert.ok(!('outcome' in noReceipt)); assert.equal(noReceipt.operation?.state, 'unknown');
   const forged = await retry({ ...receipt, terminal: { kind: 'ok' } });
@@ -410,8 +427,12 @@ test('a signed observed terminal survives restart without trusting a forged brow
   assert.ok(!('outcome' in wrongId)); assert.ok('error' in wrongId && wrongId.error);
   const wrongHost = await retry({ ...receipt, hostId: 'ssh-fixture' });
   assert.ok(!('outcome' in wrongHost)); assert.ok('error' in wrongHost && wrongHost.error);
-  const wrongSignature = await retry({ ...receipt, signature: 'A'.repeat(43) });
+  const wrongSignature = await retry({ ...receipt, signature: 'A'.repeat(86) });
   assert.ok(!('outcome' in wrongSignature)); assert.ok('error' in wrongSignature && wrongSignature.error);
+  const attacker = generateKeyPairSync('ed25519');
+  const forgedSignature = sign(null, payload({ kind: 'ok' }), attacker.privateKey).toString('base64url');
+  const attackerReceipt = await retry({ ...receipt, terminal: { kind: 'ok' }, signature: forgedSignature });
+  assert.ok(!('outcome' in attackerReceipt)); assert.ok('error' in attackerReceipt && attackerReceipt.error);
   assert.equal((await query()).operation?.state, 'unknown');
   await assert.rejects(query('ssh-fixture'), /another host/);
   const restored = await retry(receipt);
@@ -423,28 +444,92 @@ test('a signed observed terminal survives restart without trusting a forged brow
   assert.deepEqual(h.connectCalls, ['local']);
 });
 
-test('receipt issuance stays disabled until native state is isolated from browser file access', async t => {
+test('an original browser receipt restores the terminal after the signing process exits', async t => {
+  const root = await mkdtemp('/tmp/yard-config-receipt-restart-');
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const statePath = join(root, 'native-state.json'), browserPath = join(root, 'browser-receipt.json');
+  const script = `
+    import { readFile, writeFile } from 'node:fs/promises';
+    import { createConfigWrites } from './src/native/config-writes.ts';
+    import { createConfigWriteHost } from './src/native/config-write-host.ts';
+    import { createStateMutations } from './src/native/state-mutations.ts';
+    const [phase, statePath, browserPath] = process.argv.slice(1);
+    const state = phase === 'issue' ? {} : JSON.parse(await readFile(statePath, 'utf8'));
+    let saves = 0, calls = 0;
+    const writes = createConfigWrites({ state, mutations: createStateMutations(),
+      persist: async () => { if (phase === 'issue' && ++saves === 3) throw new Error('fixture save failed');
+        await writeFile(statePath, JSON.stringify(state)); },
+      findFileBlocker: () => false,
+      resolveTarget: async () => ({ hostKey: 'fixture', target: '/fixture/config.toml', binding: '/fixture/config.toml', scope: 'global' }) });
+    const connection = { connected: true, socket: {}, async requestWithCursor() {
+      calls++; return { result: { status: 'okOverridden' }, eventCursor: 1 };
+    } };
+    const host = createConfigWriteHost({ writes, validateHost() {}, connect: async () => connection });
+    if (phase === 'issue') {
+      const result = await host.handle({ hostId: 'local', action: 'submit', operationId: 'restart-process',
+        method: 'config/batchWrite', params: { filePath: null } }, {});
+      if (result.outcome !== 'success' || !result.operation.storageError || !result.operation.recoveryReceipt) throw new Error('missing observed receipt');
+      await writeFile(browserPath, JSON.stringify(result.operation.recoveryReceipt));
+      process.stdout.write(JSON.stringify({ outcome: result.outcome, calls }));
+    } else {
+      const before = await host.handle({ hostId: 'local', action: 'status', operationId: 'restart-process' }, {});
+      const receipt = JSON.parse(await readFile(browserPath, 'utf8'));
+      const restored = await host.handle({ hostId: 'local', action: 'retry-persistence', operationId: 'restart-process', receipt }, {});
+      const duplicate = await writes.begin({ operationId: 'restart-process', hostId: 'local', method: 'config/batchWrite' });
+      process.stdout.write(JSON.stringify({ before: before.operation?.state, restored: restored.operation?.terminal,
+        after: restored.operation?.state, duplicate: duplicate.outcome, calls }));
+    }
+  `;
+  const run = (phase: string) => execFileAsync(process.execPath, ['--input-type=module', '--eval', script, phase, statePath, browserPath],
+    { cwd: process.cwd(), timeout: 10000 });
+  const issued = JSON.parse((await run('issue')).stdout) as unknown;
+  assert.deepEqual(issued, { outcome: 'success', calls: 1 });
+  const restored = JSON.parse((await run('restore')).stdout) as unknown;
+  assert.deepEqual(restored, { before: 'unknown', restored: { kind: 'okOverridden' }, after: 'succeeded', duplicate: 'existing', calls: 0 });
+});
+
+test('legacy records with no public key cannot be unlocked by either an HMAC or a self-signed receipt', async t => {
+  const h = await fixture(t), legacyKey = 'A'.repeat(43), terminal = { kind: 'ok' };
+  const legacyRecord = { operationId: 'legacy-receipt', hostId: 'local', method: 'config/batchWrite', state: 'pending',
+    hostKey: 'fixture', target: '/fixture/config.toml', binding: '/fixture/config.toml', scope: 'global' };
+  const attacker = generateKeyPairSync('ed25519');
+  const payload = Buffer.from(JSON.stringify(['config-write-receipt-v2-ed25519', 'legacy-receipt', 'local', 'config/batchWrite', terminal]));
+  const fake = { operationId: 'legacy-receipt', hostId: 'local', method: 'config/batchWrite', terminal,
+    signature: sign(null, payload, attacker.privateKey).toString('base64url') };
+  for (const withHmacKey of [false, true]) {
+    const state: Record<string, unknown> = { configWriteOperations: [{ ...legacyRecord, ...(withHmacKey ? { receiptKey: legacyKey } : {}) }] };
+    const writes = createConfigWrites({ ...h.options, state, mutations: createStateMutations(), persist: async () => {} });
+    assert.equal((await writes.status('legacy-receipt'))?.state, 'unknown');
+    await assert.rejects(writes.retryTerminalSave('legacy-receipt', fake), /cannot be verified/);
+    const hmacPayload = JSON.stringify(['config-write-receipt-v1', 'legacy-receipt', 'local', 'config/batchWrite', terminal]);
+    const hmac = createHmac('sha256', Buffer.from(legacyKey, 'base64url')).update(hmacPayload).digest('base64url');
+    await assert.rejects(writes.retryTerminalSave('legacy-receipt', { ...fake, signature: hmac }), /cannot be verified/);
+    const duplicate = await writes.begin({ operationId: 'legacy-receipt', hostId: 'local', method: 'config/batchWrite' });
+    assert.equal(duplicate.outcome, 'existing');
+    assert.equal(duplicate.operation.recoveryReceipt, undefined);
+    assert.equal((await writes.status('legacy-receipt'))?.state, 'unknown');
+    assert.equal((state.configWriteOperations as Record<string, unknown>[])[0]?.receiptPublicKey, undefined);
+  }
+  assert.equal(h.peer.calls('config/batchWrite').length, 0);
+});
+
+test('a changed original public key cannot be signed by the original in-memory private key', async t => {
   const h = await fixture(t);
-  const writes = createConfigWrites({ ...h.options, issueRecoveryReceipts: false });
-  const host = createConfigWriteHost<Context>({ writes, validateHost() {}, connect: h.openConnection });
   let finish: (() => void) | undefined;
   h.peer.handlers.set('config/batchWrite', (_params, call) => {
     finish = () => call.send({ id: call.message.id, result: { status: 'ok' } });
     return NO_REPLY;
   });
-  const promise = host.handle(batch('unprotected-state'), context);
+  const promise = h.submit(batch('changed-public-key'));
   await h.peer.waitForCall('config/batchWrite');
+  const replacement = generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).toString('base64url');
+  (h.state.configWriteOperations as Record<string, unknown>[])[0]!.receiptPublicKey = replacement;
   h.failNextPersist(); assert.ok(finish); finish();
   const result = await promise;
-  assert.ok('outcome' in result); assert.equal(result.outcome, 'success');
+  assert.equal(result.outcome, 'success');
   assert.equal(result.operation?.storageError, true);
   assert.equal(result.operation?.recoveryReceipt, undefined);
-  const disk = JSON.parse(await readFile(h.statePath, 'utf8')) as { configWriteOperations: Record<string, unknown>[] };
-  assert.equal(disk.configWriteOperations[0]?.receiptKey, undefined);
-  const restarted = createConfigWrites({ ...h.options, state: disk, mutations: createStateMutations(), persist: async () => {} });
-  await assert.rejects(restarted.retryTerminalSave('unprotected-state', { operationId: 'unprotected-state', hostId: 'local',
-    method: 'config/batchWrite', terminal: { kind: 'ok' }, signature: 'A'.repeat(43) }), /cannot be verified/);
-  assert.equal((await restarted.status('unprotected-state'))?.state, 'unknown');
+  assert.equal((await h.status('changed-public-key'))?.recoveryReceipt, undefined);
   assert.equal(h.peer.calls('config/batchWrite').length, 1);
 });
 
