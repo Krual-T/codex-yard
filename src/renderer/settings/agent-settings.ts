@@ -1,0 +1,125 @@
+import type { WorkbenchClient } from '../workbench-contract.ts';
+import { userConfigTarget } from './config-target.ts';
+import type { ConfigTarget } from './config-target.ts';
+
+type Approval = 'on-request' | 'never';
+type Sandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
+type Field = 'approval' | 'sandbox';
+type AgentValues = { approval: string; sandbox: string };
+type RawConfig = { approval_policy?: unknown; sandbox_mode?: unknown; profile?: unknown };
+type ConfigRead = { config: RawConfig; layers?: unknown };
+type RequirementsRead = { requirements: { allowedApprovalPolicies?: unknown; allowedSandboxModes?: unknown } | null };
+export interface AgentSnapshot {
+  loading: boolean; saving: boolean; error: string | null; writeError: string | null; warning: string | null;
+  profile: string | null; values: AgentValues; saved: AgentValues;
+  approvals: Approval[]; sandboxes: Sandbox[];
+}
+const approvals: Approval[] = ['on-request', 'never'];
+const sandboxes: Sandbox[] = ['read-only', 'workspace-write', 'danger-full-access'];
+const advanced = '__advanced__';
+const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+const profileName = (value: unknown) => typeof value === 'string' && value ? value : null;
+const valueOf = (value: unknown, fallback: string) => value == null ? fallback : typeof value === 'string' ? value : advanced;
+const matches = (a: AgentValues, b: AgentValues) => a.approval === b.approval && a.sandbox === b.sandbox;
+
+export class AgentSettings {
+  private readonly client: WorkbenchClient;
+  private readonly hostId: string;
+  private readonly listeners = new Set<() => void>();
+  private generation = 0;
+  private target: ConfigTarget | null = null;
+  private rawApproval: unknown = null;
+  private snapshot: AgentSnapshot = { loading: true, saving: false, error: null, writeError: null, warning: null,
+    profile: null, values: { approval: 'on-request', sandbox: 'read-only' }, saved: { approval: 'on-request', sandbox: 'read-only' },
+    approvals: [], sandboxes: [] };
+  constructor(client: WorkbenchClient, hostId: string) { this.client = client; this.hostId = hostId; }
+  getSnapshot = () => this.snapshot;
+  subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
+  private update(patch: Partial<AgentSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
+  get dirty() { return !matches(this.snapshot.values, this.snapshot.saved); }
+  dispose() { this.generation++; }
+  private async read(): Promise<ConfigRead> {
+    const result = await this.client.rpc<ConfigRead>('config/read', { includeLayers: true }, this.hostId);
+    if (!result?.config || typeof result.config !== 'object' || Array.isArray(result.config) ||
+      (result.config.profile != null && typeof result.config.profile !== 'string') ||
+      (result.config.sandbox_mode != null && typeof result.config.sandbox_mode !== 'string')) throw new Error('Invalid agent configuration response');
+    return result;
+  }
+  private async targetFor(read: ConfigRead) {
+    try {
+      const home = await this.client.host<{ codexHome?: unknown }>('codex-home', { hostId: this.hostId });
+      return userConfigTarget(read.layers, home?.codexHome, profileName(read.config.profile));
+    } catch { return { target: null, error: 'Cannot save: the selected host did not provide its configuration home and version.' }; }
+  }
+  private async requirements(): Promise<{ approvals: Approval[]; sandboxes: Sandbox[] }> {
+    const result = await this.client.rpc<RequirementsRead>('configRequirements/read', {}, this.hostId);
+    if (!result || !('requirements' in result) || result.requirements != null && (typeof result.requirements !== 'object' || Array.isArray(result.requirements))) {
+      throw new Error('Invalid configuration requirements response');
+    }
+    const allowedApproval = result.requirements?.allowedApprovalPolicies;
+    const allowedSandbox = result.requirements?.allowedSandboxModes;
+    if (allowedApproval != null && !Array.isArray(allowedApproval) || allowedSandbox != null && !Array.isArray(allowedSandbox)) {
+      throw new Error('Invalid configuration requirements response');
+    }
+    return { approvals: approvals.filter(value => allowedApproval == null || allowedApproval.includes(value)),
+      sandboxes: sandboxes.filter(value => allowedSandbox == null || allowedSandbox.includes(value)) };
+  }
+  async load(): Promise<void> {
+    const generation = ++this.generation;
+    this.update({ loading: true, error: null });
+    try {
+      const [read, allowed] = await Promise.all([this.read(), this.requirements()]);
+      const target = await this.targetFor(read);
+      if (generation !== this.generation) return;
+      const profile = profileName(read.config.profile);
+      if (this.dirty && profile !== this.snapshot.profile) {
+        this.update({ loading: false, error: 'The active profile changed. Discard your edits and reload before continuing.' }); return;
+      }
+      const saved = { approval: valueOf(read.config.approval_policy, 'on-request'), sandbox: valueOf(read.config.sandbox_mode, 'read-only') };
+      this.rawApproval = read.config.approval_policy;
+      this.target = target.target;
+      this.update({ loading: false, profile, saved, values: this.dirty ? this.snapshot.values : saved,
+        writeError: target.error, ...allowed });
+    } catch (error) { if (generation === this.generation) this.update({ loading: false, error: message(error), approvals: [], sandboxes: [] }); }
+  }
+  edit(field: Field, value: string) {
+    if (this.snapshot.saving || !(field === 'approval' ? this.snapshot.approvals : this.snapshot.sandboxes).includes(value as never)) return;
+    this.update({ values: { ...this.snapshot.values, [field]: value }, error: null, warning: null });
+  }
+  discard() { this.update({ values: this.snapshot.saved, error: null, warning: null }); }
+  async save(): Promise<boolean> {
+    if (!this.dirty || this.snapshot.saving) return false;
+    const { values, saved, profile } = this.snapshot, target = this.target, rawApproval = this.rawApproval;
+    if (!target) { this.update({ error: this.snapshot.writeError || 'Cannot save without a verified configuration version.' }); return false; }
+    this.update({ saving: true, error: null, warning: null });
+    try {
+      const [before, allowed] = await Promise.all([this.read(), this.requirements()]);
+      const current = await this.targetFor(before);
+      const beforeValues = { approval: valueOf(before.config.approval_policy, 'on-request'), sandbox: valueOf(before.config.sandbox_mode, 'read-only') };
+      if (profileName(before.config.profile) !== profile || !matches(beforeValues, saved) ||
+        JSON.stringify(before.config.approval_policy) !== JSON.stringify(rawApproval) ||
+        !current.target || current.target.file !== target.file || current.target.version !== target.version) {
+        this.update({ saving: false, error: 'Configuration changed elsewhere. Reload and review your edits before saving.' }); return false;
+      }
+      if (values.approval !== saved.approval && !allowed.approvals.includes(values.approval as Approval) ||
+        values.sandbox !== saved.sandbox && !allowed.sandboxes.includes(values.sandbox as Sandbox)) {
+        this.update({ saving: false, ...allowed, error: 'Configuration requirements changed. Reload and review your edits before saving.' }); return false;
+      }
+      const edits: { keyPath: string; value: string; mergeStrategy: 'upsert' }[] = [];
+      if (values.approval !== saved.approval) edits.push({ keyPath: 'approval_policy', value: values.approval, mergeStrategy: 'upsert' });
+      if (values.sandbox !== saved.sandbox) edits.push({ keyPath: 'sandbox_mode', value: values.sandbox, mergeStrategy: 'upsert' });
+      const result = await this.client.rpc<{ status: 'ok' | 'okOverridden'; overriddenMetadata?: { message?: string } | null }>('config/batchWrite',
+        { edits, filePath: target.filePath, expectedVersion: target.version, reloadUserConfig: true }, this.hostId);
+      if (result?.status !== 'ok' && result?.status !== 'okOverridden') throw new Error('The host did not confirm the write');
+      const after = await this.read(), afterTarget = await this.targetFor(after);
+      const actual = { approval: valueOf(after.config.approval_policy, 'on-request'), sandbox: valueOf(after.config.sandbox_mode, 'read-only') };
+      const confirmed = matches(actual, values) && profileName(after.config.profile) === profile && afterTarget.target?.file === target.file;
+      this.rawApproval = after.config.approval_policy;
+      this.target = afterTarget.target;
+      this.update({ saving: false, saved: actual, writeError: afterTarget.error,
+        warning: result.status === 'okOverridden' ? result.overriddenMetadata?.message || 'A higher-priority configuration overrides this change.' : null,
+        error: confirmed ? null : 'The saved configuration differs from your edit. Review the effective values.' });
+      return confirmed;
+    } catch (error) { this.update({ saving: false, error: `Could not confirm save: ${message(error)}. Your edit is preserved.` }); return false; }
+  }
+}

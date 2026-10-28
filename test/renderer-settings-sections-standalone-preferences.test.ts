@@ -93,6 +93,22 @@ test('atom change notifications refresh specified keys and surface malformed sto
   stop();
 });
 
+test('plural atom change notifications and the original microphone setting use their owning stores', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  client.settings.microphoneInputDeviceId = 'fixture-microphone';
+  const stop = prefs.start();
+  await prefs.load();
+  assert.equal(prefs.getSnapshot().microphoneInputDeviceId.value, 'fixture-microphone');
+  prefs.edit('microphoneInputDeviceId', null);
+  assert.equal(await prefs.saveOne('microphoneInputDeviceId'), true);
+  assert.equal(client.settings.microphoneInputDeviceId, null);
+  client.atoms['show-context-window-usage'] = false;
+  for (const listener of client.listeners) listener({ type: 'persisted-atoms-changed' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(prefs.getSnapshot()['show-context-window-usage'].value, false);
+  stop();
+});
+
 test('an update during save is reread after the acknowledgement', async () => {
   const client = new FakeClient(), prefs = new Preferences(client);
   const stop = prefs.start();

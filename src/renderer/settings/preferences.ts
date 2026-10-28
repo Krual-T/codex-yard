@@ -30,6 +30,7 @@ export interface PreferenceValues {
   composerEnterBehavior: 'enter' | 'cmdIfMultiline' | 'cmdAlways';
   composerPlainTextMode: boolean;
   followUpQueueMode: 'queue' | 'steer' | 'interrupt';
+  microphoneInputDeviceId: string | null;
   preventSleepWhileRunning: boolean;
   autoArchiveAfterDays: number;
   localeOverride: string | null;
@@ -102,6 +103,7 @@ export const preferenceDefinitions: Definitions = {
   composerEnterBehavior: { source: 'setting', defaultValue: 'enter', valid: oneOf('enter', 'cmdIfMultiline', 'cmdAlways') },
   composerPlainTextMode: { source: 'setting', defaultValue: false, valid: bool },
   followUpQueueMode: { source: 'setting', defaultValue: 'steer', valid: oneOf('queue', 'steer', 'interrupt') },
+  microphoneInputDeviceId: { source: 'setting', defaultValue: null, valid: (value: unknown): value is string | null => value === null || typeof value === 'string' && value.length > 0 },
   preventSleepWhileRunning: { source: 'setting', defaultValue: false, valid: bool },
   autoArchiveAfterDays: { source: 'setting', defaultValue: 0, valid: numberIn(0, Number.MAX_SAFE_INTEGER) },
   localeOverride: { source: 'setting', defaultValue: null, valid: nullableString },
@@ -173,7 +175,7 @@ export class Preferences {
     this.disposed = false;
     const lifecycle = ++this.lifecycle;
     this.unsubscribe = this.client.subscribe(event => {
-      const source = event.type === 'global-state-updated' ? 'global' : event.type === 'persisted-atom-updated' ? 'atom' :
+      const source = event.type === 'global-state-updated' ? 'global' : event.type === 'persisted-atom-updated' || event.type === 'persisted-atoms-changed' ? 'atom' :
         event.type === 'settings-changed' ? 'setting' : null;
       if (source) {
         const keys = Array.isArray(event.keys) && event.keys.length ? event.keys : typeof event.key === 'string' ? [event.key] :

@@ -44,7 +44,7 @@ function LocalWorktreesSection({ preferences, snapshot, onDirtyChange }: Worktre
   };
   return <>
     <h2>Worktrees</h2>
-    <p className="yard-muted">Managed worktree listing, creation and automatic cleanup require a Git worker that is not connected in this web host.</p>
+    <p className="yard-muted">Creating and automatically cleaning up worktrees are not available for this connection.</p>
     <div className="yard-setting-group">
       <Row label="Worktree root" description="Directory for managed worktrees; leave blank for the default." error={root.error}
         retry={() => { void preferences.reload('git-worktree-root'); }}>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { StandaloneSettingsProps } from '../workbench-contract.ts';
+import { AgentSection } from './AgentSection.tsx';
 import { AppearanceSection } from './AppearanceSection.tsx';
 import { ArchivedSection } from './ArchivedSection.tsx';
 import { CatalogSection } from './CatalogSection.tsx';
@@ -9,8 +10,11 @@ import { GeneralSection } from './GeneralSection.tsx';
 import { GitSection } from './GitSection.tsx';
 import { KeyboardSection } from './KeyboardSection.tsx';
 import { ModelSection } from './ModelSection.tsx';
+import { PersonalizationSection } from './PersonalizationSection.tsx';
 import { Preferences, preferenceKeys } from './preferences.ts';
 import { WorktreesSection } from './WorktreesSection.tsx';
+import { UsageSection } from './UsageSection.tsx';
+import { VoiceSection } from './VoiceSection.tsx';
 import { hostPath, readSettingsRoute, sectionPath } from './routing.ts';
 import './standalone-settings.css';
 
@@ -55,10 +59,25 @@ const searchLabels: Record<string, string[]> = {
     'Accent', 'Background', 'Text', 'Added lines', 'Removed lines', 'Skill color', 'Contrast', 'Transparent window', 'Interface font',
     'Content font', 'Code font', 'Code theme', 'Import theme', 'Export theme'],
   models: ['Model', 'Reasoning effort'],
+  agent: ['Approval policy', 'Sandbox mode', 'Experimental features'],
+  personalization: ['Codex instructions', 'Codex memories', 'Custom instructions', 'ChatGPT memory'],
+  voice: ['Microphone', 'Voice chat', 'Dictation'],
+  usage: ['Account', 'Usage limits'],
   'git-settings': ['Branch prefix', 'Always force push', 'Create draft pull requests', 'Pull request merge method', 'Disable Git-based diffs',
     'Review delivery', 'Commit instructions', 'Pull request instructions', 'Pull request watch instructions', 'Auto-merge when ready'],
   worktrees: ['Worktree root', 'Always fetch upstream before creating worktrees', 'Automatically delete old worktrees', 'Auto-delete limit'],
   'keyboard-shortcuts': ['Number shortcuts', 'Open web link in default browser'],
+};
+const remainingSections: Record<string, string> = {
+  'local-environments': 'Project setup scripts cannot be managed from this page yet.',
+  'browser-use': 'Browser preferences, site access, extensions, history and downloads cannot be managed from this page yet.',
+  'file-type-handlers': 'File opening preferences cannot be managed from this page yet.',
+  'security': 'Account security controls cannot be managed from this page yet.',
+  'billing': 'Billing information cannot be managed from this page yet.',
+  'time-management': 'Time management controls cannot be managed from this page yet.',
+  'extension': 'Extension settings cannot be managed from this page yet.',
+  'pets': 'Pet selection and appearance cannot be managed from this page yet.',
+  'open-source-licenses': 'Third-party notices cannot be loaded from this page yet.',
 };
 
 export function StandaloneSettings({ client, hostId, location, onNavigate, onClose, registerNavigationGuard }: SettingsIntegrationProps) {
@@ -214,6 +233,10 @@ export function StandaloneSettings({ client, hostId, location, onNavigate, onClo
         {section === 'general-settings' ? <GeneralSection preferences={preferences} snapshot={snapshot} platform={platform} navigate={navigate} /> :
           section === 'appearance' ? <AppearanceSection key={editorRevision} preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} onDirtyChange={setOtherDirty} /> :
             section === 'models' ? <ModelSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+              section === 'agent' ? <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+                section === 'personalization' ? <PersonalizationSection key={selectedHost} client={client} hostId={selectedHost} /> :
+                  section === 'voice' ? <VoiceSection preferences={preferences} snapshot={snapshot} /> :
+                    section === 'usage' ? <UsageSection key={selectedHost} client={client} hostId={selectedHost} /> :
               section === 'git-settings' ? <GitSection preferences={preferences} snapshot={snapshot} suspended={confirmLeave} /> :
                 section === 'worktrees' ? <WorktreesSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
                   preferences={preferences} snapshot={snapshot} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
@@ -221,7 +244,7 @@ export function StandaloneSettings({ client, hostId, location, onNavigate, onClo
               isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
                 section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving} /> :
                   section === 'connections' ? <ConnectionsSection client={client} onSavingChange={setOtherSaving} /> :
-            <><h2>{title}</h2><p className="yard-setting-error">This settings section is not yet available in the web host.</p></>}
+            <><h2>{title}</h2><p className="yard-setting-error">{remainingSections[section] ?? 'This settings page cannot be displayed yet.'}</p></>}
       </div>
       {(preferences.dirty || anySaving) && <div className="yard-save-bar"><span>Unsaved changes</span><div className="yard-actions">
         <button type="button" disabled={anySaving} onClick={() => preferences.discard()}>Discard</button>

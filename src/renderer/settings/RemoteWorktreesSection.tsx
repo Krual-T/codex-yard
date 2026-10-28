@@ -18,7 +18,7 @@ export function RemoteWorktreesSection({ client, hostId, onDirtyChange, onSaving
   return <>
     <h2>Worktrees</h2>
     <p className="yard-muted">Worktree preferences for {hostId}.</p>
-    <p className="yard-muted">Managed worktree listing, creation and automatic cleanup require a Git worker that is not connected in this web host.</p>
+    <p className="yard-muted">Creating and automatically cleaning up worktrees are not available for this connection.</p>
     {state.loading && <p role="status">Loading remote settings...</p>}
     {state.error && <p className="yard-setting-error" role="alert">{state.error} <button type="button" className="yard-link" disabled={state.loading || state.saving}
       onClick={() => { void settings.load(); }}>Reload</button></p>}

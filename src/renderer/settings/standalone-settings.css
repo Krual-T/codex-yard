@@ -1,67 +1,68 @@
-.yard-settings { --yard-border: #d8dde1; --yard-muted: #606a70; --yard-focus: #1769b0; display: flex; min-height: 100%; color: #20262a; background: #fff; font: 14px/1.45 system-ui, sans-serif; }
+.yard-settings { display: flex; min-height: 100%; color: var(--yard-fg, #20262a); background: var(--yard-bg, #fff); font: var(--yard-font-size, 14px)/1.45 var(--yard-ui-font, system-ui, sans-serif); }
 .yard-settings * { box-sizing: border-box; }
 .yard-settings button, .yard-settings select, .yard-settings input, .yard-settings textarea { font: inherit; }
-.yard-settings button, .yard-settings select, .yard-settings input[type="text"], .yard-settings input[type="search"], .yard-settings input[type="number"], .yard-settings textarea { border: 1px solid var(--yard-border); border-radius: 5px; background: #fff; color: inherit; padding: 6px 9px; }
+.yard-settings button, .yard-settings select, .yard-settings input[type="text"], .yard-settings input[type="search"], .yard-settings input[type="number"], .yard-settings textarea { border: 1px solid var(--yard-border, #d8dde1); border-radius: 5px; background: var(--yard-surface, var(--yard-bg, #fff)); color: inherit; padding: 6px 9px; }
 .yard-settings button { cursor: pointer; }
 .yard-settings button:disabled, .yard-settings input:disabled, .yard-settings select:disabled { cursor: not-allowed; opacity: .55; }
-.yard-settings :focus-visible { outline: 2px solid var(--yard-focus); outline-offset: 2px; }
-.yard-settings-nav { width: 240px; flex: 0 0 240px; border-right: 1px solid var(--yard-border); padding: 20px 12px; overflow-y: auto; }
+.yard-settings :focus-visible { outline: 2px solid var(--yard-accent, #1769b0); outline-offset: 2px; }
+.yard-settings-nav { width: 240px; flex: 0 0 240px; border-right: 1px solid var(--yard-border, #d8dde1); padding: 20px 12px; overflow-y: auto; }
 .yard-settings-nav-header, .yard-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .yard-settings-nav-header { padding: 0 4px 18px; }
-.yard-host-label { display: grid; gap: 5px; padding: 0 4px; font-size: 12px; color: var(--yard-muted); }
-.yard-host-label select { width: 100%; color: #20262a; }
-.yard-settings-search { display: grid; gap: 5px; padding: 14px 4px 0; font-size: 12px; color: var(--yard-muted); }
+.yard-host-label { display: grid; gap: 5px; padding: 0 4px; font-size: 12px; color: var(--yard-muted, #606a70); }
+.yard-host-label select { width: 100%; color: var(--yard-fg, #20262a); }
+.yard-settings-search { display: grid; gap: 5px; padding: 14px 4px 0; font-size: 12px; color: var(--yard-muted, #606a70); }
 .yard-settings-search input { width: 100%; }
 .yard-search-results { margin: 10px 0; }
 .yard-search-results button { display: grid; width: 100%; gap: 2px; text-align: left; background: transparent; border-color: transparent; }
-.yard-search-results small, .yard-search-results p { color: var(--yard-muted); font-size: 12px; }
+.yard-search-results small, .yard-search-results p { color: var(--yard-muted, #606a70); font-size: 12px; }
 .yard-nav-group { margin-top: 20px; }
-.yard-settings .yard-nav-group h2 { margin: 0 8px 5px; color: var(--yard-muted); font-size: 12px; font-weight: 600; }
+.yard-settings .yard-nav-group h2 { margin: 0 8px 5px; color: var(--yard-muted, #606a70); font-size: 12px; font-weight: 600; }
 .yard-mobile-section { display: none; }
 .yard-nav-group button { display: block; width: 100%; text-align: left; background: transparent; border-color: transparent; padding: 7px 8px; }
-.yard-nav-group button[aria-current="page"] { background: #edf2f4; font-weight: 600; }
+.yard-nav-group button[aria-current="page"] { background: color-mix(in srgb, var(--yard-accent, #1769b0) 14%, var(--yard-surface, var(--yard-bg, #fff))); font-weight: 600; }
 .yard-settings-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
-.yard-settings-content { width: min(100%, 840px); padding: 32px 40px 60px; margin: 0 auto; }
+.yard-settings-content { width: min(100%, 840px); padding: 32px 40px 60px; margin: 0 auto; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
 .yard-settings h2 { font-size: 22px; line-height: 1.25; margin: 0 0 18px; }
 .yard-settings h3 { font-size: 15px; margin: 24px 0 8px; }
 .yard-section-heading h2, .yard-section-heading h3 { margin: 0; }
 .yard-section-heading { margin-bottom: 16px; }
-.yard-setting-group { border-top: 1px solid var(--yard-border); }
-.yard-setting-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 0; border-bottom: 1px solid var(--yard-border); }
+.yard-setting-group { border-top: 1px solid var(--yard-border, #d8dde1); }
+.yard-setting-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 0; border-bottom: 1px solid var(--yard-border, #d8dde1); }
 .yard-setting-copy { min-width: 0; }
 .yard-setting-label { font-weight: 550; }
-.yard-setting-description, .yard-muted { color: var(--yard-muted); font-size: 13px; }
+.yard-setting-description, .yard-settings .yard-muted { color: var(--yard-muted, #606a70); font-size: 13px; }
 .yard-setting-control { flex: 0 1 auto; display: flex; gap: 8px; align-items: center; min-width: 0; }
 .yard-setting-control select, .yard-setting-control input[type="text"] { max-width: 240px; width: 100%; }
 .yard-setting-control textarea { width: min(360px, 100%); min-width: 180px; resize: vertical; }
 .yard-setting-control input[type="number"] { width: 76px; }
-.yard-setting-control input[type="color"] { width: 36px; height: 30px; padding: 1px; border: 1px solid var(--yard-border); border-radius: 4px; background: white; }
-.yard-setting-control input[type="checkbox"] { width: 20px; height: 20px; accent-color: #126d5c; }
-.yard-color-value { font-family: monospace; font-size: 12px; }
-.yard-setting-error { color: #a02d2a; font-size: 13px; overflow-wrap: anywhere; }
+.yard-setting-control input[type="color"] { width: 36px; height: 30px; padding: 1px; border: 1px solid var(--yard-border, #d8dde1); border-radius: 4px; background: var(--yard-surface, var(--yard-bg, #fff)); }
+.yard-setting-control input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--yard-accent, #1769b0); }
+.yard-settings code, .yard-settings pre, .yard-color-value { font-family: var(--yard-code-font, monospace); font-size: var(--yard-code-size, 12px); }
+.yard-setting-error { color: var(--yard-danger, #a02d2a); font-size: 13px; overflow-wrap: anywhere; }
 .yard-settings .yard-link { color: inherit; border: 0; padding: 0; text-decoration: underline; }
 .yard-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .yard-segmented { display: flex; margin-top: 28px; gap: 4px; }
-.yard-segmented button[aria-pressed="true"] { background: #e5f3ef; border-color: #8dbbad; }
+.yard-segmented button[aria-pressed="true"] { background: color-mix(in srgb, var(--yard-accent, #1769b0) 14%, var(--yard-surface, var(--yard-bg, #fff))); border-color: var(--yard-accent, #1769b0); }
 .yard-theme-editor { margin-top: 20px; }
 .yard-theme-preview { display: flex; align-items: center; gap: 16px; min-height: 64px; border: 2px solid; border-radius: 6px; padding: 12px; margin: 0 0 18px; }
 .yard-theme-preview span:first-child { font-size: 20px; font-weight: 700; }
 .yard-theme-preview code { margin-left: auto; }
-.yard-save-bar { position: sticky; bottom: 0; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 24px; background: #fff; border-top: 1px solid var(--yard-border); }
+.yard-instructions { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; border: 1px solid var(--yard-border, #d8dde1); background: var(--yard-surface, var(--yard-bg, #fff)); }
+.yard-save-bar { position: sticky; bottom: 0; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 24px; background: var(--yard-surface, var(--yard-bg, #fff)); border-top: 1px solid var(--yard-border, #d8dde1); }
 .yard-inline-save { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
 .yard-filter { display: flex; align-items: end; gap: 8px; margin: 16px 0; flex-wrap: wrap; }
 .yard-filter label { display: grid; gap: 5px; flex: 1 1 220px; }
 .yard-dialog-backdrop { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; background: rgb(0 0 0 / .45); padding: 20px; }
-.yard-dialog { width: min(100%, 520px); max-height: 90vh; overflow: auto; background: white; padding: 22px; border-radius: 6px; box-shadow: 0 12px 30px rgb(0 0 0 / .2); }
+.yard-settings .yard-dialog { width: min(100%, 520px); min-width: 0; max-height: 90vh; overflow: auto; color: var(--yard-fg, #20262a); background: var(--yard-surface, var(--yard-bg, #fff)); border: 1px solid var(--yard-border, #d8dde1); padding: 22px; border-radius: 6px; box-shadow: 0 12px 30px rgb(0 0 0 / .2); }
 .yard-dialog h2, .yard-dialog h3 { margin: 0 0 12px; }
 .yard-dialog textarea { width: 100%; min-height: 160px; resize: vertical; margin-bottom: 12px; }
 .yard-dialog .yard-actions { justify-content: flex-end; }
 .yard-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
 @media (max-width: 640px) {
   .yard-settings { flex-direction: column; }
-  .yard-settings-nav { width: 100%; flex: none; border-right: 0; border-bottom: 1px solid var(--yard-border); }
-  .yard-mobile-section { display: grid; gap: 5px; padding: 8px 4px 0; font-size: 12px; color: var(--yard-muted); }
-  .yard-mobile-section select { width: 100%; color: #20262a; }
+  .yard-settings-nav { width: 100%; flex: none; border-right: 0; border-bottom: 1px solid var(--yard-border, #d8dde1); }
+  .yard-mobile-section { display: grid; gap: 5px; padding: 8px 4px 0; font-size: 12px; color: var(--yard-muted, #606a70); }
+  .yard-mobile-section select { width: 100%; color: var(--yard-fg, #20262a); }
   .yard-nav-group { display: none; }
   .yard-settings-content { padding: 24px 18px 40px; }
   .yard-setting-row { align-items: flex-start; flex-wrap: wrap; gap: 8px; }

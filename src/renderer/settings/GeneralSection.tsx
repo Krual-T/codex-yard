@@ -1,4 +1,4 @@
-import { NumberPreference, Row, Select, Toggle } from './PreferenceControls.tsx';
+import { entryState, NumberPreference, Row, Select, Toggle } from './PreferenceControls.tsx';
 import type { PreferenceProps } from './PreferenceControls.tsx';
 
 export function GeneralSection(props: PreferenceProps & { platform: string; navigate: (section: string) => void }) {
@@ -30,9 +30,13 @@ export function GeneralSection(props: PreferenceProps & { platform: string; navi
         { value: 'enter', label: 'Enter' }, { value: 'cmdIfMultiline', label: 'Enter, or Ctrl/Command + Enter for multiline' },
         { value: 'cmdAlways', label: 'Ctrl/Command + Enter' },
       ]} />
-      <Select {...props} setting="followUpQueueMode" label="Follow-up messages" options={[
-        { value: 'steer', label: 'Steer current turn' }, { value: 'queue', label: 'Queue' }, { value: 'interrupt', label: 'Interrupt current turn' },
-      ]} />
+      <Row label="Follow-up messages" error={props.snapshot.followUpQueueMode.error} retry={() => { void props.preferences.reload('followUpQueueMode'); }}>
+        <select aria-label="Follow-up messages" value={props.snapshot.followUpQueueMode.value === 'interrupt' ? 'steer' : props.snapshot.followUpQueueMode.value}
+          disabled={entryState(props.snapshot.followUpQueueMode).disabled}
+          onChange={event => props.preferences.edit('followUpQueueMode', event.target.value as 'queue' | 'steer')}>
+          <option value="steer">Steer current turn</option><option value="queue">Queue</option>
+        </select>
+      </Row>
     </div>
   </>;
 }
