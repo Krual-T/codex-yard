@@ -13,6 +13,7 @@ import { KeyboardSection } from './KeyboardSection.tsx';
 import { ModelSection } from './ModelSection.tsx';
 import { PersonalizationSection } from './PersonalizationSection.tsx';
 import { PluginSection } from './PluginSection.tsx';
+import { SkillSection } from './SkillSection.tsx';
 import { Preferences, preferenceKeys } from './preferences.ts';
 import { WorktreesSection } from './WorktreesSection.tsx';
 import { UsageSection } from './UsageSection.tsx';
@@ -246,6 +247,8 @@ export function StandaloneSettings({ client, hostId, location, onNavigate, onClo
               section === 'plugins-settings' ? <PluginSection key={selectedHost} client={client} hostId={selectedHost} route={route}
                 navigate={path => guard(() => onNavigate(path, { state: location.state }))} /> :
               section === 'hooks-settings' ? <HookSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
+                onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+              section === 'skills-settings' ? <SkillSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
                 onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
               isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
                 section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving} /> :

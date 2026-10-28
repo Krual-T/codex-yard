@@ -56,10 +56,10 @@
 .yard-filter label { display: grid; gap: 5px; flex: 1 1 220px; }
 .yard-plugin-search { display: grid; gap: 5px; margin-bottom: 16px; }
 .yard-plugin-search input { width: 100%; }
-.yard-hook-details { margin-top: 8px; }
-.yard-hook-details summary { cursor: pointer; }
-.yard-hook-details p { margin: 8px 0; overflow-wrap: anywhere; }
-.yard-hook-conflict { margin: 16px 0; color: var(--yard-danger, #a02d2a); }
+.yard-hook-details, .yard-skill-details { margin-top: 8px; }
+.yard-hook-details summary, .yard-skill-details summary { cursor: pointer; }
+.yard-hook-details p, .yard-skill-details p { margin: 8px 0; overflow-wrap: anywhere; }
+.yard-hook-conflict, .yard-skill-conflict { margin: 16px 0; color: var(--yard-danger, #a02d2a); }
 .yard-dialog-backdrop { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; background: rgb(0 0 0 / .45); padding: 20px; }
 .yard-settings .yard-dialog { width: min(100%, 520px); min-width: 0; max-height: 90vh; overflow: auto; color: var(--yard-fg, #20262a); background: var(--yard-surface, var(--yard-bg, #fff)); border: 1px solid var(--yard-border, #d8dde1); padding: 22px; border-radius: 6px; box-shadow: 0 12px 30px rgb(0 0 0 / .2); }
 .yard-dialog h2, .yard-dialog h3 { margin: 0 0 12px; }
