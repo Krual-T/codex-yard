@@ -23,9 +23,16 @@ export interface BrowserPages {
   detachElectronWebview(host: ManagedWebview, ref: unknown, kind?: string, generation?: number): void;
 }
 export interface BrowserRenderer { NWt(): void; MWt: { pages: BrowserPages } }
-let React: typeof ReactRuntime;
 
-function ChromeSurface({ target, bridge, visible }: { target: BrowserTarget; bridge: BrowserChrome; visible: boolean }) {
+export interface ChromeSurfaceProps {
+  target: BrowserTarget;
+  bridge: BrowserChrome;
+  visible: boolean;
+  onQuote?(target: BrowserTarget, pageId: number): Promise<string>;
+}
+
+export function createChromeSurface(React: typeof ReactRuntime) {
+return function ChromeSurface({ target, bridge, visible, onQuote }: ChromeSurfaceProps) {
   const [state, setState] = React.useState<ChromePanelState>();
   const [text, setText] = React.useState('');
   const [busy, setBusy] = React.useState(false);
@@ -128,7 +135,7 @@ function ChromeSurface({ target, bridge, visible }: { target: BrowserTarget; bri
         onClick={() => {
           if (state?.pageId == null || inFlight.current) return;
           inFlight.current++; setBusy(true); setReferenceStatus('');
-          void bridge.quoteSelectedElement(target, state.pageId).then(title => setReferenceStatus(`已添加到输入框：${title}`),
+          void (onQuote ? onQuote(target, state.pageId) : bridge.quoteSelectedElement(target, state.pageId)).then(title => setReferenceStatus(`已添加到输入框：${title}`),
             error => setReferenceStatus((error as Error).message)).finally(() => { inFlight.current--; setBusy(inFlight.current > 0); });
         }}>引用所选元素</button>
       <label><input type="checkbox" checked={refresh} onChange={event => setRefresh(event.target.checked)} />自动刷新</label>
@@ -161,12 +168,14 @@ function ChromeSurface({ target, bridge, visible }: { target: BrowserTarget; bri
       <button disabled={busy || !text || !state?.pageId}>输入</button>
     </form>
   </section>;
+};
 }
 
 /** Keep the original pages manager, native host object, presentation transitions,
  * tabs and address bar. Only replace the inert Web <webview>'s pixel surface. */
 export function installChromeWebviews(react: typeof ReactRuntime, dom: { createRoot(element: Element): Root }, application: BrowserRenderer) {
-  React = react;
+  const React = react;
+  const ChromeSurface = createChromeSurface(react);
   application.NWt();
   const pages = application.MWt.pages;
   const bridge = (window as ChromeWindow).workbenchChrome;

@@ -1,6 +1,6 @@
 import type { HostMessage } from '../native/protocol.ts';
 import { targetKey, chromeSnapshot } from './protocol.ts';
-import type { BrowserTarget, ChromeElementComment, ChromePanelState, ChromeRequest, ChromeTransport } from './protocol.ts';
+import type { BrowserTarget, ChromeElementComment, ChromeElementContext, ChromePanelState, ChromeRequest, ChromeTransport } from './protocol.ts';
 import type { ChromeConnections, ConnectionRequest } from './client-protocol.ts';
 
 export class BrowserChrome {
@@ -31,6 +31,17 @@ export class BrowserChrome {
   private saveComments(value: Record<string, unknown[]>) {
     localStorage.setItem('workbench.browser-comments.v1', JSON.stringify(value));
     this.comments = value;
+  }
+  async selectedElement(target: BrowserTarget, pageId: number): Promise<ChromeElementContext> {
+    const key = targetKey(target), generation = this.generations.get(key) ?? 0;
+    const state = await this.request({ ...target, pageId, operation: 'element-context' });
+    if (generation !== (this.generations.get(key) ?? 0) || this.states.get(key)?.pageId !== pageId) throw new Error('浏览器面板已切换，请重新引用');
+    if (!state.elementContext) throw new Error(state.error || 'Chrome 未返回所选元素');
+    return state.elementContext;
+  }
+  selectionVersion(target: BrowserTarget) { return this.generations.get(targetKey(target)) ?? 0; }
+  selectionIsCurrent(target: BrowserTarget, pageId: number, version: number) {
+    return this.selectionVersion(target) === version && this.getState(target)?.pageId === pageId;
   }
   async quoteSelectedElement(target: BrowserTarget, pageId: number) {
     if (!this.commentConverter) throw new Error('聊天编辑器尚未就绪，请稍后再试');
@@ -72,11 +83,17 @@ export class BrowserChrome {
     return this.request({ ...target, operation: 'state' });
   }
   request: ChromeTransport = async request => {
-    const key = targetKey(request), generation = this.generations.get(key) ?? 0;
+    const key = targetKey(request);
+    if (request.operation === 'select' || request.operation === 'release' || request.operation === 'command') {
+      this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
+    }
+    const generation = this.generations.get(key) ?? 0;
     try {
       const state = await this.requestHost('chrome-browser', { ...request,
         connection: this.connectionFor(request), clientKey: this.identity() }) as ChromePanelState;
       if (generation !== (this.generations.get(key) ?? 0)) return state;
+      // An element lookup is a transient read and may finish after a page change.
+      if (request.operation === 'element-context') return state;
       const { elementContext: _context, ...persistent } = state;
       if (request.operation === 'release' || request.command?.type === 'close-tab') this.states.delete(targetKey(request));
       else this.states.set(targetKey(request), persistent);
