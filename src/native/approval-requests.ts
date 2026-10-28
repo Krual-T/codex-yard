@@ -39,6 +39,7 @@ type Phase = 'ready' | 'claimed' | 'sending' | 'sent' | 'unknown' | 'resolved';
 interface Entry {
   ref: ApprovalRequestRef;
   threadId: string | null;
+  inputTurnId?: string;
   phase: Phase;
 }
 interface Slot {
@@ -72,7 +73,7 @@ export class ApprovalRequestRegistry<Page extends object, Socket extends object>
   private readonly closedPages = new WeakSet<Page>();
   private readonly claims = new WeakMap<ApprovalRequestClaim, ClaimState<Page, Socket>>();
 
-  register(source: ApprovalSource<Page, Socket>, request: { id: ApprovalRequestId; threadId: string | null }): ApprovalRegisterResult {
+  register(source: ApprovalSource<Page, Socket>, request: { id: ApprovalRequestId; threadId: string | null; inputTurnId?: string }): ApprovalRegisterResult {
     if (!source.hostId || !validId(request.id)
       || (request.threadId !== null && (typeof request.threadId !== 'string' || !request.threadId))) {
       return { status: 'rejected', reason: 'invalid-request' };
@@ -97,16 +98,18 @@ export class ApprovalRequestRegistry<Page extends object, Socket extends object>
     }
     const ref = Object.freeze({ hostId: source.hostId, id: request.id, generation: `${this.prefix}:${++this.nextGeneration}` });
     slot.history.set(request.threadId, (slot.history.get(request.threadId) ?? 0) + 1);
-    slot.pending.set(ref.generation, { ref, threadId: request.threadId, phase: 'ready' });
+    slot.pending.set(ref.generation, { ref, threadId: request.threadId, inputTurnId: request.inputTurnId, phase: 'ready' });
     return { status: 'registered', ref };
   }
 
-  claim(source: ApprovalSource<Page, Socket>, ref: ApprovalRequestRef): ApprovalClaimResult {
+  claim(source: ApprovalSource<Page, Socket>, ref: ApprovalRequestRef, inputOrigin?: { threadId: string; turnId: string }): ApprovalClaimResult {
     const state = this.source(source);
     if (!state || ref.hostId !== source.hostId) return { status: 'unavailable', reason: 'wrong-source' };
     const slot = state.slots.get(ref.id);
     const entry = slot?.pending.get(ref.generation);
     if (!slot || !entry) return { status: 'unavailable', reason: 'missing' };
+    if (inputOrigin && (entry.threadId !== inputOrigin.threadId || !entry.inputTurnId || entry.inputTurnId !== inputOrigin.turnId))
+      return { status: 'unavailable', reason: 'wrong-source' };
     // A JSON-RPC response has no generation or thread, so it cannot target overlapping ids.
     if (slot.pending.size !== 1) return { status: 'unavailable', reason: 'ambiguous-id' };
     if (entry.phase === 'claimed') return { status: 'unavailable', reason: 'already-claimed' };

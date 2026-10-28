@@ -868,6 +868,52 @@ test('native prewarming, notifications and approval answers use the real RPC bri
   assert.deepEqual((await h.fake.waitFor((message: Record<string, unknown>) => message.id === 'approval' && message.result)).result, { decision: 'decline' });
 });
 
+test('native approval resolution carries only the proven original request generation', async t => {
+  const h = await fixture(t), client = await h.connect();
+  await client.rpc(1, 'model/list');
+  h.fake.send({ id: 'reused', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a' } });
+  const first = await client.until(message => message.type === 'mcp-request' && message.request.id === 'reused');
+  h.fake.send({ method: 'serverRequest/resolved', params: { requestId: 'reused', threadId: 'thread-a', marker: 'first' } });
+  const resolved = await client.until(message => message.method === 'serverRequest/resolved' && message.params.marker === 'first');
+  assert.deepEqual(resolved.requestRef, first.requestRef);
+  h.fake.send({ id: 'reused', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-a' } });
+  const second = await client.until(message => message.type === 'mcp-request' && message.request.id === 'reused'
+    && message.requestRef.generation !== first.requestRef.generation);
+  h.fake.send({ method: 'serverRequest/resolved', params: { requestId: 'reused', threadId: 'thread-a', marker: 'late-duplicate' } });
+  const duplicate = await client.until(message => message.method === 'serverRequest/resolved' && message.params.marker === 'late-duplicate');
+  assert.equal(duplicate.requestRef, undefined);
+  client.send({ type: 'mcp-response', hostId: 'local', generation: second.requestRef.generation,
+    requestId: 'second-answer', response: { id: 'reused', result: { decision: 'decline' } } });
+  assert.equal((await client.until(message => message.type === 'server-request-response' && message.requestId === 'second-answer')).success, true);
+  assert.equal(h.fake.messages.filter(message => message.id === 'reused' && message.result).length, 1);
+});
+
+test('input dismissal interrupts only the original request turn and shares its one-shot reservation', async t => {
+  const h = await fixture(t), client = await h.connect();
+  h.fake.handlers.set('turn/interrupt', () => ({}));
+  await client.rpc(1, 'model/list');
+  h.fake.send({ id: 'input-request', method: 'item/tool/requestUserInput', params: { threadId: 'original-thread', turnId: 'original-turn', questions: [] } });
+  const request = await client.until(message => message.request?.id === 'input-request');
+  async function interrupt(id: string, threadId: string, turnId: string) {
+    client.send({ type: 'fetch', requestId: id, url: 'vscode://codex/approval-request-interrupt',
+      body: JSON.stringify({ hostId: 'local', ref: request.requestRef, threadId, turnId }) });
+    return client.until(message => message.type === 'fetch-response' && message.requestId === id);
+  }
+  assert.equal((await interrupt('wrong-turn', 'original-thread', 'other-turn')).responseType, 'error');
+  assert.equal((await interrupt('wrong-thread', 'other-thread', 'original-turn')).responseType, 'error');
+  assert.equal(h.fake.calls('turn/interrupt').length, 0);
+  assert.equal((await interrupt('original', 'original-thread', 'original-turn')).responseType, 'success');
+  assert.deepEqual(h.fake.calls('turn/interrupt').map(message => message.params), [{ threadId: 'original-thread', turnId: 'original-turn' }]);
+  assert.equal((await interrupt('again', 'original-thread', 'original-turn')).responseType, 'error');
+  client.send({ type: 'mcp-response', hostId: 'local', generation: request.requestRef.generation,
+    requestId: 'duplicate-answer', response: { id: 'input-request', result: { answers: {} } } });
+  const duplicate = await client.until(message => message.type === 'server-request-response' && message.requestId === 'duplicate-answer');
+  assert.equal(duplicate.success, undefined);
+  assert.equal(duplicate.uncertain, false);
+  assert.equal(h.fake.calls('turn/interrupt').length, 1);
+  assert.equal(h.fake.messages.some(message => message.id === 'input-request' && message.result), false);
+});
+
 async function configureModelFixture(fake: Awaited<ReturnType<typeof createFakeCodex>>, root: string) {
   const codexHome = join(root, 'codex'), file = join(codexHome, 'config.toml');
   await mkdir(codexHome, { recursive: true }); await writeFile(file, 'model = "fixture-model"\n');

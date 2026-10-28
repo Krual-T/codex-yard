@@ -14,6 +14,7 @@ import { createAppTools } from '../../lib/app-tools.ts';
 import { appToolCatalog, createHostToolHandler } from '../../lib/host-tools.ts';
 import { projectRoot, rendererVersion } from '../../lib/app-resources.ts';
 import type { ConfigReadSource } from '../../lib/config-write-protocol.ts';
+import { ApprovalRequestRegistry } from './approval-requests.ts';
 import { record, publicConfig, readMethods, writeMethods } from './protocol.ts';
 import type { HostMessage, ObjectValue } from './protocol.ts';
 import { createThreadProjects, readThreadProjectState } from './thread-projects.ts';
@@ -155,7 +156,15 @@ export async function createNativeWorkbench(options: Options = {}) {
     id: project.path, name: project.name, rootPaths: [project.path], createdAt: Date.now(), updatedAt: Date.now(),
   }]));
   const clients = new Map<WebSocket, Map<string, CodexConnection>>();
-  const pendingServerRequests = new Map<WebSocket, Map<string, { socket: WebSocket; generation: string }>>();
+  const approvalRequests = new ApprovalRequestRegistry<WebSocket, WebSocket>();
+  const observedApprovalSockets = new WeakSet<WebSocket>();
+  function observeApprovalSocket(page: WebSocket, hostId: string, socket: WebSocket) {
+    if (observedApprovalSockets.has(socket)) return;
+    observedApprovalSockets.add(socket);
+    const source = { page, hostId, socket };
+    if (socket.readyState !== WebSocket.OPEN) approvalRequests.disconnect(source);
+    else socket.once('close', () => approvalRequests.disconnect(source));
+  }
   const terminals = new Map<WebSocket, TerminalHost>();
   const browsers = new Map<WebSocket, ChromePanelRouter>();
   const chromeClients = new ClientChromeBroker({ configured: !!chromeConnection, label:
@@ -394,7 +403,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     });
     client.on('close', () => {
       clients.delete(client);
-      pendingServerRequests.delete(client);
+      approvalRequests.closePage(client);
       void browser.close().finally(() => browsers.delete(client));
       // Hang up page-owned shells before closing their daemon connection, so
       // an interactive shell can notify its background jobs before exiting.
@@ -425,9 +434,19 @@ export async function createNativeWorkbench(options: Options = {}) {
     } : { cwd: workspace });
     connections.set(hostId, connection);
     const current = connection;
-    current.on('message', (message: { id?: string | number; method: string; params: unknown; seq?: number }) => {
+    current.on('message', (message, sourceSocket) => {
+      if (!sourceSocket || sourceSocket !== current.socket || sourceSocket.readyState !== WebSocket.OPEN) return;
+      observeApprovalSocket(client, hostId, sourceSocket);
+      const source = { page: client, hostId, socket: sourceSocket };
       const params = record(message.params);
-      if (message.method === 'serverRequest/resolved') pendingServerRequests.get(client)?.delete(JSON.stringify([hostId, params.requestId]));
+      const registered = message.id != null ? approvalRequests.register(source, {
+        id: message.id, threadId: typeof params.threadId === 'string' ? params.threadId : null,
+        ...(message.method === 'item/tool/requestUserInput' && typeof params.turnId === 'string' ? { inputTurnId: params.turnId } : {}),
+      }) : undefined;
+      if (registered && registered.status !== 'registered') return;
+      const resolved = message.method === 'serverRequest/resolved'
+        && (typeof params.requestId === 'string' || typeof params.requestId === 'number')
+        ? approvalRequests.resolve(source, { requestId: params.requestId, threadId: typeof params.threadId === 'string' ? params.threadId : null }) : null;
       if (hostId === 'local' && message.method === 'turn/completed') {
         legacyTitleCalls.delete(JSON.stringify([params.threadId, record(params.turn).id]));
       }
@@ -437,6 +456,9 @@ export async function createNativeWorkbench(options: Options = {}) {
       if (hostId === 'local' && message.id != null && message.method === 'item/tool/call' &&
           params.namespace === 'codex_app' && params.tool === 'set_thread_title' &&
           typeof params.threadId === 'string' && typeof params.turnId === 'string' && typeof params.callId === 'string') {
+        if (registered?.status !== 'registered') return;
+        const claimed = approvalRequests.claim(source, registered.ref);
+        if (claimed.status !== 'claimed') return;
         const turnKey = JSON.stringify([params.threadId, params.turnId]);
         let calls = legacyTitleCalls.get(turnKey);
         if (!calls) { calls = new Map(); legacyTitleCalls.set(turnKey, calls); }
@@ -446,33 +468,25 @@ export async function createNativeWorkbench(options: Options = {}) {
             threadId: params.threadId, turnId: params.turnId, callId: params.callId, arguments: params.arguments });
           calls.set(params.callId, result);
         }
-        const socket = current.socket;
         void result.then(reply => {
-          if (current.socket === socket && current.connected) return current.respond(message.id!, reply);
+          const payload = JSON.stringify({ id: message.id, result: reply });
+          return approvalRequests.dispatch(claimed.claim, socket => new Promise<void>((resolve, reject) => {
+            if (socket.readyState !== WebSocket.OPEN) { reject(new Error('Original socket closed')); return; }
+            socket.send(payload, error => error ? reject(error) : resolve());
+          }));
         })
           // A lost reply is uncertain; never retry a title write on reconnect.
           .catch(() => {});
         return;
       }
-      if (message.id != null && current.socket) {
-        const requests = pendingServerRequests.get(client) ?? new Map<string, { socket: WebSocket; generation: string }>();
-        const connectionGeneration = connectionGenerations.get(current.socket) ?? crypto.randomUUID();
-        connectionGenerations.set(current.socket, connectionGeneration);
-        // A daemon may reuse a resolved JSON-RPC id on the same socket.
-        const generation = connectionGeneration + ':' + crypto.randomUUID();
-        requests.set(JSON.stringify([hostId, message.id]), { socket: current.socket, generation }); pendingServerRequests.set(client, requests);
-      }
-      send(client, message.id != null ? { type: 'mcp-request', hostId, request: message,
-        requestRef: { hostId, id: message.id, generation: pendingServerRequests.get(client)?.get(JSON.stringify([hostId, message.id]))?.generation } }
-        : { type: 'mcp-notification', hostId, method: message.method, params: message.params, seq: message.seq });
+      send(client, registered?.status === 'registered' ? { type: 'mcp-request', hostId, request: message, requestRef: registered.ref }
+        : { type: 'mcp-notification', hostId, method: message.method, params: message.params, seq: message.seq,
+          ...(resolved?.status === 'resolved' ? { requestRef: resolved.ref } : {}) });
     });
     current.on('status', () => {
       // The daemon survives a client disconnect. Keep other hosts connected;
       // the renderer restores subscriptions when this host reconnects.
-      if (!current.connected) {
-        const requests = pendingServerRequests.get(client);
-        for (const [key] of requests ?? []) if ((JSON.parse(key) as [string, unknown])[0] === hostId) requests?.delete(key);
-      }
+      if (current.socket) observeApprovalSocket(client, hostId, current.socket);
       notifyConnection(client, hostId, current);
     });
     return current;
@@ -511,18 +525,17 @@ export async function createNativeWorkbench(options: Options = {}) {
       // an approval to a daemon connection that never received the request.
       const connection = connections.get(hostId);
       if (!connection?.connected) throw new Error('连接已断开，请核对请求状态');
-      const key = JSON.stringify([hostId, message.response.id]);
-      const requests = pendingServerRequests.get(client);
-      const pending = requests?.get(key);
-      if (!pending || pending.socket !== connection.socket || message.generation !== pending.generation) throw new Error('请求已失效，请核对当前会话状态');
-      requests?.delete(key);
-      if (message.response.error) {
-        if (!connection.socket || connection.socket.readyState !== WebSocket.OPEN) throw new Error('连接已断开，请核对请求状态');
-        await new Promise<void>((resolve, reject) => connection.socket!.send(JSON.stringify(message.response), error => {
-          if (error) reject(Object.assign(new Error('回答发送结果待确认，请核对请求状态。'), { uncertain: true })); else resolve();
-        }));
-      }
-      else await connection.respond(message.response.id, message.response.result);
+      const socket = connection.socket;
+      if (!socket || socket.readyState !== WebSocket.OPEN || typeof message.generation !== 'string') throw new Error('请求已失效，请核对请求状态');
+      const payload = JSON.stringify(message.response);
+      const claimed = approvalRequests.claim({ page: client, hostId, socket }, { hostId, id: message.response.id, generation: message.generation });
+      if (claimed.status !== 'claimed') throw new Error('请求已失效或已回答，请核对原请求状态');
+      const dispatched = await approvalRequests.dispatch(claimed.claim, original => new Promise<void>((resolve, reject) => {
+        if (original.readyState !== WebSocket.OPEN) { reject(new Error('Original socket closed')); return; }
+        original.send(payload, error => error ? reject(error) : resolve());
+      }));
+      if (dispatched.status !== 'sent') throw Object.assign(new Error(dispatched.status === 'unknown'
+        ? '回答发送结果待确认，请核对原请求状态。' : '原请求已失效，回答未发送。'), { uncertain: dispatched.status === 'unknown' });
       if (message.requestId) send(client, { type: 'server-request-response', requestId: message.requestId, success: true });
       return;
     }
@@ -613,6 +626,22 @@ export async function createNativeWorkbench(options: Options = {}) {
     validHost(hostId);
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
     switch (endpoint) {
+      case 'approval-request-interrupt': {
+        const ref = record(params.ref), connection = connections.get(hostId), socket = connection?.socket;
+        if (!connection?.connected || !socket || socket.readyState !== WebSocket.OPEN || ref.hostId !== hostId
+          || typeof ref.generation !== 'string' || !(typeof ref.id === 'string' || typeof ref.id === 'number' && Number.isFinite(ref.id))
+          || typeof params.threadId !== 'string' || !params.threadId || typeof params.turnId !== 'string' || !params.turnId)
+          throw Object.assign(new Error('原输入请求不可用，未停止其他会话。'), { uncertain: false });
+        const claim = approvalRequests.claim({ page: client, hostId, socket },
+          { hostId, id: ref.id, generation: ref.generation }, { threadId: params.threadId, turnId: params.turnId });
+        if (claim.status !== 'claimed') throw Object.assign(new Error('原输入请求已失效或正在处理。'), { uncertain: false });
+        const dispatched = await approvalRequests.dispatch(claim.claim, original => {
+          if (connection.socket !== original || original.readyState !== WebSocket.OPEN) throw new Error('Original input connection closed');
+          return connection.request('turn/interrupt', { threadId: params.threadId, turnId: params.turnId }, { mutating: true }).then(() => undefined);
+        });
+        if (dispatched.status !== 'sent') throw Object.assign(new Error('停止原任务的结果待确认，请检查原会话。'), { uncertain: dispatched.status === 'unknown' });
+        return null;
+      }
       case 'chrome-browser': return browsers.get(client)!.request(params as unknown as ChromeRequest);
       case 'chrome-connections': return chromeClients.connections(params as unknown as ConnectionRequest);
       case 'refresh-remote-connections': return { remoteConnections: await remoteProfiles() };

@@ -56,6 +56,8 @@ export interface ApprovalDialogProps {
   request: ServerRequest;
   onRespond(result: unknown): Promise<void>;
   onUnsupported(): Promise<void>;
+  /** Close this view while the parent retains the original request and answers. */
+  onCloseView?(): void;
   onInputEscape?(origin: ApprovalInputOrigin): Promise<void>;
   /** Only for the original onboarding/auto-resolution request cases. */
   inputDismissMode?: 'interrupt' | 'reply-empty';
@@ -350,7 +352,7 @@ export function ApprovalDialog(props: ApprovalDialogProps) {
   return <ApprovalDialogContent key={JSON.stringify([props.request.ref.hostId, props.request.ref.generation, props.request.ref.id])} {...props} />;
 }
 
-function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscape, inputDismissMode = 'interrupt', stateRef, outcome, onBegin, onOutcome,
+function ApprovalDialogContent({ request, onRespond, onUnsupported, onCloseView, onInputEscape, inputDismissMode = 'interrupt', stateRef, outcome, onBegin, onOutcome,
   inputDraft, onInputDraftChange, onInputAnswerChange, formDraft, onFormDraftChange, onCheckRequestValidity, onPickApprovalFiles, onBeginUserVerification,
   onApplyToolSuggestion, onSubmitBrowserAuth, browserAuthBinding, onSubscribeBrowserAuthQr, browserAuthQrCode,
   browserAuthAcknowledgement, onAcknowledgeBrowserAuth, browserAuthCandidates, onRequestBrowserAuthCandidates,
@@ -732,6 +734,7 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
     }}>
     <h2 id={formId + '-title'}>{input ? 'Codex needs your input' : elicitation ? 'Additional information requested'
       : known ? 'Approval required' : 'Unable to handle this request'}</h2>
+    {onCloseView && <button type="button" onClick={onCloseView}>Close request view</button>}
     <p>Host: {request.ref.hostId}{threadId && <> · Thread: {threadId}</>}{turnId && <> · Turn: {turnId}</>}</p>
     {elicitation && <><p>{typeof request.params.message === 'string' ? request.params.message : ''}</p>
       {typeof request.params.serverName === 'string' && <p>Server: {request.params.serverName}</p>}

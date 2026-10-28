@@ -1,7 +1,7 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { flushSync } from 'react-dom';
 import type { ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-protocol.ts';
-import type { ComposerDraft, MessageEditOrigin, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
+import type { ComposerDraft, MessageEditOrigin, ServerRequestRef, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
 import { StandaloneComposer, bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from '../composer/StandaloneComposer.tsx';
 import type { ComposerDraftController, ComposerDraftLease, ComposerDraftSnapshot, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
 import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
@@ -10,11 +10,11 @@ import { StandaloneGoal } from '../composer/StandaloneGoal.tsx';
 import { StandaloneSettings } from '../settings/StandaloneSettings.tsx';
 import type { SettingsInstructionEditorProps } from '../settings/PersonalizationSection.tsx';
 import { CodeEditor } from '../files/CodeEditor.tsx';
-import { BrowserWorkbenchClient, isServerRequestEvent } from './client.ts';
+import { BrowserWorkbenchClient } from './client.ts';
 import { isThreadBusy } from './thread-state.ts';
 import { ConversationSessions, useConversationSession } from './conversation-sessions.ts';
 import { ApprovalDialog } from './ApprovalDialog.tsx';
-import type { ServerRequest } from './ApprovalDialog.tsx';
+import { ApprovalRequestsController } from './approval-requests.ts';
 import { submitDraft } from './submission.ts';
 import { applyAppearance } from './appearance.ts';
 import { sessionOptions } from './session-options.ts';
@@ -110,7 +110,20 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const threads = list.rows;
   const listRef = useRef(list); listRef.current = list;
   const [prefills, setPrefills] = useState<Record<string, { id: string; draft: ComposerDraft }[]>>({});
-  const [requests, setRequests] = useState<ServerRequest[]>([]);
+  const approvals = useMemo(() => new ApprovalRequestsController(client), [client]);
+  const requests = useSyncExternalStore(approvals.subscribe, approvals.getSnapshot);
+  useEffect(() => () => approvals.dispose(), [approvals]);
+  const [selectedRequest, setSelectedRequest] = useState<ServerRequestRef | null>(null);
+  const [requestViewHidden, setRequestViewHidden] = useState(false);
+  const newestRequestKey = requests.filter(entry => entry.current && entry.outcome === 'ready')
+    .map(entry => JSON.stringify(entry.request.ref)).at(-1);
+  useEffect(() => {
+    if (newestRequestKey) { setSelectedRequest(JSON.parse(newestRequestKey) as ServerRequestRef); setRequestViewHidden(false); }
+  }, [newestRequestKey]);
+  const selectedRequestEntry = requests.find(entry => selectedRequest && entry.request.ref.hostId === selectedRequest.hostId
+    && entry.request.ref.id === selectedRequest.id && entry.request.ref.generation === selectedRequest.generation)
+    ?? requests.find(entry => entry.current) ?? requests[0];
+  const approvalDialog = selectedRequestEntry && !requestViewHidden ? approvals.dialog(selectedRequestEntry.request.ref) : null;
   const [menu, setMenu] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [leaving, setLeaving] = useState(false);
@@ -291,7 +304,6 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       if (event.type === 'connection-state') {
         connectionReadGeneration.current++;
         setBridgeStatus(String(event.state)); setSettingsSourceEpoch(value => value + 1);
-        if (event.state !== 'connected') setRequests([]);
       }
       if (event.type === 'page-resumed') {
         setSettingsSourceEpoch(value => value + 1);
@@ -308,7 +320,6 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           if (event.state === 'connected') setRefresh(value => value + 1);
         }
       }
-      if (event.type === 'codex-app-server-connection-changed' && event.state !== 'connected') setRequests(previous => previous.filter(request => request.hostId !== event.hostId));
       if (event.type === 'shared-object-updated' && event.key === 'remote_ssh_connections' && Array.isArray(event.value)) {
         setHosts([{ hostId: 'local', displayName: 'Local' }, ...event.value as Host[]]);
         void reloadProjects().catch(cause => setError(String(cause)));
@@ -327,15 +338,6 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         setTabs(previous => previous.map(tab => tab.hostId === event.hostId && tab.id === id ? { ...tab, readOnly } : tab));
         setCurrent(previous => previous.hostId === event.hostId && previous.threadId === id ? { ...previous, readOnly } : previous);
         void refreshList();
-      }
-      if (isServerRequestEvent(event)) {
-        const request = event.request;
-        setRequests(previous => [...previous.filter(item => item.id !== request.id || item.hostId !== event.hostId),
-          { ...request, hostId: event.hostId, params: request.params ?? {}, ref: event.requestRef }]);
-      }
-      if (event.type === 'mcp-notification' && event.method === 'serverRequest/resolved') {
-        const params = record(event.params);
-        setRequests(previous => previous.filter(request => request.hostId !== event.hostId || request.id !== params.requestId));
       }
       if (event.type === 'settings-changed' || event.type === 'global-state-updated') void reloadPreferences().catch(cause => setError(String(cause)));
       if (event.type === 'thread-project-memberships-updated' || event.type === 'global-state-updated'
@@ -597,9 +599,6 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       await refreshList(); setRefresh(value => value + 1);
     } catch (cause) { setError((cause as Error).message); }
   };
-  const respond = async (request: typeof requests[number], result: unknown) => {
-    await client.reply(request.ref, { result }); setRequests(previous => previous.filter(item => item !== request));
-  };
   const newChat = async (nextCwd = cwd, project?: Project) => {
     if (!await navigate('/' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId)))) return;
     const id = crypto.randomUUID();
@@ -700,7 +699,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   };
 
   const shortcuts = useWorkbenchShortcuts(client, {
-    blocked: () => navigationLocked.current || leaving || menu || requests.length > 0,
+    blocked: () => navigationLocked.current || leaving || menu || Boolean(approvalDialog),
     selectTab: slot => {
       const ordered = document.documentElement.dir === 'rtl' ? [...tabs].reverse() : tabs;
       const tab = ordered[slot - 1];
@@ -732,6 +731,12 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         })}</div>
         <select aria-label="Execution host" value={current.hostId} onChange={event => navigate('/?hostId=' + encodeURIComponent(event.target.value))}>{hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.displayName}</option>)}</select>
         <span className="yard-connection" title={'Browser: ' + bridgeStatus + '; Host: ' + (hostStatuses[current.hostId] ?? 'connecting')} data-state={status}>●</span>
+        {requests.length > 0 && <label>Requests <select aria-label="Inspect approval request" value={selectedRequestEntry ? JSON.stringify(selectedRequestEntry.request.ref) : ''}
+          onChange={event => { setSelectedRequest(JSON.parse(event.target.value) as ServerRequestRef); setRequestViewHidden(false); }}>
+          {requests.map(entry => <option key={JSON.stringify(entry.request.ref)} value={JSON.stringify(entry.request.ref)}>
+            {entry.request.hostId}: {entry.request.method} · {entry.outcome}
+          </option>)}
+        </select><button type="button" onClick={() => setRequestViewHidden(false)}>Open request</button></label>}
         {bridgeStatus === 'connected' && hostStatuses[current.hostId] === 'disconnected' && <button onClick={() => {
           const hostId = current.hostId;
           void client.rpc('thread/list', { limit: 1 }, hostId).catch(cause => setError(String(cause)));
@@ -841,8 +846,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       </aside>
       </div>
     </main>
-    {requests[0] && <ApprovalDialog key={requests[0].ref.generation + ':' + requests[0].id} request={requests[0]} onRespond={result => respond(requests[0]!, result)} onUnsupported={async () => {
-      const request = requests[0]!; await client.reply(request.ref, { error: { code: -32601, message: '当前 Web 宿主不支持此请求。' } }); setRequests(previous => previous.filter(item => item !== request));
-    }} />}
+    {approvalDialog && <ApprovalDialog key={JSON.stringify(approvalDialog.request.ref)} {...approvalDialog}
+      onCloseView={() => setRequestViewHidden(true)}
+      onInputEscape={async origin => { await client.host('approval-request-interrupt', { ref: origin.ref, hostId: origin.hostId,
+        threadId: origin.threadId, turnId: origin.turnId }); }} />}
   </div></I18nProvider>;
 }

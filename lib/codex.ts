@@ -68,7 +68,7 @@ interface PendingRequest {
 }
 const maxLateObservers = 16;
 const lateObserverLifetimeMs = 5 * 60_000;
-export class CodexConnection extends EventEmitter<{ message: [RpcMessage]; status: [] }> {
+export class CodexConnection extends EventEmitter<{ message: [RpcMessage, WebSocket?]; status: [] }> {
   readonly socketPath: string;
   readonly timeout: number;
   readonly cwd: string | undefined;
@@ -109,8 +109,8 @@ export class CodexConnection extends EventEmitter<{ message: [RpcMessage]; statu
       perMessageDeflate: false,
     });
     this.socket = socket;
-    socket.on('message', data => this.receive(data));
-    socket.on('error', error => { this.lastError = error.message; });
+    socket.on('message', data => this.receive(data, socket));
+    socket.on('error', error => { if (socket === this.socket) this.lastError = error.message; });
     socket.on('close', () => {
       if (socket !== this.socket) return;
       this.connected = false;
@@ -166,7 +166,8 @@ export class CodexConnection extends EventEmitter<{ message: [RpcMessage]; statu
     return permissionCatalog({ config, requirements, profiles, cwd, ...options });
   }
 
-  receive(data: WebSocket.RawData) {
+  receive(data: WebSocket.RawData, sourceSocket = this.socket) {
+    if (sourceSocket && sourceSocket !== this.socket) return;
     let message: unknown;
     try { message = JSON.parse(String(data)); } catch { return; }
     if (!isRecord(message)) return;
@@ -204,7 +205,7 @@ export class CodexConnection extends EventEmitter<{ message: [RpcMessage]; statu
     if (typeof message.method === 'string') {
       this.eventCursor += 1;
       this.emit('message', { ...message, method: message.method, params: message.params,
-        id: typeof message.id === 'string' || typeof message.id === 'number' ? message.id : undefined, seq: this.eventCursor });
+        id: typeof message.id === 'string' || typeof message.id === 'number' ? message.id : undefined, seq: this.eventCursor }, sourceSocket);
     }
   }
 
