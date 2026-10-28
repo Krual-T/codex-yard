@@ -1,5 +1,5 @@
 import type { ThreadItemSummary } from '../../../lib/codex-protocol.ts';
-import type { ComposerDraft } from '../workbench-contract.ts';
+import type { ComposerDocument, ComposerDraft, StandaloneMessagesProps } from '../workbench-contract.ts';
 
 export type ImageSource = { kind: 'url' | 'path' | 'fileId'; value: string; label: string };
 export type UserContentPart =
@@ -11,6 +11,19 @@ export type UserContentPart =
 export function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown> : {};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isComposerDocument(value: unknown): value is ComposerDocument {
+  if (!isRecord(value) || typeof value.type !== 'string') return false;
+  if (value.attrs !== undefined && !isRecord(value.attrs)) return false;
+  if (value.text !== undefined && typeof value.text !== 'string') return false;
+  if (value.marks !== undefined && (!Array.isArray(value.marks) || !value.marks.every((mark: unknown) =>
+    isRecord(mark) && typeof mark.type === 'string' && (mark.attrs === undefined || isRecord(mark.attrs))))) return false;
+  return value.content === undefined || (Array.isArray(value.content) && value.content.every(isComposerDocument));
 }
 
 export function asString(value: unknown): string {
@@ -48,19 +61,29 @@ export function parseUserContent(item: ThreadItemSummary): UserContentPart[] {
   });
 }
 
-export function editableDraft(parts: UserContentPart[]): ComposerDraft | null {
-  if (parts.some((part) => part.kind === 'unsupported' || part.kind === 'reference'
-    || (part.kind === 'text' && part.hasElements)
-    || (part.kind === 'image' && (part.image.kind === 'fileId' || part.hasDetail)))) return null;
+export function editableDraft(item: ThreadItemSummary): ComposerDraft | null {
+  if (!Array.isArray(item.content) || item.content.some((value: unknown) =>
+    value === null || typeof value !== 'object' || Array.isArray(value))) return null;
+  let input: Record<string, unknown>[];
+  try { input = structuredClone(item.content) as Record<string, unknown>[]; }
+  catch { return null; }
+  const parts = parseUserContent(item);
   const textParts = parts.filter((part) => part.kind === 'text');
-  if (textParts.length > 1 || (textParts.length && parts[0]?.kind !== 'text')) return null;
   const images = parts.flatMap((part, index) => part.kind !== 'image' ? [] : [{
     id: `image-${index}`,
-    src: part.image.value,
+    src: part.image.kind === 'fileId' ? '' : part.image.value,
     ...(part.image.kind === 'path' ? { path: part.image.value } : {}),
+    ...(part.image.kind === 'fileId' ? { fileId: part.image.value } : {}),
     name: part.image.label,
   }]);
-  return { text: textParts[0]?.text ?? '', images, files: [] };
+  const skills = parts.flatMap((part) => part.kind === 'reference' && part.referenceType === 'skill'
+    ? [{ name: part.name, path: part.path }] : []);
+  return {
+    text: textParts.map((part) => part.text).join('\n'), images, files: [], input,
+    ...(skills.length ? { skills } : {}),
+    ...(isComposerDocument(item.document) ? { document: structuredClone(item.document) } : {}),
+    ...(Array.isArray(item.hints) ? { hints: structuredClone(item.hints) } : {}),
+  };
 }
 
 export function resolveFilePath(path: string, cwd: string): string {
@@ -73,11 +96,24 @@ export function resolveFilePath(path: string, cwd: string): string {
   return path.startsWith('/') ? path : `${cwd.replace(/\/+$/, '')}/${path}`;
 }
 
+export function resolveFileLocation(href: string, cwd: string, hostId: string): Parameters<NonNullable<StandaloneMessagesProps['onOpenFileAt']>>[0] {
+  const match = /#L([1-9]\d*)(?:C([1-9]\d*))?(?:-L[1-9]\d*(?:C[1-9]\d*)?)?$/i.exec(href);
+  const raw = match ? href.slice(0, match.index) : href;
+  let path: string;
+  if (raw.startsWith('file://')) path = resolveFilePath(raw, cwd);
+  else {
+    try { path = resolveFilePath(decodeURIComponent(raw), cwd); }
+    catch { path = resolveFilePath(raw, cwd); }
+  }
+  const line = match ? Number(match[1]) : undefined;
+  const column = match?.[2] ? Number(match[2]) : undefined;
+  return { path, hostId, cwd,
+    ...(Number.isSafeInteger(line) ? { line } : {}),
+    ...(Number.isSafeInteger(column) ? { column } : {}) };
+}
+
 export function resolveFileLink(href: string, cwd: string): string {
-  const path = href.replace(/#L\d+(?:C\d+)?(?:-L\d+(?:C\d+)?)?$/i, '');
-  if (path.startsWith('file://')) return resolveFilePath(path, cwd);
-  try { return resolveFilePath(decodeURIComponent(path), cwd); }
-  catch { return resolveFilePath(path, cwd); }
+  return resolveFileLocation(href, cwd, '').path;
 }
 
 export function safeExternalUrl(value: string, image = false): string | undefined {

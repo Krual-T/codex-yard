@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Check, Clipboard } from 'lucide-react';
+import { writeClipboardText } from '../../native/browser-clipboard.ts';
 
 export function CopyButton({ text, label }: { text: string; label: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'error'>('idle');
@@ -10,7 +11,7 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
   }, [state]);
   async function copy() {
     try {
-      await navigator.clipboard.writeText(text);
+      await writeClipboardText(text);
       setState('copied');
     } catch {
       setState('error');

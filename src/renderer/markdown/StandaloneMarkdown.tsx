@@ -9,23 +9,27 @@ import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import rehypeKatex from 'rehype-katex';
 import rehypeHighlight from 'rehype-highlight';
-import type { WorkbenchClient } from '../workbench-contract.ts';
+import type { StandaloneMessagesProps, WorkbenchClient } from '../workbench-contract.ts';
+import { writeClipboardText } from '../../native/browser-clipboard.ts';
 import { MessageImage } from '../messages/MessageImage.tsx';
-import { resolveFileLink, safeExternalUrl } from '../messages/message-data.ts';
+import { resolveFileLocation, resolveFilePath, safeExternalUrl } from '../messages/message-data.ts';
 import type { ImageSource } from '../messages/message-data.ts';
+import { remarkVisualizations } from './visualization-directives.ts';
 
 const schema = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
+    a: [...(defaultSchema.attributes?.a ?? []), ['dataYardVisualization', 'directive']],
     code: [...(defaultSchema.attributes?.code ?? []), ['className', /^language-./, 'math-inline', 'math-display']],
     input: [...(defaultSchema.attributes?.input ?? []), 'checked'],
     ul: [...(defaultSchema.attributes?.ul ?? []), ['className', 'contains-task-list']],
     li: [...(defaultSchema.attributes?.li ?? []), ['className', 'task-list-item']],
   },
-  protocols: { ...defaultSchema.protocols, src: ['http', 'https', 'data'] },
+  protocols: { ...defaultSchema.protocols, href: [...(defaultSchema.protocols?.href ?? []), 'yard-visualization'], src: ['http', 'https', 'data'] },
 };
-const remarkPlugins = [remarkGfm, remarkMath];
+
+const remarkPlugins: NonNullable<ComponentProps<typeof Markdown>['remarkPlugins']> = [remarkGfm, remarkMath, remarkVisualizations];
 type RehypePlugins = NonNullable<ComponentProps<typeof Markdown>['rehypePlugins']>;
 const safeHtmlPlugins: RehypePlugins = [rehypeRaw, [rehypeSanitize, schema], rehypeKatex, rehypeHighlight];
 const textHtmlPlugins: RehypePlugins = [rehypeKatex, rehypeHighlight];
@@ -67,7 +71,7 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   const isDiagram = language.toLowerCase() === 'mermaid';
   async function copy() {
     try {
-      await navigator.clipboard.writeText(source);
+      await writeClipboardText(source);
       setCopied(true);
       setError('');
     } catch (reason) {
@@ -96,31 +100,46 @@ export type StandaloneMarkdownProps = {
   text: string;
   client: WorkbenchClient;
   hostId: string;
+  threadId?: string;
   cwd: string;
   allowBasicHtml?: boolean;
   onOpenFile?: (path: string) => void;
+  onOpenFileAt?: StandaloneMessagesProps['onOpenFileAt'];
+  onOpenVisualization?: StandaloneMessagesProps['onOpenVisualization'];
   onOpenImage?: (image: ImageSource) => void;
 };
 
-export function StandaloneMarkdown({ text, client, hostId, cwd, allowBasicHtml = false, onOpenFile, onOpenImage }: StandaloneMarkdownProps) {
+export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowBasicHtml = false, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenImage }: StandaloneMarkdownProps) {
   const components = useMemo<Components>(() => ({
     pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
-    a: ({ href, children }) => {
+    a: ({ href, children, node }) => {
       if (!href) return <span>{children}</span>;
+      if (href.startsWith('yard-visualization:')) {
+        if (node?.properties?.dataYardVisualization !== 'directive') return <span>{children}</span>;
+        let path = '';
+        try { path = decodeURIComponent(href.slice('yard-visualization:'.length)); } catch { return <span>{children}</span>; }
+        if (!path.trim()) return <span>{children}</span>;
+        if (!threadId || !onOpenVisualization) return <span>Visualization: {path}</span>;
+        return <button type="button" className="yard-file-link" onClick={() => onOpenVisualization({ hostId, threadId, path: resolveFilePath(path, cwd) })}>{children}</button>;
+      }
       const external = safeExternalUrl(href);
       if (external) return <a href={external} target={external.startsWith('#') ? undefined : '_blank'}
         rel={external.startsWith('#') ? undefined : 'noreferrer noopener'}>{children}</a>;
-      if (!onOpenFile) return <span>{children}</span>;
-      return <button type="button" className="yard-file-link" onClick={() => onOpenFile(resolveFileLink(href, cwd))}>{children}</button>;
+      if (!onOpenFile && !onOpenFileAt) return <span>{children}</span>;
+      return <button type="button" className="yard-file-link" onClick={() => {
+        const location = resolveFileLocation(href, cwd, hostId);
+        if (onOpenFileAt) onOpenFileAt(location); else onOpenFile?.(location.path);
+      }}>{children}</button>;
     },
     img: ({ src, alt }) => {
       if (typeof src !== 'string' || !src) return <span>Image unavailable</span>;
       const source: ImageSource = { kind: /^(?:https?:|data:)/i.test(src) ? 'url' : 'path', value: src, label: alt || 'Image' };
       return <MessageImage source={source} client={client} hostId={hostId} cwd={cwd} onOpen={onOpenImage ? () => onOpenImage(source) : undefined} />;
     },
-  }), [client, cwd, hostId, onOpenFile, onOpenImage]);
+  }), [client, cwd, hostId, threadId, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenImage]);
   const transformUrl: UrlTransform = (value, _key) => {
     const trimmed = value.trim();
+    if (_key === 'href' && trimmed.startsWith('yard-visualization:')) return trimmed;
     if (/^(?:https?:|mailto:|data:|#)/i.test(trimmed)) return safeExternalUrl(trimmed, _key === 'src') ?? '';
     if (/^(?:file:\/\/|\/|\.\.?\/)/i.test(trimmed) || !/^[a-z][a-z\d+.-]*:/i.test(trimmed)) return trimmed;
     return '';

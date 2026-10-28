@@ -13,22 +13,27 @@ import './standalone-messages.css';
 type RenderItemProps = {
   item: ThreadItemSummary;
   turnId: string;
+  threadId: string;
   client: WorkbenchClient;
   hostId: string;
   cwd: string;
   onEdit: StandaloneMessagesProps['onEdit'];
   onFork: StandaloneMessagesProps['onFork'];
   onOpenFile: StandaloneMessagesProps['onOpenFile'];
+  onOpenFileAt: StandaloneMessagesProps['onOpenFileAt'];
+  onOpenVisualization: StandaloneMessagesProps['onOpenVisualization'];
+  onOpenBrowser: StandaloneMessagesProps['onOpenBrowser'];
   onOpenImages: (images: ImageSource[], index: number) => void;
   searchMatch: boolean;
 };
 
-function UserMessage({ item, turnId, client, hostId, cwd, onEdit, onFork, onOpenFile, onOpenImages, searchMatch }: RenderItemProps) {
+function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenImages, searchMatch }: RenderItemProps) {
   const [expanded, setExpanded] = useState(false);
+  const [actionError, setActionError] = useState('');
   const parts = useMemo(() => parseUserContent(item), [item]);
   const openSingleImage = useCallback((image: ImageSource) => onOpenImages([image], 0), [onOpenImages]);
   const images = parts.flatMap((part) => part.kind === 'image' ? [part.image] : []);
-  const draft = editableDraft(parts);
+  const draft = useMemo(() => onEdit ? editableDraft(item) : null, [item, onEdit]);
   const text = parts.flatMap((part) => part.kind === 'text' ? [part.text] : []).join('\n');
   const long = text.length > 1200;
   let imageIndex = 0;
@@ -36,7 +41,7 @@ function UserMessage({ item, turnId, client, hostId, cwd, onEdit, onFork, onOpen
     <div className="yard-user-bubble"><div className="yard-user-body">
       {parts.map((part, index) => {
         if (part.kind === 'text') return <div key={index} className={long && !expanded && !searchMatch ? 'yard-user-text is-collapsed' : 'yard-user-text'}>
-          <StandaloneMarkdown text={part.text} client={client} hostId={hostId} cwd={cwd} onOpenFile={onOpenFile} onOpenImage={openSingleImage} /></div>;
+          <StandaloneMarkdown text={part.text} client={client} hostId={hostId} threadId={threadId} cwd={cwd} onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenImage={openSingleImage} /></div>;
         if (part.kind === 'image') {
           const current = imageIndex++;
           return <MessageImage key={index} source={part.image} client={client} hostId={hostId} cwd={cwd} onOpen={() => onOpenImages(images, current)} />;
@@ -48,16 +53,27 @@ function UserMessage({ item, turnId, client, hostId, cwd, onEdit, onFork, onOpen
       aria-expanded={expanded}>{expanded ? 'Show less' : 'Show more'} <ChevronDown size={15} /></button>}</div>
     <div className="yard-message-actions"><CopyButton text={text} label="Copy message" />
       {onEdit && <button type="button" className="yard-icon-button" title={draft ? 'Edit message' : 'This message cannot be edited without losing content'}
-        aria-label="Edit message" disabled={!draft} onClick={() => { if (draft) onEdit(draft); }}><Pencil size={16} /></button>}
-      {onFork && <button type="button" className="yard-icon-button" title="Fork from this turn" aria-label="Fork from this turn" onClick={() => onFork(turnId)}><GitFork size={16} /></button>}
+        aria-label="Edit message" disabled={!draft} onClick={() => {
+          if (!draft) return;
+          const origin = { turnId, itemId: item.id, ...(typeof item.format === 'string' ? { format: item.format } : {}),
+            ...(Array.isArray(item.hints) ? { hints: structuredClone(item.hints) } : {}) };
+          setActionError('');
+          void Promise.resolve().then(() => onEdit(structuredClone(draft), origin)).catch((reason: unknown) => setActionError(reason instanceof Error ? reason.message : 'Edit failed.'));
+        }}><Pencil size={16} /></button>}
+      {onFork && <button type="button" className="yard-icon-button" title="Fork from this turn" aria-label="Fork from this turn" onClick={() => {
+        setActionError('');
+        void Promise.resolve().then(() => onFork(turnId)).catch((reason: unknown) => setActionError(reason instanceof Error ? reason.message : 'Fork failed.'));
+      }}><GitFork size={16} /></button>}
     </div>
+    {actionError && <div className="yard-action-error" role="alert">{actionError}</div>}
   </div>;
 }
 
 function MessageItem(props: RenderItemProps) {
-  const { item, turnId, client, hostId, cwd, onOpenFile, onOpenImages, onFork } = props;
+  const { item, turnId, threadId, client, hostId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImages, onFork } = props;
+  const [actionError, setActionError] = useState('');
   const openSingleImage = useCallback((image: ImageSource) => onOpenImages([image], 0), [onOpenImages]);
-  const markdownProps = { client, hostId, cwd, onOpenFile, onOpenImage: openSingleImage };
+  const markdownProps = { client, hostId, threadId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenImage: openSingleImage };
   if (item.type === 'userMessage') return <UserMessage {...props} />;
   if (item.type === 'agentMessage' || item.type === 'plan') {
     const text = asString(item.text);
@@ -70,7 +86,11 @@ function MessageItem(props: RenderItemProps) {
       })}
       {item.memoryCitation != null && <details className="yard-citation"><summary>Memory citations</summary><pre>{displayJson(item.memoryCitation)}</pre></details>}
       <div className="yard-message-actions"><CopyButton text={text} label="Copy message" />
-        {onFork && <button type="button" className="yard-icon-button" title="Fork from this turn" aria-label="Fork from this turn" onClick={() => onFork(turnId)}><GitFork size={16} /></button>}</div>
+        {onFork && <button type="button" className="yard-icon-button" title="Fork from this turn" aria-label="Fork from this turn" onClick={() => {
+          setActionError('');
+          void Promise.resolve().then(() => onFork(turnId)).catch((reason: unknown) => setActionError(reason instanceof Error ? reason.message : 'Fork failed.'));
+        }}><GitFork size={16} /></button>}</div>
+      {actionError && <div className="yard-action-error" role="alert">{actionError}</div>}
     </div>;
   }
   if (item.type === 'reasoning') {
@@ -87,7 +107,8 @@ function MessageItem(props: RenderItemProps) {
       return <div key={index}><StandaloneMarkdown text={asString(value.text)} {...markdownProps} />
         {asString(value.hookRunId) && <span className="yard-hook-id">{asString(value.hookRunId)}</span>}</div>;
     })}</div>;
-  return <ToolItem item={item} client={client} hostId={hostId} cwd={cwd} onOpenFile={onOpenFile} onOpenImage={markdownProps.onOpenImage} />;
+  return <ToolItem item={item} client={client} hostId={hostId} threadId={threadId} cwd={cwd} onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt}
+    onOpenBrowser={onOpenBrowser} onOpenImage={markdownProps.onOpenImage} />;
 }
 
 function TurnStatus({ turn }: { turn: TurnSummary }) {
@@ -115,13 +136,14 @@ function searchText(value: unknown): string {
   return typeof value === 'number' || typeof value === 'boolean' ? String(value) : '';
 }
 
-export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onOpenFile }: StandaloneMessagesProps) {
+export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser }: StandaloneMessagesProps) {
   const [query, setQuery] = useState('');
   const [matchIndex, setMatchIndex] = useState(-1);
   const [following, setFollowing] = useState(true);
   const [viewer, setViewer] = useState<ViewerState | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const nodes = useRef(new Map<string, HTMLElement>());
+  const searchOpened = useRef(new Set<HTMLDetailsElement>());
   const followRef = useRef(true);
   const threadId = useRef(thread?.id);
   const openImages = useCallback((images: ImageSource[], index: number) => setViewer({ images, index }), []);
@@ -163,6 +185,10 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
     window.addEventListener('afterprint', afterPrint);
     return () => { window.removeEventListener('beforeprint', beforePrint); window.removeEventListener('afterprint', afterPrint); };
   }, []);
+  function restoreSearchDetails() {
+    for (const details of searchOpened.current) if (details.isConnected) details.open = false;
+    searchOpened.current.clear();
+  }
   function scrollToMatch(index: number) {
     if (!hits.length) return;
     const next = ((index % hits.length) + hits.length) % hits.length;
@@ -170,7 +196,9 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
     followRef.current = false;
     setFollowing(false);
     const node = nodes.current.get(hits[next]?.key ?? '');
-    node?.querySelectorAll('details').forEach((details) => { details.open = true; });
+    node?.querySelectorAll('details').forEach((details) => {
+      if (!details.open) { searchOpened.current.add(details); details.open = true; }
+    });
     node?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }
   function followLatest() {
@@ -186,14 +214,20 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
   }
   return <div className="yard-messages-root">
     <div className="yard-message-search"><Search size={16} aria-hidden="true" /><input aria-label="Search messages" value={query}
-      placeholder="Search messages" onChange={(event) => { setQuery(event.target.value); setMatchIndex(-1); }}
+      placeholder="Search messages" onChange={(event) => { restoreSearchDetails(); setQuery(event.target.value); setMatchIndex(-1); }}
       onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); scrollToMatch(event.shiftKey && matchIndex < 0 ? hits.length - 1 : matchIndex + (event.shiftKey ? -1 : 1)); } }} />
       {query && <><span aria-live="polite">{hits.length ? `${matchIndex < 0 ? 0 : Math.min(matchIndex, hits.length - 1) + 1} / ${hits.length}` : '0 results'}</span>
         <button type="button" className="yard-icon-button" title="Previous result" aria-label="Previous result" disabled={!hits.length} onClick={() => scrollToMatch(matchIndex < 0 ? hits.length - 1 : matchIndex - 1)}><ChevronLeft size={16} /></button>
         <button type="button" className="yard-icon-button" title="Next result" aria-label="Next result" disabled={!hits.length} onClick={() => scrollToMatch(matchIndex + 1)}><ChevronRight size={16} /></button>
-        <button type="button" className="yard-icon-button" title="Clear search" aria-label="Clear search" onClick={() => { setQuery(''); setMatchIndex(-1); }}><X size={16} /></button></>}
+        <button type="button" className="yard-icon-button" title="Clear search" aria-label="Clear search" onClick={() => { restoreSearchDetails(); setQuery(''); setMatchIndex(-1); }}><X size={16} /></button></>}
     </div>
-    <div className="yard-message-scroll" ref={scroller} onScroll={onScroll} data-thread-find-target="conversation">
+    <div className="yard-message-scroll" ref={scroller} onScroll={onScroll} onClickCapture={(event) => {
+      const target = event.target;
+      if (target instanceof Element) {
+        const summary = target.closest('summary');
+        if (summary?.parentElement instanceof HTMLDetailsElement) searchOpened.current.delete(summary.parentElement);
+      }
+    }} data-thread-find-target="conversation">
       {!thread ? <div className="yard-message-empty">Select a conversation</div> : thread.turns.length === 0 ? <div className="yard-message-empty">No messages yet</div> :
         <div className="yard-message-list">{thread.turns.map((turn) => <section className="yard-turn" key={turn.id} data-turn-id={turn.id}>
           {turn.items.map((item) => {
@@ -201,8 +235,9 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
             const searchMatch = hitKeys.has(key);
             return <article className="yard-message-item" key={item.id} data-message-id={item.id} data-search-current={selected?.key === key || undefined}
               ref={(node) => { if (node) nodes.current.set(key, node); else nodes.current.delete(key); }}>
-              <MessageItem item={item} turnId={turn.id} client={client} hostId={hostId} cwd={thread.cwd} onEdit={onEdit} onFork={onFork}
-                onOpenFile={onOpenFile} onOpenImages={openImages} searchMatch={searchMatch} /></article>;
+              <MessageItem item={item} turnId={turn.id} threadId={thread.id} client={client} hostId={hostId} cwd={thread.cwd} onEdit={onEdit} onFork={onFork}
+                onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenVisualization={onOpenVisualization} onOpenBrowser={onOpenBrowser}
+                onOpenImages={openImages} searchMatch={searchMatch} /></article>;
           })}{turn.status !== 'completed' && <div data-search-current={selected?.key === itemKey(turn.id, null) || undefined}
             ref={(node) => { const key = itemKey(turn.id, null); if (node) nodes.current.set(key, node); else nodes.current.delete(key); }}><TurnStatus turn={turn} /></div>}
         </section>)}</div>}

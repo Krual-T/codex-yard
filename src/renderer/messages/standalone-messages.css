@@ -86,9 +86,13 @@
 .yard-tool-block-heading, .yard-file-change-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 8px; font-size: 12px; }
 .yard-tool-block-heading { border-bottom: 1px solid var(--yard-border, #d7dfdc); }
 .yard-file-change + .yard-file-change, .yard-search-result + .yard-search-result { margin-top: 12px; }
+.yard-command-action { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.yard-agent-list { margin: 8px 0; padding-left: 20px; overflow-wrap: anywhere; }
+.yard-web-action { margin: 8px 0; overflow-wrap: anywhere; }
 .yard-reference, .yard-hook-id { color: var(--yard-muted, #626c69); font-size: 12px; }
 .yard-turn-status { margin-top: 12px; color: var(--yard-muted, #626c69); font-size: 12px; }
 .yard-turn-status.is-failed { color: #a33333; }
+.yard-action-error { color: #a33333; font-size: 12px; }
 .yard-image-shell { display: inline-block; max-width: 100%; vertical-align: middle; }
 .yard-image-button { display: inline-block; max-width: min(100%, 320px); margin: 6px 6px 6px 0; padding: 0; border: 1px solid var(--yard-border, #d7dfdc); border-radius: 5px; background: none; cursor: zoom-in; vertical-align: middle; overflow: hidden; }
 .yard-image-button img { display: block; max-width: 100%; max-height: 240px; object-fit: contain; }
