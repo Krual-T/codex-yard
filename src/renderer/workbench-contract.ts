@@ -47,6 +47,7 @@ export interface ComposerDraft {
   /** Original ordered protocol content, retained through message editing. */
   input?: Record<string, unknown>[];
   hints?: unknown[];
+  skills?: { name: string; path: string }[];
 }
 export interface SubmitOptions {
   model?: string;
