@@ -11,9 +11,9 @@ Install Node.js and Codex CLI, sign in, and start the workspace. The fixed web i
 This is an experimental, independent project with a TypeScript host and React extensions. Its current interface is based on **Codex App 26.1013.40934**. The vendored interface is compiled upstream JavaScript, CSS, fonts and assets; the App's original TypeScript/TSX source is not included. See [third-party components](THIRD_PARTY.md).
 
 Authored React + TypeScript modules handle shared rows and timestamps, user
-messages and attachments, code blocks, composer view/controller/draft and queue
+and assistant messages, attachments, adaptive Markdown and code blocks, composer view/controller/draft and queue
 editing boundaries, settings navigation and General/Appearance composition and
-theme controls inside the existing page. The
+theme and preference controls inside the existing page. The
 full frontend migration is ongoing; see the [migration boundaries](docs/react-typescript-migration.md).
 
 ## Current capabilities

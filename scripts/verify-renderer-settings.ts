@@ -51,6 +51,43 @@ try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, permissions: ['clipboard-read', 'clipboard-write'] });
   page = await context.newPage();
   page.on('pageerror', error => errors.push(error.message));
+  if (process.env.AGENTS_SETTINGS_PREFERENCES_ONLY === '1') {
+    await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/settings/general-settings'), { waitUntil: 'commit' });
+    await page.getByRole('heading', { name: 'General', exact: true }).waitFor({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Appearance', exact: true }).click();
+    await page.getByRole('heading', { name: 'Appearance', exact: true }).waitFor({ timeout: 60_000 });
+    const advanced = page.getByRole('button', { name: 'Advanced', exact: true });
+    await advanced.click();
+    await mounted(page, ['ReducedMotion', 'DiffMarkers', 'PointerCursors', 'FontSmoothing']);
+    checks.push('The actual Appearance route calls all four authored preference components with the original settings scope');
+    const motionOn = page.getByRole('button', { name: 'On', exact: true });
+    const symbols = page.getByRole('button', { name: 'Plus / minus diff markers', exact: true });
+    const pointers = page.getByRole('switch', { name: 'Use pointer cursors', exact: true });
+    await motionOn.click();
+    await symbols.click();
+    const nextPointers = await pointers.getAttribute('aria-checked') !== 'true';
+    await pointers.click();
+    await page.waitForFunction(expected => document.querySelector('[role="switch"][aria-label="Use pointer cursors"]')?.getAttribute('aria-checked') === String(expected), nextPointers);
+    assert.equal(await motionOn.getAttribute('aria-pressed'), 'true');
+    assert.equal(await symbols.getAttribute('aria-pressed'), 'true');
+    assert.equal(await pointers.getAttribute('aria-checked'), String(nextPointers));
+    checks.push('Original reduced-motion, diff-marker and pointer writes update their authored controls');
+    await page.reload({ waitUntil: 'commit' });
+    await page.getByRole('heading', { name: 'Appearance', exact: true }).waitFor({ timeout: 60_000 });
+    await advanced.click();
+    assert.equal(await motionOn.getAttribute('aria-pressed'), 'true');
+    assert.equal(await symbols.getAttribute('aria-pressed'), 'true');
+    assert.equal(await pointers.getAttribute('aria-checked'), String(nextPointers));
+    await mounted(page, ['ReducedMotion', 'DiffMarkers', 'PointerCursors', 'FontSmoothing']);
+    checks.push('All three saved preferences survive a full document reload through the original persistence path');
+    assert.equal(await page.getByRole('switch', { name: 'Font smoothing', exact: true }).count(), 0);
+    report.fontSmoothing = 'Component called on this Linux host; its macOS-only control remains a conditional fixture test';
+    await page.setViewportSize({ width: 800, height: 1280 });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.screenshot({ path: join(output, 'preferences-800.png') });
+    await writeFile(join(output, 'final-aria.txt'), await page.locator('body').ariaSnapshot());
+    checks.push('The preference rows keep the original 800px layout without horizontal overflow');
+  } else {
   await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/settings/general-settings'), { waitUntil: 'commit' });
   await page.getByRole('heading', { name: 'General', exact: true }).waitFor({ timeout: 60_000 });
   await mounted(page, ['SettingsPage', 'GeneralSettings', 'GeneralContent']);
@@ -114,6 +151,7 @@ try {
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   checks.push('The authored Appearance route retains the original responsive layout at 800px without horizontal overflow');
   await writeFile(join(output, 'final-aria.txt'), await page.locator('body').ariaSnapshot());
+  }
   await context.close();
   assert.equal(fake.calls('turn/start').length, 0);
   assert.deepEqual(errors, []);

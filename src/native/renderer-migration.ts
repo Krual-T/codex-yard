@@ -12,11 +12,13 @@ export function adaptMigratedRendererModule(path: string, content: Buffer): Buff
       && path !== '/assets/user-message-attachments-9d0c60d2f476.js'
       && path !== '/assets/general-settings-8997e171b11a.js'
       && path !== '/assets/appearance-settings-deb0b7565185.js'
+      && path !== '/assets/sites-end-resource-b11586198b69.js'
+      && path !== '/assets/local-conversation-turn-981410324fed.js'
       && path !== '/assets/settings-page-25f8fd08b293.js') return content;
   let source = content.toString('utf8');
   let prefix: string;
   if (path === '/assets/app-initial-a68277f60b93.js') {
-    prefix = `import{createRelativeTimeComponent as __yardCreateRelativeTime,createTaskRowComponent as __yardCreateTaskRow,createSidebarConversationRowComponent as __yardCreateConversationRow,createSidebarStatusBadgeComponent as __yardCreateBadge,createMarkdownCodeBlockComponent as __yardCreateMarkdownCodeBlock,createMermaidLoadingPlaceholderComponent as __yardCreateMermaidPlaceholder,createMainComposerViewComponent as __yardCreateComposerView,createComposerControllerProvider as __yardCreateComposerProvider}from"${rendererComponentsPath}";let __yardRelativeTime,__yardTaskRow,__yardConversationRow,__yardBadge,__yardMarkdownCodeBlock,__yardMermaidPlaceholder,__yardComposerView,__yardComposerProvider;\n`;
+    prefix = `import{createRelativeTimeComponent as __yardCreateRelativeTime,createTaskRowComponent as __yardCreateTaskRow,createSidebarConversationRowComponent as __yardCreateConversationRow,createSidebarStatusBadgeComponent as __yardCreateBadge,createMarkdownCodeBlockComponent as __yardCreateMarkdownCodeBlock,createMermaidLoadingPlaceholderComponent as __yardCreateMermaidPlaceholder,createMainComposerViewComponent as __yardCreateComposerView,createComposerControllerProvider as __yardCreateComposerProvider,createAdaptiveStreamingMarkdownComponent as __yardCreateAdaptiveMarkdown,createMarkdownRootComponent as __yardCreateMarkdownRoot}from"${rendererComponentsPath}";let __yardRelativeTime,__yardTaskRow,__yardConversationRow,__yardBadge,__yardMarkdownCodeBlock,__yardMermaidPlaceholder,__yardComposerView,__yardComposerProvider,__yardAdaptiveMarkdown,__yardMarkdownRoot;\n`;
     source = replacePinnedFunction(path, source,
       'function YEc(e){',
       '(l=(0,eDc.jsx)(ZEc,{dateString:n,now:c,dayBasis:o}),t[6]=n,t[7]=o,t[8]=c,t[9]=l):l=t[9],l}',
@@ -49,6 +51,13 @@ export function adaptMigratedRendererModule(path: string, content: Buffer): Buff
       'function BSd(e){let t=(0,VSd.c)(45),',
       't[42]=V,t[43]=ae,t[44]=oe):oe=t[44],oe}',
       'function BSd(e){return(0,USd.jsx)(__yardComposerProvider??=__yardCreateComposerProvider(U9,{ControllerContext:ncr,useEnterBehavior:()=>oa(Ua.composerEnterBehavior),usePlainTextMode:()=>oa(Ua.composerPlainTextMode),useIsHydrating:ie,flushSync:HSd.flushSync,createController:xUu,documentFromText:lq,createTextSelection:(doc,anchor,head)=>$s.create(doc,anchor,head)}),e)}');
+    source = replacePinnedFunction(path, source,
+      'function Jdd(e){let t=(0,Xdd.c)(29),',
+      't[22]=o,t[23]=n,t[24]=_,t[25]=v,t[26]=y,t[27]=g,t[28]=b):b=t[28],b}',
+      'function Jdd(e){return(0,Qdd.jsx)(__yardAdaptiveMarkdown??=__yardCreateAdaptiveMarkdown(Zdd,{useClient:uy,useReducedMotion:to,createStore:(...a)=>new vdd(...a),isSlowStreamingEnabled:c=>py(c,`267402900`).get(`streaming-response`,false),Markdown:$dd}),e)}');
+    source = replacePinnedFunction(path, source,
+      'function Nod(e){let t=(0,Pod.c)(55),', 't[52]=ie,t[53]=be,t[54]=xe):xe=t[54],xe}',
+      'function Nod(e){return(0,Iod.jsx)(__yardMarkdownRoot??=__yardCreateMarkdownRoot(Fod,{ExternalResourcePolicyContext:t5u,defaultHostId:ol,markdownRootClassName:z7.MarkdownRoot,markdownIdAttribute:G4l,classNames:Wc,onCopy:Xba,renderTokens:xLo}),e)}');
   } else if (path === '/assets/collapsible-user-message-content-636c4ff1e0ff.js') {
     prefix = `import{createCollapsibleUserMessageContentComponent as __yardCreateMessageContent}from"${rendererComponentsPath}";let __yardMessageContent;\n`;
     source = replacePinnedFunction(path, source,
@@ -108,7 +117,7 @@ export function adaptMigratedRendererModule(path: string, content: Buffer): Buff
       't[101]=E,t[102]=T,t[103]=w,t[104]=me,t[105]=I,t[106]=F,t[107]=Ve,t[108]=Be,t[109]=We):We=t[109],We}',
       'function fn(e){return(0,$.jsx)(__yardUserMessageImage??=__yardCreateUserMessageImage(Q,{useScope:()=>d(tt),useIntl:g,useImageClient:_e,useConversationHostId:e=>i(Ke,e),useDisableImageOverlay:()=>_(_t),useReducedMotion:C,useResolvedImage:Re,useImageOverlayEnabled:e=>ut(`2983946247`,e).get(`image_overlay_enabled`,false),isAssetPointer:Ae,getLocalImagePath:U,resolveLocalImage:Ne,getDurableIdentity:(e,t,n,r)=>{let i=e.value.routeKind===`local-thread`&&e.value.conversationId===t?e.get(He):null;return r==null&&i!=null?Ee(i,n):void 0},openImageEditor:Ue,openAnimatedOverlay:qe,recordImagePreview:ke,parseChatGptConversationId:je,getImageContextMenu:kt,ImageContextMenu:be,ImageDialog:gt,ImageOverlay:Sn,LoadingIcon:ue,AssetIcon:c,editAsset:r,FormattedMessage:l}),e)}');
   } else if (path === '/assets/general-settings-8997e171b11a.js') {
-    prefix = `import{createGeneralSettingsComponents as __yardCreateGeneralSettings,createAppearancePreferencesComponent as __yardCreateAppearancePreferences,createThemeVariantsComponent as __yardCreateThemeVariants,createThemeFormComponent as __yardCreateThemeForm,createAppearanceControlComponents as __yardCreateAppearanceControls}from"${rendererComponentsPath}";let __yardGeneralSettings,__yardAppearancePreferences,__yardThemeVariants,__yardThemeForm,__yardAppearanceControls;\n`;
+    prefix = `import{createGeneralSettingsComponents as __yardCreateGeneralSettings,createAppearancePreferencesComponent as __yardCreateAppearancePreferences,createThemeVariantsComponent as __yardCreateThemeVariants,createThemeFormComponent as __yardCreateThemeForm,createAppearanceControlComponents as __yardCreateAppearanceControls,createAppearancePreferenceRows as __yardCreateAppearanceRows}from"${rendererComponentsPath}";let __yardGeneralSettings,__yardAppearancePreferences,__yardThemeVariants,__yardThemeForm,__yardAppearanceControls,__yardAppearanceRows;\n`;
     source = replacePinnedFunction(path, source,
       'function Js(){', 'e[5]=n,e[6]=a),a}',
       'function Js(){return(0,$.jsx)(__yardGeneralSettings??=__yardCreateGeneralSettings(Lc,{Page:dr,PageTitle:lr,ToysBoundary:Mn,Toys:zo,Group:U,Rows:rt,FormattedMessage:M,composerGroupTitle:W.composerGroupTitle,notificationsTitle:W.notifications,appName:Pt,getWindowsShell:()=>_.windowsShell,useAnySettingsAccess:()=>L(Qr),useLocalAccess:()=>L(Vr),useLocalOrWorkLocalAccess:()=>L(mr),useHostId:()=>L(Dr),useFeatureFlag:Yn,useImportFeatureFlag:()=>Yn(zi),useImportDismissed:()=>L(kn),rows:{AccessSettings:To,FullAccessSettings:vo,ProjectlessWorkspace:Ts,DefaultOpenTarget:lc,AgentEnvironment:pc,TerminalShell:fc,Language:gc,MenuBar:cc,CloseConfirmation:ls,AdditionalPreference:Mo,WindowsStartup:sc,BottomPanelControl:Cc,TerminalLocation:wc,PreventSleep:Fc,AutoArchive:is,ChatHistoryCompression:js,ServiceTier:Hs,AmbientSuggestions:Ko,ImportSettings:hs,OpenSourceLicenses:Qs,Plugins:Xi,DesktopBeta:$s,InAppUpdates:ec,MessagePredictions:aa,EducationalTips:$i,LiteralText:ac,ContextUsage:Oc,EnterBehavior:Pc,FollowUpBehavior:Dc,PopoutWindow:ic,Notifications:Ki}}).GeneralSettings,{})}');
@@ -131,11 +140,45 @@ export function adaptMigratedRendererModule(path: string, content: Buffer): Buff
     source = replacePinnedFunction(path, source,
       'function Mc(){', 'description:`Unit label for code font size setting`}),e[18]=n,e[19]=h);let g;e[20]===h?g=e[21]:(g=(0,$.jsx)(`span`,{className:`text-sm text-secondary`,children:h}),e[20]=h,e[21]=g);let _;return e[22]!==g||e[23]!==m?(_=(0,$.jsx)(V,{label:s,description:c,control:(0,$.jsxs)(`div`,{className:`flex items-center gap-2`,children:[m,g]})}),e[22]=g,e[23]=m,e[24]=_):_=e[24],_}',
       `function Mc(){return(0,$.jsx)((${appearanceControls}).CodeFontSize,{})}`);
+    const appearanceRows = '__yardAppearanceRows??=__yardCreateAppearanceRows(Lc,{useScope:()=>{let s=N(R);return{setReducedMotion:v=>D(s,Ke.reducedMotionPreference,v),setDiffMarkerStyle:v=>D(s,Ke.diffMarkerStyle,v),setPointerCursors:v=>D(s,zc,v),setFontSmoothing:v=>D(s,Rc,v),get toast(){return s.get(qe)}}},useIntl:I,useReducedMotion:()=>F(Ke.reducedMotionPreference),useDiffMarkerStyle:()=>F(Ke.diffMarkerStyle),usePointerCursors:()=>F(zc),usePlatform:Kn,useFontSmoothing:()=>F(Rc),messages:Y,FormattedMessage:M,Row:V,MotionSelection:Gn,DiffSelection:Gn,Toggle:Le})';
+    source = replacePinnedFunction(path, source,
+      'function Ec(){', 'e[23]=a,e[24]=r,e[25]=_,e[26]=v):v=e[26],v}',
+      `function Ec(){return(0,$.jsx)((${appearanceRows}).ReducedMotion,{})}`);
+    source = replacePinnedFunction(path, source,
+      'function Tc(){', 'e[17]=a,e[18]=r,e[19]=m,e[20]=h):h=e[20],h}',
+      `function Tc(){return(0,$.jsx)((${appearanceRows}).DiffMarkers,{})}`);
+    source = replacePinnedFunction(path, source,
+      'function bc(){', 'let c;e[4]===n?c=e[5]:(c=n.formatMessage(Y.pointerCursors),e[4]=n,e[5]=c);let l;return e[6]!==o||e[7]!==s||e[8]!==c?(l=(0,$.jsx)(V,{label:i,description:a,control:(0,$.jsx)(Le,{checked:o,onChange:s,ariaLabel:c})}),e[6]=o,e[7]=s,e[8]=c,e[9]=l):l=e[9],l}',
+      `function bc(){return(0,$.jsx)((${appearanceRows}).PointerCursors,{})}`);
+    source = replacePinnedFunction(path, source,
+      'function Nc(){', 'e[6]=a,e[7]=c,e[8]=l,e[9]=u):u=e[9],u}',
+      `function Nc(){return(0,$.jsx)((${appearanceRows}).FontSmoothing,{})}`);
   } else if (path === '/assets/appearance-settings-deb0b7565185.js') {
     prefix = `import{createAppearanceSettingsComponent as __yardCreateAppearanceSettings}from"${rendererComponentsPath}";let __yardAppearanceSettings;\n`;
     source = replacePinnedFunction(path, source,
       'function f(){', 'e[1]=r,e[2]=i,e[3]=s):s=e[3],s}',
       'function f(){return(0,h.jsx)(__yardAppearanceSettings??=__yardCreateAppearanceSettings(m,{OutletContext:c,PageTitle:a,Page:o,AppearancePreferences:u}),{})}');
+  } else if (path === '/assets/sites-end-resource-b11586198b69.js') {
+    prefix = `import{createAssistantMessageComponent as __yardCreateAssistant,createAssistantMessageActionsComponent as __yardCreateAssistantActions,createAssistantMessageOverflowComponent as __yardCreateAssistantOverflow,createReasoningMessageComponent as __yardCreateReasoning}from"${rendererComponentsPath}";let __yardAssistant,__yardAssistantActions,__yardAssistantOverflow,__yardReasoning;\n`;
+    source = replacePinnedFunction(path, source,
+      'function zx(e){let t=(0,$x.c)(284),',
+      't[275]=kt,t[276]=At,t[277]=jt,t[278]=Mt,t[279]=Nt,t[280]=Pt,t[281]=Lt,t[282]=Rt,t[283]=zt):zt=t[283],zt}',
+      'function zx(e){return(0,tS.jsx)(__yardAssistant??=__yardCreateAssistant(eS,{useScope:()=>Se(Jc),useIntl:Me,useBrowserEnabled:()=>V(Hl,eS.useMemo(()=>({name:`browser.in-app`}),[])).isCapable,useIsAeon:id=>V(oS,id),useAeonFormatting:id=>V(up,id),useAeonReveal:(on,id)=>V(on?xa:null,id),useNativeMessageEnabled:(on,id)=>V(on?Ed:null,id),useNativeMessageFeature:on=>Fe(on&&Jd),getDeliveryAction:Zs,describeDelivery:Ib,deliveryActionText:zb,prepareCopyText:(text,{conversationId,turnId,cwd,projectlessOutputDirectory,annotations,intl})=>{let prepared=fd(text,value=>Uc(il(conversationId,turnId,value)));let outputPath=projectlessOutputDirectory==null?void 0:resourcePath=>Uf({cwd,projectlessOutputDirectory,resourcePath});return rx(_g(Xd(ba(gi(prepared)),outputPath)),annotations,intl)},formatDisplayContent:fc,hasAutomationCitationMarker:Xx,formatAutomationCitation:Vx,extractCompletedResults:ib,createFileDirectives:Pf,shouldRenderOutputPath:Uf,createFollowupDirectives:Dx,createAnnotationDirectives:nx,resolveAutomationCitation:Zx,directiveNames:{comment:Td,writing:Rc,automation:Nu,other:qy},writingDirective:nS,otherDirective:Wy,CommentDirective:Mb,AutomationCitation:kh,formatMarkdown:text=>ba(ou(text)),attachOutputLinks:km,getSelectionContent:Hi,shouldOfferAnnotation:Ef,AnnotationAction:ob,ShareAction:Qb,markdownComponentsForAeon:lh,savedContentBackend:ds.CHATGPT_CONTENT_REFERENCE_SAVED_CONTENT_BACKEND_APP_SERVER,isDurableHost:host=>As(host)===`durable`,renderCompactRoot:ch,Markdown:qu,StreamingProvider:rs,DeliveryAction:Hb,DeliveredMessage:qb,NativeMessage:xh,Reveal:Zh,getAnnouncementContent:Fo,trimStreamingAnnouncement:Vd,mergeRefs:Bn,shimmerRef:Nn,annotationDataAttributes:{conversationId:li,messageId:ff},formatTimestampTitle:(intl,sentAtMs)=>Kg({intl,sentAtMs,now:new Date()}),Speaker:qh,ExternalDeliveryStatus:_y,LiveRegion:Wx,Spinner:Xn,Timestamp:Xg,ComputerHandoff:Zm,CompletedResults:xx,Actions:Jx,styles:{activeCommentary:Lx.activeCommentary,...ka},classNames:J}),e)}');
+    source = replacePinnedFunction(path, source,
+      'function Jx(e){let t=(0,$x.c)(52),',
+      't[46]=M,t[47]=fe,t[48]=pe,t[49]=me,t[50]=W,t[51]=he):he=t[51],he}',
+      'function Jx(e){return(0,tS.jsx)(__yardAssistantActions??=__yardCreateAssistantActions(eS,{useIntl:Me,useAnalytics:()=>Fe(Ns),useFeedbackEnabled:()=>Fe(Ts),toPlainText:Es,copyToClipboard:Qn,CopyButton:kr,Feedback:a_,RejectedReview:Yy,OverflowMenu:Ax,CompletedGoal:Yx,Timestamp:Xg,classNames:J}),e)}');
+    source = replacePinnedFunction(path, source,
+      'function Ax(e){let t=(0,Mx.c)(50),', 't[47]=P,t[48]=E,t[49]=ee):ee=t[49],ee}',
+      'function Ax(e){return(0,Px.jsx)(__yardAssistantOverflow??=__yardCreateAssistantOverflow(Nx,{useIntl:Me,MenuButton:Ae,Menu:m,MenuItem:qe.Item,BranchIcon:F,ReviewIcon:be,hookAsset:kt,memoryAsset:Kn,skillAsset:De,FormattedMessage:G,Modal:bn,AutoReviewDetails:Xy,HookDetails:Ug,DialogContainer:Fn,DialogSection:_n,DialogHeader:Ht,DialogTitle:At}),e)}');
+    source = replacePinnedFunction(path, source,
+      'function pE(e){let t=(0,yE.c)(49),', 't[46]=j,t[47]=z,t[48]=B):B=t[48],B}',
+      'function pE(e){return(0,xE.jsx)(__yardReasoning??=__yardCreateReasoning(bE,{useReasoningState:id=>V(js,id),getCompletedContent:Bd,formatElapsed:SE,useMeasurement:ig,FormattedMessage:G,Markdown:qu,ActivityLabel:id,Header:pp,Scrollable:QT,Surface:sg,MotionDiv:Tn.div,Layout:tp,transition:rr,styles:dE,classNames:J}),e)}');
+  } else if (path === '/assets/local-conversation-turn-981410324fed.js') {
+    prefix = `import{createThinkingStatusSlotComponent as __yardCreateThinkingSlot}from"${rendererComponentsPath}";let __yardThinkingSlot;\n`;
+    source = replacePinnedFunction(path, source,
+      'function ss(e){let t=(0,us.c)(8),', 't[5]=a,t[6]=o,t[7]=s):s=t[7],s}',
+      'function ss(e){return(0,Z.jsx)(__yardThinkingSlot??=__yardCreateThinkingSlot(de(),{useReducedMotion:M,AnimatePresence:ke,MotionDiv:B.div,transition:Ce}),e)}');
   } else {
     prefix = `import{createSettingsPageComponent as __yardCreateSettingsPage}from"${rendererComponentsPath}";let __yardSettingsPage;\n`;
     source = replacePinnedFunction(path, source,

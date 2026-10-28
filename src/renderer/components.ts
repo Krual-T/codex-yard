@@ -23,3 +23,11 @@ export { createAppearancePreferencesComponent, createAppearanceSettingsComponent
 export { createThemeVariantsComponent } from './settings/sections/theme-variants.tsx';
 export { createThemeFormComponent } from './settings/sections/theme-form.tsx';
 export { createAppearanceControlComponents } from './settings/sections/appearance-controls.tsx';
+export { createAppearancePreferenceRows } from './settings/sections/appearance-preference-rows.tsx';
+export { createAssistantMessageComponent } from './messages/assistant-message.tsx';
+export { createAssistantMessageActionsComponent } from './messages/assistant-message-actions.tsx';
+export { createAssistantMessageOverflowComponent } from './messages/assistant-message-overflow.tsx';
+export { createReasoningMessageComponent } from './messages/reasoning-message.tsx';
+export { createThinkingStatusSlotComponent } from './messages/thinking-status.tsx';
+export { createAdaptiveStreamingMarkdownComponent } from './markdown/adaptive-streaming.tsx';
+export { createMarkdownRootComponent } from './markdown/markdown-root.tsx';

@@ -10,6 +10,7 @@ import { webRendererPrefix } from '../src/native/visualizations.ts';
 import { createFakeCodex } from './fake-codex.ts';
 
 test('the pinned component seams produce valid ESM and require unique function boundaries', async () => {
+  const validatedModules = new Set<string>();
   for (const [path, marker, end, next] of [
     ['/assets/app-initial-a68277f60b93.js', 'function YEc(e){', '(l=(0,eDc.jsx)(ZEc,{dateString:n,now:c,dayBasis:o}),t[6]=n,t[7]=o,t[8]=c,t[9]=l):l=t[9],l}', 'function XEc(e){'],
     ['/assets/app-initial-a68277f60b93.js', 'function GTc(e){', 't[272]=fee,t[273]=pee,t[274]=Or,t[275]=mee):mee=t[275],mee}', 'function KTc(e){'],
@@ -19,6 +20,8 @@ test('the pinned component seams produce valid ESM and require unique function b
     ['/assets/app-initial-a68277f60b93.js', 'function trd(e){let t=(0,nrd.c)(5),', 'description:`Shimmering status text shown while a Mermaid diagram response is waiting to render`})})}),t[4]=i):i=t[4],i}', 'var nrd,rrd;'],
     ['/assets/app-initial-a68277f60b93.js', 'function y_d(e){let t=(0,b_d.c)(101),', 't[99]=Ie,t[100]=Le):Le=t[100],Le}', 'var b_d,x_d,M9,S_d;function C_d()'],
     ['/assets/app-initial-a68277f60b93.js', 'function BSd(e){let t=(0,VSd.c)(45),', 't[42]=V,t[43]=ae,t[44]=oe):oe=t[44],oe}', 'var VSd,U9,HSd,USd;function WSd()'],
+    ['/assets/app-initial-a68277f60b93.js', 'function Jdd(e){let t=(0,Xdd.c)(29),', 't[22]=o,t[23]=n,t[24]=_,t[25]=v,t[26]=y,t[27]=g,t[28]=b):b=t[28],b}', 'function Ydd(e){'],
+    ['/assets/app-initial-a68277f60b93.js', 'function Nod(e){let t=(0,Pod.c)(55),', 't[52]=ie,t[53]=be,t[54]=xe):xe=t[54],xe}', 'var Pod,Fod,Iod;function Lod()'],
     ['/assets/collapsible-user-message-content-636c4ff1e0ff.js', 'function C(e){', 'n[57]=Q,n[58]=$):$=n[58],$}', 'function w(e,t,n){'],
     ['/assets/app-primary-f5ea123a0407.js', 'function RBt(e){', 't[17]=T,t[18]=O,t[19]=k):k=t[19],k}', 'async function zBt(e){'],
     ['/assets/app-primary-f5ea123a0407.js', 'function Mpt(e){let t=(0,wZ.c)(251),', 't[249]=er,t[250]=J):J=t[250],J}', 'function Npt(e){'],
@@ -38,12 +41,24 @@ test('the pinned component seams produce valid ESM and require unique function b
     ['/assets/general-settings-8997e171b11a.js', 'function yc(){', 'e[8]=o,e[9]=s,e[10]=c):c=e[10],c}', 'function bc(){'],
     ['/assets/general-settings-8997e171b11a.js', 'function jc(){', 'description:`Unit label for sans font size setting`}),e[18]=n,e[19]=h);let g;e[20]===h?g=e[21]:(g=(0,$.jsx)(`span`,{className:`text-sm text-secondary`,children:h}),e[20]=h,e[21]=g);let _;return e[22]!==g||e[23]!==m?(_=(0,$.jsx)(V,{label:s,description:c,control:(0,$.jsxs)(`div`,{className:`flex items-center gap-2`,children:[m,g]})}),e[22]=g,e[23]=m,e[24]=_):_=e[24],_}', 'function Mc(){'],
     ['/assets/general-settings-8997e171b11a.js', 'function Mc(){', 'description:`Unit label for code font size setting`}),e[18]=n,e[19]=h);let g;e[20]===h?g=e[21]:(g=(0,$.jsx)(`span`,{className:`text-sm text-secondary`,children:h}),e[20]=h,e[21]=g);let _;return e[22]!==g||e[23]!==m?(_=(0,$.jsx)(V,{label:s,description:c,control:(0,$.jsxs)(`div`,{className:`flex items-center gap-2`,children:[m,g]})}),e[22]=g,e[23]=m,e[24]=_):_=e[24],_}', 'function Nc(){'],
+    ['/assets/general-settings-8997e171b11a.js', 'function Ec(){', 'e[23]=a,e[24]=r,e[25]=_,e[26]=v):v=e[26],v}', 'function Dc(){'],
+    ['/assets/general-settings-8997e171b11a.js', 'function Tc(){', 'e[17]=a,e[18]=r,e[19]=m,e[20]=h):h=e[20],h}', 'function Ec(){'],
+    ['/assets/general-settings-8997e171b11a.js', 'function bc(){', 'let c;e[4]===n?c=e[5]:(c=n.formatMessage(Y.pointerCursors),e[4]=n,e[5]=c);let l;return e[6]!==o||e[7]!==s||e[8]!==c?(l=(0,$.jsx)(V,{label:i,description:a,control:(0,$.jsx)(Le,{checked:o,onChange:s,ariaLabel:c})}),e[6]=o,e[7]=s,e[8]=c,e[9]=l):l=e[9],l}', 'function xc(){'],
+    ['/assets/general-settings-8997e171b11a.js', 'function Nc(){', 'e[6]=a,e[7]=c,e[8]=l,e[9]=u):u=e[9],u}', 'function Pc(){'],
     ['/assets/appearance-settings-deb0b7565185.js', 'function f(){', 'e[1]=r,e[2]=i,e[3]=s):s=e[3],s}', 'var p,m,h;'],
+    ['/assets/sites-end-resource-b11586198b69.js', 'function zx(e){let t=(0,$x.c)(284),', 't[275]=kt,t[276]=At,t[277]=jt,t[278]=Mt,t[279]=Nt,t[280]=Pt,t[281]=Lt,t[282]=Rt,t[283]=zt):zt=t[283],zt}', 'function Bx(e){'],
+    ['/assets/sites-end-resource-b11586198b69.js', 'function Jx(e){let t=(0,$x.c)(52),', 't[46]=M,t[47]=fe,t[48]=pe,t[49]=me,t[50]=W,t[51]=he):he=t[51],he}', 'function Yx(e){'],
+    ['/assets/sites-end-resource-b11586198b69.js', 'function Ax(e){let t=(0,Mx.c)(50),', 't[47]=P,t[48]=E,t[49]=ee):ee=t[49],ee}', 'function jx(e,t){'],
+    ['/assets/sites-end-resource-b11586198b69.js', 'function pE(e){let t=(0,yE.c)(49),', 't[46]=j,t[47]=z,t[48]=B):B=t[48],B}', 'function mE(e){'],
+    ['/assets/local-conversation-turn-981410324fed.js', 'function ss(e){let t=(0,us.c)(8),', 't[5]=a,t[6]=o,t[7]=s):s=t[7],s}', 'function cs(e,t,n){'],
   ]) {
     const original = await readFile(join(rendererRoot, path));
     const adapted = adaptMigratedRendererModule(path, original);
     assert.ok(adapted.includes(Buffer.from(`from"${rendererComponentsPath}"`)));
-    await transform(adapted.toString(), { format: 'esm', target: 'es2022' });
+    if (!validatedModules.has(path)) {
+      await transform(adapted.toString(), { format: 'esm', target: 'es2022' });
+      validatedModules.add(path);
+    }
     const missing = Buffer.from(original.toString().replace(marker, 'function MissingMigrationBoundary(e){'));
     assert.throws(() => adaptMigratedRendererModule(path, missing), /does not match the pinned renderer/);
     const duplicated = Buffer.concat([original, Buffer.from(marker + '}')]);
@@ -67,7 +82,7 @@ test('adapted modules cannot remain immutable across authored component upgrades
   t.after(async () => { await app?.close(); await fake.close(); await rm(root, { recursive: true, force: true }); });
   app = await createNativeWorkbench({ port: 0, socketPath: fake.socketPath, codexHome: join(root, 'codex'),
     dataDir: join(root, 'data'), workspace: root, hostCatalog: { hosts: [], projects: [], assignments: {} } });
-  for (const path of ['app-initial-a68277f60b93.js', 'collapsible-user-message-content-636c4ff1e0ff.js', 'app-primary-f5ea123a0407.js', 'app-shared-61271c39e3c5.js', 'settings-page-25f8fd08b293.js', 'user-message-58a6f09045c4.js', 'user-message-attachments-9d0c60d2f476.js', 'general-settings-8997e171b11a.js', 'appearance-settings-deb0b7565185.js']) {
+  for (const path of ['app-initial-a68277f60b93.js', 'collapsible-user-message-content-636c4ff1e0ff.js', 'app-primary-f5ea123a0407.js', 'app-shared-61271c39e3c5.js', 'settings-page-25f8fd08b293.js', 'user-message-58a6f09045c4.js', 'user-message-attachments-9d0c60d2f476.js', 'general-settings-8997e171b11a.js', 'appearance-settings-deb0b7565185.js', 'sites-end-resource-b11586198b69.js', 'local-conversation-turn-981410324fed.js']) {
     // Check both first adaptation and the server's in-memory cached response.
     for (let request = 0; request < 2; request++) {
       const response: Response = await fetch(app.url + webRendererPrefix + '/assets/' + path);

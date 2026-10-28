@@ -21,10 +21,14 @@ the upstream App's original TSX source is not available.
 | Queue editing orchestration | `src/renderer/composer/composer-queue-edit.ts`, `composer-queue-types.ts` | `alt` and its local `olt/slt` logic; original controller, scoped atoms, queue actions, attachment services, undo history and transport. Authored edit races, draft/attachment restoration, delete/undo/redo and send-now routing; queue presentation remains upstream |
 | User message and body | `src/renderer/messages/user-message.tsx` | `user-message`'s `Rt` and `yt`; original scope, editing draft atom, Markdown, editor, clipboard and primitives; authored message/actions/selection and edit/copy orchestration |
 | File and image attachments | `src/renderer/messages/user-message-attachments.tsx`, `user-message-image.tsx` | `gn`, `pn`, `fn`; original filesystem/image services, context menu, dialog/overlay/editor and thread identity; authored routing, asynchronous loading, controlled navigation and focus restoration |
+| Assistant body and actions | `src/renderer/messages/assistant-message.tsx`, `assistant-message-actions.tsx`, `assistant-message-overflow.tsx` | `zx/Jx/Ax`; original thread scope, services, feature gates, clipboard, feedback and menu primitives; authored body, response actions and conditional menu composition |
+| Reasoning and thinking presentation | `src/renderer/messages/reasoning-message.tsx`, `thinking-status.tsx` | `pE/ss`; original reasoning state, Markdown, measurement and motion primitives. Conditional consumers remain open for actual-page acceptance; the pinned local activity classifier omits reasoning items |
+| Adaptive Markdown and root | `src/renderer/markdown/adaptive-streaming.tsx`, `markdown-root.tsx` | `Jdd/Nod`; original streaming buffer, parser/token renderer, media services and component context; authored subscription lifecycle, streaming presentation and Markdown root composition |
 | Settings root | `src/renderer/settings/settings-page.tsx`, `settings-types.ts` | `settings-page`'s `_i`; original configuration scope, visibility/host/router hooks, sidebar, shell, section content and dialog; authored navigation guard, search targets and route/host composition |
 | General section composition | `src/renderer/settings/sections/general.tsx` | `Js` and its `Ys/Xs/Zs` arrangements; original access/host/feature gates, Windows service and individual preference rows |
 | Appearance composition and theme form | `src/renderer/settings/sections/appearance.tsx`, `theme-variants.tsx`, `theme-form.tsx` | Route `f`, preferences `tc`, variant dispatch `Qa` and form `$a`; original theme hook `hn`, configuration atoms, clipboard/toasts and lower pickers/dialog/slider. Authored advanced/separate-mode state, theme import/export and color/font patches |
 | Appearance mode and font sizes | `src/renderer/settings/sections/appearance-controls.tsx` | `yc/kc/Ac/jc/Mc`; original configuration writers/schema, font limits, artwork, input and tooltip primitives; authored radio and font-input interaction |
+| Appearance preference rows | `src/renderer/settings/sections/appearance-preference-rows.tsx` | `Ec/Tc/bc/Nc`; original reduced-motion, diff-marker, pointer-cursor and font-smoothing atoms and writers; authored choices, save-error handling and macOS visibility |
 
 The timestamp entry is shared by local and remote sidebar rows, pending worktree
 rows, hover cards and other lazy pages. The same defaults, message identifiers,
@@ -112,6 +116,15 @@ font input normalization and saved mode/font-size restoration after reload.
 `npm run test:queue` exercises the actual queue edit/delete/requeue/reload path
 and uses V8 coverage to confirm that the authored queue hook executes. These
 scripts use disposable protocol peers; they do not perform real model inference.
+
+Set `AGENTS_SETTINGS_PREFERENCES_ONLY=1` for focused preference-row acceptance,
+including saved values after reload. The Linux check calls the font-smoothing
+component and verifies its macOS control stays hidden; macOS interaction has
+separate component coverage. `npm run test:renderer-messages:ui` checks the actual
+assistant/actions/overflow and Markdown fibers, response copy, protocol deltas,
+completion and reload at desktop/tablet widths. `AGENTS_MESSAGES_EVIDENCE` selects
+its private evidence directory. This local fixture does not claim that conditional
+reasoning or reserved thinking-slot consumers have been mounted.
 
 ## Later batches
 
