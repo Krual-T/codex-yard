@@ -17,7 +17,7 @@ test('browser comments import once into transactions and preserve invalid archiv
     export { addBrowserComment, adoptLegacyBrowserComments, readBrowserComments, readLegacyBrowserComments } from './src/renderer/browser/comments.ts';
     export { readBrowserAtom, updateBrowserAtom } from './src/renderer/storage/ui-atoms.ts';
   ` }, bundle: true, format: 'esm', write: false });
-  const ui = await build({ entryPoints: ['test/browser-owned-fixture.tsx'], bundle: true, format: 'iife', write: false });
+  const ui = await build({ entryPoints: ['test/browser-owned-fixture.tsx'], bundle: true, format: 'iife', write: false, loader: { '.css': 'empty' } });
   const root = await mkdtemp(join(process.env.YARD_TEST_ARTIFACTS ?? tmpdir(), 'browser-comment-storage-'));
   const server = createServer(async (request, response) => {
     if (request.url === '/module.js' || request.url === '/bundle.js') {

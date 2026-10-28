@@ -1,19 +1,18 @@
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 import { StandaloneBrowser } from '../src/renderer/browser/index.tsx';
-import { addBrowserComment, browserCommentsAtomKey, browserOwnerKey,
-  readBrowserCommentsSnapshot } from '../src/renderer/browser/comments.ts';
+import { addBrowserComment, browserCommentsAtomKey, browserOwnerKey, changeBrowserComment, claimLegacyBrowserComment,
+  pruneBrowserDraftDeletions, readBrowserCommentsSnapshot, removeBrowserReferenceFromDraft } from '../src/renderer/browser/comments.ts';
 import type { BrowserOwner, BrowserReference } from '../src/renderer/browser/comments.ts';
-import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference,
-  watchBrowserDraftDeletions } from '../src/renderer/app/browser-draft.ts';
+import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference } from '../src/renderer/app/browser-draft.ts';
 import { SendRecoveryStore } from '../src/renderer/app/send-recovery.ts';
 import type { SendIntent } from '../src/renderer/app/send-recovery.ts';
 import { StandaloneComposer } from '../src/renderer/composer/StandaloneComposer.tsx';
 import type { ComposerDraftController, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
-import { bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraftVersions,
+import { bindComposerDraftToThread, clearComposerDraftRevision, composerDraftAtomKey, readComposerDraftVersions,
   retainComposerDraftVersion } from '../src/renderer/composer/composer-draft-store.ts';
-import { normalizeDraft } from '../src/renderer/composer/standalone-draft.ts';
-import { readBrowserAtom, updateBrowserAtom } from '../src/renderer/storage/ui-atoms.ts';
+import { draftToInput, normalizeDraft } from '../src/renderer/composer/standalone-draft.ts';
+import { readBrowserAtom, subscribeBrowserAtoms, updateBrowserAtom } from '../src/renderer/storage/ui-atoms.ts';
 import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 
 export interface Fixture {
@@ -33,6 +32,12 @@ export interface Fixture {
   atom(key: string): Promise<unknown>;
   preserveUnknown(): Promise<void>;
   attempts(): number;
+  change(owner: BrowserOwner, original: Record<string, unknown>, text: string | null, snapshot: ComposerDraftSnapshot): Promise<ComposerDraftSnapshot>;
+  claim(owner: BrowserOwner, legacyOwner: string, expected: unknown[], index: number, keepBoth: boolean): Promise<void>;
+  removeReference(owner: BrowserOwner, reference: BrowserReference, snapshot: ComposerDraftSnapshot): Promise<ComposerDraftSnapshot>;
+  setLegacyEvidence(key: string, owner: BrowserOwner): Promise<void>;
+  input(): Record<string, unknown>[];
+  injectReference(reference: { id: string; text: string; kind?: string }): Promise<boolean>;
 }
 declare global { interface Window { browserConsumption: Fixture } }
 
@@ -56,6 +61,15 @@ let attemptCount = 0;
 const anchor = { kind: 'element' as const, pageUrl: 'https://fixture.invalid/page', framePath: [], title: 'Fixture element',
   immediateText: 'Example', role: 'button', name: 'Example', selector: '#fixture', elementPath: '#fixture', nearbyText: 'Example',
   rect: { x: 1, y: 2, width: 20, height: 10 }, elementMetadata: { tag: 'button', future: 'kept' } };
+const resolveLegacyOwner = (atoms: Readonly<Record<string, unknown>>, key: string): BrowserOwner | null => {
+  const evidence = atoms['fixture.legacy-identity'];
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return null;
+  const owner = (evidence as Record<string, unknown>)[key];
+  if (!owner || typeof owner !== 'object' || Array.isArray(owner)) return null;
+  const value = owner as Record<string, unknown>;
+  return typeof value.hostId === 'string' && (value.threadId === null || typeof value.threadId === 'string')
+    && typeof value.draftId === 'string' ? { hostId: value.hostId, threadId: value.threadId, draftId: value.draftId } : null;
+};
 
 function App() {
   const [owner, setOwner] = React.useState(initialOwner);
@@ -68,7 +82,11 @@ function App() {
   React.useLayoutEffect(() => { ownerRef.current = owner; }, [owner]);
   React.useLayoutEffect(() => {
     window.browserConsumption = {
-      mount(value) { setSnapshot(null); setOwner(value); void recovery.read().then(state => setBindings(state.bindings)); },
+      mount(value) {
+        const current = controller.current?.snapshot();
+        setSnapshot(current && JSON.stringify(current.owner) === JSON.stringify(value) ? current : null);
+        setOwner(value); void recovery.read().then(state => setBindings(state.bindings));
+      },
       showBrowser(value) { setBrowserVisible(value); },
       snapshot() { return controller.current?.snapshot() ?? null; },
       addComment(value) { return addBrowserComment(value, anchor); },
@@ -125,6 +143,18 @@ function App() {
         });
       },
       attempts: () => attemptCount,
+      change: changeBrowserComment,
+      claim: claimLegacyBrowserComment,
+      removeReference: removeBrowserReferenceFromDraft,
+      async setLegacyEvidence(key, value) {
+        await updateBrowserAtom('fixture.legacy-identity', previous => ({ ...(previous && typeof previous === 'object' ? previous : {}), [key]: value }));
+      },
+      input() { const value = controller.current?.snapshot(); return value ? draftToInput(value.draft, value.owner.hostId) : []; },
+      async injectReference(reference) {
+        const current = controller.current, value = current?.snapshot();
+        if (!current || !value) throw new Error('Fixture draft missing');
+        return current.update(value.owner, draft => ({ ...draft, references: [...(draft.references ?? []), reference] }));
+      },
     };
   });
   const browserOwner = browserDraftOwner(owner, bindings);
@@ -135,14 +165,51 @@ function App() {
     const ready = current.snapshot();
     if (!ready || !matches() || !await current.update(ready.owner, update)) throw new Error('Fixture owner changed');
   }, [bindings]);
+  const getDraftSnapshot = React.useCallback(async (value: BrowserOwner) => {
+    const current = controller.current, initial = current?.snapshot();
+    const matches = () => JSON.stringify(browserDraftOwner(ownerRef.current, bindings)) === JSON.stringify(value);
+    if (!current || !initial || !matches() || !await current.flush(initial.owner)) throw new Error('Fixture owner changed');
+    const ready = current.snapshot();
+    if (!ready || current !== controller.current || !matches()) throw new Error('Fixture owner changed');
+    return ready;
+  }, [bindings]);
+  const acceptCommitted = React.useCallback(async (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => {
+    const current = controller.current;
+    for (let i = 0; i < 100; i++) {
+      const value = current?.snapshot();
+      if (current !== controller.current || !value || JSON.stringify(value.owner) !== JSON.stringify(before.owner)) return false;
+      if (value.revision === after.revision) return true;
+      if (value.revision !== before.revision) return false;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return false;
+  }, []);
   const receiveController = React.useCallback((value: ComposerDraftController | null) => {
     controller.current = value; setControllerReady(value !== null);
   }, []);
   const browserKey = JSON.stringify(browserOwner);
   React.useEffect(() => {
     if (!controllerReady) return;
-    return watchBrowserDraftDeletions(browserOwner, update => apply(browserOwner, update), () => {});
-  }, [browserKey, controllerReady, apply, snapshot?.revision]);
+    let live = true, running = false, pending = false;
+    const refresh = () => {
+      pending = true;
+      if (running) return;
+      running = true;
+      void (async () => {
+        while (live && pending) {
+          pending = false;
+          const before = await getDraftSnapshot(browserOwner);
+          const after = await pruneBrowserDraftDeletions(browserOwner, before, () => live);
+          if (live && before.revision !== after.revision) await acceptCommitted(before, after);
+        }
+      })().catch(() => {}).finally(() => { running = false; if (live && pending) refresh(); });
+    };
+    const unsubscribe = subscribeBrowserAtoms(keys => {
+      if (keys.includes(browserCommentsAtomKey) || keys.includes(composerDraftAtomKey)) refresh();
+    });
+    refresh();
+    return () => { live = false; unsubscribe(); };
+  }, [browserKey, controllerReady, getDraftSnapshot, acceptCommitted, snapshot?.revision]);
   const empty = { text: '', images: [], files: [], references: [] };
   return <>
     <StandaloneComposer client={client} context={{ ...owner, cwd: '/fixture' }} busy={false}
@@ -150,7 +217,8 @@ function App() {
       onRemoveReference={(draftOwner, reference) => removeBrowserDraftReference(browserDraftOwner(draftOwner, bindings), reference)}
       onSubmit={async () => { throw new Error('Fixture does not perform inference'); }} onInterrupt={async () => {}} />
     {browserVisible ? <StandaloneBrowser client={client} {...browserOwner} browserTabId="fixture" draft={snapshot?.draft ?? empty}
-      visible allowNavigation={false} onClose={() => {}} onDraftChange={apply} /> : null}
+      visible allowNavigation={false} onClose={() => {}} onDraftChange={apply} getDraftSnapshot={getDraftSnapshot}
+      onDraftVersionCommitted={acceptCommitted} resolveLegacyOwner={resolveLegacyOwner} /> : null}
   </>;
 }
 createRoot(document.getElementById('root')!).render(<App />);

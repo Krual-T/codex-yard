@@ -17,7 +17,7 @@ import type { ChromeRequest } from '../src/browser-reuse/protocol.ts';
 
 test('owned React Chrome controls an isolated real Chrome through the official MCP',
   { skip: !existsSync('/usr/bin/google-chrome'), timeout: 120_000 }, async () => {
-  const app = await build({ entryPoints: ['test/browser-owned-fixture.tsx'], bundle: true, write: false, format: 'iife' });
+  const app = await build({ entryPoints: ['test/browser-owned-fixture.tsx'], bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' } });
   const root = await mkdtemp(join(process.env.YARD_TEST_ARTIFACTS ?? tmpdir(), 'owned-real-chrome-'));
   const profile = join(root, 'target-profile');
   const broker = new ClientChromeBroker({ configured: true, label: 'Isolated Chrome' }, 30_000);

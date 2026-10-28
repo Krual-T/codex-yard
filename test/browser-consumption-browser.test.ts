@@ -135,10 +135,32 @@ test('confirmed browser references consume only the submitted version across pag
     assert.equal(changedState.consumed.length, 0, 'An independently edited comment is not marked as the original');
     assert.match((await second.evaluate(() => window.browserConsumption.snapshot()))!.draft.references![0]!.text, /Changed before confirmation/);
     const beforeDelete = await second.evaluate(() => window.browserConsumption.prepare());
-    await second.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('Newer C after submit'); await durable(second);
+    await first.waitForFunction(revision => window.browserConsumption.snapshot()?.revision === revision, beforeDelete.revision);
+    const locker = await context.newPage(); await locker.goto(origin + '/locker');
+    await locker.evaluate(async () => {
+      const scope = window as unknown as { lockReady: boolean; unlock(): void };
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open('codex-yard.ui-atoms.v1', 1);
+        request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+      });
+      const tx = db.transaction('atoms', 'readwrite'), store = tx.objectStore('atoms'); let held = true;
+      scope.unlock = () => { held = false; };
+      tx.oncomplete = () => db.close();
+      const keep = () => { if (held) { const request = store.get('native-atoms'); request.onsuccess = () => { scope.lockReady = true; keep(); }; } };
+      keep();
+    });
+    await locker.waitForFunction(() => (window as unknown as { lockReady: boolean }).lockReady);
+    await first.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('Independent A after submit');
+    await second.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('Newer C after submit');
+    await first.waitForFunction(() => window.browserConsumption.snapshot()?.draft.text === 'Independent A after submit');
+    await second.waitForFunction(() => window.browserConsumption.snapshot()?.draft.text === 'Newer C after submit');
+    await locker.evaluate(() => (window as unknown as { unlock(): void }).unlock());
+    await durable(first); await durable(second); await locker.close();
+    assert.equal((await second.evaluate(value => window.browserConsumption.versions(value), changedOwner)).versions.length, 2);
     const newerC = (await second.evaluate(() => window.browserConsumption.snapshot()))!.revision;
     await mount(second, { hostId: 'ssh-other', threadId: 'elsewhere', draftId: 'elsewhere' });
     await first.getByRole('button', { name: '删除引用' }).click();
+    await first.waitForFunction(async value => (await window.browserConsumption.comments(value)).comments.length === 0, changedOwner);
     await second.evaluate(id => window.browserConsumption.confirm(id), beforeDelete.id);
     await second.evaluate(id => window.browserConsumption.finish(id), beforeDelete.id);
     assert.equal((await second.evaluate(value => window.browserConsumption.comments(value), changedOwner)).comments.length, 0);
@@ -151,8 +173,17 @@ test('confirmed browser references consume only the submitted version across pag
       'The actual prepare transaction rejects a stale deleted reference without reserving a send');
     await second.evaluate(() => window.browserConsumption.showBrowser(false));
     await mount(second, changedOwner);
-    await second.getByText('选择草稿版本').click();
-    await second.getByRole('button', { name: 'Newer C after submit' }).click();
+    const chooseNewer = async () => {
+      const choices = second.getByText('选择草稿版本').locator('..');
+      if (!await choices.evaluate(element => (element as HTMLDetailsElement).open)) await second.getByText('选择草稿版本').click();
+      await second.getByRole('button', { name: 'Newer C after submit' }).click();
+    };
+    if ((await second.evaluate(() => window.browserConsumption.snapshot()))?.draft.text !== 'Newer C after submit') await chooseNewer();
+    await second.waitForFunction(async owner => (await window.browserConsumption.versions(owner)).versions.some(value =>
+      value.draft.text === 'Newer C after submit' && value.draft.references?.length === 0), changedOwner);
+    if ((await second.evaluate(() => window.browserConsumption.snapshot()))?.draft.references?.length !== 0) {
+      await chooseNewer();
+    }
     try {
       await second.waitForFunction(() => window.browserConsumption.snapshot()?.draft.text === 'Newer C after submit'
         && window.browserConsumption.snapshot()?.draft.references?.length === 0, undefined, { timeout: 8_000 });

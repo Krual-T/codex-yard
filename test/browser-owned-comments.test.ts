@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { browserOwnerKey, browserReferences, reconcileBrowserReferences, removeExplicitlyDeletedBrowserReferences } from '../src/renderer/browser/comments.ts';
 
-test('browser references preserve unknown data and reconcile only unchanged draft snapshots', () => {
+test('browser references preserve unknown data and do not reconcile independent draft versions', () => {
   const owner = { hostId: 'local', threadId: 'same-id', draftId: 'home' };
   const remote = { ...owner, hostId: 'ssh' };
   const comment = { type: 'comment', origin: 'browser', content: [{ content_type: 'text', text: 'Edited', extra: 1 }],
@@ -22,7 +22,9 @@ test('browser references preserve unknown data and reconcile only unchanged draf
   const changed = { ...reference, text: 'A newer composer edit' };
   assert.deepEqual(reconcileBrowserReferences({ ...draft, references: [changed, draft.references[1]!] }, [reference], []).references,
     [changed, draft.references[1]], 'A later draft edit is not cleared');
-  assert.deepEqual(reconcileBrowserReferences(draft, [reference], []).references, [draft.references[1]], 'An unchanged removed reference is cleared');
+  assert.deepEqual(reconcileBrowserReferences(draft, [reference], []).references, draft.references, 'A removed saved comment does not rewrite an independent draft');
+  assert.deepEqual(reconcileBrowserReferences(draft, [reference], [{ ...reference, text: 'R2' }]).references, draft.references,
+    'A newer saved comment does not replace the version in a draft');
   assert.deepEqual(reconcileBrowserReferences({ ...draft, references: [] }, [reference], [reference]).references, [], 'A removed draft reference is not silently reinserted');
   assert.deepEqual(reconcileBrowserReferences({ ...draft, references: [] }, [], [reference]).references, [],
     'A stale comment snapshot cannot automatically reinsert a submitted reference');

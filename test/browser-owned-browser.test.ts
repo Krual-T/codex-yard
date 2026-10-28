@@ -34,7 +34,7 @@ declare global { interface Window { browserHarness: Harness } }
 
 test('owned React Chrome uses the broker and preserves qualified references across pages',
   { skip: !existsSync('/usr/bin/google-chrome'), timeout: 120_000 }, async () => {
-  const app = await build({ entryPoints: ['test/browser-owned-fixture.tsx'], bundle: true, write: false, format: 'iife' });
+  const app = await build({ entryPoints: ['test/browser-owned-fixture.tsx'], bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' } });
   const broker = new ClientChromeBroker({ configured: false, label: 'Fixture server' }, 15_000);
   const sockets = new WebSocketServer({ noServer: true });
   const routers = new Map<string, ChromePanelRouter>();
@@ -215,13 +215,14 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     await second.goto(origin);
     await second.evaluate(identity => window.browserHarness.mount(identity), identity);
     await second.waitForFunction(() => window.browserHarness.references().length === 2);
-    await second.getByRole('button', { name: '添加到草稿' }).first().click();
-    await second.getByRole('button', { name: '添加到草稿' }).first().click();
+    await second.waitForFunction(() => window.browserHarness.draft().references?.length === 2);
     const firstEditors = page.getByLabel('浏览器引用批注');
     const secondEditors = second.getByLabel('浏览器引用批注');
     await firstEditors.nth(0).fill('First page edit');
+    await page.getByRole('button', { name: '保存批注' }).nth(0).click();
+    await second.waitForFunction(() => window.browserHarness.draft().references?.[0]?.text.includes('First page edit'));
     await secondEditors.nth(1).fill('Second page edit');
-    await Promise.all([page.getByRole('button', { name: '保存批注' }).nth(0).click(), second.getByRole('button', { name: '保存批注' }).nth(1).click()]);
+    await second.getByRole('button', { name: '保存批注' }).nth(1).click();
     await page.waitForFunction(() => { const refs = window.browserHarness.references(); return refs[0]?.text.includes('First page edit') && refs[1]?.text.includes('Second page edit'); });
     await second.waitForFunction(() => { const refs = window.browserHarness.references(); return refs[0]?.text.includes('First page edit') && refs[1]?.text.includes('Second page edit'); });
     await page.evaluate(references => window.browserHarness.acknowledge(references), beforeEdit);
@@ -229,8 +230,6 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     await second.reload();
     await second.evaluate(identity => window.browserHarness.mount(identity), identity);
     await second.waitForFunction(() => window.browserHarness.references().length === 2);
-    await second.getByRole('button', { name: '添加到草稿' }).first().click();
-    await second.getByRole('button', { name: '添加到草稿' }).first().click();
     await second.waitForFunction(() => window.browserHarness.draft().references?.length === 2);
     assert.equal(await second.getByLabel('浏览器引用批注').nth(0).inputValue(), 'First page edit');
     await second.getByRole('button', { name: '删除引用' }).nth(1).click();

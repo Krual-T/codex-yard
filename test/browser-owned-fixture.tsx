@@ -5,6 +5,8 @@ import { adoptLegacyBrowserComments, browserOwnerKey, browserReferences,
 import { readBrowserAtom } from '../src/renderer/storage/ui-atoms.ts';
 import { acknowledgeSubmittedBrowserReferences } from '../src/renderer/app/browser-draft.ts';
 import { SendRecoveryStore } from '../src/renderer/app/send-recovery.ts';
+import { StandaloneComposer } from '../src/renderer/composer/StandaloneComposer.tsx';
+import type { ComposerDraftController, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
 import type { BrowserOwner, BrowserReference } from '../src/renderer/browser/index.tsx';
 import type { ComposerDraft, WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 
@@ -28,20 +30,27 @@ const pageSession = crypto.randomUUID();
 const client: WorkbenchClient = {
   async reply() { throw new Error('Unexpected server response'); },
   async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
+    if (endpoint === 'get-setting') return { value: params?.key === 'composerEnterBehavior' ? 'cmdAlways' : 'queue' } as T;
     const response = await fetch('/host', { method: 'POST', headers: { 'content-type': 'application/json', 'x-fixture-session': pageSession },
       body: JSON.stringify({ endpoint, params }) });
     const result = await response.json() as { value?: T; error?: string };
     if (!response.ok) throw new Error(result.error);
     return result.value as T;
   },
-  async rpc<T>(): Promise<T> { throw new Error('Unexpected daemon call'); },
+  async rpc<T>(method: string): Promise<T> {
+    if (method === 'model/list' || method === 'thread/queue/list') return { data: [], nextCursor: null } as T;
+    if (method === 'config/read') return { config: {} } as T;
+    throw new Error('Unexpected daemon call: ' + method);
+  },
   subscribe() { return () => {}; },
 };
 
 function App() {
   const [identity, setIdentity] = React.useState<Identity | null>(null);
   const [shown, setShown] = React.useState(true);
-  const [drafts, setDrafts] = React.useState<Record<string, ComposerDraft>>({});
+  const [draftSnapshot, setDraftSnapshot] = React.useState<ComposerDraftSnapshot | null>(null);
+  const controller = React.useRef<ComposerDraftController | null>(null);
+  const receiveController = React.useCallback((value: ComposerDraftController | null) => { controller.current = value; }, []);
   const [snapshot, setSnapshot] = React.useState<{ key: string; references: BrowserReference[] }>({ key: '', references: [] });
   const active = React.useRef<Identity | null>(null);
   React.useLayoutEffect(() => { active.current = identity; }, [identity]);
@@ -59,7 +68,8 @@ function App() {
     refresh();
     return () => { live = false; unsubscribe(); };
   }, [key]);
-  const draft = drafts[key] ?? { text: '', images: [], files: [], references: [] };
+  const draft = draftSnapshot && identity && browserOwnerKey(draftSnapshot.owner) === key
+    ? draftSnapshot.draft : { text: '', images: [], files: [], references: [] };
   const latestDraft = React.useRef(draft);
   React.useLayoutEffect(() => { latestDraft.current = draft; }, [draft]);
   React.useLayoutEffect(() => {
@@ -69,7 +79,10 @@ function App() {
       visible(value) { setShown(value); },
       identity() { return identity; },
       draft() { return draft; },
-      setText(value) { if (key) setDrafts(previous => ({ ...previous, [key]: { ...(previous[key] ?? draft), text: value } })); },
+      setText(value) {
+        const current = controller.current, snapshot = current?.snapshot();
+        if (current && snapshot) void current.update(snapshot.owner, draft => ({ ...draft, text: value }));
+      },
       async adopt(legacyOwner) {
         if (!identity) throw new Error('No owner');
         const legacy = await readLegacyBrowserComments(legacyOwner);
@@ -92,12 +105,36 @@ function App() {
       async commentStore() { return await readBrowserAtom('codex-yard.browser-comments.v1') as { legacyRaw: string | null; entries: Record<string, unknown> }; },
     };
   });
-  return identity ? <StandaloneBrowser client={client} {...identity} draft={draft} visible={shown} allowNavigation
-    onClose={() => setIdentity(null)} onDraftChange={(owner, update) => {
-      if (!active.current || browserOwnerKey(active.current) !== browserOwnerKey(owner)) return;
-      const ownerKey = browserOwnerKey(owner);
-      setDrafts(previous => ({ ...previous, [ownerKey]: update(previous[ownerKey] ?? { text: '', images: [], files: [], references: [] }) }));
-    }} /> : null;
+  const getSnapshot = async (owner: BrowserOwner) => {
+    const current = controller.current, before = current?.snapshot();
+    const matches = () => active.current && browserOwnerKey(active.current) === browserOwnerKey(owner);
+    if (!current || !before || !matches() || !await current.flush(before.owner)) throw new Error('Fixture owner changed');
+    const ready = current.snapshot();
+    if (!ready || controller.current !== current || !matches()) throw new Error('Fixture owner changed');
+    return ready;
+  };
+  return identity ? <>
+    <div style={{ display: 'none' }}><StandaloneComposer client={client} context={{ ...identity, cwd: '/fixture' }} busy={false}
+      onDraftController={receiveController} onDraftChange={setDraftSnapshot}
+      onSubmit={async () => { throw new Error('Fixture does not perform inference'); }} onInterrupt={async () => {}} /></div>
+    <StandaloneBrowser client={client} {...identity} draft={draft} visible={shown} allowNavigation
+      onClose={() => setIdentity(null)} getDraftSnapshot={getSnapshot}
+      onDraftVersionCommitted={async (before, after) => {
+        const current = controller.current;
+        for (let i = 0; i < 100; i++) {
+          const value = current?.snapshot();
+          if (controller.current !== current || !value || JSON.stringify(value.owner) !== JSON.stringify(before.owner)) return false;
+          if (value.revision === after.revision) return true;
+          if (value.revision !== before.revision) return false;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        return false;
+      }}
+      onDraftChange={async (owner, update) => {
+        const before = await getSnapshot(owner), current = controller.current;
+        if (!current || !await current.update(before.owner, update)) throw new Error('Fixture owner changed');
+      }} />
+  </> : null;
 }
 
 createRoot(document.getElementById('root')!).render(<App />);
