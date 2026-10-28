@@ -12,6 +12,7 @@ class FakeClient implements WorkbenchClient {
   version = 'v1'; profile: string | null = null; failRead = false; lost = false; override = false;
   late: (() => void) | null = null;
   deferLost = false;
+  beforeList?: () => Promise<void>; beforeWrite?: () => Promise<void>;
   writes: { params: Record<string, unknown>; hostId?: string }[] = [];
   subscribe(_listener: (event: WorkbenchEvent) => void) { return () => {}; }
   async reply(): Promise<void> { throw new Error('Unexpected approval'); }
@@ -22,6 +23,7 @@ class FakeClient implements WorkbenchClient {
     assert.equal(hostId, 'ssh:one');
     if (method === 'hooks/list') {
       assert.deepEqual(params, { cwds: ['/project'] });
+      await this.beforeList?.();
       if (this.failRead) throw new Error('list failed');
       return { data: [{ cwd: '/project', hooks: this.hooks.map(hook => ({ ...hook })), warnings: ['fixture warning'], errors: [] }] } as T;
     }
@@ -31,6 +33,7 @@ class FakeClient implements WorkbenchClient {
     ] } as T;
     if (method === 'config/batchWrite') {
       assert.ok(params); this.writes.push({ params, hostId });
+      await this.beforeWrite?.();
       assert.equal(params.expectedVersion, this.version); assert.equal(params.filePath, null);
       if (this.override) return { status: 'okOverridden' } as T;
       const apply = () => {
@@ -97,6 +100,38 @@ test('a late original write remains fenced after an earlier unchanged refresh', 
   await settings.load(); settings.useLatest(); settings.discard();
   assert.equal(settings.getSnapshot().writeUncertain, true);
   assert.equal(settings.dirty, true); assert.equal(client.writes.length, 1);
+});
+
+test('suspending during hook preflight prevents the write and preserves the draft', async () => {
+  const { client, settings } = await setup();
+  let release = () => {}, entered = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  client.beforeList = async () => { entered(); await gate; };
+  settings.edit(trusted.key, false);
+  const saving = settings.save(); await waiting;
+  settings.dispose();
+  assert.equal(settings.getSnapshot().saving, false);
+  assert.equal(settings.getSnapshot().writeUncertain, false);
+  assert.equal(settings.getSnapshot().needsRefresh, true);
+  release(); assert.equal(await saving, false);
+  assert.equal(client.writes.length, 0); assert.equal(settings.dirty, true);
+});
+
+test('suspending after a hook write was sent keeps it fenced even after a late success', async () => {
+  const { client, settings } = await setup();
+  let release = () => {}, entered = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  client.beforeWrite = async () => { entered(); await gate; };
+  settings.edit(trusted.key, false);
+  const saving = settings.save(); await waiting;
+  settings.dispose();
+  assert.equal(settings.getSnapshot().writeUncertain, true);
+  release(); assert.equal(await saving, false);
+  await settings.load(); settings.useLatest(); settings.discard();
+  assert.equal(settings.getSnapshot().writeUncertain, true);
+  assert.equal(settings.dirty, true); assert.equal(await settings.save(), false); assert.equal(client.writes.length, 1);
 });
 
 test('a changed trust state or override cannot silently apply a pending edit', async () => {

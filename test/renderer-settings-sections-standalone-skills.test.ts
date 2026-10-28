@@ -10,6 +10,7 @@ class FakeClient implements WorkbenchClient {
   writes: { params: Record<string, unknown>; hostId?: string }[] = [];
   failRead = false; failWriteAt = 0; lostWriteAt = 0; override = false;
   reads = 0; beforeRead?: () => Promise<void>;
+  beforeWrite?: () => Promise<void>;
   subscribe(_listener: (event: WorkbenchEvent) => void) { return () => {}; }
   async reply(): Promise<void> { throw new Error('Unexpected approval'); }
   async host<T>(): Promise<T> { throw new Error('Unexpected host call'); }
@@ -23,6 +24,7 @@ class FakeClient implements WorkbenchClient {
     }
     if (method === 'skills/config/write') {
       assert.ok(params); this.writes.push({ params, hostId });
+      await this.beforeWrite?.();
       if (this.failWriteAt === this.writes.length) throw new Error('write unsupported');
       const matches = this.skills.filter(skill => params.name === skill.name || params.path === skill.path);
       assert.equal(matches.length, 1);
@@ -108,4 +110,36 @@ test('invalidation during a save schedules a fresh read after the write', async 
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(client.reads, 4);
   assert.deepEqual(settings.getSnapshot().skills.map(skill => skill.enabled), [false, false]);
+});
+
+test('suspending during skill preflight prevents the write and preserves the draft', async () => {
+  const { client, settings } = await setup();
+  let release = () => {}, entered = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  client.beforeRead = async () => { entered(); await gate; };
+  settings.edit(id(local.name, local.path), false);
+  const saving = settings.save(); await waiting;
+  settings.dispose();
+  assert.equal(settings.getSnapshot().saving, false);
+  assert.equal(settings.getSnapshot().writeUncertain, false);
+  assert.equal(settings.getSnapshot().needsRefresh, true);
+  release(); assert.equal(await saving, false);
+  assert.equal(client.writes.length, 0); assert.equal(settings.dirty, true);
+});
+
+test('suspending after a skill write was sent keeps it fenced even after a late success', async () => {
+  const { client, settings } = await setup();
+  let release = () => {}, entered = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  client.beforeWrite = async () => { entered(); await gate; };
+  settings.edit(id(local.name, local.path), false);
+  const saving = settings.save(); await waiting;
+  settings.dispose();
+  assert.equal(settings.getSnapshot().writeUncertain, true);
+  release(); assert.equal(await saving, false);
+  await settings.load(); settings.useLatest();
+  assert.equal(settings.getSnapshot().writeUncertain, true);
+  assert.equal(settings.dirty, true); assert.equal(await settings.save(), false); assert.equal(client.writes.length, 1);
 });

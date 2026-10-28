@@ -59,12 +59,20 @@ export class SkillSettings {
   private latestRead: SkillRead | null = null;
   private generation = 0;
   private invalidated = false;
+  private writeInFlight = false;
   constructor(client: WorkbenchClient, hostId: string, cwds: readonly string[]) { this.client = client; this.hostId = hostId; this.cwds = [...cwds]; }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<SkillSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
   get dirty() { return this.snapshot.drafts.length > 0; }
-  dispose() { this.generation++; this.invalidated = false; }
+  dispose() {
+    this.generation++; this.invalidated = false;
+    if (this.snapshot.saving) this.update({ saving: false, loading: false, needsRefresh: true,
+      writeUncertain: this.snapshot.writeUncertain || this.writeInFlight,
+      error: this.writeInFlight ? 'The previous save has an unknown result. The host must confirm it has ended before another save.' :
+        'The save was interrupted. Refresh and review your edits before saving.' });
+    else if (this.snapshot.loading) this.update({ loading: false });
+  }
   invalidate() {
     if (this.snapshot.saving || this.snapshot.loading) { this.invalidated = true; return; }
     void this.load();
@@ -145,7 +153,10 @@ export class SkillSettings {
         const skill = before.skills.find(item => item.id === draft.id);
         if (!skill || !canEditSkill(skill, before.skills)) throw new Error('The skill selector is no longer unique');
         writeInFlight = true;
-        const result = await this.client.rpc<{ effectiveEnabled?: unknown }>('skills/config/write', { ...selector(skill), enabled: draft.enabled }, this.hostId);
+        this.writeInFlight = true;
+        let result: { effectiveEnabled?: unknown };
+        try { result = await this.client.rpc<{ effectiveEnabled?: unknown }>('skills/config/write', { ...selector(skill), enabled: draft.enabled }, this.hostId); }
+        finally { this.writeInFlight = false; }
         writeInFlight = false;
         if (generation !== this.generation) return false;
         if (result?.effectiveEnabled !== draft.enabled) throw new Error('The host reported a different effective skill state');

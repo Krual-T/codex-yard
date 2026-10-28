@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ComponentType } from 'react';
 import type { StandaloneSettingsProps } from '../workbench-contract.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
@@ -11,12 +11,14 @@ import { ConnectionsSection } from './ConnectionsSection.tsx';
 import { GeneralSection } from './GeneralSection.tsx';
 import { GitSection } from './GitSection.tsx';
 import { HookSection } from './HookSection.tsx';
+import type { HookSectionMemory } from './HookSection.tsx';
 import { KeyboardSection } from './KeyboardSection.tsx';
 import { ModelSection } from './ModelSection.tsx';
 import { PersonalizationSection } from './PersonalizationSection.tsx';
 import type { SettingsInstructionEditorProps } from './PersonalizationSection.tsx';
 import { PluginSection } from './PluginSection.tsx';
 import { SkillSection } from './SkillSection.tsx';
+import type { SkillSectionMemory } from './SkillSection.tsx';
 import { Preferences, preferenceKeys } from './preferences.ts';
 import type { PreferenceProps } from './PreferenceControls.tsx';
 import { PreferenceConflicts } from './PreferenceConflicts.tsx';
@@ -64,6 +66,7 @@ export type SettingsIntegrationProps = StandaloneSettingsProps & {
   registerNavigationGuard?: (guard: SettingsNavigationGuard | null) => void;
   projectRoots: SettingsProjectRoots | null;
   sessionCwd: SettingsSessionCwd | null;
+  scopeStatus?: { state: 'loading' | 'error' | 'ready'; error?: string; retry(): void };
   InstructionEditor: ComponentType<SettingsInstructionEditorProps>;
 };
 const remainingSections: Record<string, string> = {
@@ -85,11 +88,15 @@ export function StandaloneSettings(props: SettingsIntegrationProps) {
   return <SettingsPage {...props} preferences={preferences} snapshot={snapshot} />;
 }
 
-function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, projectRoots, sessionCwd, InstructionEditor, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
+function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, projectRoots, sessionCwd, scopeStatus, InstructionEditor, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
   const { t, locale } = useI18n();
   const route = readSettingsRoute(location, hostId);
   const { section, hostId: selectedHost } = route;
   const projectScope = settingsScope(selectedHost, projectRoots, sessionCwd);
+  const foreignScope = !!(projectRoots && projectRoots.hostId !== selectedHost || sessionCwd && sessionCwd.hostId !== selectedHost);
+  const scopeState = scopeStatus?.state === 'ready' && foreignScope ? 'loading' : scopeStatus?.state ?? 'ready';
+  const hookMemory = useRef<HookSectionMemory | null>(null);
+  const skillMemory = useRef<SkillSectionMemory | null>(null);
   const [hosts, setHosts] = useState<RemoteConnection[]>([]);
   const [hostError, setHostError] = useState<string | null>(null);
   const [platform, setPlatform] = useState('unknown');
@@ -108,6 +115,11 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
   const anySaving = saving || otherSaving || preferenceKeys.some(key => snapshot[key].saving);
   const flags = useRef({ dirty, saving: anySaving });
   flags.current = { dirty, saving: anySaving };
+
+  useLayoutEffect(() => {
+    if (section !== 'hooks-settings') hookMemory.current = null;
+    if (section !== 'skills-settings') skillMemory.current = null;
+  }, [section]);
 
   const requestLeave = useCallback((): Promise<boolean> => {
     if (flags.current.saving || preferences.saving) return Promise.resolve(false);
@@ -214,6 +226,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
       display: translateKnown(t, entry.label), isTitle: entry.id === '__heading__' }));
   }) : [];
   const isCatalog = (value: string): value is CatalogKind => ['skills-settings', 'hooks-settings', 'mcp-settings', 'plugins-settings'].includes(value);
+  const needsScope = section === 'plugins-settings' || section === 'hooks-settings' || section === 'skills-settings';
   return <div className="yard-settings">
     <aside className="yard-settings-nav" aria-label={t('Settings navigation')}>
       <div className="yard-settings-nav-header"><strong>{t('Settings')}</strong><button type="button" onClick={() => guard(onClose)} aria-label={t('Close settings')}>{t('Close')}</button></div>
@@ -250,7 +263,11 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
     </aside>
     <main className="yard-settings-main" aria-label={locale.startsWith('en') ? `${title} settings` : `${t('Settings')}: ${title}`}>
       <div className="yard-settings-content" ref={content}>
-        {section === 'general-settings' ? <GeneralSection preferences={preferences} snapshot={snapshot} platform={platform} navigate={navigate} /> :
+        {needsScope && scopeState !== 'ready' ? scopeState === 'error' ?
+          <p className="yard-setting-error" role="alert">{t('Selected project or session')}: {t('Unavailable')}{scopeStatus?.error ? `: ${scopeStatus.error}` : ''}{' '}
+            <button type="button" className="yard-link" onClick={() => scopeStatus?.retry()}>{t('Retry')}</button></p> :
+          <p role="status">{t('Selected project or session')}: {t('Loading...')}</p> :
+        section === 'general-settings' ? <GeneralSection preferences={preferences} snapshot={snapshot} platform={platform} navigate={navigate} /> :
           section === 'appearance' ? <AppearanceSection key={editorRevision} preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} onDirtyChange={setOtherDirty} /> :
             section === 'models' ? <ModelSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
               section === 'agent' ? <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
@@ -264,9 +281,9 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
               section === 'plugins-settings' ? <PluginSection key={`${selectedHost}:${scopeKey(projectScope)}`} client={client} hostId={selectedHost} route={route} projectScope={projectScope}
                 navigate={path => guard(() => onNavigate(path, { state: location.state }))} /> :
               section === 'hooks-settings' ? <HookSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
-                projectScope={projectScope} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+                projectScope={projectScope} memory={hookMemory} revision={editorRevision} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
               section === 'skills-settings' ? <SkillSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
-                projectScope={projectScope} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
+                projectScope={projectScope} memory={skillMemory} revision={editorRevision} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
               isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
                 section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving} /> :
                   section === 'connections' ? <ConnectionsSection client={client} onSavingChange={setOtherSaving} /> :

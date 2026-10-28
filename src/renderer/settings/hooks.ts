@@ -69,6 +69,7 @@ export class HookSettings {
   private readonly cwds: readonly string[];
   private readonly listeners = new Set<() => void>();
   private generation = 0;
+  private writeInFlight = false;
   private target: ConfigTarget | null = null;
   private profile: string | null = null;
   private latestRead: HookRead | null = null;
@@ -78,7 +79,13 @@ export class HookSettings {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<HookSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
   get dirty() { return this.snapshot.drafts.length > 0; }
-  dispose() { this.generation++; }
+  dispose() {
+    this.generation++;
+    if (this.snapshot.saving) this.update({ saving: false, loading: false, needsRefresh: true,
+      writeUncertain: this.snapshot.writeUncertain || this.writeInFlight,
+      error: this.writeInFlight ? unknownWrite : 'The save was interrupted. Refresh and review your edits before saving.' });
+    else if (this.snapshot.loading) this.update({ loading: false });
+  }
 
   private async read(): Promise<HookRead> {
     if (!this.cwds.length || !this.cwds.every(validScopePath)) throw new Error('Select a project or session with a working directory.');
@@ -168,9 +175,14 @@ export class HookSettings {
       }
       const edits = drafts.map(draft => ({ keyPath: `hooks.state.${JSON.stringify(draft.key)}.enabled`, value: draft.enabled, mergeStrategy: 'upsert' }));
       writeStarted = true;
-      const result = await this.client.rpc<{ status: 'ok' | 'okOverridden' }>('config/batchWrite',
-        { edits, filePath: null, expectedVersion: target.version, reloadUserConfig: true }, this.hostId);
+      this.writeInFlight = true;
+      let result: { status: 'ok' | 'okOverridden' };
+      try {
+        result = await this.client.rpc<{ status: 'ok' | 'okOverridden' }>('config/batchWrite',
+          { edits, filePath: null, expectedVersion: target.version, reloadUserConfig: true }, this.hostId);
+      } finally { this.writeInFlight = false; }
       writeFinished = true;
+      if (generation !== this.generation) return false;
       if (result?.status !== 'ok') throw new Error(result?.status === 'okOverridden' ? 'A higher-priority setting overrides the change' : 'The host did not confirm the write');
       const after = await this.read();
       if (generation !== this.generation) return false;

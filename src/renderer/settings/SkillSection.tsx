@@ -1,29 +1,40 @@
 import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import type { RefObject } from 'react';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { canEditSkill, SkillSettings } from './skills.ts';
 import { scopeKey, validScopePath } from './scope.ts';
 import type { SettingsScope } from './scope.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
 
-export function SkillSection({ client, hostId, projectScope, onDirtyChange, onSavingChange }: {
+export interface SkillSectionMemory {
+  client: WorkbenchClient; hostId: string; revision: number; cwd: string; scopeError: string | null; query: string;
+  scope: { origin: string; paths: string[] }; settings: SkillSettings;
+}
+
+export function SkillSection({ client, hostId, projectScope, memory, revision, onDirtyChange, onSavingChange }: {
   client: WorkbenchClient; hostId: string; projectScope: SettingsScope; onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
+  memory: RefObject<SkillSectionMemory | null>; revision: number;
 }) {
   const { t } = useI18n();
-  const [cwd, setCwd] = useState('');
+  const [retained] = useState(() => memory.current?.client === client && memory.current.hostId === hostId && memory.current.revision === revision ? memory.current : null);
+  const [cwd, setCwd] = useState(() => retained?.cwd ?? '');
   const incomingKey = scopeKey(projectScope);
-  const [scope, setScope] = useState(() => ({ origin: incomingKey, paths: projectScope.paths }));
-  const [scopeError, setScopeError] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
-  const settings = useMemo(() => new SkillSettings(client, hostId, scope.paths), [client, hostId, scope]);
+  const [scope, setScope] = useState(() => retained?.scope ?? { origin: incomingKey, paths: projectScope.paths });
+  const [scopeError, setScopeError] = useState<string | null>(() => retained?.scopeError ?? null);
+  const [query, setQuery] = useState(() => retained?.query ?? '');
+  const settings = useMemo(() => retained?.scope === scope && retained.client === client && retained.hostId === hostId && retained.revision === revision ?
+    retained.settings : new SkillSettings(client, hostId, scope.paths), [client, hostId, revision, scope, retained]);
   const state = useSyncExternalStore(settings.subscribe, settings.getSnapshot, settings.getSnapshot);
   const scopeChanged = scope.origin !== incomingKey;
-  useEffect(() => {
+  useLayoutEffect(() => { memory.current = { client, hostId, revision, cwd, scopeError, query, scope, settings }; }, [client, hostId, revision, cwd, scopeError, query, scope, settings, memory]);
+  useLayoutEffect(() => {
+    if (scopeChanged) return () => { settings.dispose(); onSavingChange(false); };
     const unsubscribe = client.subscribe(event => {
       if (event.type === 'mcp-notification' && event.hostId === hostId && event.method === 'skills/changed') settings.invalidate();
     });
     void settings.load();
-    return () => { unsubscribe(); settings.dispose(); };
-  }, [client, hostId, settings]);
+    return () => { unsubscribe(); settings.dispose(); onSavingChange(false); };
+  }, [client, hostId, settings, scopeChanged, onSavingChange]);
   useEffect(() => {
     if (scopeChanged && !settings.dirty && !state.saving && !state.loading && !state.writeUncertain) {
       setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); setScopeError(null);

@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import type { RefObject } from 'react';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { canEditHook, HookSettings } from './hooks.ts';
 import type { HookEntry } from './hooks.ts';
@@ -10,23 +11,35 @@ const eventLabel = (hook: HookEntry) => hook.eventName.charAt(0).toUpperCase() +
 const trustLabel = (hook: HookEntry) => hook.isManaged || hook.trustStatus === 'managed' ? 'Managed' : hook.trustStatus === 'untrusted' ? 'Needs review'
   : hook.trustStatus === 'modified' ? 'Changed since review' : hook.trustStatus === 'trusted' ? '' : 'Trust status unknown';
 
-export function HookSection({ client, hostId, projectScope, onDirtyChange, onSavingChange }: {
+export interface HookSectionMemory {
+  client: WorkbenchClient; hostId: string; revision: number; cwd: string; scopeError: string | null;
+  scope: { origin: string; paths: string[] }; settings: HookSettings;
+}
+
+export function HookSection({ client, hostId, projectScope, memory, revision, onDirtyChange, onSavingChange }: {
   client: WorkbenchClient; hostId: string; projectScope: SettingsScope; onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
+  memory: RefObject<HookSectionMemory | null>; revision: number;
 }) {
   const { t } = useI18n();
-  const [cwd, setCwd] = useState('');
+  const [retained] = useState(() => memory.current?.client === client && memory.current.hostId === hostId && memory.current.revision === revision ? memory.current : null);
+  const [cwd, setCwd] = useState(() => retained?.cwd ?? '');
   const incomingKey = scopeKey(projectScope);
-  const [scope, setScope] = useState(() => ({ origin: incomingKey, paths: projectScope.paths }));
-  const [scopeError, setScopeError] = useState<string | null>(null);
-  const settings = useMemo(() => new HookSettings(client, hostId, scope.paths), [client, hostId, scope]);
+  const [scope, setScope] = useState(() => retained?.scope ?? { origin: incomingKey, paths: projectScope.paths });
+  const [scopeError, setScopeError] = useState<string | null>(() => retained?.scopeError ?? null);
+  const settings = useMemo(() => retained?.scope === scope && retained.client === client && retained.hostId === hostId && retained.revision === revision ?
+    retained.settings : new HookSettings(client, hostId, scope.paths), [client, hostId, revision, scope, retained]);
   const state = useSyncExternalStore(settings.subscribe, settings.getSnapshot, settings.getSnapshot);
   const scopeChanged = scope.origin !== incomingKey;
-  useEffect(() => { void settings.load(); return () => settings.dispose(); }, [settings]);
+  useLayoutEffect(() => { memory.current = { client, hostId, revision, cwd, scopeError, scope, settings }; }, [client, hostId, revision, cwd, scopeError, scope, settings, memory]);
+  useLayoutEffect(() => {
+    if (!scopeChanged) void settings.load();
+    return () => { settings.dispose(); onSavingChange(false); };
+  }, [settings, scopeChanged, onSavingChange]);
   useEffect(() => {
-    if (scopeChanged && !settings.dirty && !state.saving && !state.loading) {
+    if (scopeChanged && !settings.dirty && !state.saving && !state.loading && !state.writeUncertain) {
       setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); setScopeError(null);
     }
-  }, [scopeChanged, incomingKey, projectScope, settings, state.drafts, state.saving, state.loading]);
+  }, [scopeChanged, incomingKey, projectScope, settings, state.drafts, state.saving, state.loading, state.writeUncertain]);
   useLayoutEffect(() => { onDirtyChange(settings.dirty); }, [settings, state.drafts, onDirtyChange]);
   useLayoutEffect(() => { onSavingChange(state.saving); }, [state.saving, onSavingChange]);
   const locked = state.loading || state.saving || state.writeUncertain || state.latest !== null || scopeChanged;
