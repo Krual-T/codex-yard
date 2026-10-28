@@ -5,7 +5,30 @@ type MessageDescriptor = { id: string; defaultMessage: string; description: stri
 type ImageRouteScope = { value: { kind: string; routeKind?: string; conversationId?: string } };
 type ImageEntrypoint = 'image_click' | 'lightbox_edit_button';
 
-export type UserMessageImageProps<Resolver, Attribution, SourceImage, Submit extends (...args: never[]) => unknown> = {
+export type UserMessageImageAssetResolver = {
+  cacheKey?: readonly unknown[];
+  validationSessionId?: string | null;
+  useDownloadUrlAsImageSrc?: boolean;
+  resolveAsset: (fileId: string) => Promise<
+    | { kind: 'available'; downloadUrl: string; imageSrc?: string | null; requestHeaders?: Record<string, string> | null; eligibleForDirectUrl?: boolean }
+    | { kind: 'trashed'; libraryFileId: string }
+    | { kind: 'permanently-deleted' }
+  >;
+};
+export type UserMessageSourceImage = { id: string; src?: string | null; status: string; type: string };
+export type UserMessageImageEditRequest<Attribution> = {
+  prompt: string;
+  maskSrc?: string | null;
+  annotationCount?: number;
+  editMode?: string;
+  attribution?: Attribution;
+};
+export type UserMessageImageEditSubmit<Attribution> = (
+  request: UserMessageImageEditRequest<Attribution>, signal: AbortSignal,
+) => Promise<boolean | void>;
+
+export type UserMessageImageProps<Resolver extends UserMessageImageAssetResolver, Attribution,
+  SourceImage extends UserMessageSourceImage, Submit extends UserMessageImageEditSubmit<Attribution>> = {
   src: string;
   conversationId: string;
   chatGptConversationId?: string;
@@ -42,8 +65,8 @@ type ImageDetails<Attribution, SourceImage, Submit> = {
 };
 
 export type UserMessageImageDependencies<
-  Scope extends ImageRouteScope, Client, Resolver, Attribution, SourceImage,
-  Submit extends (...args: never[]) => unknown, Identity, MenuItems, Asset,
+  Scope extends ImageRouteScope, Client, Resolver extends UserMessageImageAssetResolver, Attribution,
+  SourceImage extends UserMessageSourceImage, Submit extends UserMessageImageEditSubmit<Attribution>, Identity, MenuItems, Asset,
 > = {
   useScope: () => Scope;
   useIntl: () => { formatMessage: (message: MessageDescriptor) => string };
@@ -110,8 +133,8 @@ export type UserMessageImageDependencies<
 };
 
 export function createUserMessageImageComponent<
-  Scope extends ImageRouteScope, Client, Resolver, Attribution, SourceImage,
-  Submit extends (...args: never[]) => unknown, Identity, MenuItems, Asset,
+  Scope extends ImageRouteScope, Client, Resolver extends UserMessageImageAssetResolver, Attribution,
+  SourceImage extends UserMessageSourceImage, Submit extends UserMessageImageEditSubmit<Attribution>, Identity, MenuItems, Asset,
 >(
   React: typeof import('react'),
   dependencies: UserMessageImageDependencies<Scope, Client, Resolver, Attribution, SourceImage, Submit, Identity, MenuItems, Asset>,

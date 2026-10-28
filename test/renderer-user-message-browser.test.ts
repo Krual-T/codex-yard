@@ -8,9 +8,11 @@ declare global {
   interface Window {
     userMessageHarness: {
       renderMessage: (text: string, printing?: boolean) => void;
+      unmountMessage: () => void;
+      getDraft: () => { literalMarkdownLinkSources: (string | null)[] | null } | null;
       renderFiles: () => void;
       renderImages: () => void;
-      renderSingleImage: (src: string, options?: { overlay?: boolean; uploaded?: boolean; withResolver?: boolean; assetStatus?: 'loading' | 'error' | 'ready' }) => void;
+      renderSingleImage: (src: string, options?: { overlay?: boolean; uploaded?: boolean; withResolver?: boolean; withEdit?: boolean; assetStatus?: 'loading' | 'error' | 'ready' }) => void;
       resolveImage: (path: string, src: string | null) => void;
       find?: { text: string; isTruncated: boolean; reveal?: () => void };
       reads: { path: string; hostId: string; conversationId: string }[];
@@ -23,6 +25,8 @@ declare global {
       failEdit: boolean;
       editorCalls: { entrypoint: string; src: string; identity?: string }[];
       identityCalls: { src: string; hasResolver: boolean }[];
+      resolvedAssets: string[];
+      submittedEdits: { prompt: string; maskSrc: string; attribution: { imageSource: string }; signalAborted: boolean; sourceImage: { id: string; src: string; status: string; type: string } }[];
     };
   }
 }
@@ -79,8 +83,10 @@ test('user message, attachment actions and image loading use the supplied state 
           toPlainText: text => text,
           copyToClipboard: content => {window.userMessageHarness.copies.push(content); return Promise.resolve(true)},
           UserMessageBody: Body,
-          Editor: ({initialMessage, onCancel, onSubmit}) => h('div', {id: 'editor'},
-            h('span', null, initialMessage), h('button', {onClick: onCancel}, 'Cancel edit'),
+          Editor: ({initialMessage, initialLiteralMarkdownLinkSources, onDraftChange, onCancel, onSubmit}) => h('div', {id: 'editor'},
+            h('span', null, initialMessage), h('span', {id:'draft-links'}, JSON.stringify(initialLiteralMarkdownLinkSources)),
+            h('button', {onClick: () => onDraftChange({message:initialMessage,authoredMarkdownLinkSourcesByOccurrence:[null],literalMarkdownLinkSources:[null]})}, 'Draft link'),
+            h('button', {onClick: onCancel}, 'Cancel edit'),
             h('button', {onClick: () => void onSubmit('updated')}, 'Save edit')),
           Button, Tooltip: ({children}) => children, FormattedMessage: Formatted, Timestamp: () => null,
           HookStatsButton: () => null, CopyIcon: Icon, CopiedIcon: Icon, EditIcon: Icon,
@@ -106,11 +112,28 @@ test('user message, attachment actions and image loading use the supplied state 
               ? String(attachment.startLine) + '-' + String(attachment.endLine) : String(attachment.startLine),
         });
         const png = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+        const resolver = {cacheKey:['fixture'],resolveAsset:async fileId => {
+          window.userMessageHarness.resolvedAssets.push(fileId);
+          if(fileId==='missing-resolved') throw new Error('fixture failure');
+          return {kind:'available',downloadUrl:png};
+        }};
         const Image = createUserMessageImageComponent(React, {
           useScope: () => scope, useIntl: () => intl, useImageClient: () => client, useConversationHostId: () => 'ssh-host',
           useDisableImageOverlay: () => false, useReducedMotion: () => true,
-          useResolvedImage: src => !src ? {isError:false, src:null}
-            : assetStatus === 'error' ? {isError:true, src:null} : {isError:false, src:assetStatus === 'ready' ? png : null},
+          useResolvedImage: (src, selectedResolver) => {
+            const [resolved, setResolved] = React.useState({isError:false,src:null});
+            React.useEffect(() => {
+              if(!src || !selectedResolver) return;
+              let cancelled=false;
+              setResolved({isError:false,src:null});
+              selectedResolver.resolveAsset(src.slice('file-service://'.length)).then(value => {
+                if(!cancelled) setResolved(value.kind==='available' ? {isError:false,src:value.downloadUrl} : {isError:true,src:null});
+              }, () => {if(!cancelled) setResolved({isError:true,src:null})});
+              return () => {cancelled=true};
+            }, [src, selectedResolver]);
+            return selectedResolver && src ? resolved : !src ? {isError:false,src:null}
+              : assetStatus === 'error' ? {isError:true, src:null} : {isError:false, src:assetStatus === 'ready' ? png : null};
+          },
           useImageOverlayEnabled: () => overlay,
           isAssetPointer: src => src.startsWith('file-service://'),
           getLocalImagePath: src => src.startsWith('/') ? src : null,
@@ -133,7 +156,13 @@ test('user message, attachment actions and image loading use the supplied state 
               onNextImage && h('button', {onClick: onNextImage}, 'Next image'),
               editButton && h('button', {onClick: editButton.onClick}, editButton.ariaLabel),
               h('button', {onClick: () => onOpenChange(false)}, 'Close image preview'))),
-          ImageOverlay: ({onClose, onCloseAutoFocus}) => h('div', {role: 'dialog', 'aria-label': 'Image overlay'},
+          ImageOverlay: ({image, onClose, onCloseAutoFocus}) => h('div', {role: 'dialog', 'aria-label': 'Image overlay'},
+            image.onImageEditSubmit && h('button', {onClick: () => {
+              const controller=new AbortController();
+              window.userMessageHarness.submittedSource=image.sourceImage;
+              void image.onImageEditSubmit({prompt:'change',maskSrc:'mask',attribution:image.imageEditAttribution},controller.signal);
+              controller.abort();
+            }}, 'Submit image edit'),
             h('button', {onClick: () => {onClose(); onCloseAutoFocus({preventDefault(){}})}}, 'Close overlay')),
           LoadingIcon: () => h('i', {'data-loading': ''}), AssetIcon: () => h('i'), editAsset: 'edit', FormattedMessage: Formatted,
         });
@@ -142,7 +171,7 @@ test('user message, attachment actions and image loading use the supplied state 
         const fileRoot = createRoot(document.getElementById('file-root'));
         const imageRoot = createRoot(document.getElementById('image-root'));
         window.userMessageHarness = {
-          reads: [], files: [], uploads: [], shares: [], copies: [], copySucceeded: [], edits: [], editorCalls: [], identityCalls: [], failEdit: false,
+          reads: [], files: [], uploads: [], shares: [], copies: [], copySucceeded: [], edits: [], editorCalls: [], identityCalls: [], resolvedAssets: [], submittedEdits: [], failEdit: false,
           renderMessage(text, isPrinting = false) {
             printing = isPrinting;
             flushSync(() => messageRoot.render(h(Message, {message:text, threadId:'thread-a', turnId:'turn-a',
@@ -150,6 +179,8 @@ test('user message, attachment actions and image loading use the supplied state 
               onCopySucceeded: text => window.userMessageHarness.copySucceeded.push(text),
               onEditMessage: async text => {if (window.userMessageHarness.failEdit) throw Error('failed'); window.userMessageHarness.edits.push(text)}})));
           },
+          unmountMessage() {flushSync(() => messageRoot.render(null))},
+          getDraft() {return scope.draft},
           renderFiles() {
             const items = [
               {path:'src/main.ts',fsPath:'/srv/repo/src/main.ts',label:'main.ts (8-10)',startLine:8,endLine:10},
@@ -169,7 +200,15 @@ test('user message, attachment actions and image loading use the supplied state 
           renderSingleImage(src, options = {}) {
             overlay = !!options.overlay; assetStatus = options.assetStatus ?? 'loading';
             flushSync(() => imageRoot.render(h(Image,{src,conversationId:'thread-a',imageSource:options.uploaded ? 'uploaded' : undefined,
-              imageAssetResolver:options.withResolver ? {id:'resolver'} : undefined})));
+              imageAssetResolver:options.withResolver ? resolver : undefined,
+              sourceImage:options.withEdit ? {id:'image-1',src,status:'completed',type:'generated-image'} : undefined,
+              imageEditAttribution:options.withEdit ? {imageSource:'uploaded'} : undefined,
+              onImageEditSubmit:options.withEdit ? async (request,signal) => {
+                const entry={...request,signalAborted:false,sourceImage:window.userMessageHarness.submittedSource};
+                window.userMessageHarness.submittedEdits.push(entry);
+                signal.addEventListener('abort',()=>{entry.signalAborted=signal.aborted},{once:true});
+                return false;
+              } : undefined})));
           },
           resolveImage(path, src) {const resolve = pending.get(path); if (!resolve) throw Error('missing image request'); resolve(src)},
         };
@@ -202,6 +241,11 @@ test('user message, attachment actions and image loading use the supplied state 
     assert.deepEqual(await page.evaluate(() => window.userMessageHarness.copySucceeded), [longText]);
     await page.getByRole('button', { name: 'Edit message' }).click();
     await page.locator('#editor').waitFor();
+    await page.getByRole('button', { name: 'Draft link' }).click();
+    assert.deepEqual((await page.evaluate(() => window.userMessageHarness.getDraft()))?.literalMarkdownLinkSources, [null]);
+    await page.evaluate(() => window.userMessageHarness.unmountMessage());
+    await page.evaluate(text => window.userMessageHarness.renderMessage(text), longText);
+    assert.equal(await page.locator('#draft-links').textContent(), '[null]');
     await page.evaluate(() => { window.userMessageHarness.failEdit = true; });
     await page.getByRole('button', { name: 'Save edit' }).click();
     assert.equal(await page.locator('#editor').count(), 1);
@@ -270,6 +314,15 @@ test('user message, attachment actions and image loading use the supplied state 
       { entrypoint: 'image_click', src: png, identity: undefined });
     await page.evaluate(() => window.userMessageHarness.renderSingleImage('file-service://missing', { assetStatus: 'error' }));
     assert.equal(await page.getByRole('img', { name: 'Image failed to load' }).textContent(), 'Failed');
+    await page.evaluate(() => window.userMessageHarness.renderSingleImage('file-service://good', { withResolver: true, withEdit: true, uploaded: true, overlay: true }));
+    await page.getByRole('button', { name: 'User attachment' }).click();
+    await page.getByRole('button', { name: 'Submit image edit' }).click();
+    assert.deepEqual(await page.evaluate(() => window.userMessageHarness.submittedEdits), [{ prompt:'change', maskSrc:'mask',
+      attribution:{ imageSource:'uploaded' }, signalAborted:true,
+      sourceImage:{ id:'image-1', src:'file-service://good', status:'completed', type:'generated-image' } }]);
+    await page.evaluate(() => window.userMessageHarness.renderSingleImage('file-service://missing-resolved', { withResolver: true }));
+    await page.getByRole('img', { name: 'Image failed to load' }).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.userMessageHarness.resolvedAssets), ['good', 'missing-resolved']);
     await page.close();
   } finally {
     await browser.close();

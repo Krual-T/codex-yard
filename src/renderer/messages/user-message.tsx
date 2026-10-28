@@ -58,7 +58,7 @@ export function createUserMessageBodyComponent<Directives>(
 type MessageDescriptor = { id: string; defaultMessage: string; description: string; values?: { count: number } };
 type UserMessageDraft = {
   authoredMarkdownLinkSourcesByOccurrence: (string | null)[] | null;
-  literalMarkdownLinkSources: string[] | null;
+  literalMarkdownLinkSources: (string | null)[] | null;
   message: string;
   renderFormat?: 'markdown';
 };
@@ -144,7 +144,7 @@ export type UserMessageDependencies<Scope, HookStats, InlineSystemHints> = {
     hostId?: string | null;
     initialAuthoredMarkdownLinkSourcesByOccurrence: (string | null)[] | null;
     initialMessage: string;
-    initialLiteralMarkdownLinkSources: string[] | null;
+    initialLiteralMarkdownLinkSources: (string | null)[] | null;
     initialRenderFormat?: 'markdown';
     onCancel: () => void;
     onDraftChange: (draft: UserMessageDraft) => void;
