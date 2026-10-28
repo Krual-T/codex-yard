@@ -55,12 +55,14 @@ test('standalone composer preserves drafts, routes settings and controls the aut
       };
       let props = {client,context:{hostId:'local',threadId:'thread-a',draftId:'thread-a',cwd:'/fixture/a'},busy:false,activeTurnId:'turn-active',
         initialOptions:{approvalPolicy:{granular:{sandbox_approval:true,rules:false,skill_approval:true,request_permissions:false,mcp_elicitations:true}},approvalsReviewer:'guardian_subagent',permissionProfileId:'fixture-profile'},
+        onDraftChange(snapshot) { state.snapshot = snapshot; },
         onSubmit(draft,options,action) { if(action.type==='queue') return client.rpc('thread/queue/add',{threadId:props.context.threadId,input:draftToInput(draft,props.context.hostId),clientUserMessageId:crypto.randomUUID()},props.context.hostId); state.submissions.push({draft:structuredClone(draft),options:structuredClone(options),action}); return new Promise((resolve,reject)=>{resolveSubmit=resolve;rejectSubmit=reject;}); },
         async onStartQueued(id) { await client.rpc('thread/resume',{threadId:props.context.threadId},props.context.hostId); await client.rpc('thread/queue/start',{threadId:props.context.threadId,queuedSubmissionId:id},props.context.hostId); },
         async onInterrupt() { if(state.interruptFail) throw Error('fixture stop failure'); }};
       const root = createRoot(document.getElementById('root'));
       window.fixture = {state, render(changes={}) {props={...props,...changes,context:{...props.context,...changes.context}};root.render(React.createElement(StandaloneComposer,props));},
-        resolveSubmit(){resolveSubmit();}, rejectSubmit(){rejectSubmit(Error('fixture submit failure'));}};
+        resolveSubmit(){resolveSubmit();}, rejectSubmit(){rejectSubmit(Error('fixture submit failure'));},
+        input(){return draftToInput(state.snapshot.draft,props.context.hostId);}};
       window.fixture.render();
     ` },
     bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' },
@@ -131,6 +133,24 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.getByText('fixture reference').waitFor();
     assert.equal(await page.getByText('fixture reference').count(), 1);
     await page.getByRole('button', { name: '移除引用' }).click();
+    await page.getByText('fixture reference').waitFor({ state: 'detached' });
+    await page.evaluate(() => (window as any).fixture.render({ prefill: { id: 'browser-ref', draft: {
+      text: '', images: [], files: [], references: [{ id: 'browser:fixture', kind: 'browser',
+        text: 'Browser selection: Save button\nPage and element context: {"selector":"#save","extra":"retained"}',
+        context: { localBrowserContext: { targetDescription: 'Save button', targetSelector: '#save' } }, original: { unknown: 'preserved' } }],
+    } } }));
+    const reference = page.locator('.standalone-composer__reference').filter({ hasText: 'Save button' });
+    await reference.waitFor();
+    assert.equal(await reference.locator('summary').innerText(), 'Save button');
+    assert.equal(await reference.locator('pre').isVisible(), false);
+    await reference.locator('summary').click();
+    assert.match(await reference.locator('pre').innerText(), /"extra":"retained"/);
+    await page.waitForFunction(() => (window as any).fixture.state.snapshot?.draft.references.some((item: any) => item.id === 'browser:fixture'));
+    const browserInput = await page.evaluate(() => (window as any).fixture.input());
+    assert.ok(browserInput.some((item: any) => item.type === 'text' && item.text.includes('"extra":"retained"')));
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.snapshot.draft.references.find((item: any) => item.id === 'browser:fixture').original), { unknown: 'preserved' });
+    await reference.getByRole('button', { name: '移除引用' }).click();
+    await reference.waitFor({ state: 'detached' });
     await page.getByLabel('发送方式').selectOption('cmdAlways');
     await page.waitForFunction(() => (window as any).fixture.state.settings.composerEnterBehavior === 'cmdAlways');
     await editor.press('Enter');

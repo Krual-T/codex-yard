@@ -40,8 +40,9 @@
 .standalone-composer__image img { width: 64px; height: 64px; border-radius: 4px; object-fit: cover; }
 .standalone-composer__image button { position: absolute; top: 0; right: 0; color: white; background: #222b; padding: 1px 4px; }
 .standalone-composer__file, .standalone-composer__reference { display: flex; align-items: flex-start; min-width: 0; max-width: 100%; background: color-mix(in srgb, var(--yard-fg, #222) 8%, transparent); border-radius: 4px; padding: 3px 5px; }
-.standalone-composer__file details, .standalone-composer__reference span { min-width: 0; overflow-wrap: anywhere; }
-.standalone-composer__file pre { max-width: min(600px, 75vw); max-height: 200px; overflow: auto; white-space: pre-wrap; }
+.standalone-composer__file details, .standalone-composer__reference details, .standalone-composer__reference span { min-width: 0; overflow-wrap: anywhere; }
+.standalone-composer__reference summary { max-width: min(240px, 60vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.standalone-composer__file pre, .standalone-composer__reference pre { max-width: min(600px, 75vw); max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .standalone-queue { border-bottom: 1px solid var(--yard-border, #c9c9c9); padding: 6px 0; }
 .standalone-queue__heading { font-weight: 600; padding: 4px; }
 .standalone-queue__heading span { color: var(--yard-muted, #666); font-weight: 400; }

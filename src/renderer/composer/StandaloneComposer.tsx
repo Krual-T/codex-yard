@@ -41,6 +41,14 @@ export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSu
 };
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function referenceLabel(reference: ComposerReference): string {
+  const browser = reference.context?.localBrowserContext;
+  if (reference.kind === 'browser' && browser && typeof browser === 'object' && !Array.isArray(browser)) {
+    const description = (browser as Record<string, unknown>).targetDescription;
+    if (typeof description === 'string' && description.trim()) return description.trim();
+  }
+  return reference.text.split(/\r?\n/, 1)[0] || reference.text;
+}
 function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; hostId: string; path: string; name: string }) {
   const [preview, setPreview] = useState<string | null>(null);
   return <details onToggle={event => {
@@ -294,7 +302,9 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           <button type="button" title="移除文件" aria-label={'移除文件 ' + file.name} disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, files: value.files.filter(item => item.path !== file.path) }))}>×</button>
         </div>)}
         {draft.references.map(reference => <div className="standalone-composer__reference" key={reference.id}>
-          <span>{reference.text}</span><button type="button" title="移除引用" aria-label="移除引用" disabled={!!editIssue || structuredInput || removing?.controller === controller && removing.ids.has(reference.id)} onClick={() => void removeReference(reference)}>×</button>
+          {referenceLabel(reference) === reference.text ? <span>{reference.text}</span> :
+            <details><summary>{referenceLabel(reference)}</summary><pre>{reference.text}</pre></details>}
+          <button type="button" title="移除引用" aria-label="移除引用" disabled={!!editIssue || structuredInput || removing?.controller === controller && removing.ids.has(reference.id)} onClick={() => void removeReference(reference)}>×</button>
         </div>)}
         {draft.skills.map(skill => <div className="standalone-composer__reference" key={skill.path}>
           <span>技能：{skill.name}</span><button type="button" title="移除技能" aria-label={'移除技能 ' + skill.name} disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, skills: value.skills.filter(item => item.path !== skill.path) }))}>×</button>
