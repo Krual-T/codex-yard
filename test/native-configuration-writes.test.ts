@@ -45,6 +45,13 @@ async function fixture(t: import('node:test').TestContext, initialState: Record<
     return {
       socket, fetchHost,
       async host(value: Record<string, unknown>) {
+        if (value.action === 'submit' && !Object.hasOwn(value, 'source')) {
+          const requestId = ++id;
+          socket.send(JSON.stringify({ type: 'mcp-request', hostId: 'local', request: { id: requestId, method: 'config/read', params: {} } }));
+          const read = (await until(value => value.type === 'mcp-response' && value.message.id === requestId)).message;
+          assert.ok(read.result?.yardConfigSource);
+          value = { ...value, source: read.result.yardConfigSource };
+        }
         const response = await fetchHost('configuration-write', value);
         assert.equal(response.responseType, 'success', JSON.stringify(response));
         return response.body;
@@ -90,13 +97,56 @@ test('actual configuration host requires operation IDs, preserves terminal outco
   assert.equal(h.fake.messages.filter(message => message.method === 'config/batchWrite').length, 1);
 });
 
+test('configuration reads and writes bind the same owned socket and reject changed home or generation before dispatch', async t => {
+  const h = await fixture(t), client = await h.connect();
+  let originalReadSocket: WebSocket | undefined, writeSocket: WebSocket | undefined;
+  h.fake.handlers.set('config/read', (_params, { socket }) => {
+    originalReadSocket = socket;
+    return { config: {}, layers: [{ name: { type: 'user', file: h.file, profile: null }, version: 'v1' }] };
+  });
+  h.fake.handlers.set('config/batchWrite', (params, { socket }) => {
+    writeSocket = socket;
+    assert.equal(params.source, undefined, 'the Yard source envelope is not a CLI config key');
+    return { status: 'ok' };
+  });
+  const source = (await client.rpc('config/read')).result.yardConfigSource;
+  assert.equal(source.hostId, 'local'); assert.equal(source.codexHome, join(h.root, 'codex'));
+  const original = originalReadSocket;
+  const params = { edits: [{ keyPath: 'model', value: 'same-version', mergeStrategy: 'replace' }], filePath: null, expectedVersion: 'v1', reloadUserConfig: true };
+  for (const [id, invalid] of [
+    ['home', { ...source, codexHome: join(h.root, 'another-home') }],
+    ['generation', { ...source, generation: 'another-socket' }], ['missing', undefined],
+  ] as const) {
+    const result = await client.host({ action: 'submit', operationId: id, method: 'config/batchWrite', params, source: invalid });
+    assert.equal(result.outcome, 'not-started'); assert.equal(result.error.uncertain, false);
+  }
+  assert.equal(h.fake.calls('config/batchWrite').length, 0);
+  assert.equal((await client.host({ action: 'submit', operationId: 'same-source', method: 'config/batchWrite', params, source })).outcome, 'success');
+  assert.equal(writeSocket, original);
+  const closed = once(original!, 'close'); original!.terminate(); await closed;
+  let reread = await client.rpc('config/read');
+  if (reread.error) {
+    // Closing the peer is observable before the host has consumed its close
+    // event. An explicit read may fail; it must not turn into a queued write.
+    assert.match(reread.error.message, /断开|connection|connect|socket|closed/i);
+    assert.equal(h.fake.calls('config/batchWrite').length, 1);
+    reread = await client.rpc('config/read');
+  }
+  assert.equal(reread.error, undefined);
+  const next = reread.result.yardConfigSource;
+  assert.notEqual(next.generation, source.generation);
+  const stale = await client.host({ action: 'submit', operationId: 'old-after-reconnect', method: 'config/batchWrite', params, source });
+  assert.equal(stale.outcome, 'not-started'); assert.equal(h.fake.calls('config/batchWrite').length, 1);
+});
+
 test('closing the submitting page retains the host-owned original configuration connection and terminal', async t => {
   const h = await fixture(t), client = await h.connect();
   let original: WebSocket | undefined;
   h.fake.handlers.set('config/batchWrite', (_params, { socket }) => { original = socket; return NO_REPLY; });
   const params = { edits: [{ keyPath: 'model', value: 'fixture-new', mergeStrategy: 'replace' }], filePath: null, expectedVersion: 'v1', reloadUserConfig: true };
+  const source = (await client.rpc('config/read')).result.yardConfigSource;
   client.socket.send(JSON.stringify({ type: 'fetch', requestId: 'closing', url: 'vscode://codex/configuration-write',
-    body: JSON.stringify({ hostId: 'local', action: 'submit', operationId: 'closing-original', method: 'config/batchWrite', params }) }));
+    body: JSON.stringify({ hostId: 'local', action: 'submit', operationId: 'closing-original', method: 'config/batchWrite', params, source }) }));
   const call = await h.fake.waitForCall('config/batchWrite');
   assert.ok(call);
   const closed = once(client.socket, 'close'); client.socket.close(); await closed;

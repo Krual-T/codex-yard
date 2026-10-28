@@ -13,6 +13,7 @@ import { CodexConnection } from '../../lib/codex.ts';
 import { createAppTools } from '../../lib/app-tools.ts';
 import { appToolCatalog, createHostToolHandler } from '../../lib/host-tools.ts';
 import { projectRoot, rendererVersion } from '../../lib/app-resources.ts';
+import type { ConfigReadSource } from '../../lib/config-write-protocol.ts';
 import { record, publicConfig, readMethods, writeMethods } from './protocol.ts';
 import type { HostMessage, ObjectValue } from './protocol.ts';
 import { createThreadProjects, readThreadProjectState } from './thread-projects.ts';
@@ -110,6 +111,7 @@ export async function createNativeWorkbench(options: Options = {}) {
   const stateMutations = createStateMutations();
   const ownedPaths = new WeakMap<CodexConnection, { paths?: HostPaths; sshHost: typeof catalog.hosts[number] }>();
   const connectionSnapshots = new WeakMap<WebSocket, { connection: CodexConnection; hostId: string; paths: HostPaths; sshHost?: typeof catalog.hosts[number] }>();
+  const connectionGenerations = new WeakMap<WebSocket, string>();
   async function ownedConnectionFor(hostId: string) {
     validHost(hostId);
     let connection = hostId === 'local' ? control : fileConnections.get(hostId);
@@ -129,11 +131,20 @@ export async function createNativeWorkbench(options: Options = {}) {
     });
     return connection;
   }
+  function configurationSource(hostId: string, connection: CodexConnection, socket: WebSocket | undefined): ConfigReadSource {
+    const snapshot = socket && connectionSnapshots.get(socket);
+    if (!socket || !connection.connected || connection.socket !== socket || socket.readyState !== WebSocket.OPEN
+      || snapshot?.hostId !== hostId || snapshot.connection !== connection) throw new Error('The original settings connection changed. Reload the settings.');
+    let generation = connectionGenerations.get(socket);
+    if (!generation) { generation = crypto.randomUUID(); connectionGenerations.set(socket, generation); }
+    return { hostId, generation, homeDirectory: snapshot.paths.homeDirectory, codexHome: snapshot.paths.codexHome };
+  }
   const files = createFiles({ dataDir, workspace, hosts: sshHosts, remoteCommand: options.remoteFileCommand,
     mutations: stateMutations, activeConfiguration: () => configurationWrites.activeForFile() !== null,
     async request(hostId, method, params, mutating = false, onLateTerminal) {
       const connection = await ownedConnectionFor(hostId);
-      return connection.request(method, params, { mutating, onLateTerminal });
+      return connection.request(method, params, { mutating, onLateTerminal,
+        ...(onLateTerminal ? { retainLateUntilDisconnect: true as const } : {}) });
     },
   });
   function validHost(hostId: string) { if (hostId !== 'local' && !sshHosts.has(hostId)) throw new Error('未登记的执行主机：' + hostId); }
@@ -145,7 +156,6 @@ export async function createNativeWorkbench(options: Options = {}) {
   }]));
   const clients = new Map<WebSocket, Map<string, CodexConnection>>();
   const pendingServerRequests = new Map<WebSocket, Map<string, { socket: WebSocket; generation: string }>>();
-  const connectionGenerations = new WeakMap<WebSocket, string>();
   const terminals = new Map<WebSocket, TerminalHost>();
   const browsers = new Map<WebSocket, ChromePanelRouter>();
   const chromeClients = new ClientChromeBroker({ configured: !!chromeConnection, label:
@@ -185,7 +195,15 @@ export async function createNativeWorkbench(options: Options = {}) {
   });
   const configurationWriteHost = createConfigWriteHost<{ client: WebSocket; connections: Map<string, CodexConnection> }>({
     writes: configurationWrites, validateHost: validHost,
-    connect: hostId => ownedConnectionFor(hostId),
+    async connect(hostId, _context, source) {
+      const connection = await ownedConnectionFor(hostId), socket = connection.socket;
+      const current = configurationSource(hostId, connection, socket);
+      if (source.hostId !== current.hostId || source.generation !== current.generation
+        || source.homeDirectory !== current.homeDirectory || source.codexHome !== current.codexHome) {
+        throw new Error('The original settings source changed. Reload the settings before saving.');
+      }
+      return { connection, socket };
+    },
   });
   const addProject = createProjectCatalogWrites(globals, stateMutations, persist, broadcast);
   let projectCompatibility: import('./thread-projects.ts').ThreadProjectCompatibility = {};
@@ -519,7 +537,10 @@ export async function createNativeWorkbench(options: Options = {}) {
         const result = await files.rpc(method, params, hostId, hostPaths.get(hostId)?.codexHome);
         send(client, { type: 'mcp-response', hostId, message: { id, result } }); return;
       }
-      const connection = await connectedFor(client, connections, hostId);
+      const readsConfigurationSource = method === 'config/read' || method === 'skills/list';
+      const connection = readsConfigurationSource ? await ownedConnectionFor(hostId) : await connectedFor(client, connections, hostId);
+      const sourceSocket = connection.socket;
+      const readSource = readsConfigurationSource ? configurationSource(hostId, connection, sourceSocket) : undefined;
       if (!readMethods.has(method) && !writeMethods.has(method)) { unsupported.add(method); throw new Error('Web 宿主尚未接入：' + method); }
       if (method === 'thread/delete') {
         if (!createdThreads.has(hostId + ':' + String(params.threadId))) throw new Error('仅清理本次宿主创建的空预热对话');
@@ -546,6 +567,13 @@ export async function createNativeWorkbench(options: Options = {}) {
       if (method === 'thread/start' && record(record(result).thread).id) createdThreads.add(hostId + ':' + String(record(record(result).thread).id));
       if (method === 'thread/delete') createdThreads.delete(hostId + ':' + String(params.threadId));
       if (method === 'config/read') result = publicConfig(result);
+      if (readSource) {
+        const current = configurationSource(hostId, connection, sourceSocket);
+        if (current.generation !== readSource.generation || current.homeDirectory !== readSource.homeDirectory || current.codexHome !== readSource.codexHome) {
+          throw new Error('The settings source changed while reading. Reload the settings.');
+        }
+        result = { ...record(result), yardConfigSource: readSource };
+      }
       // The renderer's browser.in-app capability reads experimentalFeature/list.
       // Manual Chrome transport includes pairing an access computer, even when
       // the optional service-machine Chrome is not configured.

@@ -60,6 +60,11 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
     }
     let hostSequence = 0;
     async function host(params: Record<string, unknown>) {
+      if (params.action === 'submit' && !Object.hasOwn(params, 'source')) {
+        const read = await rpc(-100000 - ++hostSequence, 'config/read', {}, String(params.hostId ?? 'local'));
+        assert.ok(read.result?.yardConfigSource);
+        params = { ...params, source: read.result.yardConfigSource };
+      }
       const requestId = 'configuration-' + ++hostSequence;
       send({ type: 'fetch', requestId, url: 'vscode://codex/configuration-write', body: JSON.stringify(params) });
       const response = await until(message => message.type === 'fetch-response' && message.requestId === requestId);
