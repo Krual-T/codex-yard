@@ -11,7 +11,7 @@ test('transactional atom import, concurrent writes, rollback and malformed data 
   skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable',
 }, async () => {
   const built = await build({ stdin: { contents: `export { browserAtom } from './src/renderer/app/browser-atoms.ts';
-    export { readBrowserAtoms, subscribeBrowserAtoms } from './src/renderer/storage/ui-atoms.ts';`, resolveDir: process.cwd() },
+    export { readBrowserAtoms, subscribeBrowserAtoms, updateBrowserAtoms } from './src/renderer/storage/ui-atoms.ts';`, resolveDir: process.cwd() },
     bundle: true, format: 'esm', write: false });
   const root = await mkdtemp('/tmp/yard-atoms-test-');
   const server = createServer((request, response) => {
@@ -88,6 +88,29 @@ test('transactional atom import, concurrent writes, rollback and malformed data 
       return rejected && before === JSON.stringify(await readBrowserAtoms());
     });
     assert(aborted, 'An aborted write must reject and preserve committed data.');
+    const batch = await fresh.evaluate(async () => {
+      const modulePath = '/atoms.js'; const { readBrowserAtoms, updateBrowserAtoms } = await import(modulePath);
+      await updateBrowserAtoms(() => ({ value: null, updates: { fileA: { revision: 'A' }, fileB: { revision: 'B' } } }));
+      const before = JSON.stringify(await readBrowserAtoms());
+      let rejected = false;
+      try {
+        await updateBrowserAtoms((atoms: Record<string, any>) => {
+          const updates: Record<string, unknown> = {};
+          if (atoms.fileA.revision === 'A') updates.fileA = null;
+          if (atoms.fileB.revision !== 'stale') throw new Error('The other file has a newer owner.');
+          updates.fileB = null;
+          return { value: null, updates };
+        });
+      } catch { rejected = true; }
+      const unchanged = rejected && before === JSON.stringify(await readBrowserAtoms());
+      const result = await updateBrowserAtoms((atoms: Record<string, any>) => {
+        if (atoms.fileA.revision !== 'A' || atoms.fileB.revision !== 'B') throw new Error('Unexpected revision');
+        return { value: 'discarded-together', updates: { fileA: null, fileB: null } };
+      });
+      const after = await readBrowserAtoms();
+      return { unchanged, result, fileA: after.fileA, fileB: after.fileB, records: Object.keys(after.records).length, unknown: after.unknown };
+    });
+    assert.deepEqual(batch, { unchanged: true, result: 'discarded-together', fileA: null, fileB: null, records: 400, unknown: { retain: true } });
     await fresh.evaluate(() => localStorage.setItem('native-atoms', '{later legacy corruption'));
     assert.equal(await fresh.evaluate(async () => {
       const modulePath = '/atoms.js'; return Object.keys((await (await import(modulePath)).readBrowserAtoms()).records).length;

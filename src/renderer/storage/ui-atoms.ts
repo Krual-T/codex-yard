@@ -105,3 +105,13 @@ export function updateBrowserAtom(key: string, update: (previous: unknown) => un
     return { value, next: { ...atoms, [key]: value }, keys: [key] };
   });
 }
+/** Compare and update related atoms in the same existing root transaction. */
+export function updateBrowserAtoms<T>(update: (atoms: Readonly<Record<string, unknown>>) => {
+  value: T;
+  updates?: Record<string, unknown>;
+}): Promise<T> {
+  return transaction(atoms => {
+    const { value, updates } = update(atoms);
+    return updates === undefined ? { value } : { value, next: { ...atoms, ...updates }, keys: Object.keys(updates) };
+  });
+}
