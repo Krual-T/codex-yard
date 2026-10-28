@@ -1,7 +1,7 @@
 import { createElement, startTransition, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
-import { StandaloneVisualization, type StandaloneVisualizationProps } from '../src/renderer/visualizations/index.tsx';
+import { StandaloneVisualization, type StandaloneVisualizationProps, type VisualizationFollowUp } from '../src/renderer/visualizations/index.tsx';
 import type { ComposerDraft, WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 
 const root = createRoot(document.getElementById('root')!);
@@ -9,6 +9,8 @@ const reads: Record<string, unknown>[] = [];
 const rpc: string[] = [];
 const drafts: ComposerDraft[] = [];
 const draftHosts: string[] = [];
+const sent: VisualizationFollowUp[] = [];
+const signals: AbortSignal[] = [];
 const states: unknown[] = [];
 const html: Record<string, string> = {};
 let resolveSlow: ((value: { path: string; contents: string }) => void) | undefined;
@@ -18,6 +20,8 @@ let suspended = false;
 let suspensions = 0;
 let finishSuspension: (() => void) | undefined;
 let suspension = Promise.resolve();
+let releaseSend: (() => void) | undefined;
+let sendWaiting = false;
 const client: WorkbenchClient = {
   async reply() { throw new Error('Visualization fixture never approves server requests'); },
   async host<T>(endpoint: string, params?: Record<string, unknown>) {
@@ -37,10 +41,12 @@ function tree(value: StandaloneVisualizationProps | null) {
 }
 function render() { flushSync(() => root.render(tree(current))); }
 const harness = {
-  reads, rpc, drafts, draftHosts, states, html,
+  reads, rpc, drafts, draftHosts, sent, signals, states, html,
   get closes() { return closes; },
   get suspensions() { return suspensions; },
-  mount(options: { path?: string; hostId?: string; threadId?: string; theme?: 'light' | 'dark'; saveState?: boolean } = {}) {
+  get sendWaiting() { return sendWaiting; },
+  releaseSend() { releaseSend?.(); },
+  mount(options: { path?: string; hostId?: string; threadId?: string; theme?: 'light' | 'dark'; saveState?: boolean; send?: boolean; delaySend?: boolean; failSend?: boolean } = {}) {
     current = {
       client, path: options.path ?? '/chart.html', hostId: options.hostId ?? 'ssh-host', threadId: options.threadId ?? 'thread-a',
       theme: options.theme ?? 'light', initialWidgetState: { count: 1 },
@@ -48,7 +54,19 @@ const harness = {
       onPrefill(draft) {
         drafts.push(draft);
         draftHosts.push(options.hostId ?? 'ssh-host');
-        (document.getElementById('composer') as HTMLTextAreaElement).value = draft.text;
+        const composer = document.getElementById('composer') as HTMLTextAreaElement;
+        composer.value = [composer.value, draft.text].filter(Boolean).join('\n');
+      },
+      onFollowUp: options.send === false ? undefined : async (request, signal) => {
+        signals.push(signal);
+        if (options.delaySend) {
+          sendWaiting = true;
+          await new Promise<void>(resolve => { releaseSend = resolve; });
+          sendWaiting = false;
+        }
+        if (signal.aborted) throw new Error('Visualization source changed');
+        if (options.failSend) throw new Error('Synthetic send failure');
+        sent.push(request);
       },
       onClose() { closes++; current = null; render(); },
     };

@@ -14,12 +14,20 @@ export interface VisualizationReferenceContext {
   title?: string;
   context?: unknown;
 }
+export interface VisualizationFollowUp {
+  hostId: string;
+  threadId: string;
+  path: string;
+  draft: ComposerDraft;
+}
 export interface StandaloneVisualizationProps {
   client: WorkbenchClient;
   hostId: string;
   threadId: string;
   path: string;
   onPrefill(draft: ComposerDraft): void;
+  /** The caller must recheck this owner and the signal before submitting. */
+  onFollowUp?(request: VisualizationFollowUp, signal: AbortSignal): Promise<void>;
   onClose(): void;
   theme?: 'light' | 'dark';
   themeVariables?: Record<string, string>;
@@ -32,6 +40,9 @@ export interface StandaloneVisualizationProps {
 
 type Value = Record<string, unknown>;
 type Download = { blob: Blob; name: string };
+type FollowUp = { prompt: string; title?: string; context?: unknown };
+type FollowUpDecision = FollowUp & { action: 'send' | 'draft' };
+type PendingFollowUp = { epoch: number; serial: number; timer: number; resolve(value: FollowUpDecision): void; reject(error: Error): void };
 const object = (value: unknown): Value => value != null && typeof value === 'object' && !Array.isArray(value) ? value as Value : {};
 const buttonStyle: CSSProperties = { border: '1px solid #b8c0c7', borderRadius: 4, padding: '6px 9px', background: 'transparent', color: 'inherit', cursor: 'pointer', font: 'inherit' };
 const filename = (value: string) => value.split(/[\\/]/).at(-1)?.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 180) || 'visualization';
@@ -69,6 +80,49 @@ function download(blob: Blob, name: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
+function FollowUpDialog({ request, canSend, onCancel, onConfirm }: { request: FollowUp; canSend: boolean;
+  onCancel(): void; onConfirm(decision: FollowUpDecision): void }) {
+  const dialog = useRef<HTMLElement>(null);
+  const [prompt, setPrompt] = useState(request.prompt);
+  const [contextText, setContextText] = useState(() => request.context === undefined ? '' : JSON.stringify(request.context, null, 2));
+  let context: unknown;
+  let contextValid = true;
+  if (request.context !== undefined) {
+    try { context = JSON.parse(contextText) as unknown; contextValid = JSON.stringify(context).length <= 32_768; }
+    catch { contextValid = false; }
+  }
+  const valid = !!prompt.trim() && prompt.length <= 20_000 && contextValid;
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    dialog.current?.querySelector<HTMLElement>('textarea')?.focus();
+    return () => previous?.focus();
+  }, []);
+  const choose = (action: FollowUpDecision['action']) => {
+    if (valid) onConfirm({ action, prompt: prompt.trim(), ...(request.title !== undefined ? { title: request.title } : {}),
+      ...(request.context !== undefined ? { context } : {}) });
+  };
+  return <div className="yard-dialog-backdrop" style={{ zIndex: 1100 }}><section ref={dialog} className="yard-dialog" role="dialog" aria-modal="true" aria-labelledby="yard-visualization-follow-up-title" style={{ width: 'min(100%, 680px)', minWidth: 0, overflowWrap: 'anywhere' }} onKeyDown={event => {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onCancel(); return; }
+    if (event.key !== 'Tab') return;
+    const items = [...dialog.current!.querySelectorAll<HTMLElement>('button:not(:disabled),textarea:not(:disabled),summary')];
+    if (event.shiftKey && document.activeElement === items[0]) { event.preventDefault(); items.at(-1)?.focus(); }
+    else if (!event.shiftKey && document.activeElement === items.at(-1)) { event.preventDefault(); items[0]?.focus(); }
+  }}>
+    <h2 id="yard-visualization-follow-up-title">Send follow-up?</h2>
+    <p>A visualization wants to send this prompt{request.title ? `: ${request.title}` : '.'}</p>
+    <label>Prompt<textarea aria-label="Prompt" value={prompt} maxLength={20_000} onChange={event => setPrompt(event.currentTarget.value)} style={{ display: 'block', width: '100%', minHeight: 100 }} /></label>
+    {request.context !== undefined && <details><summary>Widget state</summary><p>This JSON will be included with the prompt. Editing it will not change the widget.</p>
+      <textarea aria-label="Widget state JSON" value={contextText} onChange={event => setContextText(event.currentTarget.value)} style={{ display: 'block', width: '100%', minHeight: 100 }} />
+      {!contextValid && <p role="alert">Enter valid JSON under 32 KB.</p>}
+      <button type="button" onClick={() => setContextText(JSON.stringify(request.context, null, 2))}>Reset</button>
+    </details>}
+    {!canSend && <p role="status">Sending from a visualization is not connected. You can add the prompt to the draft instead.</p>}
+    <div><button type="button" onClick={onCancel}>Cancel</button>
+      {!canSend && <button type="button" disabled={!valid} onClick={() => choose('draft')}>Add to draft instead</button>}
+      <button type="button" disabled={!canSend || !valid} onClick={() => choose('send')}>Send</button></div>
+  </section></div>;
+}
+
 /** A host-scoped preview. Authored HTML receives only the limited visualization port. */
 export function StandaloneVisualization(props: StandaloneVisualizationProps) {
   const { client, hostId, threadId, path, theme = 'light' } = props;
@@ -80,6 +134,8 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
   const selectionRef = useRef<{ registrationId: string; targetId: string } | null>(null);
   const variantsRef = useRef<{ carousel: number; variant: string; label?: string }[]>([]);
   const epochRef = useRef(0);
+  const followUpSerialRef = useRef(0);
+  const pendingFollowUpRef = useRef<PendingFollowUp | null>(null);
   const expandedRef = useRef(false);
   const hoveringRef = useRef(false);
   const propsRef = useRef(props);
@@ -99,6 +155,7 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
   const [changes, setChanges] = useState<AnnotationChange[]>([]);
   const [pendingDownload, setPendingDownload] = useState<Download | null>(null);
   const [pendingLink, setPendingLink] = useState<string | null>(null);
+  const [pendingFollowUp, setPendingFollowUp] = useState<{ request: FollowUp; pending: PendingFollowUp } | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [savingAnnotation, setSavingAnnotation] = useState(false);
 
@@ -124,12 +181,14 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
     frameUrl.searchParams.set('app', 'skybridge');
     frameUrl.searchParams.set('yard_viz_init', initId);
     setStatus('loading'); setError(''); setHeight(320); expandedRef.current = false; setExpanded(false); hoveringRef.current = false; setHovering(false); setInputMethod('pointer');
-    setAnnotating(false); setExcerpt(null); setComment(''); setPendingDownload(null); setPendingLink(null);
+    setAnnotating(false); setExcerpt(null); setComment(''); setPendingDownload(null); setPendingLink(null); setPendingFollowUp(null);
     registrationsRef.current = new Map(); changesRef.current = []; annotationActiveRef.current = false; selectionRef.current = null;
     variantsRef.current = []; setSavingAnnotation(false);
     setRegistrations([]); setSelection(null); setChanges([]);
     sourceRef.current = null;
     let widgetState: unknown = propsRef.current.initialWidgetState;
+    let followUpInFlight = false;
+    const followUpAbort = new AbortController();
     let persisted = propsRef.current.initialWidgetState === undefined && !propsRef.current.onWidgetStateChange;
     const currentIdentity = () => active && propsRef.current.client === client && propsRef.current.hostId === hostId &&
       propsRef.current.threadId === threadId && propsRef.current.path === path;
@@ -142,6 +201,9 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
     function fail(message: string) {
       if (!currentIdentity()) return;
       active = false;
+      followUpAbort.abort();
+      cancelEpochFollowUp(epoch, message);
+      setPendingFollowUp(null);
       setError(message);
       setStatus('error');
       window.removeEventListener('message', onMessage);
@@ -168,10 +230,34 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
             if (serialized === undefined || serialized.length > 32_768) throw new Error('Invalid follow-up context');
             context = JSON.parse(serialized) as unknown;
           }
-          if (input.title !== undefined || input.context !== undefined) {
-            propsRef.current.onPrefill(visualizationDraft(input.prompt, { type: 'visualization', hostId, threadId, path: sourceRef.current?.path ?? path,
-              ...(typeof input.title === 'string' ? { title: input.title.trim() } : {}), ...(input.context !== undefined ? { context } : {}) }));
-          } else propsRef.current.onPrefill({ text: input.prompt, images: [], files: [] });
+          if (followUpInFlight) throw new Error('A follow-up message is already awaiting confirmation');
+          followUpInFlight = true;
+          try {
+            const request: FollowUp = { prompt: input.prompt, ...(typeof input.title === 'string' ? { title: input.title.trim() } : {}),
+              ...(input.context !== undefined ? { context } : {}) };
+            const decision = await new Promise<FollowUpDecision>((resolve, reject) => {
+              const pending: PendingFollowUp = { epoch, serial: ++followUpSerialRef.current, timer: 0, resolve, reject };
+              pending.timer = window.setTimeout(() => {
+                if (cancelFollowUp(pending, 'Follow-up confirmation timed out')) setPendingFollowUp(null);
+              }, 29_000);
+              pendingFollowUpRef.current = pending;
+              setPendingFollowUp({ request, pending });
+            });
+            if (!currentIdentity() || followUpAbort.signal.aborted) throw new Error('Visualization source changed');
+            const sourcePath = sourceRef.current?.path ?? path;
+            const draft = decision.title !== undefined || decision.context !== undefined
+              ? visualizationDraft(decision.prompt, { type: 'visualization', hostId, threadId, path: sourcePath,
+                ...(decision.title !== undefined ? { title: decision.title } : {}), ...(decision.context !== undefined ? { context: decision.context } : {}) })
+              : { text: decision.prompt, images: [], files: [] };
+            if (decision.action === 'draft') {
+              propsRef.current.onPrefill(draft);
+              throw new Error('Follow-up was not sent; adding it to the draft was requested');
+            }
+            const send = propsRef.current.onFollowUp;
+            if (!send) throw new Error('Visualization follow-up sending is not connected');
+            if (decision.context != null) draft.text = `${decision.prompt}\n\nCurrent widget context (JSON):\n${JSON.stringify(decision.context, null, 2)}`;
+            await send({ hostId, threadId, path: sourcePath, draft }, followUpAbort.signal);
+          } finally { followUpInFlight = false; }
         } else if (message.method === 'display-mode') {
           if (input.mode !== 'inline' && input.mode !== 'fullscreen') throw new Error('Invalid display mode');
           expandedRef.current = input.mode === 'fullscreen';
@@ -249,7 +335,11 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
         } else throw new Error('Visualization operation is not available');
         if (currentIdentity()) port?.postMessage({ type: 'response', id, ok: true, value });
       } catch (reason) {
-        if (currentIdentity()) port?.postMessage({ type: 'response', id, ok: false, error: reason instanceof Error ? reason.message : 'Visualization operation failed' });
+        if (currentIdentity()) {
+          const messageText = reason instanceof Error ? reason.message : 'Visualization operation failed';
+          if (message.method === 'follow-up' && messageText !== 'Follow-up message was not confirmed' && messageText !== 'Follow-up was not sent; adding it to the draft was requested') setError(messageText.slice(0, 1000));
+          port?.postMessage({ type: 'response', id, ok: false, error: messageText });
+        }
       } finally { requests.delete(id); }
     }
     function onMessage(event: MessageEvent) {
@@ -328,6 +418,8 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
     }).catch(reason => fail(reason instanceof Error ? reason.message : 'Could not read visualization'));
     return () => {
       active = false;
+      followUpAbort.abort();
+      cancelEpochFollowUp(epoch, 'Visualization source changed');
       if (epochRef.current === epoch) epochRef.current++;
       window.removeEventListener('message', onMessage);
       window.removeEventListener('pointerover', pointerOutside, true);
@@ -339,6 +431,25 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
       if (portRef.current === port) portRef.current = null;
     };
   }, [client, hostId, threadId, path, attempt]);
+
+  function cancelFollowUp(pending: PendingFollowUp, message: string): boolean {
+    if (pendingFollowUpRef.current !== pending) return false;
+    pendingFollowUpRef.current = null;
+    clearTimeout(pending.timer);
+    pending.reject(new Error(message));
+    return true;
+  }
+  function cancelEpochFollowUp(epoch: number, message: string) {
+    const pending = pendingFollowUpRef.current;
+    if (pending?.epoch === epoch) cancelFollowUp(pending, message);
+  }
+  function decideFollowUp(pending: PendingFollowUp, decision: FollowUpDecision) {
+    if (pendingFollowUpRef.current !== pending || pending.epoch !== epochRef.current) return;
+    pendingFollowUpRef.current = null;
+    clearTimeout(pending.timer);
+    setPendingFollowUp(null);
+    pending.resolve(decision);
+  }
 
   useEffect(() => { portRef.current?.postMessage({ type: 'theme', theme, themeVariables: props.themeVariables ?? {}, locale: props.locale }); }, [theme, props.themeVariables, props.locale]);
   function changeMode(next: boolean) {
@@ -437,6 +548,9 @@ export function StandaloneVisualization(props: StandaloneVisualizationProps) {
       <label>Feedback <textarea aria-label="Annotation feedback" disabled={savingAnnotation} value={comment} onChange={event => setComment(event.target.value)} style={{ display: 'block', width: '100%', boxSizing: 'border-box', minHeight: 64, font: 'inherit' }} /></label>
       <div><button style={buttonStyle} disabled={savingAnnotation || (!comment.trim() && changes.length === 0)} onClick={() => { void prefillAnnotation(); }}>Add to draft</button> <button style={buttonStyle} disabled={savingAnnotation} onClick={cancelAnnotation}>Cancel</button></div>
     </div>}
+    {pendingFollowUp && <FollowUpDialog key={pendingFollowUp.pending.serial} request={pendingFollowUp.request} canSend={!!props.onFollowUp} onCancel={() => {
+      if (cancelFollowUp(pendingFollowUp.pending, 'Follow-up message was not confirmed')) setPendingFollowUp(null);
+    }} onConfirm={decision => decideFollowUp(pendingFollowUp.pending, decision)} />}
     {pendingDownload && <div style={{ padding: 8 }}>Download {pendingDownload.name}? <button style={buttonStyle} onClick={() => { download(pendingDownload.blob, pendingDownload.name); setPendingDownload(null); }}>Download file</button> <button style={buttonStyle} onClick={() => setPendingDownload(null)}>Dismiss download</button></div>}
     {pendingLink && <div style={{ padding: 8, overflowWrap: 'anywhere' }}>Open {pendingLink}? <a href={pendingLink} target="_blank" rel="noopener noreferrer" onClick={() => setPendingLink(null)}>Open link</a> <button style={buttonStyle} onClick={() => setPendingLink(null)}>Dismiss link</button></div>}
     <iframe key={JSON.stringify([hostId, threadId, path, attempt])} ref={frameRef} title="Visualization content" sandbox="allow-scripts" referrerPolicy="no-referrer" onPointerLeave={event => {

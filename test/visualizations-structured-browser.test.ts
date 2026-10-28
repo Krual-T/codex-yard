@@ -40,7 +40,7 @@ window.panel = new Tweak({container: document.getElementById('chart'), onChange:
   .addColorPicker(window.values, 'color', {label: 'Color'})
   .addToggle(window.values, 'enabled', {label: 'Enabled'})
   .addSelect(window.values, 'mode', {label: 'Mode', options: [{label: 'Alpha', value: 'a'}, {label: 'Beta', value: 'b'}]});
-document.getElementById('follow').onclick = () => openai.sendFollowUpMessage({prompt:'Explain this', title:'Chart details', context:{series:['a','b'], count:2}});
+document.getElementById('follow').onclick = () => openai.sendFollowUpMessage({prompt:'Explain this', title:'Chart details', context:{series:['a','b'], count:2}}).catch(() => {});
 document.getElementById('save').onclick = () => openai.setWidgetState({modelContent:{selected:2}, privateContent:{filter:'current'}}).then(() => window.saved = true).catch(e => window.saveError = e.message);
 document.getElementById('dispose').onclick = () => window.panel.dispose();
 document.getElementById('second').onclick = () => { window.secondary = { enabled: true }; window.secondPanel = new Tweak({container: document.getElementById('chart')}).addToggle(window.secondary, 'enabled', {label:'Secondary'}); };
@@ -95,6 +95,7 @@ test('structured React visualization persists and previews controls in an isolat
     });
     assert.deepEqual(security, { generic: true, invalid: true, parent: true });
     await locator.locator('#follow').click();
+    await page.getByRole('dialog', { name: 'Send follow-up?' }).getByRole('button', { name: 'Add to draft instead' }).click();
     await page.waitForFunction(() => window.structuredHarness.drafts.length === 1);
     const followUp = await page.evaluate(() => window.structuredHarness.drafts[0]);
     assert.equal(followUp.text, 'Explain this');
