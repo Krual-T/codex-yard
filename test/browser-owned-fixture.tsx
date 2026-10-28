@@ -121,15 +121,7 @@ function App() {
     <StandaloneBrowser client={client} {...identity} draft={draft} visible={shown} allowNavigation
       onClose={() => setIdentity(null)} getDraftSnapshot={getSnapshot}
       onDraftVersionCommitted={async (before, after) => {
-        const current = controller.current;
-        for (let i = 0; i < 100; i++) {
-          const value = current?.snapshot();
-          if (controller.current !== current || !value || JSON.stringify(value.owner) !== JSON.stringify(before.owner)) return false;
-          if (value.revision === after.revision) return true;
-          if (value.revision !== before.revision) return false;
-          await new Promise(resolve => setTimeout(resolve, 10));
-        }
-        return false;
+        return await controller.current?.acceptCommittedVersion(before, after) ?? false;
       }} />
   </> : null;
 }

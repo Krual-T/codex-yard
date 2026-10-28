@@ -6,7 +6,7 @@ import { attachBrowserComment, browserCommentsAtomKey, browserOwnerKey, changeBr
   pruneBrowserDraftDeletions, readBrowserCommentsSnapshot, removeBrowserReferenceFromDraft } from '../src/renderer/browser/comments.ts';
 import { addBrowserComment } from './browser-comment-fixture.ts';
 import type { BrowserOwner, BrowserReference } from '../src/renderer/browser/comments.ts';
-import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference } from '../src/renderer/app/browser-draft.ts';
+import { acknowledgeSubmittedBrowserReferences, browserDraftOwner } from '../src/renderer/app/browser-draft.ts';
 import { SendRecoveryStore } from '../src/renderer/app/send-recovery.ts';
 import type { SendIntent } from '../src/renderer/app/send-recovery.ts';
 import { StandaloneComposer } from '../src/renderer/composer/StandaloneComposer.tsx';
@@ -191,15 +191,7 @@ function App() {
   }, [bindings]);
   const acceptCommitted = React.useCallback(async (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => {
     if (rejectCommit) { rejectCommit = false; return false; }
-    const current = controller.current;
-    for (let i = 0; i < 100; i++) {
-      const value = current?.snapshot();
-      if (current !== controller.current || !value || JSON.stringify(value.owner) !== JSON.stringify(before.owner)) return false;
-      if (value.revision === after.revision) return true;
-      if (value.revision !== before.revision) return false;
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    return false;
+    return await controller.current?.acceptCommittedVersion(before, after) ?? false;
   }, []);
   const receiveController = React.useCallback((value: ComposerDraftController | null) => {
     controller.current = value; setControllerReady(value !== null);
@@ -233,7 +225,15 @@ function App() {
   return <>
     <StandaloneComposer client={client} context={{ ...owner, cwd: '/fixture' }} busy={false}
       onDraftController={receiveController} onDraftChange={setSnapshot}
-      onRemoveReference={(draftOwner, reference) => removeBrowserDraftReference(browserDraftOwner(draftOwner, bindings), reference)}
+      onRemoveReference={async (draftOwner, reference) => {
+        if (reference.kind !== 'browser') return;
+        const target = browserDraftOwner(draftOwner, bindings), current = controller.current;
+        if (!current) throw new Error('Fixture controller missing');
+        const before = await getDraftSnapshot(target);
+        const after = await removeBrowserReferenceFromDraft(target, reference as BrowserReference, before);
+        await current.acceptCommittedVersion(before, after);
+        return 'handled';
+      }}
       onSubmit={async () => { throw new Error('Fixture does not perform inference'); }} onInterrupt={async () => {}} />
     <StandaloneBrowser client={client} {...browserOwner} browserTabId="fixture" draft={snapshot?.draft ?? empty}
       visible={browserVisible} allowNavigation={false} onClose={() => { closeCount += 1; }} getDraftSnapshot={getDraftSnapshot}

@@ -166,10 +166,6 @@ test('real composer and browser panel preserve complete comment versions and cla
       await first.getByLabel('浏览器引用批注').fill(text);
       await first.getByRole('button', { name: '保存批注' }).click();
       await first.waitForFunction(async ({ owner, text }) => JSON.stringify((await window.browserConsumption.comments(owner)).comments).includes(text), { owner, text });
-      await first.getByText('批注和新草稿版本已保存', { exact: false }).waitFor();
-      const choices = first.getByText('选择草稿版本').locator('..');
-      if (!await choices.evaluate(element => (element as HTMLDetailsElement).open)) await first.getByText('选择草稿版本').click();
-      await first.getByRole('button', { name: 'Page A', exact: true }).click();
       await first.waitForFunction(value => window.browserConsumption.snapshot()?.draft.references?.[0]?.text.includes(value), text);
     }
     await second.evaluate(() => window.browserConsumption.showBrowser(true));

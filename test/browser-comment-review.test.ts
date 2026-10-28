@@ -213,17 +213,12 @@ test('R1 confirmation and removal preserve shared R2 and an explicitly selected 
   assert.deepEqual(marked.consumptionRecords, [{ intentId: intent.id, owner, revision: intent.revision, reference: original }]);
   await second.getByText('已提交').waitFor();
   await second.getByRole('button', { name: '从当前草稿移除' }).click();
-  await second.getByText('批注和新草稿版本已保存', { exact: false }).first().waitFor();
-  await second.getByText('选择草稿版本').click();
-  await second.getByRole('button', { name: 'Page B', exact: true }).click();
   await second.waitForFunction(() => window.browserConsumption.snapshot()?.draft.references?.length === 0);
   await second.waitForFunction(() => !window.browserConsumption.dirty());
   let state = await second.evaluate(target => window.browserConsumption.comments(target), owner);
   assert.deepEqual(state.comments, r2);
   assert.deepEqual(state.deleted, []);
   await second.getByRole('button', { name: '添加到草稿' }).click();
-  await second.getByText('批注和新草稿版本已保存', { exact: false }).first().waitFor();
-  await second.getByRole('button', { name: 'Page B', exact: true }).click();
   await second.waitForFunction(value => JSON.stringify(window.browserConsumption.snapshot()?.draft.references) === JSON.stringify([value]), r2Ref);
   state = await second.evaluate(target => window.browserConsumption.comments(target), owner);
   assert.deepEqual(state.consumed, [original]);
