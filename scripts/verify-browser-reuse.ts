@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, readFile, writeFile, rm, cp } from 'node:fs/promises';
-import { tmpdir, homedir } from 'node:os';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -14,10 +14,11 @@ import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/
 
 // Hold /tmp/agents-workbench-heavy.lock for this runner's entire lifecycle.
 const root = await mkdtemp(join(tmpdir(), 'aw-chrome-'));
-const evidence = resolve(process.env.AGENTS_BROWSER_EVIDENCE ?? '.local/browser-reuse-verification');
+const evidence = process.env.AGENTS_BROWSER_EVIDENCE
+  ? resolve(process.env.AGENTS_BROWSER_EVIDENCE) : await mkdtemp('/tmp/yard-chrome-evidence-');
 await mkdir(evidence, { recursive: true });
 const cleanup: (() => Promise<unknown>)[] = [];
-const report: Record<string, unknown> = { startedAt: new Date().toISOString(), renderer: '26.1013.40934', personalProfile: false, daemonUsed: false };
+const report: Record<string, unknown> = { startedAt: new Date().toISOString(), renderer: 'owned', personalProfile: false, daemonUsed: false };
 const errors: string[] = [];
 let nativePage: Page | undefined;
 let targetPage: Page | undefined;
@@ -46,11 +47,14 @@ try {
   await new Promise<void>(resolve => fixture.listen(0, '127.0.0.1', resolve));
   cleanup.push(() => new Promise<void>(resolve => fixture.close(() => resolve())));
   const fixtureUrl = `http://127.0.0.1:${(fixture.address() as import('node:net').AddressInfo).port}`;
+  const fixtureHeaders = await fetch(fixtureUrl + '/headers');
+  assert.equal(fixtureHeaders.headers.get('x-frame-options'), 'DENY');
+  assert.match(fixtureHeaders.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
   const profile = join(root, 'chrome');
   console.log('Starting isolated installed Chromium');
-  const chrome = spawn(process.env.AGENTS_TEST_CHROMIUM ?? process.env.AGENTS_TEST_CHROME ?? join(homedir(), '.cache/ms-playwright/chromium-1228/chrome-linux64/chrome'), [
+  const chrome = spawn(process.env.AGENTS_TEST_CHROMIUM ?? process.env.AGENTS_TEST_CHROME ?? '/usr/bin/google-chrome', [
     '--headless=new', '--no-sandbox', '--no-first-run', '--no-default-browser-check', '--disable-sync', '--disable-extensions',
-    '--disable-background-networking', '--disable-dev-shm-usage', '--window-size=1200,900',
+    '--disable-background-networking', '--disable-dev-shm-usage', '--window-size=1200,900', '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1',
     '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
     // Match Playwright's default: Chromium 149's old screenshot surface stalls
     // on background tabs. This affects only our temporary test profile.
@@ -88,9 +92,10 @@ try {
   const ui = await chromium.connectOverCDP(endpoint);
   cleanup.push(() => ui.close());
   const context = ui.contexts()[0]!;
-  const target = context.pages().find(page => page.url().startsWith(fixtureUrl))!;
+  const target = context.pages()[0];
+  assert.ok(target, 'Chrome must expose its startup tab');
+  if (!target.url().startsWith(fixtureUrl)) await target.goto(fixtureUrl + '/before');
   targetPage = target;
-  assert.ok(target, 'Existing fixture tab');
   const second = await context.newPage();
   await second.goto(fixtureUrl + '/second');
   const fake = await createFakeCodex(root);
@@ -103,7 +108,6 @@ try {
   fake.handlers.set('thread/resume', (params: Record<string, unknown>) => ({ ...fake.defaultResult('thread/resume', params), turnsBackwardsCursor: '0', itemsBackwardsCursor: '0' }));
   fake.threads.set(id, fixtureThread(id, root, { name: 'Chrome 原版面板验收', turns: [fixtureTurn('browser-turn', [agentItem('browser-message', `[打开浏览器验收页](${fixtureUrl}/external)`)])] }));
   const dataDir = join(root, 'data');
-  if (process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT) await cp(process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT, join(dataDir, 'configuration-snapshot'), { recursive: true });
   const app = await createNativeWorkbench({ port: 0, socketPath: fake.socketPath, codexHome: join(root, 'codex-home'), dataDir, workspace: root,
     httpFetch: async () => new Response('Isolated browser fixture: external telemetry disabled', { status: 503 }),
     hostCatalog: { hosts: [], projects: [], assignments: {} }, chromeConnection: { browserUrl: gatedEndpoint } });
@@ -112,15 +116,11 @@ try {
   nativePage = await context.newPage();
   const chromeRequests = new Set<string>();
   const transport: unknown[] = [];
-  const officialCommands: unknown[] = [];
   const httpErrors: unknown[] = [];
   report.chromeTransport = transport;
-  report.officialCommands = officialCommands;
   report.httpErrors = httpErrors;
   nativePage.on('response', response => {
-    if (response.status() >= 400) void response.text().then(body => httpErrors.push({
-      url: response.url(), status: response.status(), request: response.request().postDataJSON(), body: body.slice(0, 1000),
-    })).catch(() => {});
+    if (response.status() >= 400) httpErrors.push({ url: response.url(), status: response.status() });
   });
   nativePage.on('websocket', socket => {
     socket.on('framesent', ({ payload }) => {
@@ -143,20 +143,10 @@ try {
   });
   nativePage.on('pageerror', error => errors.push(String(error)));
   nativePage.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
-  await nativePage.goto(app.url + '/?initialRoute=' + encodeURIComponent('/local/' + id));
+  await nativePage.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
+  await nativePage.goto(app.url + '/local/' + id);
+  await nativePage.locator('[data-owned-renderer="true"]').waitFor();
   await nativePage.getByRole('link', { name: '打开浏览器验收页' }).waitFor({ timeout: 60000 });
-  await nativePage.exposeFunction('recordBrowserCommand', (message: unknown) => { officialCommands.push(message); });
-  await nativePage.evaluate(() => {
-    const host = window as Window & { electronBridge?: { sendMessageFromView(message: { type: string }): Promise<void> }; recordBrowserCommand?: (message: unknown) => void };
-    const recordCommand = host.recordBrowserCommand;
-    if (!recordCommand) throw new Error('Browser command recorder was not installed');
-    const bridge = host.electronBridge!;
-    const send = bridge.sendMessageFromView.bind(bridge);
-    bridge.sendMessageFromView = message => {
-      if (message.type === 'browser-sidebar-command') recordCommand(message);
-      return send(message);
-    };
-  });
   await nativePage.evaluate(() => {
     const trace: unknown[] = [];
     Object.assign(window, { browserKeyTrace: trace });
@@ -166,12 +156,9 @@ try {
     }, true);
   });
   await capture('workbench-before');
-  console.log('Opening original browser panel through its tab menu');
-  await nativePage.getByRole('button', { name: '新建标签页', exact: true }).click({ button: 'right' });
-  await nativePage.getByRole('menuitem', { name: /浏览器|Browser/ }).click();
-  const address = nativePage.getByLabel('搜索或输入网址', { exact: true });
-  await address.fill(fixtureUrl + '/before');
-  await address.press('Enter');
+  console.log('Opening the owned browser panel');
+  await nativePage.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
+  const address = nativePage.getByLabel('网页地址', { exact: true });
   await nativePage.getByLabel('已有 Chrome 标签').waitFor({ timeout: 30000 });
   assert.equal(await nativePage.getByLabel('浏览器所在电脑').inputValue(), 'client');
   await nativePage.getByLabel('浏览器所在电脑').selectOption('server');
@@ -182,11 +169,15 @@ try {
   assert.ok(refusedConnections > 0);
   await capture('workbench-refused');
   allowDebug = true;
-  await nativePage.getByRole('button', { name: '刷新', exact: true }).click();
+  await nativePage.getByRole('region', { name: 'Chrome 网页画面', exact: true }).getByRole('button', { name: '刷新', exact: true }).click();
   const option = select.locator('option').filter({ hasText: fixtureUrl + '/before' });
   await option.waitFor({ state: 'attached', timeout: 30000 });
   const pageId = await option.getAttribute('value'); assert.ok(pageId);
   await select.selectOption(pageId);
+  await nativePage.waitForFunction(id => {
+    const control = document.querySelector<HTMLSelectElement>('select[aria-label="已有 Chrome 标签"]');
+    return control?.value === id && !control.disabled;
+  }, pageId);
   const image = nativePage.getByRole('img', { name: 'Chrome 标签的最新画面' });
   await image.waitFor({ timeout: 30000 });
   await image.evaluate(async element => (element as HTMLImageElement).decode());
@@ -210,7 +201,7 @@ try {
   // No typing delay: every key must survive screenshots and MCP round trips.
   await image.pressSequentially('Fast123');
   await target.waitForFunction(() => document.querySelector('input')?.value === 'Fast123', undefined, { timeout: 10000, polling: 100 });
-  assert.doesNotMatch(await nativePage.getByRole('textbox', { name: '和 Codex 一起工作' }).innerText(), /Fast123|ast123/);
+  assert.doesNotMatch(await nativePage.getByRole('textbox', { name: '和 Codex 一起工作' }).inputValue(), /Fast123|ast123/);
   report.keyTrace = await nativePage.evaluate(() => (window as Window & { browserKeyTrace?: unknown[] }).browserKeyTrace);
   await nativePage.getByRole('status').filter({ hasText: '点击画面后可键入' }).waitFor({ timeout: 30000 });
   await nativePage.getByLabel('向网页输入').fill('原版 Chrome 面板中文输入');
@@ -222,29 +213,31 @@ try {
   assert.equal(await target.locator('output').innerText(), '收到：Fast123原版 Chrome 面板中文输入');
   assert.notEqual(await image.getAttribute('src'), before);
   await capture('workbench-input');
-  report.panel = { originalTabMenu: true, existingPageId: pageId, screenshotDisplayed: true, coordinateClick: true, fastKeyboardNoDelay: 'Fast123', chineseInput: true, screenshotChanged: true, iframeDenied: true };
-  console.log('Checking original address bar, navigation and existing tab switching');
+  report.panel = { ownedPanel: true, existingPageId: pageId, screenshotDisplayed: true, coordinateClick: true, fastKeyboardNoDelay: 'Fast123', chineseInput: true, screenshotChanged: true, targetFrameDenyHeaders: true };
+  console.log('Checking the owned address bar, navigation and existing tab switching');
   await address.fill(fixtureUrl + '/after');
   await address.press('Enter');
   await target.waitForFunction(url => location.href === url, fixtureUrl + '/after', { polling: 100 });
-  const navigation = nativePage.getByRole('group', { name: '导航', exact: true });
-  await navigation.getByRole('button', { name: '返回', exact: true }).click();
+  const navigation = nativePage.getByRole('region', { name: '浏览器', exact: true });
+  await navigation.getByRole('button', { name: '后退', exact: true }).click();
   // History restoration can use BFCache without another load event.
   await target.waitForFunction(url => location.href === url, fixtureUrl + '/before', { polling: 100 });
   await navigation.getByRole('button', { name: '前进', exact: true }).click();
   await target.waitForFunction(url => location.href === url, fixtureUrl + '/after', { polling: 100 });
   await Promise.all([
     target.waitForEvent('domcontentloaded'),
-    navigation.getByRole('button', { name: '重新加载页面', exact: true }).click(),
+    navigation.getByRole('button', { name: '重新加载', exact: true }).click(),
   ]);
   await nativePage.getByRole('status').filter({ hasText: '点击画面后可键入' }).waitFor({ timeout: 30000 });
+  await nativePage.waitForFunction(url => document.querySelector<HTMLInputElement>('input[aria-label="网页地址"]')?.value?.endsWith(url) === true,
+    fixtureUrl.replace('http://', '') + '/after');
   assert.equal((await address.inputValue()).replace(/^http:\/\//, ''), fixtureUrl.replace('http://', '') + '/after');
   const secondId = await select.locator('option').filter({ hasText: fixtureUrl + '/second' }).getAttribute('value');
   assert.ok(secondId);
   await select.selectOption(secondId);
-  await nativePage.waitForFunction(url => document.querySelector<HTMLInputElement>('input[aria-label="搜索或输入网址"]')?.value?.endsWith(url) === true, fixtureUrl.replace('http://', '') + '/second');
+  await nativePage.waitForFunction(url => document.querySelector<HTMLInputElement>('input[aria-label="网页地址"]')?.value?.endsWith(url) === true, fixtureUrl.replace('http://', '') + '/second');
   await select.selectOption(pageId);
-  await nativePage.waitForFunction(url => document.querySelector<HTMLInputElement>('input[aria-label="搜索或输入网址"]')?.value?.endsWith(url) === true, fixtureUrl.replace('http://', '') + '/after');
+  await nativePage.waitForFunction(url => document.querySelector<HTMLInputElement>('input[aria-label="网页地址"]')?.value?.endsWith(url) === true, fixtureUrl.replace('http://', '') + '/after');
   report.navigation = { address: true, back: true, forward: true, reload: true, existingSession: true, switchExistingTabs: true };
   await capture('workbench-panel');
 
@@ -257,7 +250,7 @@ try {
   await writeFile(packagePath, Buffer.from(await downloaded.arrayBuffer()));
   await promisify(execFile)('npm', ['install', '--prefix', installRoot, '--offline', '--ignore-scripts', '--no-audit', '--no-fund', packagePath], { timeout: 60_000 });
   // Invoke the installed bin symlink, matching npx's command resolution.
-  const clientBin = join(installRoot, 'node_modules', '.bin', 'agents-workbench-chrome');
+  const clientBin = join(installRoot, 'node_modules', '.bin', 'codex-yard-chrome');
   const help = await promisify(execFile)(process.execPath, [clientBin, '--help']);
   assert.match(help.stdout, /--connect/);
   async function pairClient(page: Page, browserUrl: string, label: string) {
@@ -277,20 +270,22 @@ try {
     };
     cleanup.push(stop);
     await page.getByRole('status', { name: '', exact: true }).filter({ hasText: /^已配对$/ }).waitFor({ timeout: 30000 });
-    await page.getByRole('status').filter({ hasText: '点击画面后可键入' }).waitFor({ timeout: 30000 });
     assert.equal(await page.getByLabel('这台电脑的配对命令').count(), 0);
     return stop;
   }
   await nativePage.getByLabel('浏览器所在电脑').selectOption('client');
   const stopA = await pairClient(nativePage, endpoint, '验收电脑 A');
-  await select.selectOption(pageId);
+  const clientAOption = select.locator('option').filter({ hasText: fixtureUrl + '/after' });
+  await clientAOption.waitFor({ state: 'attached', timeout: 30000 });
+  const clientAId = await clientAOption.getAttribute('value'); assert.ok(clientAId);
+  await select.selectOption(clientAId);
   await nativePage.getByRole('status').filter({ hasText: '点击画面后可键入' }).waitFor({ timeout: 30000 });
   await capture('workbench-client-a');
 
   const secondProfile = join(root, 'chrome-b');
-  const chromeB = spawn(process.env.AGENTS_TEST_CHROMIUM ?? join(homedir(), '.cache/ms-playwright/chromium-1228/chrome-linux64/chrome'), [
+  const chromeB = spawn(process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome', [
     '--headless=new', '--no-sandbox', '--no-first-run', '--no-default-browser-check', '--disable-sync', '--disable-extensions',
-    '--disable-background-networking', '--disable-dev-shm-usage', '--window-size=1200,900',
+    '--disable-background-networking', '--disable-dev-shm-usage', '--window-size=1200,900', '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1',
     '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
     '--enable-features=CDPScreenshotNewSurface', '--remote-debugging-port=0', '--user-data-dir=' + secondProfile, fixtureUrl + '/computer-b',
   ], { stdio: 'ignore' });
@@ -314,19 +309,22 @@ try {
   const nativeB = await accessB.newPage();
   clientBPage = nativeB;
   await nativeB.bringToFront();
-  await nativeB.goto(app.url + '/?initialRoute=' + encodeURIComponent('/local/' + id));
+  await nativeB.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
+  await nativeB.goto(app.url + '/local/' + id);
+  await nativeB.locator('[data-owned-renderer="true"]').waitFor();
   await nativeB.getByRole('link', { name: '打开浏览器验收页' }).waitFor({ timeout: 60000 });
-  await nativeB.getByRole('button', { name: '新建标签页', exact: true }).click({ button: 'right' });
-  await nativeB.getByRole('menuitem', { name: /浏览器|Browser/ }).click();
-  await nativeB.getByLabel('搜索或输入网址', { exact: true }).fill(fixtureUrl + '/computer-b');
-  await nativeB.getByLabel('搜索或输入网址', { exact: true }).press('Enter');
+  await nativeB.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
   await nativeB.getByLabel('浏览器所在电脑').waitFor({ timeout: 30000 });
   assert.equal(await nativeB.getByLabel('浏览器所在电脑').inputValue(), 'client');
   const stopB = await pairClient(nativeB, endpointB, '验收电脑 B');
   const selectB = nativeB.getByLabel('已有 Chrome 标签');
+  const clientBOption = selectB.locator('option').filter({ hasText: fixtureUrl + '/computer-b' });
+  await clientBOption.waitFor({ state: 'attached', timeout: 30000 });
   assert.match(await selectB.innerText(), /computer-b/);
   assert.doesNotMatch(await selectB.innerText(), /\/after|\/second/);
   assert.doesNotMatch(await select.innerText(), /computer-b/);
+  const clientBId = await clientBOption.getAttribute('value'); assert.ok(clientBId);
+  await selectB.selectOption(clientBId);
   const imageB = nativeB.getByRole('img', { name: 'Chrome 标签的最新画面' });
   await imageB.evaluate(async element => (element as HTMLImageElement).decode());
   const inputB = await targetB.getByRole('textbox', { name: '测试输入' }).boundingBox(); assert.ok(inputB);
@@ -342,10 +340,7 @@ try {
   await nativeB.screenshot({ path: join(evidence, 'workbench-client-b.png') });
   await nativeB.bringToFront();
   await nativeB.reload({ waitUntil: 'commit' });
-  // The original renderer restores this tab as its new-tab page. Reopen its
-  // address through the original UI; the device pairing must remain available.
-  await nativeB.getByLabel('搜索或输入网址', { exact: true }).fill(fixtureUrl + '/computer-b');
-  await nativeB.getByLabel('搜索或输入网址', { exact: true }).press('Enter');
+  await nativeB.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
   await nativeB.getByRole('status').filter({ hasText: /^已配对$/ }).waitFor({ timeout: 60000 });
   const restoredId = await selectB.locator('option').filter({ hasText: fixtureUrl + '/computer-b' }).getAttribute('value');
   assert.ok(restoredId);
@@ -358,10 +353,10 @@ try {
   assert.equal(targetB.isClosed(), false);
   await capture('workbench-client-a-after-b-disconnect');
   report.clientConnections = { downloadablePackageInstalled: true, installedBinWorks: true, twoRealChromeInstances: true,
-    isolatedTabsAndInput: true, pairingSurvivesPageReload: true, originalNewTabReopened: true, disconnectClearsFrame: true, noServerFallback: true, realTabsPreserved: true };
+    isolatedTabsAndInput: true, pairingSurvivesPageReload: true, panelReopened: true, disconnectClearsFrame: true, noServerFallback: true, realTabsPreserved: true };
   await nativeB.close();
-  await nativePage.getByRole('button', { name: '关闭Chrome 隔离验收标签页', exact: true }).click();
-  await image.waitFor({ state: 'detached' });
+  await navigation.getByRole('button', { name: '关闭', exact: true }).click();
+  await image.waitFor({ state: 'hidden' });
   assert.equal(target.isClosed(), false);
   assert.equal(second.isClosed(), false);
   report.panelDetachKeepsChromeTabs = true;
@@ -370,6 +365,14 @@ try {
   await app.close(); cleanup.splice(cleanup.indexOf(closeApp), 1);
   assert.equal((await fetch(endpoint + '/json/version')).status, 200);
   assert.equal(target.isClosed(), false);
+  const requests = transport.map(value => (value as { request?: { operation?: string; command?: { type?: string } } }).request).filter(Boolean);
+  for (const operation of ['state', 'select', 'click', 'text', 'command', 'release']) {
+    assert.ok(requests.some(request => request?.operation === operation), 'Missing actual chrome-browser operation: ' + operation);
+  }
+  for (const command of ['navigate', 'go-back', 'go-forward', 'reload']) {
+    assert.ok(requests.some(request => request?.command?.type === command), 'Missing actual Chrome navigation: ' + command);
+  }
+  assert.deepEqual(errors, []);
   report.attachedChromeSurvivesDisconnect = true;
   report.passed = true;
 } catch (error) {
