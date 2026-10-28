@@ -4,17 +4,22 @@ import { readBrowserAtom, subscribeBrowserAtoms, updateBrowserAtom } from '../st
 export type SettingsWriteMethod = 'config/batchWrite' | 'skills/config/write';
 export type SettingsWriteSection = 'models' | 'agent' | 'worktrees' | 'hooks-settings' | 'skills-settings';
 export interface SettingsWriteOrigin { section: SettingsWriteSection; scope?: readonly string[]; draft: unknown }
+export type WriteErrorCategory = 'configVersionConflict' | 'configValidationError' | 'configLayerReadonly';
 export type WriteTerminal = { kind: 'ok' | 'okOverridden' } | { kind: 'effectiveEnabled'; value: boolean }
-  | { kind: 'rejected'; code?: number } | { kind: 'not-sent'; code?: 'OBSERVER_LIMIT' };
+  | { kind: 'rejected'; code?: number; category?: WriteErrorCategory } | { kind: 'not-sent'; code?: 'OBSERVER_LIMIT' };
+export interface WriteReceipt {
+  operationId: string; hostId: string; method: SettingsWriteMethod; terminal: WriteTerminal; signature: string;
+}
 export interface WriteStatus {
   operationId: string; hostId: string; method?: SettingsWriteMethod;
-  state: 'pending' | 'unknown' | 'succeeded' | 'failed'; terminal?: WriteTerminal;
-  observedTerminal?: WriteTerminal; storageError?: true;
+  state: 'preparing' | 'pending' | 'unknown' | 'succeeded' | 'failed'; terminal?: WriteTerminal;
+  observedTerminal?: WriteTerminal; storageError?: true; interrupted?: true; recoveryReceipt?: WriteReceipt;
 }
 export interface SettingsWriteRecord {
   operationId: string; hostId: string; method: SettingsWriteMethod; params: Record<string, unknown>;
   origin: SettingsWriteOrigin; phase: 'pending' | 'unknown' | 'finished' | 'not-started' | 'blocked';
   operation?: WriteStatus; blocker?: WriteStatus; result?: unknown; error?: string;
+  recoveryReceipt?: WriteReceipt; blockerReceipt?: WriteReceipt;
   workingDrafts?: { editorId: string; revision: number; draft: unknown }[];
 }
 export interface SettingsWriteStorage {
@@ -32,6 +37,7 @@ const browserStorage: SettingsWriteStorage = {
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const methods = new Set(['config/batchWrite', 'skills/config/write']);
+const categories = new Set(['configVersionConflict', 'configValidationError', 'configLayerReadonly']);
 const sections = new Set(['models', 'agent', 'worktrees', 'hooks-settings', 'skills-settings']);
 const phases = new Set(['pending', 'unknown', 'finished', 'not-started', 'blocked']);
 
@@ -63,6 +69,23 @@ function records(value: unknown): SettingsWriteRecord[] {
       || !status(item.blocker, item.blocker.operationId, item.blocker.hostId, item.blocker.method as SettingsWriteMethod | undefined))) {
       throw new Error('A blocking configuration operation cannot be verified. Writes are blocked.');
     }
+    if (item.recoveryReceipt !== undefined && !receipt(item.recoveryReceipt, item.operationId, item.hostId, item.method as SettingsWriteMethod)
+      || item.blockerReceipt !== undefined && (!object(item.blocker) || typeof item.blocker.operationId !== 'string'
+        || typeof item.blocker.hostId !== 'string' || !methods.has(String(item.blocker.method))
+        || !receipt(item.blockerReceipt, item.blocker.operationId, item.blocker.hostId, item.blocker.method as SettingsWriteMethod))) {
+      throw new Error('A saved configuration recovery receipt cannot be verified. Writes are blocked.');
+    }
+    const ownReceipt = item.recoveryReceipt as WriteReceipt | undefined;
+    if (ownReceipt && operation && completed(operation) && operation.terminal && !sameTerminal(ownReceipt.terminal, operation.terminal)) {
+      throw new Error('The saved configuration terminal does not match its receipt. Writes are blocked.');
+    }
+    if (item.blockerReceipt && object(item.blocker) && typeof item.blocker.operationId === 'string'
+      && typeof item.blocker.hostId === 'string') {
+      const blocker = status(item.blocker, item.blocker.operationId, item.blocker.hostId, item.blocker.method as SettingsWriteMethod);
+      if (blocker && completed(blocker) && blocker.terminal && !sameTerminal((item.blockerReceipt as WriteReceipt).terminal, blocker.terminal)) {
+        throw new Error('The saved blocking terminal does not match its receipt. Writes are blocked.');
+      }
+    }
     ids.add(item.operationId);
   }
   return value as SettingsWriteRecord[];
@@ -72,14 +95,46 @@ function terminal(value: unknown, method: SettingsWriteMethod, state: string): v
   if (state === 'succeeded') return method === 'config/batchWrite' && (value.kind === 'ok' || value.kind === 'okOverridden')
     || method === 'skills/config/write' && value.kind === 'effectiveEnabled' && typeof value.value === 'boolean';
   return state === 'failed' && (value.kind === 'rejected' && (value.code === undefined || Number.isSafeInteger(value.code))
+    && (value.category === undefined || categories.has(String(value.category)))
     || value.kind === 'not-sent' && (value.code === undefined || value.code === 'OBSERVER_LIMIT'));
+}
+function terminalState(value: unknown): 'succeeded' | 'failed' {
+  return object(value) && (value.kind === 'ok' || value.kind === 'okOverridden' || value.kind === 'effectiveEnabled') ? 'succeeded' : 'failed';
+}
+function sameTerminal(left: WriteTerminal, right: WriteTerminal): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === 'effectiveEnabled' && right.kind === 'effectiveEnabled') return left.value === right.value;
+  if (left.kind === 'rejected' && right.kind === 'rejected') return left.code === right.code && left.category === right.category;
+  if (left.kind === 'not-sent' && right.kind === 'not-sent') return left.code === right.code;
+  return true;
+}
+function receipt(value: unknown, id: string, hostId: string, method: SettingsWriteMethod): value is WriteReceipt {
+  return object(value) && value.operationId === id && value.hostId === hostId && value.method === method
+    && typeof value.signature === 'string' && value.signature.length > 0 && value.signature.length <= 4096
+    && terminal(value.terminal, method, terminalState(value.terminal));
+}
+export function writeTerminalMessage(value: WriteTerminal | undefined): string | undefined {
+  if (value?.kind !== 'rejected') return undefined;
+  if (value.category === 'configVersionConflict') return 'The configuration changed. Reload and review your edits before saving again.';
+  if (value.category === 'configValidationError') return 'The configuration was rejected as invalid. Review your edits before saving again.';
+  if (value.category === 'configLayerReadonly') return 'The selected configuration layer is read-only. Choose a writable target before saving again.';
+  return 'The configuration write was rejected. Review your edits before saving again.';
 }
 function status(value: unknown, id: string, hostId: string, method?: SettingsWriteMethod): WriteStatus | null {
   if (!object(value) || value.operationId !== id || value.hostId !== hostId
+    || value.method !== undefined && !methods.has(String(value.method))
     || method && value.method !== undefined && value.method !== method
-    || !['pending', 'unknown', 'succeeded', 'failed'].includes(String(value.state))
-    || value.storageError !== undefined && value.storageError !== true) return null;
-  if ((value.state === 'succeeded' || value.state === 'failed') && (!method || !terminal(value.terminal, method, value.state))) return null;
+    || !['preparing', 'pending', 'unknown', 'succeeded', 'failed'].includes(String(value.state))
+    || value.storageError !== undefined && value.storageError !== true
+    || value.interrupted !== undefined && (value.interrupted !== true || value.state !== 'preparing')) return null;
+  if ((value.state === 'succeeded' || value.state === 'failed')
+    && (!method || value.method !== method || !terminal(value.terminal, method, value.state))) return null;
+  if (value.terminal !== undefined && value.state !== 'succeeded' && value.state !== 'failed') return null;
+  if (value.observedTerminal !== undefined && (value.storageError !== true || !method || value.method !== method
+    || !terminal(value.observedTerminal, method, terminalState(value.observedTerminal)))) return null;
+  if (value.recoveryReceipt !== undefined && (!method || value.storageError !== true
+    || !receipt(value.recoveryReceipt, id, hostId, method) || !value.observedTerminal
+    || !sameTerminal(value.recoveryReceipt.terminal, value.observedTerminal as WriteTerminal))) return null;
   return value as unknown as WriteStatus;
 }
 function active(record: SettingsWriteRecord) { return record.phase === 'pending' || record.phase === 'unknown' || record.phase === 'blocked'; }
@@ -101,19 +156,22 @@ export class SettingsWriteError extends Error {
     super(message); this.name = 'SettingsWriteError'; this.uncertain = uncertain; this.operationId = operationId; this.blocker = blocker;
   }
 }
-export interface SettingsWriteSnapshot { records: SettingsWriteRecord[]; loading: boolean; error: string | null; localRetry: string[]; draftRetry: string[]; draftPending: number }
+export interface SettingsWriteSnapshot { records: SettingsWriteRecord[]; loading: boolean; error: string | null; localRetry: string[]; draftRetry: string[]; draftPending: number; inFlight: string[] }
 interface PendingDraft { hostId: string; section: SettingsWriteSection; scope?: readonly string[]; draft: unknown; record: SettingsWriteRecord | null }
 interface PendingReceipt { patch: Partial<SettingsWriteRecord>; record?: SettingsWriteRecord }
+class ObservationMismatch extends Error {}
 
 /** Settings-only recovery records in the existing browser atom transaction. */
 export class SettingsConfigOperations {
   private client: WorkbenchClient;
   private storage: SettingsWriteStorage;
   private newId: () => string;
-  private snapshot: SettingsWriteSnapshot = { records: [], loading: true, error: null, localRetry: [], draftRetry: [], draftPending: 0 };
+  private snapshot: SettingsWriteSnapshot = { records: [], loading: true, error: null, localRetry: [], draftRetry: [], draftPending: 0, inFlight: [] };
   private listeners = new Set<() => void>();
   private localPending = new Map<string, PendingReceipt>();
+  private observationWrites = new Map<string, Promise<void>>();
   private localDraftPending = new Map<string, PendingDraft>();
+  private inFlight = new Set<string>();
   private draftPending = 0;
   private sequence = 0;
   private unsubscribe: (() => void) | null = null;
@@ -128,7 +186,7 @@ export class SettingsConfigOperations {
     return () => { this.listeners.delete(listener); if (!this.listeners.size) { this.unsubscribe?.(); this.unsubscribe = null; } };
   };
   private publish(patch: Partial<SettingsWriteSnapshot>) {
-    this.snapshot = { ...this.snapshot, ...patch, localRetry: [...this.localPending.keys()], draftRetry: [...this.localDraftPending.keys()], draftPending: this.draftPending };
+    this.snapshot = { ...this.snapshot, ...patch, localRetry: [...this.localPending.keys()], draftRetry: [...this.localDraftPending.keys()], draftPending: this.draftPending, inFlight: [...this.inFlight] };
     for (const listener of this.listeners) listener();
   }
   async refresh(): Promise<void> {
@@ -178,39 +236,87 @@ export class SettingsConfigOperations {
     if (!pending) throw new Error('The newer browser edit is no longer available.');
     await this.saveDraft(pending.hostId, pending.section, pending.scope, editorId, pending.draft);
   }
-  private async change(id: string, patch: Partial<SettingsWriteRecord>, fallback?: SettingsWriteRecord) {
+  private async change(id: string, patch: Partial<SettingsWriteRecord>, fallback?: SettingsWriteRecord, restoreMissing = false) {
     await this.storage.update(value => {
       const list = records(value), index = list.findIndex(item => item.operationId === id);
+      if (index < 0 && !restoreMissing) throw new ObservationMismatch('The original browser record was already closed. Review the current operations.');
       const original = index < 0 ? fallback : list[index];
       if (!original || original.operationId !== id) throw new Error('The original local configuration record is missing.');
+      if (fallback && (original.hostId !== fallback.hostId || original.method !== fallback.method
+        || JSON.stringify(original.params) !== JSON.stringify(fallback.params) || JSON.stringify(original.origin) !== JSON.stringify(fallback.origin))) {
+        throw new ObservationMismatch('The saved operation no longer matches the original submission. Review the recovery record.');
+      }
       const stale = (original.phase === 'finished' || original.phase === 'not-started')
         && (patch.phase === 'unknown' || patch.phase === 'pending' || patch.phase === 'blocked');
-      const safePatch = stale ? patch.result !== undefined && original.result === undefined ? { result: patch.result } : {} : patch;
+      const confirmedTerminal = original.operation && completed(original.operation) ? original.operation.terminal : undefined;
+      const incomingTerminal = patch.operation?.terminal ?? patch.operation?.observedTerminal;
+      if (confirmedTerminal && incomingTerminal && !sameTerminal(confirmedTerminal, incomingTerminal)) {
+        throw new ObservationMismatch('The host returned conflicting terminal results for the original operation.');
+      }
+      const safePatch = stale ? patch.result !== undefined && original.result === undefined && confirmedTerminal && incomingTerminal
+        && sameTerminal(confirmedTerminal, incomingTerminal) ? { result: patch.result } : {} : patch;
+      const own = safePatch.operation?.recoveryReceipt, blocking = safePatch.blocker?.recoveryReceipt;
+      const mergeReceipt = (old: WriteReceipt | undefined, next: WriteReceipt | undefined) => {
+        if (old && next && (old.operationId !== next.operationId || old.hostId !== next.hostId || old.method !== next.method
+          || old.signature !== next.signature || !sameTerminal(old.terminal, next.terminal))) {
+          throw new ObservationMismatch('The host returned conflicting original receipts. Check the original operation.');
+        }
+        return old ?? next;
+      };
+      const ownReceipt = mergeReceipt(original.recoveryReceipt, own), blockerReceipt = mergeReceipt(original.blockerReceipt, blocking);
+      for (const [saved, observed] of [[ownReceipt, safePatch.operation], [blockerReceipt, safePatch.blocker]] as const) {
+        if (saved && observed && completed(observed) && observed.terminal && !sameTerminal(saved.terminal, observed.terminal)) {
+          throw new ObservationMismatch('The host terminal does not match the original recovery receipt.');
+        }
+      }
+      if (original.operation && completed(original.operation) && safePatch.operation && completed(safePatch.operation)
+        && original.operation?.terminal && safePatch.operation.terminal && !sameTerminal(original.operation.terminal, safePatch.operation.terminal)) {
+        throw new ObservationMismatch('The host returned conflicting terminal results for the original operation.');
+      }
       const next = { ...original, ...safePatch, operationId: original.operationId, hostId: original.hostId,
-        method: original.method, params: original.params, origin: original.origin };
+        method: original.method, params: original.params, origin: original.origin,
+        ...(ownReceipt ? { recoveryReceipt: ownReceipt } : {}), ...(blockerReceipt ? { blockerReceipt } : {}) };
       if (index < 0) list.push(next); else list[index] = next;
       return list;
     });
     this.localPending.delete(id); await this.refresh();
   }
-  private async saveObservation(id: string, patch: Partial<SettingsWriteRecord>, fallback?: SettingsWriteRecord) {
-    try { await this.change(id, patch, fallback); }
-    catch (error) {
-      this.localPending.set(id, { patch, record: fallback ?? this.localPending.get(id)?.record });
-      this.publish({ error: `The browser could not save the original receipt: ${message(error)}. Retry saving the receipt.` });
-      throw new SettingsWriteError('The browser could not save the original receipt. Your edit is preserved.', true, id);
-    }
+  private async saveObservation(id: string, patch: Partial<SettingsWriteRecord>, fallback?: SettingsWriteRecord, retry = false) {
+    const previous = this.observationWrites.get(id);
+    const write = (previous ? previous.catch(() => {}) : Promise.resolve()).then(async () => {
+      if (this.localPending.has(id) && !retry) {
+        throw new SettingsWriteError('Retry saving the browser receipt before checking the host operation.', true, id);
+      }
+      try { await this.change(id, patch, fallback, retry); }
+      catch (error) {
+        if (error instanceof ObservationMismatch) {
+          this.publish({ error: error.message });
+          throw new SettingsWriteError(error.message, true, id);
+        }
+        this.localPending.set(id, { patch, record: fallback ?? this.localPending.get(id)?.record });
+        this.publish({ error: `The browser could not save the original receipt: ${message(error)}. Retry saving the receipt.` });
+        throw new SettingsWriteError('The browser could not save the original receipt. Your edit is preserved.', true, id);
+      }
+    });
+    this.observationWrites.set(id, write);
+    try { await write; } finally { if (this.observationWrites.get(id) === write) this.observationWrites.delete(id); }
   }
   async retryLocal(id: string): Promise<void> {
     const pending = this.localPending.get(id);
     if (!pending) throw new Error('The original browser receipt is no longer available. Check the host operation.');
-    await this.saveObservation(id, pending.patch, pending.record);
+    await this.saveObservation(id, pending.patch, pending.record, true);
   }
   async submit(hostId: string, method: SettingsWriteMethod, params: Record<string, unknown>, origin: SettingsWriteOrigin,
     canDispatch: () => boolean = () => true, onPrepared: (id: string) => void = () => {}): Promise<{ operationId: string; result: unknown }> {
     const operationId = this.newId();
     if (!operationId) throw new SettingsWriteError('Cannot create a configuration operation ID.', false);
     onPrepared(operationId);
+    this.inFlight.add(operationId); this.publish({});
+    try { return await this.submitPrepared(operationId, hostId, method, params, origin, canDispatch); }
+    finally { this.inFlight.delete(operationId); this.publish({}); }
+  }
+  private async submitPrepared(operationId: string, hostId: string, method: SettingsWriteMethod, params: Record<string, unknown>, origin: SettingsWriteOrigin,
+    canDispatch: () => boolean): Promise<{ operationId: string; result: unknown }> {
     const entry: SettingsWriteRecord = structuredClone({ operationId, hostId, method, params, origin, phase: 'pending' as const });
     try {
       await this.storage.update(value => {
@@ -248,15 +354,17 @@ export class SettingsConfigOperations {
     }
     const operation = object(response) ? status(response.operation, operationId, hostId, method) : null;
     if (operation) {
-      const detail = object(response) && object(response.error) && typeof response.error.message === 'string' ? response.error.message : undefined;
+      const detail = writeTerminalMessage(operation.terminal ?? operation.observedTerminal)
+        ?? (object(response) && object(response.error) && typeof response.error.message === 'string' ? response.error.message : undefined);
       const result = object(response) && outcome === 'success' ? response.result : undefined;
       const compatibleOutcome = outcome === 'existing' || outcome === 'success' && (operation.state === 'succeeded' || !!operation.storageError)
         || (outcome === 'error' || outcome === 'unknown' || outcome === 'not-started') && operation.state !== 'succeeded';
-      const validResult = outcome !== 'success' || operation.state !== 'succeeded' || object(result)
-        && (method === 'config/batchWrite' ? result.status === operation.terminal?.kind
-          : operation.terminal?.kind === 'effectiveEnabled' && result.effectiveEnabled === operation.terminal.value);
+      const resultTerminal = operation.terminal ?? operation.observedTerminal;
+      const validResult = outcome !== 'success' || object(result)
+        && (method === 'config/batchWrite' ? result.status === resultTerminal?.kind
+          : resultTerminal?.kind === 'effectiveEnabled' && result.effectiveEnabled === resultTerminal.value);
       const phase = completed(operation) && compatibleOutcome && validResult ? 'finished' : 'unknown';
-      await this.saveObservation(operationId, { phase, operation, ...(result !== undefined ? { result } : {}), ...(detail ? { error: detail } : {}) }, entry);
+      await this.saveObservation(operationId, { phase, operation, ...(result !== undefined && validResult && compatibleOutcome ? { result } : {}), ...(detail ? { error: detail } : {}) }, entry);
       if (operation.storageError) throw new SettingsWriteError('The host observed a result but could not save its receipt. Retry saving the host receipt.', true, operationId);
       if (phase === 'finished' && operation.state === 'succeeded') {
         const effectiveResult = result ?? terminalResult(operation);
@@ -272,12 +380,15 @@ export class SettingsConfigOperations {
     return !!operation && completed(operation);
   }
   async check(id: string, retryPersistence = false): Promise<void> {
+    if (this.localPending.has(id)) throw new Error('Retry saving the browser receipt before checking the host operation.');
     const list = records(await this.storage.read()), entry = list.find(item => item.operationId === id);
     if (!entry) throw new Error('The original local configuration record is missing.');
     const blocker = entry.phase === 'blocked' ? entry.blocker : undefined;
     const targetId = blocker?.operationId ?? id, targetHost = blocker?.hostId ?? entry.hostId;
+    const savedReceipt = blocker ? entry.blockerReceipt : entry.recoveryReceipt;
     const response = await this.client.host<unknown>('configuration-write', { hostId: targetHost,
-      action: retryPersistence ? 'retry-persistence' : 'status', operationId: targetId });
+      action: retryPersistence ? 'retry-persistence' : 'status', operationId: targetId,
+      ...(retryPersistence && savedReceipt ? { receipt: savedReceipt } : {}) });
     const operation = object(response) ? status(response.operation, targetId, targetHost, blocker?.method ?? entry.method) : null;
     if (!operation) {
       await this.saveObservation(id, { error: 'The host has no confirmed original operation. Its result remains unknown.' }, entry); return;
@@ -288,14 +399,14 @@ export class SettingsConfigOperations {
       return;
     }
     const phase = completed(operation) ? 'finished' : 'unknown';
-    const error = object(response) && object(response.error) && typeof response.error.message === 'string' ? response.error.message : undefined;
-    const pending = this.localPending.get(id);
-    await this.saveObservation(id, { ...pending?.patch, phase, operation, error }, pending?.record ?? entry);
+    const error = writeTerminalMessage(operation.terminal ?? operation.observedTerminal)
+      ?? (object(response) && object(response.error) && typeof response.error.message === 'string' ? response.error.message : undefined);
+    await this.saveObservation(id, { phase, operation, error }, entry);
   }
   async finish(id: string, discardDrafts = false): Promise<void> {
     await this.storage.update(value => {
       const list = records(value), item = list.find(record => record.operationId === id);
-      if (!item || active(item) || item.operation?.storageError || this.draftPending || this.localPending.has(id)
+      if (!item || active(item) || item.operation?.storageError || this.draftPending || this.localPending.has(id) || this.observationWrites.has(id)
         || [...this.localDraftPending.values()].some(pending => pending.record?.operationId === id)) throw new Error('The original operation is not ready to close.');
       if (item.workingDrafts?.length && !discardDrafts) throw new Error('Newer edits still have a saved copy. Review them before closing this operation.');
       if (!discardDrafts && list.some(other => other.operationId !== id && other.hostId === item.hostId
@@ -310,7 +421,7 @@ export class SettingsConfigOperations {
     await this.storage.update(value => {
       const list = records(value), group = list.filter(item => unique.has(item.operationId));
       if (this.draftPending || group.length !== unique.size || group.some(item => item.phase !== 'finished' || item.operation?.state !== 'succeeded'
-        || item.operation.storageError || item.workingDrafts?.length || this.localPending.has(item.operationId)
+        || item.operation.storageError || item.workingDrafts?.length || this.localPending.has(item.operationId) || this.observationWrites.has(item.operationId)
         || [...this.localDraftPending.values()].some(pending => pending.record?.operationId === item.operationId))) {
         throw new Error('The original configuration receipts or newer edits still need review.');
       }

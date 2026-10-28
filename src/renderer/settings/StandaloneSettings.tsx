@@ -115,8 +115,9 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
   const [confirmLeave, setConfirmLeave] = useState(false);
   const pending = useRef<{ promise: Promise<boolean>; resolve: (allowed: boolean) => void } | null>(null);
   const transition = useRef(0);
-  const dirty = preferences.dirty || otherDirty || !!recovery.localRetry.length || !!recovery.draftRetry.length;
-  const anySaving = saving || otherSaving || recovery.draftPending > 0 || preferenceKeys.some(key => snapshot[key].saving);
+  const dirty = preferences.dirty || otherDirty || !!recovery.localRetry.length || !!recovery.draftRetry.length
+    || recovery.records.some(item => item.phase === 'pending' || item.phase === 'unknown' || item.phase === 'blocked');
+  const anySaving = saving || otherSaving || recovery.draftPending > 0 || recovery.inFlight.length > 0 || preferenceKeys.some(key => snapshot[key].saving);
   const flags = useRef({ dirty, saving: anySaving });
   flags.current = { dirty, saving: anySaving };
 
