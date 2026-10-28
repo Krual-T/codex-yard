@@ -39,7 +39,7 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
           assignment:{projectKind:'local',projectId:'two'},projectless:false}],
         unresolved:{assignments:{},projectless:[],qualified:[],outputDirectories:{},workspaceRoots:{},unreadable:{}},
         outputDirectories:[],workspaceRoots:[]};
-      const client={rpc:(method,params)=>{
+      const client={subscribe:()=>()=>{},rpc:(method,params)=>{
         if(method!=='thread/list')throw Error('Unexpected RPC');
         if(params.cursor)return new Promise((resolve,reject)=>waiting.push({resolve,reject}));
         return Promise.resolve({data:params.archived?archived:active,nextCursor:params.archived?null:'next'});
