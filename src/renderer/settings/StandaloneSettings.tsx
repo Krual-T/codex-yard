@@ -234,7 +234,7 @@ export function StandaloneSettings({ client, hostId, location, onNavigate, onClo
           section === 'appearance' ? <AppearanceSection key={editorRevision} preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} onDirtyChange={setOtherDirty} /> :
             section === 'models' ? <ModelSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
               section === 'agent' ? <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
-                section === 'personalization' ? <PersonalizationSection key={selectedHost} client={client} hostId={selectedHost} /> :
+                section === 'personalization' ? <PersonalizationSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
                   section === 'voice' ? <VoiceSection preferences={preferences} snapshot={snapshot} /> :
                     section === 'usage' ? <UsageSection key={selectedHost} client={client} hostId={selectedHost} /> :
               section === 'git-settings' ? <GitSection preferences={preferences} snapshot={snapshot} suspended={confirmLeave} /> :

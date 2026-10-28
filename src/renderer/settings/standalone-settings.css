@@ -1,4 +1,4 @@
-.yard-settings { display: flex; min-height: 100%; color: var(--yard-fg, #20262a); background: var(--yard-bg, #fff); font: var(--yard-font-size, 14px)/1.45 var(--yard-ui-font, system-ui, sans-serif); }
+.yard-settings { display: flex; min-height: 100%; color: var(--yard-fg, #20262a); background: var(--yard-bg, #fff); font: var(--yard-font-size, 14px)/1.45 var(--yard-font-ui, var(--yard-ui-font, system-ui, sans-serif)); }
 .yard-settings * { box-sizing: border-box; }
 .yard-settings button, .yard-settings select, .yard-settings input, .yard-settings textarea { font: inherit; }
 .yard-settings button, .yard-settings select, .yard-settings input[type="text"], .yard-settings input[type="search"], .yard-settings input[type="number"], .yard-settings textarea { border: 1px solid var(--yard-border, #d8dde1); border-radius: 5px; background: var(--yard-surface, var(--yard-bg, #fff)); color: inherit; padding: 6px 9px; }
@@ -21,7 +21,7 @@
 .yard-nav-group button { display: block; width: 100%; text-align: left; background: transparent; border-color: transparent; padding: 7px 8px; }
 .yard-nav-group button[aria-current="page"] { background: color-mix(in srgb, var(--yard-accent, #1769b0) 14%, var(--yard-surface, var(--yard-bg, #fff))); font-weight: 600; }
 .yard-settings-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
-.yard-settings-content { width: min(100%, 840px); padding: 32px 40px 60px; margin: 0 auto; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
+.yard-settings-content { width: min(100%, 840px); padding: 32px 40px 60px; margin: 0 auto; font-family: var(--yard-font-content, var(--yard-content-font, var(--yard-font-ui, var(--yard-ui-font, system-ui, sans-serif)))); }
 .yard-settings h2 { font-size: 22px; line-height: 1.25; margin: 0 0 18px; }
 .yard-settings h3 { font-size: 15px; margin: 24px 0 8px; }
 .yard-section-heading h2, .yard-section-heading h3 { margin: 0; }
@@ -37,7 +37,7 @@
 .yard-setting-control input[type="number"] { width: 76px; }
 .yard-setting-control input[type="color"] { width: 36px; height: 30px; padding: 1px; border: 1px solid var(--yard-border, #d8dde1); border-radius: 4px; background: var(--yard-surface, var(--yard-bg, #fff)); }
 .yard-setting-control input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--yard-accent, #1769b0); }
-.yard-settings code, .yard-settings pre, .yard-color-value { font-family: var(--yard-code-font, monospace); font-size: var(--yard-code-size, 12px); }
+.yard-settings code, .yard-settings pre, .yard-color-value { font-family: var(--yard-font-code, var(--yard-code-font, monospace)); font-size: var(--yard-code-size, 12px); }
 .yard-setting-error { color: var(--yard-danger, #a02d2a); font-size: 13px; overflow-wrap: anywhere; }
 .yard-settings .yard-link { color: inherit; border: 0; padding: 0; text-decoration: underline; }
 .yard-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -48,6 +48,8 @@
 .yard-theme-preview span:first-child { font-size: 20px; font-weight: 700; }
 .yard-theme-preview code { margin-left: auto; }
 .yard-instructions { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; border: 1px solid var(--yard-border, #d8dde1); background: var(--yard-surface, var(--yard-bg, #fff)); }
+.yard-instruction-editor { margin: 20px 0; }
+.yard-instruction-editor textarea { display: block; width: 100%; min-height: 160px; resize: vertical; font-family: var(--yard-font-code, var(--yard-code-font, monospace)); font-size: var(--yard-code-size, 12px); }
 .yard-save-bar { position: sticky; bottom: 0; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 24px; background: var(--yard-surface, var(--yard-bg, #fff)); border-top: 1px solid var(--yard-border, #d8dde1); }
 .yard-inline-save { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
 .yard-filter { display: flex; align-items: end; gap: 8px; margin: 16px 0; flex-wrap: wrap; }
