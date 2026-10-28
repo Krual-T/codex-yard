@@ -18,7 +18,7 @@ test('composer recovers transactional legacy atoms without overwriting later inp
     const client={async rpc(method){
       if(method==='model/list'||method==='thread/queue/list')return {data:[],nextCursor:null};
       if(method==='config/read')return {config:{}};throw Error('Unexpected RPC '+method);
-    },async host(method,params){if(method==='get-setting')return {value:params.key==='composerEnterBehavior'?'cmdAlways':'queue'};
+    },async host(method,params){if(method==='get-setting')return {exists:true,value:params.key==='composerEnterBehavior'?'cmdAlways':params.key==='composerPlainTextMode'?false:'queue'};
       throw Error('Unexpected host '+method)},subscribe(){return ()=>{}},async reply(){throw Error('unexpected approval')}};
     let props={client,context:{hostId:'local',threadId:'thread-1',draftId:'client',cwd:'/fixture'},busy:false,
       onDraftController(value){state.controller=value},onDraftChange(value){state.snapshots.push(value)},

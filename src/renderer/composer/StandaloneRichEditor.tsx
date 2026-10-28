@@ -39,13 +39,21 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
   const tags = new Set(['div', 'span', 'p', 'br', 'strong', 'b', 'em', 'i', 'code', 'pre', 'blockquote',
     'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a']);
   const attributes = new Set(['class', 'dir', 'href', 'title', 'start', 'contenteditable', 'spellcheck',
-    'data-pm-slice', 'data-mention', 'data-composer-attrs']);
+    'data-pm-slice', 'data-mention', 'data-composer-attrs', 'data-system-hint-type', 'data-system-hint-label']);
   if (document.querySelector('style, link, script')) return false;
   return Array.from(document.body.querySelectorAll('*')).every(element => {
     if (!tags.has(element.localName) || !Array.from(element.attributes).every(attribute => attributes.has(attribute.name))) return false;
     const mention = element.getAttribute('data-mention');
     if (mention !== null && !allowMentions) return false;
     if (mention !== null && (element.localName !== 'span' || mention !== 'file' && mention !== 'skill')) return false;
+    const systemHint = element.getAttribute('data-system-hint-type');
+    const hintLabel = element.getAttribute('data-system-hint-label');
+    if (systemHint === null && hintLabel !== null) return false;
+    if (systemHint !== null && (!allowMentions || mention !== null || element.localName !== 'span'
+      || hintLabel === null || hintLabel !== element.textContent)) return false;
+    if (systemHint !== null && !readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [
+      { type: 'chatGptSystemHint', attrs: { label: hintLabel, systemHint } },
+    ] }] })) return false;
     if (!element.hasAttribute('data-composer-attrs')) return mention === null;
     const spec = mention === 'file' ? composerSchema.nodes.atMention?.spec : mention === 'skill' ? composerSchema.nodes.skillMention?.spec
       : element.localName === 'pre' ? composerSchema.nodes.code_block?.spec : element.localName === 'a' ? composerSchema.marks.link?.spec : null;

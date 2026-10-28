@@ -6,7 +6,13 @@ import type { StoredDraft } from './standalone-draft.ts';
 
 export interface ComposerDraftOwner { hostId: string; threadId: string | null; draftId: string }
 export interface ComposerDraftSnapshot { owner: ComposerDraftOwner; draft: ComposerDraft; revision: string }
-export interface ComposerSubmissionDescription { owner: ComposerDraftOwner; revision: string; overrides: Partial<import('../workbench-contract.ts').SubmitOptions> }
+export interface ComposerSubmissionDescription {
+  owner: ComposerDraftOwner;
+  revision: string;
+  overrides: Partial<import('../workbench-contract.ts').SubmitOptions>;
+  /** Captured at submission so the parent can serialize and recover the same document mode. */
+  documentPlainTextMode?: boolean;
+}
 
 interface Version extends StoredDraft { owner: ComposerDraftOwner; placeholder?: boolean }
 interface Entry { versions: Version[]; retained: Version[]; createdThreadId?: string }

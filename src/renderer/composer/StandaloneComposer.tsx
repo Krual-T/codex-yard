@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import type { ClipboardEvent } from 'react';
 import type { ComposerDraft, StandaloneComposerProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
-import { activatePending, documentFromText, draftToInput, hasContent, mergePrefill, richEditIssue, textEditIssue, updateDraftText, updateRichDraft } from './standalone-draft.ts';
+import { activatePending, documentFromText, draftToInput, hasContent, mergePrefill, recoverLegacyDraft, richEditIssue, textEditIssue, updateDraftText, updateRichDraft } from './standalone-draft.ts';
 import { localizeDraftIssue } from './standalone-draft-issues.ts';
 import { useComposerDraft } from './use-composer-draft.ts';
 import type { ComposerDraftController, ComposerDraftLease } from './use-composer-draft.ts';
@@ -26,7 +26,7 @@ import './standalone-composer.css';
 
 export { draftToInput } from './standalone-draft.ts';
 export { bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from './composer-draft-store.ts';
-export type { DraftSkill } from './standalone-draft.ts';
+export type { DraftInputOptions, DraftSkill } from './standalone-draft.ts';
 export type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescription } from './composer-draft-store.ts';
 export type { ComposerDraftController, ComposerDraftLease } from './use-composer-draft.ts';
 export type ComposerReference = NonNullable<ComposerDraft['references']>[number];
@@ -130,6 +130,9 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     return false;
   };
   const editIssue = draft.document ? richEditIssue(draft) : textEditIssue(draft);
+  const recoverableLegacy = editIssue && recoverLegacyDraft(draft);
+  const plainModeUnavailable = !!draft.document && !draft.input
+    && (plainTextSetting.loading || !plainTextSetting.available || !!plainTextSetting.error);
   const richActive = !!draft.document && !editIssue;
   const structuredInput = draft.input !== undefined;
   const completions = useCompletions(client, context.hostId, context.cwd,
@@ -250,6 +253,10 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       || current.current.draft.document && richEditIssue(current.current.draft)) {
       setError(t('This draft cannot be sent without losing content.')); return;
     }
+    const readyPlainTextMode = plainTextSetting.readyValue();
+    if (current.current.draft.document && !current.current.draft.input && readyPlainTextMode === undefined) {
+      setError(t('Could not read plain text preference:') + (plainTextSetting.error ?? t('Loading...'))); return;
+    }
     if (busy && followUp === 'queue' && (current.current.draft.hints?.length || current.current.draft.references.some(reference => reference.context !== undefined || reference.original !== undefined))) {
       setError(t('The queue cannot retain this draft context.')); return;
     }
@@ -261,7 +268,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       if (!activeTurnId) { setError(t('Current task has no confirmed turn ID')); return; }
       action = { type: 'steer', turnId: activeTurnId };
     }
-    try { draftToInput(current.current.draft, context.hostId); }
+    const documentPlainTextMode = readyPlainTextMode ?? plainTextSetting.value;
+    try { draftToInput(current.current.draft, context.hostId, { plainTextMode: documentPlainTextMode }); }
     catch (reason) { setError(message(reason)); return; }
     const captured = structuredClone(current.current);
     const submittedOptions = structuredClone(options), submittedOverrides = structuredClone(overrides);
@@ -275,7 +283,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       try { retained = await retain(captured); } finally { finishPreparation(retained); }
       if (!retained) throw new Error(t('Could not persist the submitted version.'));
       if (activeController.current !== controller) return;
-      await onSubmit(submitted, submittedOptions, action, { owner: structuredClone(owner), revision: captured.revision, overrides: submittedOverrides });
+      await onSubmit(submitted, submittedOptions, action, { owner: structuredClone(owner), revision: captured.revision,
+        overrides: submittedOverrides, ...(submitted.document ? { documentPlainTextMode } : {}) });
       confirmed = true;
       while (frozenRef.current && activeController.current === controller) {
         await new Promise<void>(resolve => thawWaiters.current.add(resolve));
@@ -390,8 +399,11 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           <span>{t('Skill')}：{skill.name}</span><button type="button" title={t('Remove skill')} aria-label={t('Remove skill') + ' ' + skill.name} disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, skills: value.skills.filter(item => item.path !== skill.path) }))}>×</button>
         </div>)}
       </div> : null}
-      {editIssue ? <div className="standalone-composer__retained" role="status">{localizeDraftIssue(editIssue, t)}<details><summary>{t('View retained content')}</summary><pre>{JSON.stringify({ document: draft.document, input: draft.input, hints: draft.hints, preserved: draft.preserved, pending: draft.pendingDrafts }, null, 2)}</pre></details></div> : null}
-      {plainTextSetting.value && richActive && textEditIssue(draft) ? <div role="status">{t('Existing formatting is retained while plain text mode is on.')}</div> : null}
+      {editIssue ? <div className="standalone-composer__retained" role="status">{localizeDraftIssue(editIssue, t)}
+        {recoverableLegacy ? <button type="button" disabled={frozen || !loaded} onClick={() => void changeDraft(value => recoverLegacyDraft(value) ?? value)}>{t('Restore')}</button> : null}
+        <details><summary>{t('View retained content')}</summary><pre>{JSON.stringify({ document: draft.document, input: draft.input, hints: draft.hints, preserved: draft.preserved, pending: draft.pendingDrafts }, null, 2)}</pre></details></div> : null}
+      {plainTextSetting.value && richActive && textEditIssue(draft) ? <div role="status">{t('Existing formatting is retained while plain text mode is on.')}
+        {!draft.input ? ' ' + (locale.toLowerCase().startsWith('zh') ? '发送时使用纯文本，不包含粗体等格式。' : 'Sending uses plain text without bold and similar formatting.') : null}</div> : null}
       {richActive && draft.document ? <StandaloneRichEditor ref={richEditor} document={draft.document} currentDocument={() => current.current.draft.document}
         plainTextMode={plainTextSetting.value}
         onChange={document => changeDraftFromOperation(value => updateRichDraft(value, document))} onKeyDown={keyDown}
@@ -449,17 +461,19 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         {busy ? <button type="button" onClick={() => void interrupt()} disabled={interrupting} title={t('Stop current task')}>{t('Stop')}</button> : null}
         {busy ? <button type="button" onClick={() => void submit(followUpSetting.value === 'queue' ? 'steer' : 'queue')}
           title={followUpSetting.value === 'queue' && !activeTurnId ? t('Current task has no confirmed turn ID') : undefined}
-          disabled={sending || uploading || !hasContent(draft) || followUpSetting.value === 'queue' && !activeTurnId}>
+          disabled={sending || uploading || !hasContent(draft) || plainModeUnavailable || followUpSetting.value === 'queue' && !activeTurnId}>
           {t(followUpSetting.value === 'queue' ? 'Send to current task' : 'Queue message')}</button> : null}
         <button className="standalone-composer__submit" type="button" onClick={() => void submit()}
           title={busy && followUpSetting.value === 'steer' && !activeTurnId ? t('Current task has no confirmed turn ID') : undefined}
-          disabled={sending || uploading || defaultPending || !hasContent(draft) || busy && (followUpSetting.pending || followUpSetting.value === 'steer' && !activeTurnId)}>
+          disabled={sending || uploading || defaultPending || !hasContent(draft) || plainModeUnavailable
+            || busy && (followUpSetting.pending || followUpSetting.value === 'steer' && !activeTurnId)}>
           {t(sending ? 'Sending...' : busy ? followUpSetting.value === 'queue' ? 'Queue message' : 'Send to current task' : 'Send')}</button>
       </div>
     </div>
     </div>
     {uploading ? <div role="status">{t('Uploading attachments...')}</div> : null}
-    {plainTextSetting.error ? <div role="status">{t('Could not read plain text preference:')} {plainTextSetting.error}</div> : null}
+    {plainTextSetting.error ? <div role="status">{t('Could not read plain text preference:')} {plainTextSetting.error}
+      <button type="button" onClick={() => void plainTextSetting.reload()}>{t('Retry reading')}</button></div> : null}
     {saving ? <div role="status">{t('Saving draft...')}</div> : null}
     {storageError ? <div role="alert">{storageError} <button type="button" disabled={frozen} onClick={retry}>{t('Retry saving')}</button></div> : null}
     {enterSetting.error ? <div role="alert">{enterSetting.error}</div> : null}

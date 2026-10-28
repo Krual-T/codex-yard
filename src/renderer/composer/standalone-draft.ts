@@ -1,5 +1,5 @@
 import type { ComposerContext, ComposerDocument, ComposerDraft, ComposerImage } from '../workbench-contract.ts';
-import { readRichDocument, richDocumentSkills, serializeRichDocument } from './rich-document.ts';
+import { isOrdinaryRichText, readRichDocument, richDocumentSkills, serializePlainDocument, serializeRichDocument } from './rich-document.ts';
 
 export interface DraftImage extends ComposerImage { previewSrc: string }
 export interface DraftSkill { name: string; path: string }
@@ -90,6 +90,16 @@ export function parseStoredDraft(raw: string): StoredDraft {
 function emptyMetadata(value: unknown): boolean {
   return value == null || value === false || value === '' || Array.isArray(value) && value.length === 0;
 }
+function legacyPlainTextMode(draft: ComposerDraft): boolean | undefined {
+  if (!('preserved' in draft) || !record(draft.preserved)) return undefined;
+  const preserved = draft.preserved;
+  if (typeof preserved.promptKey !== 'string' && typeof preserved.retainedKey !== 'string') return undefined;
+  const raw = preserved.draft;
+  const saved = record(raw) && 'draft' in raw ? raw.draft : raw;
+  const prompt = record(saved) && 'prompt' in saved ? saved.prompt : saved;
+  const source = record(preserved.retained) && 'document' in preserved.retained ? preserved.retained : prompt;
+  return record(source) && typeof source.plainTextMode === 'boolean' ? source.plainTextMode : undefined;
+}
 function plainParagraphs(document: ComposerDocument): string[] | null {
   const only = (node: ComposerDocument, keys: string[]) => Object.keys(node).every(key => keys.includes(key));
   if (document.type !== 'doc' || !only(document, ['type', 'content']) || !Array.isArray(document.content)) return null;
@@ -178,20 +188,26 @@ function readLegacy(atoms: Record<string, unknown>, promptKey: string | undefine
     if (isDocument(source.document)) {
       document = source.document;
       const plain = plainDocument(document, promptText);
-      if (plain !== null && (promptText === undefined || plain === promptText)) text = plain;
+      if (source.plainTextMode !== true && plain !== null && (promptText === undefined || plain === promptText)) text = plain;
       else {
         const rich = readRichDocument(document);
         if (rich === null) blocked = '此草稿包含尚不支持的文档内容，已保留原始数据。';
-        else if (promptText === undefined) text = serializeRichDocument(rich);
-        else if (plain !== promptText && serializeRichDocument(rich) !== promptText) {
+        else if (promptText === undefined) text = source.plainTextMode === true ? serializePlainDocument(rich, true) : serializeRichDocument(rich);
+        else if ((source.plainTextMode === true || plain !== promptText)
+          && (source.plainTextMode === true ? serializePlainDocument(rich, true) : serializeRichDocument(rich)) !== promptText) {
           blocked = '此草稿的文档与保存的文本不一致，已保留两个版本。';
         }
       }
     } else blocked = '此草稿的文档格式无法读取，已保留原始数据。';
   } else if (value !== undefined && typeof value !== 'string') blocked = '此草稿包含未识别的内容，已保留原始数据。';
   if (record(value) && 'document' in value && source !== value && record(source)
-    && JSON.stringify(value.document) !== JSON.stringify(source.document)) {
+    && (JSON.stringify(value.document) !== JSON.stringify(source.document)
+      || typeof value.plainTextMode === 'boolean' && typeof source.plainTextMode === 'boolean' && value.plainTextMode !== source.plainTextMode)) {
     blocked = '此草稿包含不同版本的文档，均已保留。';
+  }
+  if (record(source) && 'plainTextMode' in source && typeof source.plainTextMode !== 'boolean'
+    || record(value) && 'plainTextMode' in value && typeof value.plainTextMode !== 'boolean') {
+    blocked = '此草稿包含未识别的内容，已保留原始数据。';
   }
   if (record(value) && Object.entries(value).some(([key, item]) => key !== 'document' && key !== 'plainTextMode' && !emptyMetadata(item))
     || record(retainedValue) && Object.entries(retainedValue).some(([key, item]) => key !== 'document' && key !== 'plainTextMode' && key !== 'prompt' && !emptyMetadata(item))) {
@@ -202,6 +218,30 @@ function readLegacy(atoms: Record<string, unknown>, promptKey: string | undefine
   }
   return { revision: createId(), prefills: [], draft: { ...emptyDraft(), text, document, blocked,
     preserved: { promptKey, retainedKey, draft: raw, retained: retainedValue } } };
+}
+
+/** Offer recovery of an already-imported legacy version without discarding its raw envelope. */
+export function recoverLegacyDraft(draft: Draft): Draft | null {
+  const unsupported = '此草稿包含尚不支持的文档内容，已保留原始数据。';
+  const mismatch = '此草稿的文档与保存的文本不一致，已保留两个版本。';
+  if (![legacyBlockedMessage, unsupported, mismatch].includes(draft.blocked ?? '') || !record(draft.preserved)) return null;
+  const preserved = draft.preserved;
+  const promptKey = typeof preserved.promptKey === 'string' ? preserved.promptKey : undefined;
+  const retainedKey = typeof preserved.retainedKey === 'string' ? preserved.retainedKey : undefined;
+  if (!promptKey && !retainedKey) return null;
+  const atoms = {
+    'composer-prompt-drafts-v2': promptKey && 'draft' in preserved ? { [promptKey]: preserved.draft } : {},
+    'composer-retained-documents-v1': retainedKey && 'retained' in preserved ? { [retainedKey]: preserved.retained } : {},
+  };
+  const recovered = readLegacy(atoms, promptKey, retainedKey);
+  if (!recovered || recovered.draft.blocked || JSON.stringify(recovered.draft.document) !== JSON.stringify(draft.document)
+    || JSON.stringify(recovered.draft.preserved) !== JSON.stringify(preserved)) return null;
+  const raw = preserved.draft, saved = record(raw) && 'draft' in raw ? raw.draft : raw;
+  const prompt = record(saved) && 'prompt' in saved ? saved.prompt : saved;
+  const hadSavedText = typeof prompt === 'string' || record(preserved.retained) && typeof preserved.retained.prompt === 'string';
+  if (draft.text !== recovered.draft.text && !(draft.blocked === unsupported && draft.text === '' && !draft.input && !hadSavedText)) return null;
+  const candidate = { ...draft, text: recovered.draft.text, blocked: undefined };
+  return richEditIssue(candidate) ? null : candidate;
 }
 export function legacyDraftCandidates(context: ComposerContext, atoms: Record<string, unknown>): StoredDraft[] {
   const keys = legacyKeys(context, atoms);
@@ -284,7 +324,8 @@ export function richEditIssue(draft: Draft): string | null {
   if (draft.blocked) return draft.blocked;
   const document = draft.document && readRichDocument(draft.document);
   if (!document) return '此草稿包含尚不支持的文档内容，已保留原始数据。';
-  if (serializeRichDocument(document) !== draft.text && plainDocument(draft.document!, draft.text) !== draft.text) {
+  const serialized = legacyPlainTextMode(draft) === true ? serializePlainDocument(document, true) : serializeRichDocument(document);
+  if (serialized !== draft.text && (legacyPlainTextMode(draft) === true || plainDocument(draft.document!, draft.text) !== draft.text)) {
     return '此草稿的文档与保存的文本不一致，已保留两个版本。';
   }
   if (draft.hints?.length) return '此草稿包含提示信息，当前编辑器不能无损编辑。';
@@ -307,7 +348,8 @@ export function updateRichDraft(draft: Draft, document: ComposerDocument): Draft
   if (richEditIssue(draft)) return draft;
   const next = readRichDocument(document), previous = draft.document && readRichDocument(draft.document);
   if (!next || !previous) return draft;
-  const text = editedPlainDocument(document, draft.document!, draft.text) ?? serializeRichDocument(next);
+  const text = legacyPlainTextMode(draft) === true ? serializePlainDocument(next, true)
+    : editedPlainDocument(document, draft.document!, draft.text) ?? serializeRichDocument(next);
   const oldSkills = richDocumentSkills(previous), newSkills = richDocumentSkills(next);
   const removed = oldSkills.filter(old => !newSkills.some(skill => skill.name === old.name && skill.path === old.path));
   const input = draft.input?.filter(item => !removed.some(skill => item.type === 'skill'
@@ -358,24 +400,50 @@ export function activatePending(draft: Draft, keepCurrent: boolean): Draft {
   return { ...normalizeDraft(next!), ...(parked.length ? { pendingDrafts: parked } : {}) };
 }
 
-export function draftToInput(draft: ComposerDraft, hostId: string): Record<string, unknown>[] {
+export interface DraftInputOptions { plainTextMode?: boolean }
+
+export function draftToInput(draft: ComposerDraft, hostId: string, options?: DraftInputOptions): Record<string, unknown>[] {
   const rich = draft.document && readRichDocument(draft.document);
-  if (draft.document && (!rich || serializeRichDocument(rich) !== draft.text && plainDocument(draft.document, draft.text) !== draft.text)) {
+  const legacyPlain = legacyPlainTextMode(draft) === true;
+  const savedText = rich && (legacyPlain ? serializePlainDocument(rich, true) : serializeRichDocument(rich));
+  const plainText = draft.document && plainDocument(draft.document, draft.text);
+  if (draft.document && (!rich || savedText !== draft.text && (legacyPlain || plainText !== draft.text))) {
     throw new Error('草稿文档无法与待发送文本无损对应，已保留原始草稿。');
   }
+  if (draft.hints?.length) throw new Error('此草稿包含尚不支持的提示信息，已保留原始数据。');
   const input: Record<string, unknown>[] = draft.input?.map(item => ({ ...item })) ?? [];
   if (draft.input) {
     const text = input.filter(item => item.type === 'text');
-    if (text.length === 0 && draft.text || text.length === 1 && Array.isArray(text[0]!.text_elements)
-      && text[0]!.text_elements.length === 0 && text[0]!.text !== draft.text) {
+    if (text.some(item => typeof item.text !== 'string') || text.map(item => item.text).join('\n') !== draft.text) {
       throw new Error('草稿文本与原始消息不一致，已保留原始消息。');
+    }
+    for (const item of text) {
+      if (item.text_elements === undefined) continue;
+      if (!Array.isArray(item.text_elements)) throw new Error('消息引用范围无法读取，已保留原始消息。');
+      const original = item.text as string, bytes = new TextEncoder().encode(original);
+      if (new TextDecoder('utf-8', { fatal: true }).decode(bytes) !== original) throw new Error('消息文本包含无效 Unicode，已保留原始消息。');
+      const boundary = (index: number) => index === bytes.length || (bytes[index]! & 0xc0) !== 0x80;
+      if (item.text_elements.some(element => {
+        if (!record(element) || !record(element.byteRange)) return true;
+        const { start, end } = element.byteRange;
+        return typeof start !== 'number' || typeof end !== 'number' || !Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+          || start < 0 || end < start || end > bytes.length || !boundary(start) || !boundary(end);
+      })) throw new Error('消息引用的 UTF-8 范围无效，已保留原始消息。');
     }
   }
   const original = input.slice(), matched = new Set<number>();
+  let submittedText = draft.text;
+  if (rich && !draft.input) {
+    if (options?.plainTextMode ?? legacyPlain) {
+      if (legacyPlain || plainText !== draft.text) submittedText = serializePlainDocument(rich);
+    } else if (isOrdinaryRichText(rich)) {
+      if (plainText !== draft.text) submittedText = serializePlainDocument(rich);
+    } else if (options?.plainTextMode === false && legacyPlain) submittedText = serializeRichDocument(rich);
+  }
   const parts = draft.input
     ? [...draft.files.filter(file => !input.some(item => item.type === 'mention' && item.path === file.path)).map(file => file.path),
       ...(draft.references ?? []).map(reference => reference.text)].filter(Boolean)
-    : [draft.text, ...draft.files.map(file => file.path), ...(draft.references ?? []).map(reference => reference.text)].filter(Boolean);
+    : [submittedText, ...draft.files.map(file => file.path), ...(draft.references ?? []).map(reference => reference.text)].filter(Boolean);
   if (parts.length) input.push({ type: 'text', text: parts.join('\n'), text_elements: [] });
   for (const image of draft.images) {
     let item: Record<string, unknown>;

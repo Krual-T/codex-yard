@@ -202,7 +202,8 @@ test('ordered input, hints, references and file IDs survive normalization and se
     input: [{ type: 'text', text: 'Original', text_elements: [] }, { type: 'image', fileId: 'file-1', detail: 'high' },
       { type: 'future-kind', payload: { preserved: true } }] };
   const normalized = normalizeDraft(draft);
-  assert.deepEqual(draftToInput(normalized, 'local'), [...draft.input!, { type: 'text', text: 'selected', text_elements: [] }]);
+  assert.throws(() => draftToInput(normalized, 'local'), /提示/);
+  assert.deepEqual(draftToInput({ ...normalized, hints: [] }, 'local'), [...draft.input!, { type: 'text', text: 'selected', text_elements: [] }]);
   assert.deepEqual(normalized.references, draft.references);
   assert.deepEqual(normalized.hints, draft.hints);
   assert.ok(textEditIssue(normalized));

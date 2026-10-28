@@ -81,7 +81,7 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
       if(method==='thread/queue/list') return {data:[],nextCursor:null};
       throw Error('Unexpected RPC '+method);
     },async host(method,params) {
-      if(method==='get-setting') return {value:params.key==='composerEnterBehavior'?'enter':'queue'};
+      if(method==='get-setting') return {exists:true,value:params.key==='composerEnterBehavior'?'enter':params.key==='composerPlainTextMode'?false:'queue'};
       throw Error('Unexpected host '+method);
     },subscribe(listener){state.listeners.add(listener);return ()=>state.listeners.delete(listener)},async reply(){throw Error('unexpected approval')}};
     let props={client,context:{hostId:'local',threadId:'thread-1',draftId:'legacy',cwd:'/workspace'},busy:false,

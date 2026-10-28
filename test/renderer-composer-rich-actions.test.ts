@@ -22,7 +22,7 @@ test('rich completion and Markdown list operations survive editing, undo, refres
       throw Error('Unexpected RPC '+method);
     },async host(method,params) {
       state.calls.push({method,params});
-      if(method==='get-setting') return {value:params.key==='composerEnterBehavior'?state.enter:'queue'};
+      if(method==='get-setting') return {exists:true,value:params.key==='composerEnterBehavior'?state.enter:params.key==='composerPlainTextMode'?false:'queue'};
       if(method==='set-setting') { if(params.key==='composerEnterBehavior') state.enter=params.value; return {success:true}; }
       if(method==='workspace-directory-entries') return {entries:params.directoryPath==='src'
         ? [{name:'main.ts',path:'src/main.ts',type:'file'}] : [{name:'src',path:'src',type:'directory'}]};
