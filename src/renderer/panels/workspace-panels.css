@@ -35,5 +35,16 @@
 .yard-file-media { display: grid; flex: 1; min-height: 0; place-items: center; padding: 16px; overflow: auto; background: #f6f7f7; }
 .yard-file-media img, .yard-file-media video { max-width: 100%; max-height: 100%; object-fit: contain; }
 .yard-file-hex { flex: 1; min-height: 0; margin: 0; padding: 12px; overflow: auto; font: 12px/1.6 ui-monospace, monospace; }
+.yard-pdf-viewer { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.yard-pdf-toolbar { display: flex; align-items: center; justify-content: center; gap: 4px; min-height: 40px; border-bottom: 1px solid var(--yard-panel-border); }
+.yard-pdf-toolbar span { min-width: 52px; text-align: center; }
+.yard-pdf-scroll { flex: 1; min-height: 0; padding: 16px; overflow: auto; background: #e9ebeb; }
+.yard-pdf-page { position: relative; margin: 0 auto; background: white; box-shadow: 0 1px 5px #0003; --scale-round-x: 1px; --scale-round-y: 1px; }
+.yard-pdf-page canvas { display: block; }
+.yard-pdf-text-layer { position: absolute; inset: 0; overflow: clip; line-height: 1; text-align: initial; transform-origin: 0 0; --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size)); }
+.yard-pdf-text-layer :is(span, br) { position: absolute; color: transparent; white-space: pre; cursor: text; transform-origin: 0 0; user-select: text; }
+.yard-pdf-text-layer > :not(.markedContent), .yard-pdf-text-layer .markedContent span:not(.markedContent) { font-size: calc(var(--text-scale-factor) * var(--font-height, 0)); transform: rotate(var(--rotate, 0deg)) scaleX(var(--scale-x, 1)) scale(var(--min-font-size-inv)); }
+.yard-pdf-text-layer .markedContent { display: contents; }
+.yard-pdf-text-layer ::selection { background: #0074cc55; }
 @media (max-width: 560px) { .yard-files-tree { flex-basis: 36%; } .yard-file-toolbar { padding-left: 6px; } }
 @media (prefers-color-scheme: dark) { .yard-workspace-panels { --yard-panel-border: #414648; --yard-panel-muted: #a4abad; color: #e5e8e8; background: #202324; } .yard-panel-icon:hover, .yard-panel-tab-close:hover, .yard-files-tree-entry:hover { background: #353a3b; } .yard-file-gutter, .yard-file-media { background: #292d2e; } .yard-file-error { color: #ffb0a9; background: #472b29; border-color: #70433f; } }

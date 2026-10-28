@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { build } from 'esbuild';
@@ -29,11 +29,18 @@ test('file paths, Unicode bytes and line endings retain their host representatio
 function samplePdf() {
   let pdf = '%PDF-1.4\n';
   const offsets = [0];
+  const stream = (text: string) => {
+    const content = `BT /F1 16 Tf 20 100 Td (${text}) Tj ET`;
+    return `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`;
+  };
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>',
-    '<< /Length 0 >>\nstream\n\nendstream',
+    '<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    stream('First PDF page'),
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>',
+    stream('Second PDF page'),
   ];
   for (const [index, object] of objects.entries()) {
     offsets.push(Buffer.byteLength(pdf));
@@ -62,6 +69,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   await writeFile(join(project, 'late-binary.txt'), Buffer.concat([Buffer.alloc(4096, 65), Buffer.from([255])]));
   await writeFile(join(project, 'image.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=', 'base64'));
   await writeFile(join(project, 'report.pdf'), samplePdf());
+  await writeFile(join(project, 'broken.pdf'), '%PDF-1.4\nnot a PDF');
   await writeFile(join(other, 'other.txt'), 'other scope');
   const fake = await createFakeCodex(root);
   let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
@@ -77,6 +85,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   const fileRpc = fileDaemonFixture();
   for (const method of fileMethods) fake.handlers.set(method, params => fileRpc(method, record(params)));
   const { renderer, adapterPath } = await nativeFixture(root);
+  await copyFile('node_modules/pdfjs-dist/build/pdf.worker.min.mjs', join(renderer, 'pdf.worker.min.mjs'));
   const bundle = await build({
     stdin: { resolveDir: process.cwd(), loader: 'js', contents: `
       import * as React from 'react';
@@ -138,8 +147,10 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   page.setDefaultTimeout(7_000);
   const errors: string[] = [];
   const browserConsole: string[] = [];
+  const requestedUrls: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') browserConsole.push(message.text()); });
+  page.on('request', request => requestedUrls.push(request.url()));
   await page.goto(app.url);
 
   const editor = page.getByRole('textbox', { name: `File: ${join(project, 'notes.txt')}` });
@@ -200,7 +211,22 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   await image.waitFor();
   await page.waitForFunction(() => Boolean(document.querySelector('img')?.naturalWidth));
   await page.getByRole('button', { name: 'report.pdf', exact: true }).click();
-  await page.getByRole('alert').filter({ hasText: 'PDF preview is unavailable' }).waitFor();
+  await page.getByLabel('PDF page 1').waitFor();
+  await page.locator('.yard-pdf-text-layer').getByText('First PDF page').waitFor();
+  assert.ok(requestedUrls.some(url => new URL(url).pathname === '/pdf.worker.min.mjs'));
+  const firstWidth = await page.getByLabel('PDF page 1').evaluate(element => element.getBoundingClientRect().width);
+  assert.ok(await page.getByLabel('PDF page 1').evaluate(element => {
+    const canvas = element as HTMLCanvasElement;
+    const pixels = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
+    return pixels.some((value, index) => index % 4 !== 3 && value < 100);
+  }));
+  await page.getByRole('button', { name: 'Zoom in' }).click();
+  await page.waitForFunction(width => document.querySelector('canvas')!.getBoundingClientRect().width > width, firstWidth);
+  await page.getByRole('button', { name: 'Next page' }).click();
+  await page.locator('.yard-pdf-text-layer').getByText('Second PDF page').waitFor();
+  assert.equal(await page.getByLabel('PDF page', { exact: true }).innerText(), '2 / 2');
+  await page.getByRole('button', { name: 'Previous page' }).click();
+  await page.locator('.yard-pdf-text-layer').getByText('First PDF page').waitFor();
   const pdfDownload = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Download file' }).click();
   assert.deepEqual(await readFile(await (await pdfDownload).path()), samplePdf());
@@ -209,6 +235,8 @@ test('workspace file panels use the real host with a disposable synthetic daemon
     await mkdir(screenshotDir, { recursive: true });
     await page.screenshot({ path: join(screenshotDir, 'pdf.png') });
   }
+  await page.getByRole('button', { name: 'broken.pdf', exact: true }).click();
+  await page.getByRole('alert').filter({ hasText: 'PDF preview:' }).waitFor();
   assert.deepEqual(browserConsole.filter(message => /content security policy|refused to frame/i.test(message)), []);
 
   await page.getByRole('tab', { name: /notes.txt/ }).click();

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { base64Bytes } from './file-service.ts';
 import type { FileContents } from './file-service.ts';
+import { PdfViewer } from './PdfViewer.tsx';
 
 interface Location { line: number; column?: number; id: number }
 interface Props {
@@ -90,7 +91,7 @@ function BinaryViewer({ path, content }: { path: string; content: Extract<FileCo
     setUrl(next);
     return () => URL.revokeObjectURL(next);
   }, [bytes, content.mimeType]);
-  if (content.mimeType === 'application/pdf') return <div className="yard-file-status" role="alert">PDF preview is unavailable in this panel. Download the file to open it.</div>;
+  if (content.mimeType === 'application/pdf') return <PdfViewer bytes={bytes} />;
   if (!url) return <div className="yard-file-status">Loading preview...</div>;
   if (content.mimeType.startsWith('image/')) return <div className="yard-file-media"><img src={url} alt={path} /></div>;
   if (content.mimeType.startsWith('audio/')) return <div className="yard-file-media"><audio controls src={url} /></div>;
