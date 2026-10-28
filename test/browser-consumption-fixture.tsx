@@ -1,8 +1,10 @@
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 import { StandaloneBrowser } from '../src/renderer/browser/index.tsx';
-import { addBrowserComment, browserCommentsAtomKey, browserOwnerKey, changeBrowserComment, claimLegacyBrowserComment,
+import { attachBrowserComment, browserCommentsAtomKey, browserOwnerKey, changeBrowserComment, claimLegacyBrowserComment,
+  claimProvenLegacyBrowserComments,
   pruneBrowserDraftDeletions, readBrowserCommentsSnapshot, removeBrowserReferenceFromDraft } from '../src/renderer/browser/comments.ts';
+import { addBrowserComment } from './browser-comment-fixture.ts';
 import type { BrowserOwner, BrowserReference } from '../src/renderer/browser/comments.ts';
 import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference } from '../src/renderer/app/browser-draft.ts';
 import { SendRecoveryStore } from '../src/renderer/app/send-recovery.ts';
@@ -35,6 +37,15 @@ export interface Fixture {
   change(owner: BrowserOwner, original: Record<string, unknown>, text: string | null, snapshot: ComposerDraftSnapshot): Promise<ComposerDraftSnapshot>;
   claim(owner: BrowserOwner, legacyOwner: string, expected: unknown[], index: number, keepBoth: boolean): Promise<void>;
   removeReference(owner: BrowserOwner, reference: BrowserReference, snapshot: ComposerDraftSnapshot): Promise<ComposerDraftSnapshot>;
+  attach(owner: BrowserOwner, reference: BrowserReference, snapshot: ComposerDraftSnapshot): Promise<ComposerDraftSnapshot>;
+  claimProven(owner: BrowserOwner, key: string): Promise<void>;
+  holdSnapshot(): void;
+  snapshotBlocked(): boolean;
+  releaseSnapshot(): void;
+  rejectNextCommit(): void;
+  dirty(): boolean;
+  canLeave(): Promise<boolean>;
+  closes(): number;
   setLegacyEvidence(key: string, owner: BrowserOwner): Promise<void>;
   input(): Record<string, unknown>[];
   injectReference(reference: { id: string; text: string; kind?: string }): Promise<boolean>;
@@ -58,6 +69,8 @@ const client: WorkbenchClient = {
 };
 const recovery = new SendRecoveryStore(client);
 let attemptCount = 0;
+let snapshotGate: Promise<void> | undefined, releaseGate: (() => void) | undefined, snapshotBlocked = false;
+let rejectCommit = false, dirty = false, closeCount = 0, recoveryBarrier: (() => Promise<void>) | null = null;
 const anchor = { kind: 'element' as const, pageUrl: 'https://fixture.invalid/page', framePath: [], title: 'Fixture element',
   immediateText: 'Example', role: 'button', name: 'Example', selector: '#fixture', elementPath: '#fixture', nearbyText: 'Example',
   rect: { x: 1, y: 2, width: 20, height: 10 }, elementMetadata: { tag: 'button', future: 'kept' } };
@@ -146,6 +159,15 @@ function App() {
       change: changeBrowserComment,
       claim: claimLegacyBrowserComment,
       removeReference: removeBrowserReferenceFromDraft,
+      attach: attachBrowserComment,
+      claimProven(value, key) { return claimProvenLegacyBrowserComments(value, (_atoms, legacyKey) => legacyKey === key ? value : null); },
+      holdSnapshot() { snapshotBlocked = false; snapshotGate = new Promise(resolve => { releaseGate = resolve; }); },
+      snapshotBlocked: () => snapshotBlocked,
+      releaseSnapshot() { releaseGate?.(); snapshotGate = undefined; releaseGate = undefined; },
+      rejectNextCommit() { rejectCommit = true; },
+      dirty: () => dirty,
+      async canLeave() { try { await recoveryBarrier?.(); return true; } catch { return false; } },
+      closes: () => closeCount,
       async setLegacyEvidence(key, value) {
         await updateBrowserAtom('fixture.legacy-identity', previous => ({ ...(previous && typeof previous === 'object' ? previous : {}), [key]: value }));
       },
@@ -158,14 +180,8 @@ function App() {
     };
   });
   const browserOwner = browserDraftOwner(owner, bindings);
-  const apply = React.useCallback(async (value: BrowserOwner, update: Parameters<ComposerDraftController['update']>[1]) => {
-    const current = controller.current, initial = current?.snapshot();
-    const matches = () => JSON.stringify(browserDraftOwner(ownerRef.current, bindings)) === JSON.stringify(value);
-    if (!current || !initial || !matches() || !await current.flush(initial.owner)) throw new Error('Fixture owner changed');
-    const ready = current.snapshot();
-    if (!ready || !matches() || !await current.update(ready.owner, update)) throw new Error('Fixture owner changed');
-  }, [bindings]);
   const getDraftSnapshot = React.useCallback(async (value: BrowserOwner) => {
+    if (snapshotGate) { snapshotBlocked = true; await snapshotGate; }
     const current = controller.current, initial = current?.snapshot();
     const matches = () => JSON.stringify(browserDraftOwner(ownerRef.current, bindings)) === JSON.stringify(value);
     if (!current || !initial || !matches() || !await current.flush(initial.owner)) throw new Error('Fixture owner changed');
@@ -174,6 +190,7 @@ function App() {
     return ready;
   }, [bindings]);
   const acceptCommitted = React.useCallback(async (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => {
+    if (rejectCommit) { rejectCommit = false; return false; }
     const current = controller.current;
     for (let i = 0; i < 100; i++) {
       const value = current?.snapshot();
@@ -210,15 +227,18 @@ function App() {
     refresh();
     return () => { live = false; unsubscribe(); };
   }, [browserKey, controllerReady, getDraftSnapshot, acceptCommitted, snapshot?.revision]);
+  const onDirtyChange = React.useCallback((value: boolean) => { dirty = value; }, []);
+  const onRecoveryBarrier = React.useCallback((value: (() => Promise<void>) | null) => { recoveryBarrier = value; }, []);
   const empty = { text: '', images: [], files: [], references: [] };
   return <>
     <StandaloneComposer client={client} context={{ ...owner, cwd: '/fixture' }} busy={false}
       onDraftController={receiveController} onDraftChange={setSnapshot}
       onRemoveReference={(draftOwner, reference) => removeBrowserDraftReference(browserDraftOwner(draftOwner, bindings), reference)}
       onSubmit={async () => { throw new Error('Fixture does not perform inference'); }} onInterrupt={async () => {}} />
-    {browserVisible ? <StandaloneBrowser client={client} {...browserOwner} browserTabId="fixture" draft={snapshot?.draft ?? empty}
-      visible allowNavigation={false} onClose={() => {}} onDraftChange={apply} getDraftSnapshot={getDraftSnapshot}
-      onDraftVersionCommitted={acceptCommitted} resolveLegacyOwner={resolveLegacyOwner} /> : null}
+    <StandaloneBrowser client={client} {...browserOwner} browserTabId="fixture" draft={snapshot?.draft ?? empty}
+      visible={browserVisible} allowNavigation={false} onClose={() => { closeCount += 1; }} getDraftSnapshot={getDraftSnapshot}
+      onDirtyChange={onDirtyChange} onRecoveryBarrier={onRecoveryBarrier}
+      onDraftVersionCommitted={acceptCommitted} resolveLegacyOwner={resolveLegacyOwner} />
   </>;
 }
 createRoot(document.getElementById('root')!).render(<App />);

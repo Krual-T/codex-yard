@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
-import { adoptLegacyBrowserComments, browserOwnerKey, browserReferences,
+import { browserOwnerKey, browserReferences,
   readBrowserComments, readLegacyBrowserComments, StandaloneBrowser, subscribeBrowserComments } from '../src/renderer/browser/index.tsx';
+import { adoptLegacyBrowserComments } from './browser-comment-fixture.ts';
 import { readBrowserAtom } from '../src/renderer/storage/ui-atoms.ts';
 import { acknowledgeSubmittedBrowserReferences } from '../src/renderer/app/browser-draft.ts';
 import { SendRecoveryStore } from '../src/renderer/app/send-recovery.ts';
@@ -129,10 +130,6 @@ function App() {
           await new Promise(resolve => setTimeout(resolve, 10));
         }
         return false;
-      }}
-      onDraftChange={async (owner, update) => {
-        const before = await getSnapshot(owner), current = controller.current;
-        if (!current || !await current.update(before.owner, update)) throw new Error('Fixture owner changed');
       }} />
   </> : null;
 }

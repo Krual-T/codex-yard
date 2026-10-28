@@ -5,14 +5,14 @@ import { createChromeSurface } from '../../browser-reuse/webview.tsx';
 import type { ComposerDraft, WorkbenchClient } from '../workbench-contract.ts';
 import type { ComposerDraftSnapshot } from '../composer/composer-draft-store.ts';
 import { addBrowserCommentToDraft, attachBrowserComment, browserOwnerKey, browserReferences, changeBrowserComment, claimLegacyBrowserComment,
-  claimProvenLegacyBrowserComments, listLegacyBrowserComments, readBrowserCommentsSnapshot,
+  claimProvenLegacyBrowserComments, listLegacyBrowserComments, readBrowserCommentArchive, readBrowserCommentsSnapshot, removeBrowserReferenceFromDraft,
   subscribeBrowserComments } from './comments.ts';
 import type { BrowserOwner, BrowserReference, LegacyBrowserComments, ResolveLegacyBrowserOwner } from './comments.ts';
 import { sameBrowserValue } from './draft-transaction.ts';
 
-export { addBrowserCommentToDraft, adoptLegacyBrowserComments, attachBrowserComment, browserOwnerKey, browserReferences, changeBrowserComment,
+export { addBrowserCommentToDraft, attachBrowserComment, browserOwnerKey, browserReferences, changeBrowserComment,
   claimLegacyBrowserComment, claimProvenLegacyBrowserComments, listLegacyBrowserComments, pruneBrowserDraftDeletions, readBrowserComments,
-  readLegacyBrowserComments, reconcileBrowserReferences, removeBrowserReferenceFromDraft, subscribeBrowserComments } from './comments.ts';
+  readLegacyBrowserComments, removeBrowserReferenceFromDraft, subscribeBrowserComments } from './comments.ts';
 export type { BrowserOwner, BrowserReference } from './comments.ts';
 export type { ResolveLegacyBrowserOwner } from './comments.ts';
 
@@ -24,8 +24,8 @@ export interface StandaloneBrowserProps {
   draftId: string;
   browserTabId: string;
   draft: ComposerDraft;
-  /** Retained for existing callers; explicit deletion synchronization is owned by the parent. */
-  onDraftChange(owner: BrowserOwner, update: (draft: ComposerDraft) => ComposerDraft): void | Promise<void>;
+  onDirtyChange?(dirty: boolean): void;
+  onRecoveryBarrier?(barrier: (() => Promise<void>) | null): void;
   /** Flush the active composer and return its exact durable owner and revision. */
   getDraftSnapshot?(owner: BrowserOwner): Promise<ComposerDraftSnapshot>;
   /** Adopt an already committed version only if the controller still displays before. */
@@ -45,37 +45,65 @@ function displayValue(value: unknown): string {
   try { return JSON.stringify(value, null, 2) ?? String(value); } catch { return '[无法显示此保存值]'; }
 }
 
-function CommentEditor({ owner, reference, saved, consumed, attached, getSnapshot, isCurrent, accept }: { owner: BrowserOwner; reference: BrowserReference;
-  saved?: BrowserReference; consumed: boolean; attached: boolean; getSnapshot(): Promise<ComposerDraftSnapshot>; isCurrent(): boolean;
-  accept(before: ComposerDraftSnapshot, after: ComposerDraftSnapshot): Promise<void> }) {
-  const initialText = (value: Record<string, unknown>) => Array.isArray(value.content)
-    ? value.content.filter((item): item is { content_type: string; text: string } =>
-      item != null && typeof item === 'object' && item.content_type === 'text' && typeof item.text === 'string').map(item => item.text).join('\n') : '';
-  const [base, setBase] = React.useState(reference.original);
-  const [text, setText] = React.useState(() => initialText(reference.original));
-  const [dirty, setDirty] = React.useState(false);
-  const [busy, setBusy] = React.useState(false);
+interface PendingEdit { owner: BrowserOwner; reference: BrowserReference; base: Record<string, unknown>; text: string }
+interface PendingProjection { owner: BrowserOwner; snapshot: ComposerDraftSnapshot }
+interface BrowserEdits {
+  edits: Record<string, PendingEdit>;
+  projections: Record<string, PendingProjection>;
+  edit(owner: BrowserOwner, reference: BrowserReference, text: string): void;
+  discard(key: string): void;
+  begin(): void;
+  end(): void;
+  hold(owner: BrowserOwner, snapshot: ComposerDraftSnapshot): void;
+  release(owner: BrowserOwner): void;
+  projection(owner: BrowserOwner): PendingProjection | undefined;
+  barrier(): Promise<void>;
+}
+const editKey = (owner: BrowserOwner, reference: BrowserReference) => JSON.stringify([browserOwnerKey(owner), reference.id]);
+const commentText = (value: Record<string, unknown>) => Array.isArray(value.content)
+  ? value.content.filter((item): item is { content_type: string; text: string } =>
+    item != null && typeof item === 'object' && item.content_type === 'text' && typeof item.text === 'string').map(item => item.text).join('\n') : '';
+
+function CopyButton({ value, label }: { value: string; label: string }) {
   const [error, setError] = React.useState('');
-  React.useEffect(() => {
-    if (!dirty) { setBase(reference.original); setText(initialText(reference.original)); }
-  }, [reference.original, dirty]);
+  return <><button type="button" onClick={() => {
+    void (navigator.clipboard?.writeText(value) ?? Promise.reject(new Error('Clipboard unavailable')))
+      .then(() => setError('')).catch(() => setError('复制失败，请选择文本手动复制。'));
+  }}>{label}</button>{error ? <span role="alert">{error}</span> : null}</>;
+}
+
+function CommentEditor({ owner, reference, saved, consumed, attached, getSnapshot, isCurrent, accept, edits }: { owner: BrowserOwner; reference: BrowserReference;
+  saved?: BrowserReference; consumed: boolean; attached: boolean; getSnapshot(): Promise<ComposerDraftSnapshot>; isCurrent(): boolean;
+  accept(before: ComposerDraftSnapshot, after: ComposerDraftSnapshot): Promise<void>; edits: BrowserEdits }) {
+  const key = editKey(owner, reference), pending = edits.edits[key];
+  const base = pending?.base ?? reference.original, text = pending?.text ?? commentText(reference.original);
+  const [busy, setBusy] = React.useState(false);
+  const busyRef = React.useRef(false);
+  const [error, setError] = React.useState('');
   const update = async (value: string | null) => {
+    if (busyRef.current) return;
+    busyRef.current = true; edits.begin();
     setBusy(true); setError('');
     try {
       const before = await getSnapshot();
-      const after = await changeBrowserComment(owner, base, value, before, isCurrent);
-      setDirty(false); await accept(before, after);
+      const after = value === null && attached
+        ? await removeBrowserReferenceFromDraft(owner, reference, before, isCurrent)
+        : await changeBrowserComment(owner, base, value, before, isCurrent);
+      if (value !== null) edits.discard(key);
+      await accept(before, after);
     }
     catch (failure) { setError((failure as Error).message); }
-    finally { setBusy(false); }
+    finally { busyRef.current = false; edits.end(); setBusy(false); }
   };
   const add = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true; edits.begin();
     setBusy(true); setError('');
     try { const before = await getSnapshot(); await accept(before, await attachBrowserComment(owner, reference, before, isCurrent)); }
     catch (failure) { setError((failure as Error).message); }
-    finally { setBusy(false); }
+    finally { busyRef.current = false; edits.end(); setBusy(false); }
   };
-  const pendingConflict = dirty && !sameBrowserValue(base, reference.original);
+  const pendingConflict = !!pending && !sameBrowserValue(base, reference.original);
   const contextValue = pendingConflict ? base.localBrowserContext : reference.context.localBrowserContext;
   const context = contextValue && typeof contextValue === 'object' && !Array.isArray(contextValue)
     ? contextValue as Record<string, unknown> : {};
@@ -88,20 +116,22 @@ function CommentEditor({ owner, reference, saved, consumed, attached, getSnapsho
       <details><summary>核对批注版本</summary><p>{pendingConflict ? '编辑起点' : '草稿版本'}</p><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(pendingConflict ? base : reference)}</pre>
         <p>已保存版本</p><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{saved ? displayValue(saved) : '已保存批注不存在或无法识别'}</pre></details>
     </div> : null}
-    <textarea aria-label="浏览器引用批注" value={text} readOnly={conflict} onChange={event => { setText(event.target.value); setDirty(true); }} rows={2} />
+    <textarea aria-label="浏览器引用批注" value={text} readOnly={busy || conflict && !pending} onChange={event => edits.edit(owner, reference, event.target.value)} rows={2} />
     <div style={{ display: 'flex', gap: 8 }}>
       {!attached ? <button disabled={busy} onClick={() => { void add(); }}>添加到草稿</button> : null}
-      <button disabled={conflict || !dirty || busy} onClick={() => { void update(text); }}>保存批注</button>
-      <button disabled={conflict || busy} onClick={() => { void update(null); }}>删除引用</button>
+      <button disabled={conflict || !pending || busy} onClick={() => { void update(text); }}>保存批注</button>
+      <button disabled={!!pending || busy || conflict && !attached} onClick={() => { void update(null); }}>{conflict && attached ? '从当前草稿移除' : '删除引用'}</button>
+      {pending ? <><CopyButton value={text} label="复制未保存文字" /><button disabled={busy} onClick={() => edits.discard(key)}>放弃编辑</button></> : null}
     </div>
     {error ? <span role="alert">{error}</span> : null}
   </li>;
 }
 
 function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNavigation, navigationRequest, onNavigationConsumed,
-  getDraftSnapshot, onDraftVersionCommitted, resolveLegacyOwner, onClose }: {
+  getDraftSnapshot, onDraftVersionCommitted, resolveLegacyOwner, onClose, edits }: {
   client: WorkbenchClient; owner: BrowserOwner; browserTabId: string; visible: boolean; allowNavigation: boolean;
   draft: ComposerDraft;
+  edits: BrowserEdits;
   onClose(): void;
   getDraftSnapshot: StandaloneBrowserProps['getDraftSnapshot']; resolveLegacyOwner: StandaloneBrowserProps['resolveLegacyOwner'];
   onDraftVersionCommitted: StandaloneBrowserProps['onDraftVersionCommitted'];
@@ -118,22 +148,25 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
   const [error, setError] = React.useState('');
   const [commentsError, setCommentsError] = React.useState('');
   const [legacyError, setLegacyError] = React.useState('');
+  const [archive, setArchive] = React.useState<string | null>(null);
   const active = React.useRef(false);
   const snapshotRef = React.useRef(getDraftSnapshot);
   const committedRef = React.useRef(onDraftVersionCommitted);
   React.useLayoutEffect(() => { snapshotRef.current = getDraftSnapshot;
     committedRef.current = onDraftVersionCommitted; }, [getDraftSnapshot, onDraftVersionCommitted]);
   const getSnapshot = React.useCallback(async () => {
+    if (edits.projection(owner)) throw new Error('请选择已保存的草稿版本后，再修改浏览器引用。');
     if (!active.current || !snapshotRef.current || !committedRef.current) throw new Error('草稿版本尚未就绪，浏览器引用未更改。');
     const snapshot = await snapshotRef.current(owner);
     if (!active.current) throw new Error('草稿已切换，浏览器引用未更改。');
     return snapshot;
-  }, [ownerKey]);
+  }, [ownerKey, edits.projection]);
   const accept = React.useCallback(async (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => {
     if (before.revision === after.revision) return;
-    try { if (await committedRef.current?.(before, after)) return; } catch { /* The transaction already committed. */ }
+    edits.hold(owner, after);
+    try { if (await committedRef.current?.(before, after)) { edits.release(owner); return; } } catch { /* The transaction already committed. */ }
     throw new Error('批注和新草稿版本已保存，请在草稿版本中核对并选择；当前编辑已保留。');
-  }, []);
+  }, [ownerKey, edits.hold, edits.release]);
   React.useEffect(() => bridge.subscribe(target, setState), [bridge, target]);
   React.useEffect(() => { setAddress(state?.frame?.url ?? ''); }, [state?.frame?.url]);
   const attemptedNavigation = React.useRef<string | null>(null);
@@ -175,7 +208,10 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
           setComments(nextSnapshot.comments); setConsumed(nextSnapshot.consumed); setLegacy(nextLegacy); setCommentsError('');
         }
       })().catch(failure => {
-        if (live && active.current) setCommentsError((failure as Error).message);
+        if (live && active.current) {
+          setCommentsError((failure as Error).message);
+          void readBrowserCommentArchive().then(value => { if (live && active.current) setArchive(value); }).catch(() => {});
+        }
       }).finally(() => { refreshing = false; if (pending) refresh(); });
     };
     const unsubscribe = subscribeBrowserComments(refresh);
@@ -185,6 +221,8 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
     return () => { live = false; unsubscribe(); };
   }, [bridge, target, ownerKey, visible, resolveLegacyOwner]);
   const quote = React.useCallback(async (_target: BrowserTarget, pageId: number) => {
+    edits.begin();
+    try {
     const version = bridge.selectionVersion(target);
     const anchor = await bridge.selectedElement(target, pageId);
     const isCurrent = () => active.current && bridge.selectionIsCurrent(target, pageId, version);
@@ -193,7 +231,8 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
     const result = await addBrowserCommentToDraft(owner, anchor, before, isCurrent);
     await accept(before, result.snapshot);
     return anchor.title;
-  }, [bridge, target, ownerKey, getSnapshot, accept]);
+    } finally { edits.end(); }
+  }, [bridge, target, ownerKey, getSnapshot, accept, edits.begin, edits.end]);
   const command = (type: string, url?: string) => {
     setError('');
     void bridge.request({ ...target, operation: 'command', command: { type, ...(url === undefined ? {} : { url }) } })
@@ -209,9 +248,23 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
     return { reference: attached.length === 1 && recognized.length === 1 ? recognized[0]! : saved, saved,
       attached: attached.length > 0, ambiguous: attached.length > 1 || attached.length === 1 && recognized.length !== 1, raw: attached };
   });
-  for (const reference of draftReferences) if (!references.some(value => value.id === reference.id)) {
-    displayed.push({ reference, saved: undefined as unknown as BrowserReference, attached: true, ambiguous: false, raw: [reference] });
+  for (const reference of draftReferences) if (!displayed.some(value => value.reference.id === reference.id)) {
+    const raw = (draft.references ?? []).filter(value => value.id === reference.id);
+    displayed.push({ reference, saved: undefined as unknown as BrowserReference, attached: true, ambiguous: raw.length !== 1, raw });
   }
+  const visibleIds = new Set(displayed.filter(value => !value.ambiguous).map(value => value.reference.id));
+  const pendingElsewhere = Object.entries(edits.edits).filter(([, value]) => browserOwnerKey(value.owner) !== ownerKey || !visibleIds.has(value.reference.id));
+  const projection = edits.projections[ownerKey];
+  const otherProjections = Object.values(edits.projections).filter(value => browserOwnerKey(value.owner) !== ownerKey);
+  React.useEffect(() => {
+    if (!visible || !projection || !sameBrowserValue(draft, projection.snapshot.draft) || !snapshotRef.current) return;
+    let live = true;
+    void snapshotRef.current(owner).then(current => {
+      if (live && active.current && sameBrowserValue(current, projection.snapshot)
+        && sameBrowserValue(edits.projection(owner)?.snapshot, projection.snapshot)) edits.release(owner);
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [ownerKey, draft, visible, projection, edits.projection, edits.release]);
   return <section aria-label="浏览器" style={{ display: visible ? 'flex' : 'none', flexDirection: 'column', height: '100%', minHeight: 0 }}>
     <header style={{ display: 'flex', gap: 6, alignItems: 'center', padding: 8 }}>
       <strong>Chrome</strong>
@@ -224,20 +277,45 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
           <button>打开</button>
         </form>
       </> : null}
-      <button onClick={onClose}>关闭</button>
+      <button onClick={() => { void edits.barrier().then(onClose).catch(failure => setError((failure as Error).message)); }}>关闭</button>
     </header>
     {error ? <p role="alert" style={{ margin: 8 }}>{error}</p> : null}
     {commentsError ? <p role="alert" style={{ margin: 8 }}>{commentsError}</p> : null}
     {legacyError ? <p role="alert" style={{ margin: 8 }}>{legacyError}</p> : null}
+    {archive !== null && commentsError ? <details><summary>取回旧批注原文</summary>
+      <textarea aria-label="旧批注原文" readOnly value={archive} rows={5} /><CopyButton value={archive} label="复制旧批注原文" />
+    </details> : null}
     <div style={{ flex: 1, minHeight: 200 }}><ChromeSurface target={target} bridge={bridge} visible={visible} onQuote={quote} /></div>
     <section aria-label="浏览器引用" style={{ maxHeight: '40%', overflow: 'auto', padding: '0 8px' }}>
-      {displayed.length ? <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>{displayed.map(({ reference, saved, attached, ambiguous, raw }, index) =>
-        ambiguous ? <li key={reference.id + ':' + index} role="status">草稿中相同 ID 的引用无法安全核对，内容已保留。
+      {projection ? <section role="status"><strong>批注和新草稿版本已保存，请在草稿版本中核对并选择。</strong>
+        <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(projection.snapshot.draft.references)}</pre>
+        <button onClick={() => {
+          edits.begin();
+          void (async () => {
+            const current = await snapshotRef.current?.(owner);
+            if (!current || !sameBrowserValue(current, projection.snapshot)) throw new Error('当前草稿尚未选择该已保存版本。');
+            edits.release(owner); setError('');
+          })().catch(failure => setError((failure as Error).message)).finally(() => edits.end());
+        }}>核对已保存的草稿版本</button>
+      </section> : null}
+      {otherProjections.map(value => <section key={browserOwnerKey(value.owner)} role="status">
+        <strong>其他草稿有已保存但尚未接收的版本</strong><p>{value.owner.hostId} / {value.owner.threadId ?? '新会话'} / {value.owner.draftId}</p>
+        <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(value.snapshot.draft.references)}</pre>
+      </section>)}
+      {pendingElsewhere.length ? <section aria-label="待处理的批注编辑"><strong>待处理的批注编辑</strong>
+        {pendingElsewhere.map(([key, value]) => <div key={key}>
+          <p>{value.owner.hostId} / {value.owner.threadId ?? '新会话'} / {value.owner.draftId}</p>
+          <textarea aria-label="待处理的批注文字" value={value.text} readOnly rows={2} />
+          <CopyButton value={value.text} label="复制未保存文字" /><button onClick={() => edits.discard(key)}>放弃编辑</button>
+        </div>)}
+      </section> : null}
+      {displayed.length ? <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>{displayed.map(({ reference, saved, attached, ambiguous, raw }) =>
+        ambiguous ? <li key={reference.id} role="status">草稿中相同 ID 的引用无法安全核对，内容已保留。
           <details><summary>核对草稿和已保存引用</summary><p>草稿版本</p><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(raw)}</pre>
             <p>已保存版本</p><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(saved)}</pre></details></li> :
-        <CommentEditor key={reference.id + ':' + index} owner={owner} reference={reference} saved={saved}
+        <CommentEditor key={reference.id} owner={owner} reference={reference} saved={saved}
           consumed={consumed.some(value => sameBrowserValue(value, reference))} attached={attached} getSnapshot={getSnapshot} accept={accept}
-          isCurrent={() => active.current} />)}</ul> : null}
+          isCurrent={() => active.current} edits={edits} />)}</ul> : null}
       {comments.length > references.length ? <details><summary>无法识别或冲突的已保存批注</summary>
         <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(comments)}</pre></details> : null}
       {legacy.length ? <details><summary>待认领的旧浏览器批注</summary>
@@ -256,10 +334,10 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
               <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(item)}</pre>
               {collisions.length ? <details><summary>核对目标中的同 ID 批注</summary><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(collisions)}</pre></details> : null}
               {candidate ? <button onClick={() => {
-                setLegacyError('');
+                setLegacyError(''); edits.begin();
                 void claimLegacyBrowserComment(owner, entry.owner, entry.value as unknown[], index, collisions.length > 0, () => active.current)
-                  .catch(failure => { if (active.current) setLegacyError((failure as Error).message); });
-              }}>{collisions.length ? '保留两份并认领到当前草稿' : '认领到当前草稿'}</button> : <span>此旧记录无法识别，已保留。</span>}
+                  .catch(failure => { if (active.current) setLegacyError((failure as Error).message); }).finally(() => edits.end());
+              }}>{collisions.length ? '保留两份并认领批注' : '认领可添加的批注'}</button> : <span>此旧记录无法识别，已保留。</span>}
             </div>;
           }) : <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(entry.value)}</pre>}
         </section>)}
@@ -269,10 +347,54 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
 }
 
 export function StandaloneBrowser(props: StandaloneBrowserProps) {
+  const pending = React.useRef<Record<string, PendingEdit>>({});
+  const projections = React.useRef<Record<string, PendingProjection>>({});
+  const inFlight = React.useRef(0);
+  const dirtyCallback = React.useRef(props.onDirtyChange);
+  const [, render] = React.useReducer((value: number) => value + 1, 0);
+  React.useLayoutEffect(() => { dirtyCallback.current = props.onDirtyChange; }, [props.onDirtyChange]);
+  const dirty = React.useCallback(() => inFlight.current > 0 || Object.keys(pending.current).length > 0
+    || Object.keys(projections.current).length > 0, []);
+  const changed = React.useCallback(() => { dirtyCallback.current?.(dirty()); render(); }, [dirty]);
+  const edit = React.useCallback((owner: BrowserOwner, reference: BrowserReference, text: string) => {
+    const key = editKey(owner, reference), previous = pending.current[key];
+    pending.current = { ...pending.current, [key]: previous ? { ...previous, text }
+      : { owner: structuredClone(owner), reference: structuredClone(reference), base: structuredClone(reference.original), text } };
+    changed();
+  }, [changed]);
+  const discard = React.useCallback((key: string) => {
+    if (!Object.hasOwn(pending.current, key)) return;
+    const next = { ...pending.current }; delete next[key]; pending.current = next; changed();
+  }, [changed]);
+  const begin = React.useCallback(() => { inFlight.current += 1; changed(); }, [changed]);
+  const end = React.useCallback(() => { inFlight.current -= 1; changed(); }, [changed]);
+  const hold = React.useCallback((owner: BrowserOwner, snapshot: ComposerDraftSnapshot) => {
+    projections.current = { ...projections.current, [browserOwnerKey(owner)]: { owner: structuredClone(owner), snapshot: structuredClone(snapshot) } };
+    changed();
+  }, [changed]);
+  const release = React.useCallback((owner: BrowserOwner) => {
+    const key = browserOwnerKey(owner);
+    if (!Object.hasOwn(projections.current, key)) return;
+    const next = { ...projections.current }; delete next[key]; projections.current = next; changed();
+  }, [changed]);
+  const projection = React.useCallback((owner: BrowserOwner) => projections.current[browserOwnerKey(owner)], []);
+  const barrier = React.useCallback(async () => {
+    if (dirty()) throw new Error('浏览器批注有待处理的编辑或已保存版本，请先核对、保存或明确放弃编辑。');
+  }, [dirty]);
+  React.useLayoutEffect(() => {
+    props.onRecoveryBarrier?.(barrier); props.onDirtyChange?.(dirty());
+    return () => props.onRecoveryBarrier?.(null);
+  }, [props.onRecoveryBarrier, props.onDirtyChange, barrier, dirty]);
+  React.useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => { if (dirty()) event.preventDefault(); };
+    window.addEventListener('beforeunload', beforeUnload);
+    return () => window.removeEventListener('beforeunload', beforeUnload);
+  }, [dirty]);
+  const edits: BrowserEdits = { edits: pending.current, projections: projections.current, edit, discard, begin, end, hold, release, projection, barrier };
   const owner = { hostId: props.hostId, threadId: props.threadId, draftId: props.draftId };
   const key = JSON.stringify([browserOwnerKey(owner), props.browserTabId]);
   return <BrowserPanel key={key} client={props.client} owner={owner} browserTabId={props.browserTabId} draft={props.draft} visible={props.visible}
     allowNavigation={props.allowNavigation} navigationRequest={props.navigationRequest} onNavigationConsumed={props.onNavigationConsumed}
     getDraftSnapshot={props.getDraftSnapshot} onDraftVersionCommitted={props.onDraftVersionCommitted}
-    resolveLegacyOwner={props.resolveLegacyOwner} onClose={props.onClose} />;
+    resolveLegacyOwner={props.resolveLegacyOwner} onClose={props.onClose} edits={edits} />;
 }

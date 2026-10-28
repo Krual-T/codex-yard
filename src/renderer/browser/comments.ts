@@ -42,6 +42,7 @@ export interface BrowserSubmission {
 export interface BrowserCommentsSnapshot {
   comments: unknown[];
   consumed: BrowserReference[];
+  consumptionRecords: unknown[];
   deleted: BrowserReference[];
 }
 
@@ -83,6 +84,16 @@ async function readStore(): Promise<CommentStore & { entries: Record<string, unk
 
 export async function ensureBrowserCommentStore(): Promise<void> { await readStore(); }
 
+/** Recover the imported bytes without treating a malformed archive as writable state. */
+export async function readBrowserCommentArchive(): Promise<string | null> {
+  let value = await readBrowserAtom(browserCommentsAtomKey);
+  if (value === undefined) {
+    try { await readStore(); } catch { /* Read the original bytes from the imported record. */ }
+    value = await readBrowserAtom(browserCommentsAtomKey);
+  }
+  return record(value) && typeof value.legacyRaw === 'string' ? value.legacyRaw : null;
+}
+
 function ownerComments(map: Record<string, unknown>, key: string): unknown[] {
   if (!Object.hasOwn(map, key)) return [];
   if (!Array.isArray(map[key])) throw new Error('当前草稿的浏览器批注格式无效，原数据已保留');
@@ -107,17 +118,16 @@ export async function readBrowserCommentsSnapshot(owner: BrowserOwner): Promise<
   const consumed = ownerRecords(store, 'codex-yard.browser-consumption.v1', key);
   const deleted = ownerRecords(store, 'codex-yard.browser-deletions.v1', key).flatMap(value =>
     record(value) && record(value.reference) ? [value.reference as unknown as BrowserReference] : []);
-  return { comments, consumed: browserReferences(owner, comments).filter(reference => consumed.some(value =>
-    record(value) && same(value.reference, reference))), deleted };
+  return { comments, consumptionRecords: consumed, consumed: consumed.flatMap(value =>
+    record(value) && record(value.reference) ? [value.reference as unknown as BrowserReference] : []), deleted };
 }
 
 /** Apply inside the transaction that checks the immutable confirmed send. */
 export function recordSubmittedBrowserComments(value: unknown, owner: BrowserOwner, submission: BrowserSubmission): unknown {
   const store = commentStore(value), key = browserOwnerKey(owner);
-  const old = ownerRecords(store, 'codex-yard.browser-consumption.v1', key), references = browserReferences(owner, ownerComments(store.entries, key));
+  const old = ownerRecords(store, 'codex-yard.browser-consumption.v1', key);
   const additions: unknown[] = [];
   for (const reference of submission.references) {
-    if (!references.some(current => same(current, reference))) continue;
     const marker = { intentId: submission.intentId, owner: submission.owner, revision: submission.revision, reference };
     if (!old.some(item => same(item, marker)) && !additions.some(item => same(item, marker))) additions.push(marker);
   }
@@ -205,17 +215,6 @@ export function createBrowserComment(anchor: ChromeElementContext, line: number)
       targetSelector: anchor.selector, targetPath: anchor.elementPath, nearbyText: anchor.nearbyText,
       targetRect: anchor.rect, elementMetadata: anchor.elementMetadata },
     localBrowserCommentMetadata: { commentId: id, kind: anchor.kind, hasAnnotationFeatures: true } };
-}
-
-export async function addBrowserComment(owner: BrowserOwner, anchor: ChromeElementContext, isCurrent?: () => boolean): Promise<BrowserReference> {
-  const key = browserOwnerKey(owner);
-  return updateMap(map => {
-    const comments = ownerComments(map, key), comment = createBrowserComment(anchor, comments.length + 1);
-    const reference = browserReferences(owner, [comment])[0];
-    if (!reference) throw new Error('无法创建浏览器引用');
-    map[key] = [...comments, comment];
-    return reference;
-  }, isCurrent);
 }
 
 async function updateVersion<T>(owner: BrowserOwner, snapshot: ComposerDraftSnapshot, isCurrent: (() => boolean) | undefined,
@@ -321,23 +320,20 @@ export async function removeBrowserReferenceFromDraft(owner: BrowserOwner, refer
   if (!canonical || !same(clicked, canonical) || matches.length !== 1 || !same(matches[0], clicked)) {
     throw new Error('所选浏览器引用或草稿版本已改变，请核对后重试。');
   }
-  return changeBrowserComment(owner, clicked.original, null, captured, isCurrent);
-}
-
-/** A caller must establish the legacy owner's host and draft from external evidence. */
-export async function adoptLegacyBrowserComments(owner: BrowserOwner, legacyOwner: string, expected: unknown[]): Promise<void> {
-  expected = structuredClone(expected);
-  const key = browserOwnerKey(owner);
-  if (!legacyOwner || legacyOwner.startsWith(ownerPrefix)) throw new Error('旧批注身份无效');
-  await updateMap(map => {
-    if (!Object.hasOwn(map, legacyOwner) || !same(map[legacyOwner], expected) || !Array.isArray(map[legacyOwner])) {
-      throw new Error('旧批注已变化，原数据已保留');
+  const key = browserOwnerKey(owner), id = commentId(clicked.original)!;
+  const result = await updateVersion(owner, captured, isCurrent, (map, store, draft) => {
+    const current = (draft.references ?? []).filter(value => value.id === clicked.id);
+    if (current.length !== 1 || !same(current[0], clicked)) throw new Error('所选浏览器引用或草稿版本已改变，请核对后重试。');
+    const comments = ownerComments(map, key), indices = comments.flatMap((value, index) => metadataId(value) === id ? [index] : []);
+    if (indices.length === 1 && same(comments[indices[0]!], clicked.original)) {
+      const field = 'codex-yard.browser-deletions.v1', old = ownerRecords(store, field, key), marker = { reference: clicked };
+      const previous = store[field];
+      store[field] = { ...(record(previous) ? previous : {}), [key]: old.some(value => same(value, marker)) ? old : [...old, marker] };
+      map[key] = comments.filter((_, index) => index !== indices[0]);
     }
-    const existing = ownerComments(map, key), ids = new Set(existing.map(metadataId).filter(Boolean));
-    for (const item of expected) { const id = metadataId(item); if (id && ids.has(id)) throw new Error('旧批注与目标冲突，请逐条核对。'); if (id) ids.add(id); }
-    map[key] = [...existing, ...expected];
-    delete map[legacyOwner];
+    return { value: undefined, draft: { ...draft, references: (draft.references ?? []).filter(value => !same(value, clicked)) } };
   });
+  return result.snapshot;
 }
 
 export async function claimLegacyBrowserComment(owner: BrowserOwner, legacyOwner: string, expected: unknown[], index: number,
@@ -345,19 +341,24 @@ export async function claimLegacyBrowserComment(owner: BrowserOwner, legacyOwner
   expected = structuredClone(expected);
   const key = browserOwnerKey(owner);
   if (!legacyOwner || legacyOwner.startsWith(ownerPrefix) || !Number.isInteger(index) || index < 0) throw new Error('旧批注身份无效。');
-  await updateMap(map => {
+  await updateMap((map, store) => {
     if (!same(map[legacyOwner], expected) || !Array.isArray(map[legacyOwner]) || index >= expected.length) throw new Error('旧批注已变化，请重新核对。');
     const value = expected[index], id = commentId(value), existing = ownerComments(map, key);
     if (!id || !record(value)) throw new Error('此旧批注格式无法识别，原数据已保留。');
     const collision = existing.some(item => metadataId(item) === id);
     if (collision && !keepBoth) throw new Error('目标已有相同 ID 的批注，请核对两份内容并选择保留两份。');
+    const deleted = ownerRecords(store, 'codex-yard.browser-deletions.v1', key);
+    const candidate = browserReferences(owner, [value])[0];
+    const deletedConflict = candidate && deleted.some(marker => record(marker) && same(marker.reference, candidate));
     let replacementId = id;
-    if (collision) {
-      const used = new Set(existing.map(metadataId).filter(Boolean));
+    if (collision || deletedConflict) {
+      const deletedIds = deleted.flatMap(marker => record(marker) && record(marker.reference) && record(marker.reference.original)
+        ? [metadataId(marker.reference.original)] : []);
+      const used = new Set([...existing.map(metadataId), ...deletedIds].filter(Boolean));
       for (let attempt = 0; used.has(replacementId) && attempt < 10; attempt++) replacementId = crypto.randomUUID();
       if (used.has(replacementId)) throw new Error('无法分配独立批注身份，原数据已保留。');
     }
-    const adopted = collision ? { ...value, localBrowserCommentMetadata: { ...(value.localBrowserCommentMetadata as Record<string, unknown>), commentId: replacementId } } : value;
+    const adopted = replacementId !== id ? { ...value, localBrowserCommentMetadata: { ...(value.localBrowserCommentMetadata as Record<string, unknown>), commentId: replacementId } } : value;
     map[key] = [...existing, adopted];
     const remaining = expected.filter((_, i) => i !== index);
     if (remaining.length) map[legacyOwner] = remaining; else delete map[legacyOwner];
@@ -374,8 +375,10 @@ export async function claimProvenLegacyBrowserComments(owner: BrowserOwner, reso
     if (isCurrent && !isCurrent()) throw new Error('草稿已切换，未认领旧批注。');
     const original = commentStore(atoms[browserCommentsAtomKey]), map = { ...original.entries };
     let existing = ownerComments(map, key), changed = false;
+    const deleted = ownerRecords(original, 'codex-yard.browser-deletions.v1', key);
     for (const [legacyOwner, value] of Object.entries(map)) {
       if (legacyOwner.startsWith(ownerPrefix) || !Array.isArray(value) || !same(resolve(atoms, legacyOwner), owner)) continue;
+      if (browserReferences(owner, value).some(reference => deleted.some(marker => record(marker) && same(marker.reference, reference)))) continue;
       const ids = new Set(existing.map(metadataId).filter(Boolean));
       let conflict = false;
       for (const item of value) { const id = metadataId(item); if (id && ids.has(id)) { conflict = true; break; } if (id) ids.add(id); }
@@ -387,12 +390,6 @@ export async function claimProvenLegacyBrowserComments(owner: BrowserOwner, reso
     map[key] = existing;
     return { value: undefined, updates: { [browserCommentsAtomKey]: { ...original, entries: map } } };
   });
-}
-
-/** Existing draft versions are never rewritten from a separate comment snapshot. */
-export function reconcileBrowserReferences(draft: ComposerDraft, previous: readonly BrowserReference[], current: readonly BrowserReference[]): ComposerDraft {
-  void previous; void current;
-  return draft;
 }
 
 export function removeExplicitlyDeletedBrowserReferences(draft: ComposerDraft, deleted: readonly BrowserReference[]): ComposerDraft {
@@ -423,9 +420,4 @@ export function assertBrowserDraftReferencesNotDeleted(value: unknown, owner: Br
   if ((draft.references ?? []).some(reference => deleted.some(item => record(item) && same(item.reference, reference)))) {
     throw new Error('浏览器引用已在其他页面删除，请先更新原草稿。');
   }
-}
-
-export function addBrowserDraftReference(draft: ComposerDraft, reference: BrowserReference): ComposerDraft {
-  const references = draft.references ?? [];
-  return references.some(item => item.id === reference.id) ? draft : { ...draft, references: [...references, reference] };
 }

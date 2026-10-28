@@ -74,7 +74,7 @@ test('real composer and browser panel preserve complete comment versions and cla
     await first.getByText('核对目标中的同 ID 批注').click();
     assert.match(await first.locator('section[aria-label="浏览器引用"]').innerText(), /legacy value/);
     assert.match(await first.locator('section[aria-label="浏览器引用"]').innerText(), /already saved/);
-    await first.getByRole('button', { name: '保留两份并认领到当前草稿' }).click();
+    await first.getByRole('button', { name: '保留两份并认领批注' }).click();
     await first.waitForFunction(async owner => (await window.browserConsumption.comments(owner)).comments.length === 2, target);
     const claimed = await first.evaluate(owner => window.browserConsumption.comments(owner), target);
     const values = claimed.comments as typeof original[];
@@ -176,7 +176,7 @@ test('real composer and browser panel preserve complete comment versions and cla
     await second.getByText('草稿中的引用与已保存批注不同', { exact: false }).waitFor();
     assert.equal(await second.getByLabel('浏览器引用批注').inputValue(), 'Chrome 中所选元素');
     assert.equal(await second.getByRole('button', { name: '保存批注' }).isDisabled(), true);
-    assert.equal(await second.getByRole('button', { name: '删除引用' }).isDisabled(), true);
+    assert.equal(await second.getByRole('button', { name: '从当前草稿移除' }).isDisabled(), false);
     await second.getByText('核对批注版本').click();
     const comparison = await second.locator('section[aria-label="浏览器引用"]').innerText();
     assert.match(comparison, /Chrome 中所选元素/); assert.match(comparison, /R3 from A/);

@@ -132,7 +132,8 @@ test('confirmed browser references consume only the submitted version across pag
     await first.evaluate(id => window.browserConsumption.confirm(id), beforeEdit.id);
     await first.evaluate(id => window.browserConsumption.finish(id), beforeEdit.id);
     const changedState = await second.evaluate(value => window.browserConsumption.comments(value), changedOwner);
-    assert.equal(changedState.consumed.length, 0, 'An independently edited comment is not marked as the original');
+    assert.deepEqual(changedState.consumed, [beforeEdit.draft.references![0]], 'The confirmed original is recorded even after the shared comment changed');
+    assert.notDeepEqual(changedState.consumed[0]?.original, changedState.comments[0], 'The edited comment is not marked as the original');
     assert.match((await second.evaluate(() => window.browserConsumption.snapshot()))!.draft.references![0]!.text, /Changed before confirmation/);
     const beforeDelete = await second.evaluate(() => window.browserConsumption.prepare());
     await first.waitForFunction(revision => window.browserConsumption.snapshot()?.revision === revision, beforeDelete.revision);

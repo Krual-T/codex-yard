@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { browserOwnerKey, browserReferences, reconcileBrowserReferences, removeExplicitlyDeletedBrowserReferences } from '../src/renderer/browser/comments.ts';
+import { browserOwnerKey, browserReferences, removeExplicitlyDeletedBrowserReferences } from '../src/renderer/browser/comments.ts';
 
 test('browser references preserve unknown data and do not reconcile independent draft versions', () => {
   const owner = { hostId: 'local', threadId: 'same-id', draftId: 'home' };
@@ -20,14 +20,6 @@ test('browser references preserve unknown data and do not reconcile independent 
   assert.deepEqual(browserReferences(owner, [comment, comment, { unknown: true }]), [], 'Duplicate and unknown entries are not guessed');
   const draft = { text: 'Prompt', images: [], files: [], references: [reference, { id: 'unrelated', text: 'Other' }] };
   const changed = { ...reference, text: 'A newer composer edit' };
-  assert.deepEqual(reconcileBrowserReferences({ ...draft, references: [changed, draft.references[1]!] }, [reference], []).references,
-    [changed, draft.references[1]], 'A later draft edit is not cleared');
-  assert.deepEqual(reconcileBrowserReferences(draft, [reference], []).references, draft.references, 'A removed saved comment does not rewrite an independent draft');
-  assert.deepEqual(reconcileBrowserReferences(draft, [reference], [{ ...reference, text: 'R2' }]).references, draft.references,
-    'A newer saved comment does not replace the version in a draft');
-  assert.deepEqual(reconcileBrowserReferences({ ...draft, references: [] }, [reference], [reference]).references, [], 'A removed draft reference is not silently reinserted');
-  assert.deepEqual(reconcileBrowserReferences({ ...draft, references: [] }, [], [reference]).references, [],
-    'A stale comment snapshot cannot automatically reinsert a submitted reference');
   assert.deepEqual(removeExplicitlyDeletedBrowserReferences(draft, [reference]).references, [draft.references[1]], 'An explicit deletion is durable');
   assert.deepEqual(removeExplicitlyDeletedBrowserReferences({ ...draft, references: [changed] }, [reference]).references, [changed],
     'An independently edited reference is not removed by an older deletion');

@@ -14,7 +14,8 @@ test('browser comments import once into transactions and preserve invalid archiv
   skip: !existsSync('/usr/bin/google-chrome'), timeout: 60_000,
 }, async () => {
   const module = await build({ stdin: { resolveDir: process.cwd(), contents: `
-    export { addBrowserComment, adoptLegacyBrowserComments, readBrowserComments, readLegacyBrowserComments } from './src/renderer/browser/comments.ts';
+    export { addBrowserComment, adoptLegacyBrowserComments } from './test/browser-comment-fixture.ts';
+    export { readBrowserComments, readLegacyBrowserComments } from './src/renderer/browser/comments.ts';
     export { readBrowserAtom, updateBrowserAtom } from './src/renderer/storage/ui-atoms.ts';
   ` }, bundle: true, format: 'esm', write: false });
   const ui = await build({ entryPoints: ['test/browser-owned-fixture.tsx'], bundle: true, format: 'iife', write: false, loader: { '.css': 'empty' } });
@@ -126,6 +127,13 @@ test('browser comments import once into transactions and preserve invalid archiv
           await page.evaluate(value => localStorage.setItem('workbench.browser-comments.v1', value), malformed);
           await page.evaluate(owner => window.browserHarness.mount({ ...owner, browserTabId: 'fixture' }), local);
           await page.getByText('旧浏览器批注无法转换，原始数据已保留，未改写。').waitFor();
+          await page.getByText('取回旧批注原文').click();
+          assert.equal(await page.getByLabel('旧批注原文').inputValue(), malformed);
+          await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+            writeText: async (text: string) => { (window as unknown as { copied: string }).copied = text; },
+          } }));
+          await page.getByRole('button', { name: '复制旧批注原文' }).click();
+          assert.equal(await page.evaluate(() => (window as unknown as { copied: string }).copied), malformed);
           const result = await page.evaluate(async ({ local, anchor }) => {
             const path = '/module.js'; const m = await import(path);
             let readError = '', writeError = '';
@@ -142,6 +150,8 @@ test('browser comments import once into transactions and preserve invalid archiv
           await page.reload();
           await page.evaluate(owner => window.browserHarness.mount({ ...owner, browserTabId: 'fixture' }), local);
           await page.getByText('旧浏览器批注无法转换，原始数据已保留，未改写。').waitFor();
+          await page.getByText('取回旧批注原文').click();
+          assert.equal(await page.getByLabel('旧批注原文').inputValue(), malformed);
         } finally { await isolated.close(); }
       }
     } finally { await browser.close(); }
