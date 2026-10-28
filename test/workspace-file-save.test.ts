@@ -179,7 +179,9 @@ test('readback disagreement reports an unknown save and preserves the actual cur
   assert.equal(h.calls.filter(call => call.method === 'fs/writeFile').length, 1);
 });
 
-for (const lateError of [false, true]) test(`the original RPC ${lateError ? 'error' : 'success'} settles its own timed-out write after a directory link changes`, async t => {
+for (const { lateError, switchLink } of [
+  { lateError: false, switchLink: true }, { lateError: true, switchLink: true }, { lateError: false, switchLink: false },
+]) test(`the original RPC ${lateError ? 'error' : 'success'} settles its own timed-out write ${switchLink ? 'after a directory link changes' : 'before a later save'}`, async t => {
   const root = await mkdtemp('/tmp/yard-file-late-rpc-'), cwd = join(root, 'workspace');
   const a = join(cwd, 'a'), b = join(cwd, 'b'), link = join(cwd, 'link');
   await mkdir(a, { recursive: true }); await mkdir(b);
@@ -214,13 +216,19 @@ for (const lateError of [false, true]) test(`the original RPC ${lateError ? 'err
   assert.equal(await readFile(join(a, 'file.txt'), 'utf8'), 'old a');
   assert.deepEqual(await files.fetch('workspace-file-save', { hostId: 'local', cwd, path, operationId: 'blocked', expectedContents: 'old a', contents: 'must wait' }),
     { outcome: 'blocked', operationId: 'original' });
-  await unlink(link); await symlink(b, link);
   const status = { hostId: 'local', cwd, path, operationId: 'original' };
-  assert.deepEqual(await files.fetch('workspace-file-save-status', status), { outcome: 'unknown' });
-  assert.deepEqual(await files.fetch('workspace-file-save', { hostId: 'local', cwd, path, operationId: 'other', expectedContents: 'old b', contents: 'new b' }), { outcome: 'saved' });
+  if (switchLink) {
+    await unlink(link); await symlink(b, link);
+    assert.deepEqual(await files.fetch('workspace-file-save-status', status), { outcome: 'unknown' });
+    assert.deepEqual(await files.fetch('workspace-file-save', { hostId: 'local', cwd, path, operationId: 'other', expectedContents: 'old b', contents: 'new b' }), { outcome: 'saved' });
+  }
   release(); await late;
   assert.equal(await readFile(join(a, 'file.txt'), 'utf8'), lateError ? 'old a' : 'new a');
-  assert.equal(await readFile(join(b, 'file.txt'), 'utf8'), 'new b');
-  assert.deepEqual(await files.fetch('workspace-file-save-status', status), { outcome: lateError ? 'failed' : 'conflict' });
-  assert.deepEqual(peer.calls('fs/writeFile').map(call => call.params.path), [join(a, 'file.txt'), join(b, 'file.txt')]);
+  assert.equal(await readFile(join(b, 'file.txt'), 'utf8'), switchLink ? 'new b' : 'old b');
+  assert.deepEqual(await files.fetch('workspace-file-save-status', status), { outcome: lateError ? 'failed' : switchLink ? 'conflict' : 'saved' });
+  if (!switchLink) {
+    assert.deepEqual(await files.fetch('workspace-file-save', { hostId: 'local', cwd, path, operationId: 'after-terminal', expectedContents: 'new a', contents: 'newer a' }), { outcome: 'saved' });
+    assert.equal(await readFile(join(a, 'file.txt'), 'utf8'), 'newer a');
+  }
+  assert.deepEqual(peer.calls('fs/writeFile').map(call => call.params.path), [join(a, 'file.txt'), join(switchLink ? b : a, 'file.txt')]);
 });
