@@ -264,6 +264,18 @@ export async function writeComposerDraftVersion(owner: ComposerDraftOwner, expec
   return versionsFor(store, owner);
 }
 
+/** Explicitly preserve an unresolved projection without replacing another active version. */
+export async function saveComposerDraftConflict(owner: ComposerDraftOwner, value: StoredDraft): Promise<ComposerDraftVersions> {
+  const store = await mutate(current => {
+    const entry = entryFor(current, owner);
+    if ([...entry.versions, ...entry.retained].some(version => version.revision === value.revision)) {
+      throw new Error('草稿新版本已存在，请重新核对。');
+    }
+    return replaceEntry(current, owner, { ...entry, versions: [...entry.versions, asVersion(owner, value)] });
+  });
+  return versionsFor(store, owner);
+}
+
 /** Freeze the exact submitted version while later edits continue on their own revision. */
 export async function retainComposerDraftVersion(owner: ComposerDraftOwner, value: StoredDraft): Promise<void> {
   await mutate(current => {
@@ -290,9 +302,10 @@ export async function readComposerDraftVersions(owner: ComposerDraftOwner): Prom
 }
 
 /** Remove only the confirmed version; newer branches and pending drafts remain recoverable. */
-export async function clearComposerDraftRevision(owner: ComposerDraftOwner, revision: string): Promise<boolean> {
+export async function clearComposerDraftRevision(owner: ComposerDraftOwner, revision: string, guard?: () => boolean): Promise<boolean> {
   let cleared = false;
   await mutate(current => {
+    if (guard && !guard()) throw new Error('当前草稿冲突尚未处理。');
     const entry = entryFor(current, owner);
     const matches = (value: Version) => sameOwner(entry, value.owner, owner) && value.revision === revision;
     const target = entry.versions.find(matches), retained = entry.retained.filter(value => !matches(value));

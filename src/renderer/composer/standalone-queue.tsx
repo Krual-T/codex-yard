@@ -76,16 +76,24 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
   const [storageState, setStorageState] = useState<'loading' | 'ready' | 'error'>('loading');
   const storageReady = useRef(false);
   const [entries, setEntries] = useState<QueueEntry[]>([]);
+  const [listReady, setListReady] = useState(false);
+  const listReadyRef = useRef(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   const [edit, setEdit] = useState<{ id: string; clientUserMessageId: string; baseInput: string; text: string } | null>(null);
+  const editRef = useRef<typeof edit>(null);
+  const editTextarea = useRef<HTMLTextAreaElement>(null);
+  const frozenRef = useRef(frozen);
+  frozenRef.current = frozen;
   const generation = useRef(0);
   const storageGeneration = useRef(0);
   const mounted = useRef(false);
   const mutation = useRef(false);
   const editing = useRef(false);
   const releases = useRef(new Map<string, { sent: boolean; pending: Promise<void> }>());
-  const changeEdit = (next: typeof edit) => {
+  const changeEdit = (next: typeof edit, fromMutation = false) => {
+    if (mutation.current && !fromMutation) return;
+    editRef.current = next;
     editing.current = next !== null;
     onEditStateChange?.(editing.current, mutation.current);
     setEdit(next);
@@ -151,6 +159,7 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
     try {
       const next = await list(client, hostId, threadId);
       if (current !== generation.current) { success = true; return true; }
+      listReadyRef.current = true; setListReady(true);
       setEntries(next);
       for (const item of releaseRef.current) {
         await releaseMarker(item.marker, item.sent);
@@ -172,7 +181,9 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
       success = true;
       return true;
     } catch (reason) {
-      if (mounted.current) setError(t('Could not read queue:') + message(reason));
+      if (mounted.current && current === generation.current) {
+        listReadyRef.current = false; setListReady(false); setError(t('Could not read queue:') + message(reason));
+      }
       return false;
     }
     finally { finish?.(success); }
@@ -193,15 +204,20 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
   }, [client, hostId, threadId, loadUnknown, refresh, refreshVersion]);
   useEffect(() => { if (!frozen) void loadUnknown().then(ready => { if (ready) void refresh(); }); }, [frozen, loadUnknown, refresh]);
   const run = async (action: () => Promise<void>) => {
-    if (mutation.current) return;
+    if (mutation.current || !listReadyRef.current) return;
     const finish = beginOperation?.();
     if (beginOperation && !finish) return;
     mutation.current = true; setPending(true); setError('');
+    if (editTextarea.current) editTextarea.current.readOnly = true;
     onEditStateChange?.(editing.current, true);
     let success = false;
     try { await action(); success = await refresh(true); }
     catch (reason) { await refresh(true); setError(t('Action unconfirmed; check the queue before retrying:') + message(reason)); }
-    finally { mutation.current = false; onEditStateChange?.(editing.current, false); setPending(false); finish?.(success); }
+    finally {
+      mutation.current = false;
+      if (editTextarea.current) editTextarea.current.readOnly = !!frozenRef.current;
+      onEditStateChange?.(editing.current, false); setPending(false); finish?.(success);
+    }
   };
   const start = (entry: QueueEntry) => run(async () => {
     if (!onStartQueued) throw new Error('会话控制器尚未提供队列发送');
@@ -212,16 +228,18 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
     const marker = { id: entry.id, clientUserMessageId: entry.clientUserMessageId, lockId: request.lockId };
     if (!mounted.current) { await client.host('queued-follow-up-send-lock-release', { ...request, sent: false }); return; }
     try {
-      await addUnknownQueueStart(hostId, threadId, marker);
-      if (!await loadUnknown(true)) throw new Error('无法读取发送状态');
+      const markers = await addUnknownQueueStart(hostId, threadId, marker);
+      if (mounted.current) {
+        storageGeneration.current++;
+        unknownRef.current = markers; setUnknown(markers); storageReady.current = true; setStorageState('ready');
+      }
     } catch {
       if (mounted.current) { storageReady.current = false; setStorageState('error'); }
       await client.host('queued-follow-up-send-lock-release', { ...request, sent: false });
       throw new Error('无法保存发送状态，未启动队列消息');
     }
     if (!mounted.current) {
-      await removeMarker(marker);
-      await client.host('queued-follow-up-send-lock-release', { ...request, sent: false });
+      await releaseMarker(marker, false);
       return;
     }
     let sent = false, release = false;
@@ -252,35 +270,41 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
       const editConflict = edit?.id === entry.id && (edit.clientUserMessageId !== entry.clientUserMessageId || edit.baseInput !== JSON.stringify(entry.input));
       return <div className="standalone-queue__row" key={entry.id}>
       {edit?.id === entry.id ? <div className="standalone-queue__edit">
-        <textarea aria-label={t('Edit queued message')} value={edit.text} onChange={event => changeEdit({ ...edit, text: event.target.value })}
+        <textarea ref={editTextarea} readOnly={pending || frozen} aria-label={t('Edit queued message')} value={edit.text} onChange={event => {
+          if (mutation.current) { event.currentTarget.value = editRef.current?.text ?? ''; return; }
+          changeEdit({ ...edit, text: event.target.value });
+        }}
           onCompositionStart={() => onCompositionChange?.(true)} onCompositionEnd={() => { requestAnimationFrame(() => onCompositionChange?.(false)); }} />
         {editConflict ? <div role="alert">{t('The queued message changed; cancel and edit again. Your edits are retained.')}</div> : null}
-        <button type="button" disabled={pending || storageState !== 'ready' || unknown.some(item => item.id === entry.id) || editConflict || !edit.text.trim()} onClick={() => void run(async () => {
+        <button type="button" disabled={pending || !listReady || storageState !== 'ready' || unknown.some(item => item.id === entry.id) || editConflict || !edit.text.trim()} onClick={() => void run(async () => {
           const input = entry.input.map(item => item === entry.input.find(part => part.type === 'text') ? { ...item, text: edit.text } : item);
           await client.rpc('thread/queue/update', { threadId, queuedSubmissionId: entry.id, input }, hostId);
-          changeEdit(null);
+          if (editRef.current === edit) changeEdit(null, true);
         })}>{t('Save')}</button><button type="button" disabled={pending} onClick={() => changeEdit(null)}>{t('Cancel')}</button>
       </div> : <span className="standalone-queue__text">{summary(entry, t)}</span>}
       <div className="standalone-queue__actions">
-        <button type="button" title={t('Move up')} aria-label={t('Move queued message up')} disabled={pending || storageState !== 'ready' || !!unknown.length || index === 0} onClick={() => void reorder(index, index - 1)}>↑</button>
-        <button type="button" title={t('Move down')} aria-label={t('Move queued message down')} disabled={pending || storageState !== 'ready' || !!unknown.length || index === entries.length - 1} onClick={() => void reorder(index, index + 1)}>↓</button>
-        <button type="button" title={t('Edit')} aria-label={t('Edit queued message')} disabled={pending || storageState !== 'ready' || unknown.some(item => item.id === entry.id) || editableText(entry) == null} onClick={() => changeEdit({ id: entry.id, clientUserMessageId: entry.clientUserMessageId, baseInput: JSON.stringify(entry.input), text: editableText(entry) ?? '' })}>{t('Edit')}</button>
-        <button type="button" title={t('Delete')} aria-label={t('Delete queued message')} disabled={pending || storageState !== 'ready' || unknown.some(item => item.id === entry.id)} onClick={() => void run(async () => {
+        <button type="button" title={t('Move up')} aria-label={t('Move queued message up')} disabled={pending || !listReady || storageState !== 'ready' || !!unknown.length || index === 0} onClick={() => void reorder(index, index - 1)}>↑</button>
+        <button type="button" title={t('Move down')} aria-label={t('Move queued message down')} disabled={pending || !listReady || storageState !== 'ready' || !!unknown.length || index === entries.length - 1} onClick={() => void reorder(index, index + 1)}>↓</button>
+        <button type="button" title={t('Edit')} aria-label={t('Edit queued message')} disabled={pending || !listReady || storageState !== 'ready' || unknown.some(item => item.id === entry.id) || editableText(entry) == null} onClick={() => changeEdit({ id: entry.id, clientUserMessageId: entry.clientUserMessageId, baseInput: JSON.stringify(entry.input), text: editableText(entry) ?? '' })}>{t('Edit')}</button>
+        <button type="button" title={t('Delete')} aria-label={t('Delete queued message')} disabled={pending || !listReady || storageState !== 'ready' || unknown.some(item => item.id === entry.id)} onClick={() => void run(async () => {
           const result = await client.rpc<{ deleted: boolean }>('thread/queue/delete', { threadId, queuedSubmissionId: entry.id }, hostId);
           if (!result.deleted) throw new Error('消息已不存在');
         })}>{t('Delete')}</button>
-        <button type="button" title={t(busy ? 'Wait for current task' : 'Send now')} aria-label={t('Send queued message now')} disabled={pending || busy || !onStartQueued || storageState !== 'ready' || unknown.some(item => item.id === entry.id)} onClick={() => void start(entry)}>{t('Send')}</button>
+        <button type="button" title={t(busy ? 'Wait for current task' : 'Send now')} aria-label={t('Send queued message now')} disabled={pending || !listReady || busy || !onStartQueued || storageState !== 'ready' || unknown.some(item => item.id === entry.id)} onClick={() => void start(entry)}>{t('Send')}</button>
       </div>
     </div>; })}
     {edit && !entries.some(entry => entry.id === edit.id) ? <div className="standalone-queue__edit" role="status">
       {t('This message is no longer in the queue; your unsaved edits are retained.')}
-      <textarea aria-label={t('Edit queued message')} value={edit.text} onChange={event => changeEdit({ ...edit, text: event.target.value })}
+      <textarea ref={editTextarea} readOnly={pending || frozen} aria-label={t('Edit queued message')} value={edit.text} onChange={event => {
+        if (mutation.current) { event.currentTarget.value = editRef.current?.text ?? ''; return; }
+        changeEdit({ ...edit, text: event.target.value });
+      }}
         onCompositionStart={() => onCompositionChange?.(true)} onCompositionEnd={() => { requestAnimationFrame(() => onCompositionChange?.(false)); }} />
       <button type="button" onClick={() => changeEdit(null)}>{t('Close editing')}</button>
     </div> : null}
     {unknown.length ? <div role="status">{t('{count} messages have an unknown send outcome. Check the conversation; they will not be resent automatically.').replace('{count}', new Intl.NumberFormat(locale).format(unknown.length))}<button type="button" onClick={() => void refresh()}>{t('Check again')}</button></div> : null}
     {storageState === 'loading' ? <div role="status">{t('Loading queue send status...')}</div> : null}
     {storageState === 'error' ? <div role="alert">{t('Queue send status could not be read or saved; queue actions are paused.')}<button type="button" onClick={() => void loadUnknown().then(ready => { if (ready) void refresh(); })}>{t('Retry reading')}</button></div> : null}
-    {error ? <div role="alert">{error}</div> : null}
+    {error ? <div role="alert">{error} {!listReady ? <button type="button" onClick={() => void refresh().then(ok => { if (ok) setError(''); })}>{t('Retry reading')}</button> : null}</div> : null}
   </section>;
 }

@@ -13,13 +13,13 @@ test('composer leases drain real attachment, reference and queue edits before th
     import {StandaloneComposer} from './src/renderer/composer/StandaloneComposer.tsx';
     import {readComposerDraft} from './src/renderer/composer/composer-draft-store.ts';
     import {addUnknownQueueStart,prepareUnknownQueueRelease,readUnknownQueueStarts,removeUnknownQueueStart} from './src/renderer/composer/standalone-queue-storage.ts';
-    const state={controller:null, snapshots:[], uploadWaiting:false, removalWaiting:false, queueWaiting:false,
+    const state={controller:null, snapshots:[], uploadWaiting:false, uploadStarts:0, removalWaiting:false, queueWaiting:false,
       queued:[{id:'queue-1',clientUserMessageId:'client-1',input:[{type:'text',text:'queued',text_elements:[]}]}], result:null,
-      holdSubmit:false,submitWaiting:false,submitCalls:0,lockReleaseWaiting:false,lockReleasePending:0,lockReleaseSent:[],queueChecks:0,failNextList:false};
-    let resolveUpload, rejectUpload, resolveRemoval, rejectRemoval, resolveQueue, resolveSubmit, resolveLockRelease, rejectLockRelease;
+      holdSubmit:false,submitWaiting:false,submitCalls:0,lockReleaseWaiting:false,lockReleasePending:0,lockReleaseSent:[],queueChecks:0,failNextList:false,failQueueImmediately:false};
+    let resolveUpload, rejectUpload, resolveRemoval, rejectRemoval, resolveQueue, rejectQueue, resolveSubmit, resolveLockRelease, rejectLockRelease;
     window.fetch = async (url) => {
       if (String(url)==='/api/files/uploads') {
-        state.uploadWaiting=true;
+        state.uploadWaiting=true;state.uploadStarts++;
         return new Promise((resolve,reject)=>{resolveUpload=()=>{state.uploadWaiting=false;resolve(new Response(JSON.stringify({uploadId:'upload'}),{status:200}))};
           rejectUpload=()=>{state.uploadWaiting=false;reject(Error('synthetic upload failure'))}});
       }
@@ -32,7 +32,8 @@ test('composer leases drain real attachment, reference and queue edits before th
       if(method==='thread/queue/list'){state.queueChecks++;if(state.failNextList){state.failNextList=false;throw Error('synthetic list failure')}
         return {data:structuredClone(state.queued),nextCursor:null};}
       if(method==='thread/items/list')return {data:[{item:{type:'userMessage',clientId:'client-1'}}],nextCursor:null};
-      if(method==='thread/queue/update') {state.queueWaiting=true;await new Promise(resolve=>{resolveQueue=resolve});
+      if(method==='thread/queue/update') {if(state.failQueueImmediately){state.failQueueImmediately=false;throw Error('immediate queue failure')}
+        state.queueWaiting=true;await new Promise((resolve,reject)=>{resolveQueue=resolve;rejectQueue=reject});
         state.queued[0].input=params.input;state.queueWaiting=false;return {};}
       throw Error('Unexpected RPC '+method);
     },async host(method,params) {
@@ -53,7 +54,7 @@ test('composer leases drain real attachment, reference and queue edits before th
         fixture.lease=lease;fixture.oldController=controller;fixture.oldOwner=owner;state.result=null;
         state.flush=lease.flush().then(value=>{state.result=value;return value});return true;},
       release(){fixture.lease.release()},resolveUpload(){resolveUpload()},rejectUpload(){rejectUpload()},
-      resolveRemoval(){resolveRemoval()},rejectRemoval(){rejectRemoval()},resolveQueue(){resolveQueue()},resolveSubmit(){resolveSubmit()},
+      resolveRemoval(){resolveRemoval()},rejectRemoval(){rejectRemoval()},resolveQueue(){resolveQueue()},rejectQueue(){state.queueWaiting=false;rejectQueue(Error('synthetic queue failure'))},resolveSubmit(){resolveSubmit()},
       async addUnknown(){state.queued=[];await addUnknownQueueStart('local','queue-thread',{id:'queue-1',clientUserMessageId:'client-1',lockId:'lock-1'});},
       async addRejected(){state.queued=[{id:'queue-1',clientUserMessageId:'client-1',input:[{type:'text',text:'queued',text_elements:[]}]}];
         const marker={id:'queue-1',clientUserMessageId:'client-1',lockId:'lock-1'};
@@ -124,6 +125,80 @@ test('composer leases drain real attachment, reference and queue edits before th
       assert.equal(await rich.locator('strong').innerText(), 'retained');
     });
 
+    await t.test('consecutive rich image pastes are both registered and drained; failed files remain retryable', async () => {
+      const isolated = await browser.newContext();
+      try {
+      const page = await isolated.newPage(); page.setDefaultTimeout(8_000);
+      await page.route('**/*', route => new URL(route.request().url()).origin === 'http://composer.test'
+        ? route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }) : route.abort());
+      await page.goto('http://composer.test/'); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+      await page.waitForFunction(() => (window as any).fixture.state.snapshots.length > 0);
+      await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('image fixture');
+      await page.getByRole('button', { name: '富文本编辑' }).click();
+      const rich = page.locator('.ProseMirror'); await rich.waitFor();
+      const initial = await page.evaluate(() => (window as any).fixture.state.uploadStarts);
+      await rich.evaluate(element => {
+        for (const name of ['first-paste.png', 'second-paste.png']) {
+          const data = new DataTransfer(); data.items.add(new File(['image'], name, { type: 'image/png' }));
+          element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+        }
+      });
+      await page.waitForFunction(count => (window as any).fixture.state.uploadStarts === count + 1, initial);
+      assert.equal(await page.evaluate(() => {
+        const f = (window as any).fixture, c = f.state.controller;
+        f.external = c.beginExternalOperation(c.snapshot().owner);
+        if (!f.external) return false;
+        f.prefilling = f.external.applyPrefill({ id: 'during-upload', draft: {
+          text: '', images: [], files: [], skills: [], references: [{ id: 'after-uploads', text: 'After uploads' }],
+        } }).then((saved: boolean) => { f.external.finish(saved); return saved; });
+        return true;
+      }), true);
+      assert.equal(await page.evaluate(() => (window as any).fixture.freeze()), true);
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.result), null);
+      await page.evaluate(() => (window as any).fixture.resolveUpload());
+      await page.waitForFunction(count => (window as any).fixture.state.uploadStarts === count + 2, initial);
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.result), null);
+      await page.evaluate(() => (window as any).fixture.resolveUpload());
+      assert.equal(await page.evaluate(() => (window as any).fixture.prefilling), true);
+      await page.waitForFunction(() => (window as any).fixture.state.result === true);
+      const names = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.images.map((x: any) => x.name));
+      assert.deepEqual(names.slice(-2), ['first-paste.png', 'second-paste.png']);
+      const prefill = await page.evaluate(async () => {
+        const f = (window as any).fixture, snapshot = f.state.controller.snapshot();
+        return { visible: snapshot.draft.pendingDrafts, saved: (await f.readComposerDraft(snapshot.owner, snapshot.revision)).draft.pendingDrafts };
+      });
+      assert.equal(prefill.visible[0].references[0].id, 'after-uploads');
+      assert.deepEqual(prefill.saved, prefill.visible);
+      await rich.evaluate(element => {
+        const data = new DataTransfer(); data.items.add(new File(['image'], 'late-paste.png', { type: 'image/png' }));
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+      });
+      await page.getByRole('alert').filter({ hasText: 'late-paste.png' }).waitFor();
+      assert.equal(await page.evaluate(() => (window as any).fixture.lease.flush()), false);
+      await page.evaluate(() => (window as any).fixture.release());
+      await page.getByRole('alert').filter({ hasText: 'late-paste.png' }).getByRole('button', { name: '重试' }).click();
+      await page.waitForFunction(count => (window as any).fixture.state.uploadStarts === count + 3, initial);
+      await page.evaluate(() => (window as any).fixture.resolveUpload());
+      await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.images.some((x: any) => x.name === 'late-paste.png'));
+      await rich.evaluate(element => {
+        const data = new DataTransfer(); data.items.add(new File(['image'], 'retry-paste.png', { type: 'image/png' }));
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+      });
+      await page.waitForFunction(count => (window as any).fixture.state.uploadStarts === count + 4, initial);
+      await page.evaluate(() => (window as any).fixture.rejectUpload());
+      await page.getByRole('alert').filter({ hasText: 'retry-paste.png' }).waitFor();
+      assert.equal(await page.evaluate(() => (window as any).fixture.freeze()), false);
+      assert.equal(await page.evaluate(() => { const event = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; }), true);
+      await page.getByRole('alert').filter({ hasText: 'retry-paste.png' }).getByRole('button', { name: '重试' }).click();
+      await page.waitForFunction(count => (window as any).fixture.state.uploadStarts === count + 5, initial);
+      await page.evaluate(() => (window as any).fixture.resolveUpload());
+      await page.getByRole('alert').filter({ hasText: 'retry-paste.png' }).waitFor({ state: 'detached' });
+      await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.images.some((x: any) => x.name === 'retry-paste.png'));
+      await page.reload(); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.draft.images.some((x: any) => x.name === 'retry-paste.png'));
+      } finally { await isolated.close(); }
+    });
+
     await t.test('pending rich DOM and link edits cannot be left behind', async () => {
       await page.getByRole('button', { name: '链接', exact: true }).click();
       await page.getByRole('textbox', { name: '链接地址' }).fill('https://fixture.test');
@@ -165,6 +240,7 @@ test('composer leases drain real attachment, reference and queue edits before th
       await page.keyboard.press('Control+Shift+z');
       await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.text.includes('edit again'));
       assert.match(await rich.innerText(), /retained edit again/);
+      await page.getByRole('alert').filter({ hasText: 'fixture.png' }).getByRole('button', { name: '放弃这些附件' }).click();
     });
 
     await t.test('cancellation invalidates the pending drain while the accepted file and later edits survive', async () => {
@@ -277,6 +353,10 @@ test('composer leases drain real attachment, reference and queue edits before th
       await rich.focus();
       await rich.dispatchEvent('compositionstart', { data: '' });
       assert.equal(await page.evaluate(() => (window as any).fixture.freeze()), false);
+      assert.equal(await page.evaluate(() => {
+        const controller = (window as any).fixture.state.controller;
+        return controller.beginExternalOperation(controller.snapshot().owner);
+      }), null);
       await page.getByRole('alert').filter({ hasText: '输入法' }).waitFor();
       await rich.dispatchEvent('compositionend', { data: '' });
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -289,6 +369,10 @@ test('composer leases drain real attachment, reference and queue edits before th
       await page.getByRole('alert').filter({ hasText: '队列编辑' }).waitFor();
       await page.getByRole('button', { name: '保存', exact: true }).click();
       await page.waitForFunction(() => (window as any).fixture.state.queueWaiting);
+      const queuedEditor = page.getByRole('textbox', { name: '编辑待发送消息' });
+      assert.equal(await queuedEditor.evaluate((element: HTMLTextAreaElement) => element.readOnly), true);
+      await queuedEditor.focus(); await page.keyboard.type('should not be lost');
+      assert.equal(await queuedEditor.inputValue(), 'new queued content');
       assert.equal(await page.evaluate(() => (window as any).fixture.freeze()), true);
       assert.equal(await page.evaluate(() => (window as any).fixture.state.result), null);
       await page.evaluate(() => (window as any).fixture.resolveQueue());
@@ -304,7 +388,34 @@ test('composer leases drain real attachment, reference and queue edits before th
       await page.waitForFunction(() => (window as any).fixture.state.result === false);
       assert.equal(await page.evaluate(() => (window as any).fixture.state.queued[0].input[0].text), 'saved but refresh failed');
       await page.evaluate(() => (window as any).fixture.release());
-      await page.getByRole('alert').filter({ hasText: 'synthetic list failure' }).waitFor();
+      const listFailure = page.getByRole('alert').filter({ hasText: 'synthetic list failure' });
+      await listFailure.waitFor();
+      assert.equal(await page.getByRole('button', { name: '编辑待发送消息' }).isDisabled(), true);
+      await listFailure.getByRole('button', { name: '重试读取' }).click();
+      await page.getByText('saved but refresh failed', { exact: true }).waitFor();
+      await page.getByRole('button', { name: '编辑待发送消息' }).click();
+      await queuedEditor.fill('retry after failure');
+      await page.getByRole('button', { name: '保存', exact: true }).click();
+      await page.waitForFunction(() => (window as any).fixture.state.queueWaiting);
+      assert.equal(await queuedEditor.evaluate((element: HTMLTextAreaElement) => element.readOnly), true);
+      await page.evaluate(() => (window as any).fixture.rejectQueue());
+      await page.getByRole('alert').filter({ hasText: 'synthetic queue failure' }).waitFor();
+      assert.equal(await queuedEditor.evaluate((element: HTMLTextAreaElement) => element.readOnly), false);
+      assert.equal(await queuedEditor.inputValue(), 'retry after failure');
+      await queuedEditor.fill('retry with newer content');
+      await page.getByRole('button', { name: '保存', exact: true }).click();
+      await page.waitForFunction(() => (window as any).fixture.state.queueWaiting);
+      await page.evaluate(() => (window as any).fixture.resolveQueue());
+      await page.waitForFunction(() => (window as any).fixture.state.queued[0].input[0].text === 'retry with newer content');
+      await page.getByRole('button', { name: '编辑待发送消息' }).click();
+      await queuedEditor.fill('immediate failure keeps editing');
+      await page.evaluate(() => { (window as any).fixture.state.failQueueImmediately = true; });
+      await page.getByRole('button', { name: '保存', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'immediate queue failure' }).waitFor();
+      assert.equal(await queuedEditor.evaluate((element: HTMLTextAreaElement) => element.readOnly), false);
+      assert.equal(await queuedEditor.inputValue(), 'immediate failure keeps editing');
+      await queuedEditor.fill('continued editing');
+      await page.getByRole('button', { name: '取消', exact: true }).click();
     });
 
     await t.test('a history-confirmed queue lock release is included in the drain', async () => {

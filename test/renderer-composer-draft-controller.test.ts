@@ -115,12 +115,19 @@ test('composer draft controller preserves current edits across reference removal
     await page.getByRole('button', { name: '移除引用' }).click();
     await page.waitForFunction(() => (window as any).fixture.state.removals.length === 1);
     assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.removals[0]), { owner: added.owner, reference });
-    await page.evaluate(async () => {
+    const duringRemoval = await page.evaluate(async () => {
       const controller = (window as any).fixture.state.controller, owner = controller.snapshot().owner;
-      await controller.update(owner, (draft: any) => ({ ...draft, references: [{ ...draft.references[0], text: 'Revised reference' }] }));
+      return controller.update(owner, (draft: any) => ({ ...draft, references: [{ ...draft.references[0], text: 'Revised reference' }] }));
     });
-    await rich.focus(); await page.keyboard.press('End'); await page.keyboard.type(' newer');
+    assert.equal(duringRemoval, false);
+    assert.equal(await page.locator('.standalone-composer > div').first().evaluate(element => element.hasAttribute('inert')), true);
     await page.evaluate(() => (window as any).fixture.resolveRemoval());
+    await page.waitForFunction(() => !document.querySelector('.standalone-composer > div')?.hasAttribute('inert'));
+    assert.equal(await page.evaluate(async reference => {
+      const controller = (window as any).fixture.state.controller, owner = controller.snapshot().owner;
+      return controller.update(owner, (draft: any) => ({ ...draft, references: [{ ...reference, text: 'Revised reference' }] }));
+    }, reference), true);
+    await rich.focus(); await page.keyboard.press('End'); await page.keyboard.type(' newer');
     await page.getByText('Revised reference').waitFor();
     assert.match((await page.evaluate(() => (window as any).fixture.state.controller.snapshot())).draft.text, /newer/);
 
@@ -144,13 +151,14 @@ test('composer draft controller preserves current edits across reference removal
     await page.getByText('Revised reference').waitFor();
 
     await page.getByRole('button', { name: '移除引用' }).click();
-    await page.evaluate(async () => {
-      const controller = (window as any).fixture.state.controller, owner = controller.snapshot().owner;
-      await controller.update(owner, (draft: any) => ({ ...draft, references: [...draft.references, { id: 'file:two', text: 'Another reference' }] }));
-    });
-    await rich.focus(); await page.keyboard.press('End'); await page.keyboard.type(' kept');
     await page.evaluate(() => (window as any).fixture.resolveRemoval());
     await page.getByText('Revised reference').waitFor({ state: 'detached' });
+    await page.waitForFunction(() => !document.querySelector('.standalone-composer > div')?.hasAttribute('inert'));
+    assert.equal(await page.evaluate(async () => {
+      const controller = (window as any).fixture.state.controller, owner = controller.snapshot().owner;
+      return controller.update(owner, (draft: any) => ({ ...draft, references: [...draft.references, { id: 'file:two', text: 'Another reference' }] }));
+    }), true);
+    await rich.focus(); await page.keyboard.press('End'); await page.keyboard.type(' kept');
     await page.getByText('Another reference').waitFor();
     assert.match((await page.evaluate(() => (window as any).fixture.state.controller.snapshot())).draft.text, /kept/);
 

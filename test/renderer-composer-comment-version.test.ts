@@ -26,14 +26,16 @@ test('composer consumes only an exact, live committed reference version', {
     const root=createRoot(document.getElementById('root'));
     let props={client,context:{hostId:'local',threadId:null,draftId:'draft-a',cwd:'/fixture'},busy:false,
       onDraftController(controller){state.controller=controller},onDraftChange(snapshot){state.snapshots.push(snapshot)},
-      async onRemoveReference(owner,reference){
+      async onRemoveReference(owner,reference,operation){
         if(state.mode==='default'){state.removed=true;return;}
-        const controller=state.controller, before=controller.snapshot();
-        state.before=before;
-        const after=await fixture.commit(before,draft=>({...draft,references:draft.references.filter(item=>item.id!==reference.id)}));
-        state.after=after;state.committed=true;
-        if(state.delay)await new Promise(resolve=>{resumeRemoval=resolve});
-        state.accepted=await controller.acceptCommittedVersion(before,after);
+        const receipt=await operation.transaction(async(before,isCurrent)=>{
+          state.before=before;
+          const after=await fixture.commit(before,draft=>({...draft,references:draft.references.filter(item=>item.id!==reference.id)}),isCurrent);
+          state.after=after;state.committed=true;
+          if(state.delay)await new Promise(resolve=>{resumeRemoval=resolve});
+          return {after,value:null};
+        });
+        state.accepted=receipt.accepted;
         state.removed=true;
         return 'handled';
       },async onSubmit(){},async onInterrupt(){}};
@@ -44,7 +46,8 @@ test('composer consumes only an exact, live committed reference version', {
           {id:'ordinary-2',text:'Other reference'}],hints:[],unknownFixture:{keep:true}}))},
       async branch(){const s=state.controller.snapshot();return writeComposerDraftVersion(s.owner,'missing',
         {revision:'independent',draft:{...s.draft,text:'independent branch'},prefills:['other-prefill']})},
-      async commit(before,change){return updateBrowserAtoms(atoms=>{
+      async commit(before,change,isCurrent=()=>true){return updateBrowserAtoms(atoms=>{
+        if(!isCurrent())throw Error('owner changed');
         const result=updateComposerDraftVersionInRoot(atoms[composerDraftAtomKey],before,change,createId());
         return result.changed?{value:result.after,updates:{[composerDraftAtomKey]:result.root}}:{value:result.after};
       })},
@@ -171,13 +174,22 @@ test('composer consumes only an exact, live committed reference version', {
         assert.equal(await page.evaluate(() => (window as any).fixture.accepting), false);
         const result = await page.evaluate(async () => {
           const f = (window as any).fixture, current = f.state.controller.snapshot();
-          await f.state.controller.flush(current.owner); return { current, versions: await f.versions(current.owner) };
+          const flushed = await f.state.controller.flush(current.owner); return { current, flushed, versions: await f.versions(current.owner) };
         });
         assert.equal(result.current.draft.text, 'newer edit B');
         assert.equal(result.current.draft.references[0].id, 'browser-1');
+        assert.equal(result.flushed, false);
         assert.ok(result.versions.versions.some((v: any) => v.revision === receipt.after.revision));
-        assert.ok(result.versions.versions.some((v: any) => v.revision === result.current.revision));
         assert.ok(result.versions.versions.some((v: any) => v.revision === 'independent'));
+        await page.getByRole('button', { name: '保存为独立草稿' }).click();
+        await page.getByRole('button', { name: '保存为独立草稿' }).waitFor({ state: 'detached' });
+        const preserved = await page.evaluate(async () => {
+          const f = (window as any).fixture, current = f.state.controller.snapshot();
+          return { current, versions: await f.versions(current.owner) };
+        });
+        assert.equal(preserved.current.draft.text, 'newer edit B');
+        assert.ok(preserved.versions.versions.some((v: any) => v.revision === preserved.current.revision));
+        assert.ok(preserved.versions.versions.some((v: any) => v.revision === receipt.after.revision));
       } finally { await context.close(); }
     });
 
@@ -195,6 +207,58 @@ test('composer consumes only an exact, live committed reference version', {
         }, receipt);
         assert.equal(result.initial, true); assert.equal(result.repeated, false);
         assert.deepEqual(result.current, receipt.after);
+      } finally { await context.close(); }
+    });
+
+    await t.test('confirmed submission cannot clear the currently unresolved projection', async () => {
+      const context = await browser.newContext();
+      try {
+        const page = await pageFor(context); await seed(page);
+        await page.evaluate(() => {
+          const f = (window as any).fixture;
+          f.render({ onSubmit: async () => { f.submitting = true; await new Promise<void>(resolve => { f.confirmSubmit = resolve; }); } });
+        });
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.waitForFunction(() => (window as any).fixture.submitting);
+        const result = await page.evaluate(async () => {
+          const f = (window as any).fixture, c = f.state.controller, before = c.snapshot();
+          const after = await f.commit(before, (draft: any) => ({ ...draft, references: [] }));
+          await f.clear(before.owner, after.revision);
+          const accepted = await c.acceptCommittedVersion(before, after);
+          f.confirmSubmit();
+          return { before, accepted };
+        });
+        assert.equal(result.accepted, false);
+        await page.getByRole('alert').filter({ hasText: '发送已确认，但草稿清理失败' }).waitFor();
+        const retained = await page.evaluate(async (owner: any) => (window as any).fixture.versions(owner), result.before.owner);
+        assert.ok(retained.retained.some((version: any) => version.revision === result.before.revision));
+        assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot()), result.before);
+      } finally { await context.close(); }
+    });
+
+    await t.test('queued submission cleanup rechecks a projection made unresolved while waiting', async () => {
+      const context = await browser.newContext();
+      try {
+        const page = await pageFor(context), blocker = await pageFor(context, false); await seed(page);
+        const receipt = await committed(page);
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('later send B');
+        const beforeSend = await page.evaluate(async () => {
+          const f = (window as any).fixture, c = f.state.controller;
+          await c.flush(c.snapshot().owner);
+          f.render({ onSubmit: async () => { f.submitting = true; await new Promise<void>(resolve => { f.confirmSubmit = resolve; }); } });
+          return c.snapshot();
+        });
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.waitForFunction(() => (window as any).fixture.submitting);
+        await hold(blocker);
+        await page.evaluate(() => { const f = (window as any).fixture; f.watchTransactions(); f.confirmSubmit(); });
+        await page.waitForFunction(() => (window as any).fixture.state.transactions > 0);
+        assert.equal(await page.evaluate(({ before, after }) => (window as any).fixture.state.controller.acceptCommittedVersion(before, after), receipt), false);
+        await blocker.evaluate(() => (window as any).releaseTransaction());
+        await page.getByRole('alert').filter({ hasText: '发送已确认，但草稿清理失败' }).waitFor();
+        const retained = await page.evaluate(async (owner: any) => (window as any).fixture.versions(owner), beforeSend.owner);
+        assert.ok(retained.retained.some((version: any) => version.revision === beforeSend.revision));
+        assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot()), beforeSend);
       } finally { await context.close(); }
     });
 
@@ -218,7 +282,45 @@ test('composer consumes only an exact, live committed reference version', {
           const f = (window as any).fixture, current = f.state.controller.snapshot(); await f.versions(current.owner); return f.state.controller.snapshot();
         });
         assert.deepEqual(current, receipt.before);
-        await page.getByText('Selected element').waitFor();
+        await page.getByText('Selected element', { exact: true }).waitFor();
+        const blocked = await page.evaluate(async () => {
+          const f = (window as any).fixture, c = f.state.controller, owner = c.snapshot().owner;
+          const lease = c.freeze(owner); const drained = lease && await lease.flush(); lease?.release();
+          const event = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(event);
+          return { drained, flushed: await c.flush(owner), beforeUnload: event.defaultPrevented };
+        });
+        assert.deepEqual(blocked, { drained: false, flushed: false, beforeUnload: true });
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('unsaved local content');
+        const unpersisted = await page.evaluate(async () => {
+          const f = (window as any).fixture, snapshot = f.state.controller.snapshot();
+          return { snapshot, versions: await f.versions(snapshot.owner) };
+        });
+        assert.ok(!unpersisted.versions.versions.some((v: any) => v.revision === unpersisted.snapshot.revision));
+        await page.evaluate(() => {
+          const original = IDBObjectStore.prototype.put;
+          (window as any).restorePut = () => { IDBObjectStore.prototype.put = original; };
+          IDBObjectStore.prototype.put = function() { throw new DOMException('fixture quota', 'QuotaExceededError'); };
+        });
+        await page.getByRole('button', { name: '保存为独立草稿' }).click();
+        await page.getByRole('alert').filter({ hasText: '无法保存独立草稿' }).waitFor();
+        assert.equal(await page.getByRole('textbox', { name: '和 Codex 一起工作' }).inputValue(), 'unsaved local content');
+        assert.equal(await page.evaluate(async () => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), false);
+        await page.evaluate(() => (window as any).restorePut());
+        await page.getByRole('button', { name: '保存为独立草稿' }).click();
+        await page.getByRole('button', { name: '保存为独立草稿' }).waitFor({ state: 'detached' });
+        const recovered = await page.evaluate(async () => {
+          const f = (window as any).fixture, snapshot = f.state.controller.snapshot();
+          return { snapshot, versions: await f.versions(snapshot.owner), flushed: await f.state.controller.flush(snapshot.owner) };
+        });
+        assert.equal(recovered.flushed, true);
+        assert.ok(recovered.versions.versions.some((v: any) => v.revision === 'independent'));
+        assert.ok(recovered.versions.versions.some((v: any) => v.revision === recovered.snapshot.revision && v.draft.text === 'unsaved local content'));
+        await page.reload(); await page.addScriptTag({ content: script });
+        await page.getByText(/其他页面或旧数据中有/).waitFor();
+        await page.getByText('选择草稿版本').click();
+        await page.getByRole('button', { name: 'unsaved local content' }).click();
+        await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.text === 'unsaved local content');
+        assert.equal(await page.getByRole('textbox', { name: '和 Codex 一起工作' }).inputValue(), 'unsaved local content');
       } finally { await context.close(); }
     });
 
@@ -273,29 +375,214 @@ test('composer consumes only an exact, live committed reference version', {
       } finally { await context.close(); }
     });
 
-    await t.test('a committed removal with newer input stays handled without deleting from the newer draft', async () => {
+    await t.test('a committed removal excludes later input until its version is adopted', async () => {
       const context = await browser.newContext();
       try {
         const page = await pageFor(context); await seed(page);
         await page.evaluate(() => { const f = (window as any).fixture; f.state.mode = 'handled'; f.state.delay = true; f.watchWrites(); });
         await page.getByRole('button', { name: '移除引用' }).first().click();
         await page.waitForFunction(() => (window as any).fixture.state.committed);
-        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('newer edit B');
-        await page.evaluate(async () => {
-          const f = (window as any).fixture, current = f.state.controller.snapshot(); await f.state.controller.flush(current.owner); f.resumeRemoval();
+        const blocked = await page.evaluate(async () => {
+          const f = (window as any).fixture, c = f.state.controller, owner = c.snapshot().owner;
+          return { inert: document.querySelector('.standalone-composer > div')!.hasAttribute('inert'),
+            update: await c.update(owner, (draft: any) => ({ ...draft, text: 'wrong edit' })) };
         });
+        assert.deepEqual(blocked, { inert: true, update: false });
+        await page.evaluate(() => (window as any).fixture.resumeRemoval());
         await page.waitForFunction(() => (window as any).fixture.state.removed);
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('newer edit B');
+        await page.evaluate(async () => { const c = (window as any).fixture.state.controller; await c.flush(c.snapshot().owner); });
         const result = await page.evaluate(async () => {
           const f = (window as any).fixture, current = f.state.controller.snapshot(), versions = await f.versions(current.owner);
           const result = { current, versions, accepted: f.state.accepted, after: f.state.after, writes: f.state.puts };
           f.stopWatchingWrites(); return result;
         });
-        assert.equal(result.accepted, false); assert.equal(result.writes, 2);
+        assert.equal(result.accepted, true); assert.equal(result.writes, 2);
         assert.equal(result.current.draft.text, 'newer edit B');
-        assert.equal(result.current.draft.references[0].id, 'browser-1');
-        assert.ok(result.versions.versions.some((v: any) => v.revision === result.after.revision));
+        assert.deepEqual(result.current.draft.references.map((item: any) => item.id), ['ordinary-2']);
+        assert.ok(!result.versions.versions.some((v: any) => v.draft.text === 'newer edit B' && v.draft.references.some((item: any) => item.id === 'browser-1')));
         assert.ok(result.versions.versions.some((v: any) => v.revision === result.current.revision));
         assert.equal(await page.getByRole('alert').filter({ hasText: '无法移除引用' }).count(), 0);
+      } finally { await context.close(); }
+    });
+
+    await t.test('external work registers before its first await and drains through the owner lease', async () => {
+      const context = await browser.newContext();
+      try {
+        const page = await pageFor(context); await seed(page);
+        const registered = await page.evaluate(() => {
+          const f = (window as any).fixture, c = f.state.controller, owner = c.snapshot().owner;
+          const wrong = c.beginExternalOperation({ ...owner, hostId: 'other' });
+          f.operation = c.beginExternalOperation(owner);
+          const duplicate = c.beginExternalOperation(owner);
+          f.receipt = f.operation.transaction(async (before: any, isCurrent: () => boolean) => {
+            f.selecting = true; await new Promise<void>(resolve => { f.finishSelection = resolve; });
+            const after = await f.commit(before, (draft: any) => ({ ...draft, references: [] }), isCurrent);
+            return { after, value: 'selected' };
+          });
+          f.lease = c.freeze(owner); f.drained = f.lease.flush();
+          const unload = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(unload);
+          return { wrong, duplicate, registered: !!f.operation, inert: document.querySelector('.standalone-composer > div')!.hasAttribute('inert'), unload: unload.defaultPrevented,
+            afterFreeze: c.beginExternalOperation(owner) };
+        });
+        assert.deepEqual(registered, { wrong: null, duplicate: null, registered: true, inert: true, unload: true, afterFreeze: null });
+        await page.waitForFunction(() => (window as any).fixture.selecting);
+        assert.equal(await page.evaluate(async () => {
+          const f = (window as any).fixture;
+          return Promise.race([f.drained, Promise.resolve('pending')]);
+        }), 'pending');
+        await page.evaluate(() => (window as any).fixture.finishSelection());
+        const receipt = await page.evaluate(async () => {
+          const f = (window as any).fixture, receipt = await f.receipt; f.operation.finish(true); return receipt;
+        });
+        assert.equal(receipt.accepted, true); assert.equal(receipt.value, 'selected');
+        assert.equal(await page.evaluate(() => (window as any).fixture.drained), true);
+        await page.evaluate(() => (window as any).fixture.lease.release());
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('after transaction');
+        const snapshot = await page.evaluate(async () => {
+          const c = (window as any).fixture.state.controller; await c.flush(c.snapshot().owner); return c.snapshot();
+        });
+        assert.equal(snapshot.draft.text, 'after transaction'); assert.deepEqual(snapshot.draft.references, []);
+      } finally { await context.close(); }
+    });
+
+    await t.test('a late external selection cannot mutate a newly mounted owner', async () => {
+      const context = await browser.newContext();
+      try {
+        const page = await pageFor(context); await seed(page);
+        await page.evaluate(() => {
+          const f = (window as any).fixture, c = f.state.controller;
+          f.oldOwner = c.snapshot().owner; f.operation = c.beginExternalOperation(f.oldOwner);
+          f.receipt = f.operation.transaction(async (before: any, isCurrent: () => boolean) => {
+            f.selecting = true; await new Promise<void>(resolve => { f.finishSelection = resolve; });
+            const after = await f.commit(before, (draft: any) => ({ ...draft, references: [] }), isCurrent);
+            return { after, value: null };
+          }).then(() => 'committed', () => 'rejected');
+        });
+        await page.waitForFunction(() => (window as any).fixture.selecting);
+        assert.equal(await page.evaluate(() => {
+          try { (window as any).fixture.operation.finish(true); return false; } catch { return true; }
+        }), true);
+        await page.evaluate(() => (window as any).fixture.render({ context: { hostId: 'remote-fixture', draftId: 'draft-b' } }));
+        await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.owner.draftId === 'draft-b');
+        await page.evaluate(() => (window as any).fixture.finishSelection());
+        assert.equal(await page.evaluate(() => (window as any).fixture.receipt), 'rejected');
+        const result = await page.evaluate(async () => {
+          const f = (window as any).fixture; f.operation.finish(false); f.operation.finish(false);
+          return { current: f.state.controller.snapshot(), versions: await f.versions(f.oldOwner) };
+        });
+        assert.equal(result.current.owner.draftId, 'draft-b'); assert.equal(result.current.draft.text, '');
+        assert.ok(result.versions.versions.some((v: any) => v.draft.references.some((r: any) => r.id === 'browser-1')));
+      } finally { await context.close(); }
+    });
+
+    await t.test('an already registered asynchronous prefill finishes inside a frozen owner lease', async () => {
+      const context = await browser.newContext();
+      try {
+        const page = await pageFor(context); await seed(page);
+        await page.evaluate(() => {
+          const f = (window as any).fixture, c = f.state.controller;
+          f.operation = c.beginExternalOperation(c.snapshot().owner);
+          f.prefilling = (async () => {
+            await new Promise<void>(resolve => { f.finishSelection = resolve; });
+            const saved = await f.operation.applyPrefill({ id: 'external-prefill', draft: {
+              text: '', images: [], files: [], skills: [], references: [{ id: 'prefill-ref', text: 'Prefilled reference' }],
+            } });
+            f.operation.finish(saved); return saved;
+          })();
+          f.lease = c.freeze(c.snapshot().owner); f.drained = f.lease.flush();
+        });
+        assert.equal(await page.evaluate(() => (window as any).fixture.finishSelection()), undefined);
+        assert.equal(await page.evaluate(() => (window as any).fixture.prefilling), true);
+        assert.equal(await page.evaluate(() => (window as any).fixture.drained), true);
+        const saved = await page.evaluate(async () => {
+          const f = (window as any).fixture, c = f.state.controller, snapshot = c.snapshot();
+          const versions = await f.versions(snapshot.owner); f.lease.release(); return { snapshot, versions };
+        });
+        assert.ok(saved.snapshot.draft.references.some((item: any) => item.id === 'prefill-ref'));
+        assert.ok(saved.versions.versions.some((item: any) => item.revision === saved.snapshot.revision && item.prefills.includes('external-prefill')));
+        const again = await page.evaluate(async () => {
+          const f = (window as any).fixture, c = f.state.controller, snapshot = c.snapshot();
+          const operation = c.beginExternalOperation(snapshot.owner);
+          const accepted = await operation.applyPrefill({ id: 'external-prefill', draft: {
+            text: 'must not be merged twice', images: [], files: [], skills: [], references: [],
+          } });
+          operation.finish(accepted); return { accepted, current: c.snapshot(), snapshot };
+        });
+        assert.equal(again.accepted, true); assert.deepEqual(again.current, again.snapshot);
+      } finally { await context.close(); }
+    });
+
+    await t.test('external failure only resolves a projection that can still be verified in storage', async () => {
+      const context = await browser.newContext();
+      try {
+        const page = await pageFor(context); await seed(page);
+        const result = await page.evaluate(async () => {
+          const f = (window as any).fixture, c = f.state.controller, before = c.snapshot();
+          const aborted = c.beginExternalOperation(before.owner);
+          try { await aborted.transaction(async () => { throw Error('not committed'); }); } catch {}
+          aborted.finish(false);
+          const first = await c.flush(before.owner);
+          const committed = c.beginExternalOperation(before.owner);
+          try { await committed.transaction(async (snapshot: any, isCurrent: () => boolean) => {
+            await f.commit(snapshot, (draft: any) => ({ ...draft, references: [] }), isCurrent);
+            throw Error('receipt lost');
+          }); } catch {}
+          committed.finish(false);
+          return { first, second: await c.flush(before.owner), current: c.snapshot(), before, versions: await f.versions(before.owner) };
+        });
+        assert.equal(result.first, true); assert.equal(result.second, false);
+        assert.deepEqual(result.current, result.before);
+        assert.ok(result.versions.versions.some((version: any) => version.draft.references.length === 0));
+        await page.getByRole('button', { name: '保存为独立草稿' }).waitFor();
+      } finally { await context.close(); }
+    });
+
+    await t.test('a late rich editor transaction remains unresolved instead of restoring a removed reference', async () => {
+      const context = await browser.newContext();
+      try {
+        const page = await pageFor(context); await seed(page);
+        assert.equal(await page.evaluate(async () => {
+          const c = (window as any).fixture.state.controller, owner = c.snapshot().owner;
+          return c.update(owner, (draft: any) => ({ ...draft, document: { type: 'doc', content: [
+            { type: 'paragraph', content: [{ type: 'text', text: 'draft A' }] },
+          ] } }));
+        }), true);
+        const rich = page.locator('.ProseMirror'); await rich.waitFor();
+        await page.evaluate(() => {
+          const f = (window as any).fixture, c = f.state.controller;
+          f.operation = c.beginExternalOperation(c.snapshot().owner);
+          f.receipt = f.operation.transaction(async (before: any, isCurrent: () => boolean) => {
+            const after = await f.commit(before, (draft: any) => ({ ...draft, references: [] }), isCurrent);
+            f.after = after; f.committed = true;
+            await new Promise<void>(resolve => { f.finishSelection = resolve; });
+            return { after, value: null };
+          });
+        });
+        await page.waitForFunction(() => (window as any).fixture.committed);
+        await rich.evaluate(element => {
+          const data = new DataTransfer(); data.setData('text/plain', 'pending editor input');
+          element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+        });
+        const beforeReceipt = await page.evaluate(async () => {
+          const f = (window as any).fixture, c = f.state.controller, current = c.snapshot();
+          return { current, flushed: await c.flush(current.owner), versions: await f.versions(current.owner) };
+        });
+        assert.match(beforeReceipt.current.draft.text, /pending editor input/);
+        assert.equal(beforeReceipt.flushed, false);
+        assert.ok(!beforeReceipt.versions.versions.some((v: any) => v.draft.text.includes('pending editor input')));
+        await page.evaluate(() => (window as any).fixture.finishSelection());
+        const receipt = await page.evaluate(async () => {
+          const f = (window as any).fixture, value = await f.receipt; f.operation.finish(true); return value;
+        });
+        assert.equal(receipt.accepted, false);
+        await page.getByRole('button', { name: '保存为独立草稿' }).click();
+        await page.getByRole('button', { name: '保存为独立草稿' }).waitFor({ state: 'detached' });
+        const versions = await page.evaluate(async () => {
+          const f = (window as any).fixture, current = f.state.controller.snapshot(); return f.versions(current.owner);
+        });
+        assert.ok(versions.versions.some((v: any) => v.revision === receipt.after.revision && !v.draft.references.length));
+        assert.ok(versions.versions.some((v: any) => v.draft.text.includes('pending editor input')));
       } finally { await context.close(); }
     });
 
