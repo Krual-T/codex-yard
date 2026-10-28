@@ -7,126 +7,133 @@ import { chromium } from 'playwright-core';
 declare global {
   interface Window {
     settingsHarness: {
-      render: (options?: { dirty?: boolean; active?: string; redirect?: boolean; section?: string; state?: unknown }) => void;
-      navigate: { to: unknown; options?: unknown }[];
-      prepared: string[];
-      hosts: string[];
-      discarded: number;
-      command: (source: string) => boolean | void;
-      reset: () => void;
+      calls: { navigation: { path: string; options: unknown }[]; writes: { endpoint: string; key: string; value: unknown }[]; closed: number };
+      settings: Record<string, unknown>;
+      globals: Record<string, unknown>;
+      lightTheme: string;
+      requestLeave: () => Promise<boolean>;
     };
   }
 }
 
-test('settings navigation preserves dirty forms, host routing, search targets and redirects', {
-  skip: !existsSync('/usr/bin/google-chrome') && 'Isolated Chrome is unavailable',
+test('standalone settings guard navigation, locate controls and save appearance through the host', {
+  skip: !existsSync('/usr/bin/google-chrome') && 'Isolated Chrome is unavailable', timeout: 120_000,
 }, async () => {
-  const built = await build({
+  const bundle = await build({
     stdin: { resolveDir: process.cwd(), loader: 'jsx', contents: `
-      import * as React from 'react';
+      import React from 'react';
       import {createRoot} from 'react-dom/client';
-      import {flushSync} from 'react-dom';
-      import {createSettingsPageComponent} from './src/renderer/settings/settings-page.tsx';
-      const sections = [{slug:'general-settings'},{slug:'appearance'},{slug:'usage'},
-        {slug:'cloud-environments'},{slug:'plugins-settings'},{slug:'profile',appRoute:'/profile'}];
-      let options = {dirty:false,active:'general-settings',redirect:false,section:'general-settings',state:{source:'fixture'}};
-      const navigate = (to,opts) => window.settingsHarness.navigate.push({to,options:opts});
-      const actions = {
-        prepareHostNavigation: host => window.settingsHarness.prepared.push(host),
-        discardChanges: action => { window.settingsHarness.discarded++; action(); },
-        trackProfileVisit: () => {}, updateLegacyContentRect: () => {},
+      import {StandaloneSettings} from './src/renderer/settings/StandaloneSettings.tsx';
+      import {defaultThemes, exportTheme} from './src/renderer/settings/preferences.ts';
+      const calls = {navigation: [], writes: [], closed: 0};
+      const settings = {appearanceTheme:'system', codeFontSize:12, localeOverride:null};
+      const globals = {'reduced-motion-preference':'system'};
+      const atoms = {};
+      let location = {pathname:'/settings/general',search:'?tab=fixture',hash:'',state:{source:'fixture'}};
+      let guard;
+      const client = {
+        rpc: async () => { throw Error('Unexpected RPC'); },
+        reply: async () => { throw Error('Unexpected approval'); },
+        subscribe: () => () => {},
+        host: async (endpoint, params = {}) => {
+          if (endpoint === 'refresh-remote-connections') return {remoteConnections:[{hostId:'ssh-fixture',displayName:'Fixture SSH'}]};
+          if (endpoint === 'os-info') return {platform:'linux',isSystemBackdropSupported:false};
+          if (endpoint === 'get-settings') return {values:{...settings}};
+          const target = endpoint.endsWith('setting') ? settings : endpoint.endsWith('global-state') ? globals : atoms;
+          if (endpoint.startsWith('get-')) return {value:target[params.key]};
+          if (endpoint.startsWith('set-')) {
+            calls.writes.push({endpoint,key:params.key,value:params.value});
+            target[params.key] = params.value;
+            return {success:true};
+          }
+          throw Error('Unexpected host operation: ' + endpoint);
+        },
       };
-      const Page = createSettingsPageComponent(React, {
-        useSettingsActions: () => actions, useCodexMicroDeviceModel: () => null,
-        useIntl: () => ({formatMessage: m => m.defaultMessage}), useNavigate: () => navigate,
-        useLocation: () => ({key:'fixture',pathname:'/settings/'+options.section,search:'',hash:'#anchor',state:options.state}),
-        useHostSelection: () => ({selectedHostId:'local',connectedRemoteConnections:[{hostId:'ssh-fixture',displayName:'Fixture SSH'}],
-          setSelectedHostId: id => window.settingsHarness.hosts.push(id)}),
-        useSectionMatch: () => ({params:{section:options.section}}), useToolMatch: () => null, useAvailableTool: () => null,
-        normalizeUsageTab: tab => tab ?? 'usage', isLocalHost: id => id === 'local',
-        useVisibleSettings: () => ({activeSettingsSection:options.active,settingsNavigationSections:sections,
-          showEnterpriseUsageLabel:false,shouldRedirectToVisibleSettingsSection:options.redirect,
-          shouldRenderRouteContent:true,visibleSettingsSections:sections}),
-        useReturnPath: () => '/local/fixture', useLayout: () => 'legacy', useHasUnsavedChanges: () => options.dirty,
-        shouldNavigateBack: state => state?.back === true,
-        resolveSection: slug => ({path:'/settings/'+slug,sectionSlug:slug}), sectionPath: slug => '/settings/'+slug,
-        localHostId:'local', useResizeObserver: () => React.useCallback(() => {}, []),
-        registerSettingsCommand: callback => { window.settingsHarness.command = callback; return () => {}; },
-        HostDropdown: ({onSelectHost}) => <button onClick={() => onSelectHost('ssh-fixture')}>SSH host</button>,
-        LocalIcon: () => null, LoadingSection: () => 'loading', SectionTitle: ({slug}) => slug,
-        CloudPreferencesError: () => 'error', SectionContainer: ({children}) => <main>{children}</main>,
-        Outlet: ({context}) => <div><button onClick={context.onClose}>Close settings</button>
-          <button onClick={() => context.onSelectSection('appearance','Color')}>Search Color</button></div>,
-        Redirect: ({to,state}) => <output data-redirect={to}>{JSON.stringify(state)}</output>,
-        DocumentTitle: () => null,
-        Sidebar: props => <aside data-active={props.activeSection}>
-          {props.sidebarHostSelector}<button onClick={() => props.onSelect('general-settings')}>General</button>
-          <button onClick={() => props.onSelect('appearance')}>Appearance</button>
-          <button onClick={() => props.onSelect('profile')}>Profile</button>
-          <button onClick={() => props.onSelectTeam('team/name','members')}>Team</button></aside>,
-        Content: ({navigationKey,targetId,targetText,children}) => <main data-key={navigationKey} data-target={targetId} data-text={targetText}>{children}</main>,
-        Shell: ({legacyContentRef,sidebar,children}) => <div ref={legacyContentRef}>{sidebar}{children}</div>,
-        UnsavedChangesDialog: ({pendingNavigation,onClearPendingNavigation}) => pendingNavigation == null ? null : <div role="dialog">
-          <button onClick={onClearPendingNavigation}>Cancel navigation</button>
-          <button onClick={() => {onClearPendingNavigation();pendingNavigation();}}>Discard and continue</button></div>,
-      });
       const root = createRoot(document.getElementById('root'));
-      window.settingsHarness = {navigate:[],prepared:[],hosts:[],discarded:0,command:()=>{},
-        reset() { this.navigate=[];this.prepared=[];this.hosts=[];this.discarded=0; },
-        render(next={}) { options={...options,...next};flushSync(() => root.render(<Page/>)); },
+      const navigate = (path, options) => {
+        calls.navigation.push({path,options});
+        const next = new URL(path, 'http://settings-fixture.invalid');
+        location = {pathname:next.pathname,search:next.search,hash:next.hash,state:options?.state};
+        render();
       };
-      window.settingsHarness.render();
-    ` }, bundle: true, write: false, format: 'iife', jsx: 'transform',
+      const registerNavigationGuard = value => { guard = value; };
+      const render = () => root.render(<StandaloneSettings client={client} hostId="local" location={location}
+        onNavigate={navigate} onClose={() => {calls.closed++;}} registerNavigationGuard={registerNavigationGuard}/>);
+      window.settingsHarness = {calls,settings,globals,
+        lightTheme:exportTheme('light',{...defaultThemes.light,accent:'#123456'},'codex'),
+        requestLeave:() => guard.requestLeave()};
+      render();
+    ` },
+    bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' },
   });
-  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] });
+  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
+    args: ['--no-sandbox', '--disable-background-networking'] });
   try {
     const page = await browser.newPage();
+    await page.route('**/*', route => route.abort());
+    const errors: string[] = [];
+    page.on('pageerror', error => errors.push(error.message));
     await page.setContent('<div id="root"></div>');
-    await page.addScriptTag({ content: built.outputFiles[0]!.text });
-    await page.getByRole('button', { name: 'General', exact: true }).click();
-    assert.deepEqual(await page.evaluate(() => window.settingsHarness.prepared), []);
-    await page.evaluate(() => window.settingsHarness.render({ dirty: true }));
-    await page.getByRole('button', { name: 'Appearance', exact: true }).click();
-    await page.getByRole('dialog').waitFor();
-    assert.deepEqual(await page.evaluate(() => window.settingsHarness.navigate), []);
-    await page.getByRole('button', { name: 'Cancel navigation' }).click();
-    assert.equal(await page.getByRole('dialog').count(), 0);
-    assert.deepEqual(await page.evaluate(() => window.settingsHarness.navigate), []);
-    await page.getByRole('button', { name: 'Search Color' }).click();
-    await page.getByRole('button', { name: 'Discard and continue' }).click();
-    assert.deepEqual(await page.evaluate(() => window.settingsHarness.navigate), [
-      { to: '/settings/appearance', options: { replace: true, state: { source: 'fixture' } } },
-    ]);
-    assert.equal(await page.evaluate(() => window.settingsHarness.discarded), 1);
-    await page.evaluate(() => window.settingsHarness.render({ active: 'appearance', section: 'appearance' }));
-    assert.equal(await page.locator('main[data-key]').getAttribute('data-key'), 'fixture:1');
-    // The target belongs to the selected route, including its fragment.
-    assert.equal(await page.locator('main[data-key]').getAttribute('data-text'), null);
-    await page.getByRole('button', { name: 'Search Color' }).click();
-    assert.equal(await page.locator('main[data-key]').getAttribute('data-key'), 'fixture:2');
-    assert.equal(await page.locator('main[data-key]').getAttribute('data-text'), 'Color');
-    assert.equal(await page.getByRole('dialog').count(), 0);
+    await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
 
-    await page.getByRole('button', { name: 'SSH host' }).click();
-    assert.deepEqual(await page.evaluate(() => window.settingsHarness.hosts), []);
-    await page.getByRole('button', { name: 'Discard and continue' }).click();
-    assert.deepEqual(await page.evaluate(() => window.settingsHarness.hosts), ['ssh-fixture']);
-    await page.evaluate(() => { window.settingsHarness.reset(); window.settingsHarness.render({ dirty: false }); });
-    await page.getByRole('button', { name: 'Profile', exact: true }).click();
-    assert.deepEqual(await page.evaluate(() => window.settingsHarness.navigate), [{ to: '/profile', options: undefined }]);
-    await page.evaluate(() => window.settingsHarness.reset());
-    await page.getByRole('button', { name: 'Team', exact: true }).click();
-    assert.deepEqual(await page.evaluate(() => window.settingsHarness.navigate), [{
-      to: { pathname: '/settings/teams/team%2Fname', search: '?tab=members' },
-      options: { replace: true, state: { source: 'fixture' } },
-    }]);
-    await page.evaluate(() => window.settingsHarness.reset());
-    assert.equal(await page.evaluate(() => window.settingsHarness.command('menu')), false);
-    await page.evaluate(() => window.settingsHarness.command('keyboard_shortcut'));
-    assert.deepEqual(await page.evaluate(() => window.settingsHarness.navigate), [{ to: '/local/fixture', options: { replace: true } }]);
-    await page.evaluate(() => window.settingsHarness.render({ redirect: true, section: 'cloud-settings', active: 'cloud-environments' }));
-    assert.equal(await page.locator('output').getAttribute('data-redirect'), '/settings/cloud-environments?tab=preferences');
-    assert.equal(await page.locator('output').textContent(), '{"source":"fixture"}');
-    await page.close();
+    const language = page.getByRole('textbox', { name: 'Language' });
+    await language.waitFor();
+    await page.waitForFunction(() => !(document.querySelector('[aria-label="Language"]') as HTMLInputElement).disabled);
+    await language.fill('fr-FR');
+    await page.getByRole('button', { name: 'Appearance', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Discard unsaved changes?' }).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.settingsHarness.calls.navigation), []);
+    await page.getByRole('button', { name: 'Keep editing' }).click();
+    assert.equal(await language.inputValue(), 'fr-FR');
+
+    await page.getByRole('button', { name: 'Appearance', exact: true }).click();
+    await page.getByRole('button', { name: 'Discard changes' }).click();
+    await page.getByRole('heading', { name: 'Appearance', exact: true }).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.settingsHarness.calls.navigation), [
+      { path: '/settings/appearance', options: { state: { source: 'fixture' } } },
+    ]);
+
+    await page.getByRole('searchbox', { name: 'Search settings' }).fill('Code font size');
+    await page.getByRole('button', { name: /Code font size/ }).click();
+    const codeSize = page.getByRole('spinbutton', { name: 'Code font size' });
+    await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Code font size');
+    await codeSize.fill('18');
+    await page.getByRole('combobox', { name: 'Reduce motion' }).selectOption('on');
+    await page.getByRole('button', { name: 'Import', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Import light theme' });
+    await dialog.getByRole('textbox', { name: 'Theme share string' }).fill('invalid theme');
+    await dialog.getByRole('button', { name: 'Import' }).click();
+    assert.equal(await dialog.getByRole('alert').isVisible(), true);
+    const theme = await page.evaluate(() => window.settingsHarness.lightTheme);
+    await dialog.getByRole('textbox', { name: 'Theme share string' }).fill(theme);
+    await dialog.getByRole('button', { name: 'Import' }).click();
+    await dialog.waitFor({ state: 'hidden' });
+    assert.equal(await page.getByLabel('light Accent').inputValue(), '#123456');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await page.waitForFunction(() => window.settingsHarness.settings.codeFontSize === 18 &&
+      window.settingsHarness.globals['reduced-motion-preference'] === 'on');
+    await page.getByRole('button', { name: 'Save', exact: true }).waitFor({ state: 'hidden' });
+    const writes = await page.evaluate(() => window.settingsHarness.calls.writes);
+    assert.ok(writes.some(write => write.endpoint === 'set-setting' && write.key === 'appearanceLightChromeTheme'));
+    assert.ok(writes.some(write => write.endpoint === 'set-global-state' && write.key === 'reduced-motion-preference'));
+
+    await codeSize.fill('19');
+    await page.getByRole('combobox', { name: 'Settings host' }).selectOption('ssh-fixture');
+    await page.getByRole('dialog', { name: 'Discard unsaved changes?' }).waitFor();
+    await page.getByRole('button', { name: 'Keep editing' }).click();
+    assert.equal(await codeSize.inputValue(), '19');
+    assert.equal(await page.getByRole('combobox', { name: 'Settings host' }).inputValue(), 'local');
+    await page.getByRole('combobox', { name: 'Settings host' }).selectOption('ssh-fixture');
+    await page.getByRole('button', { name: 'Discard changes' }).click();
+    await page.waitForFunction(() => window.settingsHarness.calls.navigation.some(call => call.path === '/settings/appearance?hostId=ssh-fixture'));
+    assert.equal(await codeSize.inputValue(), '18');
+
+    await codeSize.fill('20');
+    const leave = page.evaluate(() => window.settingsHarness.requestLeave());
+    await page.getByRole('dialog', { name: 'Discard unsaved changes?' }).waitFor();
+    await page.getByRole('button', { name: 'Keep editing' }).click();
+    assert.equal(await leave, false);
+    assert.equal(await codeSize.inputValue(), '20');
+    assert.deepEqual(errors, []);
   } finally { await browser.close(); }
 });
