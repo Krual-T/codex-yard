@@ -5,7 +5,7 @@ import { EditorState } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import type { ComposerDocument } from '../workbench-contract.ts';
 import { composerSchema, readRichDocument } from './rich-document.ts';
-import { insertRichCompletion, richCompletionContext, richEditorPlugins } from './rich-editor-actions.ts';
+import { insertRichCompletion, richCompletionContext, richEditorPlugins, syncRichSelection } from './rich-editor-actions.ts';
 import type { RichCompletionContext, RichCompletionQuery } from './rich-editor-actions.ts';
 import type { Completion } from './standalone-completions.tsx';
 
@@ -65,6 +65,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     focus: () => view.current?.focus(),
     insertCompletion: (context, query, item, cwd) => {
       const editor = view.current;
+      if (editor && !composing.current) syncRichSelection(editor);
       return !!editor && !composing.current && insertRichCompletion(editor, context, query, item, cwd);
     },
   }), []);
@@ -78,7 +79,12 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
       attributes: { role: 'textbox', 'aria-label': latest.current.ariaLabel ?? '和 Codex 一起工作', 'aria-multiline': 'true',
         ...(latest.current.enableCompletions === false ? {} : { 'aria-autocomplete': 'list' }) },
       handleDOMEvents: {
-        keydown: (editor, event) => editor.composing || composing.current || event.isComposing || event.keyCode === 229,
+        keydown: (editor, event) => {
+          if (editor.composing || composing.current || event.isComposing || event.keyCode === 229) return true;
+          syncRichSelection(editor);
+          return false;
+        },
+        paste: editor => { if (!composing.current) syncRichSelection(editor); return false; },
         focus: editor => { latest.current.onCompletionContext(composing.current ? null : richCompletionContext(editor)); return false; },
         blur: () => { latest.current.onCompletionContext(null); return false; },
         compositionstart: () => { composing.current = true; latest.current.onCompletionContext(null); return false; },
@@ -137,14 +143,14 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
 
   const mark = (name: 'strong' | 'em' | 'code') => {
     const editor = view.current, type = composerSchema.marks[name];
-    if (editor && type && !props.readOnly) { toggleMark(type)(editor.state, editor.dispatch, editor); editor.focus(); }
+    if (editor && type && !props.readOnly) { syncRichSelection(editor); toggleMark(type)(editor.state, editor.dispatch, editor); editor.focus(); }
   };
   return <>
     <div className="standalone-composer__rich-toolbar" role="toolbar" aria-label="文本格式">
       <button type="button" title="粗体" aria-label="粗体" disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('strong')}><Bold size={16} /></button>
       <button type="button" title="斜体" aria-label="斜体" disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('em')}><Italic size={16} /></button>
       <button type="button" title="行内代码" aria-label="行内代码" disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('code')}><Code2 size={16} /></button>
-      <button type="button" title="链接" aria-label="链接" disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => setLinkOpen(open => !open)}><LinkIcon size={16} /></button>
+      <button type="button" title="链接" aria-label="链接" disabled={props.readOnly} onMouseDown={event => { event.preventDefault(); if (view.current) syncRichSelection(view.current); }} onClick={() => setLinkOpen(open => !open)}><LinkIcon size={16} /></button>
       {linkOpen ? <form onSubmit={event => {
         event.preventDefault();
         const editor = view.current, type = composerSchema.marks.link;

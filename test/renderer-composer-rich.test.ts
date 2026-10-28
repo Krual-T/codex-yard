@@ -169,6 +169,18 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
     });
     await page.getByRole('alert').filter({ hasText: '无法同时粘贴文字和图片' }).waitFor();
     assert.doesNotMatch(await editor.innerText(), /mixed image text/);
+    await editor.locator('pre').click();
+    await editor.press('End');
+    await editor.evaluate(element => {
+      const paragraph = element.querySelector('ul p')!;
+      const range = window.document.createRange(); range.selectNodeContents(paragraph); range.collapse(false);
+      const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+      const clipboard = new DataTransfer();
+      clipboard.setData('text/html', '<em>immediate</em>');
+      clipboard.setData('text/plain', 'immediate');
+      element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+    });
+    assert.equal(await editor.locator('ul em').innerText(), 'immediate');
     await editor.locator('ul p').click();
     await editor.press('End');
     await editor.evaluate(element => {

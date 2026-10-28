@@ -13,6 +13,15 @@ import { composerSchema } from './rich-document.ts';
 export interface RichCompletionContext { text: string; cursor: number; blockStart: number }
 export interface RichCompletionQuery { start: number; end: number; token: string }
 
+export function syncRichSelection(editor: EditorView): void {
+  if (!editor.hasFocus() || editor.composing) return;
+  const document = editor.dom.ownerDocument, selection = document.getSelection(), window = document.defaultView;
+  if (!window || !selection?.anchorNode || !selection.focusNode
+    || !editor.dom.contains(selection.anchorNode) || !editor.dom.contains(selection.focusNode)) return;
+  // Let ProseMirror reconcile pending DOM selection and mutations before a command.
+  document.dispatchEvent(new window.Event('selectionchange'));
+}
+
 export function richCompletionContext(editor: EditorView): RichCompletionContext | null {
   const { selection } = editor.state;
   if (editor.composing || !selection.empty || !selection.$from.parent.isTextblock || selection.$from.parent.type.spec.code) return null;
