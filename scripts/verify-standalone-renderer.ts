@@ -60,7 +60,7 @@ const dataDir = join(temporary, 'data');
 await mkdir(dataDir);
 await writeFile(join(dataDir, 'native-state.json'), JSON.stringify({ globals: { 'local-projects': {
   first: { id: 'project-a', name: 'First project', rootPaths: [temporary] },
-  second: { id: 'project-b', name: 'Second project', rootPaths: [temporary] },
+  second: { id: temporary, name: 'Second project', rootPaths: [temporary] },
 } }, settings: { appearanceTheme: 'dark',
   appearanceDarkChromeTheme: { ...defaultThemes.dark, surface: '#152535', ink: '#edf5fc', fonts: { ui: 'Arial', content: 'Georgia', code: 'Courier New' } } } }));
 const context = await chromium.launchPersistentContext(join(temporary, 'browser'), { executablePath: '/usr/bin/google-chrome',
@@ -354,7 +354,7 @@ try {
     const state = await (window as any).acceptanceClient.host('thread-project-state');
     return state.memberships.find((value: any) => value.hostId === 'local' && value.threadId === id);
   }, id);
-  assert.equal(membership?.assignment?.projectId, 'project-b', 'The explicitly selected project must win over the first matching cwd.');
+  assert.equal(membership?.assignment?.projectId, temporary, 'A real project whose id equals the workspace must win over the first matching cwd.');
   const turn = fake.threads.get(id)!.turns[0]!;
   const assistant = agentItem('live-assistant', 'STREAMED_OWNED_ANSWER');
   fake.broadcast({ method: 'turn/started', params: { threadId: id, turn: { ...turn, items: [], itemsView: 'notLoaded' } } });
@@ -407,7 +407,7 @@ try {
   await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'NEWER_ORDINARY_B');
   assert.equal(fake.calls('turn/start').length, ordinaryCalls);
   await recovery.getByRole('button', { name: 'Check send result', exact: true }).click();
-  await recovery.getByText('原提交版本已发送；较新的草稿将保留。', { exact: true }).waitFor();
+  await recovery.getByText('原提交版本已提交；较新的草稿将保留。', { exact: true }).waitFor();
   assert.equal(await input.inputValue(), 'NEWER_ORDINARY_B');
   await recovery.getByRole('button', { name: 'Keep newer draft and close', exact: true }).click();
   await recovery.waitFor({ state: 'hidden' });
@@ -417,6 +417,60 @@ try {
   assert.equal(fake.calls('turn/start').length, ordinaryCalls);
   assert.equal(fake.calls('turn/start').at(-1)!.params.clientUserMessageId, record(accepted.items[0]).clientId);
   checks.push('ordinary send unknown receipt persists exact clientId; read-only check confirms A and preserves newer B through reload without replay');
+  await input.fill('ACTIVE_TURN_FOR_QUEUE_AND_STEER');
+  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === '');
+  await page.getByRole('button', { name: '停止', exact: true }).waitFor();
+  const activeForFollowup = fake.threads.get(id)!.turns.at(-1)!;
+  fake.handlers.set('turn/steer', params => {
+    assert.equal(params.expectedTurnId, activeForFollowup.id);
+    activeForFollowup.items.push({ id: 'steered-input', type: 'userMessage', clientId: params.clientUserMessageId,
+      content: structuredClone(params.input) });
+    return { turnId: activeForFollowup.id };
+  });
+  for (const action of ['queue', 'steer'] as const) {
+    await installClientProbe(page);
+    const method = action === 'queue' ? 'thread/queue/add' : 'turn/steer';
+    const originalCalls = fake.calls(method).length;
+    await page.evaluate(method => {
+      const client = (window as any).acceptanceClient, rpc = client.rpc.bind(client);
+      let lose = true;
+      client.rpc = async (...args: any[]) => {
+        const result = await rpc(...args);
+        if (args[0] === method && lose) { lose = false; throw Object.assign(new Error('SYNTHETIC_LOST_FOLLOWUP_RECEIPT'), { uncertain: true }); }
+        return result;
+      };
+    }, method);
+    await input.fill(action.toUpperCase() + '_SUBMITTED_A');
+    await page.getByRole('button', { name: action === 'queue' ? '排队' : '发送到当前任务', exact: true }).click();
+    await recovery.getByText('SYNTHETIC_LOST_FOLLOWUP_RECEIPT', { exact: true }).waitFor();
+    const submitted = fake.calls(method).at(-1)!;
+    assert.equal(fake.calls(method).length, originalCalls + 1);
+    await input.fill(action.toUpperCase() + '_NEWER_B');
+    await page.getByText('正在保存草稿…', { exact: true }).waitFor({ state: 'hidden' });
+    await page.reload(); await installClientProbe(page);
+    await page.waitForFunction(expected => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === expected, action.toUpperCase() + '_NEWER_B');
+    assert.equal(fake.calls(method).length, originalCalls + 1, 'Reload must not replay an uncertain follow-up.');
+    const state = await page.evaluate(async () => (window as any).acceptanceClient.host('get-persisted-atom', { key: 'codex-yard.send-recovery.v1' }));
+    const original = Object.values(record(record(state).value).requests as Record<string, any>).find(value => value.clientUserMessageId === submitted.params.clientUserMessageId);
+    assert.equal(original?.action.type, action);
+    if (action === 'steer') assert.equal(original?.action.turnId, activeForFollowup.id);
+    await recovery.getByRole('button', { name: 'Check send result', exact: true }).click();
+    await recovery.getByText('原提交版本已提交；较新的草稿将保留。', { exact: true }).waitFor();
+    assert.equal(await input.inputValue(), action.toUpperCase() + '_NEWER_B');
+    await recovery.getByRole('button', { name: 'Keep newer draft and close', exact: true }).click();
+    await recovery.waitFor({ state: 'hidden' });
+    assert.equal(fake.calls(method).length, originalCalls + 1);
+    if (action === 'queue') {
+      // Use the actual queue consumer to delete the confirmed pending item.
+      const deleteButton = page.getByRole('button', { name: '删除待发送消息', exact: true });
+      await deleteButton.click(); await deleteButton.waitFor({ state: 'hidden' });
+    }
+  }
+  activeForFollowup.status = 'completed'; fake.threads.get(id)!.status = { type: 'idle' };
+  fake.broadcast({ method: 'turn/completed', params: { threadId: id, turn: activeForFollowup } });
+  await page.getByRole('button', { name: '停止', exact: true }).waitFor({ state: 'hidden' });
+  checks.push('queue and steer persist immutable request/action and original turn, survive reload without replay and confirm exact peer clientId while retaining newer B');
   await installClientProbe(page);
   fake.handlers.set('thread/name/set', params => {
     fake.threads.get(String(params.threadId))!.name = 'RESTORED_PAGE_THREAD'; return NO_REPLY;

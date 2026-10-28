@@ -32,7 +32,8 @@ import { createStateMutations } from './state-mutations.ts';
 import { createProjectCatalogWrites } from './project-catalog-writes.ts';
 import { readToolHistory } from './tool-history.ts';
 import { createConversationWrites } from './conversation-writes.ts';
-import { editMessage, findSentMessage } from './message-edit.ts';
+import { editMessage } from './message-edit.ts';
+import { findSubmission } from './message-submission-status.ts';
 import { createFiles, fileEndpoints, fileMethods } from './files.ts';
 import type { RemoteFileCommand } from './files.ts';
 import { createPetOverlay } from './pet-overlay.ts';
@@ -611,7 +612,9 @@ export async function createNativeWorkbench(options: Options = {}) {
       }
       case 'message-send-status': {
         if (typeof params.threadId !== 'string' || typeof params.clientUserMessageId !== 'string') throw new Error('核对发送需要原会话及请求身份。');
-        return findSentMessage(await connectedFor(client, connections, hostId), params.threadId, params.clientUserMessageId);
+        const action = params.action ?? 'send';
+        if (action !== 'send' && action !== 'queue' && action !== 'steer') throw new Error('提交动作无效。');
+        return findSubmission(await connectedFor(client, connections, hostId), params.threadId, params.clientUserMessageId, action);
       }
       case 'custom-avatars': return typeof params.avatarId === 'string' ? petAssets.loadAvatar(params.avatarId) : petAssets.load();
       case 'terminal': return terminals.get(client)!.request(params.operation as TerminalOperation, params.args as unknown[]);

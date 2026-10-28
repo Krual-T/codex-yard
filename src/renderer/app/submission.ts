@@ -15,13 +15,14 @@ export interface SubmissionContext {
   overrides?: Partial<SubmitOptions>;
   /** Immutable model-visible widget state captured for this submission. */
   additionalContext?: Record<string, { kind: 'untrusted'; value: string }>;
-  /** A durable ordinary-send intent; hooks complete before issuing each write. */
+  /** A durable submission intent; hooks complete before issuing each write. */
   send?: {
     clientUserMessageId: string;
     creating(): Promise<unknown>;
     created(thread: ThreadSummary, settings: ThreadSettingsResponse): Promise<unknown>;
     sending(): Promise<unknown>;
     confirmed(turnId: string): Promise<unknown>;
+    queued?(queuedSubmissionId: string): Promise<unknown>;
   };
 }
 
@@ -57,15 +58,28 @@ export async function submitDraft(client: WorkbenchClient, context: SubmissionCo
   if (action.type === 'queue') {
     if (!context.threadId || origin) throw new Error('只有已有会话的新消息可以排队。');
     if (draft.references?.some(reference => reference.context !== undefined || reference.original !== undefined)) throw new Error('队列协议无法保存此上下文，草稿已保留。');
-    await client.rpc('thread/queue/add', { threadId: context.threadId, input, clientUserMessageId }, context.hostId);
+    await context.send?.sending();
+    const result = await client.rpc<{ queuedSubmission: { id: string; clientUserMessageId: string } }>('thread/queue/add', { threadId: context.threadId, input, clientUserMessageId }, context.hostId);
+    if (context.send) {
+      if (typeof result?.queuedSubmission?.id !== 'string' || !result.queuedSubmission.id
+        || result.queuedSubmission.clientUserMessageId !== clientUserMessageId || !context.send.queued) {
+        throw Object.assign(new Error('队列回执身份无法确认，原稿已保留，请检查结果。'), { uncertain: true });
+      }
+      await context.send.queued(result.queuedSubmission.id);
+    }
     return { threadId: context.threadId };
   }
   const additionalContext = { ...context.additionalContext, ...Object.fromEntries((draft.references ?? []).flatMap(reference => reference.original !== undefined || reference.context !== undefined
     ? [[reference.id, { kind: 'untrusted', value: JSON.stringify(reference.original !== undefined ? reference.original : reference.context) }]] : [])) };
   if (action.type === 'steer') {
     if (!context.threadId || !context.activeTurnId || action.turnId !== context.activeTurnId || origin) throw new Error('当前任务已改变，请核对会话后再发送。');
-    await client.rpc('turn/steer', { threadId: context.threadId, expectedTurnId: action.turnId, input, clientUserMessageId,
+    await context.send?.sending();
+    const result = await client.rpc<{ turnId: string }>('turn/steer', { threadId: context.threadId, expectedTurnId: action.turnId, input, clientUserMessageId,
       ...(Object.keys(additionalContext).length ? { additionalContext } : {}) }, context.hostId);
+    if (context.send) {
+      if (result?.turnId !== action.turnId) throw Object.assign(new Error('当前任务回复身份无法确认，原稿已保留，请检查结果。'), { uncertain: true });
+      await context.send.confirmed(result.turnId);
+    }
     return { threadId: context.threadId };
   }
   // Recovery may need a read-only check of a request that already started.

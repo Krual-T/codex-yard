@@ -1,4 +1,4 @@
-import type { ComposerDraft, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
+import type { ComposerDraft, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import type { ThreadSummary } from '../../../lib/codex-protocol.ts';
 import { readBrowserAtom, updateBrowserAtom } from '../storage/ui-atoms.ts';
 
@@ -8,7 +8,11 @@ export interface SendVersion { owner: SendOwner; revision: string }
 export type SendStage = 'prepared' | 'creating' | 'ready' | 'sending' | 'unknown' | 'failed' | 'confirmed';
 export interface SendIntent extends SendVersion {
   id: string;
+  /** Preflight ownership changes on every explicit attempt, before any write. */
+  attemptId?: string;
   clientUserMessageId: string;
+  /** Older stored records represent ordinary sends. */
+  action?: SubmitAction;
   threadId: string | null;
   cwd: string;
   projectId?: string;
@@ -20,6 +24,7 @@ export interface SendIntent extends SendVersion {
   stage: SendStage;
   error?: string;
   turnId?: string;
+  queuedSubmissionId?: string;
   /** Only an actual thread/start response grants this empty-history phase. */
   created?: { thread: ThreadSummary; settings: SubmitOptions };
 }
@@ -43,11 +48,18 @@ function snapshot(value: unknown): SendRecoverySnapshot {
       || typeof request.cwd !== 'string' || !object(request.draft) || typeof request.draft.text !== 'string'
       || !Array.isArray(request.draft.images) || !Array.isArray(request.draft.files) || !object(request.options)
       || !object(request.overrides) || request.projectId !== undefined && typeof request.projectId !== 'string'
+      || request.attemptId !== undefined && (typeof request.attemptId !== 'string' || !request.attemptId)
       || !stages.includes(request.stage as SendStage)) throw new Error('发送恢复内容无法安全读取，原值已保留。');
     if (request.additionalContext !== undefined && (!object(request.additionalContext)
       || Object.values(request.additionalContext).some(entry => !object(entry) || entry.kind !== 'untrusted' || typeof entry.value !== 'string'))) {
       throw new Error('发送上下文无法安全读取，原值已保留。');
     }
+    if (request.action !== undefined && (!object(request.action) || !['send', 'queue', 'steer'].includes(String(request.action.type))
+      || request.action.type === 'steer' && (typeof request.action.turnId !== 'string' || !request.action.turnId))) {
+      throw new Error('提交动作无法安全读取，原值已保留。');
+    }
+    if (request.queuedSubmissionId !== undefined && (typeof request.queuedSubmissionId !== 'string' || !request.queuedSubmissionId
+      || !object(request.action) || request.action.type !== 'queue')) throw new Error('队列回执无法安全读取，原值已保留。');
     if (request.created !== undefined && (!object(request.created) || !object(request.created.thread)
       || request.created.thread.id !== request.threadId || !object(request.created.settings))) throw new Error('新会话创建回执无效，原值已保留。');
   }
@@ -75,9 +87,9 @@ export class SendRecoveryStore {
     return result;
   }
   async prepare(version: SendVersion, cwd: string, draft: ComposerDraft, options: SubmitOptions, overrides: Partial<SubmitOptions>, projectId?: string,
-    additionalContext?: SendIntent['additionalContext']) {
-    const intent: SendIntent = { ...structuredClone(version), id: crypto.randomUUID(), clientUserMessageId: crypto.randomUUID(),
-      threadId: version.owner.threadId, cwd, draft: structuredClone(draft), options: structuredClone(options),
+    additionalContext?: SendIntent['additionalContext'], action: SubmitAction = { type: 'send' }) {
+    const intent: SendIntent & { attemptId: string } = { ...structuredClone(version), id: crypto.randomUUID(), attemptId: crypto.randomUUID(), clientUserMessageId: crypto.randomUUID(),
+      threadId: version.owner.threadId, cwd, draft: structuredClone(draft), options: structuredClone(options), action: structuredClone(action),
       overrides: structuredClone(overrides), stage: 'prepared', ...(projectId ? { projectId } : {}),
       ...(additionalContext && Object.keys(additionalContext).length ? { additionalContext: structuredClone(additionalContext) } : {}) };
     await this.change(state => {
@@ -96,11 +108,21 @@ export class SendRecoveryStore {
     });
     return state.requests[id]!;
   }
-  creating(id: string) { return this.update(id, intent => {
+  /** An old preflight may finish later, but cannot retain authority to write. */
+  attempt(id: string) { return this.update(id, intent => {
+    if (!['prepared', 'ready', 'failed'].includes(intent.stage)) throw new Error('原发送结果尚未核对，未重复发送。');
+    intent.attemptId = crypto.randomUUID();
+  }); }
+  private assertAttempt(intent: SendIntent, attemptId: string | undefined) {
+    if (!attemptId || intent.attemptId !== attemptId) throw new Error('原发送尝试已被另一页面处理，未重复写入。');
+  }
+  creating(id: string, attemptId: string | undefined) { return this.update(id, intent => {
+    this.assertAttempt(intent, attemptId);
     if (!['prepared', 'failed'].includes(intent.stage) || intent.threadId) throw new Error('会话创建阶段已改变，未重复创建。');
     intent.stage = 'creating';
   }); }
-  created(id: string, threadId: string, created?: SendIntent['created']) { return this.update(id, (intent, state) => {
+  created(id: string, threadId: string, created: SendIntent['created'] | undefined, attemptId: string | undefined) { return this.update(id, (intent, state) => {
+    this.assertAttempt(intent, attemptId);
     if (intent.stage !== 'creating' || !threadId || intent.threadId) throw new Error('会话创建身份已改变，请核对原请求。');
     const key = sendThreadKey(intent.owner.hostId, threadId), previous = state.bindings[key];
     if (previous !== undefined && previous !== intent.owner.draftId) throw new Error('新会话已关联另一草稿，原记录已保留。');
@@ -111,33 +133,59 @@ export class SendRecoveryStore {
       state.creations[key] = structuredClone({ ...created, owner: intent.owner });
     }
   }); }
-  sending(id: string) { return this.update(id, intent => {
+  sending(id: string, attemptId: string | undefined) { return this.update(id, intent => {
+    this.assertAttempt(intent, attemptId);
     if (!intent.threadId || !['prepared', 'ready', 'failed'].includes(intent.stage)) throw new Error('发送阶段尚未核对，未重复发送。');
     intent.stage = 'sending'; delete intent.error;
   }); }
-  failed(id: string, error: unknown) { return this.update(id, intent => {
-    // A confirmed success can never be downgraded by a late failed check.
-    if (intent.stage === 'confirmed') return;
+  failed(id: string, error: unknown, attemptId: string | undefined) { return this.update(id, intent => {
+    // A prior page's error cannot downgrade the new attempt or a known success.
+    if (!attemptId || intent.attemptId !== attemptId || intent.stage === 'confirmed') return;
     const uncertain = ['creating', 'sending', 'unknown'].includes(intent.stage) && (!object(error) || error.uncertain !== false);
     intent.stage = uncertain ? 'unknown' : 'failed';
     intent.error = error instanceof Error ? error.message : String(error);
   }); }
-  confirmed(id: string, turnId: string) { return this.update(id, (intent, state) => {
+  confirmed(id: string, turnId: string, attemptId: string | undefined) { return this.update(id, (intent, state) => {
+    this.assertAttempt(intent, attemptId);
+    if (intent.stage === 'confirmed') return;
+    if (!['sending', 'unknown'].includes(intent.stage)) throw new Error('原请求尚未发出，未清理提交版本。');
     if (!intent.threadId || !turnId) throw new Error('缺少已发送消息身份，草稿已保留。');
     intent.stage = 'confirmed'; intent.turnId = turnId; delete intent.error;
     delete state.creations[sendThreadKey(intent.owner.hostId, intent.threadId)];
   }); }
+  queued(id: string, queuedSubmissionId: string, attemptId: string | undefined) { return this.update(id, intent => {
+    this.assertAttempt(intent, attemptId);
+    if (intent.stage === 'confirmed') return;
+    if (intent.action?.type !== 'queue' || !intent.threadId || typeof queuedSubmissionId !== 'string' || !queuedSubmissionId || !['sending', 'unknown'].includes(intent.stage)) {
+      throw new Error('队列提交身份无法确认，原稿已保留。');
+    }
+    intent.stage = 'confirmed'; intent.queuedSubmissionId = queuedSubmissionId; delete intent.error;
+  }); }
   async check(id: string) {
     const intent = (await this.read()).requests[id];
     if (!intent) throw new Error('发送恢复记录已处理。');
-    if (intent.stage === 'confirmed') return intent;
+    if (!['creating', 'sending', 'unknown'].includes(intent.stage)) return intent;
     if (!intent.threadId) throw new Error('创建会话的结果尚未确认。请核对会话列表；不会重新创建或发送。');
-    const result = await this.client.host<{ turnId: string | null }>('message-send-status', {
+    const result = await this.client.host<{ turnId: string | null; queuedSubmissionId?: string | null }>('message-send-status', {
       hostId: intent.owner.hostId, threadId: intent.threadId, clientUserMessageId: intent.clientUserMessageId,
+      action: intent.action?.type ?? 'send',
     });
-    if (result.turnId) return this.confirmed(id, result.turnId);
-    return this.update(id, current => {
-      if (current.stage !== 'confirmed') {
+    if (!object(result) || !(result.turnId === null || typeof result.turnId === 'string' && !!result.turnId)
+      || result.queuedSubmissionId !== undefined && result.queuedSubmissionId !== null
+        && (typeof result.queuedSubmissionId !== 'string' || !result.queuedSubmissionId)) {
+      throw new Error('提交核对回执无效，原请求状态已保留。');
+    }
+    if (intent.action?.type === 'steer' && result.turnId !== null && result.turnId !== intent.action.turnId) {
+      throw new Error('原请求出现在不同任务，结果尚不能确认，原稿已保留。');
+    }
+    return this.update(id, (current, state) => {
+      if (current.attemptId !== intent.attemptId || current.stage !== intent.stage) return;
+      if (result.turnId) {
+        current.stage = 'confirmed'; current.turnId = result.turnId; delete current.error;
+        delete state.creations[sendThreadKey(current.owner.hostId, current.threadId!)];
+      } else if (intent.action?.type === 'queue' && result.queuedSubmissionId) {
+        current.stage = 'confirmed'; current.queuedSubmissionId = result.queuedSubmissionId; delete current.error;
+      } else {
         current.stage = 'unknown'; current.error = '完整历史尚未找到原请求；结果仍未知，原稿已保留，不会重发。';
       }
     });

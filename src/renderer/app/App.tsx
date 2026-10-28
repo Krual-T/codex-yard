@@ -390,7 +390,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         ? Object.fromEntries((await readVisualizationModelContext(client, hostId, current.threadId)).map(value =>
           ['visualization:' + JSON.stringify([value.path, value.field]), { kind: 'untrusted' as const, value: JSON.stringify(value) }])) : undefined);
       requireCurrent(current.threadId);
-      if (action.type === 'send' && !origin) {
+      if (!origin) {
         if (!description || description.owner.hostId !== hostId || (retry ? retry.threadId : description.owner.threadId) !== current.threadId) {
           throw new Error('提交草稿身份已改变，未发送。');
         }
@@ -399,10 +399,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           if (!stored || JSON.stringify(stored.draft) !== JSON.stringify(draft)) throw new Error('原提交版本未能核对，未发送。');
           requireCurrent(current.threadId);
           intent = await sendStore.prepare(description, activeCwd, draft, options, description.overrides,
-            selectedProject?.hostId === hostId ? selectedProject.id : undefined, additionalContext);
+            selectedProject?.hostId === hostId ? selectedProject.id : undefined, additionalContext, action);
         } else {
-          const latest = (await sendStore.read()).requests[retry.id];
-          if (!latest || !['prepared', 'ready', 'failed'].includes(latest.stage)) throw new Error('原发送结果尚未核对，未重复发送。');
+          intent = await sendStore.attempt(retry.id);
         }
         await reloadSends();
       }
@@ -419,9 +418,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       const result = await submitDraft(client, { hostId, threadId: current.threadId, cwd: activeCwd, initialOptions: initialOptions ?? undefined,
         overrides: description?.overrides, additionalContext: intent?.additionalContext ?? additionalContext,
         ...(intent ? { send: { clientUserMessageId: intent.clientUserMessageId,
-          creating: async () => { requireCurrent(null); await sendStore.creating(intent!.id); },
+          creating: async () => { requireCurrent(null); await sendStore.creating(intent!.id, intent!.attemptId); },
           created: async (created: ThreadSummary, settings: ThreadSettingsResponse) => {
-            await sendStore.created(intent!.id, created.id, { thread: created, settings: sessionOptions(settings) });
+            await sendStore.created(intent!.id, created.id, { thread: created, settings: sessionOptions(settings) }, intent!.attemptId);
             const controller = composerController.current, snapshot = controller?.snapshot();
             if (snapshot?.owner.hostId === intent!.owner.hostId && snapshot.owner.draftId === intent!.owner.draftId && snapshot.owner.threadId === null) {
               if (!await controller!.flush(snapshot.owner)) throw new Error('原草稿已改变，已保留创建回执，未发送输入。');
@@ -431,9 +430,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           },
           sending: async () => {
             const target = (await sendStore.read()).requests[intent!.id]?.threadId ?? null;
-            requireCurrent(target); await sendStore.sending(intent!.id);
+            requireCurrent(target); await sendStore.sending(intent!.id, intent!.attemptId);
           },
-          confirmed: async (turnId: string) => { await sendStore.confirmed(intent!.id, turnId); },
+          confirmed: async (turnId: string) => { await sendStore.confirmed(intent!.id, turnId, intent!.attemptId); },
+          queued: async (queuedSubmissionId: string) => { await sendStore.queued(intent!.id, queuedSubmissionId, intent!.attemptId); },
         } } : {}),
         activeTurnId: thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null, readOnly: current.readOnly, thread },
       draft, options, action, async (created, settings) => {
@@ -459,7 +459,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       if (intent) await finishSend((await sendStore.read()).requests[intent.id]!);
     } catch (cause) {
       if (intent) {
-        await sendStore.failed(intent.id, cause).catch(storageError => setError(String(storageError)));
+        await sendStore.failed(intent.id, cause, intent.attemptId).catch(storageError => setError(String(storageError)));
         await reloadSends().catch(storageError => setError(String(storageError)));
       }
       if (!origin) setError(cause instanceof Error ? cause.message : String(cause));
@@ -500,6 +500,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   };
   const settings = current.section !== null;
   const busy = submitting || isThreadBusy(thread);
+  const canRetryAction = (intent: SendIntent) => {
+    const action = intent.action;
+    return action?.type === 'queue' || (action?.type === 'steer'
+      ? thread?.turns.some(turn => turn.id === action.turnId && turn.status === 'inProgress') === true : !busy);
+  };
   const panelScope = JSON.stringify([current.hostId, current.threadId ?? newDraftId]);
   const panelCwd = thread?.cwd || cwd || workspace;
   const composerOwner = { hostId: current.hostId, threadId: current.threadId,
@@ -570,7 +575,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       projectState={projectState} fallbackWorkspace={workspace} rows={list.rows} nextCursor={list.nextCursor} loading={list.loading} error={list.error}
       search={search} archived={archived} onSearchChange={setSearch} onArchivedChange={setArchived} onClose={() => setSidebar(false)}
       onOpenThread={row => { void openThread(row.id, row.hostId, row.archived); }}
-      onNewChat={project => { void newChat(project?.rootPaths[0] ?? cwd, project?.id === workspace ? undefined : project ?? undefined); }}
+      onNewChat={(project, fallback) => { void newChat(project?.rootPaths[0] ?? cwd, fallback ? undefined : project ?? undefined); }}
       onAddProject={addProject} onOpenSettings={() => { backFromSettings.current = location.pathname + location.search; void navigate('/settings/general'); }}
       onRefresh={() => { void list.refresh(); }} onLoadMore={() => { void list.loadMore(); }} onRetryProjectLookup={() => { void reloadProjects().catch(cause => setError(String(cause))); }} />}
     <main className="yard-main">
@@ -586,7 +591,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       </header>
       {error && <div role="alert" className="yard-error">{error}<button onClick={() => { setError(''); setRefresh(value => value + 1); }}>Retry</button><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
       {Object.values(sendState?.requests ?? {}).map(intent => <SendRecoveryNotice key={intent.id} intent={intent}
-        canRetry={!submitting && !loading && !busy && !current.readOnly && current.hostId === intent.owner.hostId && current.threadId === intent.threadId
+        canRetry={!submitting && !loading && canRetryAction(intent) && !current.readOnly && current.hostId === intent.owner.hostId && current.threadId === intent.threadId
           && (intent.threadId !== null || newDraftId === intent.owner.draftId)}
         onOpen={async () => {
           if (intent.threadId) { await openThread(intent.threadId, intent.owner.hostId, false); return; }
@@ -597,7 +602,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
             setSelectedProject(projectState ? projectsForHost(projectState, intent.owner.hostId).find(project => project.id === intent.projectId) ?? null : null);
           }
         }} onCheck={async () => { await sendStore.check(intent.id); await reloadSends(); }}
-        onRetry={() => submit(intent.draft, intent.options, { type: 'send' }, undefined,
+        onRetry={() => submit(intent.draft, intent.options, intent.action ?? { type: 'send' }, undefined,
           { owner: intent.owner, revision: intent.revision, overrides: intent.overrides }, intent)}
         onFinish={() => finishSend(intent)} onCancel={async () => { await sendStore.cancel(intent.id); await reloadSends(); }} />)}
       <div className="yard-workspace" data-panel-open={panelOpen && !settings}>

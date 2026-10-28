@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v7，2026-10-28，完整功能和快照退役仍在实施。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v8，2026-10-28，完整功能和快照退役仍在实施。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -80,7 +80,11 @@ host工具read_thread在真实server接线中使用turnLimit/cursor分页历史�
 
 Chrome和可视化通过App实际工具栏及消息链接进入同一侧面板。Chrome批注保持原host/thread/draft归属，新建thread沿原稿身份使用同一批注；向composer同步必须等待原稿事务成功，再串行处理后续批注版本，避免插入未完成时丢失删除。移除和已发送确认按精确引用版本操作，旧发送不得清理后来批注。可视化Tweak和carousel选择保存在原widget状态服务；每次发送冻结当时的modelContent与标准references为untrusted上下文，privateContent不进入模型输入，未知发送恢复复用被冻结内容。队列上下文能力、live分支和完整F18/F19体验仍需逐项验收。
 
-独立审阅80a09a61 v6仍有必须修订项：跨页迟到失败的attempt约束、编辑未知请求的终态判断、queue/steer持久身份、check阶段约束、旧首页稿认领、编辑导航落盘、真实项目ID/fallback和文件保存未知终态。本v7接线不关闭这些裁决；分别由共享提交、消息、composer和files/panels所有者继续实现，随后冻结复审。
+普通发送、queue add和steer共同使用事务中的不可变提交版本：原host/thread/draft、clientUserMessageId、动作与steer的expectedTurnId。每次显式重试先轮换attemptId，创建/发送钩子在写前核实token和阶段；旧页面的失败或状态核对不能降低新attempt的状态。prepared/ready/failed不执行核对，也保留取消/重试；已发而未知的请求只读核对，不能根据暂未找到而重发。queue先按精确client ID遍历实际队列，被消费后再查完整历史；steer还须命中原turn。正向回执只清理原提交revision，保留较新稿。队列的结构上下文能力仍需依据原消费者继续补齐。
+
+项目新建入口显式携带临时workspace分组身份，不根据project.id与路径是否相等猜测；真实项目ID可等于路径。S04在实际页面以两个相同cwd项目且第二个真实ID等于cwd验证首发归属。
+
+独立审阅80a09a61 v6的共享attempt/check、queue/steer身份与project fallback已在本v8实施；编辑未知终态、旧首页稿认领、编辑导航落盘和文件保存未知终态已有独立来源，仍待共享集成与冻结复审，不将局部定向通过视为全体关闭。审批4a0b8774第二轮仍需修改，完整ref父级状态与原Web特殊模式继续由B和共享App按归属实施。
 
 ## 实施与验收
 

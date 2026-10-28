@@ -20,7 +20,7 @@ export interface StandaloneSidebarProps {
   onSearchChange(value: string): void;
   onArchivedChange(value: boolean): void;
   onOpenThread(row: ThreadListRow): void;
-  onNewChat(project: Project | null): void;
+  onNewChat(project: Project | null, fallback?: boolean): void;
   onAddProject(): void;
   onOpenSettings(): void;
   onClose(): void;
@@ -60,8 +60,9 @@ function ThreadRow({ row, currentThread, onOpenThread }: {
   </button>;
 }
 
-function ProjectGroup({ project, rows, query, currentThread, onOpenThread, onNewChat }: {
+function ProjectGroup({ project, fallback, rows, query, currentThread, onOpenThread, onNewChat }: {
   project: Project;
+  fallback: boolean;
   rows: readonly ThreadListRow[];
   query: string;
   currentThread: StandaloneSidebarProps['currentThread'];
@@ -78,7 +79,7 @@ function ProjectGroup({ project, rows, query, currentThread, onOpenThread, onNew
         <span>{project.name}</span>
       </button>
       <button type="button" className="yard-owned-sidebar-icon" aria-label={'New chat in ' + project.name}
-        title={'New chat in ' + project.name} onClick={() => onNewChat(project)}><Plus aria-hidden="true" /></button>
+        title={'New chat in ' + project.name} onClick={() => onNewChat(project, fallback)}><Plus aria-hidden="true" /></button>
     </div>
     <div id={id} hidden={!expanded}>
       {rows.map(row => <ThreadRow key={row.id} row={row} currentThread={currentThread} onOpenThread={onOpenThread} />)}
@@ -93,7 +94,7 @@ export function StandaloneSidebar({ hostId, currentThread, projectState, fallbac
   const query = search.trim().toLowerCase();
   const [projectsExpanded, toggleProjects] = useExpansion(query);
   const projectsId = useId();
-  const { projects, grouped, recent } = useMemo(() => {
+  const { projects, grouped, recent, fallback } = useMemo(() => {
     const assigned = projectState ? projectsForHost(projectState, hostId) : [];
     const projects: Project[] = assigned.length ? assigned : hostId === 'local' && fallbackWorkspace
       ? [{ id: fallbackWorkspace, name: fallbackWorkspace.split(/[\\/]/).filter(Boolean).at(-1) || 'Workspace',
@@ -106,7 +107,7 @@ export function StandaloneSidebar({ hostId, currentThread, projectState, fallbac
       const group = project && grouped.get(project.id);
       if (group) group.push(row); else recent.push(row);
     }
-    return { projects, grouped, recent };
+    return { projects, grouped, recent, fallback: assigned.length === 0 };
   }, [projectState, hostId, fallbackWorkspace, rows]);
   const unresolved = projectState && (!projectState.inventory.complete || Object.keys(projectState.unresolved.assignments).length > 0
     || projectState.unresolved.projectless.length > 0 || projectState.unresolved.qualified.length > 0);
@@ -134,7 +135,7 @@ export function StandaloneSidebar({ hostId, currentThread, projectState, fallbac
     </div>
     <div className="yard-owned-sidebar-scroll">
       <div id={projectsId} hidden={!projectsExpanded}>
-        {projects.map(project => <ProjectGroup key={JSON.stringify([project.hostId, project.id])} project={project} query={query}
+        {projects.map(project => <ProjectGroup key={JSON.stringify([project.hostId, project.id])} project={project} fallback={fallback} query={query}
           rows={grouped.get(project.id) ?? []} currentThread={currentThread} onOpenThread={onOpenThread} onNewChat={onNewChat} />)}
       </div>
       <div className="yard-owned-sidebar-heading yard-owned-sidebar-recents">{archived ? 'Archived' : 'Recents'}</div>
