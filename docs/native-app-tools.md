@@ -106,7 +106,10 @@ Remote daemon tool injection is not yet installed; existing remote mounts are
 preserved. No unsupported desktop/cloud tools are advertised as executable.
 
 The original Windows App keeps its own full implementation. The isolated test
-models its protocol client; a real Windows App interaction has not been verified.
+models its protocol client. A read-only check of Windows App 26.1023.6123.0's
+running native pipe returned 32 default tools and 44 tools for `threadStartKind:
+"all"`. That catalog check did not execute its business tools or verify Windows
+UI continuation. It is a newer App version than the copied kernel.
 
 ## Verification and rollout
 
@@ -121,6 +124,14 @@ all twelve tools through the official adapter, cross-client continuation, closed
 Yard pages, preservation of a healthy native mount and the old-mount lifecycle.
 It uses no account, personal conversations or shared services and removes its
 temporary state on exit.
+
+The implementation at `b041c8f4` passed typecheck and all 154 portable tests.
+A fresh detached checkout with offline-installed dependencies repeated those
+checks and the real CLI 0.164.0 probe while the entire desktop installation was
+hidden by a mount namespace. The probe also verified a model-generated native
+MCP call with real caller metadata, simultaneous App/Yard subscriptions and
+delegation while a target response was held: the same running turn remained
+in progress and subsequently completed successfully.
 
 Before activation, review the exact source commit, stable socket/adapter paths,
 daemon configuration diff, affected loaded threads and available idle window.
