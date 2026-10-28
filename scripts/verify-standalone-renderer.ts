@@ -645,7 +645,7 @@ try {
     assert.equal(original?.action.type, action);
     if (action === 'steer') assert.equal(original?.action.turnId, activeForFollowup.id);
     await recovery.getByRole('button', { name: 'Check send result', exact: true }).click();
-    await recovery.getByText('原提交版本已提交；较新的草稿将保留。', { exact: true }).waitFor();
+    await recovery.getByText('消息已发送；原提交版本的草稿清理待处理，较新的草稿将保留。', { exact: true }).waitFor();
     assert.equal(await input.inputValue(), action.toUpperCase() + '_NEWER_B');
     await recovery.getByRole('button', { name: 'Keep newer draft and close', exact: true }).click();
     await recovery.waitFor({ state: 'hidden' });
