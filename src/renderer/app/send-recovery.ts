@@ -6,7 +6,7 @@ import { browserDraftOwner } from './browser-draft.ts';
 
 export const sendsAtom = 'codex-yard.send-recovery.v1';
 export interface SendOwner { hostId: string; threadId: string | null; draftId: string }
-export interface SendVersion { owner: SendOwner; revision: string }
+export interface SendVersion { owner: SendOwner; revision: string; documentPlainTextMode?: boolean }
 export type SendStage = 'prepared' | 'creating' | 'ready' | 'sending' | 'unknown' | 'failed' | 'confirmed';
 export interface SendIntent extends SendVersion {
   id: string;
@@ -55,6 +55,7 @@ function snapshot(value: unknown): SendRecoverySnapshot {
       || !Array.isArray(request.draft.images) || !Array.isArray(request.draft.files) || !object(request.options)
       || !object(request.overrides) || request.projectId !== undefined && typeof request.projectId !== 'string'
       || request.attemptId !== undefined && (typeof request.attemptId !== 'string' || !request.attemptId)
+      || request.documentPlainTextMode !== undefined && typeof request.documentPlainTextMode !== 'boolean'
       || !stages.includes(request.stage as SendStage)) throw new Error('发送恢复内容无法安全读取，原值已保留。');
     if (request.additionalContext !== undefined && (!object(request.additionalContext)
       || Object.values(request.additionalContext).some(entry => !object(entry) || entry.kind !== 'untrusted' || typeof entry.value !== 'string'))) {

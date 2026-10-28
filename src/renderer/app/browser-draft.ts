@@ -1,8 +1,8 @@
-import { browserCommentsAtomKey, changeBrowserComment, ensureBrowserCommentStore, readBrowserCommentsSnapshot,
-  recordSubmittedBrowserComments, removeExplicitlyDeletedBrowserReferences, subscribeBrowserComments } from '../browser/comments.ts';
+import { browserCommentsAtomKey, ensureBrowserCommentStore, pruneBrowserDraftDeletions, readBrowserCommentsSnapshot,
+  recordSubmittedBrowserComments, removeBrowserReferenceFromDraft, subscribeBrowserComments } from '../browser/comments.ts';
 import type { BrowserOwner, BrowserReference } from '../browser/comments.ts';
-import type { ComposerDraftController, ComposerDraftOwner, ComposerReference } from '../composer/StandaloneComposer.tsx';
-import type { ComposerDraft } from '../workbench-contract.ts';
+import type { ComposerDraftController, ComposerDraftOwner, ComposerDraftSnapshot, ComposerReference } from '../composer/StandaloneComposer.tsx';
+import type { ComposerDraftExternalOperation } from '../composer/use-composer-draft.ts';
 import type { SendIntent } from './send-recovery.ts';
 import { sendsAtom, sendThreadKey } from './send-recovery.ts';
 import { updateBrowserAtoms } from '../storage/ui-atoms.ts';
@@ -21,16 +21,44 @@ function browserReference(reference: ComposerReference, owner: BrowserOwner): Br
     || Array.isArray(reference.original)) return null;
   return reference as BrowserReference;
 }
-export async function removeBrowserDraftReference(owner: BrowserOwner, reference: ComposerReference) {
+export async function removeBrowserDraftReference(owner: BrowserOwner, reference: ComposerReference,
+  operation: ComposerDraftExternalOperation, retain: (snapshot: ComposerDraftSnapshot) => void,
+  accepted: (snapshot: ComposerDraftSnapshot) => void): Promise<'handled' | void> {
   if (reference.kind !== 'browser') return;
   const original = browserReference(reference, owner);
   if (!original) throw new Error('浏览器引用所属草稿无法核对，原批注已保留。');
-  await changeBrowserComment(owner, original.original, null);
+  let committed: ComposerDraftSnapshot | undefined;
+  try {
+    const receipt = await operation.transaction(async (before, isCurrent) => {
+      const after = await removeBrowserReferenceFromDraft(owner, original, before, isCurrent);
+      // Retain the complete durable result before the controller attempts adoption.
+      committed = structuredClone(after); retain(committed);
+      return { after, value: undefined };
+    });
+    if (receipt.accepted) accepted(receipt.after);
+  } catch (error) {
+    if (!committed) throw error;
+  }
+  // A committed root transaction must never fall through to a second deletion.
+  return 'handled';
+}
+
+export async function syncBrowserDraftDeletions(owner: BrowserOwner, operation: ComposerDraftExternalOperation,
+  retain: (snapshot: ComposerDraftSnapshot) => void, accepted: (snapshot: ComposerDraftSnapshot) => void) {
+  let success = false;
+  try {
+    const receipt = await operation.transaction(async (before, isCurrent) => {
+      const after = await pruneBrowserDraftDeletions(owner, before, isCurrent);
+      retain(after);
+      return { after, value: undefined };
+    });
+    if (receipt.accepted) { accepted(receipt.after); success = true; }
+  } finally { operation.finish(success); }
 }
 
 /** Watch only the active draft; this does not register pages or acknowledge sends. */
 export function watchBrowserDraftDeletions(owner: BrowserOwner,
-  apply: (update: (draft: ComposerDraft) => ComposerDraft) => Promise<void>, onError: (error: unknown) => void) {
+  apply: () => Promise<void>, onError: (error: unknown) => void) {
   let active = true, pending = false, running = false;
   const refresh = () => {
     if (!active) return;
@@ -42,7 +70,7 @@ export function watchBrowserDraftDeletions(owner: BrowserOwner,
         pending = false;
         const { deleted } = await readBrowserCommentsSnapshot(owner);
         if (!active) return;
-        if (deleted.length) await apply(draft => removeExplicitlyDeletedBrowserReferences(draft, deleted));
+        if (deleted.length) await apply();
       }
     })().catch(error => { if (active) onError(error); })
       .finally(() => { running = false; if (active && pending) refresh(); });

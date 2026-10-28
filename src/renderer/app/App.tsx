@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import type { ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { ComposerDraft, MessageEditOrigin, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
 import { StandaloneComposer, bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from '../composer/StandaloneComposer.tsx';
-import type { ComposerDraftController, ComposerDraftSnapshot, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
+import type { ComposerDraftController, ComposerDraftLease, ComposerDraftSnapshot, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
 import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
 import type { MessageEditNavigationController, MessageEditNavigationLease } from '../messages/use-message-editing.ts';
 import { StandaloneGoal } from '../composer/StandaloneGoal.tsx';
@@ -35,7 +35,8 @@ import type { SendIntent, SendRecoverySnapshot } from './send-recovery.ts';
 import { SendRecoveryNotice } from './SendRecoveryNotice.tsx';
 import { StandaloneBrowser } from '../browser/index.tsx';
 import { browserOwnerKey } from '../browser/comments.ts';
-import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference, watchBrowserDraftDeletions } from './browser-draft.ts';
+import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference, syncBrowserDraftDeletions, watchBrowserDraftDeletions } from './browser-draft.ts';
+import { BrowserDraftRecoveryNotice } from './BrowserDraftRecoveryNotice.tsx';
 import type { BrowserOwner } from '../browser/comments.ts';
 import { StandaloneVisualization, readVisualizationModelContext } from '../visualizations/index.tsx';
 import { homeDraftIdentity, selectHomeDraftIdentity } from './home-draft-identity.ts';
@@ -132,10 +133,12 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const messageEditController = useRef<MessageEditNavigationController | null>(null);
   const receiveMessageEditController = useCallback((controller: MessageEditNavigationController | null) => { messageEditController.current = controller; }, []);
   const navigationLease = useRef<MessageEditNavigationLease | null>(null);
+  const composerNavigationLease = useRef<ComposerDraftLease | null>(null);
   const navigationLocked = useRef(false);
   useLayoutEffect(() => {
     // Keep the original editor frozen until the new route actually commits.
-    navigationLease.current?.release(); navigationLease.current = null; navigationLocked.current = false;
+    navigationLease.current?.release(); navigationLease.current = null;
+    composerNavigationLease.current?.release(); composerNavigationLease.current = null; navigationLocked.current = false;
   }, [navigationCommit]);
   const editStore = useMemo(() => new MessageEditRecoveryStore(client, undefined, { hostChecksRebasedSourceBeforeRevert: true }), [client]);
   const sendStore = useMemo(() => new SendRecoveryStore(client), [client]);
@@ -150,6 +153,21 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [composerSnapshot, setComposerSnapshot] = useState<ComposerDraftSnapshot | null>(null);
   const [browserSyncError, setBrowserSyncError] = useState('');
   const [browserSyncRetry, setBrowserSyncRetry] = useState(0);
+  const browserRecoveryBarrier = useRef<(() => Promise<void>) | null>(null);
+  const receiveBrowserRecoveryBarrier = useCallback((barrier: (() => Promise<void>) | null) => { browserRecoveryBarrier.current = barrier; }, []);
+  const browserProjections = useRef<Record<string, ComposerDraftSnapshot>>({});
+  const [browserProjectionState, setBrowserProjectionState] = useState<Record<string, ComposerDraftSnapshot>>({});
+  const retainBrowserProjection = useCallback((snapshot: ComposerDraftSnapshot) => {
+    const key = JSON.stringify([snapshot.owner, snapshot.revision]);
+    browserProjections.current = { ...browserProjections.current, [key]: structuredClone(snapshot) };
+    setBrowserProjectionState(browserProjections.current);
+  }, []);
+  const releaseBrowserProjection = useCallback((snapshot: ComposerDraftSnapshot) => {
+    const key = JSON.stringify([snapshot.owner, snapshot.revision]);
+    if (JSON.stringify(browserProjections.current[key]) !== JSON.stringify(snapshot)) return;
+    const next = { ...browserProjections.current }; delete next[key];
+    browserProjections.current = next; setBrowserProjectionState(next);
+  }, []);
   const receiveComposerSnapshot = useCallback((value: ComposerDraftSnapshot) => setComposerSnapshot(value), []);
   const receiveComposerController = useCallback((controller: ComposerDraftController | null) => { composerController.current = controller; }, []);
   const sendReadGeneration = useRef(0);
@@ -244,19 +262,27 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       let accepted = false;
       try {
         navigationLease.current = messageEditController.current?.freeze() ?? null;
+        const composer = composerController.current, snapshot = composer?.snapshot();
+        composerNavigationLease.current = snapshot ? composer!.freeze(snapshot.owner) : null;
+        if (composer && (!snapshot || !composerNavigationLease.current)) return false;
         // Apply native inert before the first await so input cannot change while
         // the message, composer and file transactions are being drained.
         flushSync(() => setLeaving(true));
         await navigationLease.current?.flush();
-        const composer = composerController.current, snapshot = composer?.snapshot();
-        if (snapshot && !await composer!.flush(snapshot.owner)) return false;
+        if (composerNavigationLease.current && !await composerNavigationLease.current.flush()) return false;
         if (settingsGuard.current && !await settingsGuard.current.requestLeave()) return false;
-        accepted = !panelsDirty.current || window.confirm('Keep unsaved file changes and switch pages?');
-        if (accepted) await panelRecoveryBarrier.current?.();
-        return accepted;
+        if (panelsDirty.current && !window.confirm('Keep unsaved file changes and switch pages?')) return false;
+        await panelRecoveryBarrier.current?.();
+        await browserRecoveryBarrier.current?.();
+        if (Object.keys(browserProjections.current).length) throw new Error('浏览器引用有已保存但尚未接收的版本，请先核对、复制或明确放弃。');
+        await navigationLease.current?.flush();
+        if (composerNavigationLease.current && !await composerNavigationLease.current.flush()) return false;
+        accepted = true;
+        return true;
       } catch (cause) { accepted = false; setError(String(cause)); return false; }
       finally { if (!accepted) {
-        navigationLease.current?.release(); navigationLease.current = null; navigationLocked.current = false; setLeaving(false);
+        navigationLease.current?.release(); navigationLease.current = null;
+        composerNavigationLease.current?.release(); composerNavigationLease.current = null; navigationLocked.current = false; setLeaving(false);
       } }
     }, () => setNavigationFactsEpoch(value => value + 1));
     navigation.current = controller;
@@ -328,7 +354,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const preferences = () => { void reloadPreferences().catch(cause => setError(String(cause))); };
     media.addEventListener('change', preferences); reduced.addEventListener('change', preferences);
     window.addEventListener('languagechange', preferences);
-    return () => { unsubscribe(); controller.dispose(); if (navigation.current === controller) navigation.current = null; media.removeEventListener('change', preferences); reduced.removeEventListener('change', preferences); window.removeEventListener('languagechange', preferences); };
+    return () => { unsubscribe(); controller.dispose(); navigationLease.current?.release(); composerNavigationLease.current?.release(); if (navigation.current === controller) navigation.current = null; media.removeEventListener('change', preferences); reduced.removeEventListener('change', preferences); window.removeEventListener('languagechange', preferences); };
   }, [client, reloadPreferences, reloadProjects]);
   useEffect(() => {
     if (bridgeStatus !== 'connected') return;
@@ -501,6 +527,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       if (retry?.created && retry.threadId) await assignCreatedProject(retry.threadId);
       const active = current.threadId ? sessions.view({ hostId, threadId: current.threadId }).snapshot() : conversation;
       const result = await submitDraft(client, { hostId, threadId: current.threadId, cwd: activeCwd, initialOptions: active.options ?? undefined,
+        documentPlainTextMode: intent ? intent.documentPlainTextMode : description?.documentPlainTextMode,
         overrides: description?.overrides, additionalContext: intent ? intent.additionalContext : additionalContext,
         collaborationMode: intent?.collaborationMode, createdOptions: intent?.created?.settings,
         ...(intent ? { send: { clientUserMessageId: intent.clientUserMessageId,
@@ -599,20 +626,35 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const browserOwner = browserDraftOwner(composerOwner, sendState?.bindings ?? {});
   const activeBrowserOwner = useRef(browserOwner); activeBrowserOwner.current = browserOwner;
   const sendBindings = useRef(sendState?.bindings ?? {}); sendBindings.current = sendState?.bindings ?? {};
-  const updateBrowserDraft = useCallback(async (owner: BrowserOwner, update: (draft: ComposerDraft) => ComposerDraft) => {
+  const beginBrowserDraftOperation = useCallback((owner: BrowserOwner) => {
     const controller = composerController.current, snapshot = controller?.snapshot();
-    const matches = () => controller === composerController.current && !routeRef.current.readOnly && !navigationLocked.current
-      && browserOwnerKey(owner) === browserOwnerKey(activeBrowserOwner.current);
-    if (!controller || !snapshot || !matches() || !await controller.flush(snapshot.owner)) throw new Error('草稿已切换或尚未保存，浏览器批注已保留。');
-    const ready = controller.snapshot();
-    if (!ready || !matches() || browserOwnerKey(browserDraftOwner(ready.owner, sendBindings.current)) !== browserOwnerKey(owner)) throw new Error('草稿已切换，浏览器批注已保留。');
-    if (!await controller.update(ready.owner, update)) throw new Error('草稿已切换，浏览器批注已保留。');
+    if (!controller || !snapshot || routeRef.current.readOnly || navigationLocked.current
+      || browserOwnerKey(owner) !== browserOwnerKey(activeBrowserOwner.current)
+      || browserOwnerKey(browserDraftOwner(snapshot.owner, sendBindings.current)) !== browserOwnerKey(owner)) return null;
+    return controller.beginExternalOperation(snapshot.owner);
   }, []);
+  const acceptBrowserCommittedVersion = useCallback(async (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => {
+    const controller = composerController.current;
+    if (!controller || routeRef.current.readOnly || navigationLocked.current
+      || browserOwnerKey(browserDraftOwner(after.owner, sendBindings.current)) !== browserOwnerKey(activeBrowserOwner.current)) return false;
+    const accepted = await controller.acceptCommittedVersion(before, after);
+    if (accepted) releaseBrowserProjection(after);
+    return accepted;
+  }, [releaseBrowserProjection]);
   useEffect(() => {
     if (!composerSnapshot || browserOwnerKey(browserDraftOwner(composerSnapshot.owner, sendBindings.current)) !== browserOwnerKey(browserOwner)) return;
     setBrowserSyncError('');
-    return watchBrowserDraftDeletions(browserOwner, update => updateBrowserDraft(browserOwner, update), cause => setBrowserSyncError(String(cause)));
-  }, [browserOwner.hostId, browserOwner.threadId, browserOwner.draftId, composerSnapshot?.revision, browserSyncRetry, updateBrowserDraft]);
+    return watchBrowserDraftDeletions(browserOwner, async () => {
+      const operation = beginBrowserDraftOperation(browserOwner);
+      if (!operation) throw new Error('原草稿尚未就绪，请重查浏览器引用。');
+      await syncBrowserDraftDeletions(browserOwner, operation, retainBrowserProjection, releaseBrowserProjection);
+    }, cause => setBrowserSyncError(String(cause)));
+  }, [browserOwner.hostId, browserOwner.threadId, browserOwner.draftId, composerSnapshot?.revision, browserSyncRetry, beginBrowserDraftOperation, retainBrowserProjection, releaseBrowserProjection]);
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => { if (Object.keys(browserProjections.current).length) event.preventDefault(); };
+    window.addEventListener('beforeunload', beforeUnload);
+    return () => window.removeEventListener('beforeunload', beforeUnload);
+  }, []);
   const showBrowser = (source?: { hostId: string; threadId: string; url?: string }) => {
     if (source && (source.hostId !== current.hostId || source.threadId !== current.threadId)) {
       setError('浏览器链接所属会话已改变，请返回原会话。'); return;
@@ -702,6 +744,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       </header>
       {error && <div role="alert" className="yard-error">{error}<button onClick={() => { setError(''); setRefresh(value => value + 1); }}>Retry</button><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
       {browserSyncError && <div role="alert" className="yard-error">{browserSyncError}<button onClick={() => setBrowserSyncRetry(value => value + 1)}>Retry browser reference sync</button></div>}
+      {Object.entries(browserProjectionState).map(([key, snapshot]) => <BrowserDraftRecoveryNotice key={key} snapshot={snapshot}
+        onAccept={() => acceptBrowserCommittedVersion(snapshot, snapshot)} onDiscard={() => releaseBrowserProjection(snapshot)} />)}
       {Object.values(sendState?.requests ?? {}).map(intent => <SendRecoveryNotice key={intent.id} intent={intent}
         canRetry={!submitting && !loading && canRetryAction(intent) && !current.readOnly && current.hostId === intent.owner.hostId && current.threadId === intent.threadId
           && (intent.threadId !== null || newDraftId === intent.owner.draftId)}
@@ -748,7 +792,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           {current.readOnly && <p role="status">此会话已归档，原输入已保留。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p>}
           <div inert={current.readOnly}>
           {!sendState || current.threadId && (loading || !initialOptions) && !(composerIsCurrent || current.readOnly && thread) ? current.readOnly ? null : <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
-          onRemoveReference={(owner, reference) => removeBrowserDraftReference(browserDraftOwner(owner, sendState.bindings), reference)}
+          onRemoveReference={(owner, reference, operation) => removeBrowserDraftReference(browserDraftOwner(owner, sendBindings.current), reference,
+            operation, retainBrowserProjection, releaseBrowserProjection)}
           onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} initialOptions={initialOptions ?? undefined} hosts={hosts} onTargetChange={async target => {
           if (await navigate('/' + (target.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(target.hostId)))) {
             rememberNewDraftLocation(target.hostId, homeDraftIdentity(target.hostId), target.cwd); setCwd(target.cwd); setSelectedProject(null);
@@ -779,7 +824,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
             ? composerSnapshot.draft : { text: '', images: [], files: [] }}
           visible={panelOpen && !settings && panelKind === 'browser'} allowNavigation
           navigationRequest={browserNavigation} onNavigationConsumed={id => setBrowserNavigation(previous => previous?.id === id ? null : previous)}
-          onDraftChange={updateBrowserDraft} onClose={() => setPanelOpen(false)} />}
+          beginDraftOperation={beginBrowserDraftOperation} onDraftVersionCommitted={acceptBrowserCommittedVersion}
+          onRecoveryBarrier={receiveBrowserRecoveryBarrier} onClose={() => setPanelOpen(false)} />}
         {panelOpen && !settings && panelKind === 'visualization' && visualization?.hostId === current.hostId && visualization.threadId === current.threadId
           && <StandaloneVisualization client={client} {...visualization} theme={previewAppearance.theme} themeVariables={previewAppearance.variables}
             locale={previewAppearance.locale} onPrefill={addReference} onFollowUp={async (request, signal) => {

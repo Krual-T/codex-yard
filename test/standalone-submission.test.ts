@@ -23,6 +23,22 @@ function fixture() {
   return { client, calls };
 }
 
+test('send, queue and steer use the document mode captured by the original submission', async () => {
+  const rich = { text: '**original**', images: [], files: [], document: { type: 'doc', content: [
+    { type: 'paragraph', content: [{ type: 'text', text: 'original', marks: [{ type: 'strong' }] }] },
+  ] } };
+  for (const action of [{ type: 'send' as const }, { type: 'queue' as const }, { type: 'steer' as const, turnId: 'active' }]) {
+    for (const plainTextMode of [true, false]) {
+      const h = fixture();
+      await submitDraft(h.client, { ...base, documentPlainTextMode: plainTextMode,
+        activeTurnId: action.type === 'steer' ? 'active' : null }, rich, {}, action, async () => {});
+      const method = action.type === 'queue' ? 'thread/queue/add' : action.type === 'steer' ? 'turn/steer' : 'turn/start';
+      assert.equal((h.calls.find(call => call.method === method)?.params.input as { text: string }[])[0]?.text,
+        plainTextMode ? 'original' : '**original**');
+    }
+  }
+});
+
 test('a new thread installs its selected subscription before sending and retains explicit nullable options', async () => {
   const h = fixture();
   let finishSelection: () => void = () => {};

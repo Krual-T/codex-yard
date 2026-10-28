@@ -19,6 +19,22 @@ function fixture() {
   return { storage, client, calls, store: new SendRecoveryStore(client, storage), found: (id: string | null) => { turnId = id; }, seed: (next: unknown) => { value = next; } };
 }
 
+test('a durable send intent keeps its captured document mode through failure, reload and explicit retry', async () => {
+  const h = fixture();
+  const captured = { ...version, documentPlainTextMode: true };
+  const intent = await h.store.prepare(captured, '/fixture', draft, {}, {});
+  captured.documentPlainTextMode = false;
+  await h.store.failed(intent.id, Object.assign(new Error('not sent'), { uncertain: false }), intent.attemptId);
+  const restored = new SendRecoveryStore(h.client, h.storage);
+  assert.equal((await restored.read()).requests[intent.id].documentPlainTextMode, true);
+  assert.equal((await restored.attempt(intent.id)).documentPlainTextMode, true);
+  assert.equal(h.calls.length, 0);
+  const state = await h.storage.read() as { requests: Record<string, unknown> };
+  (state.requests[intent.id] as Record<string, unknown>).documentPlainTextMode = 'changed';
+  h.seed(state);
+  await assert.rejects(restored.read(), /无法安全读取/);
+});
+
 test('queue and steer retain immutable actions and identities after uncertain replies and reload', async () => {
   for (const action of [{ type: 'queue' as const }, { type: 'steer' as const, turnId: 'original-active-turn' }]) {
     const h = fixture(), submittedAction = structuredClone(action);

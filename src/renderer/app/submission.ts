@@ -15,6 +15,8 @@ export interface SubmissionContext {
   overrides?: Partial<SubmitOptions>;
   /** Immutable model-visible widget state captured for this submission. */
   additionalContext?: Record<string, { kind: 'untrusted'; value: string }>;
+  /** The original submission's document mode, including retries and queued input. */
+  documentPlainTextMode?: boolean;
   collaborationMode?: SubmissionCollaborationMode | null;
   /** Actual thread/start settings retained by an older, not-yet-resolved intent. */
   createdOptions?: Pick<SubmitOptions, 'model' | 'effort'>;
@@ -57,7 +59,7 @@ export async function submitDraft(client: WorkbenchClient, context: SubmissionCo
   const changes: SubmitOptions = context.overrides ?? (context.threadId && context.initialOptions
     ? Object.fromEntries(Object.entries(options).filter(([key, value]) =>
       JSON.stringify(value) !== JSON.stringify(context.initialOptions![key as keyof SubmitOptions]))) : options);
-  const input = draftToInput(draft, context.hostId), clientUserMessageId = context.send?.clientUserMessageId ?? crypto.randomUUID();
+  const input = draftToInput(draft, context.hostId, { plainTextMode: context.documentPlainTextMode }), clientUserMessageId = context.send?.clientUserMessageId ?? crypto.randomUUID();
   if (!input.length) throw new Error('请输入消息。');
   if (action.type === 'queue') {
     if (!context.threadId || origin) throw new Error('只有已有会话的新消息可以排队。');
