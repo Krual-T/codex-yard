@@ -63,6 +63,7 @@ export interface ThreadItemSummary extends Record<string, unknown> { id: string;
 export interface TurnSummary {
   id: string;
   items: ThreadItemSummary[];
+  itemsView?: 'full' | 'summary';
   status: 'completed' | 'interrupted' | 'failed' | 'inProgress';
   error?: { message: string; codexErrorInfo?: unknown; additionalDetails?: string | null } | null;
 }
