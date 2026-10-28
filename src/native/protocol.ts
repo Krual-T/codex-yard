@@ -86,7 +86,7 @@ export const readMethods = new Set([
   'thread/goal/get', 'thread/queue/list', 'thread/readState/read', 'thread/metadata/read', 'thread/attachment/list',
   'skills/list', 'mcpServerStatus/list', 'collaborationMode/list', 'permissionProfile/list',
   'experimentalFeature/list', 'app/list', 'plugin/installed', 'plugin/list', 'plugin/read',
-  'remoteControl/status/read',
+  'remoteControl/status/read', 'account/rateLimits/read', 'memory/status',
   'hooks/list', 'externalAgentConfig/import/readHistories',
 ]);
 

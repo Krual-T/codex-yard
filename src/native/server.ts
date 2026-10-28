@@ -12,26 +12,31 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { CodexConnection } from '../../lib/codex.ts';
 import { createAppTools } from '../../lib/app-tools.ts';
 import { appToolCatalog, createHostToolHandler } from '../../lib/host-tools.ts';
-import { projectRoot, rendererRoot, rendererVersion } from '../../lib/app-resources.ts';
+import { projectRoot, rendererVersion } from '../../lib/app-resources.ts';
 import { record, publicConfig, readMethods, writeMethods } from './protocol.ts';
 import type { HostMessage, ObjectValue } from './protocol.ts';
-import { createThreadProjects } from './thread-projects.ts';
+import { createThreadProjects, readThreadProjectState } from './thread-projects.ts';
+import { mergeThreadProjectCatalog } from './thread-project-catalog.ts';
+import { createThreadProjectInventory } from './thread-project-inventory.ts';
 import type { ThreadProjectOperation } from './thread-projects.ts';
 import { configurationRequest, httpFailure } from './http-fetch.ts';
 import type { HttpWireRequest } from './http-fetch.ts';
-import { rendererAssets as assets } from './renderer-assets.ts';
-import { adaptMigratedRendererModule, rendererComponentsPath } from './renderer-migration.ts';
 import { loadConfigurationSnapshot } from './configuration-snapshot.ts';
 import { loadHostCatalog, publicHost } from './hosts.ts';
 import type { HostCatalog } from './hosts.ts';
 import { createSshProxyStream } from './ssh.ts';
 import type { HostPaths } from './ssh.ts';
 import { createQueuedSendLocks } from './queued-send-locks.ts';
+import { createPreferenceWrites } from './preference-writes.ts';
+import { createStateMutations } from './state-mutations.ts';
+import { readToolHistory } from './tool-history.ts';
+import { createConversationWrites } from './conversation-writes.ts';
+import { editMessage } from './message-edit.ts';
 import { createFiles, fileEndpoints, fileMethods } from './files.ts';
 import type { RemoteFileCommand } from './files.ts';
 import { createPetOverlay } from './pet-overlay.ts';
 import { createPetAssets } from './pet-assets.ts';
-import { withVisualFeedback, webManifest, brandAssets } from './visual-feedback.ts';
+import { webManifest, brandAssets } from './visual-feedback.ts';
 import { TerminalHost } from './terminal.ts';
 import type { TerminalOperation } from './terminal-protocol.ts';
 import { chromeConnectionFromEnv } from '../browser-reuse/panel-host.ts';
@@ -41,7 +46,7 @@ import { clientChromePath, clientChromePackagePath } from '../browser-reuse/clie
 import type { ConnectionRequest } from '../browser-reuse/client-protocol.ts';
 import type { ChromeConnection } from '../browser-reuse/chrome-mcp.ts';
 import type { ChromeRequest } from '../browser-reuse/protocol.ts';
-import { adaptVisualizationModule, visualizationSandboxPolicy, webRendererPrefix } from './visualizations.ts';
+import { visualizationSandboxPolicy } from './visualizations.ts';
 
 interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; httpFetch?: typeof fetch; hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection }
 const mime: Record<string, string> = {
@@ -68,7 +73,7 @@ export async function createNativeWorkbench(options: Options = {}) {
   const workspace = await realpath(options.workspace || process.env.AGENTS_WORKSPACE || homedir());
   const socketPath = options.socketPath || process.env.AGENTS_CODEX_SOCKET || join(codexHome, 'app-server-control', 'app-server-control.sock');
   const dataDir = options.dataDir || process.env.AGENTS_DATA_DIR || join(projectRoot, '.local');
-  const renderer = options.renderer || rendererRoot;
+  const renderer = options.renderer || join(projectRoot, '.local', 'renderer');
   const publicOrigin = options.publicOrigin ?? process.env.AGENTS_PUBLIC_ORIGIN ?? '';
   const chromeConnection = options.chromeConnection ?? chromeConnectionFromEnv();
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid PORT');
@@ -78,25 +83,13 @@ export async function createNativeWorkbench(options: Options = {}) {
       throw new Error('AGENTS_PUBLIC_ORIGIN 必须是精确 HTTPS 来源');
     }
   }
-  const metadata = JSON.parse(await readFile(join(renderer, 'renderer.json'), 'utf8'));
-  if (metadata.version !== rendererVersion) throw new Error('仓库内的 App 资源版本不匹配，请核对 vendor/codex-app 与当前代码版本');
-  const browserHost = await readFile(join(projectRoot, '.local', 'native-host.js'));
-  const browserEntry = await readFile(join(projectRoot, '.local', 'workbench-entry.js'));
-  const rendererComponents = await readFile(join(projectRoot, '.local', 'renderer-components.js'));
-  const migratedModules = new Map<string, Buffer>();
   const sandboxScript = await readFile(join(projectRoot, '.local', 'visualization-sandbox.js'), 'utf8');
   const sandboxHtml = '<!doctype html><html><head><meta charset="utf-8"><title>Visualization</title></head><body><script>' +
     sandboxScript.replaceAll('</script', '<\\/script') + '</script></body></html>';
   const configurationSnapshot = await loadConfigurationSnapshot(join(dataDir, 'configuration-snapshot'), rendererVersion);
   const snapshotBody = configurationSnapshot ? Buffer.from(JSON.stringify(configurationSnapshot)) : null;
   const compressedSnapshot = snapshotBody ? await compress(snapshotBody, { level: 1 }) : null;
-  const html = withVisualFeedback((await readFile(join(renderer, 'index.html'), 'utf8'))
-    .replace('./assets/index-acf264e41d60.js', '/workbench-entry.js')
-    .replaceAll('./assets/', webRendererPrefix + '/assets/')
-    .replace('</head>', [assets.application, assets.rpc, assets.primary, assets.locale]
-      .map(path => `<link rel="modulepreload" crossorigin href="${path}">`).join('') +
-      `<link rel="stylesheet" crossorigin href="${assets.applicationStyle}"></head>`)
-    .replace('<script type="module"', '<script src="/native-host.js"></script><script type="module"'));
+  const html = await readFile(join(projectRoot, 'public', 'index.html'), 'utf8');
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   await chmod(dataDir, 0o700);
   async function load(name: string, fallback: unknown) {
@@ -125,18 +118,21 @@ export async function createNativeWorkbench(options: Options = {}) {
   });
   function validHost(hostId: string) { if (hostId !== 'local' && !sshHosts.has(hostId)) throw new Error('未登记的执行主机：' + hostId); }
   if (!globals['remote-projects']) globals['remote-projects'] = catalog.projects;
-  globals['thread-project-assignments'] = { ...catalog.assignments, ...record(globals['thread-project-assignments']) };
+  globals['thread-project-assignments'] = mergeThreadProjectCatalog(globals['thread-project-assignments'], catalog.assignments);
   const projects = await load('projects.json', []) as { path: string; name: string }[];
   if (!globals['local-projects']) globals['local-projects'] = Object.fromEntries(projects.map(project => [project.path, {
     id: project.path, name: project.name, rootPaths: [project.path], createdAt: Date.now(), updatedAt: Date.now(),
   }]));
   const clients = new Map<WebSocket, Map<string, CodexConnection>>();
+  const pendingServerRequests = new Map<WebSocket, Map<string, { socket: WebSocket; generation: string }>>();
+  const connectionGenerations = new WeakMap<WebSocket, string>();
   const terminals = new Map<WebSocket, TerminalHost>();
   const browsers = new Map<WebSocket, ChromePanelRouter>();
   const chromeClients = new ClientChromeBroker({ configured: !!chromeConnection, label:
     chromeConnection && 'autoConnect' in chromeConnection && chromeConnection.windowsSsh
       ? chromeConnection.windowsSsh.host : hostname() });
   const queuedSendLocks = createQueuedSendLocks();
+  const conversationWrite = createConversationWrites();
   const createdThreads = new Set<string>();
   const unsupported = new Set<string>();
   const httpRequests = new Set<AbortController>();
@@ -154,8 +150,13 @@ export async function createNativeWorkbench(options: Options = {}) {
     if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(message));
   }
   function broadcast(message: unknown) { for (const client of clients.keys()) send(client, message); }
-  const threadProjects = createThreadProjects(globals, persist, broadcast, validHost);
-  const petOverlay = createPetOverlay(globals, settings, persist, broadcast);
+  const stateMutations = createStateMutations();
+  let projectCompatibility: import('./thread-projects.ts').ThreadProjectCompatibility = {};
+  let projectInventoryGeneration = 0;
+  const compatibility = { resolveLegacyThreadHosts: (id: string) => projectCompatibility.resolveLegacyThreadHosts?.(id) };
+  const threadProjects = createThreadProjects(globals, persist, broadcast, validHost, compatibility, stateMutations);
+  const petOverlay = createPetOverlay(globals, settings, persist, broadcast, stateMutations);
+  const writePreference = createPreferenceWrites(settings, globals, persist, broadcast, key => petOverlay.settingChanged(key), stateMutations);
   const petAssets = createPetAssets(codexHome);
   function remoteProfiles() {
     const preferences = record(globals['remote-connection-auto-connect-by-host-id']);
@@ -172,7 +173,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     knownThread: async (id: string) => control.request('thread/read', { threadId: id, includeTurns: false }),
     listProjects: async () => ({ projects, workspace }),
     listThreads: async params => control.request('thread/list', { ...params, archived: false }),
-    readThread: async params => control.request('thread/read', { threadId: params.threadId, includeTurns: true }),
+    readThread: (params, options) => readToolHistory(control, params, options),
   });
   const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'), tools: appToolCatalog, callTool: callHostTool });
   // A daemon request is broadcast to every page subscribed to its thread.
@@ -288,36 +289,18 @@ export async function createNativeWorkbench(options: Options = {}) {
           configurationSnapshot: configurationSnapshot ? { capturedAt: configurationSnapshot.capturedAt, bytes: Buffer.byteLength(configurationSnapshot.data) } : null,
           unsupported: [...unsupported], error: control.lastError })); return;
       }
-      if (path === '/native-host.js') { response.writeHead(200, { 'Content-Type': mime['.js'] }); response.end(browserHost); return; }
-      if (path === '/workbench-entry.js') { response.writeHead(200, { 'Content-Type': mime['.js'] }); response.end(browserEntry); return; }
-      if (path === rendererComponentsPath) { response.writeHead(200, { 'Content-Type': mime['.js'], 'Cache-Control': 'no-store' }); response.end(rendererComponents); return; }
       // Native route names are extensionless. Preserve the original asset tree.
       if (!extname(path) && !path.startsWith('/api/')) {
         response.writeHead(200, { 'Content-Type': mime['.html'] });
         response.end(path === '/' ? html : html.replace('<head>', '<head><meta name="initial-route" content="' + path.replaceAll('"', '&quot;').replaceAll('<', '&lt;') + '">'));
         return;
       }
-      const webRenderer = path.startsWith(webRendererPrefix + '/');
-      if (webRenderer) path = path.slice(webRendererPrefix.length);
       const assetRoot = path.startsWith('/brand/') ? join(projectRoot, 'public') : renderer;
       const file = resolve(assetRoot, '.' + path);
       if (!file.startsWith(assetRoot + sep)) { response.writeHead(404); response.end(); return; }
       let content: Buffer = await readFile(file);
-      let adapted = false;
-      if (webRenderer && path.endsWith('.js')) {
-        const cached = migratedModules.get(path);
-        if (cached) { content = cached; adapted = true; }
-        else {
-          const original = content;
-          content = adaptMigratedRendererModule(path, adaptVisualizationModule(path, content));
-          adapted = content !== original;
-          if (adapted) migratedModules.set(path, content);
-        }
-      }
-      // Their URLs contain upstream hashes, not hashes of our adapted response.
-      // Revalidate them with the authored bundle on every page load.
-      if (adapted) response.setHeader('Cache-Control', 'no-store');
-      else if (path.startsWith('/assets/') && /-[a-f0-9]{8,}\.[^.]+$/.test(path)) {
+      if (path === '/workbench-entry.js' || path === '/workbench-entry.css') response.setHeader('Cache-Control', 'no-store');
+      else if (/^\/(assets|chunks)\//.test(path)) {
         response.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       }
       if (/\.(js|mjs|css|svg|json|wasm)$/.test(path)) {
@@ -359,7 +342,8 @@ export async function createNativeWorkbench(options: Options = {}) {
       let message: HostMessage;
       try { message = JSON.parse(String(data)); } catch { client.close(1007); return; }
       void handle(message, client, connections).catch(error => {
-        if (message.type === 'fetch') send(client, { type: 'fetch-response', requestId: message.requestId, responseType: 'error', status: 500, error: error.message });
+        if (message.type === 'mcp-response' && message.requestId) send(client, { type: 'server-request-response', requestId: message.requestId, error: error.message, uncertain: error.uncertain === true });
+        else if (message.type === 'fetch') send(client, { type: 'fetch-response', requestId: message.requestId, responseType: 'error', status: 500, error: error.message, uncertain: error.uncertain === true });
         else if (message.request) send(client, { type: 'mcp-response', hostId: message.hostId ?? 'local', message: { id: message.request.id,
           error: { code: typeof error.code === 'number' ? error.code : -32000, message: error.message,
             data: error.data === undefined ? { uncertain: error.uncertain === true } : error.data } } });
@@ -367,6 +351,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     });
     client.on('close', () => {
       clients.delete(client);
+      pendingServerRequests.delete(client);
       void browser.close().finally(() => browsers.delete(client));
       // Hang up page-owned shells before closing their daemon connection, so
       // an interactive shell can notify its background jobs before exiting.
@@ -397,8 +382,9 @@ export async function createNativeWorkbench(options: Options = {}) {
     } : { cwd: workspace });
     connections.set(hostId, connection);
     const current = connection;
-    current.on('message', (message: { id?: string | number; method: string; params: unknown }) => {
+    current.on('message', (message: { id?: string | number; method: string; params: unknown; seq?: number }) => {
       const params = record(message.params);
+      if (message.method === 'serverRequest/resolved') pendingServerRequests.get(client)?.delete(JSON.stringify([hostId, params.requestId]));
       if (hostId === 'local' && message.method === 'turn/completed') {
         legacyTitleCalls.delete(JSON.stringify([params.threadId, record(params.turn).id]));
       }
@@ -425,12 +411,25 @@ export async function createNativeWorkbench(options: Options = {}) {
           .catch(() => {});
         return;
       }
-      send(client, message.id != null ? { type: 'mcp-request', hostId, request: message }
-        : { type: 'mcp-notification', hostId, method: message.method, params: message.params });
+      if (message.id != null && current.socket) {
+        const requests = pendingServerRequests.get(client) ?? new Map<string, { socket: WebSocket; generation: string }>();
+        const connectionGeneration = connectionGenerations.get(current.socket) ?? crypto.randomUUID();
+        connectionGenerations.set(current.socket, connectionGeneration);
+        // A daemon may reuse a resolved JSON-RPC id on the same socket.
+        const generation = connectionGeneration + ':' + crypto.randomUUID();
+        requests.set(JSON.stringify([hostId, message.id]), { socket: current.socket, generation }); pendingServerRequests.set(client, requests);
+      }
+      send(client, message.id != null ? { type: 'mcp-request', hostId, request: message,
+        requestRef: { hostId, id: message.id, generation: pendingServerRequests.get(client)?.get(JSON.stringify([hostId, message.id]))?.generation } }
+        : { type: 'mcp-notification', hostId, method: message.method, params: message.params, seq: message.seq });
     });
     current.on('status', () => {
       // The daemon survives a client disconnect. Keep other hosts connected;
       // the renderer restores subscriptions when this host reconnects.
+      if (!current.connected) {
+        const requests = pendingServerRequests.get(client);
+        for (const [key] of requests ?? []) if ((JSON.parse(key) as [string, unknown])[0] === hostId) requests?.delete(key);
+      }
       notifyConnection(client, hostId, current);
     });
     return current;
@@ -469,11 +468,19 @@ export async function createNativeWorkbench(options: Options = {}) {
       // an approval to a daemon connection that never received the request.
       const connection = connections.get(hostId);
       if (!connection?.connected) throw new Error('连接已断开，请核对请求状态');
+      const key = JSON.stringify([hostId, message.response.id]);
+      const requests = pendingServerRequests.get(client);
+      const pending = requests?.get(key);
+      if (!pending || pending.socket !== connection.socket || message.generation !== pending.generation) throw new Error('请求已失效，请核对当前会话状态');
+      requests?.delete(key);
       if (message.response.error) {
         if (!connection.socket || connection.socket.readyState !== WebSocket.OPEN) throw new Error('连接已断开，请核对请求状态');
-        connection.socket.send(JSON.stringify(message.response));
+        await new Promise<void>((resolve, reject) => connection.socket!.send(JSON.stringify(message.response), error => {
+          if (error) reject(Object.assign(new Error('回答发送结果待确认，请核对请求状态。'), { uncertain: true })); else resolve();
+        }));
       }
       else await connection.respond(message.response.id, message.response.result);
+      if (message.requestId) send(client, { type: 'server-request-response', requestId: message.requestId, success: true });
       return;
     }
     if ((message.type === 'mcp-request' || message.type === 'thread-prewarm-start') && message.request) {
@@ -498,7 +505,10 @@ export async function createNativeWorkbench(options: Options = {}) {
         const loaded = await connection.request('thread/loaded/list', {});
         if (!loaded.data.some(id => id === params.threadId)) params.config = { ...record(params.config), ...hostTools.config };
       }
-      let result = await connection.request(method, params, { mutating: writeMethods.has(method) });
+      const request = () => connection.requestWithCursor(method, params, { mutating: writeMethods.has(method) });
+      const response = ['turn/start', 'thread/revert', 'thread/queue/start'].includes(method) && typeof params.threadId === 'string'
+        ? await conversationWrite(hostId, params.threadId, request) : await request();
+      let result = response.result;
       if (method === 'thread/start' && record(record(result).thread).id) createdThreads.add(hostId + ':' + String(record(record(result).thread).id));
       if (method === 'thread/delete') createdThreads.delete(hostId + ':' + String(params.threadId));
       if (method === 'config/read') result = publicConfig(result);
@@ -510,7 +520,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         result = { ...record(result), data: features.map(feature => feature.name === 'in_app_browser' ? { ...feature, enabled: true } : feature) };
       }
       if (method === 'getAuthStatus') result = { ...record(result), authToken: null };
-      send(client, { type: 'mcp-response', hostId, message: { id, result } });
+      send(client, { type: 'mcp-response', hostId, message: { id, result }, eventCursor: response.eventCursor });
       return;
     }
     if (message.type === 'fetch') {
@@ -545,10 +555,12 @@ export async function createNativeWorkbench(options: Options = {}) {
       case 'refresh-remote-connections': return { remoteConnections: remoteProfiles() };
       case 'set-remote-connection-auto-connect': {
         if (!sshHosts.has(hostId) || typeof params.autoConnect !== 'boolean') throw new Error('需要 SSH 主机和连接状态');
-        globals['remote-connection-auto-connect-by-host-id'] = {
-          ...record(globals['remote-connection-auto-connect-by-host-id']), [hostId]: params.autoConnect,
-        };
-        await persist();
+        await stateMutations.run(async () => {
+          const key = 'remote-connection-auto-connect-by-host-id', existed = Object.hasOwn(globals, key), previous = globals[key];
+          globals[key] = { ...record(previous), [hostId]: params.autoConnect };
+          try { await persist(); }
+          catch (error) { if (existed) globals[key] = previous; else delete globals[key]; throw error; }
+        });
         broadcast({ type: 'shared-object-updated', key: 'remote_ssh_connections', value: remoteProfiles() });
         if (params.autoConnect) await connectedFor(client, connections, hostId);
         else {
@@ -569,7 +581,21 @@ export async function createNativeWorkbench(options: Options = {}) {
         if (connection) notifyConnection(client, hostId, connection, true);
         return { state: connection?.connected ? 'connected' : connection?.connecting ? 'connecting' : 'disconnected', error: connection?.lastError ?? null };
       }
+      case 'thread-project-state': {
+        const generation = ++projectInventoryGeneration;
+        const inventory = createThreadProjectInventory(['local', ...sshHosts.keys()], id => connectedFor(client, connections, id));
+        const status = await inventory.refresh();
+        if (generation === projectInventoryGeneration) projectCompatibility = inventory.compatibility;
+        await stateMutations.flush();
+        return { ...readThreadProjectState(globals, inventory.compatibility), inventory: status,
+          catalog: { local: globals['local-projects'], remote: globals['remote-projects'] } };
+      }
       case 'thread-projects': return threadProjects(params.operation as ThreadProjectOperation, params.value);
+      case 'message-edit': {
+        if (typeof params.threadId !== 'string' || !params.threadId) throw new Error('编辑需要会话身份。');
+        const connection = await connectedFor(client, connections, hostId);
+        return conversationWrite(hostId, params.threadId, () => editMessage(connection, hostId, params.threadId as string, params));
+      }
       case 'custom-avatars': return typeof params.avatarId === 'string' ? petAssets.loadAvatar(params.avatarId) : petAssets.load();
       case 'terminal': return terminals.get(client)!.request(params.operation as TerminalOperation, params.args as unknown[]);
       case 'queued-follow-up-send-lock-acquire':
@@ -578,18 +604,18 @@ export async function createNativeWorkbench(options: Options = {}) {
         if (typeof conversationId !== 'string' || !conversationId || typeof messageId !== 'string' || !messageId || typeof lockId !== 'string' || !lockId) {
           throw new Error('发送协调需要 conversationId、messageId 和 lockId');
         }
-        const request = { conversationId, messageId, lockId };
+        const request = { hostId, conversationId, messageId, lockId };
         if (endpoint === 'queued-follow-up-send-lock-acquire') return { acquired: queuedSendLocks.acquire(request) };
         queuedSendLocks.release({ ...request, sent: params.sent === true });
         return null;
       }
-      case 'get-settings': return { values: settings, configuredValues: settings };
+      case 'get-settings': await stateMutations.flush(); return { values: settings, configuredValues: settings };
       case 'codex-command-keymap-state': return { bindings: [], keymapPath: null, supported: false,
         primaryNumberShortcutTarget: settings['primary-number-shortcut-target'] ?? 'tabs' };
-      case 'get-setting': return { value: settings[String(params.key)] };
-      case 'set-setting': settings[String(params.key)] = params.value; await persist(); petOverlay.settingChanged(String(params.key)); return { success: true };
-      case 'get-global-state': return { value: globals[String(params.key)] };
-      case 'set-global-state': globals[String(params.key)] = params.value; await persist(); broadcast({ type: 'global-state-updated', keys: [params.key] }); return { success: true };
+      case 'get-setting': await stateMutations.flush(); return { value: settings[String(params.key)] };
+      case 'set-setting': return writePreference('setting', String(params.key ?? ''), params.value);
+      case 'get-global-state': await stateMutations.flush(); return { value: globals[String(params.key)] };
+      case 'set-global-state': return writePreference('global', String(params.key ?? ''), params.value);
       case 'os-info': return { platform: 'linux', osVersion: 'Web', osRelease: 'Web', isSystemBackdropSupported: false, isVsCodeRunningInsideWsl: false, isCodexRunningInsideWsl: false };
       case 'locale-info': return { ideLocale: 'zh-CN', systemLocale: 'zh-CN' };
       case 'codex-home':
@@ -640,7 +666,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       for (const [client, connections] of clients) { client.terminate(); for (const connection of connections.values()) connection.close(); }
       control.close(); webSockets.close(); chromeSockets.close();
       await new Promise<void>(resolve => server.close(() => resolve()));
-      await hostTools.close(); await threadProjects('flush', undefined); await persistQueue;
+      await hostTools.close(); await stateMutations.flush(); await persistQueue;
     },
   };
 }

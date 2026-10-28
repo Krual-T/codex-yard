@@ -21,3 +21,15 @@ test('send leases serialize a conversation, preserve late acceptance and expire 
   time += 600_000;
   assert.equal(locks.acquire({ ...a, lockId: 'retry' }), true);
 });
+
+test('equal thread and message IDs on separate hosts retain independent leases and receipts', () => {
+  const locks = createQueuedSendLocks();
+  const local = { hostId: 'local', conversationId: 'same', messageId: 'same', lockId: 'one' };
+  const remote = { ...local, hostId: 'ssh:fixture', lockId: 'two' };
+  assert.equal(locks.acquire(local), true);
+  assert.equal(locks.acquire(remote), true);
+  locks.release({ ...local, sent: true });
+  assert.equal(locks.acquire({ ...local, lockId: 'retry' }), false);
+  locks.release({ ...remote, sent: false });
+  assert.equal(locks.acquire({ ...remote, lockId: 'retry' }), true);
+});

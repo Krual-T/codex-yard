@@ -1,4 +1,6 @@
 import { record } from './protocol.ts';
+import { createStateMutations } from './state-mutations.ts';
+import type { StateMutations } from './state-mutations.ts';
 import type { ObjectValue } from './protocol.ts';
 
 export type ProjectAssignment =
@@ -311,14 +313,11 @@ function ensureWritable(state: ThreadProjectSnapshot, key: StoreKey, identity: T
 // envelope retains the untouched legacy value alongside host-qualified entries.
 export function createThreadProjects(globals: ObjectValue, persist: () => Promise<void>, publish: (message: unknown) => void,
   validHost: (hostId: string) => void = hostId => { if (hostId !== 'local') throw new Error('当前仅支持本机'); },
-  compatibility: ThreadProjectCompatibility = {}) {
-  let pending = Promise.resolve<unknown>(undefined);
+  compatibility: ThreadProjectCompatibility = {}, mutations: StateMutations = createStateMutations()) {
   const removedProjectlessThreads = new Set<string>();
 
   function enqueue(action: () => Promise<unknown>) {
-    const result = pending.catch(() => {}).then(action);
-    pending = result;
-    return result;
+    return mutations.run(action);
   }
   async function commit(values: ObjectValue, memberships: Record<string, IdentifiedMembership>) {
     const previous = Object.fromEntries(Object.keys(values).map(key => [key, globals[key]]));
@@ -425,7 +424,7 @@ export function createThreadProjects(globals: ObjectValue, persist: () => Promis
             .map(item => ({ hostId: item.hostId, threadId: item.threadId, assignment: null, projectless: false })), options);
         });
       }
-      case 'flush': await pending.catch(() => {}); return;
+      case 'flush': await mutations.flush(); return;
       case 'getThreadStartProjectId': assignment(value); return null;
       case 'updateProjectlessThread': {
         const params = record(value), item = parseUpdate(value, false, params.projectless !== undefined);

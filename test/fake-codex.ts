@@ -230,11 +230,14 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
         }
         return archive ? {} : { thread: { ...thread, turns: [] } };
       }
-      case 'thread/turns/list': return {
-        data: [...(threads.get(threadId)?.turns || [])].reverse().map(turn => params.itemsView === 'summary'
+      case 'thread/turns/list': {
+        const turns = [...(threads.get(threadId)?.turns || [])];
+        if (params.sortDirection !== 'asc') turns.reverse();
+        const offset = Number(params.cursor || 0), end = offset + (Number(params.limit) || 25);
+        return { data: turns.slice(offset, end).map(turn => params.itemsView === 'summary'
           ? { ...turn, items: [], itemsView: 'summary' } : turn),
-        nextCursor: null, backwardsCursor: null,
-      };
+        nextCursor: end < turns.length ? String(end) : null, backwardsCursor: null };
+      }
       case 'thread/items/list': {
         if (!params.turnId) {
           const entries = (threads.get(threadId)?.turns || []).flatMap(turn => turn.items.map(item => itemEntry(turn.id, item)));
@@ -245,14 +248,18 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
         const turn = threads.get(threadId)?.turns.find(turn => turn.id === params.turnId);
         const items = [...(turn?.items || [])];
         if (params.sortDirection === 'desc') items.reverse();
-        return { data: items.map(item => itemEntry(String(params.turnId), item)), nextCursor: null, backwardsCursor: null };
+        const offset = Number(params.cursor || 0), end = offset + (Number(params.limit) || 25);
+        return { data: items.slice(offset, end).map(item => itemEntry(String(params.turnId), item)),
+          nextCursor: end < items.length ? String(end) : null, backwardsCursor: null };
       }
       case 'thread/revert': {
         const thread = threadFor(threadId);
         const index = thread.turns.findIndex(turn => turn.id === params.beforeTurnId);
         if (index == null || index < 0) invalid('turn not found');
         thread.turns.splice(index); thread.status = { type: 'idle' };
-        send({ method: 'thread/reverted', params: { threadId: params.threadId } });
+        for (const socket of webSockets.clients) if (socket.readyState === WebSocket.OPEN) {
+          send({ method: 'thread/reverted', params: { threadId: params.threadId } }, socket);
+        }
         return { thread: { ...thread, turns: [] }, turnsBackwardsCursor: null, itemsBackwardsCursor: null };
       }
       case 'turn/start': {

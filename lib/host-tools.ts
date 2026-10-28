@@ -16,12 +16,12 @@ export interface HostToolOptions {
   knownThread: (id: string) => Promise<unknown>;
   listProjects: () => Promise<unknown>;
   listThreads: (args: ListThreadsArgs) => Promise<unknown>;
-  readThread: (args: ReadThreadArgs) => Promise<unknown>;
+  readThread: (args: ReadThreadArgs, options?: { signal?: AbortSignal }) => Promise<unknown>;
   setTitle?: (threadId: string, args: unknown) => Promise<unknown>;
 }
 export interface HostToolResult { success: boolean; contentItems: { type: 'inputText'; text: string }[] }
 
-// The official MCP adapter consumes flat descriptors, including the namespace.
+// The owned MCP adapter consumes flat descriptors, including the namespace.
 export const appToolCatalog: readonly AppToolDescriptor[] = [
   {
     namespace: 'codex_app', name: 'set_thread_title',
@@ -48,7 +48,7 @@ export const appToolCatalog: readonly AppToolDescriptor[] = [
   },
   {
     namespace: 'codex_app', name: 'read_thread',
-    description: '只读获取当前实例中一个交互式主对话的历史。默认返回最新 10 轮，每轮最新 60 项，较早内容提供游标；不恢复或发送对话。',
+    description: '只读获取当前实例中一个交互式主对话的历史。默认返回最新 10 轮、每轮最新 60 项且不含工具输出。将 nextCursor 或任一 itemsNextCursor 原样传入 cursor 可继续读取较早轮次或该轮内容；内容续页返回 itemPage。不恢复或发送对话。',
     inputSchema: { type: 'object', properties: {
       threadId: { type: 'string', minLength: 1 },
       hostId: { type: 'string', enum: ['local'] },
@@ -105,7 +105,7 @@ export function createHostToolHandler({ connection, knownThread, listProjects, l
             ...(typeof args.turnLimit === 'number' ? { turnLimit: args.turnLimit } : {}),
             ...(typeof args.includeOutputs === 'boolean' ? { includeOutputs: args.includeOutputs } : {}),
             ...(typeof args.maxOutputCharsPerItem === 'number' ? { maxOutputCharsPerItem: args.maxOutputCharsPerItem } : {}),
-          }); break;
+          }, { signal }); break;
         }
       }
       return { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(result) }] };

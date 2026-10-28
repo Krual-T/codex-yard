@@ -19,6 +19,7 @@ let suspensions = 0;
 let finishSuspension: (() => void) | undefined;
 let suspension = Promise.resolve();
 const client: WorkbenchClient = {
+  async reply() { throw new Error('Visualization fixture never approves server requests'); },
   async host<T>(endpoint: string, params?: Record<string, unknown>) {
     reads.push({ endpoint, ...params });
     const path = String(params?.path);

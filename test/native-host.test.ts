@@ -10,9 +10,8 @@ import { test } from 'node:test';
 import WebSocket from 'ws';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { record, updatedAtom } from '../src/native/protocol.ts';
-import { createThreadProjects } from '../src/native/thread-projects.ts';
+import { createThreadProjects, readThreadProjectState, threadProjectIdentityKey } from '../src/native/thread-projects.ts';
 import { BrowserHttpFetch } from '../src/native/browser-http-fetch.ts';
-import { rendererAssets } from '../src/native/renderer-assets.ts';
 import { brandAssets } from '../src/native/visual-feedback.ts';
 import type { HostCatalog } from '../src/native/hosts.ts';
 import type { createSshProxyStream } from '../src/native/ssh.ts';
@@ -503,8 +502,9 @@ test('SSH RPC, events and approvals retain their host and never receive a local 
   const initialized = await client.until(message => message.type === 'codex-app-server-initialized' && message.hostId === hostId);
   assert.equal(initialized.transport, 'websocket');
   remote.send({ id: 'ssh-approval', method: 'item/commandExecution/requestApproval', params: { threadId: ssh.result.thread.id } });
-  assert.equal((await client.until(message => message.request?.id === 'ssh-approval')).hostId, hostId);
-  client.send({ type: 'mcp-response', hostId, response: { id: 'ssh-approval', result: { decision: 'decline' } } });
+  const approval = await client.until(message => message.request?.id === 'ssh-approval');
+  assert.equal(approval.hostId, hostId);
+  client.send({ type: 'mcp-response', hostId, generation: approval.requestRef.generation, response: { id: 'ssh-approval', result: { decision: 'decline' } } });
   await remote.waitFor(message => message.id === 'ssh-approval' && message.result);
   assert.equal(h.fake.messages.some(message => message.id === 'ssh-approval'), false);
   remote.send({ method: 'item/agentMessage/delta', params: { threadId: ssh.result.thread.id, delta: 'remote' } });
@@ -513,7 +513,7 @@ test('SSH RPC, events and approvals retain their host and never receive a local 
   const saved = await projectRequest(client, 'remote-assignment', 'setAssignment', { threadId: ssh.result.thread.id, hostId, assignment });
   assert.equal(saved.responseType, 'success');
   const persisted = JSON.parse(await readFile(join(h.root, 'data', 'native-state.json'), 'utf8'));
-  assert.equal(persisted.globals['thread-project-assignments'][ssh.result.thread.id].hostId, hostId);
+  assert.equal(persisted.globals['thread-project-assignments'].hosts[hostId][ssh.result.thread.id].hostId, hostId);
   const unknown = await client.rpc(2, 'thread/start', { cwd: '/wrong' }, 'remote-ssh-discovered:unknown');
   assert.match(unknown.error.message, /未登记/);
   assert.equal(remote.calls('thread/start').length, 1);
@@ -545,14 +545,15 @@ test('a project chat saves membership before its first turn, persists it and not
   const saved = await projectRequest(client, 'assign', 'setAssignment', { threadId: thread.id, hostId: 'local', assignment });
   assert.equal(saved.responseType, 'success');
   const event = await other.until(message => message.type === 'thread-project-memberships-updated');
-  assert.deepEqual(event.memberships[thread.id], { assignment, projectless: false });
+  assert.deepEqual(event.memberships[threadProjectIdentityKey({ hostId: 'local', threadId: thread.id })],
+    { hostId: 'local', threadId: thread.id, assignment, projectless: false });
   const persisted = JSON.parse(await readFile(join(h.root, 'data', 'native-state.json'), 'utf8'));
-  assert.deepEqual(persisted.globals['thread-project-assignments'][thread.id], assignment);
+  assert.deepEqual(persisted.globals['thread-project-assignments'].hosts.local[thread.id], assignment);
   assert.ok((await client.rpc(2, 'turn/start', { threadId: thread.id, input: [{ type: 'text', text: 'first project message' }] })).result);
   assert.equal(h.fake.calls('turn/start').length, 1);
   const reloaded = createThreadProjects(persisted.globals, async () => {}, () => {});
   const beforeMove = await reloaded('moveLocalProjectThreadsToProjectless', h.root);
-  assert.deepEqual(beforeMove, [{ threadId: thread.id, assignment, projectless: false }]);
+  assert.deepEqual(beforeMove, [{ hostId: 'local', threadId: thread.id, assignment, projectless: false }]);
 });
 
 test('concurrent membership writes retain both chats and invalid restore batches leave state untouched', async t => {
@@ -565,8 +566,10 @@ test('concurrent membership writes retain both chats and invalid restore batches
   assert.ok(writes.every(reply => reply.responseType === 'success'));
   const before = await readFile(join(h.root, 'data', 'native-state.json'), 'utf8');
   const state = JSON.parse(before).globals;
-  assert.deepEqual(state['thread-project-assignments'], { 'chat-a': assignment });
-  assert.deepEqual(state['projectless-thread-ids'], ['chat-b']);
+  assert.deepEqual(readThreadProjectState(state).memberships.sort((a, b) => a.threadId.localeCompare(b.threadId)), [
+    { hostId: 'local', threadId: 'chat-a', assignment, projectless: false },
+    { hostId: 'local', threadId: 'chat-b', assignment: null, projectless: true },
+  ]);
   const invalid = await projectRequest(a, 'invalid', 'restoreMemberships', [
     { threadId: 'chat-a', assignment: null, projectless: true },
     { threadId: 'chat-b', assignment: { projectKind: 'invalid' }, projectless: false },
@@ -582,14 +585,16 @@ test('projectless hints persist and stale hint writes cannot resurrect removed m
   const value = { threadId: 'projectless', projectless: true, outputDirectory: '/outputs', workspaceRoot: '/workspace' };
   assert.equal((await projectRequest(client, 'create', 'updateProjectlessThread', value)).responseType, 'success');
   let state = JSON.parse(await readFile(join(h.root, 'data', 'native-state.json'), 'utf8')).globals;
-  assert.deepEqual(state['projectless-thread-ids'], ['projectless']);
-  assert.equal(state['thread-workspace-root-hints'].projectless, '/workspace');
+  assert.deepEqual(readThreadProjectState(state).memberships, [{ hostId: 'local', threadId: 'projectless', assignment: null, projectless: true }]);
+  assert.deepEqual(readThreadProjectState(state).workspaceRoots, [{ hostId: 'local', threadId: 'projectless', value: '/workspace' }]);
   await projectRequest(client, 'remove', 'updateProjectlessThread', { threadId: 'projectless', projectless: false, outputDirectory: null });
   await projectRequest(client, 'stale', 'updateProjectlessThread', value);
   state = JSON.parse(await readFile(join(h.root, 'data', 'native-state.json'), 'utf8')).globals;
-  assert.deepEqual(state['projectless-thread-ids'], []);
-  assert.deepEqual(state['thread-projectless-output-directories'], {});
-  assert.deepEqual(state['thread-workspace-root-hints'], {});
+  assert.deepEqual(readThreadProjectState(state).memberships, []);
+  assert.deepEqual(readThreadProjectState(state).outputDirectories, []);
+  assert.deepEqual(readThreadProjectState(state).workspaceRoots, []);
+  assert.equal(state['projectless-thread-ids'].hosts.local.projectless, false);
+  assert.equal(state['thread-projectless-output-directories'].hosts.local.projectless, null);
 });
 
 test('a failed membership save rejects, restores memory and allows a later save', async () => {
@@ -602,20 +607,18 @@ test('a failed membership save rejects, restores memory and allows a later save'
   assert.deepEqual(events, []);
   fail = false;
   await request('setAssignment', value);
-  assert.deepEqual(globals, { 'thread-project-assignments': { chat: value.assignment } });
+  assert.deepEqual(readThreadProjectState(globals).memberships, [{ hostId: 'local', threadId: 'chat', assignment: value.assignment, projectless: false }]);
   assert.ok(events.length);
 });
 
-test('native bridge serves unchanged assets and native routes with an injected TypeScript host', async t => {
+test('native bridge serves authored assets and routes without snapshot preloads or private host bootstrap', async t => {
   const h = await fixture(t);
+  await writeFile(join(h.root, 'renderer', 'workbench-entry.js'), 'export const owned = true;');
   const page = await fetch(h.app.url + '/local/test-thread');
   const html = await page.text();
-  assert.match(html, /src="\/native-host.js"/);
+  assert.doesNotMatch(html, /native-host.js|web-renderer-v2|modulepreload/);
   assert.match(html, /src="\/workbench-entry.js"/);
   assert.doesNotMatch(html, /index-acf264e41d60/);
-  for (const path of [rendererAssets.application, rendererAssets.primary, rendererAssets.locale]) {
-    assert.ok(html.includes(`rel="modulepreload" crossorigin href="${path}"`));
-  }
   assert.equal((await fetch(h.app.url + '/workbench-entry.js')).status, 200);
   assert.equal(await (await fetch(h.app.url + '/original.js')).text(), 'const original = true;');
   assert.equal((await fetch(h.app.url + '/original.js')).headers.get('content-type'), 'text/javascript');
@@ -634,7 +637,7 @@ test('hashed renderer assets are compressed and reusable while the HTML and owne
   const raw = await fetch(h.app.url + '/assets/module-0123456789ab.js', { headers: { 'Accept-Encoding': 'gzip;q=0, identity' } });
   assert.equal(raw.headers.get('content-encoding'), null);
   assert.equal(await raw.text(), source);
-  for (const path of ['/', '/workbench-entry.js', '/native-host.js', '/api/status']) {
+  for (const path of ['/', '/workbench-entry.js', '/api/status']) {
     assert.equal((await fetch(h.app.url + path)).headers.get('cache-control'), 'no-store');
   }
 });
@@ -648,7 +651,9 @@ test('web branding resolves from both native routes and the default favicon requ
     assert.ok(html.includes(`rel="icon" type="image/svg+xml" sizes="any" href="${brandAssets.icon}"`));
     assert.ok(html.includes(`rel="apple-touch-icon" sizes="180x180" href="${brandAssets.apple}"`));
     assert.match(html, /rel="manifest" href="\/site.webmanifest"/);
-    assert.match(html, /content="manifest-src &#39;self&#39;; default-src &#39;none&#39;;"/);
+    assert.match(html, /Content-Security-Policy/);
+    assert.match(html, /default-src 'self'/);
+    assert.match(html, /object-src 'none'/);
   }
   const response = await fetch(h.app.url + '/site.webmanifest');
   assert.equal(response.headers.get('content-type'), 'application/manifest+json');
@@ -794,7 +799,7 @@ test('external main-document links load while cross-site API, iframe, script and
     const response = await navigation(path);
     assert.equal(response.status, 200, path);
     assert.match(response.type!, /text\/html/);
-    assert.match(response.body, /native-host\.js/);
+    assert.match(response.body, /workbench-entry\.js/);
   }
   for (const path of ['/api/status', '/%61pi/status', '/api/configuration/bootstrap', '/original.js']) {
     assert.equal((await navigation(path)).status, 403, path);
@@ -841,8 +846,8 @@ test('native prewarming, notifications and approval answers use the real RPC bri
   h.fake.send({ method: 'item/agentMessage/delta', params: { threadId: started.result.thread.id, delta: 'streamed' } });
   assert.equal((await client.until(message => message.method === 'item/agentMessage/delta')).params.delta, 'streamed');
   h.fake.send({ id: 'approval', method: 'item/commandExecution/requestApproval', params: { threadId: started.result.thread.id } });
-  await client.until(message => message.type === 'mcp-request' && message.request.id === 'approval');
-  client.send({ type: 'mcp-response', hostId: 'local', response: { id: 'approval', result: { decision: 'decline' } } });
+  const approval = await client.until(message => message.type === 'mcp-request' && message.request.id === 'approval');
+  client.send({ type: 'mcp-response', hostId: 'local', generation: approval.requestRef.generation, response: { id: 'approval', result: { decision: 'decline' } } });
   assert.deepEqual((await h.fake.waitFor((message: Record<string, unknown>) => message.id === 'approval' && message.result)).result, { decision: 'decline' });
 });
 

@@ -75,7 +75,7 @@ test('the pinned component seams produce valid ESM and require unique function b
   assert.equal(adaptMigratedRendererModule('/assets/unrelated.js', unrelated), unrelated);
 });
 
-test('adapted modules cannot remain immutable across authored component upgrades', async t => {
+test('owned entry stays fresh and retired adaptation URLs have no runtime fallback', async t => {
   const root = await mkdtemp('/tmp/yard-migration-cache-');
   const fake = await createFakeCodex(root);
   let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
@@ -83,18 +83,20 @@ test('adapted modules cannot remain immutable across authored component upgrades
   app = await createNativeWorkbench({ port: 0, socketPath: fake.socketPath, codexHome: join(root, 'codex'),
     dataDir: join(root, 'data'), workspace: root, hostCatalog: { hosts: [], projects: [], assignments: {} } });
   for (const path of ['app-initial-a68277f60b93.js', 'collapsible-user-message-content-636c4ff1e0ff.js', 'app-primary-f5ea123a0407.js', 'app-shared-61271c39e3c5.js', 'settings-page-25f8fd08b293.js', 'user-message-58a6f09045c4.js', 'user-message-attachments-9d0c60d2f476.js', 'general-settings-8997e171b11a.js', 'appearance-settings-deb0b7565185.js', 'sites-end-resource-b11586198b69.js', 'local-conversation-turn-981410324fed.js']) {
-    // Check both first adaptation and the server's in-memory cached response.
+    // Neither a first request nor a repeated request may revive the old runtime.
     for (let request = 0; request < 2; request++) {
       const response: Response = await fetch(app.url + webRendererPrefix + '/assets/' + path);
-      assert.equal(response.status, 200);
-      assert.equal(response.headers.get('cache-control'), 'no-store');
-      assert.ok((await response.text()).includes(`from"${rendererComponentsPath}"`));
+      assert.equal(response.status, 404);
+      await response.arrayBuffer();
     }
   }
   const components = await fetch(app.url + rendererComponentsPath);
-  assert.equal(components.headers.get('cache-control'), 'no-store');
+  assert.equal(components.status, 404);
   await components.arrayBuffer();
-  const unchanged = await fetch(app.url + webRendererPrefix + '/assets/rpc-e690e45d1264.js');
-  assert.equal(unchanged.headers.get('cache-control'), 'public, max-age=31536000, immutable');
-  await unchanged.arrayBuffer();
+  for (const path of ['/', '/workbench-entry.js', '/workbench-entry.css']) {
+    const response: Response = await fetch(app.url + path);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    await response.arrayBuffer();
+  }
 });

@@ -1,18 +1,12 @@
 import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 await build({
   absWorkingDir: fileURLToPath(new URL('..', import.meta.url)),
   entryPoints: ['src/native/visualization-sandbox.ts'], outfile: '.local/visualization-sandbox.js',
   bundle: true, format: 'iife', target: ['safari17', 'chrome120'], logLevel: 'info',
-});
-await build({
-  absWorkingDir: fileURLToPath(new URL('..', import.meta.url)),
-  entryPoints: ['src/native/browser-host.ts'], outfile: '.local/native-host.js',
-  bundle: true, format: 'iife', target: ['safari17', 'chrome120'], sourcemap: true,
-  logLevel: 'info',
 });
 
 // A downloadable Node companion, containing our compiled TypeScript transport.
@@ -34,19 +28,14 @@ await writeFile(join(clientDir, 'package.json'), JSON.stringify({
 }, null, 2) + '\n');
 const packed = JSON.parse(execFileSync('npm', ['pack', './.local/chrome-client', '--pack-destination', '.local', '--ignore-scripts', '--json'], { cwd: project, encoding: 'utf8' }));
 await rename(new URL('../.local/' + packed[0].filename, import.meta.url), new URL('../.local/chrome-client.tgz', import.meta.url));
-await build({
+const renderer = await build({
   absWorkingDir: fileURLToPath(new URL('..', import.meta.url)),
-  entryPoints: ['src/native/browser-entry.ts'], outfile: '.local/workbench-entry.js',
-  bundle: true, format: 'esm', target: ['safari17', 'chrome120'], sourcemap: true,
-  logLevel: 'info',
-});
-
-const rendererComponents = await build({
-  absWorkingDir: project,
-  entryPoints: ['src/renderer/components.ts'], outfile: '.local/renderer-components.js',
-  bundle: true, format: 'esm', target: ['safari17', 'chrome120'], sourcemap: 'inline',
+  entryPoints: { 'workbench-entry': 'src/native/browser-entry.ts' }, outdir: '.local/renderer',
+  bundle: true, splitting: true, format: 'esm', target: ['safari17', 'chrome120'], sourcemap: true,
+  loader: { '.woff2': 'file', '.woff': 'file', '.ttf': 'file', '.svg': 'file', '.png': 'file' },
+  assetNames: 'assets/[name]-[hash]', chunkNames: 'chunks/[name]-[hash]',
   metafile: true, logLevel: 'info',
 });
-if (Object.keys(rendererComponents.metafile.inputs).some(path => /node_modules\/react(?:-dom)?\//.test(path))) {
-  throw new Error('Authored renderer components must use the pinned renderer’s React runtime');
-}
+await writeFile(join(project, '.local', 'renderer-metafile.json'), JSON.stringify(renderer.metafile, null, 2) + '\n');
+// PDF.js uses its managed worker from the same origin; no blob frame or snapshot.
+await copyFile(join(project, 'node_modules/pdfjs-dist/build/pdf.worker.min.mjs'), join(project, '.local/renderer/pdf.worker.min.mjs'));

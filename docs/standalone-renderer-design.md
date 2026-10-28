@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v4，2026-10-28，尚未完成实现验收。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v5，2026-10-28，尚未完成实现验收。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -37,7 +37,7 @@ CLI0.164和隔离桌面CLI0.163.0-alpha.10.2的脚本provider实测都表明：�
 
 消息组件接收 CLI ThreadSummary/turn/items，负责逐类型展示、正文/附件/复制/编辑/代码和工具活动。未知 item 以可展开的明确类型与数据展示，不悄悄丢弃。Markdown parser、高亮、数学、Mermaid 等采用按真实功能需要引入的包管理依赖；应用特有链接、文件路径、复制、外部资源和展示策略留在自有 TSX。
 
-设置通过get/set-setting、get/set-global-state、get/set-persisted-atom和CLI config/read/batchWrite访问原来源。后两个atom端点由浏览器WorkbenchClient处理，复用updatedAtom和旧native-atoms key；同源Web Lock覆盖整个读取/更新/写入，写失败拒绝，成功后本页事件及跨页storage事件更新消费者。原生localStorage草稿写入也是同一事务边界，不能跨页整对象覆盖。UI偏好是全局host设置，CLI配置是执行host作用域；界面不接触token/env。config/read(includeLayers:true)取得实际user层file/version，缺可信版本不写，冲突保留编辑。实际CLI0.164及桌面0.163-alpha只提供可写base user层，不支持旧profile/profiles配置；当前模型与effort按该层真实file/version写顶层键，不发明目标。其他后端多层按真实身份选择，不以合成fixture当本机能力。
+设置通过get/set-setting、get/set-global-state、get/set-persisted-atom和CLI config/read/batchWrite访问原来源。后两个atom端点由浏览器WorkbenchClient处理，复用updatedAtom和旧native-atoms key；读、条件检查、更新位于同一个IndexedDB readwrite事务，事务完成后才回成功，失败拒绝。成功后本页订阅及跨页BroadcastChannel只发送失效键，消费者异步重读唯一权威记录。UI偏好是全局host设置，CLI配置是执行host作用域；界面不接触token/env。config/read(includeLayers:true)取得实际user层file/version，缺可信版本不写，冲突保留编辑。实际CLI0.164及桌面0.163-alpha只提供可写base user层，不支持旧profile/profiles配置；当前模型与effort按该层真实file/version写顶层键，不发明目标。其他后端多层按真实身份选择，不以合成fixture当本机能力。
 
 共用native-state.json的项目、偏好、pet与SSH自动连接变更共享一个串行提交区间，包含读取旧值、修改内存、捕获快照、原子写入和失败回滚。不能只串行文件写入，否则会保存其他尚未提交的内存值。成功持久化后才广播；较晚编辑不被旧回执覆盖。原设置保存须连接真实消费者：composerEnterBehavior、followUpQueueMode、主题字体、终端位置等，不能只证明值写入。平台原先不支持的操作保留准确错误/空态，不能用“不支持”代替已有Web功能。
 
@@ -45,7 +45,15 @@ host工具read_thread在真实server接线中使用turnLimit/cursor分页历史�
 
 ## 兼容、并发和断线
 
-原dataDir的settings/global-state、host catalog保持权威。项目assignment/projectless/output/workspace hint迁到明确host/thread键；旧local/remote记录只有在能证明host时适配，不可推导的原记录保留并显示待确认，不默认为local。接口响应/事件带host/thread，撤销、reset及批量操作同样限定身份。浏览器native-atoms按旧key读取，识别tab/sidebar/theme/draft/queue的实际形态；同时保留workbench.browser-comments.v1和既有Chrome client身份，不换配对身份或删批注。跨tab偏好通过storage事件更新，业务通知仍由各自CLI连接提供。
+编辑恢复使用既有 `native-atoms` 中的 `codex-yard.message-edits.v1`，按 host/thread 保留 origin、完整 editor、草稿版本及提交阶段；它只保存 UI 恢复数据，CLI 历史仍是会话权威。服务端以 host/thread 串行执行完整来源核对、回退、启动，正常发送和队列启动使用同一区间。回退已确认而启动失败时只允许 retry-start；任何未知结果先用原 clientUserMessageId 只读检查，检查确认未启动后必须由另一次明确点击触发启动。
+
+每份提交还保存实际发送时的 editor sessionId/revision。只读核对保留该版本；如果用户在旧请求未知期间继续写了新稿，旧请求“已启动”只确认旧稿，返回可见说明并保留新稿，不能进入当前稿的成功清理路径。刷新也保留这个区别。跨页编辑采用读取时观察值与事务内当前值比对；冲突保留草稿并要求刷新核对，写请求不自动重放。
+
+浏览器UI atom统一保存于`codex-yard.ui-atoms.v1`数据库、`atoms`对象仓库中的`native-atoms`单记录。首次读写在同一readwrite事务中导入旧localStorage JSON，保留所有未知键及精确原始字节；无法转换的JSON或根类型也保存原始字节并阻止编辑。导入完成后只读写IndexedDB，不双写、不回退到localStorage；旧原值是只读恢复材料。所有消费者改为异步读取，条件更新函数必须在事务内同步执行，失败或配额错误中止事务。BroadcastChannel只通知键，不携带或保存另一套权威值；遗漏通知不影响下一次读取的正确性。编辑CAS也在同一记录事务中核对，跨页旧观察不能覆盖新稿。草稿原有独立scope/revision逻辑继续保留，旧native-atoms导入消费者须使用本模块读取。
+
+之前Web Lock加MessageChannel在实际双页400次写入中丢1条，材料保留。Chromium的renderer缓存和pending mutation使JavaScript锁不能等价于持久事务，不能靠延长等待关闭。采用浏览器原生事务后，验证首次并发导入、400次跨页更新及新页面回读、未知字段、malformed原值、事务中止和实际App客户端。无同步子页面或自制确认协议。参考[IndexedDB事务调度](https://www.w3.org/TR/IndexedDB/#transaction-scheduling)；具体检查结果随来源提交记录，其他浏览器仍需实际验收。
+
+原dataDir的settings/global-state、host catalog保持权威。项目assignment/projectless/output/workspace hint迁到明确host/thread键；旧local/remote记录只有在能证明host时适配，不可推导的原记录保留并显示待确认，不默认为local。接口响应/事件带host/thread，撤销、reset及批量操作同样限定身份。浏览器native-atoms按旧key导入，识别tab/sidebar/theme/draft/queue的实际形态；同时保留workbench.browser-comments.v1和既有Chrome client身份，不换配对身份或删批注。跨tab atom失效通知通过BroadcastChannel，业务通知仍由各自CLI连接提供。
 
 | 场景 | 所有者与结果 |
 | --- | --- |
@@ -67,4 +75,4 @@ host工具read_thread在真实server接线中使用turnLimit/cursor分页历史�
 
 删除快照前，逐条清理 app-resources、静态路由、MCP adapter、mini/pet 资产、字体/图标、CSS、动态导入、构建脚本、验证脚本、测试和分发说明。第三方资产通过包管理或项目自有资源替代，保留适用 notices。最终从不含整个 vendor/codex-app 的干净来源安装/构建/启动/完整测试，检查 bundle metafile、部署目录和浏览器网络，真实 CLI 只读验证与隔离 synthetic peer 验证分别记录；需要真实推理时交 Leader 裁定授权。
 
-自有入口的隔离synthetic peer整页已证明启动、历史、首次发送、delta/summary完成/刷新、真实组件加载及三档内容边界；主题配色可读性与后续功能仍需补齐。设计v3独立审阅仍为需修改，v4尚未裁决。CLI 0.164.0、现有 daemon 0.163.0 与历史 UI 参考 26.1013.40934 分开记录；正式8765、个人数据/模型/配置、共享daemon和App保持现有状态。
+本组typecheck与305项测试通过。自有入口的隔离synthetic peer整页八组检查已证明启动、历史、首次发送、delta/summary完成/刷新、实际组件加载、三档内容边界、主题正文配色/字体、两页事务更新和编辑恢复；包含旧稿已发送、新稿必须保留的刷新序列。输入框主题和后续功能仍需补齐，未声称全量或真实CLI整页验收。设计v3独立审阅仍为需修改，本次v5冻结后重新裁决。CLI 0.164.0、现有 daemon 0.163.0 与历史 UI 参考 26.1013.40934 分开记录；正式8765、个人数据/模型/配置、共享daemon和App保持现有状态。

@@ -1,5 +1,7 @@
 import type { HostMessage, ObjectValue } from './protocol.ts';
 import { record } from './protocol.ts';
+import { createStateMutations } from './state-mutations.ts';
+import type { StateMutations } from './state-mutations.ts';
 
 export interface PetPosition { x: number; y: number }
 export interface WebPetState {
@@ -21,7 +23,7 @@ export function petPosition(value: unknown): PetPosition | null {
 // Desktop Mini uses a separate BrowserWindow. The Web host retains only that
 // window's visibility/position persistence; the official route owns its UI.
 export function createPetOverlay(globals: ObjectValue, settings: ObjectValue,
-  persist: () => Promise<unknown>, broadcast: (message: HostMessage) => void) {
+  persist: () => Promise<unknown>, broadcast: (message: HostMessage) => void, mutations: StateMutations = createStateMutations()) {
   function snapshot(): WebPetState {
     return {
       isOpen: globals[openKey] === true,
@@ -39,6 +41,8 @@ export function createPetOverlay(globals: ObjectValue, settings: ObjectValue,
       publish(reply);
       return true;
     }
+    if (!['avatar-overlay-open', 'avatar-overlay-close', 'avatar-overlay-hide', 'workbench-pet-position'].includes(message.type)) return false;
+    return mutations.run(async () => {
     let key: string, value: unknown;
     if (message.type === 'avatar-overlay-open') {
       key = openKey; value = globals[openKey] !== true;
@@ -49,17 +53,18 @@ export function createPetOverlay(globals: ObjectValue, settings: ObjectValue,
       if (position === null) return true;
       key = positionKey; value = position;
     } else return false;
-    const previous = globals[key];
+    const existed = Object.hasOwn(globals, key), previous = globals[key];
     globals[key] = value;
     try { await persist(); }
     catch {
-      globals[key] = previous;
+      if (existed) globals[key] = previous; else delete globals[key];
       publish();
       reply({ type: 'workbench-pet-error', error: '宠物设置保存失败，请重试。' });
       return true;
     }
     publish();
     return true;
+    });
   }
   return { handle, publish, snapshot, settingChanged: (key: string) => {
     if (settingKeys.has(key)) {
