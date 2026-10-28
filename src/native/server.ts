@@ -20,6 +20,7 @@ import type { ThreadProjectOperation } from './thread-projects.ts';
 import { configurationRequest, httpFailure } from './http-fetch.ts';
 import type { HttpWireRequest } from './http-fetch.ts';
 import { rendererAssets as assets } from './renderer-assets.ts';
+import { adaptMigratedRendererModule, rendererComponentsPath } from './renderer-migration.ts';
 import { loadConfigurationSnapshot } from './configuration-snapshot.ts';
 import { loadHostCatalog, publicHost } from './hosts.ts';
 import type { HostCatalog } from './hosts.ts';
@@ -81,6 +82,8 @@ export async function createNativeWorkbench(options: Options = {}) {
   if (metadata.version !== rendererVersion) throw new Error('仓库内的 App 资源版本不匹配，请核对 vendor/codex-app 与当前代码版本');
   const browserHost = await readFile(join(projectRoot, '.local', 'native-host.js'));
   const browserEntry = await readFile(join(projectRoot, '.local', 'workbench-entry.js'));
+  const rendererComponents = await readFile(join(projectRoot, '.local', 'renderer-components.js'));
+  const migratedModules = new Map<string, Buffer>();
   const sandboxScript = await readFile(join(projectRoot, '.local', 'visualization-sandbox.js'), 'utf8');
   const sandboxHtml = '<!doctype html><html><head><meta charset="utf-8"><title>Visualization</title></head><body><script>' +
     sandboxScript.replaceAll('</script', '<\\/script') + '</script></body></html>';
@@ -287,6 +290,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       }
       if (path === '/native-host.js') { response.writeHead(200, { 'Content-Type': mime['.js'] }); response.end(browserHost); return; }
       if (path === '/workbench-entry.js') { response.writeHead(200, { 'Content-Type': mime['.js'] }); response.end(browserEntry); return; }
+      if (path === rendererComponentsPath) { response.writeHead(200, { 'Content-Type': mime['.js'], 'Cache-Control': 'no-store' }); response.end(rendererComponents); return; }
       // Native route names are extensionless. Preserve the original asset tree.
       if (!extname(path) && !path.startsWith('/api/')) {
         response.writeHead(200, { 'Content-Type': mime['.html'] });
@@ -299,7 +303,15 @@ export async function createNativeWorkbench(options: Options = {}) {
       const file = resolve(assetRoot, '.' + path);
       if (!file.startsWith(assetRoot + sep)) { response.writeHead(404); response.end(); return; }
       let content: Buffer = await readFile(file);
-      if (webRenderer && path.endsWith('.js')) content = adaptVisualizationModule(path, content);
+      if (webRenderer && path.endsWith('.js')) {
+        const cached = migratedModules.get(path);
+        if (cached) content = cached;
+        else {
+          const original = content;
+          content = adaptMigratedRendererModule(path, adaptVisualizationModule(path, content));
+          if (content !== original) migratedModules.set(path, content);
+        }
+      }
       if (path.startsWith('/assets/') && /-[a-f0-9]{8,}\.[^.]+$/.test(path)) {
         response.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       }

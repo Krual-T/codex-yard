@@ -40,3 +40,13 @@ await build({
   bundle: true, format: 'esm', target: ['safari17', 'chrome120'], sourcemap: true,
   logLevel: 'info',
 });
+
+const rendererComponents = await build({
+  absWorkingDir: project,
+  entryPoints: ['src/renderer/components.ts'], outfile: '.local/renderer-components.js',
+  bundle: true, format: 'esm', target: ['safari17', 'chrome120'], sourcemap: 'inline',
+  metafile: true, logLevel: 'info',
+});
+if (Object.keys(rendererComponents.metafile.inputs).some(path => /node_modules\/react(?:-dom)?\//.test(path))) {
+  throw new Error('Authored renderer components must use the pinned renderer’s React runtime');
+}

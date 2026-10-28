@@ -10,6 +10,8 @@
 
 这是一个实验阶段的独立项目。当前界面对标 **Codex App 26.1013.40934**，自有宿主和扩展采用 TypeScript + React。仓库内的原版界面是编译后的 JS、CSS、字体和其他资源，不包含 App 原始 TypeScript / TSX 源码。[第三方组件说明](THIRD_PARTY.md)
 
+首批自有 React + TypeScript 叶组件已接入现有页面，负责相对时间展示和用户消息正文折叠。[迁移边界与文件归属](docs/react-typescript-migration.md)说明接管范围、保留的上游依赖及验证入口。
+
 ## 当前功能与后续方向
 
 当前支持共享 daemon 会话、本机与已登记 SSH 项目、工作区标签、历史恢复、待发消息、图片粘贴、临时侧聊、文件、终端、Chrome 配对和元素引用，以及聊天中的交互 HTML 可视化。

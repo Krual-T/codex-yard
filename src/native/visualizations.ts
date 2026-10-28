@@ -2,7 +2,9 @@ import type { ObjectValue } from './protocol.ts';
 
 // A distinct URL namespace prevents immutable Electron assets cached by an
 // existing browser from being mixed with the Web transport adapters.
-export const webRendererPrefix = '/web-renderer-v1';
+// v2 also routes the first authored React leaves. Changing the namespace keeps
+// old immutable upstream modules from bypassing the new component seams.
+export const webRendererPrefix = '/web-renderer-v2';
 const resourceOrigins = ['https://persistent.oaistatic.com/plugins/visualize/charts/', 'https://cdnjs.cloudflare.com',
   'https://cdn.jsdelivr.net', 'https://esm.sh', 'https://fonts.bunny.net', 'https://fonts.googleapis.com',
   'https://fonts.gstatic.com', 'https://unpkg.com'].join(' ');
