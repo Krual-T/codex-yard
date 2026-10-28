@@ -10,8 +10,9 @@ Install Node.js and Codex CLI, sign in, and start the workspace. The fixed web i
 
 This is an experimental, independent project with a TypeScript host and React extensions. Its current interface is based on **Codex App 26.1013.40934**. The vendored interface is compiled upstream JavaScript, CSS, fonts and assets; the App's original TypeScript/TSX source is not included. See [third-party components](THIRD_PARTY.md).
 
-The first authored React + TypeScript leaves handle relative timestamps and user
-message disclosure inside the existing page. See the [migration boundaries](docs/react-typescript-migration.md).
+Authored React + TypeScript modules handle shared rows and timestamps, message
+disclosure, code blocks and the home input layout inside the existing page. The
+full frontend migration is ongoing; see the [migration boundaries](docs/react-typescript-migration.md).
 
 ## Current capabilities
 
@@ -82,7 +83,7 @@ Full UI validation scripts in `scripts/verify-*.ts` use a configured CLI backend
 | --- | --- |
 | `src/native/` | Browser bridge, HTTP/WebSocket host, files, terminals, preferences, visualizations |
 | `src/browser-reuse/` | Chrome pairing, panel integration, element references |
-| `src/renderer/` | Authored React presentation leaves using the pinned renderer's React and services |
+| `src/renderer/` | Authored React UI using the pinned renderer's React, state and services |
 | `lib/` | Codex transport, host tools, permissions, protocol types |
 | `scripts/` | Build and optional live validation |
 | `test/` | Portable tests, including the vendored official adapter |

@@ -22,10 +22,13 @@ const id = '00000000-0000-4000-8000-000000000631';
 const tail = 'MIGRATION_LAST_LINE';
 const text = Array.from({ length: 110 }, (_, index) => `Fixture paragraph ${index}: ${'visible sample '.repeat(9)}.`).join('\n\n') + '\n\n' + tail;
 const code = 'const greeting = "你好";\n\tconsole.log(greeting);';
+const longCode = Array.from({ length: 70 }, (_, index) => `const migrationLine${index} = ${index};`).join('\n');
+const markdown = 'Fixture answer:\n\n```ts\n' + code + '\n```\n\n```latex\nx^2+y^2=z^2\n```\n\n```ts\n' + longCode
+  + '\n```\n\n```mermaid\nflowchart TD\n  A[Migration] --> B[TypeScript]\n```';
 fake.threads.set(id, fixtureThread(id, root, { name: 'Migration conversation', updatedAt: Math.floor(Date.now() / 1000) - 300,
   turns: [fixtureTurn('migration-turn', [
     { id: 'migration-input', type: 'userMessage', content: [{ type: 'text', text, text_elements: [] }] },
-    agentItem('migration-answer', 'Fixture answer:\n\n```ts\n' + code + '\n```'),
+    agentItem('migration-answer', markdown),
   ])] }));
 fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.163.0 (fixture)' }));
 fake.handlers.set('account/read', () => ({ account: { type: 'apiKey' }, requiresOpenaiAuth: false }));
@@ -40,7 +43,7 @@ const report: Record<string, unknown> = { renderer: '26.1013.40934', realDaemonU
 let page: Page | undefined;
 
 async function mountedComponents(page: Page) {
-  return page.locator('[data-markdown-copy="exclude"][aria-expanded]').first().evaluate(element => {
+  return page.locator('[data-app-action-sidebar-thread-row]').first().evaluate(element => {
     type Fiber = { type?: { name?: string; displayName?: string }; return?: Fiber; child?: Fiber; sibling?: Fiber };
     const key = Object.keys(element).find(name => name.startsWith('__reactFiber$'));
     if (!key) throw new Error('The real renderer React fiber was not found');
@@ -50,7 +53,7 @@ async function mountedComponents(page: Page) {
     for (let visited = 0; queue.length && visited < 50_000; visited++) {
       const fiber = queue.pop()!;
       const name = fiber.type?.displayName ?? fiber.type?.name;
-      if (name && /^(CollapsibleUserMessageContent|RelativeTime|CompactRelativeTime)$/.test(name)) names.add(name);
+      if (name && /^(CollapsibleUserMessageContent|RelativeTime|CompactRelativeTime|TaskRow|SidebarConversationRow|SidebarStatusBadge|HomeComposerLayout|MarkdownCodeBlock|CodeBlockFrame|MermaidLoadingPlaceholder)$/.test(name)) names.add(name);
       if (fiber.child) queue.push(fiber.child);
       if (fiber.sibling) queue.push(fiber.sibling);
     }
@@ -66,6 +69,22 @@ try {
     page.on('pageerror', error => errors.push(error.message));
     const modules: string[] = [];
     page.on('response', response => { if (response.url().endsWith('/renderer-components.js') && response.ok()) modules.push(response.url()); });
+    await page.goto(app.url, { waitUntil: 'commit' });
+    const homeEditor = page.getByRole('textbox', { name: /^(Do anything|随心输入)$/ });
+    await homeEditor.waitFor({ timeout: 60_000 });
+    const homeComponents = await mountedComponents(page);
+    assert.ok(homeComponents.includes('HomeComposerLayout'), 'The real home route must use the authored composer layout');
+    assert.ok(homeComponents.includes('TaskRow') && homeComponents.includes('SidebarConversationRow'));
+    const draft = `Unsent home draft ${viewport.width}`;
+    await homeEditor.fill(draft);
+    await page.getByRole('button', { name: /Fixture model/ }).click();
+    await page.getByRole('menuitem', { name: /^(Select model|选择模型)$/ }).waitFor();
+    await page.keyboard.press('Escape');
+    assert.equal(await homeEditor.innerText(), draft, 'Opening the existing model menu must preserve the same document');
+    assert.equal(modules.length, 1);
+    checks.push(`${viewport.width}px: real home mounts HomeComposerLayout, TaskRow and SidebarConversationRow; typing and the original model menu preserve the unsent document`);
+    await homeEditor.fill('');
+    modules.length = 0;
     await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/local/' + id), { waitUntil: 'commit' });
     const toggle = page.locator('[data-markdown-copy="exclude"][aria-expanded]').first();
     await toggle.waitFor({ timeout: 60_000 });
@@ -82,7 +101,12 @@ try {
     }
     assert.ok(components.includes('CollapsibleUserMessageContent'), 'The authored message component must be mounted in the existing page');
     assert.ok(components.includes('RelativeTime'), 'The authored timestamp component must be mounted in the existing sidebar hover card');
-    assert.equal(modules.length, 1, 'Both seams import one authored ESM module');
+    assert.ok(components.includes('TaskRow') && components.includes('SidebarConversationRow'));
+    assert.ok(components.includes('MarkdownCodeBlock') && components.includes('CodeBlockFrame'), 'The original Markdown path must render the authored code components');
+    await page.getByRole('status', { name: 'Loading Mermaid diagram', exact: true }).waitFor({ state: 'attached' });
+    components = await mountedComponents(page);
+    assert.ok(components.includes('MermaidLoadingPlaceholder'), 'The real deferred Mermaid path must use the authored placeholder');
+    assert.equal(modules.length, 1, 'All seams import one authored ESM module in this document');
     checks.push(`${viewport.width}px: original page mounts ${components.join(', ')} from one authored module`);
     await page.screenshot({ path: join(output, `${viewport.width}-collapsed.png`) });
     await page.mouse.move(viewport.width / 2, viewport.height / 2);
@@ -106,9 +130,23 @@ try {
     await copy.click();
     await page.waitForFunction(expected => navigator.clipboard.readText().then(value => value === expected), code);
     checks.push(`${viewport.width}px: existing code copy keeps Unicode, tabs and newlines`);
+    const codeFrame = page.locator('[data-code-block]').filter({ hasText: 'const greeting' }).first();
+    await codeFrame.getByRole('button', { name: 'Enable word wrap', exact: true }).click();
+    assert.equal(await codeFrame.getByRole('button', { name: 'Disable word wrap', exact: true }).getAttribute('aria-pressed'), 'true');
+    assert.equal(await codeFrame.locator('[data-code-block-source]').evaluate(element => getComputedStyle(element).whiteSpace), 'pre-wrap');
+    const latex = page.locator('[data-code-block][data-source-visible]').first();
+    await latex.getByRole('button', { name: 'Show source', exact: true }).click();
+    assert.equal(await latex.getAttribute('data-source-visible'), 'true');
+    assert.equal(await latex.locator('[data-code-block-preview]').getAttribute('data-markdown-copy'), 'exclude');
+    await latex.getByRole('button', { name: 'Show preview', exact: true }).click();
+    assert.equal(await latex.getAttribute('data-source-visible'), 'false');
+    checks.push(`${viewport.width}px: official word-wrap preference and LaTeX source/preview controls work through the authored frame`);
     await page.reload({ waitUntil: 'commit' });
     await toggle.waitFor({ timeout: 60_000 });
     assert.ok((await mountedComponents(page)).includes('CollapsibleUserMessageContent'));
+    assert.equal(await codeFrame.getByRole('button', { name: 'Disable word wrap', exact: true }).getAttribute('aria-pressed'), 'true');
+    // Restore the fixture preference before the next independent viewport.
+    await codeFrame.getByRole('button', { name: 'Disable word wrap', exact: true }).click();
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     checks.push(`${viewport.width}px: reload keeps the original route and has no horizontal overflow`);
     await page.screenshot({ path: join(output, `${viewport.width}-reloaded.png`) });

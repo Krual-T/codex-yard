@@ -68,11 +68,11 @@ try {
     const first = page.locator('[data-app-action-sidebar-thread-row]').first();
     await first.waitFor({ timeout: 60000 });
     const scroller = page.locator('#app-shell-sidebar .sidebar-navigation .overflow-y-auto').first();
-    const newChat = page.getByRole('button', { name: '在 Tablet Project 中开始新聊天', exact: true });
+    const newChat = page.getByRole('button', { name: /^(Start new chat in Tablet Project|在 Tablet Project 中开始新聊天)$/ });
     assert.ok(await visibleThroughAncestors(newChat), 'project new-chat action must be visible without hover');
     await page.screenshot({ path: join(output, `${viewport.width}-project-action.png`) });
     // Expand the project so portrait also has enough content to scroll.
-    await page.getByRole('button', { name: '展开显示', exact: true }).first().tap();
+    await page.getByRole('button', { name: /^(Show more|展开显示)$/ }).first().tap();
     const box = await first.boundingBox();
     assert.ok(box);
     await swipe(page, box.x + 80, box.y + 15, -150);
@@ -84,8 +84,11 @@ try {
     await swipe(page, scrollBox.x + 80, scrollBox.y + 80, 150);
     await page.waitForFunction(before => (document.querySelector('#app-shell-sidebar .sidebar-navigation .overflow-y-auto')?.scrollTop ?? 0) < before, projectScroll);
     checks.push(`${viewport.width}px: the reverse swipe scrolls upward`);
-    const recent = page.locator('#app-shell-sidebar section').filter({ has: page.getByRole('button', { name: '最近', exact: true }) })
-      .locator('[data-app-action-sidebar-thread-row]').nth(12);
+    const recentSection = page.locator('#app-shell-sidebar section').filter({ has: page.getByRole('button', { name: /^(Recents|最近)$/ }) });
+    // Bring the section into view before selecting a row: the official list
+    // defers off-screen row content, so a fixed thirteenth DOM row may not exist.
+    await recentSection.getByRole('button', { name: /^(Recents|最近)$/ }).evaluate(element => element.scrollIntoView({ block: 'start' }));
+    const recent = recentSection.locator('[data-app-action-sidebar-thread-row]').first();
     await recent.evaluate(element => element.scrollIntoView({ block: 'center' }));
     const recentBox = await recent.boundingBox();
     assert.ok(recentBox);
@@ -101,12 +104,12 @@ try {
     assert.ok(fake.calls('thread/resume').length > previousResumes, 'touch taps must still open a conversation');
     checks.push(`${viewport.width}px: tapping a conversation still opens it`);
     await newChat.tap();
-    await page.getByRole('textbox', { name: '随心输入', exact: true }).waitFor();
+    await page.getByRole('textbox', { name: /^(Do anything|随心输入)$/ }).waitFor();
     await page.screenshot({ path: join(output, `${viewport.width}-new-chat.png`) });
-    const editor = page.getByRole('textbox', { name: '随心输入', exact: true });
+    const editor = page.getByRole('textbox', { name: /^(Do anything|随心输入)$/ });
     const prompt = `Tablet project test ${viewport.width}`;
     await editor.fill(prompt);
-    await page.getByRole('button', { name: '发送', exact: true }).tap();
+    await page.getByRole('button', { name: /^(Send|发送)$/ }).tap();
     await fake.waitFor(message => message.method === 'turn/start' && JSON.stringify(message.params.input).includes(prompt), 10000);
     const call = fake.calls('thread/start').at(-1);
     assert.equal(call?.params.cwd, root, 'the native project action preserves the selected project');
@@ -118,7 +121,7 @@ try {
   const row = desktop.locator('[data-app-action-sidebar-thread-row]').first();
   await row.waitFor({ timeout: 60000 });
   const scroller = desktop.locator('#app-shell-sidebar .sidebar-navigation .overflow-y-auto').first();
-  await desktop.getByRole('button', { name: '展开显示', exact: true }).first().click();
+  await desktop.getByRole('button', { name: /^(Show more|展开显示)$/ }).first().click();
   await row.hover();
   await desktop.mouse.wheel(0, 220);
   await desktop.waitForFunction(() => (document.querySelector('#app-shell-sidebar .sidebar-navigation .overflow-y-auto')?.scrollTop ?? 0) > 30);

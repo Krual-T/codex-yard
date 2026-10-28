@@ -1,7 +1,7 @@
 # React + TypeScript migration boundaries
 
-The first migration keeps the pinned App 26.1013.40934 application, transport,
-services and React tree. Two existing leaves now render from project-authored
+The migration keeps the pinned App 26.1013.40934 application, transport,
+services and React tree. The boundaries below render from project-authored
 TypeScript source. This is incremental reconstruction of the shipped behavior;
 the upstream App's original TSX source is not available.
 
@@ -9,6 +9,12 @@ the upstream App's original TSX source is not available.
 | --- | --- | --- |
 | Relative time presentation | `src/renderer/shared/relative-time.tsx` | `app-initial`'s `YEc` / exported `j$`; official clock `vIa`, locale `ca`, calendar calculation `VEc`, localized message `W`, and the original React object `AIa` |
 | User message disclosure | `src/renderer/messages/collapsible-user-message-content.tsx` | `collapsible-user-message-content`'s `C` / exported `t`; official measurement/collapse hook, print atom, search registration, Markdown preview context, button, localized messages, icons and React object `E` |
+| Shared task row | `src/renderer/shared/task-row.tsx`, `task-row-types.ts` | `app-initial`'s `GTc` / exported `U$`; original row primitives, atoms, hover/action callbacks, drag services, platform checks and React `cEc`; sidebar, scheduled and automation consumers |
+| Sidebar conversation row | `src/renderer/sidebar/conversation-row.tsx` | `vEc`; existing task row, animated title and class names; navigation, thread/project data and selection stay upstream |
+| PR status badge | `src/renderer/sidebar/status-badge.ts` | `hzc` / exported `KJ`; original icon and tooltip. Static contracts cover upstream badge data; real-page PR metadata is conditional and is not included in the current UI acceptance |
+| Markdown code presentation | `src/renderer/markdown/code-block.tsx`, `mermaid-placeholder.tsx` | `app-initial`'s `Ard` and `trd`; original preview context, language service, snippet/highlighter, Mermaid renderer and locale; authored visibility and loading presentation |
+| Code frame and controls | `src/renderer/markdown/code-block-frame.tsx` | `app-shared`'s `zzn`; original copy-result button/clipboard, wrap preference, theme, LaTeX renderer and primitives; authored action bar and preview/source layout |
+| Home composer layout | `src/renderer/composer/home-composer-layout.tsx` | `app-primary`'s `RBt`; original feature gates, model scope, layout children and controller identity. The main editor, document/draft and submit logic are subsequent boundaries |
 
 The timestamp entry is shared by local and remote sidebar rows, pending worktree
 rows, hover cards and other lazy pages. The same defaults, message identifiers,
@@ -24,20 +30,22 @@ hidden controls' accessibility handling.
 
 | Area | Responsibility |
 | --- | --- |
-| `src/renderer/shared/` | Shared presentation leaves; upstream services supply time, locale and business data |
-| `src/renderer/messages/` | Message display leaves; upstream services own conversation and disclosure state |
-| `src/renderer/components.ts` | Explicit exports of the two component factories |
-| `src/native/renderer-migration.ts` | The two pinned, uniquely matched function seams |
+| `src/renderer/shared/`, `sidebar/` | Shared rows, timestamps and sidebar presentation; upstream services supply business data |
+| `src/renderer/messages/`, `markdown/` | Message and Markdown display; upstream services own conversation state, parser/highlighting and host operations |
+| `src/renderer/composer/` | Input UI and controller boundaries; reuse the existing document, draft, scope and transport |
+| `src/renderer/components.ts` | Explicit exports of component factories |
+| `src/native/renderer-migration.ts` | Explicit pinned, uniquely matched function seams |
 | `src/native/server.ts`, `src/native/visualizations.ts`, `scripts/build-native.ts` | Resource delivery, cache namespace and authored component build |
 | `test/renderer-*.test.ts`, `scripts/verify-renderer-migration.ts` | Boundary checks and isolated page verification |
 
-The two development areas have separate source branches; shared integration is
-owned by the migration manager. A status-badge candidate remains on its source
-branch for a later batch with PR metadata fixtures.
+Development areas have separate source branches; shared integration is owned by
+the migration manager. Badge callers require PR metadata. The Web host currently
+has no GitHub service or Git worker support; ordinary local-row acceptance does
+not prove the conditional badge is mounted.
 
 ## Runtime integration
 
-The server adapts only its responses for the two fixed function boundaries.
+The server adapts only its responses for the explicitly listed fixed functions.
 It verifies the exact function start/end boundaries match once before substituting a small wrapper;
 `vendor/codex-app/` and its notices remain unchanged. Unrelated functions and
 exports stay upstream. A missing or ambiguous upstream boundary fails and requires
@@ -71,9 +79,11 @@ and a fresh headless browser. Set `AGENTS_TEST_CHROMIUM` when needed and
 for offline configuration. `AGENTS_MIGRATION_EVIDENCE` selects the private output
 directory. No personal sessions, shared daemon or default model are changed.
 
-The script checks the actual React fiber names in the existing page, one authored
-module load, the existing sidebar hover card, disclosure expansion/collapse, upstream print-state restoration,
-code copy, reload and desktop/tablet layouts. Account-backed validation and clean
+The script checks actual React fiber names on the home and local-conversation
+pages, one authored module load, typing and the existing model menu, sidebar rows
+and hover card, disclosure expansion/collapse, upstream print-state restoration,
+exact code copy, word-wrap persistence, LaTeX source/preview, the deferred Mermaid
+placeholder, reload and desktop/tablet layouts. Account-backed validation and clean
 checkout startup are recorded separately with their actual CLI/backend versions;
 App 26.1013.40934 identifies the resource reference, not the daemon version.
 
@@ -83,7 +93,11 @@ contract check does not claim that every lazy page has been exercised.
 
 ## Later batches
 
-Project/thread selection, ordering, drag interactions, menus, PR metadata,
-conversation state, Markdown rendering and the composer remain upstream. Future
-batches should follow an existing prop/service boundary and prove that the
-authored component is used by the actual page before expanding the scope.
+The full Web frontend is still being restored. Remaining work includes route and
+shell components, project/thread state and groups, message/attachment/turn parents,
+the rest of Markdown, the main composer and shared controller/drafts/queue, menus,
+settings sections, file/terminal/diff/Chrome/output wrappers, Mini and conditional
+product pages. Third-party libraries and protocol/host services may remain
+dependencies; application UI in the same bundles is not implicitly exempt.
+Each boundary must be used by the actual page and preserve its existing behavior
+before its migration is considered complete.

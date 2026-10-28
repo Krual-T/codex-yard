@@ -10,7 +10,7 @@
 
 这是一个实验阶段的独立项目。当前界面对标 **Codex App 26.1013.40934**，自有宿主和扩展采用 TypeScript + React。仓库内的原版界面是编译后的 JS、CSS、字体和其他资源，不包含 App 原始 TypeScript / TSX 源码。[第三方组件说明](THIRD_PARTY.md)
 
-首批自有 React + TypeScript 叶组件已接入现有页面，负责相对时间展示和用户消息正文折叠。[迁移边界与文件归属](docs/react-typescript-migration.md)说明接管范围、保留的上游依赖及验证入口。
+自有 React + TypeScript 模块已接入现有页面，负责共享会话行与时间、用户消息折叠、代码块及首页输入布局。完整前端迁移仍在推进；[迁移边界与文件归属](docs/react-typescript-migration.md)说明实际接管范围、保留的上游依赖及验证入口。
 
 ## 当前功能与后续方向
 
