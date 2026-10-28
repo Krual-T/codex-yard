@@ -1,5 +1,5 @@
-import { Schema } from 'prosemirror-model';
-import type { Node as ProseMirrorNode } from 'prosemirror-model';
+import { Fragment, Schema } from 'prosemirror-model';
+import type { Mark, Node as ProseMirrorNode } from 'prosemirror-model';
 import { defaultMarkdownParser, defaultMarkdownSerializer, MarkdownSerializer } from 'prosemirror-markdown';
 import type { ComposerDocument } from '../workbench-contract.ts';
 
@@ -56,6 +56,8 @@ export const composerSchema = new Schema({
         title: node.attrs.href, ...(node.attrs.isLoading ? { 'aria-busy': 'true' }
           : { role: 'button', tabindex: '0', 'aria-haspopup': 'dialog', 'aria-expanded': 'false' }) },
         node.attrs.isLoading ? node.attrs.loadingDisplayText ?? node.attrs.displayText : node.attrs.displayText] },
+    // Used only in a temporary serialization projection, never in a stored document.
+    literalMarkdownLink: { attrs: { source: string }, inline: true, group: 'inline', atom: true },
     chatGptSystemHint: { attrs: { label: string, systemHint: string }, inline: true, group: 'inline', atom: true, selectable: false,
       parseDOM: [{ tag: 'span[data-system-hint-type][data-system-hint-label]', getAttrs: dom => {
         const element = dom as HTMLElement;
@@ -91,17 +93,73 @@ function markdownDestination(path: string): string {
     ? '%' + character.charCodeAt(0).toString(16).padStart(2, '0').toUpperCase() : '\\' + character);
 }
 
-/** Accept only a whole, unformatted literal link whose parsed destination and label match this node. */
-function verifiedLiteralLink(source: unknown, label: unknown, href: unknown): string | null {
-  if (typeof source !== 'string' || !/^\[(?:\\.|[^\]\\\r\n])+\]\((?:<[^<>\r\n]+>|[^()\s\r\n]+)\)$/.test(source)) return null;
+interface LiteralPart { text: string; marks: string[] }
+interface ParsedLiteral { href: string; title: string | null; parts: LiteralPart[] }
+
+/** Parse an entire literal using the same Markdown rules as the editor. */
+function parseLiteralLink(source: unknown): ParsedLiteral | null {
+  if (typeof source !== 'string' || /[\r\n]/.test(source) || !((source.startsWith('[') && source.endsWith(')'))
+    || (source.startsWith('<') && source.endsWith('>')))) return null;
   try {
+    const tokens = defaultMarkdownParser.tokenizer.parse(source, {}), inline = tokens[1]?.children;
+    if (tokens.length !== 3 || tokens[0]?.type !== 'paragraph_open' || tokens[1]?.type !== 'inline'
+      || tokens[2]?.type !== 'paragraph_close' || !inline || inline[0]?.type !== 'link_open'
+      || inline.at(-1)?.type !== 'link_close' || inline.filter(token => token.type === 'link_open').length !== 1
+      || inline.filter(token => token.type === 'link_close').length !== 1) return null;
     const document = defaultMarkdownParser.parse(source);
     const paragraph = document?.childCount === 1 ? document.child(0) : null;
-    const text = paragraph?.type.name === 'paragraph' && paragraph.childCount === 1 ? paragraph.child(0) : null;
-    const link = text?.marks.length === 1 && text.marks[0]?.type.name === 'link' ? text.marks[0] : null;
-    return text?.isText && text.text === label && !!link && link.attrs.href === href && link.attrs.title == null
-      && typeof href === 'string' && !href.startsWith('codex-text-link://') ? source : null;
+    if (!paragraph || paragraph.type.name !== 'paragraph' || !paragraph.childCount) return null;
+    let href: string | null = null, title: string | null = null;
+    const parts: LiteralPart[] = [];
+    for (let index = 0; index < paragraph.childCount; index++) {
+      const child = paragraph.child(index), link = child.marks.find(mark => mark.type.name === 'link');
+      if (!child.isText || !child.text || !link || typeof link.attrs.href !== 'string'
+        || link.attrs.href.startsWith('codex-text-link://') || link.attrs.title != null && typeof link.attrs.title !== 'string') return null;
+      if (href !== null && (href !== link.attrs.href || title !== link.attrs.title)) return null;
+      href = link.attrs.href; title = link.attrs.title;
+      parts.push({ text: child.text, marks: child.marks.filter(mark => mark !== link).map(mark => mark.type.name).sort() });
+    }
+    return href === null ? null : { href, title, parts };
   } catch { return null; }
+}
+
+function verifiedLiteralLink(source: unknown, label: unknown, href: unknown): string | null {
+  const parsed = parseLiteralLink(source);
+  return parsed && parsed.href === href && parsed.title === null && parsed.parts.map(part => part.text).join('') === label
+    ? source as string : null;
+}
+
+/** Build a transient rendering node only after the complete marked run matches its own source. */
+function literalMarkProjection(nodes: ProseMirrorNode[], link: Mark): ProseMirrorNode | null {
+  const source = link.attrs.literalMarkdownSource, parsed = parseLiteralLink(source);
+  if (!parsed || parsed.href !== link.attrs.href || parsed.title !== link.attrs.title) return null;
+  const characters = (parts: LiteralPart[]) => parts.flatMap(part => Array.from(part.text, text => ({ text, marks: part.marks })));
+  const expected = characters(parsed.parts), actual = characters(nodes.map(node => ({ text: node.text ?? '',
+    marks: node.marks.filter(mark => mark.type.name !== 'link').map(mark => mark.type.name).sort() })));
+  if (!expected.length || expected.length !== actual.length) return null;
+  const outer = actual[0]!.marks.filter(mark => !expected[0]!.marks.includes(mark));
+  if (outer.includes('code') || expected.some((item, index) => item.text !== actual[index]!.text
+    || [...new Set([...item.marks, ...outer])].sort().join('\0') !== actual[index]!.marks.join('\0'))) return null;
+  const marks = nodes[0]!.marks.filter(mark => mark.type.name !== 'link' && outer.includes(mark.type.name));
+  return composerSchema.nodes.literalMarkdownLink!.create({ source }, null, marks);
+}
+
+function projectLiteralMarks(node: ProseMirrorNode): ProseMirrorNode {
+  if (node.isLeaf) return node;
+  const children: ProseMirrorNode[] = [];
+  for (let index = 0; index < node.childCount; index++) {
+    const child = node.child(index), link = child.isText && child.marks.find(mark => mark.type.name === 'link');
+    if (!link || typeof link.attrs.literalMarkdownSource !== 'string') { children.push(projectLiteralMarks(child)); continue; }
+    const run = [child];
+    while (index + 1 < node.childCount) {
+      const next = node.child(index + 1), nextLink = next.isText && next.marks.find(mark => mark.type.name === 'link');
+      if (!nextLink || !link.eq(nextLink)) break;
+      run.push(next); index++;
+    }
+    const projected = literalMarkProjection(run, link);
+    children.push(...(projected ? [projected] : run));
+  }
+  return node.copy(Fragment.fromArray(children));
 }
 const serializer = new MarkdownSerializer({
   paragraph: base.paragraph!, text: base.text!, hard_break: state => state.write('\\\n'), heading: base.heading!, blockquote: base.blockquote!,
@@ -123,6 +181,7 @@ const serializer = new MarkdownSerializer({
     + markdownDestination(node.attrs.path) + ')'),
   richLink: (state, node) => state.write(verifiedLiteralLink(node.attrs.literalMarkdownSource, node.attrs.displayText, node.attrs.href)
     ?? '[' + state.esc(node.attrs.displayText) + '](' + markdownDestination(node.attrs.href) + ')'),
+  literalMarkdownLink: (state, node) => state.write(node.attrs.source),
   chatGptSystemHint: (state, node) => state.write('[' + state.esc(node.attrs.label) + '](chatgpt-system-hint://' + node.attrs.systemHint + ')'),
 }, { ...defaultMarkdownSerializer.marks, link: {
   ...defaultLink,
@@ -142,6 +201,7 @@ function knownKeys(value: object, allowed: string[]): boolean {
 }
 function validJSON(node: ComposerDocument): boolean {
   if (!knownKeys(node, ['type', 'attrs', 'content', 'marks', 'text'])) return false;
+  if (node.type === 'literalMarkdownLink') return false;
   const spec = composerSchema.nodes[node.type];
   if (!spec || node.attrs && !knownKeys(node.attrs, Object.keys(spec.spec.attrs ?? {}))) return false;
   if (node.type === 'text' ? typeof node.text !== 'string' || !node.text || !!node.content || !!node.attrs
@@ -165,7 +225,8 @@ function validJSON(node: ComposerDocument): boolean {
     if (!knownKeys(mark, ['type', 'attrs'])) return true;
     const markType = composerSchema.marks[mark.type];
     if (!markType || mark.attrs && !knownKeys(mark.attrs, Object.keys(markType.spec.attrs ?? {}))) return true;
-    return mark.type === 'link' && (mark.attrs?.literalMarkdownSource != null || mark.attrs?.literalMarkdownOccurrenceId != null);
+    return mark.type === 'link' && mark.attrs?.literalMarkdownOccurrenceId != null
+      && (!Number.isSafeInteger(mark.attrs.literalMarkdownOccurrenceId) || (mark.attrs.literalMarkdownOccurrenceId as number) < 0);
   })) return false;
   return node.content?.every(validJSON) ?? true;
 }
@@ -182,6 +243,7 @@ export function readRichDocument(document: ComposerDocument): ProseMirrorNode | 
 export function serializeRichDocument(document: ProseMirrorNode, options?: { standardParagraphs?: boolean; tightLists?: boolean; escapeExtraCharacters?: RegExp }): string {
   const selected = options?.escapeExtraCharacters
     ? new MarkdownSerializer(serializer.nodes, serializer.marks, { escapeExtraCharacters: options.escapeExtraCharacters }) : serializer;
+  document = projectLiteralMarks(document);
   // The original rich serializer joins a document consisting of paragraphs with single newlines.
   if (!options?.standardParagraphs && document.childCount && Array.from({ length: document.childCount }, (_, i) => document.child(i))
     .every(node => node.type.name === 'paragraph')) {

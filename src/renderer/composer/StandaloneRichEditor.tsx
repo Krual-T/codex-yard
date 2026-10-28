@@ -259,7 +259,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
       },
       transformPastedHTML: html => {
         const parsed = new DOMParser().parseFromString(html, 'text/html');
-        for (const element of parsed.querySelectorAll('[data-mention="rich-link"][data-composer-attrs]')) {
+        for (const element of parsed.querySelectorAll('[data-mention="rich-link"][data-composer-attrs], a[data-composer-attrs]')) {
           try {
             const attrs: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
             if (!attrs || typeof attrs !== 'object' || Array.isArray(attrs)) continue;
