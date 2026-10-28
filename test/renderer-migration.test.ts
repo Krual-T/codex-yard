@@ -17,9 +17,19 @@ test('the pinned component seams produce valid ESM and require unique function b
     ['/assets/app-initial-a68277f60b93.js', 'function hzc(e){', 't[8]=n.tooltipContent,t[9]=c,t[10]=l):l=t[10],l}', 'var gzc,_zc,vzc;'],
     ['/assets/app-initial-a68277f60b93.js', 'function Ard(e){let t=(0,Prd.c)(54),', 't[52]=O,t[53]=F):F=t[53],F}', 'function jrd(e){'],
     ['/assets/app-initial-a68277f60b93.js', 'function trd(e){let t=(0,nrd.c)(5),', 'description:`Shimmering status text shown while a Mermaid diagram response is waiting to render`})})}),t[4]=i):i=t[4],i}', 'var nrd,rrd;'],
+    ['/assets/app-initial-a68277f60b93.js', 'function y_d(e){let t=(0,b_d.c)(101),', 't[99]=Ie,t[100]=Le):Le=t[100],Le}', 'var b_d,x_d,M9,S_d;function C_d()'],
+    ['/assets/app-initial-a68277f60b93.js', 'function BSd(e){let t=(0,VSd.c)(45),', 't[42]=V,t[43]=ae,t[44]=oe):oe=t[44],oe}', 'var VSd,U9,HSd,USd;function WSd()'],
     ['/assets/collapsible-user-message-content-636c4ff1e0ff.js', 'function C(e){', 'n[57]=Q,n[58]=$):$=n[58],$}', 'function w(e,t,n){'],
     ['/assets/app-primary-f5ea123a0407.js', 'function RBt(e){', 't[17]=T,t[18]=O,t[19]=k):k=t[19],k}', 'async function zBt(e){'],
+    ['/assets/app-primary-f5ea123a0407.js', 'function Mpt(e){let t=(0,wZ.c)(251),', 't[249]=er,t[250]=J):J=t[250],J}', 'function Npt(e){'],
+    ['/assets/app-primary-f5ea123a0407.js', 'function cut(e){let t=(0,MX.c)(31),', 't[29]===_?D=t[30]:(D=()=>_(),t[29]=_,t[30]=D),D}', 'var MX,NX;function lut()'],
     ['/assets/app-shared-61271c39e3c5.js', 'function zzn(e){let t=(0,Hzn.c)(79),', 't[77]=K,t[78]=De):De=t[78],De}', 'function Bzn(e){'],
+    ['/assets/settings-page-25f8fd08b293.js', 'function _i(){let e=(0,Ci.c)(143),', 'e[139]=Je,e[140]=nt,e[141]=it,e[142]=at):at=e[142],at}', 'function vi(e){'],
+    ['/assets/user-message-58a6f09045c4.js', 'function yt(e){let t=(0,bt.c)(18),', 't[13]=o,t[14]=u,t[15]=y,t[16]=r,t[17]=ee):ee=t[17],ee}', 'var bt,xt;'],
+    ['/assets/user-message-58a6f09045c4.js', 'function Rt(e){let n=(0,Vt.c)(171),', 'n[166]=Tt,n[167]=Et,n[168]=X,n[169]=It,n[170]=Lt):Lt=n[170],Lt}', 'function zt(e){'],
+    ['/assets/user-message-attachments-9d0c60d2f476.js', 'function gn(e){let t=(0,xn.c)(60),', 't[50]=n.endLine,t[51]=n.startLine,t[52]=r,t[53]=i,t[54]=f,t[55]=m,t[56]=h,t[57]=x,t[58]=S,t[59]=C):C=t[59],C}', 'function _n(e){'],
+    ['/assets/user-message-attachments-9d0c60d2f476.js', 'function pn(e){let t=(0,xn.c)(18),', 't[16]===u?d=t[17]:(d=(0,$.jsx)($.Fragment,{children:u}),t[16]=u,t[17]=d),d}', 'function mn(e){'],
+    ['/assets/user-message-attachments-9d0c60d2f476.js', 'function fn(e){let t=(0,xn.c)(110),', 't[101]=E,t[102]=T,t[103]=w,t[104]=me,t[105]=I,t[106]=F,t[107]=Ve,t[108]=Be,t[109]=We):We=t[109],We}', 'function pn(e){'],
   ]) {
     const original = await readFile(join(rendererRoot, path));
     const adapted = adaptMigratedRendererModule(path, original);
@@ -48,7 +58,7 @@ test('adapted modules cannot remain immutable across authored component upgrades
   t.after(async () => { await app?.close(); await fake.close(); await rm(root, { recursive: true, force: true }); });
   app = await createNativeWorkbench({ port: 0, socketPath: fake.socketPath, codexHome: join(root, 'codex'),
     dataDir: join(root, 'data'), workspace: root, hostCatalog: { hosts: [], projects: [], assignments: {} } });
-  for (const path of ['app-initial-a68277f60b93.js', 'collapsible-user-message-content-636c4ff1e0ff.js', 'app-primary-f5ea123a0407.js', 'app-shared-61271c39e3c5.js']) {
+  for (const path of ['app-initial-a68277f60b93.js', 'collapsible-user-message-content-636c4ff1e0ff.js', 'app-primary-f5ea123a0407.js', 'app-shared-61271c39e3c5.js', 'settings-page-25f8fd08b293.js', 'user-message-58a6f09045c4.js', 'user-message-attachments-9d0c60d2f476.js']) {
     // Check both first adaptation and the server's in-memory cached response.
     for (let request = 0; request < 2; request++) {
       const response: Response = await fetch(app.url + webRendererPrefix + '/assets/' + path);

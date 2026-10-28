@@ -38,7 +38,14 @@ try {
   if (process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT) await cp(process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT, join(dataDir, 'configuration-snapshot'), { recursive: true });
   app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: fake.socketPath, codexHome: join(root, 'codex'),
     hostCatalog: { hosts: [], projects: [], assignments: {} },
-    httpFetch: async () => new Response('External telemetry disabled for queue fixture', { status: 503 }) });
+    // The original coordinator uses these gates before reading thread/queue.
+    // Serve a disposable configuration response through the actual host fetch;
+    // do not depend on a personal cached configuration or patch React state.
+    httpFetch: async input => new URL(String(input)).pathname.endsWith('/initialize')
+      ? Response.json({ has_updates: true, time: Date.now(), feature_gates: Object.fromEntries(
+        ['1189013788', '2120612410'].map(name => [name, { name, value: true, rule_id: 'queue-fixture', secondary_exposures: [] }]),
+      ), dynamic_configs: {}, layer_configs: {} })
+      : new Response('External telemetry disabled for queue fixture', { status: 503 }) });
   browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? join(homedir(), '.cache/ms-playwright/chromium-1228/chrome-linux64/chrome'),
     headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -46,22 +53,22 @@ try {
   await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/local/' + threadId), { waitUntil: 'commit' });
   await page.getByText(editText, { exact: true }).waitFor({ timeout: 60000 });
   await capture('before');
-  await page.getByRole('button', { name: '删除排队的消息', exact: true }).nth(1).click();
+  await page.getByRole('button', { name: /^(删除排队的消息|Delete queued message)$/ }).nth(1).click();
   await page.getByText(deleteText, { exact: true }).waitFor({ state: 'detached' });
   assert.equal(fake.queues.get(threadId)?.length, 1);
-  await page.getByRole('button', { name: '排队消息操作', exact: true }).click();
+  await page.getByRole('button', { name: /^(排队消息操作|Queued message actions)$/ }).click();
   await capture('edit-menu');
-  await page.getByRole('menuitem', { name: /^编辑/ }).click();
-  const editor = page.getByRole('textbox', { name: '和 Codex 一起工作', exact: true });
+  await page.getByRole('menuitem', { name: /^(编辑|Edit)/ }).click();
+  const editor = page.getByRole('textbox', { name: /^(和 Codex 一起工作|Work with Codex)$/ });
   await editor.getByText(editText, { exact: true }).waitFor();
   assert.equal(fake.queues.get(threadId)?.length, 0);
   await capture('editing');
   const changed = '验收：修改后重新排队';
   await editor.fill(changed);
-  await page.getByRole('button', { name: '排队', exact: true }).click();
+  await page.getByRole('button', { name: /^(排队|Queue)$/ }).click();
   await page.getByRole('group', { name: new RegExp(changed) }).waitFor();
   await fake.waitFor(message => message.method === 'thread/queue/add');
-  await page.getByRole('status').filter({ hasText: /^正在发送$/ }).waitFor({ state: 'detached' });
+  await page.getByRole('status').filter({ hasText: /^(正在发送|Sending)$/ }).waitFor({ state: 'detached' });
   assert.deepEqual(fake.queues.get(threadId)?.[0]?.input, [{ type: 'text', text: changed + '\n', text_elements: [] }]);
   assert.equal(fake.calls('thread/queue/delete').length, 2);
   assert.equal(fake.calls('thread/queue/add').length, 1);

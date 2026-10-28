@@ -7,11 +7,14 @@ export function adaptMigratedRendererModule(path: string, content: Buffer): Buff
   if (path !== '/assets/app-initial-a68277f60b93.js'
       && path !== '/assets/collapsible-user-message-content-636c4ff1e0ff.js'
       && path !== '/assets/app-primary-f5ea123a0407.js'
-      && path !== '/assets/app-shared-61271c39e3c5.js') return content;
+      && path !== '/assets/app-shared-61271c39e3c5.js'
+      && path !== '/assets/user-message-58a6f09045c4.js'
+      && path !== '/assets/user-message-attachments-9d0c60d2f476.js'
+      && path !== '/assets/settings-page-25f8fd08b293.js') return content;
   let source = content.toString('utf8');
   let prefix: string;
   if (path === '/assets/app-initial-a68277f60b93.js') {
-    prefix = `import{createRelativeTimeComponent as __yardCreateRelativeTime,createTaskRowComponent as __yardCreateTaskRow,createSidebarConversationRowComponent as __yardCreateConversationRow,createSidebarStatusBadgeComponent as __yardCreateBadge,createMarkdownCodeBlockComponent as __yardCreateMarkdownCodeBlock,createMermaidLoadingPlaceholderComponent as __yardCreateMermaidPlaceholder}from"${rendererComponentsPath}";let __yardRelativeTime,__yardTaskRow,__yardConversationRow,__yardBadge,__yardMarkdownCodeBlock,__yardMermaidPlaceholder;\n`;
+    prefix = `import{createRelativeTimeComponent as __yardCreateRelativeTime,createTaskRowComponent as __yardCreateTaskRow,createSidebarConversationRowComponent as __yardCreateConversationRow,createSidebarStatusBadgeComponent as __yardCreateBadge,createMarkdownCodeBlockComponent as __yardCreateMarkdownCodeBlock,createMermaidLoadingPlaceholderComponent as __yardCreateMermaidPlaceholder,createMainComposerViewComponent as __yardCreateComposerView,createComposerControllerProvider as __yardCreateComposerProvider}from"${rendererComponentsPath}";let __yardRelativeTime,__yardTaskRow,__yardConversationRow,__yardBadge,__yardMarkdownCodeBlock,__yardMermaidPlaceholder,__yardComposerView,__yardComposerProvider;\n`;
     source = replacePinnedFunction(path, source,
       'function YEc(e){',
       '(l=(0,eDc.jsx)(ZEc,{dateString:n,now:c,dayBasis:o}),t[6]=n,t[7]=o,t[8]=c,t[9]=l):l=t[9],l}',
@@ -36,22 +39,75 @@ export function adaptMigratedRendererModule(path: string, content: Buffer): Buff
       'function trd(e){let t=(0,nrd.c)(5),',
       'description:`Shimmering status text shown while a Mermaid diagram response is waiting to render`})})}),t[4]=i):i=t[4],i}',
       'function trd(e){return(0,rrd.jsx)(__yardMermaidPlaceholder??=__yardCreateMermaidPlaceholder(Ts(),{useIntl:ca,Skeleton:aJo,ShimmeringStatus:Znd,FormattedMessage:W}),e)}');
+    source = replacePinnedFunction(path, source,
+      'function y_d(e){let t=(0,b_d.c)(101),',
+      't[99]=Ie,t[100]=Le):Le=t[100],Le}',
+      'function y_d(e){return(0,M9.jsx)(__yardComposerView??=__yardCreateComposerView(x_d,{MotionContext:Xsr,PresentationContext:Lk,Parts:Uk,Editor:n_d,Surface:Qgd,LegacyDictation:O4u,RealtimeVoice:Bgd,DictationControls:h_d,mergeRefs:Bc,classNames:Wc}),e)}');
+    source = replacePinnedFunction(path, source,
+      'function BSd(e){let t=(0,VSd.c)(45),',
+      't[42]=V,t[43]=ae,t[44]=oe):oe=t[44],oe}',
+      'function BSd(e){return(0,USd.jsx)(__yardComposerProvider??=__yardCreateComposerProvider(U9,{ControllerContext:ncr,useEnterBehavior:()=>oa(Ua.composerEnterBehavior),usePlainTextMode:()=>oa(Ua.composerPlainTextMode),useIsHydrating:ie,flushSync:HSd.flushSync,createController:xUu,documentFromText:lq,createTextSelection:(doc,anchor,head)=>$s.create(doc,anchor,head)}),e)}');
   } else if (path === '/assets/collapsible-user-message-content-636c4ff1e0ff.js') {
     prefix = `import{createCollapsibleUserMessageContentComponent as __yardCreateMessageContent}from"${rendererComponentsPath}";let __yardMessageContent;\n`;
     source = replacePinnedFunction(path, source,
       'function C(e){', 'n[57]=Q,n[58]=$):$=n[58],$}',
       'function C(e){return(0,D.jsx)(__yardMessageContent??=__yardCreateMessageContent(E,{useIsPrinting:()=>ee(x),useTextContentMeasurement:r,registerThreadFindTarget:re,CodeBlockPreviewContext:ne,Button:t,FormattedMessage:a,ChevronDown:te,classNames:m}),e)}');
   } else if (path === '/assets/app-primary-f5ea123a0407.js') {
-    prefix = `import{createHomeComposerLayoutComponent as __yardCreateHomeComposerLayout}from"${rendererComponentsPath}";let __yardHomeComposerLayout;\n`;
+    prefix = `import{createHomeComposerLayoutComponent as __yardCreateHomeComposerLayout,createComposerDraftScopeComponent as __yardCreateDraftScope,createComposerSubmitControls as __yardCreateSubmitControls}from"${rendererComponentsPath}";let __yardHomeComposerLayout,__yardDraftScope,__yardSubmitControls;\n`;
     source = replacePinnedFunction(path, source,
       'function RBt(e){', 't[17]=T,t[18]=O,t[19]=k):k=t[19],k}',
       'function RBt(e){return(0,K9.jsx)(__yardHomeComposerLayout??=__yardCreateHomeComposerLayout(G9,{useSidebarOpen:()=>Y(ape),useSidebarWidth:()=>Y(xLe),useMediaQuery:$l,sidebarBreakpoint:tMe,useLocation:Sf,useIsWorkMode:()=>Rv()===$h,useVoiceRequest:()=>Y(nle),matchMissionControl:e=>hc(`/mission-control`,e),isTemporaryChat:te,useFeatureFlag:bS,ModelPickerScope:bV,ScopeProvider:Jf,KeyboardShortcuts:cRt,LegacyLayout:MBt,ModeToggleWrapper:yj,WorkHomePage:GBt,StandardLayout:BBt,prepareTaskSuggestionDestination:zBt}),e)}');
-  } else {
+    const composerStart = 'function Mpt(e){let t=(0,wZ.c)(251),';
+    const composerEnd = 't[249]=er,t[250]=J):J=t[250],J}';
+    const composerFrom = source.indexOf(composerStart);
+    let composer = source.slice(composerFrom, source.indexOf(composerEnd, composerFrom) + composerEnd.length);
+    // Restore only Mpt's draft/provider and root composition. Its remaining
+    // application hooks and the original local/cloud controller stay upstream.
+    composer = replacePinnedFunction(path, composer, 'let ct=st,lt;', 'let pt=ft,mt;', 'let ct=st,mt;');
+    composer = replacePinnedFunction(path, composer, 'let Mn=ct??void 0,Nn;', 'let Wn;', 'let Wn;');
+    composer = replacePinnedFunction(path, composer, 'let er;t[233]!==le', composerEnd,
+      'return(0,EZ.jsx)(__yardDraftScope??=__yardCreateDraftScope(TZ,{ComposerProvider:wEe,EnvironmentSetup:Rpt,WorkspaceBanner:Nse,WorkspaceFooter:AZe,SettingsError:NZe,isClientThreadId:el,hasProtectedDraft:Sre,getSnapshot:s=>s.get(GSe),getDocument:fh,getPersistedText:s=>s.get(iC),serializeDocument:nb,isPrompt:kD,writeDocument:oNe,preserveDocument:Iae}),{scope:He,draftKey:ot,conversationId:ct,isWorkspaceStarter:nt,rootClassName:jn,surfacePlacement:Ne,showSurface:je,plainTextMode:it,defaultPrompt:he,composerController:le,onPlainTextChange:G,aboveComposerContent:o,aboveComposerContentLayout:Se,hotkeyWindowHomeFooterControls:fe,workSettingsQuery:tn,composer:$n})}');
+    source = replacePinnedFunction(path, source, composerStart, composerEnd, composer);
+    source = replacePinnedFunction(path, source,
+      'function cut(e){let t=(0,MX.c)(31),',
+      't[29]===_?D=t[30]:(D=()=>_(),t[29]=_,t[30]=D),D}',
+      'function cut(e){return(__yardSubmitControls??=__yardCreateSubmitControls(NX,{useComposerScope:()=>lr(iD),useComposerController:gm,useShortcut:qD,useStableEvent:wf,isShortcut:LS,getEnterBehavior:s=>sa(s.get,va.composerEnterBehavior),isMultilineDocument:Txe}))(e)}');
+  } else if (path === '/assets/app-shared-61271c39e3c5.js') {
     prefix = `import{createCodeBlockFrameComponent as __yardCreateCodeFrame}from"${rendererComponentsPath}";let __yardCodeFrame;\n`;
     source = replacePinnedFunction(path, source,
       'function zzn(e){let t=(0,Hzn.c)(79),',
       't[77]=K,t[78]=De):De=t[78],De}',
       'function zzn(e){return(0,K9.jsx)(__yardCodeFrame??=__yardCreateCodeFrame(Uzn,{useIsDark:o2,useIntl:EO,normalizeLanguage:Bwn,CopyButton:lLn,Tooltip:I2,Button:I1,FormattedMessage:FO,LatexPreview:Mzn,WrapEnabledIcon:gzn,WrapDisabledIcon:pzn,WrappedIcon:X0,UnwrappedIcon:Y0,CodeIcon:Z0,copyToClipboard:lCn,styles:U9,classNames:X}),e)}');
+  } else if (path === '/assets/user-message-58a6f09045c4.js') {
+    prefix = `import{createUserMessageBodyComponent as __yardCreateUserMessageBody,createUserMessageComponent as __yardCreateUserMessage}from"${rendererComponentsPath}";let __yardUserMessageBody,__yardUserMessage;\n`;
+    source = replacePinnedFunction(path, source,
+      'function yt(e){let t=(0,bt.c)(18),',
+      't[13]=o,t[14]=u,t[15]=y,t[16]=r,t[17]=ee):ee=t[17],ee}',
+      'function yt(e){return(0,xt.jsx)(__yardUserMessageBody??=__yardCreateUserMessageBody(oe(),{useExternalLinkConversationId:()=>{let e=d(Ie),t=oe().useMemo(()=>({name:`browser.in-app`}),[]),n=c(I,t);return n.isCapable?P(e.value)??void 0:void 0},CollapsibleContent:G,Markdown:U}),e)}');
+    source = replacePinnedFunction(path, source,
+      'function Rt(e){let n=(0,Vt.c)(171),',
+      'n[166]=Tt,n[167]=Et,n[168]=X,n[169]=It,n[170]=Lt):Lt=n[170],Lt}',
+      'function Rt(e){return(0,$.jsx)(__yardUserMessage??=__yardCreateUserMessage(Ht,{useScope:()=>d(Ie),getThreadId:e=>qe(e.value),useIsAeonFormatted:(e,t)=>c(e&&nt,t),useCurrentUser:e=>g(e?we:null),useEditDraft:e=>c(tt,e),setEditDraft:(e,t,n)=>e.set(tt,t,n),useEditingDisabled:()=>g(He),isEditingDisabled:e=>e.get(He),useIntl:m,useAnalytics:()=>g(De),normalizeMessage:Ne,isPlanImplementationRequest:lt,getCopyContent:Bt,toPlainText:Xe,copyToClipboard:me,UserMessageBody:yt,Editor:Ct,Button:t,Tooltip:_e,FormattedMessage:u,Timestamp:ft,HookStatsButton:mt,CopyIcon:E,CopiedIcon:he,EditIcon:pe,styles:Q,classNames:C}),e)}');
+  } else if (path === '/assets/user-message-attachments-9d0c60d2f476.js') {
+    prefix = `import{createUserMessageFileAttachmentComponent as __yardCreateUserMessageFile,createUserMessageImageListComponent as __yardCreateUserMessageImages,createUserMessageImageComponent as __yardCreateUserMessageImage}from"${rendererComponentsPath}";let __yardUserMessageFile,__yardUserMessageImages,__yardUserMessageImage;\n`;
+    source = replacePinnedFunction(path, source,
+      'function gn(e){let t=(0,xn.c)(60),',
+      't[50]=n.endLine,t[51]=n.startLine,t[52]=r,t[53]=i,t[54]=f,t[55]=m,t[56]=h,t[57]=x,t[58]=S,t[59]=C):C=t[59],C}',
+      'function gn(e){return(0,$.jsx)(__yardUserMessageFile??=__yardCreateUserMessageFile(Q,{useScope:()=>d(Ge),FileCard:ot,PastedTextCard:ct,FileContextMenu:Dt,openUploadedFile:z,openSharedThread:L,openFile:Xe,isDirectory:s,getPreviewKind:Je,isSidePanelFile:Pe,isSidePanelMedia:We,formatLabel:St,formatLineInfo:bn}),e)}');
+    source = replacePinnedFunction(path, source,
+      'function pn(e){let t=(0,xn.c)(18),',
+      't[16]===u?d=t[17]:(d=(0,$.jsx)($.Fragment,{children:u}),t[16]=u,t[17]=d),d}',
+      'function pn(e){return(0,$.jsx)(__yardUserMessageImages??=__yardCreateUserMessageImages(Q,{ImageAttachment:fn}),e)}');
+    source = replacePinnedFunction(path, source,
+      'function fn(e){let t=(0,xn.c)(110),',
+      't[101]=E,t[102]=T,t[103]=w,t[104]=me,t[105]=I,t[106]=F,t[107]=Ve,t[108]=Be,t[109]=We):We=t[109],We}',
+      'function fn(e){return(0,$.jsx)(__yardUserMessageImage??=__yardCreateUserMessageImage(Q,{useScope:()=>d(tt),useIntl:g,useImageClient:_e,useConversationHostId:e=>i(Ke,e),useDisableImageOverlay:()=>_(_t),useReducedMotion:C,useResolvedImage:Re,useImageOverlayEnabled:e=>ut(`2983946247`,e).get(`image_overlay_enabled`,false),isAssetPointer:Ae,getLocalImagePath:U,resolveLocalImage:Ne,getDurableIdentity:(e,t,n,r)=>{let i=e.value.routeKind===`local-thread`&&e.value.conversationId===t?e.get(He):null;return r==null&&i!=null?Ee(i,n):void 0},openImageEditor:Ue,openAnimatedOverlay:qe,recordImagePreview:ke,parseChatGptConversationId:je,getImageContextMenu:kt,ImageContextMenu:be,ImageDialog:gt,ImageOverlay:Sn,LoadingIcon:ue,AssetIcon:c,editAsset:r,FormattedMessage:l}),e)}');
+  } else {
+    prefix = `import{createSettingsPageComponent as __yardCreateSettingsPage}from"${rendererComponentsPath}";let __yardSettingsPage;\n`;
+    source = replacePinnedFunction(path, source,
+      'function _i(){let e=(0,Ci.c)(143),',
+      'e[139]=Je,e[140]=nt,e[141]=it,e[142]=at):at=e[142],at}',
+      'function _i(){return(0,$.jsx)(__yardSettingsPage??=__yardCreateSettingsPage(wi,{useSettingsActions:()=>{let e=ee(re);return wi.useMemo(()=>({prepareHostNavigation:t=>mn(e,t),discardChanges:t=>xi(e,t),trackProfileVisit:()=>Wt(e,c,{source:`settings_page`}),updateLegacyContentRect:t=>e.set(Ie,t==null?null:Pe(t))}),[e])},useCodexMicroDeviceModel:()=>ne(We),useIntl:te,useNavigate:a,useLocation:pe,useHostSelection:ve,useSectionMatch:()=>ie(`/settings/:section/*`),useToolMatch:()=>ie(g),useAvailableTool:e=>f(On,e),normalizeUsageTab:Gt,isLocalHost:e=>Rt(e).kind===`local`,useVisibleSettings:Cn,useReturnPath:()=>ne(De),useLayout:e=>f(kt,e),useHasUnsavedChanges:()=>ne(Ze).size>0,shouldNavigateBack:In,resolveSection:Sr,sectionPath:Ae,localHostId:le,useResizeObserver:u,registerSettingsCommand:e=>Ke(`settings`,e,{isActive:bi}),HostDropdown:Fn,LocalIcon:Yn,LoadingSection:ft,SectionTitle:pt,CloudPreferencesError:Un,SectionContainer:Ct,Outlet:oe,Redirect:ue,DocumentTitle:gn,Sidebar:Br,Content:vt,Shell:an,UnsavedChangesDialog:jn}),{})}');
   }
   return Buffer.from(prefix + source);
 }
