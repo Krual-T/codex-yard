@@ -14,6 +14,17 @@ export const builtinPets = [
 
 export type BuiltinPetId = typeof builtinPets[number]['id'];
 export type BuiltinPetAssets = Partial<Record<BuiltinPetId, string>>;
+export const builtinPetAssets: Readonly<Record<BuiltinPetId, string>> = {
+  codex: '/pets/codex-spritesheet-v6-51045ae208c0.webp',
+  dewey: '/pets/dewey-spritesheet-v5-f5285016f310.webp',
+  fireball: '/pets/fireball-spritesheet-v5-9c2a4146d3f9.webp',
+  hoots: '/pets/hoots-spritesheet-v8-21cacd193ace.webp',
+  rocky: '/pets/rocky-spritesheet-v5-97b5d14cdd54.webp',
+  seedy: '/pets/seedy-spritesheet-v10-0f6f906a2aec.webp',
+  stacky: '/pets/stacky-spritesheet-v6-18d0359c82af.webp',
+  bsod: '/pets/bsod-spritesheet-v5-cc54136ce042.webp',
+  'null-signal': '/pets/null-signal-spritesheet-v7-1e7dbf89200f.webp',
+};
 export type PetMotion = 'idle' | 'running' | 'waiting' | 'failed' | 'review' | 'jumping';
 export interface PetOption {
   id: string;

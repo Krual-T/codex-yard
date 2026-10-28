@@ -38,7 +38,7 @@ test('Mini freezes stale hosts, preserves reply certainty, and renders real ques
       const heldReply = new Promise(resolve=>{resolveHeld=resolve;});
       const activities = [
         {hostId:'ssh-a',threadId:'remote',title:'Remote work',status:'waiting',detail:'Approval requested',
-          approval:{requestRef:{hostId:'ssh-a',generation:'g1',id:'retry'},title:'Run command?',choices:[{label:'Allow once',result:{decision:'accept'}}]},
+          approval:{requestRef:{hostId:'ssh-a',generation:'g1',id:'retry'},title:'Run command?',detail:'Fixture command',choices:[{label:'Allow once',result:{decision:'accept'}}]},
           actions:[{id:'stop-1',kind:'stop',label:'Stop task',turnId:'turn-r'},
             {id:'follow-1',kind:'follow-up',label:'Follow up'},
             {id:'plan-1',kind:'implement-plan',label:'Implement plan',turnId:'turn-r',planContent:'- [ ] Fixture',collaborationMode:{mode:'default'}}]},
@@ -75,7 +75,7 @@ test('Mini freezes stale hosts, preserves reply certainty, and renders real ques
         onNotificationAction:async(identity,action)=>{calls.actions.push({identity,action:{...action}});
           if(actionCount++===0)throw Object.assign(Error('Stop was not forwarded'),{uncertain:false});},
         onNotificationActionOutcome:(identity,action,outcome)=>{calls.outcomes.push({identity,id:action.id,outcome});action.outcome=outcome;render();}},
-        React.createElement('div',null,React.createElement('textarea',{'aria-label':'Quick draft',value:draft,onChange:e=>{draft=e.target.value;render();}}),
+        React.createElement('div',null,React.createElement('code',null,'Fixture code'),React.createElement('textarea',{'aria-label':'Quick draft',value:draft,onChange:e=>{draft=e.target.value;render();}}),
           React.createElement('button',{type:'button',onClick:()=>{calls.submissions++;}},'Send draft'))));}
       function mount(){root=createRoot(document.getElementById('root'));render();}
       window.miniInteractionHarness={calls,
@@ -98,15 +98,19 @@ test('Mini freezes stale hosts, preserves reply certainty, and renders real ques
     await page.route('**/*', route => route.abort());
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
-    await page.setContent('<style>:root{--yard-fg:#edf3f4;--yard-bg:#101719;--yard-surface:#242c2e;--yard-muted:#b6c2c5;--yard-border:#627276;--yard-accent:#8acaff;--font-ui:monospace}body{background:#101719}</style><div id="root"></div>');
+    await page.setContent('<style>:root{--yard-fg:#edf3f4;--yard-bg:#101719;--yard-surface:#242c2e;--yard-muted:#b6c2c5;--yard-border:#627276;--yard-accent:#8acaff;--yard-ui-font:monospace;--yard-content-font:serif;--yard-code-font:sans-serif;--yard-font-size:18px;--yard-code-size:19px}body{background:#101719}</style><div id="root"></div>');
     await page.addStyleTag({ content: readFileSync(new URL('../src/renderer/mini/mini.css', import.meta.url), 'utf8') });
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     await page.getByText('Remote work').waitFor();
     assert.equal(await page.locator('.yard-mini-activity').first().evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(36, 44, 46)');
     assert.equal(await page.locator('.yard-mini-activity').first().evaluate(el => getComputedStyle(el).color), 'rgb(237, 243, 244)');
     assert.match(await page.locator('.yard-mini').evaluate(el => getComputedStyle(el).fontFamily), /monospace/);
+    assert.equal(await page.locator('.yard-mini').evaluate(el => getComputedStyle(el).fontSize), '18px');
+    assert.match(await page.getByText('Fixture command').evaluate(el => getComputedStyle(el).fontFamily), /serif/);
 
     await page.getByRole('button', { name: 'Quick chat', exact: true }).click();
+    assert.equal(await page.getByText('Fixture code').evaluate(el => getComputedStyle(el).fontSize), '19px');
+    assert.match(await page.getByText('Fixture code').evaluate(el => getComputedStyle(el).fontFamily), /sans-serif/);
     assert.equal(await page.getByRole('textbox', { name: 'Quick draft' }).evaluate(element => document.activeElement === element), true);
     await page.getByRole('textbox', { name: 'Quick draft' }).fill('retained draft');
     await page.evaluate(() => {

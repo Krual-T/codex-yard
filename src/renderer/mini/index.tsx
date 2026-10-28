@@ -3,7 +3,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { ChevronDown, Maximize2, MessageSquare, MoreHorizontal, Settings, X } from 'lucide-react';
 import type { PetPosition, WebPetState } from '../../native/pet-overlay.ts';
 import type { ServerRequestRef, WorkbenchClient } from '../workbench-contract.ts';
-import { builtinPets, miniShortcut, petSize, readPetOptions, readPetState } from './model.ts';
+import { builtinPetAssets, builtinPets, miniShortcut, petSize, readPetOptions, readPetState } from './model.ts';
 import type { BuiltinPetAssets, PetMotion, PetOption } from './model.ts';
 import { PetSprite } from './PetSprite.tsx';
 import { Approval, NotificationAction, Question } from './requests.tsx';
@@ -50,7 +50,7 @@ export interface StandaloneMiniProps {
   onNotificationAction?: MiniActionRunner;
   onNotificationActionOutcome?: MiniActionOutcome;
   onOpenSettings?(): void;
-  /** Manager supplies any permitted built-in sprites; custom sprites come from the host. */
+  /** Override built-in sprite URLs when the host serves them at a different path. */
   builtinAssets?: BuiltinPetAssets;
   /** The caller owns the composer, draft identity, submit and transcript. */
   children?: ReactNode;
@@ -63,7 +63,6 @@ export interface StandaloneMiniProps {
   shortcut?: boolean;
 }
 
-const noAssets: BuiltinPetAssets = {};
 const settingKeys = ['selected-avatar-id', 'avatar-overlay-mascot-width-px', 'avatar-overlay-pet-visible'] as const;
 const emptySettings: Record<string, unknown> = {};
 const statusText: Record<MiniActivity['status'], string> = {
@@ -82,7 +81,7 @@ function motionFor(activities: readonly MiniActivity[]): PetMotion {
 }
 
 export function StandaloneMini({ client, send, activities, hostConnections, onOpenThread, onExpand, onApprovalOutcome,
-  onNotificationAction, onNotificationActionOutcome, onOpenSettings, builtinAssets = noAssets, children, quickChatHostId,
+  onNotificationAction, onNotificationActionOutcome, onOpenSettings, builtinAssets = builtinPetAssets, children, quickChatHostId,
   quickChatTarget, onQuickChatTarget, shortcut = true }: StandaloneMiniProps) {
   const [state, setState] = useState<WebPetState | null>(null);
   const [settings, setSettings] = useState<Record<string, unknown>>(emptySettings);
@@ -481,7 +480,7 @@ export function StandaloneMini({ client, send, activities, hostConnections, onOp
 }
 
 export const StandalonePetOverlay = StandaloneMini;
-export { builtinPets, miniShortcut, petFrame, readPetOptions, readPetState } from './model.ts';
+export { builtinPetAssets, builtinPets, miniShortcut, petFrame, readPetOptions, readPetState } from './model.ts';
 export type { BuiltinPetAssets, BuiltinPetId, PetMotion, PetOption } from './model.ts';
 export { classifyMiniFailure } from './requests.tsx';
 export type { MiniActionOutcome, MiniActionRunner, MiniApproval, MiniIdentity, MiniNotificationAction, MiniOutcome, MiniQuestion, MiniRequest } from './requests.tsx';

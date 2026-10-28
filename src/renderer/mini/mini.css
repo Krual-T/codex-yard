@@ -3,7 +3,7 @@
   z-index: 45;
   pointer-events: none;
   color: var(--yard-fg, #202123);
-  font: 13px/1.4 var(--yard-font-ui, var(--font-ui, system-ui, sans-serif));
+  font: var(--yard-font-size, 13px)/1.4 var(--yard-ui-font, system-ui, sans-serif);
 }
 .yard-mini * { box-sizing: border-box; }
 .yard-mini button, .yard-mini input { font: inherit; }
@@ -49,15 +49,15 @@
 .yard-mini-status-review { background: #3b9664; }
 .yard-mini-status-failed { background: #c94b48; }
 .yard-mini-request { padding: 0 11px 10px 28px; overflow-wrap: anywhere; }
-.yard-mini-request p { margin: 4px 0 8px; white-space: pre-wrap; font-family: var(--yard-font-content, var(--font-content, inherit)); }
-.yard-mini-request code, .yard-mini-request pre { font-family: var(--yard-font-code, var(--font-code, monospace)); }
+.yard-mini-request p { margin: 4px 0 8px; white-space: pre-wrap; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
+.yard-mini code, .yard-mini pre { font-family: var(--yard-code-font, ui-monospace, monospace); font-size: var(--yard-code-size, 12px); }
 .yard-mini-request-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .yard-mini-request-actions button, .yard-mini-error button, .yard-mini-refresh { min-height: 32px; padding: 5px 8px; border: 1px solid var(--yard-border, #bbb); border-radius: 5px; background: var(--yard-bg, transparent); color: inherit; }
 .yard-mini-request small, .yard-mini-notification-action small { display: block; margin-top: 6px; }
 .yard-mini-request-expired { display: block; padding: 0 11px 10px 28px; color: var(--yard-muted, #666); }
 .yard-mini-activity-actions { padding: 0 11px 10px 28px; }
 .yard-mini-question fieldset { min-width: 0; margin: 8px 0; padding: 0; border: 0; }
-.yard-mini-question legend { white-space: pre-wrap; font-family: var(--yard-font-content, var(--font-content, inherit)); }
+.yard-mini-question legend { white-space: pre-wrap; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
 .yard-mini-question-option { display: flex; align-items: flex-start; gap: 6px; padding: 5px 0; }
 .yard-mini-question-option input { flex: 0 0 auto; margin: 3px 0 0; accent-color: var(--yard-accent, #3478d4); }
 .yard-mini-question-option small { margin-top: 1px; }
