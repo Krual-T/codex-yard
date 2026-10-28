@@ -335,10 +335,12 @@ test('a mutable path alias remains fenced after retargeting, including other tar
 
 test('the originating connection must remain unchanged during target verification and durable reservation', async t => {
   const h = await fixture(t), connection = await h.connect();
-  let resumeResolution!: () => void;
+  let resumeResolution!: () => void, resolutionStarted!: () => void;
   const resolution = new Promise<void>(resolve => { resumeResolution = resolve; });
-  const delayed = createConfigWrites({ ...h.options, resolveTarget: async input => { await resolution; return h.resolveTarget(input); } });
+  const verifyingTarget = new Promise<void>(resolve => { resolutionStarted = resolve; });
+  const delayed = createConfigWrites({ ...h.options, resolveTarget: async input => { resolutionStarted(); await resolution; return h.resolveTarget(input); } });
   const verifying = delayed.submit({ hostId: 'local', method: 'config/batchWrite', params: params(), connection });
+  await verifyingTarget;
   const disconnected = once(connection, 'status'); h.peer.disconnect(); await disconnected;
   await connection.connect(); resumeResolution();
   await assert.rejects(verifying, /original configuration connection changed/i);

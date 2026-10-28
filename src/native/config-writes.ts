@@ -178,8 +178,10 @@ export function createConfigWrites(options: ConfigWritesOptions) {
     }
     const { hostId, method, connection } = input;
     const originalSocket = connection.socket;
-    if (!connection.connected || !originalSocket) throw new Error('The original configuration connection is unavailable.');
     const params = structuredClone(input.params);
+    const existingGlobal = await options.mutations.run(() => records().find(value => active(value) && value.scope === 'global'));
+    if (existingGlobal) return { outcome: 'blocked', operation: project(existingGlobal) };
+    if (!connection.connected || !originalSocket || connection.socket !== originalSocket) throw new Error('The original configuration connection is unavailable.');
     const resolved = await options.resolveTarget({ hostId, method, params: structuredClone(params), connection });
     if (!resolved || !validId(resolved.hostKey) || resolved.scope !== undefined && resolved.scope !== 'global') throw new Error('The actual configuration host is unavailable.');
     if (!connection.connected || connection.socket !== originalSocket) throw new Error('The original configuration connection changed before the write.');

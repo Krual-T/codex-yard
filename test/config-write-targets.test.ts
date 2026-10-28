@@ -109,6 +109,13 @@ test('one service fences actual local and SSH requests across methods, hardlinks
   await unlink(h.config); await symlink(later, h.config);
   const afterMove = await writes.submit({ hostId: h.host.hostId, method: 'config/batchWrite', params: batch(), connection: first.connection });
   assert.equal(afterMove.outcome, 'blocked'); assert.equal(afterMove.operation.operationId, submitted.operation.operationId);
+  await unlink(h.config);
+  await rename(h.home, h.home + '-unavailable');
+  const unavailable = await writes.submit({ hostId: h.host.hostId, method: 'config/batchWrite', params: batch(), connection: first.connection });
+  assert.equal(unavailable.outcome, 'blocked'); assert.equal(unavailable.operation.operationId, submitted.operation.operationId);
+  const disconnected = await h.connect(h.secondHome); disconnected.connection.close();
+  const offline = await writes.submit({ hostId: h.host.hostId, method: 'skills/config/write', params: skillParams, connection: disconnected.connection });
+  assert.equal(offline.outcome, 'blocked'); assert.equal(offline.operation.operationId, submitted.operation.operationId);
   assert.equal((await submitted.completion).outcome, 'unknown');
   const restored = JSON.parse(await readFile(stateFile, 'utf8')) as Record<string, unknown>;
   const recovered = createConfigWrites({ ...options, state: restored, mutations: createStateMutations() });
