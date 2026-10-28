@@ -74,7 +74,8 @@ type UserMessageStyles = {
   temporaryOutline: string;
 };
 
-export type UserMessageProps<HookStats, InlineSystemHints> = {
+export type UserMessageSystemHint = 'search' | 'picture_v2' | 'cme' | 'tatertot' | 'tasks' | 'note';
+export type UserMessageProps<HookStats, InlineSystemHints extends UserMessageSystemHint[]> = {
   message: string;
   alignment?: 'start' | 'end';
   accentColor?: string | null;
@@ -108,7 +109,7 @@ export type UserMessageProps<HookStats, InlineSystemHints> = {
   enableChatGptSystemHints?: boolean;
   initialEditMessage?: string | null;
   onCopy?: () => void;
-  onEditInputMount?: (element: HTMLElement) => void;
+  onEditInputMount?: (element: HTMLElement) => void | (() => void);
   onEditMessage?: (message: string, format?: 'markdown', hints?: InlineSystemHints) => void | Promise<void>;
   onCopySucceeded?: (text: string, event: MouseEvent<HTMLButtonElement>) => void;
   threadId?: string | null;
@@ -117,7 +118,7 @@ export type UserMessageProps<HookStats, InlineSystemHints> = {
   hostId?: string | null;
 };
 
-export type UserMessageDependencies<Scope, HookStats, InlineSystemHints> = {
+export type UserMessageDependencies<Scope, HookStats, InlineSystemHints extends UserMessageSystemHint[]> = {
   useScope: () => Scope;
   getThreadId: (scope: Scope) => string | null | undefined;
   useIsAeonFormatted: (enabled: boolean, threadId: string | null | undefined) => boolean;
@@ -148,7 +149,7 @@ export type UserMessageDependencies<Scope, HookStats, InlineSystemHints> = {
     initialRenderFormat?: 'markdown';
     onCancel: () => void;
     onDraftChange: (draft: UserMessageDraft) => void;
-    onEditInputMount?: (element: HTMLElement) => void;
+    onEditInputMount?: (element: HTMLElement) => void | (() => void);
     onSubmit: (message: string, format?: 'markdown', hints?: InlineSystemHints) => Promise<void>;
   }>;
   Button: ComponentType<{
@@ -166,7 +167,7 @@ export type UserMessageDependencies<Scope, HookStats, InlineSystemHints> = {
   classNames: (...classes: (string | false | null | undefined)[]) => string;
 };
 
-export function createUserMessageComponent<Scope, HookStats, InlineSystemHints>(
+export function createUserMessageComponent<Scope, HookStats, InlineSystemHints extends UserMessageSystemHint[]>(
   React: typeof import('react'),
   dependencies: UserMessageDependencies<Scope, HookStats, InlineSystemHints>,
 ): ComponentType<UserMessageProps<HookStats, InlineSystemHints>> {

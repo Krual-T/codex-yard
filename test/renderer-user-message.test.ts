@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { transform } from 'esbuild';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { UserMessageBodyDependencies, UserMessageDependencies } from '../src/renderer/messages/user-message.tsx';
+import type { UserMessageBodyDependencies, UserMessageDependencies, UserMessageSystemHint } from '../src/renderer/messages/user-message.tsx';
 
 const { code } = await transform(await readFile(new URL('../src/renderer/messages/user-message.tsx', import.meta.url), 'utf8'), {
   loader: 'tsx', format: 'esm', jsx: 'transform',
@@ -41,7 +41,7 @@ test('composes the original visible text, link context and Markdown props', () =
 });
 
 test('renders user bubble, status chips and empty attachment-only messages', () => {
-  const dependencies: UserMessageDependencies<object, { blockedCount: number }, string[]> = {
+  const dependencies: UserMessageDependencies<object, { blockedCount: number }, UserMessageSystemHint[]> = {
     useScope: () => ({}), getThreadId: () => 'thread-1', useIsAeonFormatted: () => false,
     useCurrentUser: () => null, useEditDraft: () => null, setEditDraft: () => {}, useEditingDisabled: () => false,
     isEditingDisabled: () => false, useIntl: () => ({ formatMessage: ({ defaultMessage }) => defaultMessage }),

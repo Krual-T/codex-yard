@@ -22,6 +22,9 @@ declare global {
       copies: { 'text/plain': string; 'text/html': string }[];
       copySucceeded: string[];
       edits: string[];
+      editCalls: { text: string; format?: string; hints?: string[] }[];
+      editorMounts: number;
+      editorCleanups: number;
       failEdit: boolean;
       editorCalls: { entrypoint: string; src: string; identity?: string }[];
       identityCalls: { src: string; hasResolver: boolean }[];
@@ -83,11 +86,15 @@ test('user message, attachment actions and image loading use the supplied state 
           toPlainText: text => text,
           copyToClipboard: content => {window.userMessageHarness.copies.push(content); return Promise.resolve(true)},
           UserMessageBody: Body,
-          Editor: ({initialMessage, initialLiteralMarkdownLinkSources, onDraftChange, onCancel, onSubmit}) => h('div', {id: 'editor'},
-            h('span', null, initialMessage), h('span', {id:'draft-links'}, JSON.stringify(initialLiteralMarkdownLinkSources)),
-            h('button', {onClick: () => onDraftChange({message:initialMessage,authoredMarkdownLinkSourcesByOccurrence:[null],literalMarkdownLinkSources:[null]})}, 'Draft link'),
-            h('button', {onClick: onCancel}, 'Cancel edit'),
-            h('button', {onClick: () => void onSubmit('updated')}, 'Save edit')),
+          Editor: ({initialMessage, initialLiteralMarkdownLinkSources, onDraftChange, onCancel, onSubmit, onEditInputMount}) => {
+            const ref=React.useRef(null);
+            React.useLayoutEffect(() => onEditInputMount?.(ref.current), []);
+            return h('div', {id: 'editor',ref}, h('span', null, initialMessage), h('span', {id:'draft-links'}, JSON.stringify(initialLiteralMarkdownLinkSources)),
+              h('button', {onClick: () => onDraftChange({message:initialMessage,authoredMarkdownLinkSourcesByOccurrence:[null],literalMarkdownLinkSources:[null]})}, 'Draft link'),
+              h('button', {onClick: onCancel}, 'Cancel edit'),
+              h('button', {onClick: () => void onSubmit('updated')}, 'Save edit'),
+              h('button', {onClick: () => void onSubmit('with hints','markdown',['search','note'])}, 'Save with hints'));
+          },
           Button, Tooltip: ({children}) => children, FormattedMessage: Formatted, Timestamp: () => null,
           HookStatsButton: () => null, CopyIcon: Icon, CopiedIcon: Icon, EditIcon: Icon,
           styles: {bubble:'bubble',leadingBubble:'leading',compactMessageReaction:'reaction',compactMessageBubble:'compact',
@@ -171,13 +178,16 @@ test('user message, attachment actions and image loading use the supplied state 
         const fileRoot = createRoot(document.getElementById('file-root'));
         const imageRoot = createRoot(document.getElementById('image-root'));
         window.userMessageHarness = {
-          reads: [], files: [], uploads: [], shares: [], copies: [], copySucceeded: [], edits: [], editorCalls: [], identityCalls: [], resolvedAssets: [], submittedEdits: [], failEdit: false,
+          reads: [], files: [], uploads: [], shares: [], copies: [], copySucceeded: [], edits: [], editCalls: [], editorMounts: 0, editorCleanups: 0, editorCalls: [], identityCalls: [], resolvedAssets: [], submittedEdits: [], failEdit: false,
           renderMessage(text, isPrinting = false) {
             printing = isPrinting;
             flushSync(() => messageRoot.render(h(Message, {message:text, threadId:'thread-a', turnId:'turn-a',
               cwd:'/srv/repo', hostId:'ssh-host', collapsedLineCount:3,
               onCopySucceeded: text => window.userMessageHarness.copySucceeded.push(text),
-              onEditMessage: async text => {if (window.userMessageHarness.failEdit) throw Error('failed'); window.userMessageHarness.edits.push(text)}})));
+              onEditInputMount: element => {if(!element) throw Error('missing editor element');window.userMessageHarness.editorMounts++;
+                return () => {window.userMessageHarness.editorCleanups++}},
+              onEditMessage: async (text,format,hints) => {if (window.userMessageHarness.failEdit) throw Error('failed');
+                window.userMessageHarness.edits.push(text);window.userMessageHarness.editCalls.push({text,format,hints})}})));
           },
           unmountMessage() {flushSync(() => messageRoot.render(null))},
           getDraft() {return scope.draft},
@@ -244,6 +254,7 @@ test('user message, attachment actions and image loading use the supplied state 
     await page.getByRole('button', { name: 'Draft link' }).click();
     assert.deepEqual((await page.evaluate(() => window.userMessageHarness.getDraft()))?.literalMarkdownLinkSources, [null]);
     await page.evaluate(() => window.userMessageHarness.unmountMessage());
+    assert.equal(await page.evaluate(() => window.userMessageHarness.editorCleanups), 1);
     await page.evaluate(text => window.userMessageHarness.renderMessage(text), longText);
     assert.equal(await page.locator('#draft-links').textContent(), '[null]');
     await page.evaluate(() => { window.userMessageHarness.failEdit = true; });
@@ -253,6 +264,12 @@ test('user message, attachment actions and image loading use the supplied state 
     await page.getByRole('button', { name: 'Save edit' }).click();
     await page.locator('#editor').waitFor({ state: 'detached' });
     assert.deepEqual(await page.evaluate(() => window.userMessageHarness.edits), ['updated']);
+    await page.getByRole('button', { name: 'Edit message' }).click();
+    await page.getByRole('button', { name: 'Save with hints' }).click();
+    await page.locator('#editor').waitFor({ state: 'detached' });
+    assert.deepEqual(await page.evaluate(() => window.userMessageHarness.editCalls[1]), { text: 'with hints', format: 'markdown', hints: ['search', 'note'] });
+    assert.equal(await page.evaluate(() => window.userMessageHarness.editorMounts), 3);
+    assert.equal(await page.evaluate(() => window.userMessageHarness.editorCleanups), 3);
     await page.evaluate(text => window.userMessageHarness.renderMessage(text, true), longText);
     assert.equal(await page.locator('#message-text').textContent(), longText);
 
