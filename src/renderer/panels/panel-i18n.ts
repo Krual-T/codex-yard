@@ -1,0 +1,159 @@
+import { useMemo } from 'react';
+import { translateKnown, useI18n } from '../i18n/index.tsx';
+
+type Catalog = Record<string, string>;
+const simplified: Catalog = {
+  'Workspace files':'工作区文件', 'Hide files':'隐藏文件', 'Show files':'显示文件', 'Files':'文件',
+  'Refresh files':'刷新文件', 'Open workspace tabs':'打开的工作区标签页', 'Terminal':'终端',
+  'Close terminal':'关闭终端', 'Close diff':'关闭差异', 'Close panel':'关闭面板',
+  'Changes':'更改', '{name} changes':'{name} 的更改', 'Close {name}':'关闭 {name}',
+  'Close panel here only':'仅关闭此页面的面板', 'Save file':'保存文件', 'Reload file':'重新加载文件',
+  'Download file':'下载文件', 'Add file to conversation':'将文件添加到对话', 'Review recovery':'检查恢复记录',
+  'Check save result':'检查保存结果', 'Loading...':'正在加载...', 'Select a file':'选择文件',
+  'File: {path}':'文件：{path}', 'Undo':'撤销', 'Redo':'重做', 'Find and replace':'查找和替换',
+  'Find in file':'在文件中查找', 'Searching...':'正在搜索...', 'Language support unavailable: ':'语言支持不可用：',
+  'View source':'查看源文件', 'View preview':'查看预览', 'Enable word wrap':'启用自动换行',
+  'Disable word wrap':'关闭自动换行', 'Copy file contents':'复制文件内容',
+  'Loading preview...':'正在加载预览...', 'Media preview failed. Download the file to open it.':'媒体预览失败，请下载文件后打开。',
+  'Audio: {path}':'音频：{path}', 'Video: {path}':'视频：{path}', 'Binary: {path}':'二进制文件：{path}',
+  'First {shown} of {total} bytes shown.':'显示前 {shown} 字节，共 {total} 字节。',
+  'PDF controls':'PDF 控件', 'Previous page':'上一页', 'Next page':'下一页', 'PDF page':'PDF 页码',
+  'PDF page {page}':'PDF 第 {page} 页', 'PDF zoom':'PDF 缩放', 'Zoom out':'缩小', 'Zoom in':'放大',
+  'Loading PDF...':'正在加载 PDF...', 'PDF preview: ':'PDF 预览：',
+  'Open file':'打开文件', 'Copy diff':'复制差异', 'Switch to split diff':'切换为分栏差异',
+  'Switch to unified diff':'切换为统一差异', 'Diff is unavailable':'差异不可用', 'Diff':'差异',
+  'Open {path}:{line}':'打开 {path}:{line}', 'Open {path} line {line}':'打开 {path} 的第 {line} 行',
+  'Starting terminal...':'正在启动终端...', 'Closing terminal...':'正在关闭终端...', 'New terminal':'新终端',
+  'Connection lost. Open a new terminal; input will not be replayed.':'连接已断开。打开新终端；输入不会重放。',
+  'The previous terminal is unavailable. Open a new terminal.':'上一个终端不可用，请打开新终端。',
+  'Terminal close failed: ':'终端关闭失败：', '. The close result may be unknown.':'。关闭结果可能未知。',
+  'Terminal resize failed: ':'终端调整大小失败：', 'Terminal input failed: ':'终端输入失败：',
+  'Terminal could not be opened: ':'无法打开终端：', '. Input will not be replayed.':'。输入不会重放。',
+  'Terminal exited':'终端已退出', '. Open a new terminal.':'。请打开新终端。',
+  'Discard unsaved changes to {name}?':'放弃对 {name} 的未保存更改？',
+  'Close {name}? The unknown save and retained edits will remain available.':'关闭 {name}？未知保存和保留的编辑仍可恢复。',
+  'Close {name} on this page? Local edits may be lost; stored recovery records will not be changed.':'在此页面关闭 {name}？本页编辑可能丢失；已存恢复记录不会更改。',
+  'Close this panel on this page? Local edits may be lost; stored recovery records will not be changed.':'在此页面关闭面板？本页编辑可能丢失；已存恢复记录不会更改。',
+  'Close the panel? Other unsaved edits will be discarded. Unknown saves and their retained edits will remain available.':'关闭面板？其他未保存编辑将被放弃。未知保存及其保留编辑仍可恢复。',
+  'Discard unsaved file changes?':'放弃未保存的文件更改？',
+  'Save result is unknown. Check the original operation before saving again.':'保存结果未知。再次保存前请检查原操作。',
+  'Save result is still unknown. The original write may complete later.':'保存结果仍未知。原写入可能稍后完成。',
+  'Another save for this file has an unknown result. Check its original operation before saving.':'此文件的另一次保存结果未知。保存前请检查原操作。',
+  'File changed on disk. Reload or copy your changes before saving.':'磁盘上的文件已更改。保存前请重新加载或复制更改。',
+  'File changed on disk. Keep or copy your changes before reloading.':'磁盘上的文件已更改。重新加载前请保留或复制更改。',
+  'Could not reread this file. Keep or copy your edits.':'无法重新读取此文件。请保留或复制编辑。',
+  'File changed while closing; review the latest edit.':'关闭时文件已更改，请检查最新编辑。',
+  'Files changed while closing; review the latest edits.':'关闭时文件已更改，请检查最新编辑。',
+  'File recovery changed while closing.':'关闭时文件恢复记录已更改。',
+  'File changed while checking recovery.':'检查恢复记录时文件已更改。',
+  'Another page owns a different recovery. Keep or copy these edits; closing this tab will leave that record untouched.':'另一页面持有不同的恢复记录。请保留或复制编辑；关闭此标签页不会更改该记录。',
+  'File recovery changed in another page. Keep or copy this edit before reopening.':'另一页面更改了恢复记录。重新打开前请保留或复制编辑。',
+  'File recovery changed in another page. Keep or copy this edit before closing.':'另一页面更改了恢复记录。关闭前请保留或复制编辑。',
+  'The saved file recovery record is invalid.':'已保存的文件恢复记录无效。',
+  'A terminal could not be closed. File recovery records were retained.':'终端无法关闭。文件恢复记录已保留。',
+  'File recovery is unavailable: ':'文件恢复不可用：', 'Could not read the file: ':'无法读取文件：',
+  'Could not retain file recovery: ':'无法保留文件恢复记录：',
+  'Save result is unknown and recovery could not be updated: ':'保存结果未知，且无法更新恢复记录：',
+  'Save result is unknown: ':'保存结果未知：', '. Check the original operation before saving again.':'。再次保存前请检查原操作。',
+  'Could not check the save result: ':'无法检查保存结果：', 'Could not retain file edits: ':'无法保留文件编辑：',
+  'Invalid file response':'文件响应无效', 'File is too large to preview':'文件过大，无法预览',
+  'File changed while it was being read. Try again.':'读取时文件已更改，请重试。',
+  'File exceeds the 10 MiB preview and save limit':'文件超过 10 MiB 预览和保存限制',
+  'Invalid directory response':'目录响应无效', 'Invalid save response':'保存响应无效', 'File is no longer text':'文件不再是文本',
+  'Invalid PDF page size':'PDF 页面尺寸无效',
+  'Find':'查找', 'Replace':'替换', 'next':'下一个', 'previous':'上一个', 'all':'全部',
+  'match case':'区分大小写', 'regexp':'正则表达式', 'by word':'全字匹配', 'replace':'替换', 'replace all':'全部替换',
+  'close':'关闭', 'Go to line':'转到行', 'go':'转到', 'current match':'当前匹配', 'on line':'所在行',
+  'replaced match on line $':'已替换第 $ 行的匹配项', 'replaced $ matches':'已替换 $ 个匹配项',
+};
+const traditional: Catalog = {
+  'Workspace files':'工作區檔案', 'Hide files':'隱藏檔案', 'Show files':'顯示檔案', 'Files':'檔案',
+  'Refresh files':'重新整理檔案', 'Open workspace tabs':'開啟的工作區分頁', 'Terminal':'終端機',
+  'Close terminal':'關閉終端機', 'Close diff':'關閉差異', 'Close panel':'關閉面板', 'Changes':'變更',
+  '{name} changes':'{name} 的變更', 'Close {name}':'關閉 {name}', 'Save file':'儲存檔案', 'Reload file':'重新載入檔案',
+  'Download file':'下載檔案', 'Add file to conversation':'將檔案加入對話', 'Review recovery':'檢查復原紀錄',
+  'Check save result':'檢查儲存結果', 'Loading...':'正在載入...', 'Select a file':'選擇檔案',
+  'File: {path}':'檔案：{path}', 'Undo':'復原', 'Redo':'重做', 'Find and replace':'尋找與取代', 'Find in file':'在檔案中尋找',
+  'Searching...':'正在搜尋...', 'View source':'檢視原始碼', 'View preview':'檢視預覽',
+  'Enable word wrap':'啟用自動換行', 'Disable word wrap':'關閉自動換行', 'Copy file contents':'複製檔案內容',
+  'Loading preview...':'正在載入預覽...', 'Media preview failed. Download the file to open it.':'媒體預覽失敗，請下載檔案後開啟。',
+  'Audio: {path}':'音訊：{path}', 'Video: {path}':'影片：{path}', 'Binary: {path}':'二進位檔案：{path}',
+  'First {shown} of {total} bytes shown.':'顯示前 {shown} 位元組，共 {total} 位元組。',
+  'PDF controls':'PDF 控制項', 'Previous page':'上一頁', 'Next page':'下一頁', 'PDF page':'PDF 頁碼',
+  'PDF page {page}':'PDF 第 {page} 頁', 'PDF zoom':'PDF 縮放', 'Zoom out':'縮小', 'Zoom in':'放大',
+  'Loading PDF...':'正在載入 PDF...', 'PDF preview: ':'PDF 預覽：', 'Open file':'開啟檔案', 'Copy diff':'複製差異',
+  'Switch to split diff':'切換為分欄差異', 'Switch to unified diff':'切換為統一差異', 'Diff is unavailable':'差異無法使用', 'Diff':'差異',
+  'Open {path}:{line}':'開啟 {path}:{line}', 'Open {path} line {line}':'開啟 {path} 的第 {line} 行',
+  'Starting terminal...':'正在啟動終端機...', 'Closing terminal...':'正在關閉終端機...', 'New terminal':'新增終端機',
+  'Close panel here only':'僅關閉此頁面的面板',
+  'Connection lost. Open a new terminal; input will not be replayed.':'連線已中斷。請開啟新終端機；輸入不會重播。',
+  'The previous terminal is unavailable. Open a new terminal.':'上一個終端機無法使用，請開啟新終端機。',
+  'Terminal close failed: ':'終端機關閉失敗：', '. The close result may be unknown.':'。關閉結果可能未知。',
+  'Terminal resize failed: ':'終端機調整大小失敗：', 'Terminal input failed: ':'終端機輸入失敗：',
+  'Terminal could not be opened: ':'無法開啟終端機：', '. Input will not be replayed.':'。輸入不會重播。',
+  'Terminal exited':'終端機已結束', '. Open a new terminal.':'。請開啟新終端機。',
+  'Discard unsaved changes to {name}?':'捨棄對 {name} 尚未儲存的變更？',
+  'Close {name}? The unknown save and retained edits will remain available.':'關閉 {name}？未知的儲存結果與保留的編輯仍可復原。',
+  'Close {name} on this page? Local edits may be lost; stored recovery records will not be changed.':'在此頁面關閉 {name}？本頁編輯可能遺失；已儲存的復原紀錄不會變更。',
+  'Close this panel on this page? Local edits may be lost; stored recovery records will not be changed.':'在此頁面關閉面板？本頁編輯可能遺失；已儲存的復原紀錄不會變更。',
+  'Close the panel? Other unsaved edits will be discarded. Unknown saves and their retained edits will remain available.':'關閉面板？其他未儲存的編輯將被捨棄。未知的儲存結果及其保留編輯仍可復原。',
+  'Discard unsaved file changes?':'捨棄未儲存的檔案變更？',
+  'Save result is unknown. Check the original operation before saving again.':'儲存結果未知。再次儲存前請檢查原始操作。',
+  'Save result is still unknown. The original write may complete later.':'儲存結果仍未知。原始寫入可能稍後完成。',
+  'Another save for this file has an unknown result. Check its original operation before saving.':'此檔案另一次儲存的結果未知。儲存前請檢查原始操作。',
+  'File changed on disk. Reload or copy your changes before saving.':'磁碟上的檔案已變更。儲存前請重新載入或複製變更。',
+  'File changed on disk. Keep or copy your changes before reloading.':'磁碟上的檔案已變更。重新載入前請保留或複製變更。',
+  'Could not reread this file. Keep or copy your edits.':'無法重新讀取此檔案。請保留或複製編輯。',
+  'File changed while closing; review the latest edit.':'關閉時檔案已變更，請檢查最新編輯。',
+  'Files changed while closing; review the latest edits.':'關閉時檔案已變更，請檢查最新編輯。',
+  'File recovery changed while closing.':'關閉時檔案復原紀錄已變更。',
+  'File changed while checking recovery.':'檢查復原紀錄時檔案已變更。',
+  'Another page owns a different recovery. Keep or copy these edits; closing this tab will leave that record untouched.':'另一頁面持有不同的復原紀錄。請保留或複製編輯；關閉此分頁不會變更該紀錄。',
+  'File recovery changed in another page. Keep or copy this edit before reopening.':'另一頁面變更了復原紀錄。重新開啟前請保留或複製編輯。',
+  'File recovery changed in another page. Keep or copy this edit before closing.':'另一頁面變更了復原紀錄。關閉前請保留或複製編輯。',
+  'The saved file recovery record is invalid.':'已儲存的檔案復原紀錄無效。',
+  'A terminal could not be closed. File recovery records were retained.':'無法關閉終端機。檔案復原紀錄已保留。',
+  'File recovery is unavailable: ':'檔案復原無法使用：', 'Could not read the file: ':'無法讀取檔案：',
+  'Could not retain file recovery: ':'無法保留檔案復原紀錄：',
+  'Save result is unknown and recovery could not be updated: ':'儲存結果未知，且無法更新復原紀錄：',
+  'Save result is unknown: ':'儲存結果未知：', '. Check the original operation before saving again.':'。再次儲存前請檢查原始操作。',
+  'Could not check the save result: ':'無法檢查儲存結果：', 'Could not retain file edits: ':'無法保留檔案編輯：',
+  'Language support unavailable: ':'語言支援無法使用：', 'Invalid file response':'檔案回應無效',
+  'File is too large to preview':'檔案過大，無法預覽', 'File changed while it was being read. Try again.':'讀取時檔案已變更，請重試。',
+  'File exceeds the 10 MiB preview and save limit':'檔案超過 10 MiB 預覽與儲存限制',
+  'Invalid directory response':'目錄回應無效', 'Invalid save response':'儲存回應無效',
+  'File is no longer text':'檔案已不再是文字', 'Invalid PDF page size':'PDF 頁面尺寸無效',
+  'Find':'尋找', 'Replace':'取代', 'next':'下一個', 'previous':'上一個', 'all':'全部',
+  'match case':'區分大小寫', 'regexp':'正規表示式', 'by word':'全字比對', 'replace':'取代', 'replace all':'全部取代', 'close':'關閉',
+  'Go to line':'前往行', 'go':'前往', 'current match':'目前符合項目', 'on line':'所在行',
+  'replaced match on line $':'已取代第 $ 行的符合項目', 'replaced $ matches':'已取代 $ 個符合項目',
+};
+
+export type PanelText = (key: string, values?: Record<string, string | number>) => string;
+
+export function usePanelText(): PanelText {
+  const { locale, t } = useI18n();
+  return useMemo(() => {
+    const catalog = locale.toLowerCase().startsWith('zh') ? /(?:^|-)(?:tw|hk|mo|hant)(?:-|$)/i.test(locale) ? traditional : simplified : {};
+    return (key: string, values: Record<string, string | number> = {}) =>
+      (catalog[key] ?? translateKnown(t, key)).replace(/\{(\w+)\}/g, (match, name: string) => name in values ? String(values[name]) : match);
+  }, [locale, t]);
+}
+
+const prefixes = ['File recovery is unavailable: ', 'Could not read the file: ', 'Could not retain file recovery: ',
+  'Save result is unknown and recovery could not be updated: ', 'Save result is unknown: ', 'Could not check the save result: ',
+  'Could not retain file edits: ', 'Language support unavailable: ', 'Terminal close failed: ', 'Terminal resize failed: ',
+  'Terminal input failed: ', 'Terminal could not be opened: ', 'Terminal exited', 'PDF preview: '];
+const suffixes = ['. Check the original operation before saving again.', '. The close result may be unknown.',
+  '. Input will not be replayed.', '. Open a new terminal.'];
+
+/** Translate owned message framing, while preserving host-provided error details. */
+export function panelError(text: PanelText, message: string): string {
+  const exact = text(message);
+  if (exact !== message) return exact;
+  const prefix = prefixes.find(value => message.startsWith(value));
+  const suffix = suffixes.find(value => message.endsWith(value));
+  if (!prefix && !suffix) return message;
+  const detail = message.slice(prefix?.length ?? 0, suffix ? -suffix.length : undefined);
+  return (prefix ? text(prefix) : '') + text(detail) + (suffix ? text(suffix) : '');
+}
