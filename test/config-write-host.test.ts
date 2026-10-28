@@ -36,11 +36,8 @@ async function fixture(t: TestContext) {
     await writeFile(statePath + '.tmp', JSON.stringify(state));
     await rename(statePath + '.tmp', statePath);
   };
-  const resolveTarget = createConfigWriteTargets({
-    getHostPaths: () => ({ homeDirectory: root, codexHome: home }),
-    getSshHost: () => undefined,
-  });
-  const options = { state, persist, mutations: createStateMutations(), resolveTarget };
+  const resolveTarget = createConfigWriteTargets({ getConnectionSnapshot: () => ({ paths: { homeDirectory: root, codexHome: home } }) });
+  const options = { state, persist, mutations: createStateMutations(), resolveTarget, findFileBlocker: () => false, issueRecoveryReceipts: true };
   const writes = createConfigWrites(options), connectCalls: string[] = [];
   async function openConnection() {
     const connection = new CodexConnection(peer.socketPath, { timeout: 180 });
@@ -145,7 +142,7 @@ test('concurrent same-ID preparation shares the original and rejects host or met
   const duplicate = h.submit({ ...batch('same-id'), params: { ...batchParams(), expectedVersion: 'later-edit' } });
   await assert.rejects(h.submit(skill('same-id')), /another host or method/);
   await assert.rejects(h.submit(batch('same-id', 'ssh-fixture')), /another host or method/);
-  assert.equal(await h.status('same-id'), null);
+  assert.equal((await h.status('same-id'))?.state, 'preparing');
   request.params.expectedVersion = 'mutated-after-dispatch';
   connectionGate.release();
   const [originalResult, duplicateResult] = await Promise.all([first, duplicate]);
@@ -189,7 +186,7 @@ test('legacy pending records recover as unknown and block even an offline host',
   assert.deepEqual(h.connectCalls, []);
 });
 
-test('a failed connection rechecks a global blocker created while the connection was in progress', async t => {
+test('a failed connection records not-sent even when another operation starts during preparation', async t => {
   const h = await fixture(t), entered = gate(), connectionGate = gate();
   h.setConnectHook(async hostId => {
     if (hostId === 'ssh-fixture') { entered.release(); await connectionGate.promise; throw new Error('PRIVATE_OFFLINE_DETAIL'); }
@@ -201,9 +198,10 @@ test('a failed connection rechecks a global blocker created while the connection
   const first = h.submit(batch('new-blocker'));
   await h.peer.waitForCall('config/batchWrite');
   connectionGate.release();
-  const blocked = await offline;
-  assert.equal(blocked.outcome, 'blocked');
-  assert.equal(blocked.operation?.operationId, 'new-blocker');
+  const unsent = await offline;
+  assert.equal(unsent.outcome, 'not-started');
+  assert.equal(unsent.operation?.operationId, 'offline');
+  assert.deepEqual(unsent.operation?.terminal, { kind: 'not-sent' });
   assert.equal((await first).outcome, 'unknown');
   assert.deepEqual(h.connectCalls, ['ssh-fixture', 'local']);
 });
@@ -297,7 +295,7 @@ test('explicit rejection exposes its numeric code without private error details'
 });
 
 test('a proven pre-dispatch failure is not-started and preserves an existing not-sent record', async () => {
-  const state: Record<string, unknown> = {}, writes = createConfigWrites({ state, mutations: createStateMutations(),
+  const state: Record<string, unknown> = {}, writes = createConfigWrites({ state, mutations: createStateMutations(), findFileBlocker: () => false,
     persist: async () => {}, resolveTarget: async () => ({ hostKey: 'fixture', target: '/fixture/config.toml', binding: '/fixture/config.toml', scope: 'global' }) });
   const connection: ConfigWriteConnection = { connected: true, socket: {},
     async requestWithCursor() { throw new RpcError('PRIVATE_NOT_SENT', { status: 503, code: 'OBSERVER_LIMIT' }); } };
@@ -315,16 +313,222 @@ test('a proven pre-dispatch failure is not-started and preserves an existing not
   assert.equal(connects, 1);
 });
 
-test('failed target verification or initial connection is explicitly not-started without a record', async t => {
+test('failed target verification or initial connection persists the original not-sent record', async t => {
   const h = await fixture(t), invalid = batch('bad-target');
   const result = await h.submit({ ...invalid, params: { ...invalid.params, filePath: '/not-the-base.toml' } });
   assert.equal(result.outcome, 'not-started');
-  assert.equal(result.operation, undefined);
-  assert.equal(await h.status('bad-target'), null);
+  assert.deepEqual(result.operation?.terminal, { kind: 'not-sent' });
+  assert.deepEqual((await h.status('bad-target'))?.terminal, { kind: 'not-sent' });
   const offline = await h.submit(skill('offline', 'ssh-fixture'));
   assert.equal(offline.outcome, 'not-started');
-  assert.equal(offline.operation, undefined);
+  assert.deepEqual(offline.operation?.terminal, { kind: 'not-sent' });
   assert.doesNotMatch(JSON.stringify(offline), /PRIVATE_OFFLINE_DETAIL/);
   assert.equal(h.peer.calls('config/batchWrite').length, 0);
   assert.equal(h.peer.calls('skills/config/write').length, 0);
+});
+
+test('failure to persist the pending reservation never dispatches the original write', async t => {
+  const h = await fixture(t);
+  let saves = 0;
+  const writes = createConfigWrites({ ...h.options, persist: async () => {
+    if (++saves === 2) throw new Error('PRIVATE_PENDING_SAVE_DETAIL');
+    await h.options.persist();
+  } });
+  const host = createConfigWriteHost<Context>({ writes, validateHost() {}, connect: h.openConnection });
+  const result = await host.handle(batch('pending-save-failed'), context);
+  assert.ok('outcome' in result);
+  assert.equal(result.outcome, 'not-started');
+  assert.deepEqual(result.operation?.terminal, { kind: 'not-sent' });
+  assert.equal(saves, 3);
+  assert.equal(h.peer.calls('config/batchWrite').length, 0);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_PENDING_SAVE_DETAIL/);
+  const durable = JSON.parse(await readFile(h.statePath, 'utf8')) as Record<string, unknown>;
+  const restarted = createConfigWrites({ ...h.options, state: durable, mutations: createStateMutations() });
+  assert.deepEqual((await restarted.status('pending-save-failed'))?.terminal, { kind: 'not-sent' });
+});
+
+test('preparing is durable before connect and an interrupted preparation can only be settled locally', async t => {
+  const h = await fixture(t), entered = gate(), hold = gate();
+  h.setConnectHook(async () => { entered.release(); await hold.promise; throw new Error('fixture closed'); });
+  const original = h.submit(batch('before-connect'));
+  await entered.promise;
+  assert.equal((await h.status('before-connect'))?.state, 'preparing');
+  const durable = JSON.parse(await readFile(h.statePath, 'utf8')) as Record<string, unknown>;
+  const writes = createConfigWrites({ ...h.options, state: durable, mutations: createStateMutations(), persist: async () => {} });
+  const restarted = createConfigWriteHost<Context>({ writes, validateHost() { throw new Error('removed host'); },
+    connect: async () => { throw new Error('must not connect'); } });
+  const status = await restarted.handle({ hostId: 'local', action: 'status', operationId: 'before-connect' }, context);
+  assert.ok(!('outcome' in status));
+  assert.equal(status.operation?.state, 'preparing');
+  assert.equal(status.operation?.interrupted, true);
+  const blocked = await writes.begin({ operationId: 'other', hostId: 'local', method: 'config/batchWrite' });
+  assert.equal(blocked.outcome, 'blocked');
+  const retried = await restarted.handle({ hostId: 'local', action: 'retry-persistence', operationId: 'before-connect' }, context);
+  assert.ok(!('outcome' in retried));
+  assert.deepEqual(retried.operation?.terminal, { kind: 'not-sent' });
+  assert.equal(retried.operation?.state, 'failed');
+  hold.release();
+  assert.equal((await original).outcome, 'not-started');
+  assert.equal(h.peer.calls('config/batchWrite').length, 0);
+});
+
+test('a signed observed terminal survives restart without trusting a forged browser receipt', async t => {
+  const h = await fixture(t);
+  let finish: (() => void) | undefined;
+  h.peer.handlers.set('config/batchWrite', (_params, call) => {
+    finish = () => call.send({ id: call.message.id, result: { status: 'okOverridden', version: 'private-fixture-version' } });
+    return NO_REPLY;
+  });
+  const promise = h.submit(batch('receipt-id'));
+  await h.peer.waitForCall('config/batchWrite');
+  h.failNextPersist(); assert.ok(finish); finish();
+  const result = await promise;
+  assert.equal(result.outcome, 'success');
+  if (result.outcome !== 'success') return;
+  const receipt = result.operation.recoveryReceipt;
+  assert.ok(receipt);
+  const disk = JSON.parse(await readFile(h.statePath, 'utf8')) as { configWriteOperations: { receiptKey: string }[] };
+  const secret = disk.configWriteOperations[0]!.receiptKey;
+  assert.ok(secret);
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(secret));
+  let durable: Record<string, unknown> = structuredClone(disk);
+  const state = structuredClone(durable);
+  const writes = createConfigWrites({ ...h.options, state, mutations: createStateMutations(), persist: async () => { durable = structuredClone(state); } });
+  const host = createConfigWriteHost<Context>({ writes, validateHost() { throw new Error('host removed'); },
+    connect: async () => { throw new Error('must not connect'); } });
+  const query = (hostId = 'local') => host.handle({ hostId, action: 'status', operationId: 'receipt-id' }, context);
+  const retry = (value: unknown) => host.handle({ hostId: 'local', action: 'retry-persistence', operationId: 'receipt-id', receipt: value }, context);
+  const before = await query(); assert.ok(!('outcome' in before)); assert.equal(before.operation?.state, 'unknown');
+  const noReceipt = await host.handle({ hostId: 'local', action: 'retry-persistence', operationId: 'receipt-id' }, context);
+  assert.ok(!('outcome' in noReceipt)); assert.equal(noReceipt.operation?.state, 'unknown');
+  const forged = await retry({ ...receipt, terminal: { kind: 'ok' } });
+  assert.ok(!('outcome' in forged)); assert.ok('error' in forged && forged.error);
+  assert.equal(forged.operation?.state, 'unknown');
+  const wrongMethod = await retry({ ...receipt, method: 'skills/config/write' });
+  assert.ok(!('outcome' in wrongMethod)); assert.ok('error' in wrongMethod && wrongMethod.error);
+  const wrongId = await retry({ ...receipt, operationId: 'another-operation' });
+  assert.ok(!('outcome' in wrongId)); assert.ok('error' in wrongId && wrongId.error);
+  const wrongHost = await retry({ ...receipt, hostId: 'ssh-fixture' });
+  assert.ok(!('outcome' in wrongHost)); assert.ok('error' in wrongHost && wrongHost.error);
+  const wrongSignature = await retry({ ...receipt, signature: 'A'.repeat(43) });
+  assert.ok(!('outcome' in wrongSignature)); assert.ok('error' in wrongSignature && wrongSignature.error);
+  assert.equal((await query()).operation?.state, 'unknown');
+  await assert.rejects(query('ssh-fixture'), /another host/);
+  const restored = await retry(receipt);
+  assert.ok(!('outcome' in restored)); assert.deepEqual(restored.operation?.terminal, { kind: 'okOverridden' });
+  assert.equal(restored.operation?.state, 'succeeded');
+  const again = createConfigWrites({ ...h.options, state: durable, mutations: createStateMutations(), persist: async () => {} });
+  assert.deepEqual((await again.status('receipt-id'))?.terminal, { kind: 'okOverridden' });
+  assert.equal(h.peer.calls('config/batchWrite').length, 1);
+  assert.deepEqual(h.connectCalls, ['local']);
+});
+
+test('receipt issuance stays disabled until native state is isolated from browser file access', async t => {
+  const h = await fixture(t);
+  const writes = createConfigWrites({ ...h.options, issueRecoveryReceipts: false });
+  const host = createConfigWriteHost<Context>({ writes, validateHost() {}, connect: h.openConnection });
+  let finish: (() => void) | undefined;
+  h.peer.handlers.set('config/batchWrite', (_params, call) => {
+    finish = () => call.send({ id: call.message.id, result: { status: 'ok' } });
+    return NO_REPLY;
+  });
+  const promise = host.handle(batch('unprotected-state'), context);
+  await h.peer.waitForCall('config/batchWrite');
+  h.failNextPersist(); assert.ok(finish); finish();
+  const result = await promise;
+  assert.ok('outcome' in result); assert.equal(result.outcome, 'success');
+  assert.equal(result.operation?.storageError, true);
+  assert.equal(result.operation?.recoveryReceipt, undefined);
+  const disk = JSON.parse(await readFile(h.statePath, 'utf8')) as { configWriteOperations: Record<string, unknown>[] };
+  assert.equal(disk.configWriteOperations[0]?.receiptKey, undefined);
+  const restarted = createConfigWrites({ ...h.options, state: disk, mutations: createStateMutations(), persist: async () => {} });
+  await assert.rejects(restarted.retryTerminalSave('unprotected-state', { operationId: 'unprotected-state', hostId: 'local',
+    method: 'config/batchWrite', terminal: { kind: 'ok' }, signature: 'A'.repeat(43) }), /cannot be verified/);
+  assert.equal((await restarted.status('unprotected-state'))?.state, 'unknown');
+  assert.equal(h.peer.calls('config/batchWrite').length, 1);
+});
+
+test('known immediate and late rejection categories are safe and unknown details are never persisted', async t => {
+  const h = await fixture(t);
+  for (const category of ['configVersionConflict', 'configValidationError', 'configLayerReadonly'] as const) {
+    h.peer.handlers.set('config/batchWrite', () => { throw Object.assign(new Error('PRIVATE_MESSAGE'),
+      { code: -32600, data: { config_write_error_code: category, secret: 'PRIVATE_DATA' } }); });
+    const result = await h.submit(batch(category));
+    assert.equal(result.outcome, 'error');
+    if (result.outcome !== 'error') return;
+    assert.equal(result.error.category, category);
+    assert.equal(result.error.code, -32600);
+    assert.deepEqual(result.operation.terminal, { kind: 'rejected', code: -32600, category });
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_/);
+  }
+  let finish: (() => void) | undefined;
+  h.peer.handlers.set('config/batchWrite', (_params, call) => {
+    finish = () => call.send({ id: call.message.id, error: { code: -32600, message: 'PRIVATE_LATE',
+      data: { config_write_error_code: 'configVersionConflict', secret: 'PRIVATE_LATE_DATA' } } });
+    return NO_REPLY;
+  });
+  const unknown = await h.submit(batch('late-rejection'));
+  assert.equal(unknown.outcome, 'unknown');
+  assert.ok(finish); finish();
+  const late = await waitForStatus(() => h.status('late-rejection'), value => value.state === 'failed');
+  assert.deepEqual(late.terminal, { kind: 'rejected', code: -32600, category: 'configVersionConflict' });
+  h.peer.handlers.set('config/batchWrite', () => { throw Object.assign(new Error('PRIVATE_MESSAGE'),
+    { code: -32600, data: { config_write_error_code: 'PRIVATE_UNKNOWN_CATEGORY' } }); });
+  const unknownCategory = await h.submit(batch('unknown-category'));
+  assert.equal(unknownCategory.outcome, 'error');
+  if (unknownCategory.outcome === 'error') assert.equal(unknownCategory.error.category, undefined);
+  assert.doesNotMatch(await readFile(h.statePath, 'utf8'), /PRIVATE_/);
+});
+
+test('the shared mutation interval coordinates file reservations with configuration preparation and dispatch', async t => {
+  const h = await fixture(t), mutations = createStateMutations();
+  let fileActive = false;
+  const writes = createConfigWrites({ ...h.options, mutations, findFileBlocker: target => {
+    assert.equal(target.binding, join(h.home, 'config.toml')); return fileActive;
+  } });
+  const entered = gate(), hold = gate();
+  const host = createConfigWriteHost<Context>({ writes, validateHost() {}, connect: async () => {
+    entered.release(); await hold.promise; return h.openConnection();
+  } });
+  const reserveFile = () => mutations.run(() => {
+    if (writes.activeForFile()) return false;
+    fileActive = true; return true;
+  });
+  assert.equal(await reserveFile(), true);
+  const first = host.handle(batch('config-vs-file'), context);
+  await entered.promise;
+  assert.equal(await reserveFile(), false);
+  hold.release();
+  const blocked = await first;
+  assert.ok('outcome' in blocked);
+  assert.equal(blocked.outcome, 'not-started');
+  assert.deepEqual(blocked.operation?.terminal, { kind: 'not-sent' });
+  assert.equal(h.peer.calls('config/batchWrite').length, 0);
+  await mutations.run(() => { fileActive = false; });
+  h.peer.handlers.set('config/batchWrite', () => NO_REPLY);
+  const second = host.handle(batch('config-first'), context);
+  await h.peer.waitForCall('config/batchWrite');
+  assert.equal(await reserveFile(), false);
+  const unknown = await second;
+  assert.ok('outcome' in unknown); assert.equal(unknown.outcome, 'unknown');
+  assert.equal(await reserveFile(), false);
+});
+
+test('configuration requests request original-socket late observation and ignore a later socket generation', async () => {
+  const state: Record<string, unknown> = {};
+  const writes = createConfigWrites({ state, persist: async () => {}, mutations: createStateMutations(), findFileBlocker: () => false,
+    resolveTarget: async () => ({ hostKey: 'fixture', target: '/fixture/config.toml', binding: '/fixture/config.toml', scope: 'global' }) });
+  let socket: object = {}, callback: NonNullable<Parameters<ConfigWriteConnection['requestWithCursor']>[2]>['onLateTerminal'];
+  const connection: ConfigWriteConnection = { connected: true, get socket() { return socket; }, async requestWithCursor(_method, _params, options) {
+    assert.equal(options?.retainLateUntilDisconnect, true);
+    callback = options?.onLateTerminal;
+    throw new RpcError('fixture timeout', { uncertain: true });
+  } };
+  const host = createConfigWriteHost<Context>({ writes, validateHost() {}, connect: async () => connection });
+  const first = await host.handle(batch('old-socket'), context);
+  assert.ok('outcome' in first); assert.equal(first.outcome, 'unknown');
+  socket = {};
+  assert.ok(callback);
+  await callback({ outcome: 'success', result: { status: 'ok' } });
+  assert.equal((await writes.status('old-socket'))?.state, 'unknown');
 });

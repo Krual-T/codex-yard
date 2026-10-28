@@ -52,7 +52,7 @@ async function fixture(t: TestContext) {
     if (typeof params.filePath !== 'string') throw new Error('Fixture target is unavailable');
     return { hostKey, target: await realpath(params.filePath), binding: params.filePath };
   };
-  const options = { state, persist, mutations, resolveTarget };
+  const options = { state, persist, mutations, resolveTarget, findFileBlocker: () => false };
   const writes = createConfigWrites(options);
   async function connect() {
     const connection = new CodexConnection(peer.socketPath, { timeout: 120 });
@@ -166,13 +166,17 @@ test('a late original rejection settles its operation and preserves the RPC erro
   assert.deepEqual(result.operation.terminal, { kind: 'rejected', code: -32009 });
 });
 
-test('failure to persist the reservation never sends the daemon write and rolls back the memory field', async t => {
+test('failure to persist the preparation never sends and keeps an in-process fence until saved', async t => {
   const h = await fixture(t), connection = await h.connect();
   h.failNextPersist();
-  await assert.rejects(h.writes.submit({ operationId: randomUUID(), hostId: 'local', method: 'config/batchWrite', params: params(), connection }), /fixture persistence failed/);
+  const failed = await h.writes.submit({ operationId: 'preparation-save-failed', hostId: 'local', method: 'config/batchWrite', params: params(), connection });
+  assert.equal(failed.outcome, 'not-started');
+  assert.equal(failed.operation.storageError, true);
+  assert.deepEqual(failed.operation.observedTerminal, { kind: 'not-sent' });
   assert.equal(h.peer.calls('config/batchWrite').length, 0);
-  assert.equal(Object.hasOwn(h.state, 'configWriteOperations'), false);
   await assert.rejects(readFile(h.statePath), { code: 'ENOENT' });
+  assert.equal((await h.writes.submit({ operationId: 'another', hostId: 'local', method: 'config/batchWrite', params: params(), connection })).outcome, 'blocked');
+  assert.deepEqual((await h.writes.retryTerminalSave('preparation-save-failed')).terminal, { kind: 'not-sent' });
   h.peer.handlers.set('config/batchWrite', () => ({ status: 'ok' }));
   const next = await h.writes.submit({ operationId: randomUUID(), hostId: 'local', method: 'config/batchWrite', params: params(), connection });
   assert.equal(next.outcome, 'started'); if (next.outcome === 'started') assert.equal((await next.completion).outcome, 'success');
@@ -270,7 +274,9 @@ test('pending after restart is unknown, malformed records fail closed, and confi
 test('unverified targets, unclassified errors and unverifiable terminal frames cannot release a fence', async t => {
   const h = await fixture(t), connection = await h.connect();
   const missing = createConfigWrites({ ...h.options, resolveTarget: async () => { throw new Error('target unverified'); } });
-  await assert.rejects(missing.submit({ operationId: randomUUID(), hostId: 'local', method: 'config/batchWrite', params: params(), connection }), /target unverified/);
+  const missingTarget = await missing.submit({ operationId: randomUUID(), hostId: 'local', method: 'config/batchWrite', params: params(), connection });
+  assert.equal(missingTarget.outcome, 'not-started');
+  assert.deepEqual(missingTarget.operation.terminal, { kind: 'not-sent' });
   assert.equal(h.peer.calls('config/batchWrite').length, 0);
   const unclassified: ConfigWriteConnection = { connected: true, socket: {}, requestWithCursor: async () => { throw Object.assign(new Error('unknown transport failure'), { uncertain: false }); } };
   const first = await h.writes.submit({ operationId: randomUUID(), hostId: 'local', method: 'skills/config/write', params: { name: 'fixture', enabled: false }, connection: unclassified });
@@ -349,9 +355,10 @@ test('the originating connection must remain unchanged during target verificatio
   await verifyingTarget;
   const disconnected = once(connection, 'status'); h.peer.disconnect(); await disconnected;
   await connection.connect(); resumeResolution();
-  await assert.rejects(verifying, /original configuration connection changed/i);
+  const stopped = await verifying;
+  assert.equal(stopped.outcome, 'not-started');
+  assert.deepEqual(stopped.operation.terminal, { kind: 'not-sent' });
   assert.equal(h.peer.calls('config/batchWrite').length, 0);
-  assert.equal(Object.hasOwn(h.state, 'configWriteOperations'), false);
 
   let resumePersist!: () => void, persistStarted!: () => void, firstPersist = true;
   const persistenceGate = new Promise<void>(resolve => { resumePersist = resolve; });
@@ -365,10 +372,8 @@ test('the originating connection must remain unchanged during target verificatio
   const disconnectedAgain = once(connection, 'status'); h.peer.disconnect(); await disconnectedAgain;
   await connection.connect(); resumePersist();
   const started = await starting;
-  assert.equal(started.outcome, 'started'); if (started.outcome !== 'started') return;
-  const result = await started.completion;
-  assert.equal(result.outcome, 'error'); assert.equal(result.operation.state, 'failed');
-  assert.deepEqual(result.operation.terminal, { kind: 'not-sent' });
+  assert.equal(started.outcome, 'not-started');
+  assert.deepEqual(started.operation.terminal, { kind: 'not-sent' });
   assert.equal(h.peer.calls('config/batchWrite').length, 0);
 });
 
@@ -409,7 +414,7 @@ test('concurrent preparation for one ID resolves and dispatches once, and reject
   const input = { operationId: 'same-page-operation', hostId: 'local', method: 'config/batchWrite' as const, params: params(), connection };
   const firstPromise = writes.submit(input);
   await resolving;
-  assert.equal(await writes.status(input.operationId), null);
+  assert.equal((await writes.status(input.operationId))?.state, 'preparing');
   const duplicatePromise = writes.submit({ ...input, params: { changed: true } });
   await assert.rejects(writes.submit({ ...input, hostId: 'remote' }), /another host or method/);
   await assert.rejects(writes.submit({ ...input, method: 'skills/config/write' }), /another host or method/);

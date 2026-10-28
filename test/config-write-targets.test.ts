@@ -29,7 +29,10 @@ async function fixture(t: TestContext) {
   const hosts = new Map([[host.hostId, host]]), peers: Awaited<ReturnType<typeof createFakeCodex>>[] = [];
   const connections: CodexConnection[] = [];
   let commands = 0;
-  const resolveTarget = createConfigWriteTargets({ getSshHost: hostId => hosts.get(hostId), getHostPaths: (_hostId, connection) => paths.get(connection),
+  const resolveTarget = createConfigWriteTargets({ getConnectionSnapshot: ({ hostId, connection }) => {
+    const selectedPaths = paths.get(connection);
+    return selectedPaths ? { paths: selectedPaths, ...(hosts.has(hostId) ? { sshHost: hosts.get(hostId) } : {}) } : undefined;
+  },
     remoteCommand: async (selected, command, maxBytes, signal) => {
       assert.deepEqual(selected, host); commands++;
       const { stdout } = await run('/bin/sh', ['-c', command], { encoding: 'buffer', maxBuffer: maxBytes, signal });
@@ -89,6 +92,32 @@ test('local and registered SSH resolve symlinks, hardlinks and retargeted paths 
   assert.equal(moved.target, await realpath(laterTarget)); assert.equal(moved.binding, local.binding);
 });
 
+test('same registered host keeps paths bound to each original connection and socket', async t => {
+  const h = await fixture(t), first = await h.connect(), second = await h.connect(h.secondHome);
+  const secondTarget = await h.resolveTarget({ hostId: h.host.hostId, method: 'config/batchWrite', params: batch(), connection: second.connection });
+  const firstTarget = await h.resolveTarget({ hostId: h.host.hostId, method: 'config/batchWrite', params: batch(), connection: first.connection });
+  assert.equal(firstTarget.binding, h.config);
+  assert.equal(secondTarget.binding, h.secondConfig);
+  assert.equal(firstTarget.scope, 'global'); assert.equal(secondTarget.scope, 'global');
+});
+
+test('a socket generation change while obtaining the connection snapshot rejects before config/read', async t => {
+  const h = await fixture(t);
+  let socket: object = {}, release!: () => void, entered!: () => void, reads = 0;
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const connection: ConfigWriteConnection = { connected: true, get socket() { return socket; }, server: { codexHome: h.home },
+    async requestWithCursor() { reads++; return { result: {}, eventCursor: 0 }; } };
+  const resolver = createConfigWriteTargets({ async getConnectionSnapshot(input) {
+    assert.equal(input.socket, socket); entered(); await wait;
+    return { paths: { homeDirectory: h.root, codexHome: h.home } };
+  } });
+  const resolving = resolver({ hostId: 'local', method: 'config/batchWrite', params: batch(), connection });
+  await started; socket = {}; release();
+  await assert.rejects(resolving, /connection changed/);
+  assert.equal(reads, 0);
+});
+
 test('one service fences actual local and SSH requests across methods, hardlinks, retargeting and restart', async t => {
   const h = await fixture(t), first = await h.connect(), second = await h.connect(h.secondHome);
   const later = join(h.root, 'later.toml'), actual = join(h.root, 'actual.toml');
@@ -96,7 +125,7 @@ test('one service fences actual local and SSH requests across methods, hardlinks
   await symlink(actual, h.config); await link(actual, h.secondConfig);
   const state: Record<string, unknown> = {}, stateFile = join(h.root, 'native-state.json');
   const persist = async () => { await writeFile(stateFile + '.tmp', JSON.stringify(state)); await rename(stateFile + '.tmp', stateFile); };
-  const options = { state, persist, mutations: createStateMutations(), resolveTarget: h.resolveTarget };
+  const options = { state, persist, mutations: createStateMutations(), resolveTarget: h.resolveTarget, findFileBlocker: () => false };
   const writes = createConfigWrites(options), original = batch(), snapshot = structuredClone(original);
   first.peer.handlers.set('config/batchWrite', () => NO_REPLY);
   const submitted = await writes.submit({ operationId: randomUUID(), hostId: 'local', method: 'config/batchWrite', params: original, connection: first.connection });
@@ -130,7 +159,7 @@ test('legacy unfinished records remain readable and block a newly resolved globa
   const h = await fixture(t), { connection } = await h.connect();
   const state: Record<string, unknown> = { configWriteOperations: [{ operationId: 'previous-operation', hostId: 'old-host',
     hostKey: 'old-host-key', target: '/different/config.toml', binding: '/different/config.toml', state: 'pending' }] };
-  const writes = createConfigWrites({ state, persist: async () => {}, mutations: createStateMutations(), resolveTarget: h.resolveTarget });
+  const writes = createConfigWrites({ state, persist: async () => {}, mutations: createStateMutations(), resolveTarget: h.resolveTarget, findFileBlocker: () => false });
   assert.equal((await writes.status('previous-operation'))?.state, 'unknown');
   connection.close();
   const result = await writes.submit({ operationId: randomUUID(), hostId: 'local', method: 'config/batchWrite', params: batch(), connection });
@@ -140,7 +169,7 @@ test('legacy unfinished records remain readable and block a newly resolved globa
 test('only the original late terminal releases a global record for the next method', async t => {
   const h = await fixture(t), first = await h.connect(), second = await h.connect(h.secondHome);
   const state: Record<string, unknown> = {};
-  const writes = createConfigWrites({ state, persist: async () => {}, mutations: createStateMutations(), resolveTarget: h.resolveTarget });
+  const writes = createConfigWrites({ state, persist: async () => {}, mutations: createStateMutations(), resolveTarget: h.resolveTarget, findFileBlocker: () => false });
   let reply: (() => void) | undefined;
   first.peer.handlers.set('config/batchWrite', (_params, context) => {
     reply = () => context.send({ id: context.message.id, result: { status: 'ok' } }); return NO_REPLY;
@@ -192,7 +221,9 @@ test('dangling links, non-files, missing parents and malformed SSH output are re
   await assert.rejects(h.resolveTarget({ hostId: h.host.hostId, method: 'config/batchWrite', params: batch(), connection }));
   await unlink(h.config); await mkdir(h.config);
   await assert.rejects(h.resolveTarget({ hostId: 'local', method: 'config/batchWrite', params: batch(), connection }), /not a regular file/);
-  const invalid = createConfigWriteTargets({ getSshHost: id => h.hosts.get(id), getHostPaths: (_id, c) => h.paths.get(c), remoteCommand: async () => Buffer.from('file\0/truncated') });
+  const invalid = createConfigWriteTargets({ getConnectionSnapshot: ({ hostId, connection }) => {
+    const paths = h.paths.get(connection); return paths ? { paths, sshHost: h.hosts.get(hostId) } : undefined;
+  }, remoteCommand: async () => Buffer.from('file\0/truncated') });
   await assert.rejects(invalid({ hostId: h.host.hostId, method: 'config/batchWrite', params: batch(), connection }), /invalid/);
   const missingHome = join(h.root, 'missing-home');
   const missing = await h.connect(missingHome);
@@ -208,7 +239,7 @@ test('literal backslash-zero is a valid Linux path while an actual NUL is reject
   assert.equal(local.binding, join(unusualHome, 'config.toml'));
   const ssh = await h.resolveTarget({ ...input, hostId: h.host.hostId });
   assert.equal(ssh.binding, local.binding); assert.equal(ssh.target, local.target);
-  const writes = createConfigWrites({ state: {}, persist: async () => {}, mutations: createStateMutations(), resolveTarget: h.resolveTarget });
+  const writes = createConfigWrites({ state: {}, persist: async () => {}, mutations: createStateMutations(), resolveTarget: h.resolveTarget, findFileBlocker: () => false });
   unusual.peer.handlers.set('config/batchWrite', () => ({ status: 'ok' }));
   const started = await writes.submit({ ...input, operationId: 'literal-backslash' });
   assert.equal(started.outcome, 'started');

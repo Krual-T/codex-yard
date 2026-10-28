@@ -1,47 +1,40 @@
-import type { ConfigWriteStatus, ConfigurationWriteError, ConfigurationWriteRequest, ConfigurationWriteResponse,
-  ConfigurationWriteRetryResponse, ConfigurationWriteSubmitResponse } from '../../lib/config-write-protocol.ts';
-import type { ConfigWriteConnection, ConfigWriteIdentity, createConfigWrites } from './config-writes.ts';
+import type { ConfigWriteErrorCategory, ConfigWriteReceipt, ConfigWriteStatus, ConfigurationWriteError, ConfigurationWriteRequest,
+  ConfigurationWriteResponse, ConfigurationWriteRetryResponse, ConfigurationWriteSubmitResponse } from '../../lib/config-write-protocol.ts';
+import type { ConfigWriteConnection, createConfigWrites } from './config-writes.ts';
 
 type SubmitRequest = Extract<ConfigurationWriteRequest, { action: 'submit' }>;
 type Writes = ReturnType<typeof createConfigWrites>;
-
 interface Options<Context> {
   writes: Writes;
   validateHost(hostId: string, context: Context): void | Promise<void>;
   connect(hostId: string, context: Context): Promise<ConfigWriteConnection>;
 }
-
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
 
 function parseRequest(value: unknown): ConfigurationWriteRequest {
   if (!record(value) || !validId(value.hostId) || !validId(value.operationId)) throw new Error('Invalid configuration write request.');
   const { hostId, operationId, action } = value;
-  if (action === 'status' || action === 'retry-persistence') return { hostId, operationId, action };
+  if (action === 'status') return { hostId, operationId, action };
+  if (action === 'retry-persistence') return { hostId, operationId, action,
+    ...(value.receipt === undefined ? {} : { receipt: value.receipt as ConfigWriteReceipt }) };
   if (action !== 'submit' || value.method !== 'config/batchWrite' && value.method !== 'skills/config/write'
     || !record(value.params) || Object.hasOwn(value.params, 'operationId')) throw new Error('Invalid configuration write request.');
   try { return { hostId, operationId, action, method: value.method, params: structuredClone(value.params) }; }
   catch { throw new Error('Invalid configuration write request.'); }
 }
 
-function outcomeCode(operation: ConfigWriteStatus): number | 'OBSERVER_LIMIT' | undefined {
-  const terminal = operation.terminal ?? operation.observedTerminal;
-  return terminal?.kind === 'rejected' || terminal?.kind === 'not-sent' ? terminal.code : undefined;
+function safeError(message: string, uncertain: boolean, code?: number | 'OBSERVER_LIMIT', category?: ConfigWriteErrorCategory): ConfigurationWriteError {
+  return { message, uncertain, ...(code === undefined ? {} : { code }), ...(category === undefined ? {} : { category }) };
 }
-
-function safeError(message: string, uncertain: boolean, code?: number | 'OBSERVER_LIMIT'): ConfigurationWriteError {
-  return { message, uncertain, ...(code === undefined ? {} : { code }) };
-}
+const categoryMessages: Record<ConfigWriteErrorCategory, string> = {
+  configVersionConflict: 'The configuration changed since it was read. Reload it before saving again.',
+  configValidationError: 'The configuration was rejected as invalid. Review the submitted values.',
+  configLayerReadonly: 'The selected configuration layer is read-only.',
+};
 
 /** Host adapter for the existing configuration write fence. */
 export function createConfigWriteHost<Context>(options: Options<Context>) {
-  const preparing = new Map<string, { hostId: string; method: SubmitRequest['method']; promise: Promise<ConfigurationWriteSubmitResponse> }>();
-
-  async function preflight(identity: ConfigWriteIdentity) {
-    try { return await options.writes.preflight(identity); }
-    catch { throw new Error('Cannot verify the configuration operation identity or records.'); }
-  }
-
   async function status(hostId: string, operationId: string): Promise<ConfigWriteStatus | null> {
     let operation: ConfigWriteStatus | null;
     try { operation = await options.writes.status(operationId); }
@@ -50,20 +43,31 @@ export function createConfigWriteHost<Context>(options: Options<Context>) {
     return operation;
   }
 
-  async function runSubmit(request: SubmitRequest, context: Context): Promise<ConfigurationWriteSubmitResponse> {
+  async function submit(request: SubmitRequest, context: Context): Promise<ConfigurationWriteSubmitResponse> {
     const { operationId, hostId, method, params } = request;
-    const prior = await preflight(request);
-    if (prior) return prior;
-    let submitted;
-    try {
-      const connection = await options.connect(hostId, context);
-      submitted = await options.writes.submit({ operationId, hostId, method, params, connection });
-    } catch {
-      const recovered = await preflight(request);
-      if (recovered) return recovered;
-      return { outcome: 'not-started', error: { message: 'The configuration write could not be prepared.', uncertain: false } };
+    let prepared;
+    try { prepared = await options.writes.begin({ operationId, hostId, method }); }
+    catch { throw new Error('Cannot verify the configuration operation identity or records; it may belong to another host or method.'); }
+    if (prepared.outcome === 'existing' || prepared.outcome === 'blocked') return prepared;
+    if (prepared.outcome === 'not-started') return { outcome: 'not-started', operation: prepared.operation,
+      error: { message: 'The configuration write could not be prepared.', uncertain: false } };
+    let connection: ConfigWriteConnection;
+    try { connection = await options.connect(hostId, context); }
+    catch {
+      const operation = await prepared.notSent();
+      return { outcome: 'not-started', operation, error: { message: 'The configuration write could not be prepared.', uncertain: false } };
     }
-    if (submitted.outcome !== 'started') return submitted;
+    let submitted;
+    try { submitted = await prepared.start(params, connection); }
+    catch {
+      let operation: ConfigWriteStatus;
+      try { operation = await status(hostId, operationId) ?? { ...prepared.operation, state: 'unknown' }; }
+      catch { operation = { ...prepared.operation, state: 'unknown' }; }
+      return { outcome: 'unknown', error: safeError('The original configuration write could not be confirmed.', true), operation };
+    }
+    if (submitted.outcome === 'existing' || submitted.outcome === 'blocked') return submitted;
+    if (submitted.outcome === 'not-started') return { outcome: 'not-started', operation: submitted.operation,
+      error: { message: 'The configuration write could not be prepared or its target is blocked.', uncertain: false } };
     let completion;
     try { completion = await submitted.completion; }
     catch {
@@ -75,54 +79,36 @@ export function createConfigWriteHost<Context>(options: Options<Context>) {
     const operation = completion.operation;
     if (completion.outcome === 'success') return { outcome: 'success', result: completion.response.result, operation };
     const terminal = operation.terminal ?? operation.observedTerminal;
-    const code = outcomeCode(operation);
     if (completion.outcome === 'error' && terminal?.kind === 'not-sent') {
-      return { outcome: 'not-started', error: { ...safeError('The configuration write was not sent.', false, code), uncertain: false }, operation };
+      return { outcome: 'not-started', error: { ...safeError('The configuration write was not sent.', false, terminal.code), uncertain: false }, operation };
     }
-    return completion.outcome === 'error'
-      ? { outcome: 'error', error: safeError('The configuration write was rejected.', false, code), operation }
-      : { outcome: 'unknown', error: safeError('The original configuration write could not be confirmed.', true), operation };
+    if (completion.outcome === 'error') {
+      const rejected = terminal?.kind === 'rejected' ? terminal : undefined;
+      return { outcome: 'error', error: safeError(rejected?.category ? categoryMessages[rejected.category] : 'The configuration write was rejected.',
+        false, rejected?.code, rejected?.category), operation };
+    }
+    return { outcome: 'unknown', error: safeError('The original configuration write could not be confirmed.', true), operation };
   }
 
-  function submit(request: SubmitRequest, context: Context): Promise<ConfigurationWriteSubmitResponse> {
-    const previous = preparing.get(request.operationId);
-    if (previous) {
-      if (previous.hostId !== request.hostId || previous.method !== request.method) {
-        return Promise.reject(new Error('The configuration operation belongs to another host or method.'));
-      }
-      return previous.promise.then(async response => {
-        if (response.outcome === 'blocked' || response.outcome === 'not-started' && !response.operation) return response;
-        const operation = await status(request.hostId, request.operationId);
-        if (!operation) throw new Error('The original configuration operation is unavailable.');
-        return { outcome: 'existing' as const, operation };
-      });
-    }
-    const promise = runSubmit(request, context);
-    preparing.set(request.operationId, { hostId: request.hostId, method: request.method, promise });
-    return promise.finally(() => {
-      if (preparing.get(request.operationId)?.promise === promise) preparing.delete(request.operationId);
-    });
-  }
-
-  async function retry(hostId: string, operationId: string): Promise<ConfigurationWriteRetryResponse> {
+  async function retry(hostId: string, operationId: string, receipt?: ConfigWriteReceipt): Promise<ConfigurationWriteRetryResponse> {
     const current = await status(hostId, operationId);
-    if (!current?.storageError) return { operation: current };
-    try { return { operation: await options.writes.retryTerminalSave(operationId) }; }
+    if (!current && receipt !== undefined) throw new Error('The original configuration receipt cannot be verified.');
+    if (!current || !current.storageError && !current.interrupted && receipt === undefined) return { operation: current };
+    try { return { operation: await options.writes.retryTerminalSave(operationId, receipt) }; }
     catch {
       const operation = await status(hostId, operationId);
       const terminal = operation?.terminal ?? operation?.observedTerminal;
-      return { operation, error: safeError('The original configuration write status could not be saved.', !terminal) };
+      return { operation, error: safeError('The original configuration receipt could not be verified or saved.', !terminal) };
     }
   }
 
   async function handle(value: unknown, context: Context): Promise<ConfigurationWriteResponse> {
     const request = parseRequest(value);
+    if (request.action === 'status') return { operation: await status(request.hostId, request.operationId) };
+    if (request.action === 'retry-persistence') return retry(request.hostId, request.operationId, request.receipt);
     try { await options.validateHost(request.hostId, context); }
     catch { throw new Error('The selected configuration host is unavailable or unauthorized.'); }
-    if (request.action === 'submit') return submit(request, context);
-    if (request.action === 'status') return { operation: await status(request.hostId, request.operationId) };
-    return retry(request.hostId, request.operationId);
+    return submit(request, context);
   }
-
   return { handle };
 }

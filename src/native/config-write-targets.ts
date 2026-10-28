@@ -8,8 +8,8 @@ import type { ConfigWriteConnection, ConfigWriteTargetInput, ConfigWriteTarget }
 import type { HostPaths, SshHost } from './ssh.ts';
 
 interface Options {
-  getSshHost(hostId: string, connection: ConfigWriteConnection): SshHost | undefined | Promise<SshHost | undefined>;
-  getHostPaths(hostId: string, connection: ConfigWriteConnection): HostPaths | undefined | Promise<HostPaths | undefined>;
+  getConnectionSnapshot(input: { hostId: string; connection: ConfigWriteConnection; socket: unknown }):
+    { paths: HostPaths; sshHost?: SshHost } | undefined | Promise<{ paths: HostPaths; sshHost?: SshHost } | undefined>;
   remoteCommand?: RemoteFileCommand;
 }
 
@@ -69,19 +69,25 @@ async function sshTarget(host: SshHost, binding: string, command: RemoteFileComm
 export function createConfigWriteTargets(options: Options) {
   return async function resolveTarget(input: ConfigWriteTargetInput): Promise<ConfigWriteTarget> {
     const { hostId, method, params, connection } = input;
-    const registered = hostId === 'local' ? undefined : await options.getSshHost(hostId, connection);
-    if (hostId !== 'local' && (!registered || registered.hostId !== hostId)) throw new Error('The configuration host is not registered.');
-    const host = registered ? { ...registered } : undefined;
+    const socket = connection.socket;
+    const checkConnection = () => {
+      if (!socket || !connection.connected || connection.socket !== socket) throw new Error('The original configuration connection changed.');
+    };
+    checkConnection();
+    const snapshot = await options.getConnectionSnapshot({ hostId, connection, socket });
+    checkConnection();
+    const host = snapshot?.sshHost ? { ...snapshot.sshHost } : undefined;
+    if (hostId !== 'local' && (!host || host.hostId !== hostId) || hostId === 'local' && host) throw new Error('The configuration host is not registered.');
     if (method !== 'config/batchWrite' && method !== 'skills/config/write') throw new Error('The configuration write target is not verified.');
     if (method === 'skills/config/write') {
       const path = typeof params.path === 'string' && params.path.length > 0 && !params.path.includes('\0');
       const name = typeof params.name === 'string' && params.name.length > 0 && !params.name.includes('\0');
       if (typeof params.enabled !== 'boolean' || path === name) throw new Error('The skill selector is invalid.');
     }
-    const paths = await options.getHostPaths(hostId, connection);
-    const home = absolute(paths?.codexHome);
+    const home = absolute(snapshot?.paths.codexHome);
     if (absolute(connection.server?.codexHome) !== home) throw new Error('The original daemon configuration home does not match the selected host.');
     const response = await connection.requestWithCursor('config/read', { includeLayers: true });
+    checkConnection();
     const layers = record(response?.result) ? response.result.layers : null;
     if (!Array.isArray(layers) || layers.some(layer => !record(layer) || !record(layer.name) || typeof layer.name.type !== 'string')
       || layers.filter(layer => record(layer) && record(layer.name) && layer.name.type === 'user').length !== 1) {
@@ -95,6 +101,7 @@ export function createConfigWriteTargets(options: Options) {
       throw new Error('The requested configuration target is not the verified base user file.');
     }
     const target = host ? await sshTarget(host, binding, options.remoteCommand ?? remoteFileCommand) : await localTarget(binding);
+    checkConnection();
     return { hostKey: 'global-config-writes', target, binding, scope: 'global' };
   };
 }
