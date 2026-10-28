@@ -10,6 +10,8 @@ const untrusted = { ...trusted, key: 'new', trustStatus: 'untrusted' };
 class FakeClient implements WorkbenchClient {
   hooks = [{ ...trusted }, { ...untrusted }];
   version = 'v1'; profile: string | null = null; failRead = false; lost = false; override = false;
+  late: (() => void) | null = null;
+  deferLost = false;
   writes: { params: Record<string, unknown>; hostId?: string }[] = [];
   subscribe(_listener: (event: WorkbenchEvent) => void) { return () => {}; }
   async reply(): Promise<void> { throw new Error('Unexpected approval'); }
@@ -31,11 +33,15 @@ class FakeClient implements WorkbenchClient {
       assert.ok(params); this.writes.push({ params, hostId });
       assert.equal(params.expectedVersion, this.version); assert.equal(params.filePath, null);
       if (this.override) return { status: 'okOverridden' } as T;
-      for (const edit of params.edits as { keyPath: string; value: boolean }[]) {
-        const hook = this.hooks.find(item => `hooks.state.${JSON.stringify(item.key)}.enabled` === edit.keyPath);
-        assert.ok(hook); hook.enabled = edit.value;
-      }
-      this.version = 'v2';
+      const apply = () => {
+        for (const edit of params.edits as { keyPath: string; value: boolean }[]) {
+          const hook = this.hooks.find(item => `hooks.state.${JSON.stringify(item.key)}.enabled` === edit.keyPath);
+          assert.ok(hook); hook.enabled = edit.value;
+        }
+        this.version = 'v2';
+      };
+      if (this.deferLost) { this.late = apply; throw new Error('reply lost'); }
+      apply();
       if (this.lost) throw new Error('reply lost');
       return { status: 'ok' } as T;
     }
@@ -68,13 +74,29 @@ test('conflicts preserve edits until current state is explicitly reviewed', asyn
   assert.equal(await settings.save(), true); assert.equal(client.writes[0].params.expectedVersion, 'external');
 });
 
-test('lost replies retain the draft and require an explicit refresh and review', async () => {
+test('lost replies retain the draft and a refresh cannot release the unknown write', async () => {
   const { client, settings } = await setup(); settings.edit(trusted.key, false); client.lost = true;
   assert.equal(await settings.save(), false); assert.equal(settings.dirty, true); assert.equal(settings.getSnapshot().needsRefresh, true);
-  assert.match(settings.getSnapshot().error || '', /reply lost/); assert.equal(await settings.save(), false);
+  assert.equal(settings.getSnapshot().writeUncertain, true);
+  assert.match(settings.getSnapshot().error || '', /unknown result/); assert.equal(await settings.save(), false);
   client.failRead = true; await settings.load(); assert.equal(settings.dirty, true); assert.match(settings.getSnapshot().error || '', /list failed/);
   client.failRead = false; await settings.load(); assert.equal(settings.dirty, true); assert.ok(settings.getSnapshot().latest);
-  settings.useLatest(); assert.equal(settings.dirty, false); assert.equal(settings.getSnapshot().hooks[0].enabled, false);
+  settings.useLatest(); settings.discard();
+  assert.equal(settings.dirty, true); assert.equal(settings.getSnapshot().writeUncertain, true);
+  assert.equal(await settings.save(), false); assert.equal(client.writes.length, 1);
+});
+
+test('a late original write remains fenced after an earlier unchanged refresh', async () => {
+  const { client, settings } = await setup(); settings.edit(trusted.key, false); client.deferLost = true;
+  assert.equal(await settings.save(), false);
+  await settings.load(); settings.useLatest();
+  assert.equal(settings.getSnapshot().hooks[0].enabled, true);
+  assert.equal(settings.dirty, true); assert.equal(await settings.save(), false);
+  assert.ok(client.late); client.late();
+  assert.equal(client.hooks[0].enabled, false);
+  await settings.load(); settings.useLatest(); settings.discard();
+  assert.equal(settings.getSnapshot().writeUncertain, true);
+  assert.equal(settings.dirty, true); assert.equal(client.writes.length, 1);
 });
 
 test('a changed trust state or override cannot silently apply a pending edit', async () => {

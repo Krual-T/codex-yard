@@ -14,8 +14,9 @@ interface HookRead { hooks: HookEntry[]; warnings: string[]; target: ConfigTarge
 export interface HookDraft { key: string; enabled: boolean }
 export interface HookSnapshot {
   loading: boolean; saving: boolean; hooks: HookEntry[]; warnings: string[]; drafts: HookDraft[];
-  error: string | null; targetError: string | null; needsRefresh: boolean; latest: HookEntry[] | null;
+  error: string | null; targetError: string | null; needsRefresh: boolean; writeUncertain: boolean; latest: HookEntry[] | null;
 }
+const unknownWrite = 'The previous hook save has an unknown result. The host must confirm it has ended before another save.';
 const text = (error: unknown) => error instanceof Error ? error.message : String(error);
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const sameTarget = (left: ConfigTarget | null, right: ConfigTarget | null) => !!left && !!right
@@ -71,7 +72,7 @@ export class HookSettings {
   private target: ConfigTarget | null = null;
   private profile: string | null = null;
   private latestRead: HookRead | null = null;
-  private snapshot: HookSnapshot = { loading: true, saving: false, hooks: [], warnings: [], drafts: [], error: null, targetError: null, needsRefresh: false, latest: null };
+  private snapshot: HookSnapshot = { loading: true, saving: false, hooks: [], warnings: [], drafts: [], error: null, targetError: null, needsRefresh: false, writeUncertain: false, latest: null };
   constructor(client: WorkbenchClient, hostId: string, cwds: readonly string[]) { this.client = client; this.hostId = hostId; this.cwds = [...cwds]; }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -115,7 +116,7 @@ export class HookSettings {
       if (this.dirty && (this.snapshot.needsRefresh || this.changed(read))) {
         this.latestRead = read;
         this.update({ loading: false, latest: read.hooks, warnings: read.warnings, targetError: read.targetError,
-          error: 'Hook settings changed or the last save could not be confirmed. Review the current state before saving.' });
+          error: this.snapshot.writeUncertain ? unknownWrite : 'Hook settings changed or the last save could not be confirmed. Review the current state before saving.' });
       } else {
         this.latestRead = null; this.target = read.target; this.profile = read.profile;
         this.update({ loading: false, hooks: read.hooks, warnings: read.warnings, targetError: read.targetError, latest: null, needsRefresh: false });
@@ -123,7 +124,7 @@ export class HookSettings {
     } catch (error) { if (generation === this.generation) this.update({ loading: false, error: `Could not load hooks: ${text(error)}` }); }
   }
   edit(key: string, enabled: boolean) {
-    if (this.snapshot.loading || this.snapshot.saving || this.snapshot.latest) return;
+    if (this.snapshot.loading || this.snapshot.saving || this.snapshot.latest || this.snapshot.writeUncertain) return;
     const hook = this.snapshot.hooks.find(item => item.key === key);
     if (!hook || !canEditHook(hook)) return;
     const drafts = this.snapshot.drafts.filter(item => item.key !== key);
@@ -131,7 +132,7 @@ export class HookSettings {
     this.update({ drafts, error: null });
   }
   discard() {
-    if (this.snapshot.saving) return;
+    if (this.snapshot.saving || this.snapshot.writeUncertain) return;
     const latest = this.latestRead;
     const refresh = this.snapshot.needsRefresh && !latest;
     if (latest) { this.target = latest.target; this.profile = latest.profile; this.latestRead = null; }
@@ -140,6 +141,7 @@ export class HookSettings {
     if (refresh) void this.load();
   }
   useLatest() {
+    if (this.snapshot.writeUncertain) { this.update({ error: unknownWrite }); return; }
     const latest = this.latestRead;
     if (!latest) return;
     if (this.snapshot.drafts.some(draft => !latest.hooks.some(hook => hook.key === draft.key && canEditHook(hook)))) {
@@ -150,11 +152,12 @@ export class HookSettings {
     this.update({ hooks: latest.hooks, warnings: latest.warnings, targetError: latest.targetError, drafts, latest: null, needsRefresh: false, error: null });
   }
   async save(): Promise<boolean> {
-    if (!this.dirty || this.snapshot.saving || this.snapshot.loading || this.snapshot.latest || this.snapshot.needsRefresh) return false;
+    if (!this.dirty || this.snapshot.saving || this.snapshot.loading || this.snapshot.latest || this.snapshot.needsRefresh || this.snapshot.writeUncertain) return false;
     const target = this.target;
     if (!target) { this.update({ error: this.snapshot.targetError || 'Cannot save without a verified configuration version.' }); return false; }
     const generation = ++this.generation, drafts = this.snapshot.drafts;
     this.update({ saving: true, error: null });
+    let writeStarted = false, writeFinished = false;
     try {
       const before = await this.read();
       if (generation !== this.generation) return false;
@@ -164,8 +167,10 @@ export class HookSettings {
           error: 'Hook settings changed elsewhere. Review the current state before saving.' }); return false;
       }
       const edits = drafts.map(draft => ({ keyPath: `hooks.state.${JSON.stringify(draft.key)}.enabled`, value: draft.enabled, mergeStrategy: 'upsert' }));
+      writeStarted = true;
       const result = await this.client.rpc<{ status: 'ok' | 'okOverridden' }>('config/batchWrite',
         { edits, filePath: null, expectedVersion: target.version, reloadUserConfig: true }, this.hostId);
+      writeFinished = true;
       if (result?.status !== 'ok') throw new Error(result?.status === 'okOverridden' ? 'A higher-priority setting overrides the change' : 'The host did not confirm the write');
       const after = await this.read();
       if (generation !== this.generation) return false;
@@ -180,7 +185,11 @@ export class HookSettings {
         drafts: [], latest: null, needsRefresh: false, error: null });
       return true;
     } catch (error) {
-      if (generation === this.generation) this.update({ saving: false, needsRefresh: true, error: `Could not confirm save: ${text(error)}. Your edits are preserved; refresh before retrying.` });
+      if (generation === this.generation) {
+        const writeUncertain = writeStarted && !writeFinished;
+        this.update({ saving: false, needsRefresh: true, writeUncertain,
+          error: writeUncertain ? unknownWrite : `Could not confirm save: ${text(error)}. Your edits are preserved; refresh before retrying.` });
+      }
       return false;
     }
   }

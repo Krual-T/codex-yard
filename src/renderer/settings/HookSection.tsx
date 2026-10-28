@@ -29,7 +29,7 @@ export function HookSection({ client, hostId, projectScope, onDirtyChange, onSav
   }, [scopeChanged, incomingKey, projectScope, settings, state.drafts, state.saving, state.loading]);
   useLayoutEffect(() => { onDirtyChange(settings.dirty); }, [settings, state.drafts, onDirtyChange]);
   useLayoutEffect(() => { onSavingChange(state.saving); }, [state.saving, onSavingChange]);
-  const locked = state.loading || state.saving || state.latest !== null || scopeChanged;
+  const locked = state.loading || state.saving || state.writeUncertain || state.latest !== null || scopeChanged;
   return <>
     <div className="yard-section-heading"><h2>{t('Hooks')}</h2><button type="button" disabled={state.loading || state.saving} onClick={() => { void settings.load(); }}>{t('Refresh')}</button></div>
     <form className="yard-filter" onSubmit={event => { event.preventDefault(); if (!settings.dirty && !state.saving && !scopeChanged) {
@@ -44,8 +44,8 @@ export function HookSection({ client, hostId, projectScope, onDirtyChange, onSav
     <p className="yard-muted">{scope.paths.length ? `${t('Scope:')} ${scope.paths.join(', ')}` : t('Select a project or session with a working directory.')}</p>
     {scopeError && <p className="yard-setting-error" role="alert">{translateKnown(t, scopeError)}</p>}
     {scopeChanged && settings.dirty && <div className="yard-setting-error" role="alert"><p>{t('The selected project changed. Your hook edits remain in the previous scope.')}</p>
-      <button type="button" disabled={state.saving} onClick={() => { settings.discard(); setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); }}>{t('Discard edits and switch scope')}</button></div>}
-    {state.error && <p className="yard-setting-error" role="alert">{state.error}</p>}
+      <button type="button" disabled={state.saving || state.writeUncertain} onClick={() => { settings.discard(); setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); }}>{t('Discard edits and switch scope')}</button></div>}
+    {state.error && <p className="yard-setting-error" role="alert">{translateKnown(t, state.error)}</p>}
     {state.targetError && <p className="yard-setting-error">{state.targetError}</p>}
     {state.warnings.map((warning, index) => <p className="yard-setting-error" key={`${warning}:${index}`}>{warning}</p>)}
     {state.loading && <p role="status">{t('Loading hooks...')}</p>}
@@ -56,7 +56,7 @@ export function HookSection({ client, hostId, projectScope, onDirtyChange, onSav
         const previous = state.hooks.find(hook => hook.key === draft.key), current = state.latest?.find(hook => hook.key === draft.key);
         return <li key={draft.key}>{previous ? eventLabel(previous) : draft.key}: {current ? `Configured ${current.enabled ? 'enabled' : 'disabled'}${trustLabel(current) ? ` | ${trustLabel(current)}` : ''}` : 'No longer present'}; your edit: {draft.enabled ? 'Enabled' : 'Disabled'}</li>;
       })}</ul>
-      <button type="button" onClick={() => settings.useLatest()}>Use current state and keep edits</button>
+      <button type="button" disabled={state.writeUncertain} onClick={() => settings.useLatest()}>Use current state and keep edits</button>
     </div>}
     <div className="yard-setting-group">{state.hooks.map((hook, index) => {
       const desired = state.drafts.find(draft => draft.key === hook.key)?.enabled ?? hook.enabled;
@@ -80,7 +80,7 @@ export function HookSection({ client, hostId, projectScope, onDirtyChange, onSav
       </div>;
     })}</div>
     {settings.dirty && <div className="yard-inline-save"><span>{t('Unsaved hook changes')}</span><div className="yard-actions">
-      <button type="button" disabled={state.saving || state.loading} onClick={() => settings.discard()}>{t('Discard')}</button>
+      <button type="button" disabled={state.saving || state.loading || state.writeUncertain} onClick={() => settings.discard()}>{t('Discard')}</button>
       <button type="button" disabled={locked || state.needsRefresh || !!state.targetError} onClick={() => { void settings.save(); }}>{t(state.saving ? 'Saving...' : 'Save')}</button>
     </div></div>}
   </>;
