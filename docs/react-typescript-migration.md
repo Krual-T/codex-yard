@@ -27,7 +27,7 @@ hidden controls' accessibility handling.
 | `src/renderer/sidebar/` | Stateless list presentation; upstream services supply time, locale and business data |
 | `src/renderer/messages/` | Message display leaves; upstream services own conversation and disclosure state |
 | `src/renderer/components.ts` | Explicit exports of the two component factories |
-| `src/native/renderer-migration.ts` | The two pinned function seams and their SHA-256 guards |
+| `src/native/renderer-migration.ts` | The two pinned, uniquely matched function seams |
 | `src/native/server.ts`, `src/native/visualizations.ts`, `scripts/build-native.ts` | Resource delivery, cache namespace and authored component build |
 | `test/renderer-*.test.ts`, `scripts/verify-renderer-migration.ts` | Boundary checks and isolated page verification |
 
@@ -38,9 +38,9 @@ branch for a later batch with PR metadata fixtures.
 ## Runtime integration
 
 The server adapts only its responses for the two fixed function boundaries.
-It verifies the original function digest before substituting a small wrapper;
+It verifies the exact function start/end boundaries match once before substituting a small wrapper;
 `vendor/codex-app/` and its notices remain unchanged. Unrelated functions and
-exports stay upstream. A changed upstream boundary fails the guard and requires
+exports stay upstream. A missing or ambiguous upstream boundary fails and requires
 an explicit migration update.
 
 Each wrapper creates its authored component once, passes the original initialized
