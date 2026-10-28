@@ -2,10 +2,12 @@ import type { ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-p
 import type { ComposerDraft, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from '../composer/composer-draft-store.ts';
 import type { ComposerSubmissionDescription } from '../composer/composer-draft-store.ts';
+import type { ComposerDraftController } from '../composer/use-composer-draft.ts';
 import { acknowledgeSubmittedBrowserReferences } from './browser-draft.ts';
 import type { ConversationSessions } from './conversation-sessions.ts';
 import { sessionOptions } from './session-options.ts';
 import { submitDraft } from './submission.ts';
+import { sendsAtom, sendThreadKey } from './send-recovery.ts';
 import type { SendIntent, SendRecoveryStore } from './send-recovery.ts';
 import { readVisualizationModelContext } from '../visualizations/state.ts';
 
@@ -21,6 +23,7 @@ export interface ConversationSendServices {
   client: WorkbenchClient;
   sessions: ConversationSessions;
   sends: SendRecoveryStore;
+  cleanup: ConversationSendCleanup;
   /** Synchronously check the original owner, connection, and writable session. */
   guard(threadId: string | null, allowFirstTurn: boolean): void;
   /** Freeze and drain the original owner before its created-thread binding. */
@@ -30,12 +33,45 @@ export interface ConversationSendServices {
   recoveryChanged(): void;
 }
 
-export async function finishConversationSend(sends: SendRecoveryStore, intent: SendIntent) {
+export interface ConversationSendCleanup {
+  /** Return the mounted original owner's controller, or null only when its absence is proven.
+   * Throw when the original scope or exclusive ownership can no longer be verified. */
+  controller(intent: SendIntent): ComposerDraftController | null;
+}
+
+const record = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+
+export async function finishConversationSend(sends: SendRecoveryStore, intent: SendIntent, cleanup: ConversationSendCleanup) {
   const state = await sends.read(), current = state.requests[intent.id];
   if (!current || current.stage !== 'confirmed' || current.revision !== intent.revision
-    || JSON.stringify(current.owner) !== JSON.stringify(intent.owner)) throw new Error('原发送结果或草稿版本尚未确认。');
-  await acknowledgeSubmittedBrowserReferences(current, null, state.bindings);
-  await clearComposerDraftRevision(current.owner, current.revision);
+    || !same(current.owner, intent.owner) || current.clientUserMessageId !== intent.clientUserMessageId
+    || current.attemptId !== intent.attemptId || current.cwd !== intent.cwd || current.projectId !== intent.projectId
+    || current.documentPlainTextMode !== intent.documentPlainTextMode || !same(current.draft, intent.draft)
+    || !same(current.options, intent.options) || !same(current.overrides, intent.overrides)
+    || !same(current.action, intent.action) || !same(current.additionalContext, intent.additionalContext)) {
+    throw new Error('原发送结果或草稿版本尚未确认。');
+  }
+  const controller = cleanup.controller(current), snapshot = controller?.snapshot();
+  if (controller && (!snapshot || snapshot.owner.hostId !== current.owner.hostId || snapshot.owner.draftId !== current.owner.draftId
+    || snapshot.owner.threadId !== current.owner.threadId && !(current.owner.threadId === null && snapshot.owner.threadId === current.threadId))) {
+    throw new Error('原输入区已改变，已发送版本尚未清理。');
+  }
+  const guarded = (atoms: Readonly<Record<string, unknown>>) => {
+    const recovery = record(atoms[sendsAtom]), requests = record(recovery?.requests), bindings = record(recovery?.bindings);
+    if (!requests || !bindings || !same(requests[current.id], current) || current.stage !== 'confirmed'
+      || !current.threadId || current.owner.threadId !== null && current.owner.threadId !== current.threadId
+      || current.owner.threadId === null && bindings[sendThreadKey(current.owner.hostId, current.threadId)] !== current.owner.draftId
+      || cleanup.controller(current) !== controller) return false;
+    return !controller || same(controller.snapshot()?.owner, snapshot?.owner);
+  };
+  await acknowledgeSubmittedBrowserReferences(current, controller, state.bindings);
+  if (controller) await controller.clearSubmittedVersion(current.revision, guarded);
+  else await clearComposerDraftRevision(current.owner, current.revision, guarded);
+  if (cleanup.controller(current) !== controller || controller && !same(controller.snapshot()?.owner, snapshot?.owner)) {
+    throw new Error('原输入区已改变，已发送记录尚未关闭。');
+  }
   await sends.dismiss(current.id, current);
 }
 
@@ -48,7 +84,7 @@ export async function sendConversationDraft(services: ConversationSendServices, 
   const original = captured.scope;
   ({ draft, options, action, description, retry } = captured);
   const allowFirstTurn = action.type === 'send';
-  let intent: SendIntent | undefined;
+  let intent: SendIntent | undefined, confirmed = false;
   try {
     if (original.threadId) await sessions.ready({ hostId: original.hostId, threadId: original.threadId }, allowFirstTurn);
     guard(original.threadId, allowFirstTurn);
@@ -105,13 +141,17 @@ export async function sendConversationDraft(services: ConversationSendServices, 
           const target = (await sends.read()).requests[intent!.id]?.threadId ?? null;
           guard(target, allowFirstTurn); await sends.sending(intent!.id, intent!.attemptId); guard(target, allowFirstTurn);
         },
-        confirmed: async turnId => { await sends.confirmed(intent!.id, turnId, intent!.attemptId); },
-        queued: async id => { await sends.queued(intent!.id, id, intent!.attemptId); },
+        confirmed: async turnId => { await sends.confirmed(intent!.id, turnId, intent!.attemptId); confirmed = true; },
+        queued: async id => { await sends.queued(intent!.id, id, intent!.attemptId); confirmed = true; },
         resolvedCollaboration: async mode => { await sends.resolvedCollaboration(intent!.id, mode, intent!.attemptId); },
       },
     }, draft, options, action, services.selectCreated);
     if (result.turn) sessions.started({ hostId: original.hostId, threadId: result.threadId }, result.turn);
-    await finishConversationSend(sends, intent);
+    try { await finishConversationSend(sends, intent, services.cleanup); }
+    catch (cause) {
+      if (!confirmed) throw cause;
+      throw new Error('发送已确认，但原草稿清理尚未完成：' + (cause instanceof Error ? cause.message : String(cause)), { cause });
+    }
     services.recoveryChanged();
   } catch (error) {
     if (intent) {

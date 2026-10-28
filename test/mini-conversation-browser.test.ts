@@ -265,5 +265,148 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         assert.deepEqual(errors, []);
       } finally { await context.close(); }
     });
+
+    await t.test('a confirmed send and recovery finish preserve an unaccepted browser draft version', async () => {
+      const { context, page, errors } = await open();
+      try {
+        const mini = page.locator('.yard-mini-conversation');
+        await mini.locator('textarea').first().fill('submitted browser draft');
+        await page.waitForFunction(async () => (window as any).miniFixture.miniDurable('submitted browser draft'));
+        await page.evaluate(() => (window as any).miniFixture.attachBrowser());
+        await mini.getByRole('button', { name: '移除引用' }).waitFor();
+        await page.evaluate(() => (window as any).miniFixture.hold());
+        await mini.locator('.standalone-composer__submit').click();
+        await page.waitForFunction(() => (window as any).miniFixture.calls.some((call: any) => call.method === 'turn/start'));
+        await page.evaluate(() => (window as any).miniFixture.failNextAcceptance());
+        await mini.getByRole('button', { name: '移除引用' }).click();
+        await page.waitForFunction(() => !!(window as any).miniFixture.acceptanceFailure());
+        await page.waitForFunction(() => !!(window as any).miniFixture.receipt());
+        const receipt = await page.evaluate(() => (window as any).miniFixture.receipt());
+        assert.match(await page.evaluate(() => (window as any).miniFixture.acceptanceFailure()), /acceptCommittedVersion/);
+        assert.notEqual(receipt.before.revision, receipt.after.revision);
+        assert.equal(receipt.before.draft.references.length, 1);
+        assert.equal(receipt.after.draft.references.length, 0);
+        await page.evaluate(() => (window as any).miniFixture.release());
+        await page.waitForFunction(async () => Object.values((await (window as any).miniFixture.records()).requests)
+          .some((intent: any) => intent.stage === 'confirmed') && (window as any).miniFixture.errors.some((error: string) => error.includes('发送已确认')));
+        const state = await page.evaluate(async () => ({ records: await (window as any).miniFixture.records(),
+          versions: await (window as any).miniFixture.versions((window as any).miniFixture.receipt().before.owner),
+          snapshot: (window as any).miniFixture.draftController().snapshot() }));
+        const intent: any = Object.values(state.records.requests)[0];
+        assert.equal(intent.revision, receipt.before.revision);
+        assert.deepEqual(state.snapshot, receipt.before);
+        assert.ok(state.versions.retained.some((version: any) => version.revision === receipt.before.revision));
+        assert.ok(state.versions.versions.some((version: any) => version.revision === receipt.after.revision));
+        await assert.rejects(page.evaluate((id: string) => (window as any).miniFixture.controller().finish(id), intent.id));
+        await assert.rejects(page.evaluate((id: string) => (window as any).miniFixture.controller().retry(id), intent.id));
+        assert.equal((await page.evaluate(() => (window as any).miniFixture.records())).requests[intent.id].stage, 'confirmed');
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.retryReceipt()), true);
+        await page.evaluate(() => (window as any).miniFixture.revokeDuringClear());
+        await assert.rejects(page.evaluate((id: string) => (window as any).miniFixture.controller().finish(id), intent.id));
+        assert.match(await page.evaluate(() => (window as any).miniFixture.revocationStack()), /clearComposerDraftRevision/);
+        assert.equal((await page.evaluate(() => (window as any).miniFixture.records())).requests[intent.id].stage, 'confirmed');
+        assert.deepEqual(await page.evaluate(() => (window as any).miniFixture.draftController().snapshot()), receipt.after);
+        await page.evaluate(() => (window as any).miniFixture.restoreAuthority());
+        await page.evaluate(() => (window as any).miniFixture.switchDuringClear());
+        await assert.rejects(page.evaluate((id: string) => (window as any).miniFixture.controller().finish(id), intent.id));
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.switchResult()), true);
+        await page.waitForFunction(() => (window as any).miniFixture.miniReady('remote', 'thread-b'));
+        assert.equal((await page.evaluate(() => (window as any).miniFixture.records())).requests[intent.id].stage, 'confirmed');
+        await mini.locator('textarea').first().fill('other owner new draft');
+        await page.waitForFunction(async () => (window as any).miniFixture.miniDurable('other owner new draft'));
+        await page.waitForFunction(async () => (window as any).miniFixture.canDrain());
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('local', 'thread-a')), true);
+        await page.waitForFunction(() => (window as any).miniFixture.miniReady('local', 'thread-a'));
+        await page.evaluate((id: string) => (window as any).miniFixture.controller().finish(id), intent.id);
+        const finished = await page.evaluate(async (owner: any) => ({ records: await (window as any).miniFixture.records(),
+          versions: await (window as any).miniFixture.versions(owner), snapshot: (window as any).miniFixture.draftController().snapshot(),
+          starts: (window as any).miniFixture.calls.filter((call: any) => call.method === 'turn/start').length }), receipt.before.owner);
+        assert.equal(finished.records.requests[intent.id], undefined);
+        assert.deepEqual(finished.snapshot, receipt.after);
+        assert.ok(finished.versions.versions.some((version: any) => version.revision === receipt.after.revision));
+        assert.ok(!finished.versions.retained.some((version: any) => version.revision === receipt.before.revision));
+        assert.equal(finished.starts, 1);
+        await page.waitForFunction(async () => (window as any).miniFixture.canDrain());
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', 'thread-b')), true);
+        await page.waitForFunction(() => (window as any).miniFixture.miniReady('remote', 'thread-b'));
+        assert.equal(await mini.locator('textarea').first().inputValue(), 'other owner new draft');
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+
+    await t.test('a newer draft of the same owner survives the original confirmed send', async () => {
+      const { context, page, errors } = await open();
+      try {
+        const mini = page.locator('.yard-mini-conversation'), input = mini.locator('textarea').first();
+        await input.fill('original version');
+        await page.waitForFunction(async () => (window as any).miniFixture.miniDurable('original version'));
+        await page.evaluate(() => (window as any).miniFixture.hold());
+        await mini.locator('.standalone-composer__submit').click();
+        await page.waitForFunction(() => (window as any).miniFixture.calls.some((call: any) => call.method === 'turn/start'));
+        const original: any = Object.values((await page.evaluate(() => (window as any).miniFixture.records())).requests)[0];
+        await input.fill('newer version');
+        await page.waitForFunction(async () => (window as any).miniFixture.miniDurable('newer version'));
+        const newer = await page.evaluate(() => (window as any).miniFixture.draftController().snapshot());
+        assert.notEqual(newer.revision, original.revision);
+        await page.evaluate(() => (window as any).miniFixture.release());
+        await page.waitForFunction(async () => !Object.keys((await (window as any).miniFixture.records()).requests).length);
+        const result = await page.evaluate(async (owner: any) => ({ snapshot: (window as any).miniFixture.draftController().snapshot(),
+          versions: await (window as any).miniFixture.versions(owner) }), original.owner);
+        assert.equal(result.snapshot.draft.text, 'newer version');
+        assert.equal(result.snapshot.revision, newer.revision);
+        assert.ok(result.versions.versions.some((version: any) => version.revision === newer.revision));
+        assert.ok(!result.versions.retained.some((version: any) => version.revision === original.revision));
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+
+    await t.test('created-thread cleanup requires original binding and current owner authority', async () => {
+      const { context, page, errors } = await open();
+      try {
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', null)), true);
+        await page.waitForFunction(() => (window as any).miniFixture.miniReady('remote', null));
+        const mini = page.locator('.yard-mini-conversation'), input = mini.locator('textarea').first();
+        await input.fill('created original');
+        await page.waitForFunction(async () => (window as any).miniFixture.miniDurable('created original'));
+        await page.evaluate(() => (window as any).miniFixture.hold());
+        await mini.locator('.standalone-composer__submit').click();
+        await page.waitForFunction(() => (window as any).miniFixture.calls.some((call: any) => call.method === 'turn/start'));
+        await page.evaluate(() => (window as any).miniFixture.renderOwner(false));
+        await page.waitForFunction(() => (document.querySelector('.yard-mini-conversation .standalone-composer')?.parentElement as HTMLElement)?.inert);
+        await page.evaluate(() => (window as any).miniFixture.release());
+        await page.waitForFunction(async () => Object.values((await (window as any).miniFixture.records()).requests)
+          .some((intent: any) => intent.stage === 'confirmed'));
+        const state = await page.evaluate(() => (window as any).miniFixture.records());
+        const intent: any = Object.values(state.requests)[0];
+        assert.equal(intent.owner.threadId, null); assert.equal(intent.threadId, 'created-1');
+        await assert.rejects(page.evaluate((id: string) => (window as any).miniFixture.controller().finish(id), intent.id));
+        assert.equal((await page.evaluate(() => (window as any).miniFixture.records())).requests[intent.id].stage, 'confirmed');
+        await page.evaluate(() => (window as any).miniFixture.renderOwner(true));
+        await page.waitForFunction(() => !(document.querySelector('.yard-mini-conversation .standalone-composer')?.parentElement as HTMLElement)?.inert);
+        await page.waitForFunction(async () => (window as any).miniFixture.canDrain());
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', 'created-1')), true);
+        await page.waitForFunction(() => (window as any).miniFixture.miniReady('remote', 'created-1'));
+        await mini.locator('textarea').first().fill('created newer');
+        await page.waitForFunction(async () => (window as any).miniFixture.miniDurable('created newer'));
+        await page.evaluate((draftId: string) => (window as any).miniFixture.setBinding('remote', 'created-1', draftId), 'mini:wrong');
+        await assert.rejects(page.evaluate((id: string) => (window as any).miniFixture.controller().finish(id), intent.id));
+        assert.equal((await page.evaluate(() => (window as any).miniFixture.records())).requests[intent.id].stage, 'confirmed');
+        assert.equal(await mini.locator('textarea').first().inputValue(), 'created newer');
+        await page.evaluate((draftId: string) => (window as any).miniFixture.setBinding('remote', 'created-1', draftId), intent.owner.draftId);
+        await page.waitForFunction(async () => (window as any).miniFixture.canDrain());
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('local', 'thread-a')), true);
+        await page.waitForFunction(() => (window as any).miniFixture.miniReady('local', 'thread-a'));
+        await assert.rejects(page.evaluate((id: string) => (window as any).miniFixture.controller().finish(id), intent.id));
+        assert.equal((await page.evaluate(() => (window as any).miniFixture.records())).requests[intent.id].stage, 'confirmed');
+        await page.waitForFunction(async () => (window as any).miniFixture.canDrain());
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', 'created-1')), true);
+        await page.waitForFunction(() => (window as any).miniFixture.miniReady('remote', 'created-1'));
+        await page.evaluate((id: string) => (window as any).miniFixture.controller().finish(id), intent.id);
+        assert.equal((await page.evaluate(() => (window as any).miniFixture.records())).requests[intent.id], undefined);
+        assert.equal(await mini.locator('textarea').first().inputValue(), 'created newer');
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((call: any) => call.method === 'turn/start').length), 1);
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
   } finally { await browser.close(); }
 });

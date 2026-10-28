@@ -4,10 +4,13 @@ import { StandaloneMini } from '../src/renderer/mini/index.tsx';
 import { MiniConversation, miniDraftIdentity } from '../src/renderer/mini/MiniConversation.tsx';
 import type { MiniConversationController, MiniConversationLease, MiniConversationTarget } from '../src/renderer/mini/MiniConversation.tsx';
 import { StandaloneComposer } from '../src/renderer/composer/StandaloneComposer.tsx';
-import { readComposerDraft } from '../src/renderer/composer/composer-draft-store.ts';
+import { readComposerDraft, readComposerDraftVersions } from '../src/renderer/composer/composer-draft-store.ts';
 import type { ComposerDraftController, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
+import { removeBrowserDraftReference } from '../src/renderer/app/browser-draft.ts';
+import { addBrowserComment } from './browser-comment-fixture.ts';
+import { updateBrowserAtom } from '../src/renderer/storage/ui-atoms.ts';
 import { ConversationSessions, useConversationSession } from '../src/renderer/app/conversation-sessions.ts';
-import { SendRecoveryStore, sendThreadKey } from '../src/renderer/app/send-recovery.ts';
+import { SendRecoveryStore, sendsAtom, sendThreadKey } from '../src/renderer/app/send-recovery.ts';
 import { MessageEditRecoveryStore } from '../src/renderer/app/message-edit-recovery.ts';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import type { ThreadSummary, TurnSummary } from '../lib/codex-protocol.ts';
@@ -30,7 +33,12 @@ const thread = (hostId: string, id: string) => threads[threadKey(hostId, id)] ??
 };
 let connected = true, unknownNext = false, holdNext = false, rejectTarget = false, resolveHeld: (() => void) | undefined;
 let controller: MiniConversationController | null = null, mainController: ComposerDraftController | null = null;
+let miniController: ComposerDraftController | null = null;
 let miniSnapshot: ComposerDraftSnapshot | null = null;
+let browserReceipt: { before: ComposerDraftSnapshot; after: ComposerDraftSnapshot } | null = null;
+let failAcceptance = false, acceptanceFailureStack = '';
+let authorityGranted = true, revokeAtClear = false, revocationStack = '';
+let switchAtClear: (() => void) | null = null, switching: Promise<boolean> | null = null;
 let barrierLease: MiniConversationLease | null = null;
 let mainRelease: (() => void) | undefined;
 const client: WorkbenchClient & { connected: boolean } = {
@@ -140,8 +148,22 @@ function Fixture() {
       try { return await lease.flush(); } finally { lease.release(); } }}>
       <MiniConversation client={client} sessions={sessions} sends={sends} edits={edits} initialTarget={target}
         initialOptions={{ model: 'fixture-model', approvalPolicy: 'on-request', sandboxMode: 'workspace-write' }}
-        isConnected={() => connected} canUseOwner={owner => ownerAvailable && owner.draftId !== 'main-draft'} onController={value => { controller = value; }}
+        isConnected={() => connected} canUseOwner={owner => ownerAvailable && authorityGranted && owner.draftId !== 'main-draft'} onController={value => { controller = value; }}
+        onDraftController={value => { miniController = value; }}
         onDraftChange={value => { miniSnapshot = structuredClone(value); }}
+        onRemoveReference={(owner, reference, operation) => removeBrowserDraftReference(owner, reference, operation, (before, after) => {
+          browserReceipt = structuredClone({ before, after });
+          if (!failAcceptance) return;
+          failAcceptance = false;
+          const original = IDBObjectStore.prototype.get;
+          IDBObjectStore.prototype.get = function (key) {
+            const error = new Error('Synthetic acceptance read failure');
+            if (this.name === 'atoms' && key === 'native-atoms' && error.stack?.includes('acceptCommittedVersion')) {
+              IDBObjectStore.prototype.get = original; acceptanceFailureStack = error.stack; throw error;
+            }
+            return original.call(this, key);
+          };
+        }, () => { browserReceipt = null; })}
         onTargetChanged={value => { if (rejectTarget) throw new Error('Synthetic target persistence failure');
           targets.push(value); sessionStorage.setItem('fixture-mini-target', JSON.stringify(value)); setTarget(value); }}
         onRecoveryChanged={() => {}} onError={error => errors.push(error)} onOpenThread={value => opened.push(value)} />
@@ -149,15 +171,61 @@ function Fixture() {
   </>;
 }
 const nativePut = IDBObjectStore.prototype.put;
+const nativeGet = IDBObjectStore.prototype.get;
 let failWrites = false;
 IDBObjectStore.prototype.put = function (...args: Parameters<IDBObjectStore['put']>) {
   if (failWrites) throw new DOMException('Synthetic storage failure', 'QuotaExceededError');
   return nativePut.apply(this, args);
 };
+IDBObjectStore.prototype.get = function (key) {
+  const stack = revokeAtClear || switchAtClear ? new Error('Synthetic cleanup race').stack ?? '' : '';
+  if (this.name === 'atoms' && key === 'native-atoms' && stack.includes('clearComposerDraftRevision')) {
+    if (revokeAtClear) { revokeAtClear = false; authorityGranted = false; revocationStack = stack; }
+    const startSwitch = switchAtClear; switchAtClear = null; startSwitch?.();
+  }
+  return nativeGet.call(this, key);
+};
 const root = createRoot(document.getElementById('root')!);
 const fixture = {
   calls, hostCalls, opened, errors, targets, sends, sessions, renderConnection: (_value: boolean) => {}, renderOwner: (_value: boolean) => {},
   controller: () => controller, main: () => mainController?.snapshot(),
+  draftController: () => miniController,
+  receipt: () => structuredClone(browserReceipt),
+  acceptanceFailure: () => acceptanceFailureStack,
+  failNextAcceptance() { failAcceptance = true; acceptanceFailureStack = ''; },
+  revokeDuringClear() { revokeAtClear = true; revocationStack = ''; },
+  revocationStack: () => revocationStack,
+  restoreAuthority() { authorityGranted = true; },
+  switchDuringClear() {
+    switchAtClear = () => { switching = controller?.switchTarget({ hostId: 'remote', threadId: 'thread-b',
+      draftId: miniDraftIdentity('remote', 'thread-b'), cwd: '/fixture/remote' }) ?? Promise.resolve(false); };
+  },
+  switchResult() { return switching ?? Promise.resolve(false); },
+  async attachBrowser() {
+    const current = miniController, snapshot = current?.snapshot();
+    if (!current || !snapshot) throw new Error('Mini controller unavailable');
+    const reference = await addBrowserComment(snapshot.owner, { kind: 'element', pageUrl: 'https://fixture.invalid/page',
+      framePath: [], title: 'Fixture element', immediateText: 'Example', role: 'button', name: 'Example', selector: '#fixture',
+      elementPath: '#fixture', nearbyText: 'Example', rect: { x: 1, y: 2, width: 20, height: 10 }, elementMetadata: { tag: 'button' } });
+    if (!await current.update(snapshot.owner, draft => ({ ...draft, references: [...draft.references, reference] }))) {
+      throw new Error('Could not attach fixture browser reference');
+    }
+    return reference;
+  },
+  async retryReceipt() {
+    if (!browserReceipt || !miniController) return false;
+    const accepted = await miniController.acceptCommittedVersion(browserReceipt.before, browserReceipt.after);
+    if (accepted) browserReceipt = null;
+    return accepted;
+  },
+  versions: readComposerDraftVersions,
+  async setBinding(hostId: string, threadId: string, draftId: string) {
+    await updateBrowserAtom(sendsAtom, previous => {
+      if (!previous || typeof previous !== 'object' || Array.isArray(previous)) throw new Error('Missing fixture recovery state');
+      const state = previous as { bindings: Record<string, string> };
+      return { ...state, bindings: { ...state.bindings, [sendThreadKey(hostId, threadId)]: draftId } };
+    });
+  },
   async target(hostId: string, threadId: string | null) {
     const state = await sends.read(), draftId = miniDraftIdentity(hostId, threadId, state.bindings);
     return controller?.switchTarget({ hostId, threadId, draftId, cwd: '/fixture/' + hostId }) ?? false;
@@ -188,7 +256,7 @@ const fixture = {
   disconnect() { connected = false; fixture.renderConnection(false); emit({ type: 'connection-state', state: 'disconnected' }); },
   reconnect() { connected = true; fixture.renderConnection(true); emit({ type: 'connection-state', state: 'connected' }); },
   unknown() { unknownNext = true; }, hold() { holdNext = true; }, release() { resolveHeld?.(); resolveHeld = undefined; }, complete,
-  dispose() { root.unmount(); mainRelease?.(); sessions.dispose(); IDBObjectStore.prototype.put = nativePut; },
+  dispose() { root.unmount(); mainRelease?.(); sessions.dispose(); IDBObjectStore.prototype.put = nativePut; IDBObjectStore.prototype.get = nativeGet; },
 };
 (window as unknown as { miniFixture: typeof fixture }).miniFixture = fixture;
 root.render(<Fixture />);

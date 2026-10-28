@@ -10,6 +10,7 @@ import type { MessageEditNavigationController, MessageEditNavigationLease } from
 import { useConversationSession } from '../app/conversation-sessions.ts';
 import type { ConversationSessions } from '../app/conversation-sessions.ts';
 import { sendConversationDraft, finishConversationSend } from '../app/conversation-send.ts';
+import type { ConversationSendCleanup } from '../app/conversation-send.ts';
 import { messageEditChanged, messageEditRebaseMarker, messageEditsAtom } from '../app/message-edit-recovery.ts';
 import type { MessageEditRecoveryStore, StoredMessageEdit } from '../app/message-edit-recovery.ts';
 import { sendsAtom, sendThreadKey } from '../app/send-recovery.ts';
@@ -45,7 +46,7 @@ export interface MiniConversationProps {
   initialTarget: MiniConversationTarget;
   initialOptions?: SubmitOptions;
   hosts?: ComposerHost[];
-  /** Synchronous projections of the parent's actual connection and owner state. */
+  /** Synchronous projections of the parent's actual connection and exclusive owner state, including created-thread aliases. */
   isConnected(hostId: string): boolean;
   canUseOwner(owner: ComposerDraftOwner): boolean;
   onController(controller: MiniConversationController | null): void;
@@ -57,6 +58,8 @@ export interface MiniConversationProps {
   onOpenVisualization?(value: { hostId: string; threadId: string; path: string }): void;
   onOpenBrowser?(value: { hostId: string; threadId: string; url?: string }): void;
   onAssignCreatedProject?(target: MiniConversationTarget, thread: ThreadSummary): Promise<void>;
+  /** The mounted controller used to reconcile the parent's retained browser before/after receipt. */
+  onDraftController?(controller: ComposerDraftController | null): void;
   onDraftChange?(snapshot: ComposerDraftSnapshot): void;
   onRemoveReference?(owner: ComposerDraftOwner, reference: ComposerReference, operation: ComposerDraftExternalOperation): Promise<'handled' | void>;
 }
@@ -94,6 +97,7 @@ export function MiniConversation(props: MiniConversationProps) {
   const receiveComposer = useCallback((value: ComposerDraftController | null) => {
     composer.current = value;
     mountedComposerKey.current = value ? targetKey(targetRef.current) : null;
+    latest.current.onDraftController?.(value);
   }, []);
   const receiveEditor = useCallback((value: MessageEditNavigationController | null) => { messageEditor.current = value; }, []);
 
@@ -186,6 +190,20 @@ export function MiniConversation(props: MiniConversationProps) {
     finally { lease.release(); }
   }, [freeze, commitTarget, report]);
 
+  const cleanupFor = useCallback((scope: MiniConversationTarget): ConversationSendCleanup => {
+    const scopeKey = targetKey(scope);
+    return { controller(intent) {
+      if (!mounted.current || locked.current || targetKey(targetRef.current) !== scopeKey || !latest.current.canUseOwner(ownerOf(scope))
+        || intent.owner.hostId !== scope.hostId || intent.owner.draftId !== scope.draftId
+        || scope.threadId !== intent.owner.threadId && !(intent.owner.threadId === null && scope.threadId === intent.threadId)) {
+        throw new Error('原 Mini 草稿的所有权已改变，已发送记录和输入已保留。');
+      }
+      const current = composer.current;
+      if (current && mountedComposerKey.current !== scopeKey) throw new Error('原 Mini 输入区尚未确认。');
+      return current;
+    } };
+  }, []);
+
   const runSend = useCallback(async (draft: ComposerDraft, options: SubmitOptions, action: SubmitAction,
     description: ComposerSubmissionDescription, retry?: SendIntent) => {
     if (inFlight.current || locked.current) throw notSent('Mini 正在处理其他操作，原输入已保留。');
@@ -209,6 +227,7 @@ export function MiniConversation(props: MiniConversationProps) {
     };
     try {
       await sendConversationDraft({ client: latest.current.client, sessions: latest.current.sessions, sends: latest.current.sends, guard,
+        cleanup: cleanupFor(original),
         recoveryChanged: changed,
         assignCreatedProject: async intent => {
           if (!intent.created || !latest.current.onAssignCreatedProject) throw notSent('项目关联尚未接入，原输入已保留。');
@@ -246,7 +265,7 @@ export function MiniConversation(props: MiniConversationProps) {
       creation.release?.(); creation.lease?.release();
       inFlight.current = false; if (mounted.current) setWorking(false);
     }
-  }, [changed, commitTarget, report]);
+  }, [changed, cleanupFor, commitTarget, report]);
 
   const retry = useCallback(async (id: string) => {
     const current = (await latest.current.sends.read()).requests[id], scope = targetRef.current;
@@ -257,10 +276,11 @@ export function MiniConversation(props: MiniConversationProps) {
         ...(current.documentPlainTextMode !== undefined ? { documentPlainTextMode: current.documentPlainTextMode } : {}) }, current);
   }, [runSend]);
   const finish = useCallback(async (id: string) => {
-    const current = (await latest.current.sends.read()).requests[id], scope = targetRef.current;
+    const scope = structuredClone(targetRef.current), current = (await latest.current.sends.read()).requests[id];
     if (!current || current.owner.hostId !== scope.hostId || current.owner.draftId !== scope.draftId) throw new Error('此 Mini 原发送记录不可用。');
-    await finishConversationSend(latest.current.sends, current); changed();
-  }, [changed]);
+    try { await finishConversationSend(latest.current.sends, current, cleanupFor(scope)); }
+    finally { changed(); }
+  }, [changed, cleanupFor]);
   const controller = useMemo<MiniConversationController>(() => ({ target: () => structuredClone(targetRef.current), freeze, switchTarget, retry, finish }),
     [freeze, switchTarget, retry, finish]);
   useLayoutEffect(() => { props.onController(controller); return () => props.onController(null); }, [props.onController, controller]);
