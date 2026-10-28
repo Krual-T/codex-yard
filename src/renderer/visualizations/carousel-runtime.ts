@@ -57,9 +57,16 @@ export function installVisualizationCarousels(): () => void {
     summary.append(count, name); picker.append(summary, options); controls.append(previous, picker, next); root.append(controls, status);
     controlsAdded.push(controls, status);
     let active = 0;
+    let pressedPointer: number | undefined;
+    let suppressSummaryClick = false;
     const choices = panels.map((panel, index) => {
       const choice = document.createElement('button'); choice.type = 'button'; choice.textContent = panel.dataset.variant ?? '';
       choice.addEventListener('click', () => { select(index); summary.focus(); }, { signal });
+      choice.addEventListener('pointerup', event => {
+        if (picker.open && event.pointerType === 'mouse' && event.button === 0 && event.pointerId === pressedPointer) {
+          select(index); summary.focus();
+        }
+      }, { signal });
       options.append(choice);
       return choice;
     });
@@ -76,6 +83,13 @@ export function installVisualizationCarousels(): () => void {
     }
     previous.addEventListener('click', () => select((active + panels.length - 1) % panels.length), { signal });
     next.addEventListener('click', () => select((active + 1) % panels.length), { signal });
+    summary.addEventListener('pointerdown', event => {
+      suppressSummaryClick = event.pointerType === 'mouse' && event.button === 0 && !event.ctrlKey;
+      if (!suppressSummaryClick) return;
+      event.preventDefault(); summary.focus({ preventScroll: true }); picker.open = !picker.open;
+      pressedPointer = picker.open ? event.pointerId : undefined;
+    }, { signal });
+    summary.addEventListener('click', event => { if (suppressSummaryClick && event.detail > 0) event.preventDefault(); }, { signal });
     picker.addEventListener('keydown', event => {
       if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;
       if (event.key === 'Escape' && picker.open) { event.preventDefault(); picker.open = false; summary.focus(); return; }
@@ -90,6 +104,8 @@ export function installVisualizationCarousels(): () => void {
     }, { signal });
     picker.addEventListener('focusout', event => { if (!picker.contains(event.relatedTarget as Node | null)) picker.open = false; }, { signal });
     document.addEventListener('pointerdown', event => { if (!picker.contains(event.target as Node | null)) picker.open = false; }, { signal });
+    document.addEventListener('pointerup', () => { pressedPointer = undefined; }, { signal });
+    document.addEventListener('pointercancel', () => { pressedPointer = undefined; }, { signal });
     select(0);
   }
   return () => { abort.abort(); style.remove(); controlsAdded.forEach(element => element.remove()); };

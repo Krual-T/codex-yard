@@ -81,6 +81,22 @@ test('carousel and bounded preview interaction run in the isolated React visuali
     await page.keyboard.press('End');
     await page.keyboard.press('Enter');
     assert.equal(await frame.locator('.viz-carousel').getAttribute('data-active-variant'), 'Summary');
+    await view.locator('.viz-carousel-picker summary').click();
+    await view.getByRole('button', { name: 'Detailed', exact: true }).click();
+    assert.equal(await frame.locator('.viz-carousel').getAttribute('data-active-variant'), 'Detailed');
+    const summary = await view.locator('.viz-carousel-picker summary').boundingBox();
+    assert.ok(summary);
+    await page.mouse.move(summary.x + summary.width / 2, summary.y + summary.height / 2);
+    await page.mouse.down();
+    await frame.waitForFunction(() => {
+      const choices = document.querySelector('.viz-carousel-options');
+      return !!choices && choices.getBoundingClientRect().bottom <= innerHeight;
+    });
+    const choice = await view.getByRole('button', { name: 'Summary', exact: true }).boundingBox();
+    assert.ok(choice);
+    await page.mouse.move(choice.x + choice.width / 2, choice.y + choice.height / 2);
+    await page.mouse.up();
+    assert.equal(await frame.locator('.viz-carousel').getAttribute('data-active-variant'), 'Summary');
     await view.getByRole('button', { name: 'Later' }).click();
     assert.equal(await frame.locator('.viz-carousel').getAttribute('data-active-variant'), 'Compact');
     assert.equal(await page.evaluate(() => window.carouselHarness.drafts.length), 0);
