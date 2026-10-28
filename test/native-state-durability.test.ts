@@ -102,7 +102,7 @@ test('startup handles missing and malformed files without replacing existing byt
     await assert.rejects(owner.load());
     assert.equal(await readFile(path, 'utf8'), contents);
   }
-  const contents = '{"settings":{"theme":"light"},"future":{"keep":true}}';
+  const contents = '{"settings":{"theme":"light"},"future":{"keep":true,"negativeZero":-0}}';
   await writeFile(path, contents);
   let failStartupSync: NativeStateCheckpoint | null = 'startup-file-sync';
   const restarting = createNativeState({ dataDir, publish: () => {}, checkpoint(step) {
@@ -115,7 +115,9 @@ test('startup handles missing and malformed files without replacing existing byt
   await assert.rejects(restarting.load(), /startup sync failed/);
   assert.throws(restarting.assertAvailable, /尚未载入/);
   failStartupSync = null;
-  assert.deepEqual(await restarting.load(), JSON.parse(contents));
+  const restored = await restarting.load();
+  assert.deepEqual(restored, JSON.parse(contents));
+  assert.equal(Object.is(object(restored.future).negativeZero, -0), true);
 });
 
 test('pre-rename file fsync failure rolls back the caller and leaves the old disk snapshot', async t => {
@@ -344,6 +346,17 @@ test('publishing an unknown prototype-named field preserves it without changing 
   assert.deepEqual(disk.__proto__, { preserved: true });
   assert.equal(Object.hasOwn(f.state, '__proto__'), true);
   assert.equal(Object.getPrototypeOf(f.state), Object.prototype);
+});
+
+test('an unknown negative zero survives a complete snapshot and publication', async t => {
+  const f = await fixture(); t.after(f.dispose);
+  await f.mutations.run(async () => {
+    f.state.future = { ...object(f.state.future), negativeZero: -0 };
+    await f.owner.persist(f.state);
+  });
+  assert.equal(Object.is(object(f.state.future).negativeZero, -0), true);
+  assert.equal(Object.is(object((await f.disk()).future).negativeZero, -0), true);
+  assert.match(await readFile(f.path, 'utf8'), /"negativeZero": -0/);
 });
 
 test('snapshot is captured before asynchronous filesystem work and rejects lossy values', async t => {

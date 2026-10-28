@@ -35,7 +35,7 @@ function snapshotText(root: unknown): string {
   function check(value: unknown, optional = false): void {
     if (value === undefined && optional) return;
     if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
-    if (typeof value === 'number' && Number.isFinite(value) && !Object.is(value, -0)) return;
+    if (typeof value === 'number' && Number.isFinite(value)) return;
     if (typeof value !== 'object' || value === null || parents.has(value)) throw new Error('native-state 包含无法保存的值。');
     const prototype = Object.getPrototypeOf(value);
     if (Array.isArray(value) ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
@@ -60,13 +60,13 @@ function snapshotText(root: unknown): string {
   }
   if (!isObject(root)) throw new Error('native-state 根必须是对象。');
   check(root);
-  return JSON.stringify(root, null, 2) + '\n';
+  const rawJSON = (JSON as typeof JSON & { rawJSON(value: string): unknown }).rawJSON;
+  return JSON.stringify(root, (_key, value: unknown) => Object.is(value, -0) ? rawJSON('-0') : value, 2) + '\n';
 }
 
 function parseRoot(text: string): NativeStateRoot {
   const value: unknown = JSON.parse(text);
   if (!isObject(value)) throw new Error('native-state 根必须是对象。');
-  // JSON.parse permits a numeric -0; do not silently change it on the next write.
   snapshotText(value);
   return value;
 }
