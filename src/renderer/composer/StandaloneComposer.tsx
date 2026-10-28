@@ -22,7 +22,7 @@ import { FilePenLine } from 'lucide-react';
 import './standalone-composer.css';
 
 export { draftToInput } from './standalone-draft.ts';
-export { clearComposerDraftRevision, readComposerDraft } from './composer-draft-store.ts';
+export { bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from './composer-draft-store.ts';
 export type { DraftSkill } from './standalone-draft.ts';
 export type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescription } from './composer-draft-store.ts';
 export type { ComposerDraftController } from './use-composer-draft.ts';

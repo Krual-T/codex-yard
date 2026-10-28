@@ -11,7 +11,7 @@ test('composer drafts commit and recover across isolated renderer pages', {
   const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'js', contents: `
     import React from 'react';
     import { createRoot } from 'react-dom/client';
-    import { StandaloneComposer, readComposerDraft, clearComposerDraftRevision } from './src/renderer/composer/StandaloneComposer.tsx';
+    import { StandaloneComposer, bindComposerDraftToThread, readComposerDraft, clearComposerDraftRevision } from './src/renderer/composer/StandaloneComposer.tsx';
     import { readComposerDraftVersions, composerDraftAtomKey } from './src/renderer/composer/composer-draft-store.ts';
     import { readBrowserAtom, readBrowserAtoms } from './src/renderer/storage/ui-atoms.ts';
     const state={controller:null,snapshots:[],submissions:[],consumed:[]};
@@ -30,7 +30,7 @@ test('composer drafts commit and recover across isolated renderer pages', {
       onSubmit(draft,options,action,description){state.submissions.push(structuredClone({draft,options,action,description}));
         return new Promise((resolve,reject)=>{resolveSubmit=resolve;rejectSubmit=reject});},async onInterrupt(){}};
     const root=createRoot(document.getElementById('root'));
-    window.fixture={state,readComposerDraft,readComposerDraftVersions,clearComposerDraftRevision,readBrowserAtom,readBrowserAtoms,composerDraftAtomKey,
+    window.fixture={state,bindComposerDraftToThread,readComposerDraft,readComposerDraftVersions,clearComposerDraftRevision,readBrowserAtom,readBrowserAtoms,composerDraftAtomKey,
       render(changes={}){props={...props,...changes,context:{...props.context,...changes.context}};root.render(React.createElement(StandaloneComposer,props));},
       resolveSubmit(){resolveSubmit()},rejectSubmit(){rejectSubmit(Error('fixture unknown response'))},
       async hold(){
@@ -141,6 +141,98 @@ test('composer drafts commit and recover across isolated renderer pages', {
         await b.reload(); await b.addScriptTag({ content: script });
         await mount(b, { context: { threadId: null, draftId: 'new-b' } });
         assert.equal(await editorB.inputValue(), 'new B');
+      } finally { await context.close(); }
+    });
+
+    await t.test('a created thread explicitly adopts the submitted owner without losing a newer draft', async () => {
+      const context = await browser.newContext();
+      try {
+        const page = await setup(context);
+        await mount(page, { context: { hostId: 'ssh-fixture', threadId: null, draftId: 'new-fixture' } });
+        const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' });
+        await editor.fill('submitted A'); await saved(page);
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);
+        const submission = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
+        const original = submission.description.owner;
+        const created = { ...original, threadId: 'created-thread' };
+        assert.deepEqual(original, { hostId: 'ssh-fixture', threadId: null, draftId: 'new-fixture' });
+        await editor.fill('newer B'); await saved(page);
+        const newer = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+        assert.equal(await page.evaluate(owner => (window as any).fixture.readComposerDraft(owner), created), null);
+        const invalid = await page.evaluate(async ({ original, created }) => {
+          const bind = (window as any).fixture.bindComposerDraftToThread;
+          const failure = async (owner: any, threadId: string) => {
+            try { await bind(owner, threadId); return 'unexpected success'; } catch (error) { return (error as Error).message; }
+          };
+          return [await failure({ ...original, draftId: 'unknown-draft' }, created.threadId),
+            await failure({ ...original, threadId: 'existing-thread' }, created.threadId), await failure(original, '  ')];
+        }, { original, created });
+        assert.match(invalid[0], /尚未初始化/);
+        assert.match(invalid[1], /原始新会话身份/);
+        assert.match(invalid[2], /线程 ID/);
+
+        const rejected = await page.evaluate(async ({ original, created }) => {
+          const f = (window as any).fixture;
+          f.failWrites();
+          try { await f.bindComposerDraftToThread(original, created.threadId); return 'unexpected success'; }
+          catch (error) { return (error as Error).message; }
+          finally { f.restoreWrites(); }
+        }, { original, created });
+        assert.match(rejected, /quota/);
+        assert.equal(await page.evaluate(owner => (window as any).fixture.readComposerDraft(owner), created), null);
+        assert.equal((await page.evaluate(owner => (window as any).fixture.readComposerDraft(owner), original)).draft.text, 'newer B');
+        await page.evaluate(async ({ original, created }) => {
+          const f = (window as any).fixture;
+          await f.state.controller.flush(original);
+          await f.bindComposerDraftToThread(original, created.threadId);
+          await f.bindComposerDraftToThread(original, created.threadId);
+          f.oldController = f.state.controller;
+        }, { original, created });
+        const boundA = await page.evaluate(async ({ created, revision }) =>
+          (window as any).fixture.readComposerDraft(created, revision), { created, revision: submission.description.revision });
+        assert.deepEqual(boundA.owner, created);
+        assert.equal(boundA.draft.text, 'submitted A');
+        const boundB = await page.evaluate(owner => (window as any).fixture.readComposerDraft(owner), created);
+        assert.deepEqual(boundB.owner, created);
+        assert.equal(boundB.revision, newer.revision);
+        assert.equal(boundB.draft.text, 'newer B');
+        assert.equal(await page.evaluate(owner => (window as any).fixture.readComposerDraft(owner), { ...created, threadId: 'unrelated-thread' }), null);
+        assert.equal(await page.evaluate(owner => (window as any).fixture.readComposerDraft(owner), { ...created, hostId: 'other-host' }), null);
+
+        await page.evaluate(created => (window as any).fixture.render({ context: created }), created);
+        await page.waitForFunction(threadId => (window as any).fixture.state.controller?.snapshot()?.owner.threadId === threadId, created.threadId);
+        await page.waitForFunction(threadId => (window as any).fixture.state.snapshots.some((value: any) =>
+          value.owner.threadId === threadId && value.draft.text === 'newer B'), created.threadId);
+        assert.equal(await editor.inputValue(), 'newer B');
+        const stale = await page.evaluate(async original => {
+          const f = (window as any).fixture;
+          return { snapshot: f.oldController.snapshot(), old: await f.oldController.update(original, (draft: any) => ({ ...draft, text: 'stale' })),
+            wrongOwner: await f.state.controller.update(original, (draft: any) => ({ ...draft, text: 'wrong owner' })) };
+        }, original);
+        assert.deepEqual(stale, { snapshot: null, old: false, wrongOwner: false });
+        await editor.fill('newer B on thread'); await saved(page);
+        const latest = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+        const oldView = await page.evaluate(async ({ original, revision }) =>
+          (window as any).fixture.readComposerDraft(original, revision), { original, revision: latest.revision });
+        assert.deepEqual(oldView.owner, original);
+        assert.equal(oldView.draft.text, 'newer B on thread');
+        assert.equal(await page.evaluate(async ({ original, revision }) =>
+          (window as any).fixture.clearComposerDraftRevision(original, revision), { original, revision: submission.description.revision }), true);
+        assert.equal(await page.evaluate(async ({ created, revision }) =>
+          (window as any).fixture.readComposerDraft(created, revision), { created, revision: submission.description.revision }), null);
+        assert.equal((await page.evaluate(owner => (window as any).fixture.readComposerDraft(owner), created)).draft.text, 'newer B on thread');
+        await page.evaluate(() => (window as any).fixture.resolveSubmit());
+        await page.reload(); await page.addScriptTag({ content: script });
+        await mount(page, { context: created });
+        assert.equal(await editor.inputValue(), 'newer B on thread');
+        const conflict = await page.evaluate(async original => {
+          try { await (window as any).fixture.bindComposerDraftToThread(original, 'different-thread'); return 'unexpected success'; }
+          catch (error) { return (error as Error).message; }
+        }, original);
+        assert.match(conflict, /已关联其他线程/);
+        await page.evaluate(async ({ original, created }) => (window as any).fixture.bindComposerDraftToThread(original, created.threadId), { original, created });
+        assert.equal((await page.evaluate(owner => (window as any).fixture.readComposerDraft(owner), created)).draft.text, 'newer B on thread');
       } finally { await context.close(); }
     });
 

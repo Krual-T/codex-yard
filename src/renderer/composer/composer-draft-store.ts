@@ -9,12 +9,14 @@ export interface ComposerDraftSnapshot { owner: ComposerDraftOwner; draft: Compo
 export interface ComposerSubmissionDescription { owner: ComposerDraftOwner; revision: string; overrides: Partial<import('../workbench-contract.ts').SubmitOptions> }
 
 interface Version extends StoredDraft { owner: ComposerDraftOwner; placeholder?: boolean }
-interface Entry { versions: Version[]; retained: Version[] }
+interface Entry { versions: Version[]; retained: Version[]; createdThreadId?: string }
 interface Repository { version: 1; archive: Record<string, string>; claims: Record<string, string>; initialized: Record<string, boolean>; entries: Record<string, Entry> }
 export const composerDraftAtomKey = 'codex-yard.composer-drafts.v3';
 
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
-const sameOwner = (a: ComposerDraftOwner, b: ComposerDraftOwner) => a.hostId === b.hostId && a.threadId === b.threadId && a.draftId === b.draftId;
+const sameOwner = (entry: Entry, a: ComposerDraftOwner, b: ComposerDraftOwner) => a.hostId === b.hostId && a.draftId === b.draftId
+  && (a.threadId === b.threadId || entry.createdThreadId !== undefined
+    && (a.threadId === null && b.threadId === entry.createdThreadId || b.threadId === null && a.threadId === entry.createdThreadId));
 const ownerKey = (owner: ComposerDraftOwner) => JSON.stringify([owner.hostId, owner.threadId, owner.draftId]);
 function isOwner(value: unknown): value is ComposerDraftOwner {
   return record(value) && typeof value.hostId === 'string' && (value.threadId === null || typeof value.threadId === 'string')
@@ -26,7 +28,8 @@ function isVersion(value: unknown): value is Version {
 }
 function isEntry(value: unknown): value is Entry {
   return record(value) && Array.isArray(value.versions) && value.versions.every(isVersion)
-    && Array.isArray(value.retained) && value.retained.every(isVersion);
+    && Array.isArray(value.retained) && value.retained.every(isVersion)
+    && (value.createdThreadId === undefined || typeof value.createdThreadId === 'string' && value.createdThreadId.trim().length > 0);
 }
 function repository(value: unknown): Repository {
   if (!record(value) || value.version !== 1 || !record(value.archive) || !Object.values(value.archive).every(item => typeof item === 'string')
@@ -61,14 +64,14 @@ function replaceEntry(store: Repository, owner: ComposerDraftOwner, entry: Entry
 function asVersion(owner: ComposerDraftOwner, stored: StoredDraft, placeholder = false): Version {
   return { ...stored, owner: { ...owner }, placeholder };
 }
-function snapshot(value: Version): ComposerDraftSnapshot {
-  return structuredClone({ owner: value.owner, draft: value.draft, revision: value.revision });
+function snapshot(value: Version, owner: ComposerDraftOwner): ComposerDraftSnapshot {
+  return structuredClone({ owner, draft: value.draft, revision: value.revision });
 }
 export interface ComposerDraftVersions { versions: StoredDraft[]; retained: StoredDraft[] }
 function versionsFor(store: Repository, owner: ComposerDraftOwner): ComposerDraftVersions {
   const entry = entryFor(store, owner);
-  return structuredClone({ versions: entry.versions.filter(value => sameOwner(value.owner, owner)),
-    retained: entry.retained.filter(value => sameOwner(value.owner, owner)) });
+  return structuredClone({ versions: entry.versions.filter(value => sameOwner(entry, value.owner, owner)),
+    retained: entry.retained.filter(value => sameOwner(entry, value.owner, owner)) });
 }
 function legacyArchiveKey(context: ComposerContext, archive: Record<string, string>): string | undefined {
   const key = draftKey(context);
@@ -79,13 +82,29 @@ function legacyArchiveKey(context: ComposerContext, archive: Record<string, stri
   return (matchingThread || context.legacyDraftKey === oldKey) && Object.hasOwn(archive, oldKey) ? oldKey : undefined;
 }
 
+/** Bind an initialized new-conversation draft to its authoritative created thread. */
+export async function bindComposerDraftToThread(owner: ComposerDraftOwner, threadId: string): Promise<void> {
+  if (!isOwner(owner) || !owner.hostId || owner.threadId !== null || typeof threadId !== 'string' || !threadId.trim()) {
+    throw new Error('草稿关联需要原始新会话身份和已创建的线程 ID。');
+  }
+  await mutate(current => {
+    if (!current.initialized[ownerKey(owner)]) throw new Error('原始草稿尚未初始化，不能关联线程。');
+    const entry = entryFor(current, owner);
+    if (entry.createdThreadId !== undefined && entry.createdThreadId !== threadId) {
+      throw new Error('此草稿已关联其他线程，未更改关联。');
+    }
+    return entry.createdThreadId === threadId ? current : replaceEntry(current, owner, { ...entry, createdThreadId: threadId });
+  });
+}
+
 /** Establish this owner's first version and import old bytes in the same transaction. */
 export async function openComposerDraft(context: ComposerContext, atoms: Record<string, unknown>, currentOwner: () => boolean = () => true): Promise<ComposerDraftVersions> {
   const owner: ComposerDraftOwner = { hostId: context.hostId, threadId: context.threadId, draftId: context.draftId };
   const store = await mutate(current => {
     if (!currentOwner()) return current;
     const entry = entryFor(current, owner);
-    if (current.initialized[ownerKey(owner)]) return current;
+    if (current.initialized[ownerKey(owner)] || owner.threadId === entry.createdThreadId
+      && current.initialized[ownerKey({ ...owner, threadId: null })]) return current;
     const key = legacyArchiveKey(context, current.archive);
     const claimed = key && current.claims[key];
     const saved = key && (!claimed || claimed === ownerKey(owner)) ? parseStoredDraft(current.archive[key]!) : null;
@@ -99,7 +118,7 @@ export async function openComposerDraft(context: ComposerContext, atoms: Record<
     const values = replacePendingEmpty
       ? [{ ...legacy[0]!, prefills: saved.prefills }, ...legacy.slice(1)]
       : [...initial ? [initial] : [], ...legacy];
-    const placeholder = values.length === 0 && !entry.versions.some(value => sameOwner(value.owner, owner));
+    const placeholder = values.length === 0 && !entry.versions.some(value => sameOwner(entry, value.owner, owner));
     if (placeholder) values.push({ revision: createId(), draft: emptyDraft(), prefills: [] });
     const claims = key && saved ? { ...current.claims, [key]: ownerKey(owner) } : current.claims;
     const initialized = { ...current.initialized, [ownerKey(owner)]: true };
@@ -112,13 +131,13 @@ export async function openComposerDraft(context: ComposerContext, atoms: Record<
 export async function writeComposerDraftVersion(owner: ComposerDraftOwner, expectedRevision: string, next: StoredDraft): Promise<ComposerDraftVersions> {
   const store = await mutate(current => {
     const entry = entryFor(current, owner), versions = [...entry.versions];
-    const existing = versions.findIndex(value => sameOwner(value.owner, owner) && value.revision === expectedRevision);
-    const duplicate = versions.findIndex(value => sameOwner(value.owner, owner) && value.revision === next.revision);
+    const existing = versions.findIndex(value => sameOwner(entry, value.owner, owner) && value.revision === expectedRevision);
+    const duplicate = versions.findIndex(value => sameOwner(entry, value.owner, owner) && value.revision === next.revision);
     if (duplicate >= 0) return current;
     if (existing >= 0) versions.splice(existing, 1);
     else {
-      const blank = versions.findIndex(value => sameOwner(value.owner, owner) && value.placeholder && isPristine(value.draft)
-        && !value.prefills.length && !entry.retained.some(item => sameOwner(item.owner, owner) && item.revision === value.revision));
+      const blank = versions.findIndex(value => sameOwner(entry, value.owner, owner) && value.placeholder && isPristine(value.draft)
+        && !value.prefills.length && !entry.retained.some(item => sameOwner(entry, item.owner, owner) && item.revision === value.revision));
       if (blank >= 0) versions.splice(blank, 1);
     }
     versions.unshift(asVersion(owner, next));
@@ -131,7 +150,7 @@ export async function writeComposerDraftVersion(owner: ComposerDraftOwner, expec
 export async function retainComposerDraftVersion(owner: ComposerDraftOwner, value: StoredDraft): Promise<void> {
   await mutate(current => {
     const entry = entryFor(current, owner);
-    const matches = (version: Version) => sameOwner(version.owner, owner) && version.revision === value.revision;
+    const matches = (version: Version) => sameOwner(entry, version.owner, owner) && version.revision === value.revision;
     const versions = entry.versions.some(matches) ? entry.versions : [...entry.versions, asVersion(owner, value)];
     const retained = entry.retained.some(matches) ? entry.retained : [...entry.retained, asVersion(owner, value)];
     return replaceEntry(current, owner, { ...entry, versions, retained });
@@ -144,8 +163,8 @@ export async function readComposerDraft(owner: ComposerDraftOwner, revision?: st
   if (raw === undefined) return null;
   const entry = entryFor(repository(raw), owner);
   const versions = [...entry.versions, ...entry.retained];
-  const found = versions.find(value => sameOwner(value.owner, owner) && (revision === undefined || value.revision === revision));
-  return found ? snapshot(found) : null;
+  const found = versions.find(value => sameOwner(entry, value.owner, owner) && (revision === undefined || value.revision === revision));
+  return found ? snapshot(found, owner) : null;
 }
 export async function readComposerDraftVersions(owner: ComposerDraftOwner): Promise<ComposerDraftVersions> {
   const raw = await readBrowserAtom(composerDraftAtomKey);
@@ -157,13 +176,13 @@ export async function clearComposerDraftRevision(owner: ComposerDraftOwner, revi
   let cleared = false;
   await mutate(current => {
     const entry = entryFor(current, owner);
-    const matches = (value: Version) => sameOwner(value.owner, owner) && value.revision === revision;
+    const matches = (value: Version) => sameOwner(entry, value.owner, owner) && value.revision === revision;
     const target = entry.versions.find(matches), retained = entry.retained.filter(value => !matches(value));
     cleared = !!target || retained.length !== entry.retained.length;
     if (!cleared) return current;
     const versions = entry.versions.filter(value => !matches(value));
     if (target?.draft.pendingDrafts?.length) versions.push(asVersion(owner, { ...target, revision: createId(), draft: activatePending(target.draft, false) }));
-    if (!versions.some(value => sameOwner(value.owner, owner))) {
+    if (!versions.some(value => sameOwner(entry, value.owner, owner))) {
       versions.push(asVersion(owner, { revision: createId(), draft: emptyDraft(), prefills: target?.prefills ?? [] }, true));
     }
     return replaceEntry(current, owner, { ...entry, versions, retained });
