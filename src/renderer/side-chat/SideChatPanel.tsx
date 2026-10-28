@@ -6,19 +6,28 @@ import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
 import { isThreadBusy } from '../app/thread-state.ts';
 import type { ComposerDraft, StandaloneMessagesProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import type { SideChatController } from './controller.ts';
-import { useSideThread } from './use-side-thread.ts';
-import type { RestoreSideChatSubscription } from './use-side-thread.ts';
+import type { SideChatHistory } from './types.ts';
 import './side-chat.css';
 
+export interface SideChatCloseBarrier {
+  hostId: string;
+  parentThreadId: string;
+  childThreadId: string | null;
+  operationId: string | null;
+  draftId: string;
+  draftController: ComposerDraftController | null;
+}
 export interface SideChatPanelProps {
   client: WorkbenchClient;
   controller: SideChatController;
   open: boolean;
+  history: SideChatHistory | null;
   onClose(): void;
+  /** Check the shared send ledger and guarantee that pending composer edits have quiesced. */
+  onBeforeClose(scope: SideChatCloseBarrier): Promise<void>;
   onSubmit(description: ComposerSubmissionDescription, draft: ComposerDraft, options: SubmitOptions,
     action: SubmitAction, controller: ComposerDraftController): Promise<void>;
-  onRestoreSubscription?: RestoreSideChatSubscription;
-  onReplaceExpired?(scope: { hostId: string; parentThreadId: string; childThreadId: string; draftId: string }): void;
+  onReplaceExpired?(scope: SideChatCloseBarrier): void | Promise<void>;
   onStartQueued?(id: string, scope: { hostId: string; threadId: string }): Promise<void>;
   messages?: Omit<StandaloneMessagesProps, 'client' | 'hostId' | 'thread'>;
   prefill?: StandaloneComposerRuntimeProps['prefill'];
@@ -29,24 +38,42 @@ export interface SideChatPanelProps {
 }
 
 export function SideChatPanel(props: SideChatPanelProps) {
-  if (!props.open) return null;
-  const { parent, draftId } = props.controller.getSnapshot();
-  return <SideChatSession key={JSON.stringify([parent.hostId, parent.threadId, draftId])} {...props} />;
+  const { hostId, parentThreadId, draftId } = props.controller.getSnapshot();
+  return <SideChatSession key={JSON.stringify([hostId, parentThreadId, draftId])} {...props} />;
 }
 
-function SideChatSession({ client, controller, open, onClose, onSubmit, onRestoreSubscription, onReplaceExpired, onStartQueued, messages, prefill,
+function SideChatSession({ client, controller, open, history, onClose, onBeforeClose, onSubmit, onReplaceExpired, onStartQueued, messages, prefill,
   onPrefillConsumed, onDraftChange, onRemoveReference, confirmBeforeClose = true }: SideChatPanelProps) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
-  useEffect(() => { controller.watchConnection(client); }, [client, controller]);
-  const projection = useSideThread(client, controller, state.phase === 'ready' ? state.thread : null, onRestoreSubscription);
-  const [confirm, setConfirm] = useState(false);
-  const [replaceStarted, setReplaceStarted] = useState(false), [replaceError, setReplaceError] = useState<string | null>(null);
-  const titleId = useId();
-  const dialog = useRef<HTMLDialogElement>(null), draftController = useRef<ComposerDraftController | null>(null), replacing = useRef(false);
-  const closed = useRef(false);
+  const [confirm, setConfirm] = useState(false), [frozen, setFrozen] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null), [replaceStarted, setReplaceStarted] = useState(false);
+  const titleId = useId(), dialog = useRef<HTMLDialogElement>(null), composer = useRef<HTMLDivElement>(null);
+  const draftController = useRef<ComposerDraftController | null>(null), freezing = useRef(false), gatePassed = useRef(false);
+  const closed = useRef(false), mountedComposer = useRef(false), historyRef = useRef(history);
+  historyRef.current = history;
+  const view = state.view, child = view?.child ?? null, childId = view?.childId ?? null;
+  const ownedHistory = childId && history?.hostId === state.hostId && history.threadId === childId
+    && (!history.thread || history.thread.id === childId) ? history : null;
+  const ready = view?.fork.status === 'received' && view.inject.status === 'received' && !!child;
+  if (ready && !mountedComposer.current && view?.close.status !== 'closed'
+    && (!view?.close.requested && !state.pendingClose || ['prepare-failed', 'not-sent', 'rejected', 'unknown', 'cleanup-pending'].includes(view!.close.status)))
+    mountedComposer.current = true;
+  const showComposer = mountedComposer.current && !!child;
+
+  useEffect(() => { if (!open) setConfirm(false); }, [open]);
   useEffect(() => {
-    if (state.phase === 'closed' && !closed.current) { closed.current = true; onClose(); }
+    if (ownedHistory?.thread?.turns.some(turn => turn.items.length > 0)) controller.markActivity();
+  }, [controller, ownedHistory]);
+  useEffect(() => {
+    if (state.phase === 'closed' && !closed.current && (!mountedComposer.current || gatePassed.current)) {
+      closed.current = true; onClose();
+    }
   }, [state.phase, onClose]);
+  useEffect(() => {
+    if (!state.view && state.phase === 'idle' && state.pendingClose && gatePassed.current && !closed.current) {
+      closed.current = true; onClose();
+    }
+  }, [state.view, state.phase, state.pendingClose, onClose]);
   useEffect(() => {
     if (!confirm || !dialog.current) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -54,67 +81,139 @@ function SideChatSession({ client, controller, open, onClose, onSubmit, onRestor
     element.showModal();
     return () => { if (element.open) element.close(); previous?.focus(); };
   }, [confirm]);
-  if (!open) return null;
-  const activeTurn = projection.thread?.turns?.find(turn => turn.status === 'inProgress')?.id ?? null;
-  const requestClose = () => {
-    if (state.kind === 'temporary' && confirmBeforeClose && state.hasActivity && !state.closeRequested) setConfirm(true);
-    else void controller.close(activeTurn);
+
+  const restoreInputState = () => {
+    const current = controller.getSnapshot(), currentView = current.view;
+    const editable = currentView?.fork.status === 'received' && currentView.inject.status === 'received'
+      && !!currentView.child && !current.pendingClose && !currentView.close.requested && current.phase !== 'closed';
+    if (composer.current) composer.current.inert = !editable;
   };
-  const busy = isThreadBusy(projection.thread);
-  const error = state.error || projection.error;
-  const unknown = state.phase.endsWith('-unknown');
-  const failed = state.phase.endsWith('-failed');
-  return <section className="yard-side-chat" aria-label="侧聊">
+  const barrier = async (): Promise<SideChatCloseBarrier> => {
+    if (freezing.current) throw new Error('正在检查草稿。');
+    freezing.current = true; gatePassed.current = false;
+    if (composer.current) composer.current.inert = true;
+    setFrozen(true); setLocalError(null);
+    const current = controller.getSnapshot(), currentView = current.view, draft = draftController.current;
+    const owner = { hostId: current.hostId, threadId: currentView?.childId ?? null, draftId: current.draftId };
+    const scope: SideChatCloseBarrier = { hostId: current.hostId, parentThreadId: current.parentThreadId,
+      childThreadId: currentView?.childId ?? null, operationId: currentView?.operationId ?? null, draftId: current.draftId, draftController: draft };
+    try {
+      if (mountedComposer.current) {
+        if (!draft || !draft.snapshot() || !await draft.flush(owner)) throw new Error('侧聊草稿身份尚未就绪。');
+      }
+      await onBeforeClose(scope);
+      if (mountedComposer.current) {
+        if (draftController.current !== draft || !draft || !await draft.flush(owner)) throw new Error('侧聊草稿身份已改变。');
+      }
+      gatePassed.current = true;
+      return scope;
+    } catch (error) {
+      freezing.current = false; restoreInputState(); setFrozen(false);
+      throw error;
+    }
+  };
+  const close = async () => {
+    if (freezing.current) return;
+    try {
+      await barrier();
+      const current = controller.getSnapshot();
+      if (current.phase === 'closed') { if (!closed.current) { closed.current = true; onClose(); } return; }
+      if (!current.view && current.phase !== 'preparing') { closed.current = true; onClose(); return; }
+      await controller.close();
+    } catch (error) { setLocalError('无法关闭侧聊，草稿已保留：' + (error instanceof Error ? error.message : String(error))); }
+  };
+  const requestClose = () => {
+    if (confirmBeforeClose && state.hasActivity && !state.pendingClose && !view?.close.requested) setConfirm(true);
+    else void close();
+  };
+  const continueOperation = async (persistence = false) => {
+    const current = controller.getSnapshot();
+    try {
+      if ((current.pendingClose || current.view?.close.requested) && !gatePassed.current) await barrier();
+      if (persistence) await controller.retryPersistence(); else await controller.retry();
+    } catch (error) { setLocalError('无法继续关闭，草稿已保留：' + (error instanceof Error ? error.message : String(error))); }
+  };
+  const replace = async () => {
+    if (freezing.current || !onReplaceExpired || !ownedHistory?.expired) return;
+    try {
+      const scope = await barrier();
+      setReplaceStarted(true);
+      await onReplaceExpired(scope);
+    } catch (error) {
+      freezing.current = false; gatePassed.current = false; restoreInputState();
+      setFrozen(false); setReplaceStarted(false); setLocalError('无法开始新侧聊，原草稿已保留：' + (error instanceof Error ? error.message : String(error)));
+    }
+  };
+  const thread = ownedHistory?.thread ?? null, activeTurn = thread?.turns?.find(turn => turn.status === 'inProgress')?.id ?? null;
+  const busy = isThreadBusy(thread);
+  const canEdit = !!ready && !state.pendingClose && !view?.close.requested && state.phase !== 'closed' && !frozen;
+  const retryable = controller.canRetry;
+  const error = localError || state.error || view?.close.error || view?.inject.error || view?.fork.error || ownedHistory?.error;
+  return <section className="yard-side-chat" aria-label="侧聊" hidden={!open}>
     <header className="yard-side-chat__header"><strong>侧聊</strong><button type="button" className="yard-side-chat__icon"
-      title="关闭侧聊" aria-label="关闭侧聊" onClick={requestClose}><X size={16} /></button></header>
+      title="关闭侧聊" aria-label="关闭侧聊" onClick={requestClose} disabled={frozen}><X size={16} /></button></header>
     {state.phase === 'idle' ? <div className="yard-side-chat__status"><button type="button" onClick={() => void controller.start()}>打开侧聊</button></div> : null}
-    {state.phase === 'forked' ? <div className="yard-side-chat__status" role="status">{state.closeRequested ? '侧聊已创建，关闭尚未完成。' : '侧聊已创建，尚未设置隔离边界。'}
-      <button type="button" onClick={() => void controller.retry()}>{state.closeRequested ? '继续关闭' : '继续设置'}</button></div> : null}
-    {['creating', 'boundary', 'preparing-close', 'discarding', 'interrupting', 'cleaning'].includes(state.phase)
-      ? <div className="yard-side-chat__status" role="status">{state.closeRequested ? '正在关闭侧聊…' : '正在准备侧聊…'}</div> : null}
-    {error ? <div className="yard-side-chat__status" role="alert">{error}
-      {unknown ? <><p>操作结果未知，已保留原请求。核对后才能继续。</p>
-        {controller.canReconcile ? <button type="button" onClick={() => void controller.reconcile()}>核对结果</button> : <p>宿主尚未提供原请求核对能力。</p>}</> : null}
-      {failed ? <button type="button" onClick={() => void controller.retry()}>重试</button> : null}
-      {['close-failed', 'discard-failed'].includes(state.phase) ? <button type="button" onClick={() => controller.reopen()}>继续侧聊</button> : null}
-      {state.phase === 'ready' && projection.error && !projection.expired ? <button type="button" onClick={projection.retry}>重试加载</button> : null}
-      {projection.expired && state.thread ? onReplaceExpired ? <button type="button" disabled={replaceStarted} onClick={() => {
-        if (replacing.current) return;
-        replacing.current = true; setReplaceStarted(true); setReplaceError(null);
-        try { onReplaceExpired({ hostId: state.parent.hostId, parentThreadId: state.parent.threadId, childThreadId: state.thread!.id, draftId: state.draftId }); }
-        catch (error) { replacing.current = false; setReplaceStarted(false); setReplaceError(error instanceof Error ? error.message : String(error)); }
-      }}>开始新侧聊</button> : <p>宿主尚未接入新侧聊入口。</p> : null}
-      {replaceError ? <p role="alert">{replaceError}</p> : null}
-    </div> : null}
-    {state.phase === 'ready' && !state.closeRequested && projection.thread ? <>
-      {projection.loading ? <div className="yard-side-chat__notice" role="status">正在加载会话历史…</div> : null}
-      {projection.streamGap ? <div className="yard-side-chat__notice" role="status">部分进行中的内容尚未收到，完成后将重新加载。</div> : null}
-      <div className="yard-side-chat__messages">{projection.complete || projection.thread.turns.length > 0
-        ? <StandaloneMessages client={client} hostId={state.parent.hostId} thread={projection.thread} {...messages} /> : null}</div>
-      {projection.complete || busy && !projection.error ? <StandaloneComposer client={client}
-        context={{ hostId: state.parent.hostId, threadId: state.thread!.id, cwd: state.parent.cwd, draftId: state.draftId, placement: 'side-chat' }}
-        busy={busy} activeTurnId={activeTurn} initialOptions={state.childOptions}
+    {['preparing', 'starting', 'forking', 'injecting', 'closing'].includes(state.phase)
+      ? <div className="yard-side-chat__status" role="status">{state.pendingClose || view?.close.requested ? '正在关闭侧聊…' : '正在准备侧聊…'}</div> : null}
+    {state.phase === 'closing' && state.pendingClose && !view?.close.requested && retryable
+      ? <div className="yard-side-chat__status"><button type="button" onClick={() => void continueOperation()}>继续关闭</button></div> : null}
+    {state.phase === 'closing' && view?.close.status === 'cleanup-pending' && retryable && !error
+      ? <div className="yard-side-chat__status"><button type="button" onClick={() => void continueOperation()}>继续清理</button></div> : null}
+    {state.phase === 'waiting' ? <div className="yard-side-chat__status">侧聊尚未创建。
+      {retryable && !error ? <button type="button" onClick={() => void continueOperation()}>继续操作</button> : null}</div> : null}
+    {state.phase === 'injecting' && view?.inject.status === 'waiting' && retryable && !error
+      ? <div className="yard-side-chat__status"><button type="button" onClick={() => void continueOperation()}>继续设置</button></div> : null}
+    {error || state.phase.endsWith('-unknown') || ['fork-failed', 'inject-failed', 'close-failed', 'link-failed'].includes(state.phase) ?
+      <div className="yard-side-chat__status" role="alert">{error || '宿主未能完成此侧聊操作。'}
+        {state.phase.endsWith('-unknown') ? <p>原操作结果未知，记录和草稿已保留。</p> : null}
+        {view ? <button type="button" onClick={() => void controller.read()}>核对结果</button> : null}
+        {retryable ? <button type="button" onClick={() => void continueOperation()}>继续操作</button> : null}
+        {view ? <button type="button" onClick={() => void continueOperation(true)}>重试保存回执</button> : null}
+        {ownedHistory?.error && !ownedHistory.expired ? <button type="button" onClick={() => void ownedHistory.retry()}>重试加载</button> : null}
+      </div> : null}
+    {ownedHistory?.expired ? <div className="yard-side-chat__status" role="status">临时侧聊已过期，原草稿已保留。
+      {onReplaceExpired ? <button type="button" disabled={replaceStarted} onClick={() => void replace()}>开始新侧聊</button> : null}</div> : null}
+    {state.phase === 'closed' && mountedComposer.current && !gatePassed.current
+      ? <div className="yard-side-chat__status" role="alert">宿主已关闭此侧聊，当前草稿仍在此处。请检查草稿后关闭面板。</div> : null}
+    {child && !ownedHistory ? <div className="yard-side-chat__notice" role="status">正在等待该侧聊的会话投影。</div> : null}
+    {ownedHistory?.loading ? <div className="yard-side-chat__notice" role="status">正在加载会话历史…</div> : null}
+    {ownedHistory?.streamGap ? <div className="yard-side-chat__notice" role="status">部分进行中的内容尚未收到。</div> : null}
+    {child ? <div className="yard-side-chat__messages">{thread && (ownedHistory?.historyComplete || thread.turns.length > 0)
+      ? <StandaloneMessages client={client} hostId={state.hostId} thread={thread} {...messages} /> : null}</div> : null}
+    {showComposer && child ? <div className="yard-side-chat__composer" ref={composer} inert={!canEdit} aria-busy={frozen || undefined}>
+      <StandaloneComposer client={client}
+        context={{ hostId: state.hostId, threadId: child.thread.id, cwd: view!.parent.cwd, draftId: state.draftId, placement: 'side-chat' }}
+        busy={busy} activeTurnId={activeTurn} initialOptions={ownedHistory?.options ?? child.options}
         onDraftController={value => { draftController.current = value; }} onDraftChange={onDraftChange}
         onRemoveReference={onRemoveReference} prefill={prefill} onPrefillConsumed={onPrefillConsumed}
-        onStartQueued={onStartQueued ? id => onStartQueued(id, { hostId: state.parent.hostId, threadId: state.thread!.id }) : undefined}
-        onInterrupt={async () => { if (!activeTurn) throw new Error('当前任务没有可确认的 turn ID。');
-          await client.rpc('turn/interrupt', { threadId: state.thread!.id, turnId: activeTurn }, state.parent.hostId); }}
+        onStartQueued={onStartQueued ? async id => {
+          const latest = controller.getSnapshot(), currentHistory = historyRef.current;
+          if (freezing.current || latest.phase !== 'ready' || latest.pendingClose || latest.view?.childId !== child.thread.id
+            || currentHistory?.hostId !== state.hostId || currentHistory.threadId !== child.thread.id || !currentHistory.canSubmit
+            || currentHistory.thread?.id !== child.thread.id || currentHistory.expired || currentHistory.error
+            || !currentHistory.historyComplete && !isThreadBusy(currentHistory.thread)) throw new Error('侧聊尚未就绪或正在关闭。');
+          await onStartQueued(id, { hostId: state.hostId, threadId: child.thread.id });
+        } : undefined}
+        onInterrupt={async () => { const latest = historyRef.current;
+          if (!activeTurn || freezing.current || latest?.hostId !== state.hostId || latest.threadId !== child.thread.id
+            || !latest.thread?.turns.some(turn => turn.id === activeTurn && turn.status === 'inProgress')) throw new Error('当前任务没有可确认的 turn ID。');
+          await client.rpc('turn/interrupt', { threadId: child.thread.id, turnId: activeTurn }, state.hostId); }}
         onSubmit={async (draft, options, action, description) => {
-          const owner = description?.owner, draftSession = draftController.current;
-          const current = controller.getSnapshot();
-          if (current.phase !== 'ready' || current.closeRequested || current.thread?.id !== state.thread!.id || !projection.canSubmit())
-            throw new Error('侧聊正在关闭，草稿已保留。');
-          if (!description || !draftSession || owner?.hostId !== state.parent.hostId || owner.threadId !== state.thread!.id || owner.draftId !== state.draftId)
+          const current = controller.getSnapshot(), latestHistory = historyRef.current, owner = description?.owner, draftSession = draftController.current;
+          if (freezing.current || current.phase !== 'ready' || current.pendingClose || current.view?.childId !== child.thread.id
+            || !latestHistory || latestHistory.hostId !== current.hostId || latestHistory.threadId !== child.thread.id
+            || latestHistory.thread?.id !== child.thread.id || !latestHistory.canSubmit || latestHistory.expired || latestHistory.error
+            || !latestHistory.historyComplete && !isThreadBusy(latestHistory.thread)) throw new Error('侧聊尚未就绪或正在关闭，草稿已保留。');
+          if (!description || !draftSession || owner?.hostId !== current.hostId || owner.threadId !== child.thread.id || owner.draftId !== current.draftId)
             throw new Error('侧聊草稿身份尚未就绪。');
           controller.markActivity();
           await onSubmit(description, draft, options, action, draftSession);
-        }} /> : null}
-    </> : null}
+        }} />
+    </div> : null}
     {confirm ? <dialog className="yard-side-chat__dialog" ref={dialog} onCancel={event => { event.preventDefault(); setConfirm(false); }}
-      aria-labelledby={titleId}><h2 id={titleId}>关闭侧聊？</h2>
-      <p>{state.kind === 'durable' ? '关闭侧聊面板？' : '关闭后此临时侧聊将无法恢复。'}</p><div className="yard-side-chat__dialog-actions">
+      aria-labelledby={titleId}><h2 id={titleId}>关闭侧聊？</h2><p>关闭后此临时侧聊可能无法恢复。</p><div className="yard-side-chat__dialog-actions">
         <button type="button" autoFocus onClick={() => setConfirm(false)}>取消</button>
-        <button type="button" onClick={() => { setConfirm(false); void controller.close(activeTurn); }}>关闭侧聊</button>
+        <button type="button" onClick={() => { setConfirm(false); void close(); }}>关闭侧聊</button>
       </div></dialog> : null}
   </section>;
 }

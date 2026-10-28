@@ -1,236 +1,223 @@
-import type { ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-protocol.ts';
-import { sessionOptions } from '../app/session-options.ts';
-import type { SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
-import { sideChatBoundaryItems, sideChatDeveloperInstructions } from './instructions.ts';
-import type { DurableSideChatReceipt, SideChatOperation, SideChatOperationKind, SideChatOperationResult, SideChatOperations, SideChatParent, SideChatPhase, SideChatSnapshot } from './types.ts';
+import type { SideChatControllerOptions, SideChatHostPort, SideChatHostView, SideChatPhase, SideChatScope, SideChatSnapshot } from './types.ts';
 
-function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function object(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+const requestStatuses = new Set(['waiting', 'inflight', 'not-sent', 'rejected', 'unknown', 'received', 'invalid']);
+const closeStatuses = new Set(['idle', 'preparing', 'prepare-failed', 'inflight', 'not-sent', 'rejected', 'unknown', 'cleanup-pending', 'cleaning', 'closed']);
+const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+function stable(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, stable(entry)]));
+  return value;
 }
-function operationResult(value: unknown): SideChatOperationResult {
-  const result = object(value);
-  if (result.outcome === 'success' && Object.hasOwn(result, 'result')) return { outcome: 'success', result: result.result };
-  if ((result.outcome === 'not-applied' || result.outcome === 'unknown') && typeof result.message === 'string')
-    return { outcome: result.outcome, message: result.message };
-  return { outcome: 'unknown', message: '宿主回执格式无效，请核对原请求。' };
+function evidence(view: SideChatHostView, method: 'start' | 'retry' | 'close'): string {
+  return method === 'close' ? JSON.stringify([view.close.requested, view.close.status])
+    : JSON.stringify([view.fork.status, view.inject.status, view.childId, view.close.requested, view.close.status]);
 }
 
 export function createSideChatDraftId(): string { return 'side-chat:' + crypto.randomUUID(); }
 
-function mergeSettings(current: SubmitOptions, settings: ThreadSettingsResponse): SubmitOptions {
-  const next = { ...current, ...sessionOptions(settings) };
-  if (settings.activePermissionProfile === null) delete next.permissionProfileId;
-  return next;
+function phase(view: SideChatHostView | null, command: string | null, linkFailed: boolean, pendingClose: boolean, closeDispatched: boolean): SideChatPhase {
+  if (!view) return command === 'prepare' ? 'preparing' : 'idle';
+  if (linkFailed) return 'link-failed';
+  if (view.close.status === 'closed') return 'closed';
+  if (view.close.requested || pendingClose) {
+    if (closeDispatched && !view.close.requested) return 'close-unknown';
+    if (view.close.status === 'unknown') return 'close-unknown';
+    if (['prepare-failed', 'not-sent', 'rejected'].includes(view.close.status)
+      || view.close.status === 'cleanup-pending' && view.close.error) return 'close-failed';
+    return 'closing';
+  }
+  if (command === 'start' && view.fork.status === 'waiting') return 'starting';
+  if (view.fork.status === 'waiting') return 'waiting';
+  if (view.fork.status === 'inflight') return 'forking';
+  if (view.fork.status === 'unknown') return 'fork-unknown';
+  if (view.fork.status !== 'received') return 'fork-failed';
+  if (view.inject.status === 'waiting' || view.inject.status === 'inflight') return 'injecting';
+  if (view.inject.status === 'unknown') return 'inject-unknown';
+  if (view.inject.status !== 'received') return 'inject-failed';
+  return view.child ? 'ready' : 'inject-failed';
 }
 
-export function sideChatForkParams(parent: SideChatParent): Record<string, unknown> {
-  if (!parent.developerInstructions) throw new Error('父会话的开发者指令来源不可用。');
-  const options = parent.options;
-  const config = structuredClone(parent.forkConfig);
-  if (options.effort !== undefined) config.model_reasoning_effort = options.effort;
-  const disabled = object(config['apps.connector_openai_pages.tools']);
-  config['apps.connector_openai_pages.tools'] = { ...disabled,
-    ...Object.fromEntries(['create_presentation', 'create_spreadsheet', 'create_canvas', 'execute_artifact_code', 'inspect_artifact']
-      .map(name => ['chatgpt_space.' + name, { enabled: false }])) };
-  return {
-    threadId: parent.threadId, cwd: parent.cwd, runtimeWorkspaceRoots: [...parent.workspaceRoots],
-    threadSource: 'user', ephemeral: true, excludeTurns: true, deferGoalContinuation: true,
-    developerInstructions: sideChatDeveloperInstructions(parent.developerInstructions.text), config,
-    ...(options.model !== undefined ? { model: options.model } : {}),
-    ...(options.approvalPolicy !== undefined ? { approvalPolicy: options.approvalPolicy } : {}),
-    ...(options.approvalsReviewer !== undefined ? { approvalsReviewer: options.approvalsReviewer } : {}),
-    ...(options.permissionProfileId ? { permissions: options.permissionProfileId }
-      : options.sandboxMode ? { sandbox: options.sandboxMode } : {}),
-    ...(options.serviceTier !== undefined ? { serviceTier: options.serviceTier } : {}),
-  };
+function validate(view: SideChatHostView, hostId: string, parentThreadId: string, previous: SideChatHostView | null): SideChatHostView {
+  if (!view || typeof view.operationId !== 'string' || !view.operationId || !view.parent || view.parent.hostId !== hostId || view.parent.threadId !== parentThreadId
+    || typeof view.parent.cwd !== 'string' || !view.parent.cwd || !Array.isArray(view.parent.workspaceRoots)
+    || view.parent.workspaceRoots.some(root => typeof root !== 'string' || !root) || typeof view.parent.archived !== 'boolean'
+    || !view.parent.options || typeof view.parent.options !== 'object' || Array.isArray(view.parent.options)
+    || !requestStatuses.has(view.fork?.status) || !requestStatuses.has(view.inject?.status) || !closeStatuses.has(view.close?.status)
+    || [view.fork.error, view.inject.error, view.close.error].some(error => error !== null && typeof error !== 'string')
+    || typeof view.close.requested !== 'boolean' || !['thread-override', 'host-config'].includes(view.instructionSource)
+    || !(view.childId === null || typeof view.childId === 'string' && !!view.childId && view.childId !== parentThreadId)
+    || view.child != null && (!view.childId || view.child.thread?.id !== view.childId || !view.child.options || view.fork.status !== 'received')
+    || view.inject.status === 'received' && view.fork.status !== 'received'
+    || previous && (previous.operationId !== view.operationId || JSON.stringify(stable(previous.parent)) !== JSON.stringify(stable(view.parent))
+      || previous.instructionSource !== view.instructionSource || previous.childId != null && previous.childId !== view.childId
+      || previous.child != null && view.child == null || previous.fork.status === 'received' && view.fork.status !== 'received'
+      || previous.inject.status === 'received' && view.inject.status !== 'received'
+      || previous.close.requested && !view.close.requested || previous.close.status === 'closed' && view.close.status !== 'closed')) {
+    throw new Error('侧聊宿主记录与原会话身份不匹配，已保留原记录。');
+  }
+  return structuredClone(view);
 }
 
-function receivedThread(result: unknown, parent: SideChatParent): ThreadSummary | null {
-  const thread = object(object(result).thread);
-  if (typeof thread.id !== 'string' || !thread.id || thread.id === parent.threadId) return null;
-  return { ...thread, id: thread.id, name: typeof thread.name === 'string' ? thread.name : null,
-    cwd: typeof thread.cwd === 'string' && thread.cwd ? thread.cwd : parent.cwd,
-    turns: Array.isArray(thread.turns) ? thread.turns as ThreadSummary['turns'] : [],
-    status: thread.status && typeof thread.status === 'object' ? thread.status as ThreadSummary['status'] : { type: 'notLoaded' } };
-}
-
-/** One controller belongs to one parent and must survive hidden/unmounted panels. */
+/** One controller is owned by one parent and outlives its panel's visibility. */
 export class SideChatController {
   private value: SideChatSnapshot;
+  private readonly port: SideChatHostPort;
+  private readonly onPrepared: SideChatControllerOptions['onPrepared'];
+  private readonly canDispatch: SideChatControllerOptions['canDispatch'];
+  private linked: boolean;
+  private linkFailed = false;
+  private command: string | null = null;
+  private closeInFlight = false;
+  private closeDispatched = false;
+  private linking: Promise<boolean> | null = null;
+  private uncertain: { method: 'start' | 'retry' | 'close'; evidence: string; error: string } | null = null;
+  private requestVersion = 0;
+  private disposed = false;
   private listeners = new Set<() => void>();
-  private checking = false;
-  private watchedClient: WorkbenchClient | undefined;
-  private unwatch: (() => void) | undefined;
-  private readonly operations: SideChatOperations;
-  constructor(parent: SideChatParent, draftId: string, operations: SideChatOperations, restored?: SideChatSnapshot) {
-    this.operations = operations;
-    if (!draftId || !parent.hostId || !parent.threadId || !parent.cwd) throw new Error('侧聊缺少父会话或草稿身份。');
-    if (restored && (restored.draftId !== draftId || restored.parent.hostId !== parent.hostId
-      || restored.parent.threadId !== parent.threadId)) throw new Error('侧聊恢复身份不匹配。');
-    this.value = restored ? structuredClone(restored) : { parent: structuredClone(parent), draftId, kind: 'temporary', phase: 'idle', childOptions: structuredClone(parent.options),
-      thread: null, boundaryConfirmed: false, subscriptionLost: false, operation: null, sequence: 0, closeRequested: false, activeTurnId: null, hasActivity: false, error: null };
-    if (restored?.thread) this.value.subscriptionLost = true;
-    if (restored && ['creating', 'boundary', 'discarding'].includes(restored.phase)) {
-      this.value.phase = restored.phase === 'creating' ? 'create-unknown' : restored.phase === 'boundary' ? 'boundary-unknown' : 'discard-unknown';
-      this.value.error = '页面恢复时操作结果未知，请核对原请求。';
-    }
-    if (restored?.phase === 'interrupting') { this.value.phase = 'discard-failed'; this.value.error = '关闭中断，请重试关闭。'; }
-    if (restored?.phase === 'cleaning') { this.value.phase = 'cleanup-failed'; this.value.error = '本地清理中断，请重试清理。'; }
-    if (restored?.phase === 'preparing-close') { this.value.phase = 'close-failed'; this.value.error = '关闭准备中断，请核对后重试。'; }
-  }
-  /** Attach only a real, fully prepared durable receipt supplied by its owner. */
-  static attachDurable(parent: SideChatParent, draftId: string, operations: SideChatOperations, receipt: DurableSideChatReceipt): SideChatController {
-    if (parent.archived || receipt.hostId !== parent.hostId || receipt.parentThreadId !== parent.threadId
-      || !receipt.boundaryReady || !receipt.thread.id || receipt.thread.id === parent.threadId) throw new Error('持久侧聊回执或父会话身份无效。');
-    const controller = new SideChatController(parent, draftId, operations);
-    controller.value = { ...controller.value, kind: 'durable', phase: 'ready', thread: structuredClone(receipt.thread),
-      childOptions: structuredClone(receipt.childOptions), boundaryConfirmed: true, hasActivity: receipt.hasActivity };
-    return controller;
+  private unwatch: () => void;
+
+  constructor({ hostId, parentThreadId, draftId, port, onPrepared, canDispatch, restored }: SideChatControllerOptions) {
+    if (!hostId || !parentThreadId || !draftId) throw new Error('侧聊缺少父会话或草稿身份。');
+    this.port = port;
+    this.onPrepared = onPrepared;
+    this.canDispatch = canDispatch;
+    const view = restored ? validate(restored, hostId, parentThreadId, null) : null;
+    this.linked = !!view;
+    this.value = { hostId, parentThreadId, draftId, view, phase: phase(view, null, false, false, false),
+      error: null, pendingClose: false, hasActivity: false };
+    this.unwatch = port.subscribe(hint => {
+      if (hint.hostId === this.value.hostId && hint.operationId === this.value.view?.operationId) void this.read();
+    });
   }
   getSnapshot = (): SideChatSnapshot => this.value;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
-  get canReconcile(): boolean { return !!this.operations.reconcile; }
-  /** Keep the connection observer alive while the panel is hidden. */
-  watchConnection(client: WorkbenchClient): void {
-    if (this.value.phase === 'closed' || this.watchedClient === client) return;
-    if (this.watchedClient) this.markSubscriptionLost();
-    this.unwatch?.();
-    this.watchedClient = client;
-    this.unwatch = client.subscribe(event => {
-      if (event.type === 'page-resumed' || event.type === 'connection-state' && event.state === 'disconnected'
-        || event.type === 'codex-app-server-connection-changed' && event.hostId === this.value.parent.hostId && event.state === 'disconnected')
-        this.markSubscriptionLost();
-    });
+  get canRetry(): boolean {
+    const view = this.value.view;
+    if (this.linkFailed) return true;
+    if (!view || this.uncertain || this.command || this.closeInFlight) return false;
+    if (this.value.pendingClose && !view.close.requested) return !this.closeDispatched && this.permitted(view, 'close');
+    if (!this.permitted(view, 'advance')) return false;
+    return view.close.requested ? ['prepare-failed', 'not-sent', 'cleanup-pending'].includes(view.close.status)
+      : view.fork.status === 'waiting' || view.fork.status === 'not-sent'
+        || view.fork.status === 'received' && ['waiting', 'not-sent'].includes(view.inject.status);
   }
-  markSubscriptionLost(): void { if (!this.value.subscriptionLost) this.set({ subscriptionLost: true }); }
-  markSubscriptionRestored(): void { if (this.value.subscriptionLost) this.set({ subscriptionLost: false }); }
-  updateSettings(settings: ThreadSettingsResponse): void {
-    this.set({ childOptions: mergeSettings(this.value.childOptions, settings) });
-  }
-  private set(patch: Partial<SideChatSnapshot>) {
-    this.value = { ...this.value, ...patch };
-    if (this.value.phase === 'closed') { this.unwatch?.(); this.unwatch = undefined; this.watchedClient = undefined; }
+  dispose(): void { this.disposed = true; this.unwatch(); this.listeners.clear(); }
+  private set(patch: Partial<SideChatSnapshot>): void {
+    if (this.disposed) return;
+    const next = { ...this.value, ...patch };
+    next.phase = phase(next.view, this.command, this.linkFailed, next.pendingClose, this.closeDispatched);
+    this.value = next;
     for (const listener of this.listeners) listener();
   }
-  private scope() {
-    return { hostId: this.value.parent.hostId, parentThreadId: this.value.parent.threadId, childThreadId: this.value.thread!.id };
+  private scope(view: SideChatHostView): SideChatScope {
+    return { hostId: this.value.hostId, parentThreadId: this.value.parentThreadId, operationId: view.operationId, draftId: this.value.draftId };
   }
-  private operation(kind: SideChatOperationKind, method: SideChatOperation['method'], params: Record<string, unknown>): SideChatOperation {
-    const sequence = this.value.sequence + 1;
-    return { id: `${this.value.draftId}:${sequence}`, kind, method, hostId: this.value.parent.hostId,
-      parentThreadId: this.value.parent.threadId, childThreadId: this.value.thread?.id ?? null, params };
+  private permitted(view: SideChatHostView, action: 'advance' | 'close'): boolean {
+    try { return this.canDispatch(this.scope(view), action) === true; } catch { return false; }
   }
-  private async dispatch(operation: SideChatOperation, phase: SideChatPhase) {
-    this.set({ operation, phase, sequence: this.value.sequence + 1, error: null });
-    let result: SideChatOperationResult;
-    try { result = await this.operations.execute(structuredClone(operation)); }
-    catch (error) { result = { outcome: 'unknown', message: errorText(error) }; }
-    await this.acceptResult(operation.id, result);
+  private accept(view: SideChatHostView, version: number): void {
+    if (this.disposed || version !== this.requestVersion) return;
+    const next = validate(view, this.value.hostId, this.value.parentThreadId, this.value.view);
+    if (this.uncertain && evidence(next, this.uncertain.method) !== this.uncertain.evidence) this.uncertain = null;
+    this.set({ view: next, error: this.uncertain?.error ?? null });
+  }
+  private async call(method: 'start' | 'read' | 'retry' | 'close' | 'retryPersistence'): Promise<void> {
+    const view = this.value.view;
+    if (!view || this.disposed) return;
+    const version = ++this.requestVersion;
+    const baseline = method === 'start' || method === 'retry' || method === 'close' ? evidence(view, method) : null;
+    try {
+      const result = await this.port[method](view.operationId);
+      this.accept(result, version);
+      if (method !== 'read' && version !== this.requestVersion && !this.disposed) void this.read();
+    } catch (error) {
+      if (!this.disposed) {
+        const text = '宿主操作结果未确认，原记录已保留：' + message(error);
+        if (baseline !== null && (method === 'start' || method === 'retry' || method === 'close') && this.value.view
+          && evidence(this.value.view, method) === baseline) this.uncertain = { method, evidence: baseline, error: text };
+        if (version === this.requestVersion || this.uncertain) this.set({ error: this.uncertain?.error ?? text });
+      }
+      if (method !== 'read' && version !== this.requestVersion && !this.disposed) void this.read();
+    }
+  }
+  async read(): Promise<void> { await this.call('read'); }
+  private link(): Promise<boolean> {
+    const view = this.value.view;
+    if (!view || this.linked) return Promise.resolve(!!view);
+    if (this.linking) return this.linking;
+    this.linking = Promise.resolve().then(async () => {
+      try {
+        await this.onPrepared(this.scope(view));
+        if (this.disposed) return false;
+        this.linked = true; this.linkFailed = false; this.set({ error: null });
+        return true;
+      } catch (error) {
+        this.linkFailed = true; this.set({ error: '无法保存侧聊与草稿的关联，尚未创建侧聊：' + message(error) });
+        return false;
+      } finally { this.linking = null; }
+    });
+    return this.linking;
   }
   async start(): Promise<void> {
-    if (!['idle', 'create-failed'].includes(this.value.phase) || this.value.closeRequested) return;
-    const parent = this.value.parent, capability = parent.capabilities;
-    if (parent.archived) { this.set({ phase: 'create-failed', error: '已归档的会话不能创建侧聊。' }); return; }
-    if (!parent.developerInstructions || !parent.developerInstructions.source) {
-      this.set({ phase: 'create-failed', error: '无法取得父会话的开发者指令，请检查宿主能力。' }); return;
-    }
-    if (!capability.ephemeralFork || !capability.boundaryInjection || !capability.preventGoalContinuation || !capability.discard) {
-      this.set({ phase: 'create-failed', error: '此主机尚未确认临时 fork、边界注入、安全暂停目标或关闭能力。' }); return;
-    }
-    const operation = this.operation('fork', 'thread/fork', sideChatForkParams(parent));
-    await this.dispatch(operation, 'creating');
-  }
-  private async boundary() {
-    if (!this.value.thread) return;
-    const operation = this.operation('boundary', 'thread/inject_items', { threadId: this.value.thread.id, items: sideChatBoundaryItems() });
-    await this.dispatch(operation, 'boundary');
-  }
-  private async discard() {
-    if (!this.value.thread) return;
-    if (this.value.activeTurnId) {
-      const scope = { hostId: this.value.parent.hostId, threadId: this.value.thread.id, turnId: this.value.activeTurnId };
-      this.set({ phase: 'interrupting', error: null, activeTurnId: null });
-      try { await this.operations.interrupt(scope); } catch { /* Original close still attempts discard. */ }
-    }
-    const method = this.value.parent.capabilities.discard === 'stop' ? 'thread/stop' : 'thread/unsubscribe';
-    const operation = this.operation('discard', method, { threadId: this.value.thread.id });
-    await this.dispatch(operation, 'discarding');
-  }
-  private async prepareClose() {
-    if (!this.value.thread) return;
-    this.set({ phase: 'preparing-close', error: null });
-    try { await this.operations.prepareClose(this.scope()); }
-    catch (error) { this.set({ phase: 'close-failed', error: errorText(error) }); return; }
-    if (this.value.kind === 'durable') this.set({ phase: 'closed', operation: null, error: null });
-    else await this.discard();
-  }
-  private async cleanup() {
-    this.set({ phase: 'cleaning', operation: null, error: null });
-    try { await this.operations.cleanup(this.scope()); this.set({ phase: 'closed', error: null }); }
-    catch (error) { this.set({ phase: 'cleanup-failed', error: errorText(error) }); }
-  }
-  /** Manager may deliver a late or independently reconciled receipt for the same operation. */
-  async acceptResult(id: string, result: SideChatOperationResult): Promise<void> {
-    const operation = this.value.operation;
-    if (!operation || operation.id !== id || !['creating', 'create-unknown', 'boundary', 'boundary-unknown', 'discarding', 'discard-unknown'].includes(this.value.phase)) return;
-    result = operationResult(result);
-    if (result.outcome === 'success' && operation.kind === 'boundary'
-      && (!result.result || typeof result.result !== 'object' || Array.isArray(result.result)))
-      result = { outcome: 'unknown', message: '隔离边界回执无效，请核对原请求。' };
-    if (result.outcome === 'success' && operation.method === 'thread/unsubscribe'
-      && !['unsubscribed', 'notLoaded', 'notSubscribed'].includes(String(object(result.result).status)))
-      result = { outcome: 'unknown', message: '关闭回执缺少有效的订阅状态，请核对原请求。' };
-    const kind = operation.kind;
-    if (result.outcome !== 'success') {
-      const phase = (kind === 'fork' ? 'create-' : kind === 'boundary' ? 'boundary-' : 'discard-')
-        + (result.outcome === 'unknown' ? 'unknown' : 'failed');
-      this.set({ phase: phase as SideChatPhase, error: result.message });
-      if (result.outcome === 'not-applied' && this.value.closeRequested) {
-        if (kind === 'fork') this.set({ phase: 'closed', operation: null });
-        else if (kind === 'boundary') await this.prepareClose();
+    if (this.disposed || this.command || this.value.pendingClose || this.value.view) return;
+    this.command = 'prepare'; this.set({ error: null });
+    try {
+      const version = ++this.requestVersion;
+      const view = await this.port.prepare(this.value.hostId, this.value.parentThreadId);
+      this.accept(view, version);
+      if (!this.value.view || !await this.link()) return;
+      if (this.value.pendingClose) { await this.dispatchClose(); return; }
+      if (!this.permitted(this.value.view, 'advance')) {
+        this.set({ error: '上一次宿主调用尚未确认，侧聊记录已保留。' }); return;
       }
+      this.command = 'start'; this.set({});
+      await this.call('start');
+    } catch (error) { this.set({ error: '无法准备侧聊：' + message(error) }); }
+    finally { this.command = null; this.set({}); }
+  }
+  /** Explicitly advance only states permitted by E's retry implementation. */
+  async retry(): Promise<void> {
+    if (this.disposed || this.command || this.closeInFlight || this.uncertain) return;
+    if (!this.value.view) return this.start();
+    if (!this.linked && !await this.link()) return;
+    const view = this.value.view;
+    if (this.value.pendingClose && !view.close.requested) {
+      if (!this.closeDispatched) await this.dispatchClose();
       return;
     }
-    if (kind === 'fork') {
-      const thread = receivedThread(result.result, this.value.parent);
-      if (!thread) { this.set({ phase: 'create-unknown', error: '创建回执缺少有效的侧聊身份，请核对原请求。' }); return; }
-      this.set({ thread, operation: null, phase: 'forked', error: null,
-        childOptions: mergeSettings(this.value.childOptions, object(result.result) as ThreadSettingsResponse) });
-      if (this.value.closeRequested) await this.prepareClose(); else await this.boundary();
-    } else if (kind === 'boundary') {
-      this.set({ operation: null, phase: 'ready', boundaryConfirmed: true, error: null });
-      if (this.value.closeRequested) await this.prepareClose();
-    } else await this.cleanup();
+    if (!this.permitted(view, 'advance')) { this.set({ error: '上一次宿主调用尚未确认，侧聊记录已保留。' }); return; }
+    const allowed = view.close.requested
+      ? ['prepare-failed', 'not-sent', 'cleanup-pending'].includes(view.close.status)
+      : view.fork.status === 'waiting' || view.fork.status === 'not-sent'
+        || view.fork.status === 'received' && ['waiting', 'not-sent'].includes(view.inject.status);
+    if (!allowed) return;
+    this.command = 'retry'; this.set({ error: null });
+    try { await this.call('retry'); } finally { this.command = null; this.set({}); }
   }
-  async reconcile(): Promise<void> {
-    const operation = this.value.operation;
-    if (this.checking || !operation || !this.operations.reconcile || !this.value.phase.endsWith('-unknown')) return;
-    this.checking = true;
-    try { await this.acceptResult(operation.id, await this.operations.reconcile(structuredClone(operation))); }
-    catch (error) { if (this.value.operation?.id === operation.id) this.set({ error: errorText(error) }); }
-    finally { this.checking = false; }
-  }
-  async retry(): Promise<void> {
-    if (this.value.phase === 'create-failed') return this.start();
-    if (this.value.phase === 'forked') return this.value.closeRequested ? this.prepareClose() : this.boundary();
-    if (this.value.phase === 'boundary-failed') return this.boundary();
-    if (this.value.phase === 'close-failed') return this.prepareClose();
-    if (this.value.phase === 'discard-failed') return this.discard();
-    if (this.value.phase === 'cleanup-failed') return this.cleanup();
+  async retryPersistence(): Promise<void> {
+    if (!this.value.view || this.disposed) return;
+    await this.call('retryPersistence');
   }
   markActivity(): void { if (!this.value.hasActivity) this.set({ hasActivity: true }); }
-  reopen(): void {
-    if (!['close-failed', 'discard-failed'].includes(this.value.phase)) return;
-    this.set({ phase: this.value.boundaryConfirmed ? 'ready' : 'forked', closeRequested: false, activeTurnId: null, operation: null, error: null });
+  private async dispatchClose(): Promise<void> {
+    if (this.closeInFlight || this.closeDispatched || !this.value.view || this.value.view.close.requested || !this.linked) return;
+    if (!this.permitted(this.value.view, 'close')) {
+      this.set({ error: '上一次关闭调用尚未确认，侧聊记录已保留。' }); return;
+    }
+    this.closeInFlight = true;
+    this.closeDispatched = true;
+    try { await this.call('close'); } finally { this.closeInFlight = false; this.set({}); }
   }
-  async close(activeTurnId: string | null = null): Promise<void> {
-    if (this.value.phase === 'closed') return;
-    if (this.value.closeRequested && !['close-failed', 'discard-failed', 'cleanup-failed'].includes(this.value.phase)) return;
-    this.set({ closeRequested: true, activeTurnId });
-    if (['idle', 'create-failed'].includes(this.value.phase)) this.set({ phase: 'closed', operation: null });
-    else if (['ready', 'forked', 'boundary-failed', 'close-failed'].includes(this.value.phase)) await this.prepareClose();
-    else if (this.value.phase === 'discard-failed') await this.discard();
-    else if (this.value.phase === 'cleanup-failed') await this.cleanup();
+  /** Call only after the actual mounted draft and the shared send ledger pass the close barrier. */
+  async close(): Promise<void> {
+    if (this.disposed || this.value.phase === 'closed') return;
+    this.set({ pendingClose: true, error: null });
+    if (!this.value.view) {
+      if (this.command === 'prepare') return;
+      this.set({ pendingClose: false });
+      return;
+    }
+    if (!this.linked && !await this.link()) return;
+    await this.dispatchClose();
   }
 }

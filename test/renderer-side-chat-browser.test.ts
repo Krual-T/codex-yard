@@ -5,75 +5,79 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 
-const chromePath = '/usr/bin/google-chrome';
-
-test('side panel isolates host history, drafts, late reads and close confirmation', {
-  skip: !existsSync(chromePath) && 'Google Chrome is unavailable', timeout: 120_000,
+test('side panel keeps the real composer across hidden, host changes, failure and close', {
+  skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
 }, async () => {
-  const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'js', contents: `
-    import * as React from 'react';
-    import { createRoot } from 'react-dom/client';
-    import { SideChatController } from './src/renderer/side-chat/controller.ts';
-    import { SideChatPanel } from './src/renderer/side-chat/SideChatPanel.tsx';
-    const state = { calls: [], submissions: [], subscribers: new Set(), closeCount: 0, failRead: true, delayRead: false, delayRestore: false, expired: false };
-    let releaseRead, releaseRestore, rejectSend;
-    const thread = host => ({ id: 'child-' + host, name: null, cwd: '/synthetic/' + host, turns: [], status: { type: 'idle' } });
-    const client = {
-      async rpc(method, params = {}, host = 'a') {
-        state.calls.push({method, params: structuredClone(params), host});
-        if (method === 'thread/read') {
-          if (host === 'a' && state.failRead) throw Error('synthetic history failure');
-          if (host === 'a' && state.delayRead) await new Promise(resolve => { releaseRead = resolve; });
-          return {thread: thread(host)};
-        }
-        if (method === 'thread/turns/list') return {data:[{id:'history-' + host, status:'completed', itemsView:'full',
-          items:[{id:'message-' + host, type:'agentMessage', text:'History ' + host}]}],nextCursor:null};
-        if (method === 'thread/queue/list') return {data:[],nextCursor:null};
-        if (method === 'model/list') return {data:[{id:'model-' + host, model:'model-' + host, displayName:'Model ' + host,
-          isDefault:true, defaultReasoningEffort:'high', supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};
-        if (method === 'config/read') return {config:{model:'model-' + host, model_reasoning_effort:'high'}};
-        if (method === 'turn/interrupt') return {};
-        throw Error('Unexpected synthetic RPC: ' + method);
+  const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'jsx', contents: `
+    import React from 'react';
+    import {createRoot} from 'react-dom/client';
+    import {SideChatController} from './src/renderer/side-chat/controller.ts';
+    import {SideChatPanel} from './src/renderer/side-chat/SideChatPanel.tsx';
+    const state = {calls:[], submissions:[], closes:[], failGate:false, failIDB:false, failClose:true, subscribers:new Set()};
+    const originalTransaction = IDBDatabase.prototype.transaction;
+    IDBDatabase.prototype.transaction = function(...args) {
+      if (state.failIDB) throw Error('synthetic IDB transaction failure');
+      return originalTransaction.apply(this,args);
+    };
+    const thread = host => ({id:'child-' + host,name:null,cwd:'/synthetic/' + host,turns:[{id:'turn-' + host,status:'completed',itemsView:'full',
+      items:[{id:'message-' + host,type:'agentMessage',text:'History ' + host}]}],status:{type:'idle'}});
+    const views = {};
+    const calls = (name,id) => state.calls.push({name,id});
+    const port = {
+      async prepare(hostId,parentThreadId) {
+        calls('prepare',hostId); return views[hostId] = {operationId:'op-' + hostId,parent:{hostId,threadId:parentThreadId,cwd:'/synthetic/' + hostId,
+          workspaceRoots:['/synthetic/' + hostId],project:{id:'project-' + hostId},archived:false,
+          options:{model:'model-' + hostId,effort:null,mode:'plan'}},childId:null,child:null,
+          fork:{status:'waiting',error:null},inject:{status:'waiting',error:null},close:{requested:false,status:'idle',error:null},instructionSource:'host-config'};
       },
-      async host(endpoint) { if (endpoint === 'get-setting') return {value:'enter'}; throw Error('Unexpected synthetic host: ' + endpoint); },
-      subscribe(listener) { state.subscribers.add(listener); return () => state.subscribers.delete(listener); },
-      async reply() { throw Error('unexpected reply'); },
+      async start(id) { calls('start',id); const host=id.slice(3), v=views[host];
+        v.childId='child-' + host; v.child={thread:thread(host),options:{...v.parent.options}};
+        v.fork.status='received'; v.inject.status='received'; return structuredClone(v); },
+      async read(id) {calls('read',id); return structuredClone(views[id.slice(3)]);},
+      async retry(id) {calls('retry',id); const v=views[id.slice(3)]; v.close.status='closed'; v.close.error=null; return structuredClone(v);},
+      async close(id) {calls('close',id); const v=views[id.slice(3)]; v.close.requested=true;
+        v.close.status=state.failClose?'prepare-failed':'closed'; v.close.error=state.failClose?'synthetic close failure':null; return structuredClone(v);},
+      async retryPersistence(id) {calls('retryPersistence',id); return structuredClone(views[id.slice(3)]);},
+      subscribe(listener) {state.subscribers.add(listener);return()=>state.subscribers.delete(listener);},
     };
-    function parent(host) { return {hostId:host,threadId:'parent-' + host,cwd:'/synthetic/' + host,archived:false,
-      workspaceRoots:['/synthetic/' + host],projectId:'project-' + host,options:{model:'model-' + host,effort:'high',mode:'plan'},
-      developerInstructions:{text:'Base ' + host,source:'synthetic parent'},forkConfig:{},
-      capabilities:{ephemeralFork:true,boundaryInjection:true,preventGoalContinuation:true,discard:'unsubscribe'}}; }
-    const operations = { async execute(operation) { state.calls.push({operation:structuredClone(operation)});
-      return {outcome:'success',result:operation.kind === 'fork' ? {thread:thread(operation.hostId)} : operation.kind === 'discard' ? {status:'unsubscribed'} : {}}; },
-      async prepareClose(scope) {state.calls.push({prepareClose:structuredClone(scope)});},
-      async cleanup(scope) {state.calls.push({cleanup:structuredClone(scope)});},
-      async interrupt(scope) {state.calls.push({interrupt:structuredClone(scope)});} };
-    const controllers = {a:new SideChatController(parent('a'),'draft-side-a',operations), b:new SideChatController(parent('b'),'draft-side-b',operations)};
-    let activeClient = client;
-    const root = createRoot(document.getElementById('root'));
-    const submit = (description,draft,options,action,controller) => {
-      state.submissions.push({description:structuredClone(description),draft:structuredClone(draft),options:structuredClone(options),
-        action:structuredClone(action),controllerOwner:controller.snapshot().owner});
-      return new Promise((_resolve,reject)=>{rejectSend=reject;});
+    const client = {
+      async rpc(method,params={},host='a') {
+        if(method==='thread/queue/list') return {data:[],nextCursor:null};
+        if(method==='model/list') return {data:[{id:'model-'+host,model:'model-'+host,displayName:'Model '+host,isDefault:true,
+          defaultReasoningEffort:'high',supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};
+        if(method==='config/read') return {config:{model:'model-'+host,model_reasoning_effort:null}};
+        if(method==='turn/interrupt') return {};
+        throw Error('unexpected synthetic RPC '+method);
+      },
+      async host(endpoint) {if(endpoint==='get-setting') return {value:'enter'};throw Error('unexpected synthetic host '+endpoint);},
+      subscribe() {return ()=>{};},async reply() {throw Error('unexpected reply');}
     };
-    window.peer = {state,controllers,client,render(host) { root.render(React.createElement(SideChatPanel,{
-      client:activeClient,controller:controllers[host],open:true,onClose(){state.closeCount++;},onSubmit:submit,
-      async onRestoreSubscription(scope) {state.calls.push({restore:structuredClone(scope)});
-        if (state.delayRestore) await new Promise(resolve => {releaseRestore = resolve;});
-        return state.expired ? {status:'expired'} : {status:'restored'};},
-      onReplaceExpired(scope) {state.calls.push({replace:structuredClone(scope)});} })); },
-      replaceClient(host) {activeClient = {...client}; this.render(host);},
-      hide() {root.render(null);},emit(event) { for(const listener of state.subscribers) listener(event); },
-      rejectSend() {rejectSend(Error('synthetic unknown send'));},releaseRead() {releaseRead?.();},releaseRestore() {releaseRestore?.();} };
-    window.peer.render('a');
-  ` }, bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' } });
-  const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ['--no-sandbox'] });
+    const controllers = Object.fromEntries(['a','b','c'].map(host=>[host,new SideChatController({hostId:host,parentThreadId:'parent-'+host,
+      draftId:'draft-side-'+host,port,canDispatch:()=>true,async onPrepared(scope){state.calls.push({name:'link',scope});}})]));
+    const histories = Object.fromEntries(['a','b','c'].map(host=>[host,{hostId:host,threadId:'child-'+host,thread:thread(host),loading:false,
+      options:{model:'model-'+host,effort:null,mode:'plan'},historyComplete:true,streamGap:false,error:null,expired:false,canSubmit:true,retry(){state.calls.push({name:'retryHistory',host});}}]));
+    let selected='a', visible=true, replaceCalls=[];
+    let rejectSend;
+    const root=createRoot(document.getElementById('root'));
+    function render() {root.render(<>{['a','b','c'].map(host=><SideChatPanel key={host} client={client} controller={controllers[host]}
+      open={visible && selected===host} history={histories[host]} onClose={()=>state.closes.push(host)}
+      onBeforeClose={async scope=>{state.calls.push({name:'barrier',scope:{...scope,draftController:!!scope.draftController}});
+        if(state.failGate) throw Error('synthetic unresolved send');}}
+      onSubmit={(description,draft,options,action,controller)=>{state.submissions.push({description,draft,options,action,owner:controller.snapshot().owner});
+        return new Promise((_resolve,reject)=>{rejectSend=reject;});}}
+      onReplaceExpired={scope=>{replaceCalls.push({...scope,draftController:!!scope.draftController});}} />)}</>);}
+    window.peer={state,controllers,histories,views,render,select(host){selected=host;visible=true;render();},
+      hide(){visible=false;render();},show(){visible=true;render();},rejectSend(){rejectSend(Error('unknown send'));},
+      replaceCalls,markNode(host){window.savedNode=document.querySelectorAll('.yard-side-chat')[['a','b','c'].indexOf(host)].querySelector('textarea');},
+      sameNode(host){return window.savedNode===document.querySelectorAll('.yard-side-chat')[['a','b','c'].indexOf(host)].querySelector('textarea');}};
+    render();
+  ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' } });
+  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
+    args: ['--no-sandbox', '--disable-background-networking'] });
   const context = await browser.newContext({ viewport: { width: 390, height: 800 } });
   try {
-    const page = await context.newPage();
-    page.setDefaultTimeout(8_000);
-    const failures: string[] = [];
-    page.on('pageerror', error => failures.push(error.message));
+    const page = await context.newPage(); page.setDefaultTimeout(8_000);
+    const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
     await page.route('**/*', route => new URL(route.request().url()).pathname === '/'
       ? route.fulfill({ contentType: 'text/html', body: '<main id="root" style="height:100vh"></main>' }) : route.abort());
     await page.goto('http://localhost/');
@@ -83,113 +87,101 @@ test('side panel isolates host history, drafts, late reads and close confirmatio
         .map(path => readFileSync(path, 'utf8')),
     ].join('\n') });
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
-    assert.equal(await page.evaluate(() => (window as any).peer.state.calls.length), 0);
-    await page.getByRole('button', { name: '打开侧聊' }).click();
-    await page.getByText('synthetic history failure').waitFor();
-    assert.equal(await page.getByRole('textbox', { name: '和 Codex 一起工作' }).count(), 0);
-    assert.equal(await page.getByText('No messages yet').count(), 0);
-    await page.evaluate(() => { (window as any).peer.state.failRead = false; });
-    await page.getByRole('button', { name: '重试加载' }).click();
-    await page.getByText('History a').waitFor();
+    assert.deepEqual(await page.evaluate(() => (window as any).peer.state.calls), []);
+    await page.getByRole('button', { name: '打开侧聊' }).click(); await page.getByText('History a').waitFor();
     const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' });
-    await editor.fill('initial side draft');
-    await editor.press('Enter');
+    await editor.fill('initial side draft'); await editor.press('Enter');
     await page.waitForFunction(() => (window as any).peer.state.submissions.length === 1);
     const sent = await page.evaluate(() => (window as any).peer.state.submissions[0]);
     assert.deepEqual(sent.description.owner, { hostId: 'a', threadId: 'child-a', draftId: 'draft-side-a' });
-    assert.deepEqual(sent.controllerOwner, sent.description.owner);
-    assert.equal(sent.options.model, 'model-a'); assert.equal(sent.options.mode, 'plan');
-    assert.ok(sent.description.revision); assert.equal(sent.action.type, 'send');
-    await editor.fill('newer side draft');
-    await page.evaluate(() => (window as any).peer.rejectSend());
-    await page.getByText(/发送未确认/).waitFor();
+    assert.deepEqual(sent.owner, sent.description.owner); assert.equal(sent.options.mode, 'plan'); assert.ok(sent.description.revision);
+    await editor.fill('newer side draft'); await page.evaluate(() => (window as any).peer.rejectSend());
+    await page.locator('.yard-side-chat:visible').getByText(/发送未确认/).waitFor();
+    await page.evaluate(() => (window as any).peer.markNode('a'));
+    await page.evaluate(() => (window as any).peer.hide());
+    assert.equal(await page.locator('.yard-side-chat').first().isHidden(), true);
+    assert.equal(await page.evaluate(() => (window as any).peer.sameNode('a')), true);
+    await page.evaluate(() => (window as any).peer.show());
     assert.equal(await editor.inputValue(), 'newer side draft');
-    await page.evaluate(async () => { await (window as any).peer.controllers.b.start(); (window as any).peer.render('b'); });
-    await page.getByText('History b').waitFor();
-    assert.equal(await editor.inputValue(), '');
-    await page.evaluate(() => (window as any).peer.emit({type:'codex-app-server-connection-changed',hostId:'a',state:'disconnected'}));
-    assert.equal(await editor.count(), 1);
-    await page.evaluate(() => { const peer = (window as any).peer; peer.state.delayRestore = true;
-      peer.emit({type:'codex-app-server-connection-changed',hostId:'b',state:'disconnected'}); });
-    await page.getByText(/侧聊连接已中断/).waitFor();
-    assert.equal(await editor.count(), 0);
+    assert.equal(await page.evaluate(() => (window as any).peer.sameNode('a')), true);
+    await page.evaluate(() => { const p=(window as any).peer; p.histories.a.error='no rollout found'; p.histories.a.canSubmit=false; p.render(); });
+    await page.getByText('no rollout found').waitFor(); assert.equal(await editor.inputValue(), 'newer side draft');
+    assert.equal(await page.getByRole('button', { name: '开始新侧聊' }).count(), 0);
     await page.getByRole('button', { name: '重试加载' }).click();
-    await page.waitForFunction(() => (window as any).peer.state.calls.some((call: any) => call.restore));
-    await page.evaluate(() => { const peer = (window as any).peer;
-      peer.emit({type:'connection-state',state:'disconnected'}); peer.releaseRestore(); });
-    await page.getByText(/侧聊连接已中断/).waitFor();
-    assert.equal(await editor.count(), 0);
-    await page.evaluate(() => { (window as any).peer.state.delayRestore = false; });
-    await page.getByRole('button', { name: '重试加载' }).click();
+    assert.equal(await page.evaluate(() => (window as any).peer.state.calls.filter((c:any)=>c.name==='retryHistory').length), 1);
+    await page.evaluate(async () => { const p=(window as any).peer; await p.controllers.b.start(); p.select('b'); });
+    await page.getByText('History b').waitFor(); await editor.fill('draft b');
+    await page.evaluate(() => { const p=(window as any).peer; p.histories.b={...p.histories.a}; p.render(); });
+    await page.getByText('正在等待该侧聊的会话投影。').waitFor();
+    assert.equal(await page.getByText('History a').isVisible(), false); assert.equal(await editor.inputValue(), 'draft b');
+    await page.evaluate(() => { const p=(window as any).peer; p.histories.b={hostId:'b',threadId:'child-b',thread:p.views.b.child.thread,
+      options:{model:'model-b',effort:null,mode:'plan'},loading:false,historyComplete:true,streamGap:false,error:null,expired:false,canSubmit:true,retry(){}}; p.render(); });
     await page.getByText('History b').waitFor();
-    const restores = await page.evaluate(() => (window as any).peer.state.calls.filter((call: any) => call.restore));
-    assert.equal(restores.length, 2);
-    assert.deepEqual(restores[1].restore, {hostId:'b',parentThreadId:'parent-b',childThreadId:'child-b'});
-    await editor.fill('draft b');
-    await page.evaluate(() => {
-      const peer = (window as any).peer;
-      peer.emit({type:'mcp-notification',hostId:'a',method:'turn/started',params:{threadId:'child-b',turn:{id:'foreign',status:'inProgress',items:[]}}});
-      peer.emit({type:'mcp-notification',hostId:'b',method:'turn/started',params:{threadId:'child-a',turn:{id:'foreign',status:'inProgress',items:[]}}});
-      peer.emit({type:'mcp-notification',hostId:'b',method:'item/completed',params:{threadId:'child-b',turnId:'live',item:{id:'ok',type:'agentMessage',text:'Only child b'}}});
-    });
-    await page.getByText('Only child b').waitFor();
-    assert.equal(await page.getByText('History a').count(), 0);
-    await page.evaluate(() => { (window as any).peer.state.delayRead = true; (window as any).peer.render('a'); });
-    await page.getByText(/侧聊订阅已失效/).waitFor();
-    await page.getByRole('button', { name: '重试加载' }).click();
-    await page.getByText('正在加载会话历史…').waitFor();
-    await page.evaluate(() => (window as any).peer.render('b'));
-    await page.getByText('History b').waitFor();
-    await page.evaluate(() => (window as any).peer.releaseRead());
-    await page.waitForTimeout(100);
-    assert.equal(await page.getByText('History a').count(), 0);
+    await page.evaluate(() => { const p=(window as any).peer; p.histories.b.historyComplete=false; p.histories.b.streamGap=true; p.render(); });
+    await page.getByText(/部分进行中的内容尚未收到/).waitFor(); await editor.press('Enter');
+    await page.locator('.yard-side-chat:visible').getByText(/发送未确认/).waitFor();
+    assert.equal(await page.evaluate(() => (window as any).peer.state.submissions.length), 1);
     assert.equal(await editor.inputValue(), 'draft b');
-    await page.evaluate(() => { (window as any).peer.state.delayRead = false; (window as any).peer.render('a'); });
-    await page.getByText('History a').waitFor();
-    await page.waitForFunction(() => (document.querySelector('textarea[aria-label="和 Codex 一起工作"]') as HTMLTextAreaElement)?.value === 'newer side draft');
-    assert.equal(await editor.inputValue(), 'newer side draft');
-    await page.evaluate(() => { const peer = (window as any).peer; peer.hide(); });
-    await page.waitForFunction(() => !document.querySelector('.yard-side-chat'));
-    await page.evaluate(() => { const peer = (window as any).peer; peer.emit({type:'connection-state',state:'disconnected'}); peer.render('a'); });
-    await page.getByText(/侧聊订阅已失效/).waitFor();
-    assert.equal(await editor.count(), 0);
-    await page.getByRole('button', { name: '重试加载' }).click();
-    await page.getByText('History a').waitFor();
-    await page.waitForFunction(() => (document.querySelector('textarea[aria-label="和 Codex 一起工作"]') as HTMLTextAreaElement)?.value === 'newer side draft');
-    const beforeClientChange = await page.evaluate(() => (window as any).peer.state.calls.filter((call: any) => call.restore).length);
-    await page.evaluate(() => (window as any).peer.replaceClient('a'));
-    await page.getByText(/侧聊订阅已失效/).waitFor();
-    assert.equal(await page.evaluate(() => (window as any).peer.state.calls.filter((call: any) => call.restore).length), beforeClientChange);
-    await page.getByRole('button', { name: '重试加载' }).click();
-    await page.getByText('History a').waitFor();
-    const styling = await page.locator('.yard-side-chat').evaluate(element => ({ background: getComputedStyle(element).backgroundColor,
-      font: getComputedStyle(element).fontFamily, fontSize: getComputedStyle(element).fontSize, scroll: element.scrollWidth, width: element.clientWidth }));
-    assert.equal(styling.background, 'rgb(23, 33, 29)'); assert.match(styling.font, /Arial/); assert.equal(styling.fontSize, '15px');
+    await page.evaluate(() => { const p=(window as any).peer; p.histories.b.historyComplete=true; p.histories.b.streamGap=false; p.render(); });
+    const styling = await page.locator('.yard-side-chat:visible').evaluate(element => ({background:getComputedStyle(element).backgroundColor,
+      font:getComputedStyle(element).fontFamily,size:getComputedStyle(element).fontSize,scroll:element.scrollWidth,width:element.clientWidth}));
+    assert.equal(styling.background, 'rgb(23, 33, 29)'); assert.match(styling.font, /Arial/); assert.equal(styling.size, '15px');
     assert.ok(styling.scroll <= styling.width, JSON.stringify(styling));
-    if (process.env.SIDE_CHAT_SCREENSHOTS) await page.screenshot({ path: join(process.env.SIDE_CHAT_SCREENSHOTS, 'side-chat-mobile.png') });
-    await page.setViewportSize({ width: 1100, height: 760 });
-    if (process.env.SIDE_CHAT_SCREENSHOTS) await page.screenshot({ path: join(process.env.SIDE_CHAT_SCREENSHOTS, 'side-chat-desktop.png') });
+    if (process.env.SIDE_CHAT_SCREENSHOTS) await page.screenshot({ path: join(process.env.SIDE_CHAT_SCREENSHOTS, 'side-chat-host-mobile.png') });
+    await page.evaluate(() => { const p=(window as any).peer; p.state.failIDB=true; });
+    await editor.fill('unsaved b'); await page.getByText(/草稿未能保存/).first().waitFor();
+    await page.evaluate(() => (window as any).peer.markNode('b'));
     await page.getByRole('button', { name: '关闭侧聊', exact: true }).click();
-    const dialog = page.getByRole('dialog');
-    await dialog.getByRole('heading', { name: '关闭侧聊？' }).waitFor();
-    await page.keyboard.press('Escape');
-    assert.equal(await dialog.count(), 0);
+    await page.getByRole('dialog').getByRole('button', { name: '关闭侧聊', exact: true }).click();
+    await page.getByText(/无法关闭侧聊，草稿已保留/).waitFor();
+    assert.equal(await editor.inputValue(), 'unsaved b'); assert.equal(await page.evaluate(() => (window as any).peer.sameNode('b')), true);
+    assert.equal(await page.evaluate(() => (window as any).peer.state.calls.filter((c:any)=>c.name==='close').length), 0);
+    await page.evaluate(() => { const p=(window as any).peer; p.state.failIDB=false; p.select('a'); });
+    await page.getByText('no rollout found').waitFor();
+    await page.evaluate(() => (window as any).peer.markNode('a'));
+    await page.evaluate(() => { const p=(window as any).peer; p.histories.a.error=null; p.histories.a.canSubmit=true; p.state.failGate=true; p.render(); });
+    await page.getByRole('button', { name: '关闭侧聊', exact: true }).click();
+    let dialog = page.getByRole('dialog'); await dialog.getByRole('heading', { name: '关闭侧聊？' }).waitFor();
+    await page.keyboard.press('Escape'); assert.equal(await dialog.count(), 0);
     await page.getByRole('button', { name: '关闭侧聊', exact: true }).click();
     await dialog.getByRole('button', { name: '关闭侧聊', exact: true }).click();
-    await page.waitForFunction(() => (window as any).peer.state.closeCount === 1);
-    const discards = await page.evaluate(() => (window as any).peer.state.calls.filter((call: any) => call.operation?.kind === 'discard'));
-    assert.equal(discards.length, 1); assert.equal(discards[0].operation.hostId, 'a');
-    assert.deepEqual(discards[0].operation.params, { threadId: 'child-a' });
-    await page.evaluate(() => { const peer = (window as any).peer; peer.state.expired = true;
-      peer.emit({type:'codex-app-server-connection-changed',hostId:'b',state:'disconnected'}); peer.render('b'); });
-    await page.getByText(/侧聊订阅已失效/).waitFor();
-    await page.getByRole('button', { name: '重试加载' }).click();
+    await page.getByText(/synthetic unresolved send/).waitFor();
+    assert.equal(await editor.inputValue(), 'newer side draft');
+    assert.equal(await page.evaluate(() => (window as any).peer.state.calls.filter((c:any)=>c.name==='close').length), 0);
+    await page.evaluate(() => { (window as any).peer.state.failGate=false; });
+    await page.getByRole('button', { name: '关闭侧聊', exact: true }).click();
+    dialog = page.getByRole('dialog'); await dialog.getByRole('button', { name: '关闭侧聊', exact: true }).click();
+    await page.getByText('synthetic close failure').waitFor();
+    assert.equal(await page.evaluate(() => (window as any).peer.sameNode('a')), true);
+    assert.equal(await page.locator('.yard-side-chat:visible textarea').inputValue(), 'newer side draft');
+    assert.equal(await page.locator('.yard-side-chat:visible .yard-side-chat__composer').evaluate(e => (e as HTMLElement).inert), true);
+    await page.getByRole('button', { name: '继续操作' }).click();
+    await page.waitForFunction(() => (window as any).peer.state.closes.includes('a'));
+    assert.equal(await page.evaluate(() => (window as any).peer.state.calls.filter((c:any)=>c.name==='close').length), 1);
+    await page.evaluate(() => { const p=(window as any).peer; p.select('b'); p.histories.b.expired=true; p.histories.b.canSubmit=false; p.render(); });
     await page.getByText(/临时侧聊已过期/).waitFor();
-    assert.equal(await editor.count(), 0);
     await page.getByRole('button', { name: '开始新侧聊' }).click();
-    const replacement = await page.evaluate(() => (window as any).peer.state.calls.filter((call: any) => call.replace));
-    assert.deepEqual(replacement, [{replace:{hostId:'b',parentThreadId:'parent-b',childThreadId:'child-b',draftId:'draft-side-b'}}]);
+    await page.getByText(/无法开始新侧聊，原草稿已保留/).waitFor();
+    assert.equal(await editor.inputValue(), 'unsaved b');
+    assert.equal(await page.evaluate(() => (window as any).peer.replaceCalls.length), 0);
+    await page.evaluate(() => { const p=(window as any).peer; p.histories.b.expired=false;
+      p.views.b.close={requested:true,status:'prepare-failed',error:'restored close failure'};
+      for (const subscriber of p.state.subscribers) subscriber({hostId:'b',operationId:'op-b'}); p.render(); });
+    await page.getByRole('button', { name: '继续操作' }).click();
+    await page.getByText(/无法继续关闭，草稿已保留/).waitFor();
+    assert.equal(await page.locator('.yard-side-chat:visible textarea').inputValue(), 'unsaved b');
+    assert.equal(await page.evaluate(() => (window as any).peer.state.calls.filter((c:any)=>c.name==='retry'&&c.id==='op-b').length), 0);
+    await page.evaluate(async () => { const p=(window as any).peer; p.select('c'); await p.controllers.c.start(); });
+    await page.getByText('History c').waitFor(); await editor.fill('retained c draft');
+    await page.evaluate(() => { const p=(window as any).peer; p.histories.c.expired=true; p.histories.c.canSubmit=false; p.render(); });
+    await page.getByRole('button', { name: '开始新侧聊' }).click();
+    await page.waitForFunction(() => (window as any).peer.replaceCalls.length === 1);
+    const replaced = await page.evaluate(() => (window as any).peer.replaceCalls[0]);
+    assert.deepEqual(replaced, {hostId:'c',parentThreadId:'parent-c',childThreadId:'child-c',operationId:'op-c',draftId:'draft-side-c',draftController:true});
     assert.equal(await page.getByRole('button', { name: '开始新侧聊' }).isDisabled(), true);
-    assert.deepEqual(failures, []);
+    assert.equal(await page.locator('.yard-side-chat:visible textarea').inputValue(), 'retained c draft');
+    await page.setViewportSize({ width: 1100, height: 760 });
+    if (process.env.SIDE_CHAT_SCREENSHOTS) await page.screenshot({ path: join(process.env.SIDE_CHAT_SCREENSHOTS, 'side-chat-host-desktop.png') });
+    assert.deepEqual(errors, []);
   } finally { await context.close(); await browser.close(); }
 });

@@ -1,79 +1,80 @@
 import type { ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { SubmitOptions } from '../workbench-contract.ts';
 
-export interface SideChatParent {
+export type SideChatRequestStatus = 'waiting' | 'inflight' | 'not-sent' | 'rejected' | 'unknown' | 'received' | 'invalid';
+export type SideChatCloseStatus = 'idle' | 'preparing' | 'prepare-failed' | 'inflight' | 'not-sent' | 'rejected' | 'unknown'
+  | 'cleanup-pending' | 'cleaning' | 'closed';
+
+/** Authorized and sanitized projection of one native SideChatOperation. */
+export interface SideChatHostView {
+  operationId: string;
+  parent: {
+    hostId: string;
+    threadId: string;
+    cwd: string;
+    workspaceRoots: string[];
+    project: unknown;
+    archived: boolean;
+    options: SubmitOptions;
+  };
+  childId: string | null;
+  child: { thread: ThreadSummary; options: SubmitOptions } | null;
+  fork: { status: SideChatRequestStatus; error: string | null };
+  inject: { status: SideChatRequestStatus; error: string | null };
+  close: { requested: boolean; status: SideChatCloseStatus; error: string | null };
+  instructionSource: 'thread-override' | 'host-config';
+}
+
+export interface SideChatHostPort {
+  prepare(hostId: string, parentThreadId: string): Promise<SideChatHostView>;
+  start(operationId: string): Promise<SideChatHostView>;
+  read(operationId: string): Promise<SideChatHostView>;
+  retry(operationId: string): Promise<SideChatHostView>;
+  close(operationId: string): Promise<SideChatHostView>;
+  retryPersistence(operationId: string): Promise<SideChatHostView>;
+  subscribe(listener: (hint: { hostId: string; operationId: string }) => void): () => void;
+}
+
+export interface SideChatScope { hostId: string; parentThreadId: string; operationId: string; draftId: string }
+export interface SideChatControllerOptions {
+  hostId: string;
+  parentThreadId: string;
+  draftId: string;
+  port: SideChatHostPort;
+  /** Resolve only after the operation and draft association is durable. */
+  onPrepared(scope: SideChatScope): Promise<void>;
+  /** Consult the owner's durable dispatch state; host endpoints must enforce it too. */
+  canDispatch(scope: SideChatScope, action: 'advance' | 'close'): boolean;
+  /** A restored operation must already have its durable draft association. */
+  restored?: SideChatHostView;
+}
+
+export type SideChatPhase = 'idle' | 'preparing' | 'link-failed' | 'starting' | 'waiting' | 'forking'
+  | 'fork-failed' | 'fork-unknown' | 'injecting' | 'inject-failed' | 'inject-unknown' | 'ready'
+  | 'closing' | 'close-failed' | 'close-unknown' | 'closed';
+export interface SideChatSnapshot {
+  hostId: string;
+  parentThreadId: string;
+  draftId: string;
+  view: SideChatHostView | null;
+  phase: SideChatPhase;
+  error: string | null;
+  pendingClose: boolean;
+  hasActivity: boolean;
+}
+
+/** The shared conversation service owns subscription, history and recovery. */
+export interface SideChatHistory {
   hostId: string;
   threadId: string;
-  cwd: string;
-  archived: boolean;
-  workspaceRoots: string[];
-  projectId: string | null;
-  options: SubmitOptions;
-  /** An actual parent-scoped instruction snapshot, including an explicitly empty one. */
-  developerInstructions: { text: string; source: string } | null;
-  /** Effective fork configuration obtained for this parent, not the selected page. */
-  forkConfig: Record<string, unknown>;
-  capabilities: {
-    ephemeralFork: boolean;
-    boundaryInjection: boolean;
-    /** The inherited goal cannot auto-continue for the entire side-chat lifetime, including after a user turn. */
-    preventGoalContinuation: boolean;
-    discard: 'unsubscribe' | 'stop' | null;
-  };
-}
-
-export type SideChatOperationKind = 'fork' | 'boundary' | 'discard';
-export interface SideChatOperation {
-  id: string;
-  kind: SideChatOperationKind;
-  hostId: string;
-  parentThreadId: string;
-  childThreadId: string | null;
-  method: 'thread/fork' | 'thread/inject_items' | 'thread/unsubscribe' | 'thread/stop';
-  params: Record<string, unknown>;
-}
-export type SideChatOperationResult =
-  | { outcome: 'success'; result: unknown }
-  | { outcome: 'not-applied'; message: string }
-  | { outcome: 'unknown'; message: string };
-
-/** Manager persists each operation before dispatch, and can return its original late receipt. */
-export interface SideChatOperations {
-  execute(operation: SideChatOperation): Promise<SideChatOperationResult>;
-  reconcile?(operation: SideChatOperation): Promise<SideChatOperationResult>;
-  /** Evict only this child's caches and any ephemeral voice history. */
-  cleanup(scope: { hostId: string; parentThreadId: string; childThreadId: string }): Promise<void>;
-  /** Stop this child's voice and coordinate in-flight or unknown sends before closing. */
-  prepareClose(scope: { hostId: string; parentThreadId: string; childThreadId: string }): Promise<void>;
-  /** The original close path attempts to stop a running turn before unsubscribing. */
-  interrupt(scope: { hostId: string; threadId: string; turnId: string }): Promise<void>;
-}
-
-export type SideChatPhase = 'idle' | 'creating' | 'create-failed' | 'create-unknown' | 'forked'
-  | 'boundary' | 'boundary-failed' | 'boundary-unknown' | 'ready'
-  | 'preparing-close' | 'close-failed' | 'interrupting' | 'discarding' | 'discard-failed' | 'discard-unknown' | 'cleaning' | 'cleanup-failed' | 'closed';
-export interface DurableSideChatReceipt {
-  hostId: string;
-  parentThreadId: string;
-  thread: ThreadSummary;
-  childOptions: SubmitOptions;
-  /** The durable provider has completed its own side-conversation setup. */
-  boundaryReady: true;
-  hasActivity: boolean;
-}
-export interface SideChatSnapshot {
-  parent: SideChatParent;
-  draftId: string;
-  kind: 'temporary' | 'durable';
-  phase: SideChatPhase;
   thread: ThreadSummary | null;
-  childOptions: SubmitOptions;
-  boundaryConfirmed: boolean;
-  subscriptionLost: boolean;
-  operation: SideChatOperation | null;
-  sequence: number;
-  closeRequested: boolean;
-  activeTurnId: string | null;
-  hasActivity: boolean;
+  /** The child session's current authoritative options. */
+  options: SubmitOptions;
+  loading: boolean;
+  historyComplete: boolean;
+  streamGap: boolean;
   error: string | null;
+  expired: boolean;
+  canSubmit: boolean;
+  retry(): void | Promise<void>;
 }
