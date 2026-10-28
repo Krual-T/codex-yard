@@ -24,6 +24,7 @@ async function turns(connection: Connection, threadId: string): Promise<TurnSumm
     const page = record(await connection.request('thread/turns/list', { threadId, cursor, limit: 100, sortDirection: 'asc', itemsView: 'summary' }));
     if (!Array.isArray(page.data) || page.data.some(value => typeof record(value).id !== 'string')) throw new Error('无法核对完整会话历史，编辑已保留。');
     result.push(...page.data as TurnSummary[]);
+    if (page.nextCursor !== undefined && page.nextCursor !== null && typeof page.nextCursor !== 'string') throw new Error('会话历史游标无效，未修改记录。');
     cursor = typeof page.nextCursor === 'string' && page.nextCursor ? page.nextCursor : null;
     if (cursor && seen.has(cursor)) throw new Error('会话历史分页未前进，编辑已保留。');
     if (cursor) seen.add(cursor);
@@ -37,6 +38,7 @@ async function items(connection: Connection, threadId: string, turnId: string): 
     const page = record(await connection.request('thread/items/list', { threadId, turnId, cursor, limit: 100, sortDirection: 'asc' }));
     if (!Array.isArray(page.data) || page.data.some(value => typeof record(record(value).item).id !== 'string')) throw new Error('无法核对消息内容，编辑已保留。');
     result.push(...page.data.map(value => record(value).item as ThreadItemSummary));
+    if (page.nextCursor !== undefined && page.nextCursor !== null && typeof page.nextCursor !== 'string') throw new Error('消息内容游标无效，未修改记录。');
     cursor = typeof page.nextCursor === 'string' && page.nextCursor ? page.nextCursor : null;
     if (cursor && seen.has(cursor)) throw new Error('消息内容分页未前进，编辑已保留。');
     if (cursor) seen.add(cursor);
@@ -45,6 +47,16 @@ async function items(connection: Connection, threadId: string, turnId: string): 
 }
 function failure(stage: EditStage, error: unknown): EditMessageResult {
   return { stage, error: error instanceof Error ? error.message : String(error) };
+}
+
+/** Read every history/item page and match the protocol's exact user clientId. */
+export async function findSentMessage(connection: Connection, threadId: string, clientUserMessageId: string) {
+  if (!threadId || !clientUserMessageId) throw new Error('核对发送需要原会话及请求身份。');
+  for (const turn of await turns(connection, threadId)) {
+    if ((await items(connection, threadId, turn.id)).some(item => item.type === 'userMessage' && item.clientId === clientUserMessageId)) return { turnId: turn.id };
+  }
+  // Absence is not proof that a previously issued request cannot still arrive.
+  return { turnId: null };
 }
 
 /** Caller holds the same Yard write interval as turn/start, revert and queue/start.

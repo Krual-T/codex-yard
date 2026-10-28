@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
-import { createFakeCodex, fixtureThread, fixtureTurn, agentItem, commandItem } from '../test/fake-codex.ts';
+import { createFakeCodex, fixtureThread, fixtureTurn, agentItem, commandItem, NO_REPLY } from '../test/fake-codex.ts';
 import { fileDaemonFixture } from '../test/file-daemon-fixture.ts';
 import { fileMethods } from '../src/native/files.ts';
 import { record } from '../src/native/protocol.ts';
@@ -15,17 +15,50 @@ if (!artifacts) throw new Error('Set YARD_TEST_ARTIFACTS to an isolated evidence
 await mkdir(artifacts, { recursive: true });
 const temporary = await mkdtemp('/tmp/yard-owned-ui-');
 const fake = await createFakeCodex(temporary);
+// Real CLI 0.164/0.163 cannot list/resume a newly created empty thread.
+// Only threads created by this fixture have this first-turn lifecycle.
+const createdEmpty = new Set<string>();
+fake.handlers.set('thread/start', params => {
+  const result = fake.defaultResult('thread/start', record(params)) as { thread: { id: string } };
+  createdEmpty.add(result.thread.id); return result;
+});
+for (const method of ['thread/resume', 'thread/turns/list']) fake.handlers.set(method, params => {
+  const id = String(params.threadId);
+  if (createdEmpty.has(id) && !fake.threads.get(id)?.turns.length) throw new Error('list_turns is not supported yet');
+  return fake.defaultResult(method, record(params));
+});
 const fileRpc = fileDaemonFixture();
 for (const method of fileMethods) fake.handlers.set(method, params => fileRpc(method, record(params)));
+const notesPath = join(temporary, 'workspace-notes.txt');
+await writeFile(notesPath, '\ufeffone\r\ntwo\nthree');
+let shellHandle = '';
+fake.handlers.set('process/spawn', (params, peer) => {
+  const handle = String(params.processHandle);
+  if (!params.tty) {
+    for (const processHandle of [handle, shellHandle]) peer.send({ method: 'process/exited', params: { processHandle, exitCode: 0 } });
+    return {};
+  }
+  shellHandle = handle;
+  peer.send({ method: 'process/outputDelta', params: { processHandle: handle, stream: 'stdout',
+    deltaBase64: Buffer.from(`\x1e${handle}\x1f/bin/bash\x1f1234\x1f\u001b[31mAPP_TERMINAL_READY\u001b[0m\r\n`).toString('base64') } });
+  return {};
+});
+fake.handlers.set('process/writeStdin', (params, peer) => { peer.send({ method: 'process/outputDelta', params: { ...params, stream: 'stdout' } }); return {}; });
+fake.handlers.set('process/resizePty', () => ({}));
+fake.handlers.set('process/kill', (params, peer) => { peer.send({ method: 'process/exited', params: { processHandle: params.processHandle, exitCode: 137 } }); return {}; });
 const user = { id: 'user-one', type: 'userMessage', content: [{ type: 'text', text: 'Show the owned renderer', text_elements: [] }] };
 fake.threads.set('owned-conversation', fixtureThread('owned-conversation', temporary, {
   name: 'Owned renderer acceptance',
   turns: [fixtureTurn('turn-one', [user, commandItem('command-one', 'SYNTHETIC_COMMAND_OUTPUT', temporary),
-    agentItem('assistant-one', 'Owned **React and TypeScript** conversation.\n\n| Item | State |\n| --- | --- |\n| Renderer | Authored |\n\n```ts\nconst owned = true;\n```')])],
+    agentItem('assistant-one', 'Owned **React and TypeScript** conversation.\n\n| Item | State |\n| --- | --- |\n| Renderer | Authored |\n\n```ts\nconst owned = true;\n```\n\n[Workspace notes](./workspace-notes.txt#L2)')])],
 }));
+Object.assign(fake.threads.get('owned-conversation')!.turns[0]!, { diff: '--- a/workspace-notes.txt\n+++ b/workspace-notes.txt\n@@ -1 +1 @@\n-one\n+two\n' });
 const dataDir = join(temporary, 'data');
 await mkdir(dataDir);
-await writeFile(join(dataDir, 'native-state.json'), JSON.stringify({ globals: {}, settings: { appearanceTheme: 'dark',
+await writeFile(join(dataDir, 'native-state.json'), JSON.stringify({ globals: { 'local-projects': {
+  first: { id: 'project-a', name: 'First project', rootPaths: [temporary] },
+  second: { id: 'project-b', name: 'Second project', rootPaths: [temporary] },
+} }, settings: { appearanceTheme: 'dark',
   appearanceDarkChromeTheme: { ...defaultThemes.dark, surface: '#152535', ink: '#edf5fc', fonts: { ui: 'Arial', content: 'Georgia', code: 'Courier New' } } } }));
 const app = await createNativeWorkbench({ socketPath: fake.socketPath, codexHome: join(temporary, 'codex'),
   dataDir, workspace: temporary, port: 0, hostCatalog: { hosts: [], projects: [], assignments: {} } });
@@ -98,6 +131,53 @@ try {
   await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark'
     && getComputedStyle(document.querySelector('.yard-markdown')!).color === 'rgb(237, 245, 252)');
   checks.push('persisted light/dark surface and ink reach actual Markdown text');
+
+  await page.setViewportSize({ width: 1360, height: 900 });
+  await page.getByRole('button', { name: 'Workspace notes', exact: true }).click();
+  const fileEditor = page.getByRole('textbox', { name: `File: ${notesPath}`, exact: true });
+  await fileEditor.waitFor(); assert.equal(await fileEditor.innerText(), 'one\ntwo\nthree');
+  await fileEditor.press('ControlOrMeta+End'); await page.keyboard.type(' edited');
+  const sidebarButton = page.getByRole('button', { name: 'Toggle sidebar', exact: true });
+  if (!await page.getByRole('button', { name: 'Settings', exact: true }).isVisible()) await sidebarButton.click();
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  let restoredBeforeGuard = false;
+  const guardAnswered = new Promise<void>(resolve => page.once('dialog', async dialog => {
+    restoredBeforeGuard = new URL(page.url()).pathname === '/settings/general'; await dialog.dismiss(); resolve();
+  }));
+  await page.evaluate(() => history.back());
+  await guardAnswered;
+  await page.waitForFunction(() => location.pathname === '/settings/general');
+  await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  assert(restoredBeforeGuard, 'Back navigation must restore the committed URL before asking to leave.');
+  page.once('dialog', dialog => dialog.accept());
+  await page.evaluate(() => history.back());
+  await page.waitForURL('**/local/owned-conversation'); await fileEditor.waitFor();
+  assert.equal(await fileEditor.innerText(), 'one\ntwo\nthree edited');
+  await page.getByRole('button', { name: 'Save file', exact: true }).click();
+  await page.getByRole('button', { name: 'Save file', exact: true }).waitFor({ state: 'visible' });
+  await page.waitForFunction(() => document.querySelector<HTMLButtonElement>('button[aria-label="Save file"]')?.disabled);
+  assert.equal(await readFile(notesPath, 'utf8'), '\ufeffone\r\ntwo\nthree edited');
+  await page.getByRole('button', { name: 'Open turn changes', exact: true }).click();
+  await page.getByLabel('Diff', { exact: true }).getByText('+two', { exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Open terminal', exact: true }).click();
+  await page.locator('.xterm-rows').getByText('APP_TERMINAL_READY').waitFor();
+  await page.locator('.xterm-helper-textarea').focus(); await page.keyboard.type('app-input');
+  await page.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent?.includes('app-input'));
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 1);
+  const writes = fake.calls('process/writeStdin').map(call => Buffer.from(String(call.params.deltaBase64), 'base64').toString()).join('');
+  assert.equal(writes, 'app-input');
+  await page.setViewportSize({ width: 390, height: 900 });
+  const mobileSidebar = page.getByRole('button', { name: 'Close sidebar', exact: true });
+  if (await mobileSidebar.isVisible()) await mobileSidebar.click();
+  assert(await page.getByRole('complementary', { name: 'Workspace panel', exact: true }).isVisible());
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+  await page.screenshot({ path: join(artifacts, 'workspace-mobile.png'), fullPage: true });
+  await page.getByRole('button', { name: 'Close panel', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.yard-workspace-panel')?.hasAttribute('hidden'));
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 1);
+  checks.push('actual App file link/editor/save, BOM/mixed EOL, cancelled Back guard, retained draft, turn diff, ANSI terminal input and narrow panel');
 
   // Exercise the production client and IndexedDB readwrite transaction in two renderers.
   const other = await context.newPage();
@@ -205,17 +285,60 @@ try {
   await page.waitForFunction(() => !document.querySelector('.yard-message-edit'));
   checks.push('actual edit hook retains newer B after checking submitted A, including reload; no replay');
   await page.setViewportSize({ width: 1360, height: 900 });
-  await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
-  await page.getByRole('button', { name: '＋ New chat', exact: true }).click();
+  if (!await page.getByRole('button', { name: 'New chat', exact: true }).isVisible()) await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
+  // A rejected first turn outlives the home composer. Keep B while explicitly
+  // retrying immutable A, including the real CLI's unreadable empty phase.
+  await page.getByRole('button', { name: 'New chat in Second project', exact: true }).click();
   const input = page.getByRole('textbox', { name: '和 Codex 一起工作', exact: true });
+  const creationCount = fake.calls('thread/start').length;
+  fake.handlers.set('turn/start', () => { throw new Error('SYNTHETIC_FIRST_SEND_REJECTED'); });
+  await input.fill('ORIGINAL_FIRST_SEND_A');
+  await page.getByRole('button', { name: '发送', exact: true }).click();
+  const recovery = page.getByRole('region', { name: 'Message send recovery', exact: true });
+  await recovery.getByText('SYNTHETIC_FIRST_SEND_REJECTED', { exact: true }).waitFor();
+  await input.fill('NEWER_FIRST_SEND_B');
+  await page.getByText('正在保存草稿…', { exact: true }).waitFor({ state: 'hidden' });
+  const failedThreadId = new URL(page.url()).pathname.split('/').at(-1)!;
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'NEWER_FIRST_SEND_B');
+  fake.handlers.delete('turn/start');
+  await recovery.getByRole('button', { name: 'Retry original send', exact: true }).click();
+  await recovery.waitFor({ state: 'hidden' });
+  assert.equal(await input.inputValue(), 'NEWER_FIRST_SEND_B');
+  assert.equal(fake.calls('thread/start').length, creationCount + 1, 'An explicit first-turn retry must reuse the created thread.');
+  const retried = fake.threads.get(failedThreadId)!;
+  assert.equal(JSON.stringify(retried.turns[0]?.items).includes('ORIGINAL_FIRST_SEND_A'), true);
+  assert.equal(JSON.stringify(retried.turns[0]?.items).includes('NEWER_FIRST_SEND_B'), false);
+  retried.turns[0]!.status = 'completed'; retried.status = { type: 'idle' };
+  fake.broadcast({ method: 'turn/completed', params: { threadId: failedThreadId, turn: retried.turns[0] } });
+  const sendsAfterRetry = fake.calls('turn/start').length;
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'NEWER_FIRST_SEND_B');
+  assert.equal(fake.calls('turn/start').length, sendsAfterRetry);
+  checks.push('rejected first send survives route unmount and empty-history reload; explicit retry sends exact A once and preserves newer B');
+
+  await page.getByRole('button', { name: 'New chat in Second project', exact: true }).click();
   await input.fill('OWNED_NEW_THREAD_MESSAGE');
   await page.getByRole('button', { name: '发送', exact: true }).click();
   const started = await fake.waitFor(message => message.method === 'turn/start' && JSON.stringify(message.params.input).includes('OWNED_NEW_THREAD_MESSAGE'), 15_000);
   const id = String(started.params.threadId);
   assert(fake.loaded.has(id));
   const resumeIndex = fake.messages.findIndex(message => message.method === 'thread/resume' && message.params.threadId === id);
-  assert(resumeIndex >= 0 && resumeIndex < fake.messages.indexOf(started));
+  assert.equal(resumeIndex, -1, 'The authoritative new-thread response must install the listener without resuming unreadable empty history.');
+  assert(!fake.calls('thread/turns/list').some(message => message.params.threadId === id), 'No full history before the first turn is accepted.');
   await page.waitForURL('**/local/' + id);
+  await installClientProbe(page);
+  await recovery.waitFor({ state: 'visible' });
+  await recovery.waitFor({ state: 'hidden' });
+  const settledSend = await page.evaluate(async () =>
+    (window as any).acceptanceClient.host('get-persisted-atom', { key: 'codex-yard.send-recovery.v1' }));
+  assert.deepEqual(settledSend.value.requests, {}, 'The first send must finish its durable cleanup before this test reloads the page.');
+  await writeFile(join(artifacts, 'send-before-stream.json'), JSON.stringify(settledSend, null, 2));
+  const membership = await page.evaluate(async id => {
+    const state = await (window as any).acceptanceClient.host('thread-project-state');
+    return state.memberships.find((value: any) => value.hostId === 'local' && value.threadId === id);
+  }, id);
+  assert.equal(membership?.assignment?.projectId, 'project-b', 'The explicitly selected project must win over the first matching cwd.');
   const turn = fake.threads.get(id)!.turns[0]!;
   const assistant = agentItem('live-assistant', 'STREAMED_OWNED_ANSWER');
   fake.broadcast({ method: 'turn/started', params: { threadId: id, turn: { ...turn, items: [], itemsView: 'notLoaded' } } });
@@ -227,8 +350,61 @@ try {
   fake.broadcast({ method: 'turn/completed', params: { threadId: id, turn: { ...turn, items: [], itemsView: 'summary' } } });
   await page.reload();
   await page.getByText('STREAMED_OWNED_ANSWER', { exact: true }).waitFor();
-  checks.push('new thread resumes before first turn; notLoaded start, delta, summary completion and full reload');
-  await page.getByRole('button', { name: '⚙ Settings', exact: true }).click();
+  checks.push('new thread installs from its creation receipt without empty-history resume; notLoaded start, delta, summary completion and full reload');
+  await installClientProbe(page);
+  await writeFile(join(artifacts, 'send-after-reload.json'), JSON.stringify(await page.evaluate(async () =>
+    (window as any).acceptanceClient.host('get-persisted-atom', { key: 'codex-yard.send-recovery.v1' })), null, 2));
+  await page.evaluate(() => {
+    const client = (window as any).acceptanceClient, rpc = client.rpc.bind(client);
+    let lose = true;
+    client.rpc = async (...args: any[]) => {
+      const result = await rpc(...args);
+      if (args[0] === 'turn/start' && lose) { lose = false; throw Object.assign(new Error('SYNTHETIC_LOST_SEND_RECEIPT'), { uncertain: true }); }
+      return result;
+    };
+  });
+  await input.fill('UNKNOWN_ORDINARY_A');
+  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await recovery.getByText('SYNTHETIC_LOST_SEND_RECEIPT', { exact: true }).waitFor();
+  await input.fill('NEWER_ORDINARY_B');
+  await page.getByText('正在保存草稿…', { exact: true }).waitFor({ state: 'hidden' });
+  const ordinaryCalls = fake.calls('turn/start').length;
+  const accepted = fake.threads.get(id)!.turns.at(-1)!;
+  accepted.status = 'completed'; fake.threads.get(id)!.status = { type: 'idle' };
+  fake.broadcast({ method: 'turn/completed', params: { threadId: id, turn: accepted } });
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'NEWER_ORDINARY_B');
+  assert.equal(fake.calls('turn/start').length, ordinaryCalls);
+  await recovery.getByRole('button', { name: 'Check send result', exact: true }).click();
+  await recovery.getByText('原提交版本已发送；较新的草稿将保留。', { exact: true }).waitFor();
+  assert.equal(await input.inputValue(), 'NEWER_ORDINARY_B');
+  await recovery.getByRole('button', { name: 'Keep newer draft and close', exact: true }).click();
+  await recovery.waitFor({ state: 'hidden' });
+  assert.equal(await input.inputValue(), 'NEWER_ORDINARY_B');
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === 'NEWER_ORDINARY_B');
+  assert.equal(fake.calls('turn/start').length, ordinaryCalls);
+  assert.equal(fake.calls('turn/start').at(-1)!.params.clientUserMessageId, record(accepted.items[0]).clientId);
+  checks.push('ordinary send unknown receipt persists exact clientId; read-only check confirms A and preserves newer B through reload without replay');
+  await installClientProbe(page);
+  fake.handlers.set('thread/name/set', params => {
+    fake.threads.get(String(params.threadId))!.name = 'RESTORED_PAGE_THREAD'; return NO_REPLY;
+  });
+  await page.evaluate(id => {
+    void (window as any).acceptanceClient.rpc('thread/name/set', { threadId: id, name: 'RESTORED_PAGE_THREAD' }).catch((error: { uncertain: boolean }) => {
+      (window as any).lifecycleWriteResult = { uncertain: error.uncertain };
+    });
+  }, id);
+  await fake.waitFor(message => message.method === 'thread/name/set');
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })));
+  await page.waitForFunction(() => (window as any).lifecycleWriteResult?.uncertain === true);
+  assert.equal(await page.evaluate(() => (window as any).acceptanceClient.connected), false);
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
+  await page.waitForFunction(() => (window as any).acceptanceClient.connected);
+  await page.waitForFunction(() => document.querySelector('.yard-conversation-header strong')?.textContent === 'RESTORED_PAGE_THREAD');
+  assert.equal(fake.calls('thread/name/set').length, 1, 'Resuming must not replay a write with a lost receipt.');
+  checks.push('persisted page lifecycle events reconnect the real client, rehydrate history and retain an unknown write without replay (simulated cache events)');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
   assert.deepEqual(errors, []);
   assert(!requests.some(url => /vendor|codex-app\/|assets\/app-initial|renderer-migration/.test(url)));
@@ -242,6 +418,7 @@ try {
 } catch (error) {
   await writeFile(join(artifacts, 'failure.json'), JSON.stringify({ error: String(error), checks, errors, requests,
     atoms: await page.evaluate(() => localStorage.getItem('native-atoms')).catch(() => null),
+    sendRecovery: await page.evaluate(async () => (window as any).acceptanceClient?.host('get-persisted-atom', { key: 'codex-yard.send-recovery.v1' })).catch(error => String(error)),
     protocol: fake.messages.map(message => ({ method: message.method, params: message.params })) }, null, 2));
   throw error;
 } finally {

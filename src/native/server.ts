@@ -29,9 +29,10 @@ import type { HostPaths } from './ssh.ts';
 import { createQueuedSendLocks } from './queued-send-locks.ts';
 import { createPreferenceWrites } from './preference-writes.ts';
 import { createStateMutations } from './state-mutations.ts';
+import { createProjectCatalogWrites } from './project-catalog-writes.ts';
 import { readToolHistory } from './tool-history.ts';
 import { createConversationWrites } from './conversation-writes.ts';
-import { editMessage } from './message-edit.ts';
+import { editMessage, findSentMessage } from './message-edit.ts';
 import { createFiles, fileEndpoints, fileMethods } from './files.ts';
 import type { RemoteFileCommand } from './files.ts';
 import { createPetOverlay } from './pet-overlay.ts';
@@ -151,6 +152,7 @@ export async function createNativeWorkbench(options: Options = {}) {
   }
   function broadcast(message: unknown) { for (const client of clients.keys()) send(client, message); }
   const stateMutations = createStateMutations();
+  const addProject = createProjectCatalogWrites(globals, stateMutations, persist, broadcast);
   let projectCompatibility: import('./thread-projects.ts').ThreadProjectCompatibility = {};
   let projectInventoryGeneration = 0;
   const compatibility = { resolveLegacyThreadHosts: (id: string) => projectCompatibility.resolveLegacyThreadHosts?.(id) };
@@ -582,8 +584,18 @@ export async function createNativeWorkbench(options: Options = {}) {
         return { state: connection?.connected ? 'connected' : connection?.connecting ? 'connecting' : 'disconnected', error: connection?.lastError ?? null };
       }
       case 'thread-project-state': {
+        await stateMutations.flush();
+        const unresolved = readThreadProjectState(globals, {}).unresolved;
+        const needsInventory = unresolved.projectless.length > 0 || ['assignments', 'outputDirectories', 'workspaceRoots']
+          .some(key => Object.keys(unresolved[key as 'assignments' | 'outputDirectories' | 'workspaceRoots']).length > 0);
+        if (!needsInventory) return { ...readThreadProjectState(globals, compatibility), inventory: { complete: true, errors: {} },
+          catalog: { local: globals['local-projects'], remote: globals['remote-projects'] } };
         const generation = ++projectInventoryGeneration;
-        const inventory = createThreadProjectInventory(['local', ...sshHosts.keys()], id => connectedFor(client, connections, id));
+        const inventory = createThreadProjectInventory(['local', ...sshHosts.keys()], async id => {
+          const connection = id === 'local' ? control : connections.get(id) ?? fileConnections.get(id);
+          if (!connection?.connected) throw new Error('主机未连接，旧项目归属尚未核实。');
+          return connection;
+        });
         const status = await inventory.refresh();
         if (generation === projectInventoryGeneration) projectCompatibility = inventory.compatibility;
         await stateMutations.flush();
@@ -591,10 +603,15 @@ export async function createNativeWorkbench(options: Options = {}) {
           catalog: { local: globals['local-projects'], remote: globals['remote-projects'] } };
       }
       case 'thread-projects': return threadProjects(params.operation as ThreadProjectOperation, params.value);
+      case 'project-add': return addProject(hostId, params.path, params.name);
       case 'message-edit': {
         if (typeof params.threadId !== 'string' || !params.threadId) throw new Error('编辑需要会话身份。');
         const connection = await connectedFor(client, connections, hostId);
         return conversationWrite(hostId, params.threadId, () => editMessage(connection, hostId, params.threadId as string, params));
+      }
+      case 'message-send-status': {
+        if (typeof params.threadId !== 'string' || typeof params.clientUserMessageId !== 'string') throw new Error('核对发送需要原会话及请求身份。');
+        return findSentMessage(await connectedFor(client, connections, hostId), params.threadId, params.clientUserMessageId);
       }
       case 'custom-avatars': return typeof params.avatarId === 'string' ? petAssets.loadAvatar(params.avatarId) : petAssets.load();
       case 'terminal': return terminals.get(client)!.request(params.operation as TerminalOperation, params.args as unknown[]);

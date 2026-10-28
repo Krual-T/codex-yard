@@ -4,6 +4,7 @@ import { submitDraft } from '../src/renderer/app/submission.ts';
 import type { SubmissionContext } from '../src/renderer/app/submission.ts';
 import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 import type { ThreadSummary } from '../lib/codex-protocol.ts';
+import { sessionOptions } from '../src/renderer/app/session-options.ts';
 
 const draft = { text: 'message', images: [], files: [] };
 const thread: ThreadSummary = { id: 'thread', name: null, cwd: '/fixture', status: { type: 'idle' }, turns: [] };
@@ -88,4 +89,28 @@ test('an active turn still allows the recovery controller to check an uncertain 
   assert.equal(checked.length, 1);
   assert.deepEqual(h.calls, []);
   await assert.rejects(submitDraft(h.client, { ...base, activeTurnId: 'already-started' }, draft, {}, { type: 'send' }, async () => {}), /仍在运行/);
+});
+
+test('unchanged session controls do not reconstruct a custom sandbox or collaboration instructions', async () => {
+  const h = fixture();
+  const initialOptions = sessionOptions({ model: 'custom', reasoningEffort: 'high',
+    sandbox: { type: 'workspaceWrite', writableRoots: ['/extra'], networkAccess: true, excludeSlashTmp: true, excludeTmpdirEnvVar: true },
+    collaborationMode: { mode: 'plan' } });
+  await submitDraft(h.client, { ...base, initialOptions }, draft, initialOptions, { type: 'send' }, async () => {});
+  const params = h.calls[0].params;
+  for (const key of ['sandboxPolicy', 'permissions', 'collaborationMode', 'model', 'effort']) assert.equal(Object.hasOwn(params, key), false, key);
+  h.calls.length = 0;
+  await submitDraft(h.client, { ...base, initialOptions }, draft, { ...initialOptions, effort: null }, { type: 'send' }, async () => {});
+  assert.equal(h.calls[0].params.effort, null);
+  assert.equal(Object.hasOwn(h.calls[0].params, 'sandboxPolicy'), false);
+  assert.equal(Object.hasOwn(h.calls[0].params, 'collaborationMode'), false);
+});
+
+test('an explicit sandbox selection clears its former permission profile and leaves unrelated controls intact', async () => {
+  const h = fixture(), initialOptions = { permissionProfileId: 'existing-profile', sandboxMode: 'read-only' as const, mode: 'plan' as const, model: 'custom' };
+  await submitDraft(h.client, { ...base, initialOptions }, draft, { ...initialOptions, permissionProfileId: undefined, sandboxMode: 'workspace-write' }, { type: 'send' }, async () => {});
+  const params = h.calls[0].params;
+  assert.equal(params.permissions, null);
+  assert.deepEqual(params.sandboxPolicy, { type: 'workspaceWrite', writableRoots: ['/fixture'], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false });
+  assert.equal(Object.hasOwn(params, 'collaborationMode'), false);
 });

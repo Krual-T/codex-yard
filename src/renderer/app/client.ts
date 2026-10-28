@@ -30,7 +30,7 @@ interface Pending {
 }
 const readHostEndpoints = new Set(['get-settings', 'get-setting', 'get-global-state', 'os-info', 'locale-info', 'codex-home',
   'home-directory', 'workspace-root-options', 'workspace-directory-entries', 'remote-workspace-directory-entries', 'read-file', 'read-file-metadata', 'read-file-binary',
-  'git-diff', 'app-server-connection-state', 'codex-command-keymap-state', 'custom-avatars', 'chrome-status', 'thread-project-state']);
+  'git-diff', 'app-server-connection-state', 'codex-command-keymap-state', 'custom-avatars', 'chrome-status', 'thread-project-state', 'message-send-status']);
 export function hostRequestMutates(endpoint: string, params: Record<string, unknown>): boolean {
   if (endpoint === 'message-edit') return params.operation !== 'check';
   if (endpoint === 'workspace-files') return !['read', 'getMetadata'].includes(String(params.operation));
@@ -43,6 +43,8 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
   private opening: Promise<void> | null = null;
   private reconnect: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
+  private suspended = false;
+  private cancelOpening: ((error: Error) => void) | undefined;
   private pending = new Map<string, Pending>();
   private listeners = new Set<(event: WorkbenchEvent) => void>();
   private readonly unsubscribeAtoms: () => void;
@@ -60,18 +62,22 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
   private publish(event: WorkbenchEvent) { for (const listener of this.listeners) listener(event); }
   connect(): Promise<void> {
     if (this.stopped) return Promise.reject(new WorkbenchError('连接已关闭。'));
+    if (this.suspended) return Promise.reject(new WorkbenchError('页面连接已挂起。'));
     if (this.socket?.readyState === WebSocket.OPEN) return Promise.resolve();
     if (this.opening) return this.opening;
     this.publish({ type: 'connection-state', state: 'connecting' });
     this.opening = new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(this.url); this.socket = socket;
+      this.cancelOpening = reject;
       let opened = false;
       socket.onopen = () => {
-        opened = true; this.opening = null;
+        if (this.socket !== socket || this.stopped || this.suspended) { socket.close(); reject(new WorkbenchError('页面连接已挂起。')); return; }
+        opened = true; this.opening = null; this.cancelOpening = undefined;
         socket.send(JSON.stringify({ type: 'ready' }));
         this.publish({ type: 'connection-state', state: 'connected' }); resolve();
       };
       socket.onmessage = event => {
+        if (this.socket !== socket) return;
         let parsed: unknown;
         try { parsed = JSON.parse(String(event.data)); } catch { return; }
         if (!record(parsed) || typeof parsed.type !== 'string') return;
@@ -92,12 +98,13 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
       };
       socket.onerror = () => { if (!opened) reject(new WorkbenchError('无法连接 Yard 宿主。')); };
       socket.onclose = () => {
-        this.opening = null; this.socket = null;
+        if (this.socket !== socket) return;
+        this.opening = null; this.socket = null; this.cancelOpening = undefined;
         if (!opened) reject(new WorkbenchError('Yard 宿主连接已断开。'));
         for (const [id, pending] of this.pending) this.settle(id, undefined,
           new WorkbenchError(pending.mutating ? '连接已断开，操作结果未知。请刷新核对后再试。' : '连接已断开，请重试。', pending.mutating));
         this.publish({ type: 'connection-state', state: 'disconnected' });
-        if (!this.stopped) this.reconnect = setTimeout(() => { void this.connect().catch(() => {}); }, 2000);
+        if (!this.stopped && !this.suspended) this.reconnect = setTimeout(() => { void this.connect().catch(() => {}); }, 2000);
       };
     });
     return this.opening;
@@ -147,10 +154,23 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
     const requestId = crypto.randomUUID();
     await this.request({ type: 'mcp-response', requestId, hostId: ref.hostId, generation: ref.generation, response: { id: ref.id, ...response } }, requestId, true, true);
   }
-  close() {
-    this.stopped = true; clearTimeout(this.reconnect); this.socket?.close();
-    this.unsubscribeAtoms();
+  suspend() {
+    this.suspended = true; clearTimeout(this.reconnect);
+    this.cancelOpening?.(new WorkbenchError('页面连接已挂起。')); this.cancelOpening = undefined; this.opening = null;
+    const socket = this.socket; this.socket = null; socket?.close();
     for (const [id, pending] of this.pending) this.settle(id, undefined, new WorkbenchError(pending.mutating ? '页面连接已关闭，操作结果未知。' : '页面连接已关闭。', pending.mutating));
+    this.publish({ type: 'connection-state', state: 'disconnected' });
+  }
+  async resume() {
+    if (this.stopped) throw new WorkbenchError('连接已关闭。');
+    this.suspended = false;
+    await this.connect();
+    this.publish({ type: 'page-resumed' });
+  }
+  close() {
+    if (this.stopped) return;
+    this.stopped = true; this.suspend();
+    this.unsubscribeAtoms();
     this.listeners.clear();
   }
 }

@@ -20,5 +20,8 @@ const container = document.getElementById('root');
 if (!container) throw new Error('Root container not found');
 const client = new BrowserWorkbenchClient();
 createRoot(container).render(createElement(PageBoundary, null, createElement(App, { client })));
-window.addEventListener('pagehide', () => client.close(), { once: true });
+window.addEventListener('pagehide', event => { if (event.persisted) client.suspend(); else client.close(); });
+window.addEventListener('pageshow', event => {
+  if (event.persisted) void client.resume().catch(error => console.error('Unable to resume Yard connection', error));
+});
 performance.mark('workbench-render-requested');
