@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v13，2026-10-29，完整功能和快照退役仍在实施。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v14，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -29,6 +29,8 @@ App 以 `/`、`/local/:threadId`、`/settings/:section` 和已存在的独立页
 
 App 的 ConversationSessions 按实际host/thread复用现有loadThread和thread-state reducer，只维护CLI数据的界面投影。主页面、Mini和侧聊可以同时引用同一会话，首次可写消费者以thread/resume(excludeTurns:true)订阅，最后一个消费者离开才unsubscribe；归档消费者不resume，最后一个可写消费者离开时解除订阅，保留只读投影。每个key串行处理原订阅、读取与释放，旧代次结果不发布到新连接。读取先取元数据，再完整分页thread/turns/list(itemsView:full)，非full（含summary/notLoaded/缺省或未知值）turn继续分页thread/items/list；重复游标或失败显示真实错误，不静默截断。
 
+上述完整分页适用于后端支持的持久会话。两版CLI的临时侧聊不支持turns/list；其消费者必须沿原fork回执和原连接事件保留投影，不能将分页失败当空历史，也不能将metadata可读当新连接已订阅。该侧聊接线仍在实施。
+
 首次进入无投影的会话可显示加载页。后台历史核对、完成事件、revert和断线恢复保留已挂载编辑器；历史完整标记先失效，只有完整读取后恢复。不能以加载占位卸载正在等待回执的编辑器，丢掉错误或内存稿。桥断线使全部实际host投影失效，单host daemon断线只影响该host；重连重新订阅，不能把旧连接回执作为新订阅证明。该服务没有第二套传输、发送账本或会话业务状态；CLI仍为历史权威。当前主页面已经接入，Mini和侧聊的真实消费者接线仍须验收。
 
 订阅权限与历史完整性分开：缓存的 options/thread 不授权写入。最后一个 owner 离开时立即撤销权限、使读取代次和连续性失效；所有缓存项（含无 owner 的创建投影）在桥或所属 host 断线时失效。resume/unsubscribe 的结果未知时保持原操作围栏，复用 WorkbenchClient 既有 pending request 和 CodexConnection 的原请求迟到终态观察；仅同一原连接的终态能解除，观察超时不算终态，不重复订阅。重连另起实际订阅。被切走的活动区间保持缺口提示，后续 item/started 不抹掉已丢区间，直到完整终态历史核对。回退只使历史完整性失效，不清空已挂载编辑器的 thread。外部 archive 同步撤销 canSubmit，同时保持原 composer 挂载并 inert；恢复归档后可继续原稿。队列启动及发送在等待 ready 后再次核对实际 host/thread、导航代次、归档及活动 turn。
@@ -38,6 +40,8 @@ App 的 ConversationSessions 按实际host/thread复用现有loadThread和thread
 设置URL以yardSettingsOrigin保存来源host/thread或project ID与同源返回路线，不保存易过期路径。旧history来源只读导入URL，不再创建独立来源副本。复制深链、新页、刷新、section/host/plugin导航保持身份；切到其他host时保留返回来源并使用该host的无来源scope，用户可在已有目录输入明确选择。来源项目/归属事件、连接变化、页面恢复与重新进入设置立即使解析代次失效，从thread-project-state和正确host的thread/read重新核对，丢弃旧异步结果；不按cwd猜项目。父级按解析后的settings路由同步scopeStatus，解析时暂停实际作用域消费者，保留原controller的dirty/unknown与可编辑内容。
 
 归档进入和恢复不信旧URL/tab状态，ConversationSessions先分页读取所属host真实archive目录，完整或找到匹配项后才发布权威归档事实和发送权限；重复游标/失败保留错误且不授权。事件可同步修正同页URL而不卸载编辑器，导航controller更新同页事实时同时更新其已提交URL，未保存Back守卫继续工作。最后可写owner离开而仍有只读owner时也清除观察起点并标记活动缺口；无owner创建投影收到后续通知时使历史失效，首次消费者须重读。仅host的daemon连接断开时提供明确Reconnect host，以既有只读RPC触发实际连接，收到connected后恢复订阅；不重放写入。
+
+归档/恢复通知递增同一entry generation，使通知之前开始的目录分页和历史读取失效；排队的ensure使用较新的事实继续。桥状态和每个host的状态分别投影，桥重连或切host后以既有app-server-connection-state核对该host，较旧查询不覆盖新连接事件。旧history-only设置来源在导航controller建立后导入URL，导航守卫结束后重新同步同页事实；只有实际路由提交才释放原编辑器导航租约。C/v13第1项设置在途controller保留仍由D修订，当前scope非ready卸载的旧实现尚不能作为完成证据。
 
 CLI0.164和隔离桌面CLI0.163.0-alpha.10.2的脚本provider实测都表明：活动assistant前缀不在thread/read、turns/items或resume结果中；turn/completed还可能是itemsView:summary。arrival eventCursor不能代表快照包含范围。观察到item/started的项从起点应用delta；读取期间保留本地已观察投影，完成item按ID替换。未观察起点的活动项仅展示明确标注的已收到后缀，不能伪称完整；新打开/重连显示活动内容尚未完整的提示，完成后重新读取完整历史。summary/notLoaded/缺省或未知itemsView均按不完整合并已有items；只有明确full且终态的历史可移除省略项。读取晚于完成通知返回时保留已观察完成项和终态，再以完整历史核对。该限制的实际UI与共享daemon版本仍须验收。
 

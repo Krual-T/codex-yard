@@ -79,7 +79,10 @@ function SettingsInstructionEditor(props: SettingsInstructionEditorProps) {
 
 export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [current, setCurrent] = useState(route);
-  const [status, setStatus] = useState('connecting');
+  const [bridgeStatus, setBridgeStatus] = useState('connecting');
+  const [hostStatuses, setHostStatuses] = useState<Record<string, string>>({});
+  const status = bridgeStatus === 'connected' ? hostStatuses[current.hostId] ?? 'connecting' : bridgeStatus;
+  const connectionReadGeneration = useRef(0);
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);
   const [workspace, setWorkspace] = useState('');
@@ -109,6 +112,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [submitting, setSubmitting] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [navigationCommit, setNavigationCommit] = useState(0);
+  const [navigationFactsEpoch, setNavigationFactsEpoch] = useState(0);
   const [editState, setEditState] = useState<StoredMessageEdit | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelMounted, setPanelMounted] = useState(false);
@@ -248,11 +252,13 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       finally { if (!accepted) {
         navigationLease.current?.release(); navigationLease.current = null; navigationLocked.current = false; setLeaving(false);
       } }
-    });
+    }, () => setNavigationFactsEpoch(value => value + 1));
     navigation.current = controller;
+    setNavigationFactsEpoch(value => value + 1);
     const unsubscribe = client.subscribe(event => {
       if (event.type === 'connection-state') {
-        setStatus(String(event.state)); setSettingsSourceEpoch(value => value + 1);
+        connectionReadGeneration.current++;
+        setBridgeStatus(String(event.state)); setSettingsSourceEpoch(value => value + 1);
         if (event.state !== 'connected') setRequests([]);
       }
       if (event.type === 'page-resumed') {
@@ -261,9 +267,14 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         void reloadProjects().catch(cause => setError(String(cause)));
         void reloadPreferences().catch(cause => setError(String(cause)));
       }
-      if (event.type === 'codex-app-server-connection-changed' && event.hostId === routeRef.current.hostId) {
-        setSettingsSourceEpoch(value => value + 1);
-        setStatus(String(event.state)); if (event.state === 'connected') setRefresh(value => value + 1);
+      if (event.type === 'codex-app-server-connection-changed' && typeof event.hostId === 'string') {
+        connectionReadGeneration.current++;
+        const hostId = event.hostId, state = String(event.state);
+        setHostStatuses(previous => previous[hostId] === state ? previous : { ...previous, [hostId]: state });
+        if (hostId === routeRef.current.hostId) {
+          setSettingsSourceEpoch(value => value + 1);
+          if (event.state === 'connected') setRefresh(value => value + 1);
+        }
       }
       if (event.type === 'codex-app-server-connection-changed' && event.state !== 'connected') setRequests(previous => previous.filter(request => request.hostId !== event.hostId));
       if (event.type === 'shared-object-updated' && event.key === 'remote_ssh_connections' && Array.isArray(event.value)) {
@@ -313,11 +324,22 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     window.addEventListener('languagechange', preferences);
     return () => { unsubscribe(); controller.dispose(); if (navigation.current === controller) navigation.current = null; media.removeEventListener('change', preferences); reduced.removeEventListener('change', preferences); window.removeEventListener('languagechange', preferences); };
   }, [client, reloadPreferences, reloadProjects]);
+  useEffect(() => {
+    if (bridgeStatus !== 'connected') return;
+    const hostId = current.hostId, generation = ++connectionReadGeneration.current;
+    let active = true;
+    void client.host<{ state: string }>('app-server-connection-state', { hostId }).then(value => {
+      if (active && generation === connectionReadGeneration.current) {
+        setHostStatuses(previous => ({ ...previous, [hostId]: value.state }));
+      }
+    }).catch(cause => { if (active && generation === connectionReadGeneration.current) setError(String(cause)); });
+    return () => { active = false; };
+  }, [client, current.hostId, bridgeStatus]);
   useLayoutEffect(() => {
     if (!current.section || !settingsOrigin || new URLSearchParams(current.search).has(settingsOriginParameter)) return;
     const path = settingsOriginURL(current.pathname + current.search + current.hash, settingsOrigin);
     if (navigation.current?.replaceCurrentURL(path)) setCurrent(previous => ({ ...previous, search: new URL(path, location.href).search }));
-  }, [current.section, current.pathname, current.search, current.hash, settingsOrigin, navigationCommit]);
+  }, [current.section, current.pathname, current.search, current.hash, settingsOrigin, navigationCommit, navigationFactsEpoch]);
   useLayoutEffect(() => {
     const readOnly = conversation.archived;
     if (!current.threadId || readOnly === null) return;
@@ -329,7 +351,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       setCurrent(previous => ({ ...previous, readOnly, search: url.search }));
     } else if (current.readOnly !== readOnly) setCurrent(previous => ({ ...previous, readOnly }));
     setTabs(previous => previous.map(tab => tab.hostId === current.hostId && tab.id === current.threadId ? { ...tab, readOnly } : tab));
-  }, [current.hostId, current.threadId, current.pathname, current.search, current.hash, current.readOnly, conversation.archived, navigationCommit]);
+  }, [current.hostId, current.threadId, current.pathname, current.search, current.hash, current.readOnly, conversation.archived, navigationCommit, navigationFactsEpoch]);
   useEffect(() => {
     if (!settingsSourceKey) return;
     let active = true;
@@ -631,8 +653,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       <header className="yard-toolbar"><button aria-label="Toggle sidebar" onClick={() => setSidebar(value => !value)}>◧</button>
         <div className="yard-tab-strip" role="tablist" aria-label="Workspace tabs">{tabs.map(tab => <div className="yard-tab" key={tab.hostId + ':' + tab.id}><button role="tab" aria-selected={tab.id === current.threadId && tab.hostId === current.hostId} onClick={() => { void openTab(tab); }}>{tab.title}</button><button aria-label={'Close ' + tab.title} onClick={() => setTabs(previous => previous.filter(item => item !== tab))}>×</button></div>)}</div>
         <select aria-label="Execution host" value={current.hostId} onChange={event => navigate('/?hostId=' + encodeURIComponent(event.target.value))}>{hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.displayName}</option>)}</select>
-        <span className="yard-connection" title={status} data-state={status}>●</span>
-        {status === 'disconnected' && <button onClick={() => {
+        <span className="yard-connection" title={'Browser: ' + bridgeStatus + '; Host: ' + (hostStatuses[current.hostId] ?? 'connecting')} data-state={status}>●</span>
+        {bridgeStatus === 'connected' && hostStatuses[current.hostId] === 'disconnected' && <button onClick={() => {
           const hostId = current.hostId;
           void client.rpc('thread/list', { limit: 1 }, hostId).catch(cause => setError(String(cause)));
         }}>Reconnect host</button>}

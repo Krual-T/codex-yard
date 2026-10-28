@@ -294,6 +294,11 @@ export class ConversationSessions {
     if (typeof event.hostId !== 'string' || typeof params.threadId !== 'string') return;
     const entry = this.entries.get(key({ hostId: event.hostId, threadId: params.threadId }));
     if (entry && (event.method === 'thread/archived' || event.method === 'thread/unarchived')) {
+      // An archive-list page may have been read before this newer notification.
+      // Reuse the view generation so neither that query nor its history can
+      // restore permissions from an older archive state.
+      entry.generation++; entry.initialized = false; entry.refreshRequested = true;
+      entry.observed.clear(); entry.buffered.length = 0;
       entry.archived = event.method === 'thread/archived';
       entry.archiveKnown = true;
       delete entry.emptyCreationRevision;

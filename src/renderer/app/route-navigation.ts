@@ -1,7 +1,7 @@
 export interface NavigationOptions { replace?: boolean; delta?: number; state?: unknown }
 
 /** Keep the committed URL visible while an asynchronous leave guard is open. */
-export function createRouteNavigation(changed: () => void, requestLeave: () => Promise<boolean>) {
+export function createRouteNavigation(changed: () => void, requestLeave: () => Promise<boolean>, settled?: () => void) {
   let index = Number(history.state?.__yardIndex ?? 0), position = index;
   let committed = { url: location.href, state: history.state };
   let pending = false, approvedPop = false, disposed = false;
@@ -39,7 +39,7 @@ export function createRouteNavigation(changed: () => void, requestLeave: () => P
         if (disposed) return;
         if (target.index === index) history.replaceState(target.state, '', target.url);
         commit();
-      } finally { pending = false; }
+      } finally { pending = false; settled?.(); }
     })();
   };
   window.addEventListener('popstate', pop);
@@ -63,7 +63,7 @@ export function createRouteNavigation(changed: () => void, requestLeave: () => P
         const state = { __yardIndex: index, __yardState: options.state ?? null };
         if (options.replace) history.replaceState(state, '', path); else history.pushState(state, '', path);
         position = index; commit(); return true;
-      } finally { pending = false; }
+      } finally { pending = false; if (!approvedPop) settled?.(); }
     },
     dispose() { disposed = true; arrived?.(); arrived = null; window.removeEventListener('popstate', pop); },
   };

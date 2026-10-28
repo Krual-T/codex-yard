@@ -14,6 +14,7 @@ function fixture() {
   let unsubscribeFailure: Error | undefined;
   let heldResume: Promise<void> | undefined;
   let heldHistory: Promise<void> | undefined;
+  let heldArchiveList: Promise<void> | undefined;
   let history: TurnSummary[] = [];
   let metadata: ThreadSummary | undefined;
   let archived = false;
@@ -28,7 +29,11 @@ function fixture() {
         return { thread: thread(String(params.threadId)), model: hostId + '-model' } as T;
       }
       if (method === 'thread/read') return { thread: metadata ?? thread(String(params.threadId)) } as T;
-      if (method === 'thread/list') return { data: archived ? [thread('same')] : [], nextCursor: null } as T;
+      if (method === 'thread/list') {
+        const result = { data: archived ? [thread('same')] : [], nextCursor: null };
+        await heldArchiveList;
+        return result as T;
+      }
       if (method === 'thread/turns/list') { await heldHistory; return { data: history.map(turn => ({ ...turn, itemsView: 'full' })), nextCursor: null } as T; }
       if (method === 'thread/unsubscribe') { if (unsubscribeFailure) throw unsubscribeFailure; return {} as T; }
       throw new Error('Unexpected RPC: ' + method);
@@ -40,6 +45,7 @@ function fixture() {
     rejectResume(error: Error | undefined) { resumeFailure = error; }, holdResume(promise: Promise<void>) { heldResume = promise; },
     rejectUnsubscribe(error: Error | undefined) { unsubscribeFailure = error; },
     holdHistory(promise: Promise<void> | undefined) { heldHistory = promise; },
+    holdArchiveList(promise: Promise<void> | undefined) { heldArchiveList = promise; },
     history(turns: TurnSummary[]) { history = turns; },
     metadata(value: ThreadSummary) { metadata = value; },
     archived(value: boolean) { archived = value; },
@@ -168,6 +174,28 @@ test('an archived reader remains available when the last writable panel releases
   archived(); await setImmediate();
   assert.equal(h.calls.filter(call => call.method === 'thread/unsubscribe').length, 1);
   sessions.dispose();
+});
+
+test('new archive notifications supersede an older archive query after a fast owner handoff', async () => {
+  for (const nextArchived of [true, false]) {
+    const h = fixture(), sessions = new ConversationSessions(h.client, async () => undefined);
+    const first = sessions.acquire(scope, false); await sessions.ready(scope);
+    let finishList!: () => void;
+    h.archived(!nextArchived);
+    h.holdArchiveList(new Promise<void>(resolve => { finishList = resolve; }));
+    first();
+    const next = sessions.acquire(scope, false);
+    await setImmediate();
+    h.emit({ type: 'mcp-notification', hostId: scope.hostId, method: nextArchived ? 'thread/archived' : 'thread/unarchived',
+      params: { threadId: scope.threadId } });
+    assert.equal(sessions.view(scope).snapshot().archived, nextArchived);
+    if (nextArchived) assert.equal(sessions.view(scope).snapshot().canSubmit, false);
+    finishList(); await sessions.refresh(scope);
+    assert.equal(sessions.view(scope).snapshot().archived, nextArchived, 'The completed older query cannot replace the newer fact');
+    assert.equal(sessions.view(scope).snapshot().canSubmit, !nextArchived);
+    if (nextArchived) await assert.rejects(sessions.ready(scope)); else await sessions.ready(scope);
+    next(); await setImmediate(); sessions.dispose();
+  }
 });
 
 test('a resume from a disconnected bridge cannot satisfy the new connection subscription', async () => {

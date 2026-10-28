@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
+import { createConnection } from 'node:net';
 import { once } from 'node:events';
 import { chromium } from 'playwright-core';
 import type { Page } from 'playwright-core';
@@ -18,6 +19,11 @@ if (!artifacts) throw new Error('Set YARD_TEST_ARTIFACTS to an isolated evidence
 await mkdir(artifacts, { recursive: true });
 const temporary = await mkdtemp('/tmp/yard-owned-ui-');
 const fake = await createFakeCodex(temporary);
+const remoteRoot = join(temporary, 'remote'); await mkdir(remoteRoot);
+const remoteFake = await createFakeCodex(remoteRoot);
+const remoteHostId = 'remote-ssh-owned-check';
+let remoteAvailable = true;
+remoteFake.threads.set('remote-connection-check', fixtureThread('remote-connection-check', remoteRoot));
 // Real CLI 0.164/0.163 cannot list/resume a newly created empty thread.
 // Only threads created by this fixture have this first-turn lifecycle.
 const createdEmpty = new Set<string>();
@@ -87,7 +93,13 @@ const targetAddress = targetServer.address(); assert(targetAddress && typeof tar
 const targetUrl = 'http://127.0.0.1:' + targetAddress.port + '/owned-target';
 const targetPage = await context.newPage(); await targetPage.goto(targetUrl);
 const app = await createNativeWorkbench({ socketPath: fake.socketPath, codexHome: join(temporary, 'codex'),
-  chromeConnection: { browserUrl }, dataDir, workspace: temporary, port: 0, hostCatalog: { hosts: [], projects: [], assignments: {} } });
+  chromeConnection: { browserUrl }, dataDir, workspace: temporary, port: 0,
+  hostCatalog: { hosts: [{ hostId: remoteHostId, displayName: 'Owned remote fixture', sshAlias: 'owned-fixture', sshHost: 'owned-fixture', sshPort: null, identity: null }], projects: [], assignments: {} },
+  sshStream: (_host, onPaths) => {
+    if (!remoteAvailable) throw new Error('Synthetic remote connection is unavailable');
+    onPaths?.({ homeDirectory: remoteRoot, codexHome: join(remoteRoot, 'codex') });
+    return createConnection({ path: remoteFake.socketPath });
+  } });
 let inspectorBrowser: { disconnect(): Promise<void> } | undefined;
 await context.addInitScript(() => {
   if (window !== window.top) return;
@@ -171,6 +183,28 @@ try {
   await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).waitFor();
   assert.equal(fake.calls('turn/start').length, turnsBeforeReconnect);
   checks.push('daemon connection loss exposes an explicit read-only reconnect action and restores the actual host without replaying input');
+  const remotePage = await context.newPage();
+  remotePage.on('pageerror', error => errors.push('remote fixture: ' + error.message));
+  await remotePage.goto(app.url + '/local/remote-connection-check?hostId=' + remoteHostId);
+  const remoteDraft = remotePage.getByRole('textbox', { name: 'Work with Codex', exact: true });
+  await remoteDraft.fill('KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
+  await installClientProbe(remotePage);
+  remoteAvailable = false; remoteFake.disconnect();
+  await remotePage.getByRole('button', { name: 'Reconnect host', exact: true }).waitFor();
+  await remotePage.evaluate(async () => {
+    const client = (window as any).acceptanceClient; client.suspend(); await client.resume();
+  });
+  await remotePage.getByRole('button', { name: 'Reconnect host', exact: true }).waitFor();
+  await remotePage.waitForFunction(() => document.querySelector('.yard-connection')?.getAttribute('title') === 'Browser: connected; Host: disconnected');
+  assert.equal(await remoteDraft.inputValue(), 'KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
+  assert.equal(remoteFake.calls('turn/start').length, 0);
+  remoteAvailable = true;
+  await remotePage.getByRole('button', { name: 'Reconnect host', exact: true }).click();
+  await remotePage.waitForFunction(() => document.querySelector('.yard-connection')?.getAttribute('data-state') === 'connected');
+  assert.equal(await remoteDraft.inputValue(), 'KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
+  assert.equal(remoteFake.calls('turn/start').length, 0);
+  await remotePage.close();
+  checks.push('remote host disconnection survives a real browser bridge reconnect; its explicit reconnect preserves the draft without turn replay (synthetic remote transport)');
   const retainedComposer = page.getByRole('textbox', { name: 'Work with Codex', exact: true });
   await retainedComposer.evaluate(element => { element.setAttribute('data-retained-archive-owner', 'original'); });
   await holdUiWrites(page);
@@ -704,6 +738,14 @@ try {
     returnTo: sourceBeforeSettings.pathname + sourceBeforeSettings.search + sourceBeforeSettings.hash,
     source: { kind: 'thread', threadId: decodeURIComponent(sourceBeforeSettings.pathname.split('/')[2]!) } };
   assert.deepEqual(JSON.parse(new URL(page.url()).searchParams.get('yardSettingsOrigin')!), expectedSettingsSource);
+  const legacySettings = await context.newPage();
+  await legacySettings.addInitScript(origin => {
+    if (window === window.top && location.pathname.startsWith('/settings/')) history.replaceState({ __yardSettingsOrigin: origin }, '', location.href);
+  }, expectedSettingsSource);
+  await legacySettings.goto(app.url + '/settings/general');
+  await legacySettings.waitForFunction(() => new URL(location.href).searchParams.has('yardSettingsOrigin'));
+  assert.deepEqual(JSON.parse(new URL(legacySettings.url()).searchParams.get('yardSettingsOrigin')!), expectedSettingsSource);
+  await legacySettings.close();
   const sourceReads = fake.calls('thread/read').length;
   await page.reload(); await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
   assert.deepEqual(JSON.parse(new URL(page.url()).searchParams.get('yardSettingsOrigin')!), expectedSettingsSource);
@@ -725,8 +767,8 @@ try {
     const slot = Object.keys(projects).find(key => projects[key].id === projectId)!;
     projects[slot] = { ...projects[slot], rootPaths: [path] };
     await client.host('set-global-state', { key: 'local-projects', value: projects });
-    await client.host('thread-project-assignment-set', { hostId: 'local', threadId, projectless: false,
-      assignment: { projectKind: 'local', projectId } });
+    await client.host('thread-projects', { operation: 'setMembership', value: { hostId: 'local', threadId, projectless: false,
+      assignment: { projectKind: 'local', projectId } } });
   }, { threadId: expectedSettingsSource.source.threadId, projectId: temporary, path: changedScope });
   await page.waitForFunction(path => [...document.querySelectorAll('.yard-muted')].some(node => node.textContent === 'Scope: ' + path), changedScope);
   await otherSettingsWriter.close();
@@ -769,5 +811,5 @@ try {
   await page.screenshot({ path: join(artifacts, 'last-page.png'), fullPage: true }).catch(() => {});
   await inspectorBrowser?.disconnect(); await app.close(); await context.close();
   await new Promise<void>((resolve, reject) => targetServer.close(error => error ? reject(error) : resolve()));
-  await fake.close(); await rm(temporary, { recursive: true, force: true });
+  await fake.close(); await remoteFake.close(); await rm(temporary, { recursive: true, force: true });
 }
