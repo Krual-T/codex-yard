@@ -7,7 +7,7 @@ import { FileViewer } from '../files/FileViewer.tsx';
 import { TerminalPanel } from '../terminal/TerminalPanel.tsx';
 import type { TerminalPanelHandle } from '../terminal/TerminalPanel.tsx';
 import { DiffViewer } from '../diff/DiffViewer.tsx';
-import { editFileText, editorText, errorMessage, fileName, readWorkspaceFile, resolveFilePath } from '../files/file-service.ts';
+import { errorMessage, fileName, readWorkspaceFile, resolveFilePath } from '../files/file-service.ts';
 import type { FileContents } from '../files/file-service.ts';
 import type { ComposerDraft, WorkbenchClient } from '../workbench-contract.ts';
 import './workspace-panels.css';
@@ -335,14 +335,18 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
           </div>
           {active.error ? <div className="yard-file-error" role="alert">{active.error}</div> : null}
           {active.uncertain ? <div className="yard-file-check"><button type="button" disabled={active.saving} onClick={() => void checkSave(active)}>Check save result</button></div> : null}
-          {active.loading ? <div className="yard-file-status" role="status">Loading...</div> : active.content ?
-            <FileViewer key={`${active.key}:${active.loadId}`} path={active.path} content={active.content} text={editorText(active.draft)} location={active.location} lineHeight={lineHeight}
-              findRequest={findRequest?.key === active.key ? findRequest.id : undefined}
-              onFindRequestConsumed={id => setFindRequest(previous => previous?.id === id ? undefined : previous)}
-              readOnly={false}
-              onChange={(text, edit) => updateTabs(previous => previous.map(tab => tab.key === active.key ? { ...tab, draft: editFileText(tab.draft, text, edit) } : tab))}
-              onSave={() => void save(active)} /> : <div className="yard-file-status"><button type="button" onClick={() => reload(active)}>Retry</button></div>}
+          {active.loading ? <div className="yard-file-status" role="status">Loading...</div> : active.content?.kind === 'binary' ?
+            <FileViewer key={`${active.key}:${active.loadId}`} path={active.path} content={active.content} text="" theme={appearance.theme} visible readOnly
+              onChange={() => {}} onSave={() => {}} /> : !active.content ? <div className="yard-file-status"><button type="button" onClick={() => reload(active)}>Retry</button></div> : null}
         </> : !activeTerminal && !activeDiff ? <div className="yard-file-status">Select a file</div> : null}
+        {tabs.filter(tab => tab.content?.kind === 'text' && !tab.loading).map(tab => <div className="yard-editor-container" key={`${tab.key}:${tab.loadId}`} hidden={tab.key !== active?.key}>
+          <FileViewer path={tab.path} content={tab.content!} text={tab.draft} location={tab.location} theme={appearance.theme} visible={tab.key === active?.key}
+            findRequest={findRequest?.key === tab.key ? findRequest.id : undefined}
+            onFindRequestConsumed={id => setFindRequest(previous => previous?.id === id ? undefined : previous)}
+            readOnly={false}
+            onChange={text => updateTabs(previous => previous.map(item => item.key === tab.key ? { ...item, draft: text } : item))}
+            onSave={() => void save(tab)} />
+        </div>)}
       </div>
     </div>
   </section>;

@@ -29,14 +29,20 @@
 .yard-file-error { padding: 8px 12px; border-bottom: 1px solid #e9c4c0; background: #fff3f2; overflow-wrap: anywhere; }
 .yard-file-status { display: grid; flex: 1; place-items: center; padding: 20px; color: var(--yard-panel-muted); }
 .yard-text-viewer { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.yard-editor-container { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.yard-editor-container[hidden] { display: none; }
 .yard-file-find { display: flex; align-items: center; gap: 2px; min-width: 0; min-height: 34px; padding: 1px 4px; border-bottom: 1px solid var(--yard-panel-border); }
-.yard-file-find input { flex: 1; min-width: 40px; height: 28px; padding: 2px 6px; border: 1px solid var(--yard-panel-border); border-radius: 4px; color: inherit; background: var(--yard-panel-background); font: inherit; }
-.yard-file-find span { flex: 0 0 auto; min-width: 40px; color: var(--yard-panel-muted); text-align: center; }
-.yard-file-editor { display: flex; flex: 1; min-height: 0; overflow: hidden; font: var(--yard-panel-code-size, 12px)/var(--yard-panel-code-line-height, 18px) var(--yard-panel-code-font, var(--yard-code-font, ui-monospace, monospace)); }
-.yard-file-gutter { position: relative; flex: 0 0 auto; min-width: 42px; margin: 0; overflow: hidden; color: var(--yard-panel-muted); background: var(--yard-panel-subtle); text-align: right; user-select: none; font: inherit; }
-.yard-file-gutter span { position: absolute; right: 8px; white-space: pre; }
-.yard-file-text { flex: 1; min-width: 0; min-height: 0; resize: none; margin: 0; padding: 8px 12px; border: 0; outline: 0; color: inherit; background: transparent; font: inherit; tab-size: 2; }
-.yard-file-text:focus-visible { box-shadow: inset 0 0 0 1px #7aa9a4; }
+.yard-file-find span { overflow: hidden; color: var(--yard-panel-muted); text-overflow: ellipsis; white-space: nowrap; }
+.yard-file-editor { flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.yard-file-editor .cm-editor { height: 100%; color: var(--yard-panel-foreground); background: var(--yard-panel-background); }
+.yard-file-editor .cm-scroller { overflow: auto; font: var(--yard-panel-code-size, 12px)/var(--yard-panel-code-line-height, 18px) var(--yard-panel-code-font, var(--yard-code-font, ui-monospace, monospace)); }
+.yard-file-editor .cm-content { font: inherit; caret-color: currentColor; }
+.yard-file-editor .cm-gutters { color: var(--yard-panel-muted); background: var(--yard-panel-subtle); border-color: var(--yard-panel-border); }
+.yard-file-editor .cm-activeLine, .yard-file-editor .cm-activeLineGutter { background: var(--yard-panel-hover); }
+.yard-file-editor .cm-panels { color: var(--yard-panel-foreground); background: var(--yard-panel-subtle); border-color: var(--yard-panel-border); }
+.yard-file-editor .cm-panel.cm-search { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 30px 6px 6px; }
+.yard-file-editor .cm-panel.cm-search input:not([type=checkbox]) { min-width: 0; max-width: 100%; color: inherit; background: var(--yard-panel-background); }
+.yard-file-editor .cm-panel.cm-search button { color: inherit; background: var(--yard-panel-background); }
 .yard-file-media { display: grid; flex: 1; min-height: 0; place-items: center; padding: 16px; overflow: auto; background: var(--yard-panel-subtle); }
 .yard-file-media img, .yard-file-media video { max-width: 100%; max-height: 100%; object-fit: contain; }
 .yard-file-hex { flex: 1; min-height: 0; margin: 0; padding: 12px; overflow: auto; font: var(--yard-panel-code-size, 12px)/var(--yard-panel-code-line-height, 18px) var(--yard-panel-code-font, var(--yard-code-font, ui-monospace, monospace)); }

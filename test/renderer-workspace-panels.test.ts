@@ -5,32 +5,69 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
-import type { Browser, BrowserContext } from 'playwright-core';
+import type { Browser, BrowserContext, Locator } from 'playwright-core';
+import { history, isolateHistory, redo, undo } from '@codemirror/commands';
+import { EditorState } from '@codemirror/state';
+import type { Transaction } from '@codemirror/state';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { fileMethods } from '../src/native/files.ts';
 import { record } from '../src/native/protocol.ts';
 import { createFakeCodex } from './fake-codex.ts';
 import { fileDaemonFixture } from './file-daemon-fixture.ts';
 import { nativeFixture } from './native-fixture.ts';
-import { editFileText, editorText, previewMimeType, resolveFilePath, toBase64 } from '../src/renderer/files/file-service.ts';
+import { editorText, previewMimeType, resolveFilePath, toBase64 } from '../src/renderer/files/file-service.ts';
 import { diffRows } from '../src/renderer/diff/diff-service.ts';
+import { fileFormat, fileText } from '../src/renderer/files/editor-format.ts';
 
 const chromePath = '/usr/bin/google-chrome';
+
+test('CodeMirror transactions preserve mixed line endings and BOM through history', () => {
+  const original = '\ufeffα\r\nbeta\ngamma\rδ\r\n';
+  const format = fileFormat(original);
+  let state = EditorState.create({ doc: editorText(original), extensions: [format.extension, history()] });
+  const target = { get state() { return state; }, dispatch(transaction: Transaction) { state = transaction.state; } };
+  target.dispatch(state.update({ changes: [{ from: 2, to: 6, insert: 'B\nX' }, { from: 12, to: 13, insert: '' }] }));
+  const edited = '\ufeffα\r\nB\nX\ngammaδ\r\n';
+  assert.equal(fileText(state, format.field), edited);
+  assert.equal(undo(target), true);
+  assert.equal(fileText(state, format.field), original);
+  assert.equal(redo(target), true);
+  assert.equal(fileText(state, format.field), edited);
+  target.dispatch(state.update({ changes: { from: 0, to: state.doc.length, insert: 'replacement' }, annotations: isolateHistory.of('full') }));
+  assert.equal(fileText(state, format.field), '\ufeffreplacement');
+  undo(target);
+  assert.equal(fileText(state, format.field), edited);
+  redo(target);
+  assert.equal(fileText(state, format.field), '\ufeffreplacement');
+
+  const grouped = fileFormat('a\r\nb\nc\r');
+  state = EditorState.create({ doc: 'a\nb\nc\n', extensions: [grouped.extension, history()] });
+  target.dispatch(state.update({ changes: { from: 1, to: 2 }, userEvent: 'delete.backward' }));
+  target.dispatch(state.update({ changes: { from: 1, to: 2 }, userEvent: 'delete.backward' }));
+  assert.equal(fileText(state, grouped.field), 'a\nc\r');
+  undo(target);
+  assert.equal(fileText(state, grouped.field), 'a\r\nb\nc\r');
+  redo(target);
+  assert.equal(fileText(state, grouped.field), 'a\nc\r');
+});
 
 test('file paths, Unicode bytes and line endings retain their host representation', () => {
   assert.equal(resolveFilePath('/workspace/project', '../other/./file.txt'), '/workspace/other/file.txt');
   assert.equal(resolveFilePath('/workspace/project', 'file:///tmp/example'), 'file:///tmp/example');
   assert.equal(editorText('one\r\ntwo\r\n'), 'one\ntwo\n');
-  const mixed = 'one\r\ntwo\nthree\rfour\r\n';
-  assert.equal(editFileText(mixed, 'one\nTWO\nthree\nfour\n', { start: 4, end: 7, inputType: 'insertText' }), 'one\r\nTWO\nthree\rfour\r\n');
-  assert.equal(editFileText(mixed, 'one\ntwo\nextra\nthree\nfour\n', { start: 8, end: 8, inputType: 'insertText' }), 'one\r\ntwo\nextra\rthree\rfour\r\n');
-  assert.equal(editFileText(mixed, 'one\nthree\nfour\n', { start: 4, end: 8, inputType: 'deleteContentBackward' }), 'one\r\nthree\rfour\r\n');
-  assert.equal(editFileText('a\r\na\nb', 'a\nb', { start: 0, end: 2, inputType: 'deleteContentForward' }), 'a\nb');
+  assert.equal(editorText('\ufeffone\r\ntwo\nthree\r'), 'one\ntwo\nthree\n');
   assert.equal(Buffer.from(toBase64('中文\n'), 'base64').toString('utf8'), '中文\n');
   assert.equal(previewMimeType('/test.webm', 'application/octet-stream'), 'video/webm');
   assert.equal(previewMimeType('/test.ogg', 'application/octet-stream'), 'audio/ogg');
   assert.equal(previewMimeType('/test.webm', 'image/png'), 'image/png');
 });
+
+const editorValue = (editor: Locator) => editor.evaluate(element => (window as any).fixture.view(element).state.doc.toString());
+const editorSelection = (editor: Locator) => editor.evaluate(element => (window as any).fixture.view(element).state.selection.main.from);
+const selectEditor = (editor: Locator, anchor: number, head = anchor) => editor.evaluate((element, selection) => {
+  const view = (window as any).fixture.view(element);
+  view.dispatch({ selection }); view.focus();
+}, { anchor, head });
 
 test('unified diffs retain target paths and only offer valid new-file line locations', () => {
   const patch = [
@@ -127,6 +164,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
     stdin: { resolveDir: process.cwd(), loader: 'js', contents: `
       import * as React from 'react';
       import { createRoot } from 'react-dom/client';
+      import { EditorView } from '@codemirror/view';
       import { WorkspacePanels } from './src/renderer/panels/WorkspacePanels.tsx';
       const state = { calls: [], references: [], dirty: [], consumed: [], closed: 0, delayedPath: null, release: null, writes: [], writeOutcome: 'unknown' };
       const socket = new WebSocket(location.origin.replace('http', 'ws') + '/native-host');
@@ -173,7 +211,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
         onRequestConsumed: id => state.consumed.push(id), onReference: draft => state.references.push(draft),
         onDirtyChange: dirty => state.dirty.push(dirty), onClose: () => state.closed++};
       const root = createRoot(document.getElementById('root'));
-      window.fixture = {state,
+      window.fixture = {state, view: element => EditorView.findFromDOM(element),
         render(changes) { const next = {...props, ...changes};
           if (changes.request) next.request = {scopeId:next.scopeId,hostId:next.hostId,cwd:next.cwd,...changes.request};
           props = next; root.render(React.createElement(WorkspacePanels, props)); },
@@ -211,7 +249,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
     return { outcome: 'saved' };
   });
   // The production root serves the owned App; this test serves its own HTML.
-  await page.goto(app.url + '/index.html');
+  await page.goto(new URL('/index.html', app.url).href);
   const videoBytes = await page.evaluate(async () => {
     if (!MediaRecorder.isTypeSupported('video/mp4')) throw new Error('Chrome cannot record the MP4 fixture');
     const canvas = document.createElement('canvas');
@@ -237,21 +275,25 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   catch (cause) {
     throw new Error(`File did not open: ${await page.locator('body').innerText()}; page errors: ${errors.join('; ')}; console: ${browserConsole.join('; ')}; calls: ${JSON.stringify(await page.evaluate(() => (window as any).fixture?.state.calls))}`, { cause });
   }
-  assert.equal(await editor.inputValue(), original);
-  assert.equal(await editor.getAttribute('readonly'), null);
+  assert.equal(await editorValue(editor), original);
+  assert.equal(await editor.getAttribute('contenteditable'), 'true');
   assert.equal(await page.getByRole('button', { name: 'Save file' }).isDisabled(), true);
-  assert.equal(await editor.evaluate(element => (element as HTMLTextAreaElement).selectionStart), 'first line\nse'.length);
+  assert.equal(await editorSelection(editor), 'first line\nse'.length);
+  await selectEditor(editor, 0);
   await page.keyboard.press('Control+f');
-  const find = page.getByRole('searchbox', { name: 'Find in file' });
+  const find = page.getByRole('textbox', { name: 'Find', exact: true });
   await find.fill('LiNe');
+  await find.press('End');
+  await page.getByRole('button', { name: 'next', exact: true }).click();
   await page.getByRole('status').filter({ hasText: '1 / 3' }).waitFor();
-  assert.equal(await editor.evaluate(element => (element as HTMLTextAreaElement).selectionStart), original.indexOf('line'));
-  await page.getByRole('button', { name: 'Next match' }).click();
+  assert.equal(await editorSelection(editor), original.indexOf('line'));
+  await page.getByRole('button', { name: 'next', exact: true }).click();
   await page.getByRole('status').filter({ hasText: '2 / 3' }).waitFor();
-  assert.equal(await editor.evaluate(element => (element as HTMLTextAreaElement).selectionStart), original.indexOf('line', original.indexOf('line') + 1));
+  assert.equal(await editorSelection(editor), original.indexOf('line', original.indexOf('line') + 1));
   await find.press('Shift+Enter');
-  await page.getByRole('status').filter({ hasText: '1 / 3' }).waitFor();
+  assert.equal(await editorSelection(editor), original.indexOf('line'));
   await find.fill('missing');
+  await find.press('End');
   await page.getByRole('status').filter({ hasText: '0 / 0' }).waitFor();
   await find.press('Escape');
   assert.equal(await find.count(), 0);
@@ -269,7 +311,8 @@ test('workspace file panels use the real host with a disposable synthetic daemon
     const style = getComputedStyle(element);
     return { size: style.fontSize, lineHeight: style.lineHeight, color: style.color,
       background: getComputedStyle(element.closest('.yard-workspace-panels')!).backgroundColor,
-      selection: (element as HTMLTextAreaElement).selectionStart, scroll: (element as HTMLTextAreaElement).scrollTop };
+      selection: (window as any).fixture.view(element).state.selection.main.from,
+      scroll: (element.closest('.cm-editor')!.querySelector('.cm-scroller') as HTMLElement).scrollTop };
   });
   assert.equal(longAppearance.size, '18px');
   assert.equal(longAppearance.lineHeight, '27px');
@@ -277,9 +320,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   assert.equal(longAppearance.background, 'rgb(18, 28, 26)');
   assert.equal(longAppearance.selection, Array.from({ length: 119 }, (_, index) => `line ${index + 1}\n`).join('').length + 1);
   assert.ok(longAppearance.scroll > 2700);
-  const gutter = await page.locator('.yard-file-gutter span').evaluate(element => ({ top: parseFloat((element as HTMLElement).style.top), first: Number(element.textContent?.split('\n')[0]) }));
-  const scrolled = await long.evaluate(element => (element as HTMLTextAreaElement).scrollTop);
-  assert.equal(gutter.top, 8 + (gutter.first - 1) * 27 - scrolled);
+  assert.ok(await page.locator('.yard-editor-container:not([hidden]) .cm-lineNumbers .cm-gutterElement').filter({ hasText: '120' }).count());
   const themeScreenshots = process.env.AGENTS_PANEL_SCREENSHOTS;
   if (themeScreenshots) { await mkdir(themeScreenshots, { recursive: true }); await page.screenshot({ path: join(themeScreenshots, 'theme-find.png') }); }
   await page.evaluate(() => {
@@ -299,7 +340,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   await editor.fill('unsaved edit');
   await page.getByRole('button', { name: 'Save file' }).click();
   await page.getByRole('alert').filter({ hasText: 'Save result is unknown' }).waitFor();
-  assert.equal(await editor.inputValue(), 'unsaved edit');
+  assert.equal(await editorValue(editor), 'unsaved edit');
   assert.equal(await readFile(join(project, 'notes.txt'), 'utf8'), original);
   assert.equal(fake.calls('fs/writeFile').length, 0);
   assert.equal(await page.getByRole('button', { name: 'Save file' }).isDisabled(), true);
@@ -310,25 +351,25 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   await page.evaluate(() => (window as any).fixture.render({scopeId:'draft-b',request:null}));
   assert.equal(await page.getByRole('tab', { name: /notes.txt/ }).count(), 0);
   await page.getByRole('button', { name: 'notes.txt', exact: true }).click();
-  assert.equal(await editor.inputValue(), original);
+  assert.equal(await editorValue(editor), original);
   await editor.fill('draft b');
   await page.evaluate(() => (window as any).fixture.render({scopeId:'thread-a',request:null}));
-  assert.equal(await editor.inputValue(), 'unsaved edit');
+  assert.equal(await editorValue(editor), 'unsaved edit');
   await page.evaluate(() => (window as any).fixture.render({scopeId:'draft-b',request:null}));
-  assert.equal(await editor.inputValue(), 'draft b');
+  assert.equal(await editorValue(editor), 'draft b');
   await page.evaluate(() => (window as any).fixture.render({scopeId:'thread-a',request:null}));
-  assert.equal(await editor.inputValue(), 'unsaved edit');
+  assert.equal(await editorValue(editor), 'unsaved edit');
 
   await page.evaluate(other => (window as any).fixture.render({ cwd: other, request: null }), other);
   await page.getByRole('button', { name: 'other.txt', exact: true }).waitFor();
   await page.evaluate(project => (window as any).fixture.render({ cwd: project, request: null }), project);
   await page.getByRole('tab', { name: /notes.txt/ }).click();
-  assert.equal(await editor.inputValue(), 'unsaved edit');
+  assert.equal(await editorValue(editor), 'unsaved edit');
   await writeFile(join(project, 'notes.txt'), 'external change');
   await page.evaluate(() => { (window as any).fixture.state.writeOutcome = 'saved'; });
   await page.getByRole('button', { name: 'Save file' }).click();
   await page.getByRole('alert').filter({ hasText: 'File changed on disk' }).waitFor();
-  assert.equal(await editor.inputValue(), 'unsaved edit');
+  assert.equal(await editorValue(editor), 'unsaved edit');
   assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.writes[1]), {
     hostId: 'local', cwd: project, path: join(project, 'notes.txt'), expectedContents: original, contents: 'unsaved edit',
   });
@@ -337,38 +378,38 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   await page.getByRole('button', { name: 'mixed.txt', exact: true }).click();
   const mixedEditor = page.getByRole('textbox', { name: `File: ${join(project, 'mixed.txt')}` });
   await mixedEditor.waitFor();
-  await mixedEditor.evaluate(element => { const input = element as HTMLTextAreaElement; input.focus(); input.setSelectionRange(4, 7); });
+  await selectEditor(mixedEditor, 4, 7);
   await page.keyboard.insertText('TWO');
   await page.getByRole('button', { name: 'Save file' }).click();
   await page.waitForFunction(() => (document.querySelector('[aria-label="Save file"]') as HTMLButtonElement)?.disabled);
   assert.equal(await readFile(join(project, 'mixed.txt'), 'utf8'), 'one\r\nTWO\nthree\rfour\r\n');
 
   await page.evaluate(() => { (window as any).fixture.state.writeOutcome = 'unknown-applied'; });
-  await mixedEditor.evaluate(element => { const input = element as HTMLTextAreaElement; input.focus(); input.setSelectionRange(0, 0); });
+  await selectEditor(mixedEditor, 0);
   await page.keyboard.insertText('A');
   await page.getByRole('button', { name: 'Save file' }).click();
   await page.getByRole('alert').filter({ hasText: 'Save result is unknown' }).waitFor();
-  await mixedEditor.evaluate(element => { const input = element as HTMLTextAreaElement; input.focus(); input.setSelectionRange(1, 1); });
+  await selectEditor(mixedEditor, 1);
   await page.keyboard.insertText('B');
   const writesBeforeCheck = await page.evaluate(() => (window as any).fixture.state.writes.length);
   await page.getByRole('button', { name: 'Check save result' }).click();
   await page.getByRole('button', { name: 'Check save result' }).waitFor({ state: 'detached' });
   assert.equal(await page.evaluate(() => (window as any).fixture.state.writes.length), writesBeforeCheck);
   assert.equal(await readFile(join(project, 'mixed.txt'), 'utf8'), 'Aone\r\nTWO\nthree\rfour\r\n');
-  assert.equal(await mixedEditor.inputValue(), 'ABone\nTWO\nthree\nfour\n');
+  assert.equal(await editorValue(mixedEditor), 'ABone\nTWO\nthree\nfour\n');
   await page.evaluate(() => { (window as any).fixture.state.writeOutcome = 'saved'; });
   await page.getByRole('button', { name: 'Save file' }).click();
   await page.waitForFunction(() => (document.querySelector('[aria-label="Save file"]') as HTMLButtonElement)?.disabled);
   assert.equal(await readFile(join(project, 'mixed.txt'), 'utf8'), 'ABone\r\nTWO\nthree\rfour\r\n');
 
   await page.evaluate(() => { (window as any).fixture.state.writeOutcome = 'known-failure'; });
-  await mixedEditor.evaluate(element => { const input = element as HTMLTextAreaElement; input.focus(); input.setSelectionRange(2, 2); });
+  await selectEditor(mixedEditor, 2);
   await page.keyboard.insertText('!');
   await page.getByRole('button', { name: 'Save file' }).click();
   await page.getByRole('alert').filter({ hasText: 'synthetic unsupported endpoint' }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Check save result' }).count(), 0);
   assert.equal(await page.getByRole('button', { name: 'Save file' }).isEnabled(), true);
-  assert.equal(await mixedEditor.inputValue(), 'AB!one\nTWO\nthree\nfour\n');
+  assert.equal(await editorValue(mixedEditor), 'AB!one\nTWO\nthree\nfour\n');
 
   await page.evaluate(() => (window as any).fixture.render({scopeId:'draft-b',request:{id:'stale',scopeId:'thread-a',hostId:'old-host',cwd:'/old-cwd',kind:'file',path:'fast.txt'}}));
   await page.waitForFunction(() => (window as any).fixture.state.consumed.includes('stale'));
@@ -384,9 +425,9 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   const fast = page.getByRole('textbox', { name: `File: ${join(project, 'fast.txt')}` });
   await fast.waitFor();
   await page.evaluate(() => (window as any).fixture.release());
-  assert.equal(await fast.inputValue(), 'fast contents');
+  assert.equal(await editorValue(fast), 'fast contents');
   await page.getByRole('tab', { name: 'slow.txt' }).click();
-  assert.equal(await page.getByRole('textbox', { name: `File: ${join(project, 'slow.txt')}` }).inputValue(), 'slow contents');
+  assert.equal(await editorValue(page.getByRole('textbox', { name: `File: ${join(project, 'slow.txt')}` })), 'slow contents');
 
   let releaseDownload!: () => void;
   let finishDownload!: () => void;
@@ -472,7 +513,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   await page.getByRole('button', { name: `Open ${join(project, 'diff-target.txt')} line 2` }).click();
   const target = page.getByRole('textbox', { name: `File: ${join(project, 'diff-target.txt')}` });
   await target.waitFor();
-  assert.equal(await target.evaluate(element => (element as HTMLTextAreaElement).selectionStart), 'first\n'.length);
+  assert.equal(await editorSelection(target), 'first\n'.length);
   await page.evaluate(() => (window as any).fixture.render({ request: { id: 'diff-2', kind: 'diff' } }));
   await page.getByRole('status').filter({ hasText: 'Diff is unavailable' }).waitFor();
 
@@ -482,12 +523,12 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   }
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: 'Find in file' }).click();
-  await page.getByRole('searchbox', { name: 'Find in file' }).fill('edit');
-  await page.getByRole('status').filter({ hasText: '1 / 1' }).waitFor();
+  await page.getByRole('textbox', { name: 'Find', exact: true }).fill('edit');
   if (screenshotDir) await page.screenshot({ path: join(screenshotDir, 'mobile.png') });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
-  assert.equal(await page.locator('.yard-file-find').evaluate(element => element.scrollWidth <= element.clientWidth), true);
-  await page.getByRole('button', { name: 'Close find' }).click();
+  assert.equal(await page.locator('.yard-editor-container:not([hidden]) .yard-file-find').evaluate(element => element.scrollWidth <= element.clientWidth), true);
+  assert.equal(await page.locator('.yard-editor-container:not([hidden]) .cm-search').evaluate(element => element.scrollWidth <= element.clientWidth), true);
+  await page.getByRole('button', { name: 'close', exact: true }).click();
   await page.getByRole('button', { name: 'Hide files' }).click();
   await page.getByRole('button', { name: 'Show files' }).click();
   assert.ok(await page.evaluate(() => (window as any).fixture.state.dirty.includes(true)));

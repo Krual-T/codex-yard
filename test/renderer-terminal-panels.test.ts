@@ -120,7 +120,7 @@ test('terminal panels use the page-owned host session and never replay input aft
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   // The production root serves the owned App; this test serves its own HTML.
-  await page.goto(app.url + '/index.html');
+  await page.goto(new URL('/index.html', app.url).href);
   await page.getByRole('tab', { name: 'Terminal' }).waitFor();
   await page.locator('.xterm-rows').getByText('READY').waitFor();
   const screenshotDir = process.env.AGENTS_PANEL_SCREENSHOTS;

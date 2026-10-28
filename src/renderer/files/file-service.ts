@@ -54,46 +54,7 @@ export async function readWorkspaceFile(client: WorkbenchClient, hostId: string,
 }
 
 export function editorText(text: string): string {
-  return text.replace(/\r\n|\r/g, '\n');
-}
-
-export interface TextEdit { start: number; end: number; inputType: string }
-
-/** Apply a textarea edit to the original bytes, preserving untouched line endings. */
-export function editFileText(original: string, text: string, edit?: TextEdit): string {
-  const previous = editorText(original);
-  if (previous === text) return original;
-  let start = edit?.start ?? -1;
-  let end = edit?.end ?? -1;
-  if (edit && start === end && edit.inputType.startsWith('delete')) {
-    const removed = previous.length - text.length;
-    if (edit.inputType.endsWith('Backward')) start -= removed;
-    else end += removed;
-  }
-  let insertedLength = text.length - (previous.length - (end - start));
-  if (start < 0 || end < start || end > previous.length || insertedLength < 0 ||
-      text !== previous.slice(0, start) + text.slice(start, start + insertedLength) + previous.slice(end)) {
-    start = 0;
-    while (start < previous.length && start < text.length && previous[start] === text[start]) start++;
-    end = previous.length;
-    let textEnd = text.length;
-    while (end > start && textEnd > start && previous[end - 1] === text[textEnd - 1]) { end--; textEnd--; }
-    insertedLength = textEnd - start;
-  }
-  const rawOffset = (offset: number) => {
-    let raw = 0, normalized = 0;
-    while (raw < original.length && normalized < offset) {
-      if (original[raw] === '\r' && original[raw + 1] === '\n') raw++;
-      raw++; normalized++;
-    }
-    return raw;
-  };
-  const rawStart = rawOffset(start), rawEnd = rawOffset(end);
-  const nextEnding = /\r\n|\r|\n/.exec(original.slice(rawStart))?.[0];
-  const previousEndings = original.slice(0, rawStart).match(/\r\n|\r|\n/g);
-  const ending = nextEnding ?? previousEndings?.at(-1) ?? '\n';
-  const inserted = text.slice(start, start + insertedLength).replaceAll('\n', ending);
-  return original.slice(0, rawStart) + inserted + original.slice(rawEnd);
+  return (text.startsWith('\ufeff') ? text.slice(1) : text).replace(/\r\n|\r/g, '\n');
 }
 
 export function toBase64(text: string): string {
