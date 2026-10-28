@@ -25,6 +25,15 @@ export function safeRichLinkHref(value: string): string | null {
   } catch { return null; }
 }
 
+/** The original automatic link uses its displayed text as an HTTP(S) destination. */
+export function httpAutolinkHref(value: string): string | null {
+  if (!value || /\s/u.test(value)) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? value : null;
+  } catch { return null; }
+}
+
 /** The supported subset uses the names and attributes of retained composer documents. */
 export const composerSchema = new Schema({
   nodes: {
@@ -81,15 +90,19 @@ export const composerSchema = new Schema({
     strong: { parseDOM: [{ tag: 'strong' }, { tag: 'b' }], toDOM: () => ['strong', 0] },
     em: { parseDOM: [{ tag: 'em' }, { tag: 'i' }], toDOM: () => ['em', 0] },
     code: { code: true, parseDOM: [{ tag: 'code' }], toDOM: () => ['code', 0] },
-    link: { attrs: { href: string, title: optionalString, isAutolink: { default: false, validate: 'boolean' },
+    link: { attrs: { href: optionalString, title: optionalString, isAutolink: { default: false, validate: 'boolean' },
       isGeneratedAutolink: { default: false, validate: 'boolean' }, sourceAppId: optionalString,
       literalMarkdownSource: optionalString, literalMarkdownOccurrenceId: { default: null, validate: 'number|null' } },
-      inclusive: false, parseDOM: [{ tag: 'a[data-composer-attrs]', getAttrs: dom => copiedAttrs(dom as HTMLElement, ['href']) },
+      inclusive: false, parseDOM: [{ tag: 'span[data-composer-autolink][data-composer-attrs]', getAttrs: dom => {
+        const attrs = copiedAttrs(dom as HTMLElement, []);
+        return attrs && attrs.href === null ? attrs : false;
+      } }, { tag: 'a[data-composer-attrs]', getAttrs: dom => copiedAttrs(dom as HTMLElement, ['href']) },
         { tag: 'a[href]', getAttrs: dom => {
         const element = dom as HTMLElement;
         return { href: element.getAttribute('href'), title: element.getAttribute('title') };
       } }],
-      toDOM: mark => ['a', { ...(safeRichLinkHref(mark.attrs.href) ? { href: safeRichLinkHref(mark.attrs.href) } : { role: 'button', tabindex: '0' }),
+      toDOM: mark => mark.attrs.href === null ? ['span', { 'data-composer-autolink': '', 'data-composer-attrs': JSON.stringify(mark.attrs) }, 0]
+        : ['a', { ...(safeRichLinkHref(mark.attrs.href) ? { href: safeRichLinkHref(mark.attrs.href) } : { role: 'button', tabindex: '0' }),
         title: mark.attrs.title, 'aria-haspopup': 'dialog', 'aria-expanded': 'false', 'data-composer-attrs': JSON.stringify(mark.attrs) }, 0] },
   },
 });
@@ -143,7 +156,8 @@ function verifiedLiteralLink(source: unknown, label: unknown, href: unknown): st
 /** Build a transient rendering node only after the complete marked run matches its own source. */
 function literalMarkProjection(nodes: ProseMirrorNode[], link: Mark): ProseMirrorNode | null {
   const source = link.attrs.literalMarkdownSource, parsed = parseLiteralLink(source);
-  if (!parsed || parsed.href !== link.attrs.href || parsed.title !== link.attrs.title) return null;
+  const target = link.attrs.href === null ? httpAutolinkHref(nodes.map(node => node.text ?? '').join('')) : link.attrs.href;
+  if (!parsed || parsed.href !== target || parsed.title !== link.attrs.title) return null;
   const characters = (parts: LiteralPart[]) => parts.flatMap(part => Array.from(part.text, text => ({ text, marks: part.marks })));
   const expected = characters(parsed.parts), actual = characters(nodes.map(node => ({ text: node.text ?? '',
     marks: node.marks.filter(mark => mark.type.name !== 'link').map(mark => mark.type.name).sort() })));
@@ -160,7 +174,7 @@ function projectLiteralMarks(node: ProseMirrorNode): ProseMirrorNode {
   const children: ProseMirrorNode[] = [];
   for (let index = 0; index < node.childCount; index++) {
     const child = node.child(index), link = child.isText && child.marks.find(mark => mark.type.name === 'link');
-    if (!link || typeof link.attrs.literalMarkdownSource !== 'string') { children.push(projectLiteralMarks(child)); continue; }
+    if (!link || link.attrs.href !== null && typeof link.attrs.literalMarkdownSource !== 'string') { children.push(projectLiteralMarks(child)); continue; }
     const run = [child];
     while (index + 1 < node.childCount) {
       const next = node.child(index + 1), nextLink = next.isText && next.marks.find(mark => mark.type.name === 'link');
@@ -168,7 +182,14 @@ function projectLiteralMarks(node: ProseMirrorNode): ProseMirrorNode {
       run.push(next); index++;
     }
     const projected = literalMarkProjection(run, link);
-    children.push(...(projected ? [projected] : run));
+    if (projected) { children.push(projected); continue; }
+    if (link.attrs.href !== null) { children.push(...run); continue; }
+    const href = httpAutolinkHref(run.map(item => item.text ?? '').join(''));
+    const replacement = href ? link.type.create({ ...link.attrs, href }) : null;
+    children.push(...run.map(item => {
+      const marks = item.marks.filter(mark => !link.eq(mark));
+      return item.mark(replacement ? replacement.addToSet(marks) : marks);
+    }));
   }
   return node.copy(Fragment.fromArray(children));
 }
@@ -196,14 +217,16 @@ const serializer = new MarkdownSerializer({
   chatGptSystemHint: (state, node) => state.write('[' + state.esc(node.attrs.label) + '](chatgpt-system-hint://' + node.attrs.systemHint + ')'),
 }, { ...defaultMarkdownSerializer.marks, link: {
   ...defaultLink,
-  open: (state, mark, parent, index) => /[\s<>]/.test(mark.attrs.href) ? '['
+  open: (state, mark, parent, index) => mark.attrs.title !== null || /[\s<>]/.test(mark.attrs.href) ? '['
     : typeof defaultLink.open === 'function' ? defaultLink.open(state, mark, parent, index) : defaultLink.open,
   close: (state, mark, parent, index) => {
-    if (!/[\s<>]/.test(mark.attrs.href)) {
+    if (mark.attrs.title === null && !/[\s<>]/.test(mark.attrs.href)) {
       return typeof defaultLink.close === 'function' ? defaultLink.close(state, mark, parent, index) : defaultLink.close;
     }
+    const title = mark.attrs.title === null ? '' : ' "' + mark.attrs.title.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+      .replace(/\r/g, '&#xD;').replace(/\n/g, '&#xA;') + '"';
     return '](' + markdownDestination(mark.attrs.href)
-      + (mark.attrs.title ? ' "' + mark.attrs.title.replace(/"/g, '\\"') + '"' : '') + ')';
+      + title + ')';
   },
 } });
 
@@ -276,7 +299,7 @@ export function isOrdinaryRichText(document: ProseMirrorNode): boolean {
 }
 
 function plainLink(label: string, href: string, title?: string | null): string {
-  if (title) {
+  if (title !== undefined && title !== null) {
     const escapedLabel = label.replace(/([\\`*_\[\]])/g, '\\$1');
     const escapedTitle = title.replace(/\\/g, '\\\\').replace(/[)"]/g, '\\$&').replace(/\r/g, '&#xD;').replace(/\n/g, '&#xA;');
     return '[' + escapedLabel + '](' + markdownDestination(href) + ' "' + escapedTitle + '")';
@@ -299,7 +322,8 @@ export function serializePlainDocument(document: ProseMirrorNode, preserveTextLi
     let link: ProseMirrorNode['marks'][number] | undefined;
     const flush = () => {
       if (!text) return;
-      if (!link || preserveTextLinkMarks && text === link.attrs.href && link.attrs.title == null) output += text;
+      if (link?.attrs.href === null) output += httpAutolinkHref(text) ? plainLink(text, text) : text;
+      else if (!link || preserveTextLinkMarks && text === link.attrs.href && link.attrs.title == null) output += text;
       else output += plainLink(text, (preserveTextLinkMarks ? 'codex-text-link://' : '') + link.attrs.href, link.attrs.title);
       text = ''; link = undefined;
     };

@@ -4,12 +4,12 @@ import { toggleMark } from 'prosemirror-commands';
 import { closeHistory } from 'prosemirror-history';
 import { Fragment, Slice } from 'prosemirror-model';
 import type { Mark, Node as ProseMirrorNode } from 'prosemirror-model';
-import { EditorState } from 'prosemirror-state';
+import { EditorState, Plugin } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import type { ClipboardEvent } from 'react';
 import type { ComposerDocument } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
-import { composerSchema, readRichDocument, safeRichLinkHref } from './rich-document.ts';
+import { composerSchema, httpAutolinkHref, readRichDocument, safeRichLinkHref } from './rich-document.ts';
 import { insertRichCompletion, richCompletionContext, richEditorPlugins, syncRichSelection } from './rich-editor-actions.ts';
 import type { RichCompletionContext, RichCompletionQuery } from './rich-editor-actions.ts';
 import type { Completion } from './standalone-completions.tsx';
@@ -192,7 +192,7 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
     'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a']);
   const attributes = new Set(['class', 'dir', 'href', 'title', 'start', 'contenteditable', 'spellcheck', 'role', 'tabindex',
     'aria-busy', 'aria-expanded', 'aria-haspopup',
-    'data-pm-slice', 'data-mention', 'data-composer-attrs', 'data-system-hint-type', 'data-system-hint-label']);
+    'data-pm-slice', 'data-mention', 'data-composer-attrs', 'data-composer-autolink', 'data-system-hint-type', 'data-system-hint-label']);
   if (document.querySelector('style, link, script')) return false;
   return Array.from(document.body.querySelectorAll('*')).every(element => {
     if (!tags.has(element.localName) || !Array.from(element.attributes).every(attribute => attributes.has(attribute.name))) return false;
@@ -210,7 +210,8 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
     if (!element.hasAttribute('data-composer-attrs')) return mention === null;
     const spec = mention === 'file' ? composerSchema.nodes.atMention?.spec : mention === 'skill' ? composerSchema.nodes.skillMention?.spec
       : mention === 'rich-link' ? composerSchema.nodes.richLink?.spec
-      : element.localName === 'pre' ? composerSchema.nodes.code_block?.spec : element.localName === 'a' ? composerSchema.marks.link?.spec : null;
+      : element.localName === 'pre' ? composerSchema.nodes.code_block?.spec
+      : element.localName === 'a' || element.hasAttribute('data-composer-autolink') ? composerSchema.marks.link?.spec : null;
     if (!spec) return false;
     try {
       const value: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
@@ -293,6 +294,24 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     const doc = readRichDocument(latest.current.document);
     if (!host.current || !doc) return;
     const plugins = richEditorPlugins();
+    const insertAutolink = (editor: EditorView, from: number, to: number) => {
+      if (from !== to || composing.current || editor.composing || !editable()) return false;
+      const position = editor.state.doc.resolve(from), before = position.nodeBefore;
+      if (position.parent.type.spec.code || !before?.isText || before.marks.some(mark => mark.type.name === 'link')) return false;
+      const contents = before.text ?? '', candidate = contents.slice(contents.lastIndexOf(' ') + 1);
+      if (!httpAutolinkHref(candidate)) return false;
+      const mark = composerSchema.marks.link!.create({ href: null, sourceAppId: '' });
+      editor.dispatch(editor.state.tr.addMark(from - candidate.length, from, mark).insertText(' ', from));
+      return true;
+    };
+    const autolink = new Plugin({ props: {
+      handleKeyDown(editor, event) {
+        return event.key === ' ' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing && event.keyCode !== 229
+          && insertAutolink(editor, editor.state.selection.from, editor.state.selection.to);
+      },
+      handleTextInput(editor, from, to, text) { return text === ' ' && insertAutolink(editor, from, to); },
+    } });
+    plugins.rich.unshift(autolink); plugins.plain.unshift(autolink);
     const editor = new EditorView(host.current, {
       state: EditorState.create({ doc, plugins: latest.current.plainTextMode ? plugins.plain : plugins.rich }),
       editable: () => !latest.current.readOnly,
@@ -357,7 +376,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
       },
       transformPastedHTML: html => {
         const parsed = new DOMParser().parseFromString(html, 'text/html');
-        for (const element of parsed.querySelectorAll('[data-mention="rich-link"][data-composer-attrs], a[data-composer-attrs]')) {
+        for (const element of parsed.querySelectorAll('[data-mention="rich-link"][data-composer-attrs], a[data-composer-attrs], span[data-composer-autolink][data-composer-attrs]')) {
           try {
             const attrs: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
             if (!attrs || typeof attrs !== 'object' || Array.isArray(attrs)) continue;

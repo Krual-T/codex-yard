@@ -100,6 +100,56 @@ test('link destinations allow only explicit safe URL schemes', () => {
   }
 });
 
+test('changed links retain empty and escaped titles when serialized and parsed', () => {
+  for (const title of ['', 'backslash\\"quote', 'line\nbreak']) {
+    const doc: ComposerDocument = { type: 'doc', content: [{ type: 'paragraph', content: [
+      { type: 'text', text: 'label', marks: [{ type: 'link', attrs: { href: 'https://example.test/path', title } }] },
+    ] }] };
+    const parsed = readRichDocument(doc)!;
+    assert.equal(parsed.toJSON().content[0].content[0].marks[0].attrs.title, title);
+    for (const text of [serializeRichDocument(parsed), serializePlainDocument(parsed)]) {
+      const rendered = defaultMarkdownParser.parse(text);
+      if (title === '') assert.ok(text.endsWith(' "")'));
+      assert.equal(rendered?.firstChild?.firstChild?.marks[0]?.attrs.title, title || null);
+      assert.equal(rendered?.firstChild?.firstChild?.marks[0]?.attrs.href, 'https://example.test/path');
+    }
+  }
+});
+
+test('original null-href auto links serialize from their complete marked text', () => {
+  const url = 'https://example.test/path';
+  const auto = { type: 'link', attrs: { href: null, sourceAppId: 'fixture', literalMarkdownSource: '<' + url + '>',
+    literalMarkdownOccurrenceId: 7 } };
+  const single: ComposerDocument = { type: 'doc', content: [{ type: 'paragraph', content: [
+    { type: 'text', text: url, marks: [auto] },
+  ] }] };
+  const parsed = readRichDocument(single);
+  assert.ok(parsed);
+  assert.equal(serializeRichDocument(parsed), '<' + url + '>');
+  assert.equal(serializePlainDocument(parsed), '[' + url + '](' + url + ')');
+  assert.equal(serializePlainDocument(parsed, true), '[' + url + '](' + url + ')');
+  assert.deepEqual(parsed.toJSON().content[0].content[0].marks[0].attrs.href, null);
+  const split: ComposerDocument = { type: 'doc', content: [{ type: 'paragraph', content: [
+    { type: 'text', text: 'https://', marks: [{ type: 'strong' }, auto] },
+    { type: 'text', text: 'example.test/path', marks: [auto] },
+  ] }] };
+  const splitParsed = readRichDocument(split);
+  assert.ok(splitParsed);
+  const markdown = serializeRichDocument(splitParsed);
+  const resulting = defaultMarkdownParser.parse(markdown);
+  const urls: unknown[] = [];
+  resulting?.descendants(node => { const mark = node.marks.find(value => value.type.name === 'link'); if (mark) urls.push(mark.attrs.href); });
+  assert.ok(urls.length && urls.every(value => value === url));
+  assert.equal(serializePlainDocument(splitParsed), '[' + url + '](' + url + ')');
+  const invalid = structuredClone(single);
+  invalid.content![0]!.content![0]!.text = 'not a URL';
+  const invalidParsed = readRichDocument(invalid);
+  assert.ok(invalidParsed);
+  assert.equal(serializeRichDocument(invalidParsed), 'not a URL');
+  assert.equal(serializePlainDocument(invalidParsed), 'not a URL');
+  assert.equal(invalidParsed.toJSON().content[0].content[0].marks[0].attrs.literalMarkdownOccurrenceId, 7);
+});
+
 async function composerBundle(): Promise<string> {
   const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'js', contents: `
     import React from 'react';
@@ -330,6 +380,88 @@ test('main composer edits only the selected link and protects stale or unsafe ac
     assert.equal(submitted.input[0].text, snapshot.text);
     assert.ok(submitted.input[0].text.includes('https://example.test/new'));
     assert.equal(submitted.draft.document.content[0].content[0].attrs.displayText, 'Docs revised');
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); await browser.close(); }
+});
+
+test('main composer creates and restores null-href automatic links without losing the document', {
+  skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
+}, async () => {
+  const bundle = await composerBundle();
+  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
+    args: ['--no-sandbox', '--disable-background-networking'] });
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage(); page.setDefaultTimeout(8_000);
+    const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+    await page.route('**/*', route => new URL(route.request().url()).origin === 'http://localhost'
+      ? route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }) : route.abort());
+    await page.goto('http://localhost/'); await page.addScriptTag({ content: bundle });
+    await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+    await page.getByRole('button', { name: '富文本编辑' }).click();
+    const editor = page.locator('.ProseMirror'); await editor.waitFor(); await editor.click();
+    const url = 'https://example.test/path';
+    await page.keyboard.type(url);
+    await editor.evaluate(element => {
+      element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', keyCode: 229, isComposing: true, bubbles: true, cancelable: true }));
+    });
+    assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.freeze(c.snapshot().owner) === null; }), true);
+    assert.equal(await editor.locator('[data-composer-autolink]').count(), 0);
+    await editor.evaluate(element => element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+    await page.waitForFunction(() => { const state = (window as any).fixture.state, c = state.controller;
+      state.lease = c.freeze(c.snapshot().owner); return !!state.lease; });
+    await page.evaluate(() => (window as any).fixture.state.lease.release());
+    await editor.focus(); await page.keyboard.press('Space');
+    try { await page.waitForFunction(() => globalThis.document.querySelector('[data-composer-autolink]')?.textContent === 'https://example.test/path'); }
+    catch (error) {
+      console.error('synthetic autolink diagnostic', await page.evaluate(() => ({
+        draft: (window as any).fixture.state.controller.snapshot().draft,
+        html: globalThis.document.querySelector('.ProseMirror')?.innerHTML,
+        active: globalThis.document.activeElement?.outerHTML,
+      })));
+      throw error;
+    }
+    let draft = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+    assert.equal(draft.document.content[0].content[0].marks[0].attrs.href, null);
+    assert.equal(draft.text, '<' + url + '> ');
+    await editor.press('Control+z');
+    await page.waitForFunction(() => !globalThis.document.querySelector('[data-composer-autolink]'));
+    await editor.press('Control+Shift+z');
+    await page.waitForFunction(() => globalThis.document.querySelector('[data-composer-autolink]')?.textContent === 'https://example.test/path');
+    await editor.press('Control+End');
+    await page.keyboard.type(' separator ');
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.text.includes('separator'));
+    await editor.press('Control+End');
+    await editor.evaluate(element => {
+      const link = element.querySelector('[data-composer-autolink]')!.cloneNode(true) as HTMLElement;
+      const data = new DataTransfer(); data.setData('text/html', link.outerHTML); data.setData('text/plain', link.textContent ?? '');
+      element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+    });
+    try { await page.waitForFunction(() => globalThis.document.querySelectorAll('[data-composer-autolink]').length === 2); }
+    catch (error) {
+      console.error('synthetic autolink paste diagnostic', await page.evaluate(() => ({
+        draft: (window as any).fixture.state.controller.snapshot().draft,
+        html: globalThis.document.querySelector('.ProseMirror')?.innerHTML,
+        selection: window.getSelection()?.toString(),
+      })));
+      throw error;
+    }
+    await editor.press('Control+z');
+    await page.waitForFunction(() => globalThis.document.querySelectorAll('[data-composer-autolink]').length === 1);
+    await editor.press('Control+End'); await page.keyboard.type('continued');
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.text.endsWith('continued'));
+    draft = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+    assert.equal(draft.document.content[0].content[0].marks[0].attrs.href, null);
+    assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+    await page.reload(); await page.addScriptTag({ content: bundle });
+    await page.waitForFunction(() => globalThis.document.querySelector('[data-composer-autolink]')?.textContent === 'https://example.test/path');
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);
+    const sent = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
+    assert.equal(sent.description.documentPlainTextMode, false);
+    assert.equal(sent.input[0].text, draft.text);
+    assert.equal(sent.draft.document.content[0].content[0].marks[0].attrs.href, null);
     assert.deepEqual(errors, []);
   } finally { await context.close(); await browser.close(); }
 });
