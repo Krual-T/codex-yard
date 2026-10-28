@@ -15,6 +15,16 @@ function copiedAttrs(element: HTMLElement, required: string[]): Record<string, u
   } catch { return false; }
 }
 
+export function safeRichLinkHref(value: string): string | null {
+  const href = value.trim();
+  if (/[\u0000-\u001f\u007f]/.test(value) || !/^(?:https?:\/\/|mailto:)/i.test(href)) return null;
+  try {
+    const url = new URL(href);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !!url.hostname
+      || url.protocol === 'mailto:' && !!url.pathname ? href : null;
+  } catch { return null; }
+}
+
 /** The supported subset uses the names and attributes of retained composer documents. */
 export const composerSchema = new Schema({
   nodes: {
@@ -74,12 +84,13 @@ export const composerSchema = new Schema({
     link: { attrs: { href: string, title: optionalString, isAutolink: { default: false, validate: 'boolean' },
       isGeneratedAutolink: { default: false, validate: 'boolean' }, sourceAppId: optionalString,
       literalMarkdownSource: optionalString, literalMarkdownOccurrenceId: { default: null, validate: 'number|null' } },
-      inclusive: false, parseDOM: [{ tag: 'a[href]', getAttrs: dom => {
+      inclusive: false, parseDOM: [{ tag: 'a[data-composer-attrs]', getAttrs: dom => copiedAttrs(dom as HTMLElement, ['href']) },
+        { tag: 'a[href]', getAttrs: dom => {
         const element = dom as HTMLElement;
-        return element.hasAttribute('data-composer-attrs') ? copiedAttrs(element, ['href'])
-          : { href: element.getAttribute('href'), title: element.getAttribute('title') };
+        return { href: element.getAttribute('href'), title: element.getAttribute('title') };
       } }],
-      toDOM: mark => ['a', { href: mark.attrs.href, title: mark.attrs.title, 'data-composer-attrs': JSON.stringify(mark.attrs) }, 0] },
+      toDOM: mark => ['a', { ...(safeRichLinkHref(mark.attrs.href) ? { href: safeRichLinkHref(mark.attrs.href) } : { role: 'button', tabindex: '0' }),
+        title: mark.attrs.title, 'aria-haspopup': 'dialog', 'aria-expanded': 'false', 'data-composer-attrs': JSON.stringify(mark.attrs) }, 0] },
   },
 });
 

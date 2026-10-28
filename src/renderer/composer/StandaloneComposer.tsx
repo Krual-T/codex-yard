@@ -516,7 +516,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       {plainTextSetting.value && richActive && textEditIssue(draft) ? <div role="status">{t('Existing formatting is retained while plain text mode is on.')}
         {!draft.input ? ' ' + (locale.toLowerCase().startsWith('zh') ? '发送时使用纯文本，不包含粗体等格式。' : 'Sending uses plain text without bold and similar formatting.') : null}</div> : null}
       {richActive && draft.document ? <StandaloneRichEditor ref={richEditor} document={draft.document} currentDocument={() => current.current.draft.document}
-        plainTextMode={plainTextSetting.value}
+        plainTextMode={plainTextSetting.value} canEdit={() => !frozenRef.current}
         onChange={document => changeDraftFromOperation(value => updateRichDraft(value, document))} onKeyDown={keyDown}
         onCompositionChange={value => setComposition('editor', value)}
         onPendingLinkChange={value => { pendingLink.current = value; }}

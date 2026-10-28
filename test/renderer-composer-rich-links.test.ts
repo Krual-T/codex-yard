@@ -6,7 +6,7 @@ import { chromium } from 'playwright-core';
 import { defaultMarkdownParser } from 'prosemirror-markdown';
 import type { ComposerDocument } from '../src/renderer/workbench-contract.ts';
 import { draftToInput } from '../src/renderer/composer/standalone-draft.ts';
-import { readRichDocument, serializePlainDocument, serializeRichDocument } from '../src/renderer/composer/rich-document.ts';
+import { readRichDocument, safeRichLinkHref, serializePlainDocument, serializeRichDocument } from '../src/renderer/composer/rich-document.ts';
 
 test('literal link marks preserve titles, formatting and per-occurrence spelling in complex documents', () => {
   const href = 'https://example.test/a(b)', title = 'Link title';
@@ -92,9 +92,15 @@ test('rich link literals preserve formatted labels and parentheses only when the
   assert.equal(readRichDocument(mismatched), null);
 });
 
-test('main composer retains link source through editing, paste, undo, freeze, reload and captured submit mode', {
-  skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
-}, async () => {
+test('link destinations allow only explicit safe URL schemes', () => {
+  assert.equal(safeRichLinkHref(' https://example.test/a(b) '), 'https://example.test/a(b)');
+  assert.equal(safeRichLinkHref('mailto:person@example.test'), 'mailto:person@example.test');
+  for (const value of ['javascript:alert(1)', 'data:text/html,hello', 'https://', '/relative', 'https://example.test\n']) {
+    assert.equal(safeRichLinkHref(value), null);
+  }
+});
+
+async function composerBundle(): Promise<string> {
   const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'js', contents: `
     import React from 'react';
     import { createRoot } from 'react-dom/client';
@@ -113,6 +119,13 @@ test('main composer retains link source through editing, paste, undo, freeze, re
     window.fixture={state,async setDocument(document){const controller=state.controller,snapshot=controller.snapshot();
       return controller.update(snapshot.owner,()=>({text:serializeRichDocument(readRichDocument(document)),document,images:[],files:[],references:[],skills:[]}))}};
   ` }, bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' } });
+  return bundle.outputFiles[0]!.text;
+}
+
+test('main composer retains link source through editing, paste, undo, freeze, reload and captured submit mode', {
+  skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
+}, async () => {
+  const bundle = await composerBundle();
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
     args: ['--no-sandbox', '--disable-background-networking'] });
   const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
@@ -122,7 +135,7 @@ test('main composer retains link source through editing, paste, undo, freeze, re
     await page.route('**/*', route => new URL(route.request().url()).origin === 'http://localhost'
       ? route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }) : route.abort());
     await page.goto('http://localhost/');
-    const mount = () => page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+    const mount = () => page.addScriptTag({ content: bundle });
     await mount(); await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
     const source = '[**Bold** and *ital*](https://example.test/a\\(b\\) "Title")';
     const href = 'https://example.test/a(b)';
@@ -136,14 +149,14 @@ test('main composer retains link source through editing, paste, undo, freeze, re
     ] }] };
     assert.equal(await page.evaluate(value => (window as any).fixture.setDocument(value), document), true);
     const editor = page.locator('.ProseMirror'); await editor.waitFor();
-    await page.waitForFunction(() => document.querySelectorAll('.ProseMirror a[data-composer-attrs]').length === 6);
+    await page.waitForFunction(() => globalThis.document.querySelectorAll('.ProseMirror a[data-composer-attrs]').length === 6);
     await editor.click(); await editor.press('Control+End');
     await page.keyboard.type('!');
     try { await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.text.endsWith('*!*')); }
     catch (error) {
       console.error('synthetic editor diagnostic', await page.evaluate(() => ({
         draft: (window as any).fixture.state.controller.snapshot().draft,
-        html: document.querySelector('.ProseMirror')?.innerHTML,
+        html: globalThis.document.querySelector('.ProseMirror')?.innerHTML,
         selection: window.getSelection()?.toString(),
       })));
       throw error;
@@ -188,6 +201,135 @@ test('main composer retains link source through editing, paste, undo, freeze, re
     sent = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
     assert.equal(sent.description.documentPlainTextMode, true);
     assert.equal(sent.input[0].text, serializePlainDocument(readRichDocument(document)!));
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); await browser.close(); }
+});
+
+test('main composer edits only the selected link and protects stale or unsafe actions', {
+  skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
+}, async () => {
+  const bundle = await composerBundle();
+  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
+    args: ['--no-sandbox', '--disable-background-networking'] });
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage(); page.setDefaultTimeout(8_000);
+    const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+    await page.route('**/*', route => new URL(route.request().url()).origin === 'http://localhost'
+      ? route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }) : route.abort());
+    await page.goto('http://localhost/'); await page.addScriptTag({ content: bundle });
+    await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+    const href = 'https://example.test/docs';
+    const node = (id: number) => ({ type: 'richLink', attrs: { displayText: 'Docs', href, sourceAppId: 'fixture-app',
+      literalMarkdownSource: '[Docs](https://example.test/docs)', literalMarkdownOccurrenceId: id,
+      markdownSourceStart: id * 40, markdownSourceEnd: id * 40 + 28 } });
+    const link = { type: 'link', attrs: { href, title: 'Title', sourceAppId: 'fixture-app',
+      literalMarkdownSource: '[**Bold** *tail*](https://example.test/docs "Title")', literalMarkdownOccurrenceId: 3 } };
+    const rich: ComposerDocument = { type: 'doc', content: [{ type: 'paragraph', content: [
+      node(1), { type: 'text', text: ' and ' }, node(2), { type: 'text', text: ' plus ' },
+      { type: 'text', text: 'Bold', marks: [{ type: 'strong' }, link] },
+      { type: 'text', text: ' ', marks: [link] }, { type: 'text', text: 'tail', marks: [{ type: 'em' }, link] },
+    ] }] };
+    assert.equal(await page.evaluate(value => (window as any).fixture.setDocument(value), rich), true);
+    const editor = page.locator('.ProseMirror');
+    const nodes = editor.locator('[data-mention="rich-link"]');
+    await page.waitForFunction(() => globalThis.document.querySelectorAll('[data-mention="rich-link"]').length === 2);
+    const dialog = page.getByRole('dialog', { name: '链接' });
+    await nodes.first().click();
+    assert.equal(await dialog.getByRole('link').getAttribute('href'), href);
+    assert.match(await dialog.innerText(), /来源: fixture-app/);
+    await dialog.getByRole('button', { name: '编辑链接文字' }).click();
+    assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.freeze(c.snapshot().owner); }), null);
+    await dialog.getByRole('textbox', { name: '链接文字' }).fill('Docs revised');
+    await dialog.getByRole('button', { name: '保存链接文字' }).click();
+    await page.waitForFunction(() => globalThis.document.querySelector('[data-mention="rich-link"]')?.textContent === 'Docs revised');
+    let snapshot = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+    assert.equal(snapshot.document.content[0].content[0].attrs.literalMarkdownOccurrenceId, null);
+    assert.equal(snapshot.document.content[0].content[2].attrs.literalMarkdownOccurrenceId, 2);
+    await editor.press('Control+z');
+    await page.waitForFunction(() => globalThis.document.querySelector('[data-mention="rich-link"]')?.textContent === 'Docs');
+    await editor.press('Control+Shift+z');
+    await page.waitForFunction(() => globalThis.document.querySelector('[data-mention="rich-link"]')?.textContent === 'Docs revised');
+
+    await nodes.nth(1).click(); await dialog.getByRole('button', { name: '编辑链接地址' }).click();
+    const address = dialog.getByRole('textbox', { name: '链接地址' });
+    await address.fill('javascript:alert(1)'); await dialog.getByRole('button', { name: '保存链接地址' }).click();
+    assert.match(await dialog.getByRole('alert').innerText(), /HTTP/);
+    snapshot = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+    assert.equal(snapshot.document.content[0].content[2].attrs.href, href);
+    await address.fill('mailto:editor@example.test'); await dialog.getByRole('button', { name: '保存链接地址' }).click();
+    await page.waitForFunction(() => (globalThis.document.querySelectorAll('[data-mention="rich-link"]')[1] as HTMLElement)?.title === 'mailto:editor@example.test');
+    await nodes.nth(1).click();
+    assert.equal(await dialog.getByRole('link').getAttribute('href'), 'mailto:editor@example.test');
+    await dialog.getByRole('button', { name: '编辑链接地址' }).click(); await address.fill('');
+    await dialog.getByRole('button', { name: '移除链接' }).click();
+    await page.waitForFunction(() => globalThis.document.querySelectorAll('[data-mention="rich-link"]').length === 1);
+    assert.match(await editor.innerText(), /Docs revised and Docs plus Bold tail/);
+    await editor.press('Control+z');
+    await page.waitForFunction(() => globalThis.document.querySelectorAll('[data-mention="rich-link"]').length === 2);
+
+    await editor.locator('a[data-composer-attrs]').first().click();
+    assert.match(await dialog.innerText(), /Bold tail/);
+    await dialog.getByRole('button', { name: '编辑链接地址' }).click();
+    await address.fill('https://example.test/new'); await dialog.getByRole('button', { name: '保存链接地址' }).click();
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.text.includes('https://example.test/new'));
+    snapshot = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+    const marked = snapshot.document.content[0].content.filter((item: any) => item.marks?.some((mark: any) => mark.type === 'link'));
+    assert.equal(marked.length, 3);
+    assert.ok(marked.every((item: any) => item.marks.find((mark: any) => mark.type === 'link').attrs.href === 'https://example.test/new'));
+    assert.ok(marked[0].marks.some((mark: any) => mark.type === 'strong'));
+    assert.ok(marked[2].marks.some((mark: any) => mark.type === 'em'));
+    assert.equal(snapshot.document.content[0].content[0].attrs.displayText, 'Docs revised');
+    await editor.press('Control+z'); await page.waitForFunction(() => !(window as any).fixture.state.controller.snapshot().draft.text.includes('https://example.test/new'));
+    await editor.press('Control+Shift+z'); await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.text.includes('https://example.test/new'));
+    await editor.locator('a[data-composer-attrs]').first().click();
+    await dialog.getByRole('button', { name: '编辑链接文字' }).click();
+    await dialog.getByRole('textbox', { name: '链接文字' }).fill('Bold tails');
+    await dialog.getByRole('button', { name: '保存链接文字' }).click();
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.text.includes('tails'));
+    snapshot = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+    const revised = snapshot.document.content[0].content.filter((item: any) => item.marks?.some((mark: any) => mark.type === 'link'));
+    assert.equal(revised.map((item: any) => item.text).join(''), 'Bold tails');
+    assert.ok(revised[0].marks.some((mark: any) => mark.type === 'strong'));
+    assert.ok(revised.at(-1).marks.some((mark: any) => mark.type === 'em'));
+    assert.ok(revised.every((item: any) => item.marks.find((mark: any) => mark.type === 'link').attrs.title === 'Title'));
+    assert.equal(snapshot.document.content[0].content[0].attrs.displayText, 'Docs revised');
+    const unsafe: ComposerDocument = { type: 'doc', content: [{ type: 'paragraph', content: [
+      { type: 'text', text: 'unsafe', marks: [{ type: 'link', attrs: { href: 'javascript:alert(1)' } }] },
+    ] }] };
+    assert.equal(await page.evaluate(value => (window as any).fixture.setDocument(value), unsafe), true);
+    const unsafeLink = editor.locator('a[data-composer-attrs]');
+    await page.waitForFunction(() => globalThis.document.querySelector('.ProseMirror a[data-composer-attrs]')?.textContent === 'unsafe');
+    assert.equal(await unsafeLink.getAttribute('href'), null);
+    await unsafeLink.focus(); await page.keyboard.press('Enter');
+    assert.equal(await dialog.getByRole('link').count(), 0);
+    assert.equal(page.url(), 'http://localhost/');
+    await dialog.getByRole('button', { name: '编辑链接地址' }).click(); await address.fill('https://example.test/safe');
+    await dialog.getByRole('button', { name: '保存链接地址' }).click();
+    await page.waitForFunction(() => globalThis.document.querySelector('.ProseMirror a')?.getAttribute('href') === 'https://example.test/safe');
+
+    await unsafeLink.click(); await dialog.getByRole('button', { name: '编辑链接文字' }).click();
+    await dialog.getByRole('textbox', { name: '链接文字' }).fill('pending edit');
+    const externallyChanged: ComposerDocument = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'newer draft' }] }] };
+    assert.equal(await page.evaluate(value => (window as any).fixture.setDocument(value), externallyChanged), true);
+    await page.waitForFunction(() => globalThis.document.querySelector('.ProseMirror')?.textContent === 'newer draft');
+    await dialog.getByRole('button', { name: '保存链接文字' }).click();
+    assert.match(await dialog.getByRole('alert').innerText(), /链接已更改/);
+    assert.equal(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.text), 'newer draft');
+    assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.freeze(c.snapshot().owner); }), null);
+    await dialog.getByRole('button', { name: '关闭' }).click();
+    assert.equal(await page.evaluate(value => (window as any).fixture.setDocument(value), snapshot.document), true);
+    await page.waitForFunction(() => globalThis.document.querySelector('.ProseMirror')?.textContent?.includes('Bold tails'));
+    assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+    await page.reload(); await page.addScriptTag({ content: bundle });
+    await page.waitForFunction(() => globalThis.document.querySelector('.ProseMirror')?.textContent?.includes('Bold tails'));
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);
+    const submitted = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
+    assert.equal(submitted.description.documentPlainTextMode, false);
+    assert.equal(submitted.input[0].text, snapshot.text);
+    assert.ok(submitted.input[0].text.includes('https://example.test/new'));
+    assert.equal(submitted.draft.document.content[0].content[0].attrs.displayText, 'Docs revised');
     assert.deepEqual(errors, []);
   } finally { await context.close(); await browser.close(); }
 });
