@@ -1,7 +1,6 @@
 // Run under /tmp/agents-workbench-heavy.lock after building. No real conversations are used.
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright-core';
 import type { Page } from 'playwright-core';
@@ -10,13 +9,11 @@ import { record } from '../src/native/protocol.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
 
 const root = await mkdtemp('/tmp/yard-ui-bugs-');
-const output = resolve(process.env.AGENTS_BUG_EVIDENCE ?? '.local/sidebar-copy-models');
+const output = process.env.AGENTS_BUG_EVIDENCE
+  ? resolve(process.env.AGENTS_BUG_EVIDENCE) : await mkdtemp('/tmp/yard-sidebar-copy-evidence-');
 const dataDir = join(root, 'data');
 await mkdir(dataDir);
 await mkdir(output, { recursive: true });
-if (process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT) {
-  await cp(process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT, join(dataDir, 'configuration-snapshot'), { recursive: true });
-}
 await writeFile(join(dataDir, 'projects.json'), JSON.stringify([{ name: 'Active project', path: root }]));
 const fake = await createFakeCodex(root);
 const id = '00000000-0000-4000-8000-000000000001';
@@ -43,22 +40,19 @@ fake.handlers.set('config/batchWrite', params => {
 });
 const app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: fake.socketPath, codexHome: join(root, 'codex'),
   hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
-const browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? join(homedir(), '.cache/ms-playwright/chromium-1228/chrome-linux64/chrome'),
-  headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
-const checks: string[] = [], errors: string[] = [];
-const report: Record<string, unknown> = { checks, errors, renderer: '26.1013.40934', realDaemonUsed: false };
+const browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome',
+  headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking'] });
+const checks: string[] = [], gaps: string[] = [], errors: string[] = [];
+const report: Record<string, unknown> = { checks, gaps, errors, renderer: 'owned', realDaemonUsed: false };
 let page: Page | undefined;
 try {
   for (const viewport of [{ width: 1280, height: 800 }, { width: 800, height: 1280 }]) {
     const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true, permissions: ['clipboard-read', 'clipboard-write'] });
     page = await context.newPage();
     page.on('pageerror', error => errors.push(error.message));
-    // A saved pre-fix bundle can reproduce the missing clipboard service.
-    if (process.env.AGENTS_TEST_BASELINE_HOST) {
-      const body = await readFile(process.env.AGENTS_TEST_BASELINE_HOST, 'utf8');
-      await page.route('**/native-host.js', route => route.fulfill({ contentType: 'text/javascript', body }));
-    }
-    await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/local/' + id), { waitUntil: 'commit' });
+    await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
+    await page.goto(app.url + '/local/' + id, { waitUntil: 'commit' });
+    await page.locator('[data-owned-renderer="true"]').waitFor();
     const copy = page.getByRole('button', { name: /^(Copy code|复制代码)$/ });
     await copy.waitFor({ timeout: 60000 });
     await page.evaluate(() => navigator.clipboard.writeText('sentinel'));
@@ -66,17 +60,17 @@ try {
     await page.waitForFunction(expected => navigator.clipboard.readText().then(text => text === expected), code, { timeout: 5000 });
     checks.push(`${viewport.width}px: code copy preserves Unicode, tabs and newlines`);
 
-    const folder = page.locator('[data-app-action-sidebar-project-row]').filter({ hasText: 'Active project' });
+    const folder = page.getByRole('button', { name: 'Active project', exact: true });
     if (await folder.getAttribute('aria-expanded') === 'true') await folder.tap();
-    const indicator = folder.locator('.grid > div.col-start-1.row-start-1');
-    await indicator.waitFor();
-    const newChat = page.getByRole('button', { name: /^(Start new chat in Active project|在 Active project 中开始新聊天)$/ });
-    const indicatorBox = await indicator.boundingBox(), actionBox = await newChat.boundingBox();
-    assert.ok(indicatorBox && actionBox);
-    assert.ok(indicatorBox.x + indicatorBox.width <= actionBox.x, 'The running indicator and new-chat button must not overlap');
-    assert.equal(await indicator.evaluate(e => getComputedStyle(e).visibility), 'visible');
+    const indicator = folder.locator('..').getByRole('img', { name: 'In progress', exact: true });
+    const newChat = page.getByRole('button', { name: 'New chat in Active project', exact: true });
+    if (await indicator.isVisible()) {
+      const indicatorBox = await indicator.boundingBox(), actionBox = await newChat.boundingBox();
+      assert.ok(indicatorBox && actionBox);
+      assert.ok(indicatorBox.x + indicatorBox.width <= actionBox.x, 'The running indicator and new-chat button must not overlap');
+      checks.push(`${viewport.width}px: active collapsed project shows its indicator beside new-chat`);
+    } else gaps.push(`${viewport.width}px: a collapsed project has no visible running indicator`);
     await folder.screenshot({ path: join(output, `${viewport.width}-active-project.png`) });
-    checks.push(`${viewport.width}px: active collapsed project shows its indicator beside new-chat`);
     await newChat.tap();
     await page.getByRole('textbox').last().waitFor();
     checks.push(`${viewport.width}px: the new-chat button still opens the composer`);
@@ -86,7 +80,8 @@ try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
   page = await context.newPage();
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/local/' + id), { waitUntil: 'commit' });
+  await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
+  await page.goto(app.url + '/local/' + id, { waitUntil: 'commit' });
   const copy = page.getByRole('button', { name: /^(Copy code|复制代码)$/ });
   await copy.waitFor({ timeout: 60000 });
   // Keep the actual read API to verify the OS clipboard while exercising the
@@ -99,27 +94,39 @@ try {
   await page.waitForFunction(expected => navigator.clipboard.readText().then(text => text === expected), code, { timeout: 5000 });
   checks.push('Desktop: legacy copy writes the actual clipboard when the async write API is unavailable');
   await page.evaluate(() => { document.execCommand = () => false; });
-  await copy.click();
-  await page.getByText(/Couldn.t copy to clipboard|无法复制到剪贴板|未能复制到剪贴板/).first().waitFor({ timeout: 10000 });
+  await page.getByRole('button', { name: /^(Copy code|Copied)$/ }).click();
+  await page.locator('.yard-code-block').getByRole('alert').waitFor({ timeout: 10000 });
   checks.push('Desktop: failed clipboard writes surface an error');
   await context.close();
 
   page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
   await page.goto(app.url, { waitUntil: 'commit' });
-  await page.getByRole('button', { name: /6 Sol/ }).waitFor({ timeout: 60000 });
-  await page.getByRole('button', { name: /6 Sol/ }).click();
-  await page.getByRole('menuitem', { name: /^(选择模型|Select model)$/ }).click();
-  await page.getByRole('menuitemradio', { name: /^(?:GPT-)?6\.1 Sol$/ }).waitFor();
-  await page.getByRole('menuitemradio', { name: /^(?:GPT-)?6\.1 Terra$/ }).waitFor();
-  assert.equal(await page.getByRole('menuitemradio', { name: 'Hidden fixture', exact: true }).count(), 0);
-  await page.getByRole('menu').last().screenshot({ path: join(output, 'models.png') });
-  await page.getByRole('menuitemradio', { name: /^(?:GPT-)?6\.1 Sol$/ }).click();
-  await fake.waitFor(message => message.method === 'config/batchWrite' && selectedModel === 'gpt-6.1-sol');
+  const modelPicker = page.getByLabel('模型', { exact: true });
+  await modelPicker.locator('option[value="gpt-6.1-sol"]').waitFor({ state: 'attached', timeout: 60000 });
+  await modelPicker.locator('option[value="gpt-6.1-terra"]').waitFor({ state: 'attached' });
+  assert.equal(await modelPicker.locator('option[value="hidden-fixture"]').count(), 0);
+  await modelPicker.screenshot({ path: join(output, 'models.png') });
+  await modelPicker.selectOption('gpt-6.1-sol');
+  try {
+    await fake.waitFor(message => message.method === 'config/batchWrite', 4000);
+    const deadline = Date.now() + 4000;
+    while (selectedModel !== 'gpt-6.1-sol') {
+      assert.ok(Date.now() < deadline, 'The configuration write was not committed by the fixture');
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  }
+  catch (error) { gaps.push('Selecting a default model did not produce a confirmed persistent config write: ' + String(error)); }
   await page.reload({ waitUntil: 'commit' });
-  await page.getByRole('button', { name: /6\.1 Sol/ }).waitFor({ timeout: 60000 });
-  checks.push('Both 6.1 models are selectable, hidden models stay hidden, and the selection survives reload');
+  await modelPicker.locator('option[value="gpt-6.1-sol"]').waitFor({ state: 'attached', timeout: 60000 });
+  try {
+    await page.waitForFunction(() => document.querySelector<HTMLSelectElement>('select[aria-label="模型"]')?.value === 'gpt-6.1-sol', undefined, { timeout: 4000 });
+    checks.push('Selected default model survives reload');
+  } catch { gaps.push('Selected default model did not survive reload'); }
+  checks.push('Both 6.1 models are selectable and hidden models stay hidden');
   assert.deepEqual(errors, []);
   assert.equal(fake.calls('turn/start').length, 0);
+  assert.deepEqual(gaps, [], 'Original project indicator and model persistence must be present');
   report.ok = true;
 } catch (error) {
   report.ok = false; report.failure = String(error);
