@@ -74,7 +74,7 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
     import React from 'react';
     import { createRoot } from 'react-dom/client';
     import { StandaloneComposer, draftToInput } from './src/renderer/composer/StandaloneComposer.tsx';
-    const state={submissions:[],listeners:new Set()};
+    const state={submissions:[],listeners:new Set(),controller:null,persisted:null};
     const client={async rpc(method) {
       if(method==='model/list') return {data:[],nextCursor:null};
       if(method==='config/read') return {config:{}};
@@ -85,6 +85,7 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
       throw Error('Unexpected host '+method);
     },subscribe(listener){state.listeners.add(listener);return ()=>state.listeners.delete(listener)},async reply(){throw Error('unexpected approval')}};
     let props={client,context:{hostId:'local',threadId:'thread-1',draftId:'legacy',cwd:'/workspace'},busy:false,
+      onDraftController(value){state.controller=value},onDraftChange(value){state.persisted=value},
       onSubmit:async(draft,options,action)=>state.submissions.push({draft:structuredClone(draft),input:draftToInput(draft,'local'),options,action}),
       onInterrupt:async()=>{}};
     const root=createRoot(document.getElementById('root'));
@@ -110,6 +111,10 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
     await page.addStyleTag({ content: css });
     await page.addScriptTag({ content: script });
     const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' });
+    const saved = () => page.waitForFunction(() => {
+      const state = (window as any).fixture.state, snapshot = state.controller?.snapshot();
+      return snapshot && state.persisted?.revision === snapshot.revision;
+    });
     await page.locator('[contenteditable="true"][aria-label="和 Codex 一起工作"]').waitFor();
     assert.equal(await editor.getAttribute('contenteditable'), 'true');
     assert.equal(await page.locator('textarea[aria-label="和 Codex 一起工作"]').count(), 0);
@@ -173,10 +178,11 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
       element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
     });
     assert.equal(await editor.locator('ul strong').innerText(), 'pasted');
+    await saved();
     await page.reload();
     await page.addStyleTag({ content: css });
     await page.addScriptTag({ content: script });
-    await editor.waitFor();
+    await page.locator('[contenteditable="true"][aria-label="和 Codex 一起工作"]').waitFor();
     assert.match(await editor.innerText(), /^Edited/);
     assert.match(await editor.locator('ul p').innerText(), /item updated/);
     assert.match(await editor.locator('pre').innerText(), /const x = 1; \/\/ updated/);
@@ -214,11 +220,12 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
       element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
     });
     await page.getByRole('alert').filter({ hasText: '此结构化草稿暂不支持添加图片' }).waitFor();
+    await saved();
     await page.reload();
     await page.addStyleTag({ content: css });
     await page.addScriptTag({ content: script });
     await page.evaluate(() => (window as any).fixture.render({ context: { draftId: 'ordered' } }));
-    await editor.waitFor();
+    await page.locator('[contenteditable="true"][aria-label="和 Codex 一起工作"]').waitFor();
     assert.equal(await editor.locator('[data-mention="skill"]').count(), 0);
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);

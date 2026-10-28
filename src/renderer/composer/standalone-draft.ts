@@ -68,29 +68,25 @@ function isDraft(value: unknown): value is Draft {
   return isComposerDraft(value) && Array.isArray(value.references) && Array.isArray(value.skills)
     && value.images.every(image => typeof image.previewSrc === 'string');
 }
+export function isStoredDraft(value: unknown): value is StoredDraft {
+  return record(value) && typeof value.revision === 'string' && strings(value.prefills) && isDraft(value.draft)
+    && (value.legacyPending === undefined || typeof value.legacyPending === 'boolean');
+}
 function invalidStored(value: unknown): StoredDraft {
   return { revision: createId(), prefills: [], draft: { ...emptyDraft(), preserved: value,
     blocked: '保存的草稿包含无法读取的内容，已保留原始数据。' } };
 }
-export function readDraft(key: string): StoredDraft | null {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw === null) return null;
-    let value: unknown;
-    try { value = JSON.parse(raw); } catch { return invalidStored(raw); }
-    if (!record(value) || typeof value.revision !== 'string' || !strings(value.prefills) || !record(value.draft)
-      || value.legacyPending !== undefined && typeof value.legacyPending !== 'boolean') return invalidStored(value);
-    // v1 drafts predate skills and the optional structured fields.
-    const draft = { ...value.draft, skills: value.draft.skills ?? [] };
-    if (!isDraft(draft)) return invalidStored(value);
-    return { revision: value.revision, draft, prefills: value.prefills,
-      ...(value.legacyPending === true ? { legacyPending: true } : {}) };
-  } catch { return invalidStored('Browser storage is unavailable'); }
+export function parseStoredDraft(raw: string): StoredDraft {
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { return invalidStored(raw); }
+  if (!record(value) || typeof value.revision !== 'string' || !strings(value.prefills) || !record(value.draft)
+    || value.legacyPending !== undefined && typeof value.legacyPending !== 'boolean'
+    || Object.keys(value).some(key => !['revision', 'draft', 'prefills', 'legacyPending'].includes(key))) return invalidStored(value);
+  const draft = { ...value.draft, skills: value.draft.skills ?? [] };
+  if (!isDraft(draft)) return invalidStored(value);
+  return { revision: value.revision, draft, prefills: value.prefills,
+    ...(value.legacyPending === true ? { legacyPending: true } : {}) };
 }
-export function writeDraft(key: string, value: StoredDraft): boolean {
-  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
-}
-
 function emptyMetadata(value: unknown): boolean {
   return value == null || value === false || value === '' || Array.isArray(value) && value.length === 0;
 }
@@ -131,10 +127,19 @@ export function documentFromText(text: string): ComposerDocument {
 function legacyKeys(context: ComposerContext, atoms: Record<string, unknown>): string[] {
   const keys: string[] = [];
   const add = (key: unknown) => { if (typeof key === 'string' && key && !keys.includes(key)) keys.push(key); };
-  add(context.legacyDraftKey);
-  if (context.hostId !== 'local' && !context.legacyDraftKey) return keys;
   const bindings = record(atoms['client-thread-bindings-v1']) ? atoms['client-thread-bindings-v1'] : {};
   const identities = record(atoms['draft-thread-identities-v1']) ? atoms['draft-thread-identities-v1'] : {};
+  if (context.hostId !== 'local') {
+    const qualified = (key: string) => key.startsWith(context.hostId + ':')
+      || record(bindings[key]) && bindings[key].hostId === context.hostId && bindings[key].threadId === context.threadId;
+    if (context.legacyDraftKey && qualified(context.legacyDraftKey)) add(context.legacyDraftKey);
+    if (qualified(context.draftId)) add(context.draftId);
+    for (const [key, binding] of Object.entries(bindings)) {
+      if (record(binding) && binding.hostId === context.hostId && binding.threadId === context.threadId) add(key);
+    }
+    return keys;
+  }
+  add(context.legacyDraftKey);
   add(context.draftId);
   if (context.threadId) {
     if (context.legacyDraftKey || context.draftId === context.threadId || context.draftId === 'local:' + context.threadId
@@ -142,6 +147,7 @@ function legacyKeys(context: ComposerContext, atoms: Record<string, unknown>): s
       add('local:' + context.threadId);
       add(context.threadId);
     }
+    for (const [alias, threadId] of Object.entries(bindings)) if (threadId === context.threadId) add(alias);
   } else {
     const location = context.placement === 'side-chat' || context.placement === 'mini' ? 'panel-new-conversation' : 'new-conversation';
     const identity = identities[location];
@@ -153,15 +159,12 @@ function legacyKeys(context: ComposerContext, atoms: Record<string, unknown>): s
   }
   return keys;
 }
-function readLegacy(context: ComposerContext, atoms: Record<string, unknown>): StoredDraft | null {
-  const keys = legacyKeys(context, atoms);
+function readLegacy(atoms: Record<string, unknown>, promptKey: string | undefined, retainedKey: string | undefined, useV1 = false): StoredDraft | null {
   const v2 = record(atoms['composer-prompt-drafts-v2']) ? atoms['composer-prompt-drafts-v2'] : {};
   const v1 = record(atoms['composer-prompt-drafts-v1']) ? atoms['composer-prompt-drafts-v1'] : {};
   const retained = record(atoms['composer-retained-documents-v1']) ? atoms['composer-retained-documents-v1'] : {};
-  const promptKey = keys.find(key => key in v2) ?? keys.find(key => key in v1);
-  const retainedKey = keys.find(key => key in retained);
   if (promptKey === undefined && retainedKey === undefined) return null;
-  const raw = promptKey === undefined ? undefined : v2[promptKey] ?? v1[promptKey];
+  const raw = promptKey === undefined ? undefined : useV1 ? v1[promptKey] : v2[promptKey] ?? v1[promptKey];
   const draft = record(raw) && 'draft' in raw ? raw.draft : raw;
   const value = record(draft) && 'prompt' in draft ? draft.prompt : draft;
   const retainedValue = retainedKey === undefined ? undefined : retained[retainedKey];
@@ -200,39 +203,70 @@ function readLegacy(context: ComposerContext, atoms: Record<string, unknown>): S
   return { revision: createId(), prefills: [], draft: { ...emptyDraft(), text, document, blocked,
     preserved: { promptKey, retainedKey, draft: raw, retained: retainedValue } } };
 }
-export function loadLocalDraft(context: ComposerContext): StoredDraft | null {
-  const key = draftKey(context);
-  const oldKey = 'codex-yard.composer.v1:' + JSON.stringify([context.hostId, context.threadId, context.threadId == null ? context.cwd : null]);
-  const oldThreadId = context.threadId && (context.draftId === context.threadId || context.draftId === 'local:' + context.threadId
-    || context.legacyDraftKey === context.threadId || context.legacyDraftKey === 'local:' + context.threadId);
-  const old = oldThreadId || context.legacyDraftKey === oldKey ? readDraft(oldKey) : null;
-  return readDraft(key) ?? old;
+export function legacyDraftCandidates(context: ComposerContext, atoms: Record<string, unknown>): StoredDraft[] {
+  const keys = legacyKeys(context, atoms);
+  const v2 = record(atoms['composer-prompt-drafts-v2']) ? atoms['composer-prompt-drafts-v2'] : {};
+  const v1 = record(atoms['composer-prompt-drafts-v1']) ? atoms['composer-prompt-drafts-v1'] : {};
+  const retained = record(atoms['composer-retained-documents-v1']) ? atoms['composer-retained-documents-v1'] : {};
+  const prompts = keys.filter(key => Object.hasOwn(v2, key) || Object.hasOwn(v1, key));
+  const retainedKeys = keys.filter(key => Object.hasOwn(retained, key));
+  const used = new Set<string>();
+  const result: StoredDraft[] = [];
+  for (const key of prompts) {
+    let retainedKey = retainedKeys.find(candidate => candidate === key && !used.has(candidate));
+    if (!retainedKey && prompts.length === 1) retainedKey = retainedKeys.find(candidate => !used.has(candidate));
+    if (!retainedKey && prompts.length > 1) {
+      const raw = Object.hasOwn(v2, key) ? v2[key] : v1[key];
+      const value = record(raw) && 'draft' in raw ? raw.draft : raw;
+      const prompt = record(value) && 'prompt' in value ? value.prompt : value;
+      retainedKey = retainedKeys.find(candidate => !used.has(candidate) && record(retained[candidate])
+        && typeof prompt === 'string' && retained[candidate].prompt === prompt);
+    }
+    if (retainedKey) used.add(retainedKey);
+    const value = readLegacy(atoms, key, retainedKey);
+    if (value) result.push(value);
+    if (v2[key] != null && Object.hasOwn(v1, key) && JSON.stringify(v1[key]) !== JSON.stringify(v2[key])) {
+      const older = readLegacy(atoms, key, undefined, true);
+      if (older) result.push(older);
+    }
+  }
+  for (const key of retainedKeys) {
+    if (!used.has(key)) {
+      const value = readLegacy(atoms, undefined, key);
+      if (value) result.push(value);
+    }
+  }
+  return result;
 }
-
-function isPristine(draft: Draft): boolean {
+export function isPristine(draft: Draft): boolean {
   return draft.text === '' && !draft.images.length && !draft.files.length && !draft.references.length && !draft.skills.length
     && Object.keys(draft).every(key => ['text', 'images', 'files', 'references', 'skills'].includes(key));
 }
 
 /** Reconcile a transactional legacy snapshot with the latest in-memory draft. */
-export function loadDraft(context: ComposerContext, atoms: Record<string, unknown>, saved = loadLocalDraft(context)): StoredDraft {
+export function loadDraft(context: ComposerContext, atoms: Record<string, unknown>, saved: StoredDraft | null): StoredDraft {
+  const legacyVersions = () => legacyDraftCandidates(context, atoms);
   if (saved?.legacyPending) {
-    const legacy = readLegacy(context, atoms);
+    const versions = legacyVersions(), legacy = versions.shift();
     const { legacyPending: _pending, ...settled } = saved;
     if (!legacy) return settled;
-    const draft = isPristine(saved.draft) ? legacy.draft : {
+    const first = isPristine(saved.draft) ? legacy.draft : {
       ...saved.draft, pendingDrafts: [...saved.draft.pendingDrafts ?? [], legacy.draft],
     };
+    const draft = versions.length ? { ...first, pendingDrafts: [...first.pendingDrafts ?? [], ...versions.map(version => version.draft)] } : first;
     return { ...settled, draft };
   }
   if (saved?.draft.blocked === legacyBlockedMessage) {
-    const legacy = readLegacy(context, atoms);
+    const legacy = legacyVersions().find(version => JSON.stringify(version.draft.preserved) === JSON.stringify(saved.draft.preserved));
     const candidate = { ...saved.draft, blocked: undefined };
     if (legacy && !legacy.draft.blocked && JSON.stringify(candidate.document) === JSON.stringify(legacy.draft.document)
       && candidate.text === legacy.draft.text && JSON.stringify(candidate.preserved) === JSON.stringify(legacy.draft.preserved)
       && !richEditIssue(candidate)) return { ...saved, draft: candidate };
   }
-  return saved ?? readLegacy(context, atoms) ?? { revision: createId(), draft: emptyDraft(), prefills: [] };
+  if (saved) return saved;
+  const versions = legacyVersions(), first = versions.shift();
+  if (!first) return { revision: createId(), draft: emptyDraft(), prefills: [] };
+  return versions.length ? { ...first, draft: { ...first.draft, pendingDrafts: versions.map(version => version.draft) } } : first;
 }
 export function textEditIssue(draft: Draft): string | null {
   if (draft.blocked) return draft.blocked;

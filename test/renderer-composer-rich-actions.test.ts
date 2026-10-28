@@ -12,7 +12,7 @@ test('rich completion and Markdown list operations survive editing, undo, refres
     import { createRoot } from 'react-dom/client';
     import { StandaloneComposer, draftToInput } from './src/renderer/composer/StandaloneComposer.tsx';
     import { readRichDocument, serializeRichDocument } from './src/renderer/composer/rich-document.ts';
-    const state={submissions:[],calls:[],enter:'enter'};
+    const state={submissions:[],calls:[],enter:'enter',controller:null,persisted:null};
     const client={async rpc(method,params,host) {
       state.calls.push({method,params,host});
       if(method==='model/list') return {data:[{id:'fixture',model:'fixture',displayName:'Fixture',isDefault:true,supportedReasoningEfforts:[]}],nextCursor:null};
@@ -34,6 +34,7 @@ test('rich completion and Markdown list operations survive editing, undo, refres
       input:[{type:'future',metadata:{keep:true}},{type:'text',text:initialText,text_elements:[]}]};
     let props={client,context:{hostId:'local',threadId:'thread',draftId:'completion',cwd:'/workspace'},busy:false,
       prefill:{id:'initial',draft},onPrefillConsumed(id){state.ready=id;},
+      onDraftController(value){state.controller=value},onDraftChange(value){state.persisted=value},
       async onSubmit(draft,options,action){state.submissions.push({draft:structuredClone(draft),input:draftToInput(draft,'local'),action});},async onInterrupt(){}};
     const root=createRoot(document.getElementById('root'));
     window.fixture={state,render(changes={}){props={...props,...changes,context:{...props.context,...changes.context}};root.render(React.createElement(StandaloneComposer,props));},
@@ -54,6 +55,10 @@ test('rich completion and Markdown list operations survive editing, undo, refres
     await page.addStyleTag({ content: css });
     await page.addScriptTag({ content: script });
     const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' });
+    const saved = () => page.waitForFunction(() => {
+      const state = (window as any).fixture.state, snapshot = state.controller?.snapshot();
+      return snapshot && state.persisted?.revision === snapshot.revision;
+    });
     await editor.locator('strong').waitFor();
     await editor.evaluate(element => {
       (element as HTMLElement).focus();
@@ -99,6 +104,7 @@ test('rich completion and Markdown list operations survive editing, undo, refres
     await page.keyboard.press('Control+Shift+z');
     await skill.waitFor();
     assert.equal(await page.evaluate(() => (window as any).fixture.state.submissions.length), 0);
+    await saved();
     await page.reload();
     await page.addStyleTag({ content: css });
     await page.addScriptTag({ content: script });
@@ -133,6 +139,7 @@ test('rich completion and Markdown list operations survive editing, undo, refres
     assert.equal(await editor.locator('ul > li > ul > li').count(), 1);
     await page.keyboard.press('Control+Shift+z');
     assert.equal(await editor.locator('ul > li > ul > li').count(), 0);
+    await saved();
     await page.reload();
     await page.addStyleTag({ content: css });
     await page.addScriptTag({ content: script });

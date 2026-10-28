@@ -170,10 +170,11 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.getByRole('button', { name: '排队' }).waitFor();
     await editor.fill('queued one');
     await page.getByRole('button', { name: '排队' }).click();
-    await page.getByText('queued one', { exact: true }).waitFor();
+    await page.getByLabel('待发送消息', { exact: true }).getByText('queued one', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '排队', exact: true }).waitFor();
     await editor.fill('queued two');
     await page.getByRole('button', { name: '排队' }).click();
-    await page.getByText('queued two', { exact: true }).waitFor();
+    await page.getByLabel('待发送消息', { exact: true }).getByText('queued two', { exact: true }).waitFor();
     await page.getByRole('button', { name: '上移待发送消息' }).nth(1).click();
     await page.waitForFunction(() => (window as any).fixture.state.queues['local:thread-a'][0].input[0].text === 'queued two');
     await page.getByRole('button', { name: '编辑待发送消息' }).first().click();
@@ -181,7 +182,7 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.getByRole('button', { name: '保存', exact: true }).click();
     await page.getByText('changed queue', { exact: true }).waitFor();
     await page.getByRole('button', { name: '删除待发送消息' }).last().click();
-    await page.getByText('queued one', { exact: true }).waitFor({ state: 'detached' });
+    await page.getByLabel('待发送消息', { exact: true }).getByText('queued one', { exact: true }).waitFor({ state: 'detached' });
     await page.evaluate(() => { (window as any).fixture.state.failAdd = true; });
     await editor.fill('retain on failure');
     await page.getByRole('button', { name: '排队' }).click();

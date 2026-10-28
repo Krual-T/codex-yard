@@ -11,9 +11,9 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     import * as React from 'react';
     import { createRoot } from 'react-dom/client';
     import { StandaloneComposer } from './src/renderer/composer/StandaloneComposer.tsx';
-    const state={calls:[],changes:[],submissions:[],consumed:[],fail:false,failStorage:false,setThread:null,setPrefill:null};
-    const originalSetItem=Storage.prototype.setItem;
-    Storage.prototype.setItem=function(key,value){if(state.failStorage && key.startsWith('codex-yard.composer.v2:'))throw Error('fixture storage failure');return originalSetItem.call(this,key,value);};
+    const state={calls:[],changes:[],submissions:[],consumed:[],fail:false,failStorage:false,deferTarget:false,resolveTarget:null,setThread:null,setPrefill:null};
+    const originalPut=IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put=function(...args){if(state.failStorage && this.name==='atoms')throw Error('fixture storage failure');return originalPut.apply(this,args);};
     const hosts=[{hostId:'local',displayName:'Local'},{hostId:'ssh-fixture',displayName:'SSH fixture'}];
     const client={
       async host(endpoint,params={}){
@@ -36,7 +36,7 @@ test('composer chooses real host roots through its parent and keeps drafts parti
       state.setThread=id=>setContext(value=>({...value,threadId:id}));
       return React.createElement(StandaloneComposer,{client,context,hosts,prefill,busy:false,
         onPrefillConsumed(id){state.consumed.push(id);setPrefill(value=>value?.id===id?null:value);},
-        async onTargetChange(target){if(state.fail)throw Error('fixture rejected');state.changes.push(target);setContext(value=>({...value,...target}));},
+        async onTargetChange(target){if(state.fail)throw Error('fixture rejected');if(state.deferTarget)await new Promise(resolve=>{state.resolveTarget=resolve;});state.changes.push(target);setContext(value=>({...value,...target}));},
         async onSubmit(draft,options,action){state.submissions.push({context,draft,action});},async onInterrupt(){}});
     }
     window.fixture=state;createRoot(document.getElementById('root')).render(React.createElement(App));
@@ -58,13 +58,19 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     assert.equal(await editor.inputValue(), 'local draft');
     await page.evaluate(() => { const fixture=(window as any).fixture; fixture.failStorage=true; fixture.setPrefill({id:'one-time',draft:{text:'',images:[],files:[],references:[{id:'r',text:'local reference'}]}}); });
     await page.getByText('local reference').waitFor();
-    await page.getByRole('alert').filter({ hasText: '草稿未能保存到浏览器' }).waitFor();
+    await page.getByRole('alert').filter({ hasText: '草稿未能保存' }).waitFor();
     await page.evaluate(() => (window as any).fixture.setPrefill((value: any) => ({ ...value })));
     assert.equal(await page.evaluate(() => (window as any).fixture.consumed.length), 0);
     await page.evaluate(() => { (window as any).fixture.failStorage = false; });
     await editor.fill('local draft after recovery');
     await page.waitForFunction(() => (window as any).fixture.consumed.includes('one-time'));
+    await page.evaluate(() => { (window as any).fixture.deferTarget = true; });
     await target.selectOption({ label: 'SSH fixture: /remote/project' });
+    await page.waitForFunction(() => typeof (window as any).fixture.resolveTarget === 'function');
+    assert.equal(await editor.evaluate(element => element.closest('[inert]') !== null), true);
+    await page.keyboard.type(' should not be inserted');
+    assert.equal(await editor.inputValue(), 'local draft after recovery');
+    await page.evaluate(() => { const fixture=(window as any).fixture; fixture.deferTarget=false; fixture.resolveTarget(); });
     await page.waitForFunction(() => (window as any).fixture.changes.length === 2);
     await page.waitForFunction(() => (document.querySelector('textarea[aria-label="和 Codex 一起工作"]') as HTMLTextAreaElement)?.value === '');
     assert.equal(await page.getByText('local reference').count(), 0);

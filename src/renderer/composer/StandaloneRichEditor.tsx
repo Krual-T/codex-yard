@@ -15,6 +15,7 @@ export interface RichEditorHandle {
 }
 interface RichEditorProps {
   document: ComposerDocument;
+  currentDocument(): ComposerDocument | undefined;
   onChange(document: ComposerDocument): void;
   onKeyDown(event: KeyboardEvent): boolean;
   onImages(files: File[]): void;
@@ -112,10 +113,11 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
   }, []);
 
   useEffect(() => {
+    if (props.currentDocument() !== props.document) return;
     const editor = view.current, doc = readRichDocument(props.document);
     if (!editor || !doc || editor.state.doc.eq(doc)) return;
     editor.updateState(EditorState.create({ doc, plugins: editor.state.plugins }));
-  }, [props.document]);
+  }, [props.document, props.currentDocument]);
 
   useEffect(() => {
     view.current?.setProps({ attributes: {

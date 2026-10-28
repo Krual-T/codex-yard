@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { activatePending, draftKey, draftToInput, emptyDraft, loadDraft as loadDraftFromAtoms, mergePrefill, normalizeDraft, readDraft, textEditIssue, updateDraftText, writeDraft } from '../src/renderer/composer/standalone-draft.ts';
+import { activatePending, draftKey, draftToInput, emptyDraft, legacyDraftCandidates, loadDraft as loadDraftFromAtoms, mergePrefill, normalizeDraft, parseStoredDraft, textEditIssue, updateDraftText } from '../src/renderer/composer/standalone-draft.ts';
+import type { StoredDraft } from '../src/renderer/composer/standalone-draft.ts';
 import type { ComposerContext, ComposerDraft, StandaloneComposerProps, WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 
 function contractTypeChecks(submit: StandaloneComposerProps['onSubmit'], client: WorkbenchClient) {
@@ -32,9 +33,15 @@ function storage(): Storage {
   return result;
 }
 const context: ComposerContext = { hostId: 'local', threadId: 'thread-1', cwd: '/workspace', draftId: 'draft-1' };
+function writeDraft(key: string, value: StoredDraft) { localStorage.setItem(key, JSON.stringify(value)); return true; }
+function readDraft(key: string) { const raw = localStorage.getItem(key); return raw === null ? null : parseStoredDraft(raw); }
 function loadDraft(value: ComposerContext) {
   const raw = localStorage.getItem('native-atoms');
-  return loadDraftFromAtoms(value, raw ? JSON.parse(raw) : {});
+  const oldKey = 'codex-yard.composer.v1:' + JSON.stringify([value.hostId, value.threadId, value.threadId == null ? value.cwd : null]);
+  const oldThread = value.threadId && (value.draftId === value.threadId || value.draftId === 'local:' + value.threadId
+    || value.legacyDraftKey === value.threadId || value.legacyDraftKey === 'local:' + value.threadId);
+  const saved = readDraft(draftKey(value)) ?? (oldThread || value.legacyDraftKey === oldKey ? readDraft(oldKey) : null);
+  return loadDraftFromAtoms(value, raw ? JSON.parse(raw) : {}, saved);
 }
 
 test('draft identity is stable across cwd changes and distinct across drafts and hosts', () => {
@@ -152,17 +159,41 @@ test('conflicting retained and prompt documents remain distinct and block editin
   assert.deepEqual((draft.preserved as { retained: unknown }).retained, retained);
 });
 
-test('legacy thread drafts are restored only for an explicit matching identity', () => {
+test('legacy local thread aliases are recovered through the binding and v1 keys require a trusted identity', () => {
   const saved = storage();
   const legacyKey = 'codex-yard.composer.v1:' + JSON.stringify(['local', 'thread-1', null]);
   saved.setItem(legacyKey, JSON.stringify({ revision: 'old', draft: emptyDraft(), prefills: [] }));
   saved.setItem('native-atoms', JSON.stringify({ 'client-thread-bindings-v1': { 'original-client': 'thread-1' },
     'composer-prompt-drafts-v1': { 'original-client': 'Original client draft' } }));
-  assert.equal(loadDraft({ ...context, draftId: 'new-client' }).draft.text, '');
+  assert.equal(loadDraft({ ...context, draftId: 'new-client' }).draft.text, 'Original client draft');
   assert.equal(loadDraft({ ...context, draftId: 'original-client' }).draft.text, 'Original client draft');
   assert.equal(loadDraft({ ...context, legacyDraftKey: 'original-client' }).draft.text, 'Original client draft');
   assert.equal(loadDraft({ ...context, legacyDraftKey: legacyKey }).revision, 'old');
   assert.throws(() => draftKey({ ...context, draftId: '' }), /draftId is required/);
+});
+
+test('multiple bound aliases remain distinct and remote recovery requires host evidence', () => {
+  const atoms = { 'client-thread-bindings-v1': { first: 'thread-1', second: 'thread-1', remote: { hostId: 'ssh-a', threadId: 'thread-1' } },
+    'composer-prompt-drafts-v1': { first: 'first', second: 'second', remote: 'remote', 'thread-1': 'bare' } };
+  assert.deepEqual(legacyDraftCandidates(context, atoms).map(value => value.draft.text), ['first', 'second']);
+  assert.deepEqual(legacyDraftCandidates({ ...context, hostId: 'ssh-a', draftId: 'thread-1' }, atoms).map(value => value.draft.text), ['remote']);
+  assert.deepEqual(legacyDraftCandidates({ ...context, hostId: 'ssh-b', draftId: 'thread-1' }, atoms), []);
+});
+
+test('different v1 and v2 values for one trusted alias remain separate candidates', () => {
+  const atoms = { 'client-thread-bindings-v1': { client: 'thread-1' },
+    'composer-prompt-drafts-v1': { client: 'older' }, 'composer-prompt-drafts-v2': { client: { prompt: 'newer' } } };
+  assert.deepEqual(legacyDraftCandidates({ ...context, draftId: 'thread-1' }, atoms).map(value => value.draft.text), ['newer', 'older']);
+});
+
+test('unrecognized old draft envelopes and malformed bytes are preserved without editable conversion', () => {
+  const unknown = { revision: 'old', draft: emptyDraft(), prefills: [], future: { keep: true } };
+  const recovered = parseStoredDraft(JSON.stringify(unknown));
+  assert.deepEqual(recovered.draft.preserved, unknown);
+  assert.match(recovered.draft.blocked ?? '', /保留原始数据/);
+  const malformed = parseStoredDraft('{not json');
+  assert.equal(malformed.draft.preserved, '{not json');
+  assert.match(malformed.draft.blocked ?? '', /保留原始数据/);
 });
 
 test('ordered input, hints, references and file IDs survive normalization and serialization', () => {

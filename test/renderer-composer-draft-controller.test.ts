@@ -11,6 +11,7 @@ test('composer draft controller preserves current edits across reference removal
     import React from 'react';
     import { createRoot } from 'react-dom/client';
     import { StandaloneComposer } from './src/renderer/composer/StandaloneComposer.tsx';
+    import { writeComposerDraftVersion } from './src/renderer/composer/composer-draft-store.ts';
     const state={controller:null,snapshots:[],removals:[],submissions:[]};
     const client={async rpc(method) {
       if(method==='model/list') return {data:[],nextCursor:null};
@@ -28,7 +29,7 @@ test('composer draft controller preserves current edits across reference removal
       onRemoveReference(owner,reference){state.removals.push({owner,reference});return new Promise((resolve,reject)=>{resolveRemoval=resolve;rejectRemoval=reject;});},
       onSubmit(draft){state.submissions.push(structuredClone(draft));return new Promise(resolve=>{resolveSubmit=resolve;});},async onInterrupt(){}};
     const root=createRoot(document.getElementById('root'));
-    window.fixture={state,render(changes={}){props={...props,...changes,context:{...props.context,...changes.context}};root.render(React.createElement(StandaloneComposer,props));},
+    window.fixture={state,writeComposerDraftVersion,render(changes={}){props={...props,...changes,context:{...props.context,...changes.context}};root.render(React.createElement(StandaloneComposer,props));},
       resolveRemoval(){resolveRemoval();},rejectRemoval(){rejectRemoval(Error('fixture comment storage failure'));},resolveSubmit(){resolveSubmit();}};
     window.fixture.render();
   ` }, bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' } });
@@ -58,11 +59,11 @@ test('composer draft controller preserves current edits across reference removal
     await rich.locator('strong').waitFor();
     const reference = { id: 'browser:one', text: 'Original reference', kind: 'browser',
       context: { hostId: 'local', nested: { keep: true } }, original: { id: 'comment', content: ['original'] } };
-    const before = await page.evaluate(reference => {
+    const before = await page.evaluate(async reference => {
       const controller = (window as any).fixture.state.controller, snapshot = controller.snapshot();
       const wrongOwner = { ...snapshot.owner, threadId: 'wrong' };
-      const rejected = controller.update(wrongOwner, (draft: any) => ({ ...draft, text: 'incorrect' }));
-      const accepted = controller.update(snapshot.owner, (draft: any) => ({ ...draft, references: [reference] }));
+      const rejected = await controller.update(wrongOwner, (draft: any) => ({ ...draft, text: 'incorrect' }));
+      const accepted = await controller.update(snapshot.owner, (draft: any) => ({ ...draft, references: [reference] }));
       return { rejected, accepted, revision: snapshot.revision };
     }, reference);
     assert.equal(before.rejected, false); assert.equal(before.accepted, true);
@@ -82,44 +83,41 @@ test('composer draft controller preserves current edits across reference removal
     assert.equal(snapshotIsolation.owner.threadId, 'thread-a');
     assert.equal(snapshotIsolation.draft.references[0].text, 'Original reference');
 
-    const failure = await page.evaluate(() => {
+    const failure = await page.evaluate(async () => {
       const controller = (window as any).fixture.state.controller, before = controller.snapshot();
-      const original = Storage.prototype.setItem;
-      Storage.prototype.setItem = function(key, value) {
-        if (key.startsWith('codex-yard.composer.v2:')) throw Error('fixture quota');
-        return original.call(this, key, value);
+      const original = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function(...args: Parameters<IDBObjectStore['put']>) {
+        if (this.name === 'atoms') throw Error('fixture quota');
+        return original.apply(this, args);
       };
       let message = '';
-      try { controller.update(before.owner, (draft: any) => { draft.text = 'lost'; draft.references.length = 0; return draft; }); }
+      try { await controller.update(before.owner, (draft: any) => { draft.text = 'lost'; draft.references.length = 0; return draft; }); }
       catch (error) { message = (error as Error).message; }
-      finally { Storage.prototype.setItem = original; }
+      finally { IDBObjectStore.prototype.put = original; }
       return { message, before, after: controller.snapshot() };
     });
     assert.match(failure.message, /未能保存/);
     assert.deepEqual(failure.after, failure.before);
     await page.getByRole('alert').filter({ hasText: '草稿未能保存' }).waitFor();
 
-    const conflict = await page.evaluate(() => {
+    const conflict = await page.evaluate(async () => {
       const controller = (window as any).fixture.state.controller, before = controller.snapshot();
-      const key = 'codex-yard.composer.v2:' + JSON.stringify(['local', 'stable-draft']);
-      const original = localStorage.getItem(key)!;
-      const external = JSON.parse(original); external.revision = 'other-page'; external.draft.text = 'other page';
-      localStorage.setItem(key, JSON.stringify(external));
-      let message = '';
-      try { controller.update(before.owner, (draft: any) => ({ ...draft, text: 'overwrite' })); }
-      catch (error) { message = (error as Error).message; }
-      localStorage.setItem(key, original);
-      return { message, before, after: controller.snapshot() };
+      await (window as any).fixture.writeComposerDraftVersion(before.owner, 'stale-revision', {
+        revision: 'other-page', draft: { ...before.draft, text: 'other page' }, prefills: [],
+      });
+      const accepted = await controller.update(before.owner, (draft: any) => ({ ...draft, hints: [] }));
+      return { accepted, after: controller.snapshot() };
     });
-    assert.match(conflict.message, /其他页面修改/);
-    assert.deepEqual(conflict.after, conflict.before);
+    assert.equal(conflict.accepted, true);
+    assert.equal(conflict.after.draft.text, '**Initial** text');
+    await page.getByText('其他页面或旧数据中有 1 份独立草稿。').waitFor();
 
     await page.getByRole('button', { name: '移除引用' }).click();
     await page.waitForFunction(() => (window as any).fixture.state.removals.length === 1);
     assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.removals[0]), { owner: added.owner, reference });
-    await page.evaluate(() => {
+    await page.evaluate(async () => {
       const controller = (window as any).fixture.state.controller, owner = controller.snapshot().owner;
-      controller.update(owner, (draft: any) => ({ ...draft, references: [{ ...draft.references[0], text: 'Revised reference' }] }));
+      await controller.update(owner, (draft: any) => ({ ...draft, references: [{ ...draft.references[0], text: 'Revised reference' }] }));
     });
     await rich.focus(); await page.keyboard.press('End'); await page.keyboard.type(' newer');
     await page.evaluate(() => (window as any).fixture.resolveRemoval());
@@ -134,21 +132,21 @@ test('composer draft controller preserves current edits across reference removal
     await page.getByRole('button', { name: '移除引用' }).click();
     await page.evaluate(() => {
       const fixture = (window as any).fixture;
-      fixture.originalSetItem = Storage.prototype.setItem;
-      Storage.prototype.setItem = function(key, value) {
-        if (key.startsWith('codex-yard.composer.v2:')) throw Error('fixture quota');
-        return fixture.originalSetItem.call(this, key, value);
+      fixture.originalPut = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function(...args: Parameters<IDBObjectStore['put']>) {
+        if (this.name === 'atoms') throw Error('fixture quota');
+        return fixture.originalPut.apply(this, args);
       };
       fixture.resolveRemoval();
     });
     await page.getByRole('alert').filter({ hasText: '移除引用失败' }).waitFor();
-    await page.evaluate(() => { Storage.prototype.setItem = (window as any).fixture.originalSetItem; });
+    await page.evaluate(() => { IDBObjectStore.prototype.put = (window as any).fixture.originalPut; });
     await page.getByText('Revised reference').waitFor();
 
     await page.getByRole('button', { name: '移除引用' }).click();
-    await page.evaluate(() => {
+    await page.evaluate(async () => {
       const controller = (window as any).fixture.state.controller, owner = controller.snapshot().owner;
-      controller.update(owner, (draft: any) => ({ ...draft, references: [...draft.references, { id: 'file:two', text: 'Another reference' }] }));
+      await controller.update(owner, (draft: any) => ({ ...draft, references: [...draft.references, { id: 'file:two', text: 'Another reference' }] }));
     });
     await rich.focus(); await page.keyboard.press('End'); await page.keyboard.type(' kept');
     await page.evaluate(() => (window as any).fixture.resolveRemoval());
@@ -164,13 +162,13 @@ test('composer draft controller preserves current edits across reference removal
       fixture.render({ context: { threadId: 'thread-b' } });
     });
     await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.owner.threadId === 'thread-b');
-    assert.deepEqual(await page.evaluate(() => {
+    assert.deepEqual(await page.evaluate(async () => {
       const fixture = (window as any).fixture;
-      return { stale: fixture.oldController.snapshot(), accepted: fixture.oldController.update(fixture.oldOwner, (draft: any) => ({ ...draft, text: 'stale' })) };
+      return { stale: fixture.oldController.snapshot(), accepted: await fixture.oldController.update(fixture.oldOwner, (draft: any) => ({ ...draft, text: 'stale' })) };
     }), { stale: null, accepted: false });
-    await rich.focus(); await page.keyboard.press('End'); await page.keyboard.type(' thread-b');
+    await editor.fill('thread-b');
     await page.evaluate(() => (window as any).fixture.resolveRemoval());
-    await page.getByText('Another reference').waitFor();
+    assert.equal(await page.getByText('Another reference').count(), 0);
     assert.match((await page.evaluate(() => (window as any).fixture.state.controller.snapshot())).draft.text, /thread-b/);
     assert.equal(await page.evaluate(() => (window as any).fixture.state.snapshots.some((snapshot: any) => snapshot.owner.threadId === 'thread-b')), true);
 
@@ -181,6 +179,8 @@ test('composer draft controller preserves current edits across reference removal
     await rich.focus(); await page.keyboard.press('End'); await page.keyboard.type(' latest');
     await page.evaluate(() => (window as any).fixture.resolveSubmit());
     await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.text.includes('latest'));
+    await page.waitForFunction(() => (window as any).fixture.state.snapshots.some((snapshot: any) => snapshot.draft.text.includes('latest')));
+    const beforeRefresh = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
     assert.equal(await page.evaluate(() => (window as any).fixture.oldController.snapshot()), null);
     await page.evaluate(() => {
       const fixture = (window as any).fixture;
@@ -188,9 +188,9 @@ test('composer draft controller preserves current edits across reference removal
       fixture.render({ context: { hostId: 'ssh-fixture', threadId: 'thread-c', draftId: 'remote-draft' } });
     });
     await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.owner.hostId === 'ssh-fixture');
-    assert.equal(await page.evaluate(() => {
+    assert.equal(await page.evaluate(async () => {
       const fixture = (window as any).fixture;
-      return fixture.oldController.update(fixture.oldOwner, (draft: any) => ({ ...draft, text: 'stale remote update' }));
+      return await fixture.oldController.update(fixture.oldOwner, (draft: any) => ({ ...draft, text: 'stale remote update' }));
     }), false);
     await page.evaluate(() => (window as any).fixture.render({ context: { hostId: 'local', threadId: 'thread-a', draftId: 'stable-draft' } }));
     await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.owner.draftId === 'stable-draft');
@@ -198,8 +198,11 @@ test('composer draft controller preserves current edits across reference removal
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     await page.locator('.ProseMirror').waitFor();
     await page.getByText('Another reference').waitFor();
-    assert.match((await page.evaluate(() => (window as any).fixture.state.controller.snapshot())).draft.text, /latest/);
-    assert.equal(await page.locator('.ProseMirror strong').innerText(), 'Initial');
+    const afterRefresh = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+    assert.equal(afterRefresh.text, beforeRefresh.text);
+    assert.deepEqual(afterRefresh.document, beforeRefresh.document);
+    assert.deepEqual(afterRefresh.references, beforeRefresh.references);
+    assert.equal(await page.locator('.ProseMirror strong').innerText(), beforeRefresh.document.content[0].content[0].text);
     assert.deepEqual(errors, []);
   } finally { await context.close(); await browser.close(); }
 });

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ClipboardEvent } from 'react';
 import type { ComposerDraft, StandaloneComposerProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
-import { readBrowserAtoms, subscribeBrowserAtoms } from '../storage/ui-atoms.ts';
-import { activatePending, createId, documentFromText, draftKey, draftToInput, emptyDraft, hasContent, legacyBlockedMessage, loadDraft, loadLocalDraft, mergePrefill, normalizeDraft, readDraft, richEditIssue, textEditIssue, updateDraftText, updateRichDraft, writeDraft } from './standalone-draft.ts';
-import type { Draft, StoredDraft } from './standalone-draft.ts';
+import { activatePending, documentFromText, draftToInput, hasContent, mergePrefill, richEditIssue, textEditIssue, updateDraftText, updateRichDraft } from './standalone-draft.ts';
+import { useComposerDraft } from './use-composer-draft.ts';
+import type { ComposerDraftController } from './use-composer-draft.ts';
+import type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescription } from './composer-draft-store.ts';
 import { importAttachments } from './standalone-files.ts';
 import { useCompletions } from './standalone-completions.tsx';
 import type { Completion } from './standalone-completions.tsx';
@@ -21,25 +22,13 @@ import { FilePenLine } from 'lucide-react';
 import './standalone-composer.css';
 
 export { draftToInput } from './standalone-draft.ts';
+export { clearComposerDraftRevision, readComposerDraft } from './composer-draft-store.ts';
 export type { DraftSkill } from './standalone-draft.ts';
-export interface ComposerDraftOwner {
-  hostId: string;
-  threadId: string | null;
-  draftId: string;
-}
-export interface ComposerDraftSnapshot {
-  owner: ComposerDraftOwner;
-  draft: ComposerDraft;
-  revision: string;
-}
-export interface ComposerDraftController {
-  /** Returns null once this owner's controller has been replaced or unmounted. */
-  snapshot(): ComposerDraftSnapshot | null;
-  /** Returns false for a stale owner; throws if the update cannot be persisted. */
-  update(owner: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft): boolean;
-}
+export type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescription } from './composer-draft-store.ts';
+export type { ComposerDraftController } from './use-composer-draft.ts';
 export type ComposerReference = NonNullable<ComposerDraft['references']>[number];
-export type StandaloneComposerRuntimeProps = StandaloneComposerProps & {
+export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSubmit'> & {
+  onSubmit(draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, description?: ComposerSubmissionDescription): Promise<void>;
   /** The app's authoritative active turn, used as the steer precondition. */
   activeTurnId?: string | null;
   initialOptions?: SubmitOptions;
@@ -52,8 +41,6 @@ export type StandaloneComposerRuntimeProps = StandaloneComposerProps & {
 };
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-const legacyAtomKeys = new Set(['composer-prompt-drafts-v2', 'composer-prompt-drafts-v1', 'composer-retained-documents-v1',
-  'client-thread-bindings-v1', 'draft-thread-identities-v1']);
 function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; hostId: string; path: string; name: string }) {
   const [preview, setPreview] = useState<string | null>(null);
   return <details onToggle={event => {
@@ -65,34 +52,24 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
 }
 
 function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
-  const key = draftKey(context);
-  const [initial] = useState<StoredDraft>(() => loadLocalDraft(context)
-    ?? { revision: createId(), draft: emptyDraft(), prefills: [], legacyPending: true });
-  const current = useRef(initial);
-  const [initialPersistedRevision] = useState(() => readDraft(key)?.revision ?? null);
-  const persistedRevision = useRef(initialPersistedRevision);
-  const [stored, setStored] = useState(initial);
+  const { owner, controller, current, stored, changeDraft, retain, clear, selectVersion, conflicts, storageError, saving, loaded, retry, lastWrite }
+    = useComposerDraft(context, onDraftController, onDraftChange);
   const draft = stored.draft;
   const [overrides, setOverrides] = useState<Partial<SubmitOptions>>({});
   const [appliedOptions, setAppliedOptions] = useState<{ changes: Partial<SubmitOptions>; baseline: SubmitOptions } | null>(null);
   const options = { ...initialOptions, ...overrides };
   const [error, setError] = useState('');
-  const [storageError, setStorageError] = useState(false);
-  const [legacyError, setLegacyError] = useState('');
-  const [legacyRetry, setLegacyRetry] = useState(0);
   const [sending, setSending] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [switchingTarget, setSwitchingTarget] = useState(false);
   const [queueVersion, setQueueVersion] = useState(0);
   const [cursor, setCursor] = useState(0);
   const [richContext, setRichContext] = useState<RichCompletionContext | null>(null);
   const enterSetting = useEnterSetting(client);
   const followUpSetting = useFollowUpSetting(client);
   const mounted = useRef(false);
-  const legacyGeneration = useRef(0);
   const activeController = useRef<ComposerDraftController | null>(null);
-  const draftChangeCallback = useRef(onDraftChange);
-  draftChangeCallback.current = onDraftChange;
   const pendingReferences = useRef(new Map<string, ComposerDraftController>());
   const [removing, setRemoving] = useState<{ controller: ComposerDraftController; ids: Set<string> } | null>(null);
   const submitInFlight = useRef(false);
@@ -136,100 +113,11 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     setAppliedOptions(Object.keys(next).length ? { ...appliedOptions, changes: next } : null);
   }, [appliedOptions, initialOptions, overrides]);
 
-  const changeDraft = useCallback((update: (draft: Draft) => Draft, prefillId?: string) => {
-    if (!mounted.current) return false;
-    const previous = current.current;
-    const next = { ...previous, revision: createId(), draft: update(previous.draft),
-      prefills: prefillId ? [...previous.prefills, prefillId] : previous.prefills };
-    current.current = next;
-    const saved = writeDraft(key, next);
-    if (saved) persistedRevision.current = next.revision;
-    setStored(next); setStorageError(!saved);
-    return saved;
-  }, [key]);
-
-  const owner = useMemo<ComposerDraftOwner>(() => ({ hostId: context.hostId, threadId: context.threadId, draftId: context.draftId }),
-    [context.hostId, context.threadId, context.draftId]);
-  const controller = useMemo<ComposerDraftController>(() => {
-    const result: ComposerDraftController = {
-      snapshot() {
-        if (activeController.current !== result) return null;
-        return structuredClone({ owner, draft: current.current.draft, revision: current.current.revision });
-      },
-      update(expected, update) {
-        if (activeController.current !== result || expected.hostId !== owner.hostId
-          || expected.threadId !== owner.threadId || expected.draftId !== owner.draftId) return false;
-        const previous = current.current;
-        const persisted = readDraft(key);
-        if ((persisted?.revision ?? null) !== persistedRevision.current) {
-          throw new Error('草稿已在其他页面修改，当前内容已保留。');
-        }
-        const updated = update(structuredClone(previous.draft));
-        if (activeController.current !== result || current.current !== previous) return false;
-        const nextDraft = normalizeDraft({ ...previous.draft, ...updated });
-        if (JSON.stringify(nextDraft) === JSON.stringify(previous.draft) && persisted?.revision === previous.revision) return true;
-        const next = { ...previous, revision: createId(), draft: nextDraft };
-        if (!writeDraft(key, next)) {
-          setStorageError(true);
-          throw new Error('草稿未能保存到浏览器，当前内容已保留。');
-        }
-        persistedRevision.current = next.revision;
-        current.current = next;
-        setStored(next); setStorageError(false);
-        return true;
-      },
-    };
-    return result;
-  }, [key, owner]);
   useLayoutEffect(() => {
     mounted.current = true;
     activeController.current = controller;
     return () => { if (activeController.current === controller) activeController.current = null; mounted.current = false; };
   }, [controller]);
-  const legacyIdentity = JSON.stringify([context.hostId, context.threadId, context.draftId, context.placement ?? null, context.legacyDraftKey ?? null]);
-  useLayoutEffect(() => { legacyGeneration.current += 1; }, [legacyIdentity]);
-  useLayoutEffect(() => {
-    onDraftController?.(controller);
-    return () => onDraftController?.(null);
-  }, [controller, onDraftController]);
-  useLayoutEffect(() => {
-    const snapshot = controller.snapshot();
-    if (snapshot) draftChangeCallback.current?.(snapshot);
-  }, [controller, stored]);
-
-  useEffect(() => {
-    setLegacyError('');
-    if (!current.current.legacyPending && current.current.draft.blocked !== legacyBlockedMessage) return;
-    const generation = legacyGeneration.current;
-    let disposed = false, request = 0;
-    const valid = (serial: number) => !disposed && mounted.current && activeController.current === controller
-      && generation === legacyGeneration.current && serial === request;
-    const read = () => {
-      const serial = ++request;
-      void readBrowserAtoms().then(atoms => {
-        if (!valid(serial)) return;
-        const previous = current.current;
-        const recovered = loadDraft(context, atoms, previous);
-        if (recovered !== previous) {
-          if ((readDraft(key)?.revision ?? null) !== persistedRevision.current) {
-            throw new Error('草稿已在其他页面修改，当前内容已保留。');
-          }
-          const next = { ...recovered, revision: createId() };
-          if (!writeDraft(key, next)) throw new Error('恢复的草稿未能保存到浏览器，当前内容已保留。');
-          persistedRevision.current = next.revision;
-          current.current = next;
-          setStored(next); setStorageError(false);
-        }
-        setLegacyError('');
-        unsubscribe();
-      }).catch(reason => {
-        if (valid(serial)) setLegacyError('无法恢复旧草稿，当前内容已保留：' + message(reason));
-      });
-    };
-    const unsubscribe = subscribeBrowserAtoms(keys => { if (keys.some(key => legacyAtomKeys.has(key))) read(); });
-    read();
-    return () => { disposed = true; unsubscribe(); };
-  }, [legacyIdentity, controller, key, legacyRetry]);
 
   const removeReference = async (reference: ComposerReference) => {
     if (pendingReferences.current.get(reference.id) === controller) return;
@@ -238,7 +126,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     setError('');
     try {
       await onRemoveReference?.(structuredClone(owner), structuredClone(reference));
-      controller.update(owner, value => ({ ...value, references: (value.references ?? []).filter(item =>
+      await controller.update(owner, value => ({ ...value, references: (value.references ?? []).filter(item =>
         item.id !== reference.id || JSON.stringify(item) !== JSON.stringify(reference)) }));
     } catch (reason) {
       if (activeController.current === controller) setError('移除引用失败，草稿已保留：' + message(reason));
@@ -252,15 +140,15 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     }
   };
   useEffect(() => {
-    if (!prefill) return;
+    if (!prefill || !loaded) return;
     if (current.current.prefills.includes(prefill.id)) {
-      if (readDraft(key)?.prefills.includes(prefill.id)) onPrefillConsumed?.(prefill.id);
+      void lastWrite.current.then(saved => { if (saved && activeController.current === controller) onPrefillConsumed?.(prefill.id); });
       return;
     }
-    const saved = changeDraft(value => mergePrefill(value, prefill.draft), prefill.id);
-    if (saved) onPrefillConsumed?.(prefill.id);
+    void changeDraft(value => mergePrefill(value, prefill.draft), prefill.id)
+      .then(saved => { if (saved && activeController.current === controller) onPrefillConsumed?.(prefill.id); });
     requestAnimationFrame(() => { if (richEditor.current) richEditor.current.focus(); else editor.current?.focus(); });
-  }, [prefill, changeDraft, onPrefillConsumed, key, storageError]);
+  }, [prefill, changeDraft, onPrefillConsumed, storageError, controller, current, lastWrite, loaded]);
 
   const addFiles = async (files: File[]) => {
     if (!files.length || uploadInFlight.current || editIssue || structuredInput) return;
@@ -302,27 +190,27 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     }
     try { draftToInput(current.current.draft, context.hostId); }
     catch (reason) { setError(message(reason)); return; }
-    const captured = current.current;
+    const captured = structuredClone(current.current);
+    const submittedOptions = structuredClone(options), submittedOverrides = structuredClone(overrides);
     submitInFlight.current = true; setSending(true); setError('');
+    let confirmed = false;
     try {
       const submitted: ComposerDraft = captured.draft;
-      await onSubmit(submitted, options, action);
+      if (!await retain(captured)) throw new Error('提交版本未能持久化。');
       if (activeController.current !== controller) return;
-      if (mounted.current && action.type === 'send' && Object.keys(overrides).length) {
-        setAppliedOptions({ changes: { ...overrides }, baseline: { ...initialOptions } });
+      await onSubmit(submitted, submittedOptions, action, { owner: structuredClone(owner), revision: captured.revision, overrides: submittedOverrides });
+      confirmed = true;
+      if (activeController.current !== controller) return;
+      if (mounted.current && action.type === 'send' && Object.keys(submittedOverrides).length) {
+        setAppliedOptions({ changes: submittedOverrides, baseline: { ...initialOptions } });
       }
       if (busy && followUp === 'queue' && mounted.current) setQueueVersion(value => value + 1);
-      const persisted = readDraft(key);
-      if (current.current.revision === captured.revision && (!persisted || persisted.revision === captured.revision)) {
-        changeDraft(value => activatePending(value, false));
-      } else if (current.current.revision === captured.revision && mounted.current) {
-        setError('发送已确认，但草稿已在其他页面修改，已保留。');
-      }
+      await clear(captured.revision);
       if (mounted.current) requestAnimationFrame(() => { if (richEditor.current) richEditor.current.focus(); else editor.current?.focus(); });
     } catch (reason) {
       if (activeController.current === controller) {
         if (busy && context.threadId) setQueueVersion(value => value + 1);
-        setError('发送未确认，草稿已保留。请检查会话后再重试：' + message(reason));
+        setError((confirmed ? '发送已确认，但草稿清理失败，原内容已保留：' : '发送未确认，草稿已保留。请检查会话后再重试：') + message(reason));
       }
     } finally { submitInFlight.current = false; if (mounted.current) setSending(false); }
   };
@@ -390,7 +278,11 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   };
   return <div className="standalone-composer">
     {context.threadId ? <StandaloneQueue key={JSON.stringify([context.hostId, context.threadId])} client={client} hostId={context.hostId} threadId={context.threadId} busy={busy} refreshVersion={queueVersion} onStartQueued={onStartQueued} /> : null}
-    <div className="standalone-composer__editor">
+    <div className="standalone-composer__editor" inert={switchingTarget} aria-busy={switchingTarget || undefined}>
+      {conflicts.length ? <div role="status">其他页面或旧数据中有 {conflicts.length} 份独立草稿。<details><summary>选择草稿版本</summary>
+        {conflicts.map(version => <button type="button" key={version.revision} onClick={() => void selectVersion(version.revision)
+          .catch(reason => setError('无法切换草稿：' + message(reason)))}>{version.draft.text.slice(0, 80) || '包含附件或保留数据的草稿'}</button>)}
+      </details></div> : null}
       {draft.pendingDrafts?.length ? <div role="status">{draft.pendingDrafts.length} 份内容已单独保留，避免合并时丢失格式。 <button type="button" onClick={() => changeDraft(value => activatePending(value, true))}>切换草稿</button></div> : null}
       {draft.images.length || draft.files.length || draft.references.length || draft.skills.length ? <div className="standalone-composer__attachments">
         {draft.images.map(image => <div className="standalone-composer__image" key={image.id}>
@@ -409,7 +301,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         </div>)}
       </div> : null}
       {editIssue ? <div className="standalone-composer__retained" role="status">{editIssue}<details><summary>查看保留的内容</summary><pre>{JSON.stringify({ document: draft.document, input: draft.input, hints: draft.hints, preserved: draft.preserved, pending: draft.pendingDrafts }, null, 2)}</pre></details></div> : null}
-      {richActive && draft.document ? <StandaloneRichEditor ref={richEditor} document={draft.document}
+      {richActive && draft.document ? <StandaloneRichEditor ref={richEditor} document={draft.document} currentDocument={() => current.current.draft.document}
         onChange={document => changeDraft(value => updateRichDraft(value, document))} onKeyDown={keyDown}
         onCompletionContext={onRichContext} completionListId={completions.query ? completions.listId : undefined}
         completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
@@ -437,7 +329,12 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         {!draft.document ? <button type="button" aria-label="富文本编辑" title="富文本编辑" disabled={!!editIssue}
           onClick={() => { changeDraft(value => ({ ...value, document: documentFromText(value.text) }));
             requestAnimationFrame(() => richEditor.current?.focus()); }}><FilePenLine size={16} /></button> : null}
-        {onTargetChange ? <StandaloneTarget client={client} context={context} hosts={hosts} disabled={busy || sending || uploading} onTargetChange={onTargetChange} /> : null}
+        {onTargetChange ? <StandaloneTarget client={client} context={context} hosts={hosts} disabled={busy || sending || uploading || !!removing || switchingTarget}
+          onTargetChange={async target => {
+            setSwitchingTarget(true);
+            try { if (await controller.flush(owner)) await onTargetChange(target); }
+            finally { if (mounted.current) setSwitchingTarget(false); }
+          }} /> : null}
         <StandaloneOptions client={client} hostId={context.hostId} cwd={context.cwd} threadId={context.threadId} busy={busy} modelRef={modelPicker} value={options}
           onChange={patch => setOverrides(previous => ({ ...previous, ...patch }))} />
         <label className="standalone-composer__enter">发送方式 <select aria-label="发送方式" value={enterSetting.value} disabled={enterSetting.pending} onChange={event => {
@@ -456,8 +353,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       </div>
     </div>
     {uploading ? <div role="status">正在上传附件…</div> : null}
-    {storageError ? <div role="alert">草稿未能保存到浏览器，刷新前请检查浏览器存储空间。</div> : null}
-    {legacyError ? <div role="alert">{legacyError} <button type="button" onClick={() => setLegacyRetry(value => value + 1)}>重试恢复</button></div> : null}
+    {saving ? <div role="status">正在保存草稿…</div> : null}
+    {storageError ? <div role="alert">{storageError} <button type="button" onClick={retry}>重试保存</button></div> : null}
     {enterSetting.error ? <div role="alert">{enterSetting.error}</div> : null}
     {busy && followUpSetting.error ? <div role="alert">{followUpSetting.error}</div> : null}
     {error ? <div role="alert">{error}</div> : null}
@@ -465,5 +362,5 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
 }
 
 export function StandaloneComposer(props: StandaloneComposerRuntimeProps) {
-  return <ComposerSession key={draftKey(props.context)} {...props} />;
+  return <ComposerSession key={JSON.stringify([props.context.hostId, props.context.threadId, props.context.draftId])} {...props} />;
 }
