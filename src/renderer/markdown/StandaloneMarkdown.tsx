@@ -1,0 +1,130 @@
+import { Children, isValidElement, useEffect, useId, useMemo, useState } from 'react';
+import type { ComponentProps, ReactNode } from 'react';
+import { Check, Clipboard, Code2, Eye } from 'lucide-react';
+import Markdown from 'react-markdown';
+import type { Components, UrlTransform } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
+import rehypeKatex from 'rehype-katex';
+import rehypeHighlight from 'rehype-highlight';
+import type { WorkbenchClient } from '../workbench-contract.ts';
+import { MessageImage } from '../messages/MessageImage.tsx';
+import { resolveFileLink, safeExternalUrl } from '../messages/message-data.ts';
+import type { ImageSource } from '../messages/message-data.ts';
+
+const schema = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    code: [...(defaultSchema.attributes?.code ?? []), ['className', /^language-./, 'math-inline', 'math-display']],
+    input: [...(defaultSchema.attributes?.input ?? []), 'checked'],
+    ul: [...(defaultSchema.attributes?.ul ?? []), ['className', 'contains-task-list']],
+    li: [...(defaultSchema.attributes?.li ?? []), ['className', 'task-list-item']],
+  },
+  protocols: { ...defaultSchema.protocols, src: ['http', 'https', 'data'] },
+};
+const remarkPlugins = [remarkGfm, remarkMath];
+type RehypePlugins = NonNullable<ComponentProps<typeof Markdown>['rehypePlugins']>;
+const safeHtmlPlugins: RehypePlugins = [rehypeRaw, [rehypeSanitize, schema], rehypeKatex, rehypeHighlight];
+const textHtmlPlugins: RehypePlugins = [rehypeKatex, rehypeHighlight];
+
+function textContent(node: ReactNode): string {
+  return Children.toArray(node).map((child) => {
+    if (typeof child === 'string' || typeof child === 'number') return String(child);
+    return isValidElement<{ children?: ReactNode }>(child) ? textContent(child.props.children) : '';
+  }).join('');
+}
+
+function MermaidDiagram({ source }: { source: string }) {
+  const id = `yard-mermaid-${useId().replace(/[^a-z\d-]/gi, '')}`;
+  const [rendered, setRendered] = useState<{ source: string; svg?: string; error?: string }>({ source: '' });
+  useEffect(() => {
+    let active = true;
+    setRendered({ source });
+    void import('mermaid').then(async ({ default: mermaid }) => {
+      mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', suppressErrorRendering: true });
+      return mermaid.render(id, source);
+    }).then(({ svg }) => { if (active) setRendered({ source, svg }); }, (error: unknown) => {
+      if (active) setRendered({ source, error: error instanceof Error ? error.message : 'Diagram could not be rendered.' });
+    });
+    return () => { active = false; };
+  }, [id, source]);
+  if (rendered.source !== source || (!rendered.svg && !rendered.error)) return <div className="yard-code-loading" role="status">Rendering diagram...</div>;
+  if (rendered.error) return <div className="yard-code-error" role="status">{rendered.error}</div>;
+  return <div className="yard-mermaid" dangerouslySetInnerHTML={{ __html: rendered.svg ?? '' }} />;
+}
+
+function CodeBlock({ children }: { children?: ReactNode }) {
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState('');
+  const [showSource, setShowSource] = useState(false);
+  const code = Children.toArray(children).find((child) => isValidElement<{ className?: string }>(child));
+  const className = isValidElement<{ className?: string }>(code) ? code.props.className ?? '' : '';
+  const language = /(?:^|\s)language-([^\s]+)/.exec(className)?.[1] ?? '';
+  const source = textContent(children).replace(/\n$/, '');
+  const isDiagram = language.toLowerCase() === 'mermaid';
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(source);
+      setCopied(true);
+      setError('');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Copy failed.');
+    }
+  }
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+  return <div className="yard-code-block" data-markdown-copy="code-block" data-markdown-copy-text={source}>
+    <div className="yard-code-toolbar" data-markdown-copy="exclude"><span>{language || 'Code'}</span><div>
+      {isDiagram && <button type="button" className="yard-icon-button" title={showSource ? 'Show diagram' : 'Show source'}
+        aria-label={showSource ? 'Show diagram' : 'Show source'} onClick={() => setShowSource((value) => !value)}>
+        {showSource ? <Eye size={16} /> : <Code2 size={16} />}</button>}
+      <button type="button" className="yard-icon-button" title={copied ? 'Copied' : 'Copy code'}
+        aria-label={copied ? 'Copied' : 'Copy code'} onClick={() => void copy()}>{copied ? <Check size={16} /> : <Clipboard size={16} />}</button>
+    </div></div>
+    {isDiagram && !showSource ? <MermaidDiagram source={source} /> : <pre dir="ltr">{children}</pre>}
+    {error && <div className="yard-code-error" role="alert">{error}</div>}
+  </div>;
+}
+
+export type StandaloneMarkdownProps = {
+  text: string;
+  client: WorkbenchClient;
+  hostId: string;
+  cwd: string;
+  allowBasicHtml?: boolean;
+  onOpenFile?: (path: string) => void;
+  onOpenImage?: (image: ImageSource) => void;
+};
+
+export function StandaloneMarkdown({ text, client, hostId, cwd, allowBasicHtml = false, onOpenFile, onOpenImage }: StandaloneMarkdownProps) {
+  const components = useMemo<Components>(() => ({
+    pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+    a: ({ href, children }) => {
+      if (!href) return <span>{children}</span>;
+      const external = safeExternalUrl(href);
+      if (external) return <a href={external} target={external.startsWith('#') ? undefined : '_blank'}
+        rel={external.startsWith('#') ? undefined : 'noreferrer noopener'}>{children}</a>;
+      if (!onOpenFile) return <span>{children}</span>;
+      return <button type="button" className="yard-file-link" onClick={() => onOpenFile(resolveFileLink(href, cwd))}>{children}</button>;
+    },
+    img: ({ src, alt }) => {
+      if (typeof src !== 'string' || !src) return <span>Image unavailable</span>;
+      const source: ImageSource = { kind: /^(?:https?:|data:)/i.test(src) ? 'url' : 'path', value: src, label: alt || 'Image' };
+      return <MessageImage source={source} client={client} hostId={hostId} cwd={cwd} onOpen={onOpenImage ? () => onOpenImage(source) : undefined} />;
+    },
+  }), [client, cwd, hostId, onOpenFile, onOpenImage]);
+  const transformUrl: UrlTransform = (value, _key) => {
+    const trimmed = value.trim();
+    if (/^(?:https?:|mailto:|data:|#)/i.test(trimmed)) return safeExternalUrl(trimmed, _key === 'src') ?? '';
+    if (/^(?:file:\/\/|\/|\.\.?\/)/i.test(trimmed) || !/^[a-z][a-z\d+.-]*:/i.test(trimmed)) return trimmed;
+    return '';
+  };
+  return <div className="yard-markdown"><Markdown remarkPlugins={remarkPlugins}
+    rehypePlugins={allowBasicHtml ? safeHtmlPlugins : textHtmlPlugins} urlTransform={transformUrl} components={components}>{text}</Markdown></div>;
+}
