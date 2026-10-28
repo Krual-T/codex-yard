@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { StandaloneSettingsProps } from '../workbench-contract.ts';
+import { I18nProvider, resolveLocale, translateKnown, useI18n } from '../i18n/index.tsx';
 import { AgentSection } from './AgentSection.tsx';
 import { AppearanceSection } from './AppearanceSection.tsx';
 import { ArchivedSection } from './ArchivedSection.tsx';
@@ -15,6 +16,7 @@ import { PersonalizationSection } from './PersonalizationSection.tsx';
 import { PluginSection } from './PluginSection.tsx';
 import { SkillSection } from './SkillSection.tsx';
 import { Preferences, preferenceKeys } from './preferences.ts';
+import type { PreferenceProps } from './PreferenceControls.tsx';
 import { WorktreesSection } from './WorktreesSection.tsx';
 import { UsageSection } from './UsageSection.tsx';
 import { VoiceSection } from './VoiceSection.tsx';
@@ -83,9 +85,36 @@ const remainingSections: Record<string, string> = {
   'open-source-licenses': 'Third-party notices cannot be loaded from this page yet.',
 };
 
-export function StandaloneSettings({ client, hostId, location, onNavigate, onClose, registerNavigationGuard }: SettingsIntegrationProps) {
+function browserLanguages(): readonly string[] {
+  if (typeof navigator === 'undefined') return [];
+  return navigator.languages?.length ? [...navigator.languages] : navigator.language ? [navigator.language] : [];
+}
+
+export function StandaloneSettings(props: SettingsIntegrationProps) {
+  const { client } = props;
   const preferences = useMemo(() => new Preferences(client), [client]);
   const snapshot = useSyncExternalStore(preferences.subscribe, preferences.getSnapshot, preferences.getSnapshot);
+  const [languages, setLanguages] = useState(browserLanguages);
+  const [hostLanguages, setHostLanguages] = useState<readonly string[]>([]);
+  useEffect(() => {
+    const changed = () => setLanguages(browserLanguages());
+    window.addEventListener('languagechange', changed);
+    return () => window.removeEventListener('languagechange', changed);
+  }, []);
+  useEffect(() => {
+    let active = true;
+    setHostLanguages([]);
+    void client.host<{ ideLocale?: unknown; systemLocale?: unknown }>('locale-info').then(info => {
+      if (active) setHostLanguages([info?.ideLocale, info?.systemLocale].filter((value): value is string => typeof value === 'string' && value.length > 0));
+    }).catch(() => { if (active) setHostLanguages([]); });
+    return () => { active = false; };
+  }, [client]);
+  const locale = resolveLocale(snapshot.localeOverride.saved, [...hostLanguages, ...languages]);
+  return <I18nProvider locale={locale}><SettingsPage {...props} preferences={preferences} snapshot={snapshot} /></I18nProvider>;
+}
+
+function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
+  const { t, locale } = useI18n();
   const route = readSettingsRoute(location, hostId);
   const { section, hostId: selectedHost } = route;
   const [hosts, setHosts] = useState<RemoteConnection[]>([]);
@@ -155,7 +184,7 @@ export function StandaloneSettings({ client, hostId, location, onNavigate, onClo
   useEffect(() => {
     if (!searchTarget || searchTarget.section !== section) return;
     const rows = content.current?.querySelectorAll<HTMLElement>('.yard-setting-row') ?? [];
-    const row = Array.from(rows).find(item => item.querySelector('.yard-setting-label')?.textContent === searchTarget.label);
+    const row = Array.from(rows).find(item => item.dataset.settingLabel === searchTarget.label);
     if (row) {
       row.scrollIntoView({ block: 'center' });
       row.querySelector<HTMLElement>('input, select, textarea, button')?.focus();
@@ -188,50 +217,51 @@ export function StandaloneSettings({ client, hostId, location, onNavigate, onClo
     };
     if (next === section) action(); else guard(action);
   };
-  const title = settingsSections.find(item => item.id === section)?.title ?? section;
+  const title = translateKnown(t, settingsSections.find(item => item.id === section)?.title ?? section);
   const groups = [...new Set(settingsSections.map(item => item.group))];
-  const query = search.trim().toLocaleLowerCase();
+  const query = search.trim().toLocaleLowerCase(locale);
   const results = query ? settingsSections.flatMap(item => {
-    const labels = (searchLabels[item.id] ?? []).filter(label => label.toLocaleLowerCase().includes(query));
-    if (item.title.toLocaleLowerCase().includes(query)) labels.unshift(item.title);
-    return labels.map(label => ({ section: item.id, title: item.title, label }));
+    const matches = (value: string) => value.toLocaleLowerCase(locale).includes(query) || translateKnown(t, value).toLocaleLowerCase(locale).includes(query);
+    const labels = (searchLabels[item.id] ?? []).filter(matches);
+    if (matches(item.title)) labels.unshift(item.title);
+    return labels.map(label => ({ section: item.id, title: translateKnown(t, item.title), label, display: translateKnown(t, label), isTitle: label === item.title }));
   }) : [];
   const isCatalog = (value: string): value is CatalogKind => ['skills-settings', 'hooks-settings', 'mcp-settings', 'plugins-settings'].includes(value);
   return <div className="yard-settings">
-    <aside className="yard-settings-nav" aria-label="Settings navigation">
-      <div className="yard-settings-nav-header"><strong>Settings</strong><button type="button" onClick={() => guard(onClose)} aria-label="Close settings">Close</button></div>
-      {route.pathname.slice('/settings/'.length).includes('/') && <button type="button" onClick={() => guard(() => onNavigate(route.path, { delta: -1, state: location.state }))}>Back</button>}
-      <label className="yard-host-label">Host
-        <select aria-label="Settings host" value={selectedHost} onChange={event => {
+    <aside className="yard-settings-nav" aria-label={t('Settings navigation')}>
+      <div className="yard-settings-nav-header"><strong>{t('Settings')}</strong><button type="button" onClick={() => guard(onClose)} aria-label={t('Close settings')}>{t('Close')}</button></div>
+      {route.pathname.slice('/settings/'.length).includes('/') && <button type="button" onClick={() => guard(() => onNavigate(route.path, { delta: -1, state: location.state }))}>{t('Back')}</button>}
+      <label className="yard-host-label">{t('Host')}
+        <select aria-label={t('Settings host')} value={selectedHost} onChange={event => {
           const next = event.target.value;
           if (next === selectedHost) return;
           const path = hostPath(next, route);
           guard(() => onNavigate(path, { state: location.state }));
         }}>
-          <option value="local">Local</option>
+          <option value="local">{t('Local')}</option>
           {selectedHost !== 'local' && !hosts.some(host => host.hostId === selectedHost) && <option value={selectedHost}>{selectedHost}</option>}
           {hosts.filter(host => host.hostId !== 'local').map(host => <option key={host.hostId} value={host.hostId}>{host.displayName || host.sshAlias || host.hostId}</option>)}
         </select>
       </label>
-      {hostError && <p className="yard-setting-error" role="alert">Could not load hosts: {hostError}</p>}
-      <label className="yard-settings-search">Search settings
-        <input type="search" aria-label="Search settings" value={search} onChange={event => setSearch(event.target.value)} />
+      {hostError && <p className="yard-setting-error" role="alert">{t('Could not load hosts:')} {hostError}</p>}
+      <label className="yard-settings-search">{t('Search settings')}
+        <input type="search" aria-label={t('Search settings')} value={search} onChange={event => setSearch(event.target.value)} />
       </label>
-      {query && <div className="yard-search-results" aria-label="Settings search results">
+      {query && <div className="yard-search-results" aria-label={t('Settings search results')}>
         {results.length ? results.map(result => <button type="button" key={`${result.section}:${result.label}`} onClick={() => navigate(result.section, result.label)}>
-          <span>{result.label}</span>{result.label !== result.title && <small>{result.title}</small>}</button>) : <p>No settings found.</p>}
+          <span>{result.display}</span>{!result.isTitle && <small>{result.title}</small>}</button>) : <p>{t('No settings found.')}</p>}
       </div>}
-      <label className="yard-mobile-section">Section
-        <select aria-label="Settings section" value={section} onChange={event => navigate(event.target.value)}>
-          {groups.map(group => <optgroup key={group} label={group}>{settingsSections.filter(item => item.group === group).map(item =>
-            <option key={item.id} value={item.id}>{item.title}</option>)}</optgroup>)}
+      <label className="yard-mobile-section">{t('Section')}
+        <select aria-label={t('Settings section')} value={section} onChange={event => navigate(event.target.value)}>
+          {groups.map(group => <optgroup key={group} label={translateKnown(t, group)}>{settingsSections.filter(item => item.group === group).map(item =>
+            <option key={item.id} value={item.id}>{translateKnown(t, item.title)}</option>)}</optgroup>)}
         </select>
       </label>
-      {!query && groups.map(group => <div className="yard-nav-group" key={group}><h2>{group}</h2>
-        {settingsSections.filter(item => item.group === group).map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}>{item.title}</button>)}
+      {!query && groups.map(group => <div className="yard-nav-group" key={group}><h2>{translateKnown(t, group)}</h2>
+        {settingsSections.filter(item => item.group === group).map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}>{translateKnown(t, item.title)}</button>)}
       </div>)}
     </aside>
-    <main className="yard-settings-main" aria-label={`${title} settings`}>
+    <main className="yard-settings-main" aria-label={locale.startsWith('en') ? `${title} settings` : `${t('Settings')}: ${title}`}>
       <div className="yard-settings-content" ref={content}>
         {section === 'general-settings' ? <GeneralSection preferences={preferences} snapshot={snapshot} platform={platform} navigate={navigate} /> :
           section === 'appearance' ? <AppearanceSection key={editorRevision} preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} onDirtyChange={setOtherDirty} /> :
@@ -255,18 +285,18 @@ export function StandaloneSettings({ client, hostId, location, onNavigate, onClo
                   section === 'connections' ? <ConnectionsSection client={client} onSavingChange={setOtherSaving} /> :
             <><h2>{title}</h2><p className="yard-setting-error">{remainingSections[section] ?? 'This settings page cannot be displayed yet.'}</p></>}
       </div>
-      {(preferences.dirty || anySaving) && <div className="yard-save-bar"><span>Unsaved changes</span><div className="yard-actions">
-        <button type="button" disabled={anySaving} onClick={() => preferences.discard()}>Discard</button>
+      {(preferences.dirty || anySaving) && <div className="yard-save-bar"><span>{t('Unsaved changes')}</span><div className="yard-actions">
+        <button type="button" disabled={anySaving} onClick={() => preferences.discard()}>{t('Discard')}</button>
         <button type="button" disabled={anySaving || !preferences.dirty} onClick={() => {
           setSaving(true); void preferences.save().finally(() => setSaving(false));
-        }}>{saving ? 'Saving...' : 'Save'}</button>
+        }}>{saving ? t('Saving...') : t('Save')}</button>
       </div></div>}
-      {preferenceKeys.some(key => snapshot[key].saving) && <span className="yard-sr-only" role="status">Saving preferences</span>}
+      {preferenceKeys.some(key => snapshot[key].saving) && <span className="yard-sr-only" role="status">{t('Saving preferences')}</span>}
     </main>
     {confirmLeave && <div className="yard-dialog-backdrop"><div className="yard-dialog" role="dialog" aria-modal="true" aria-labelledby="yard-unsaved-title" onKeyDown={event => { if (event.key === 'Escape') finishLeave(false); }}>
-      <h2 id="yard-unsaved-title">Discard unsaved changes?</h2><p>Your edits have not been saved.</p>
-      <div className="yard-actions"><button type="button" autoFocus onClick={() => finishLeave(false)}>Keep editing</button>
-        <button type="button" disabled={anySaving} onClick={() => finishLeave(true)}>Discard changes</button></div>
+      <h2 id="yard-unsaved-title">{t('Discard unsaved changes?')}</h2><p>{t('Your edits have not been saved.')}</p>
+      <div className="yard-actions"><button type="button" autoFocus onClick={() => finishLeave(false)}>{t('Keep editing')}</button>
+        <button type="button" disabled={anySaving} onClick={() => finishLeave(true)}>{t('Discard changes')}</button></div>
     </div></div>}
   </div>;
 }

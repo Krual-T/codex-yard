@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useI18n } from '../i18n/index.tsx';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { Row } from './PreferenceControls.tsx';
 
@@ -21,6 +22,7 @@ const isCredits = (value: unknown): value is Credits => value != null && typeof 
   ((value as Credits).balance === null || typeof (value as Credits).balance === 'string');
 
 export function UsageSection({ client, hostId }: { client: WorkbenchClient; hostId: string }) {
+  const { t, formatDate } = useI18n();
   const [account, setAccount] = useState<Result<Account | 'signed-out'>>({ loading: true, data: null, error: null });
   const [limits, setLimits] = useState<Result<Usage>>({ loading: true, data: null, error: null });
   const [revision, setRevision] = useState(0);
@@ -50,11 +52,13 @@ export function UsageSection({ client, hostId }: { client: WorkbenchClient; host
   const format = (window: Window) => {
     const duration = typeof window.windowDurationMins === 'number' && Number.isFinite(window.windowDurationMins) ? ` / ${window.windowDurationMins} min` : '';
     const date = typeof window.resetsAt === 'number' && Number.isFinite(window.resetsAt) ? new Date(window.resetsAt * 1000) : null;
-    const reset = date && !Number.isNaN(date.getTime()) ? `, resets ${date.toLocaleString()}` : '';
+    const reset = date && !Number.isNaN(date.getTime()) ? `, ${t('Resets')} ${formatDate(date, {
+      year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
+    })}` : '';
     return `${window.usedPercent}% used${duration}${reset}`;
   };
   return <>
-    <div className="yard-section-heading"><h2>Usage</h2><button type="button" disabled={account.loading || limits.loading} onClick={refresh}>Refresh</button></div>
+    <div className="yard-section-heading"><h2>{t('Usage')}</h2><button type="button" disabled={account.loading || limits.loading} onClick={refresh}>Refresh</button></div>
     <p className="yard-muted">Account and usage for {hostId === 'local' ? 'the local host' : hostId}.</p>
     <div className="yard-setting-group"><Row label="Account" error={account.error ? `Could not load account: ${account.error}` : null} retry={refresh}>
       <span>{account.loading ? 'Loading...' : accountLabel}</span></Row>

@@ -1,10 +1,14 @@
 import { useLayoutEffect, useState } from 'react';
+import { translateKnown, useI18n } from '../i18n/index.tsx';
 import { NumberPreference, Row, Select, Toggle, entryState } from './PreferenceControls.tsx';
 import type { PreferenceProps } from './PreferenceControls.tsx';
 import { codeThemes, defaultThemes, exportTheme, importTheme, preferenceDefinitions } from './preferences.ts';
 import type { ChromeTheme, PreferenceKey, ThemeVariant } from './preferences.ts';
 
 function ThemeEditor({ variant, onDirtyChange, ...props }: PreferenceProps & { variant: ThemeVariant; backdropSupported: boolean; onDirtyChange: (dirty: boolean) => void }) {
+  const { t, locale } = useI18n();
+  const variantLabel = t(variant === 'light' ? 'Light' : 'Dark').toLocaleLowerCase(locale);
+  const themeLabel = t(variant === 'light' ? 'Light theme' : 'Dark theme');
   const themeKey = variant === 'light' ? 'appearanceLightChromeTheme' : 'appearanceDarkChromeTheme';
   const codeKey = variant === 'light' ? 'appearanceLightCodeThemeId' : 'appearanceDarkCodeThemeId';
   const entry = props.snapshot[themeKey];
@@ -31,31 +35,31 @@ function ThemeEditor({ variant, onDirtyChange, ...props }: PreferenceProps & { v
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
   return <section className="yard-theme-editor">
-    <div className="yard-section-heading"><h3>{variant === 'light' ? 'Light' : 'Dark'} theme</h3>
-      <div className="yard-actions"><button type="button" onClick={() => { setText(''); setError(''); setDialog('import'); }} disabled={disabled || entryState(codeEntry).disabled}>Import</button>
-        <button type="button" onClick={openExport} disabled={disabled || entryState(codeEntry).disabled}>Export</button></div>
+    <div className="yard-section-heading"><h3>{themeLabel}</h3>
+      <div className="yard-actions"><button type="button" onClick={() => { setText(''); setError(''); setDialog('import'); }} disabled={disabled || entryState(codeEntry).disabled}>{t('Import')}</button>
+        <button type="button" onClick={openExport} disabled={disabled || entryState(codeEntry).disabled}>{t('Export')}</button></div>
     </div>
     <div className="yard-theme-preview" style={{ backgroundColor: theme.surface, color: theme.ink, borderColor: theme.accent }}>
-      <span style={{ color: theme.accent }}>Aa</span><span>Theme preview</span><code>const color = true;</code>
+      <span style={{ color: theme.accent }}>Aa</span><span>{t('Theme preview')}</span><code>const color = true;</code>
     </div>
     <div className="yard-setting-group">
       {([['accent', 'Accent'], ['surface', 'Background'], ['ink', 'Text']] as const).map(([key, label]) =>
         <Row key={key} label={label} error={entry.error} retry={() => { void props.preferences.reload(themeKey); }}>
-          <input type="color" aria-label={`${variant} ${label}`} value={theme[key]} disabled={disabled}
+          <input type="color" aria-label={`${variantLabel} ${translateKnown(t, label)}`} value={theme[key]} disabled={disabled}
             onChange={event => update(key === 'accent' ? { accent: event.target.value, accentSource: 'custom' } : { [key]: event.target.value })} />
           <span className="yard-color-value">{theme[key]}</span>
         </Row>)}
       {([['diffAdded', 'Added lines'], ['diffRemoved', 'Removed lines'], ['skill', 'Skill color']] as const).map(([key, label]) =>
-        <Row key={key} label={label}><input type="color" aria-label={`${variant} ${label}`} value={theme.semanticColors[key]} disabled={disabled}
+        <Row key={key} label={label}><input type="color" aria-label={`${variantLabel} ${translateKnown(t, label)}`} value={theme.semanticColors[key]} disabled={disabled}
           onChange={event => update({ semanticColors: { ...theme.semanticColors, [key]: event.target.value } })} />
           <span className="yard-color-value">{theme.semanticColors[key]}</span></Row>)}
-      <Row label="Contrast"><input type="range" aria-label={`${variant} contrast`} min={0} max={100} value={theme.contrast} disabled={disabled}
+      <Row label="Contrast"><input type="range" aria-label={`${variantLabel} ${t('Contrast').toLocaleLowerCase(locale)}`} min={0} max={100} value={theme.contrast} disabled={disabled}
         onChange={event => update({ contrast: Number(event.target.value) })} /><output>{theme.contrast}</output></Row>
-      {props.backdropSupported && <Row label="Transparent window"><input type="checkbox" role="switch" aria-label={`${variant} transparent window`}
+      {props.backdropSupported && <Row label="Transparent window"><input type="checkbox" role="switch" aria-label={`${variantLabel} ${t('Transparent window').toLocaleLowerCase(locale)}`}
         checked={!theme.opaqueWindows} disabled={disabled} onChange={event => update({ opaqueWindows: !event.target.checked })} /></Row>}
       {entry.available && <>
         {(['ui', 'content', 'code'] as const).map(key => <Row key={key} label={`${key === 'ui' ? 'Interface' : key === 'content' ? 'Content' : 'Code'} font`} description="Leave blank to use the default.">
-          <input type="text" aria-label={`${variant} ${key} font`} value={theme.fonts[key] ?? ''} disabled={disabled}
+          <input type="text" aria-label={`${variantLabel} ${t(key === 'ui' ? 'Interface font' : key === 'content' ? 'Content font' : 'Code font').toLocaleLowerCase(locale)}`} value={theme.fonts[key] ?? ''} disabled={disabled}
             onChange={event => font(key, event.target.value)} />
         </Row>)}
       </>}
@@ -63,16 +67,16 @@ function ThemeEditor({ variant, onDirtyChange, ...props }: PreferenceProps & { v
         [...(codeThemes[variant].includes(codeEntry.value) ? [] : [codeEntry.value]), ...codeThemes[variant]].map(value => ({ value, label: value }))
       } />
     </div>
-    {dialog && <div className="yard-dialog-backdrop"><div className="yard-dialog" role="dialog" aria-modal="true" aria-label={`${dialog === 'import' ? 'Import' : 'Export'} ${variant} theme`}>
-      <h3>{dialog === 'import' ? 'Import' : 'Export'} {variant} theme</h3>
-      <textarea autoFocus value={text} onChange={event => setText(event.target.value)} readOnly={dialog === 'export'} aria-label="Theme share string" />
+    {dialog && <div className="yard-dialog-backdrop"><div className="yard-dialog" role="dialog" aria-modal="true" aria-label={`${t(dialog === 'import' ? 'Import' : 'Export')} ${themeLabel.toLocaleLowerCase(locale)}`}>
+      <h3>{t(dialog === 'import' ? 'Import' : 'Export')} {themeLabel.toLocaleLowerCase(locale)}</h3>
+      <textarea autoFocus value={text} onChange={event => setText(event.target.value)} readOnly={dialog === 'export'} aria-label={t('Theme share string')} />
       {error && <p className="yard-setting-error" role="alert">{error}</p>}
-      <div className="yard-actions"><button type="button" onClick={() => setDialog(null)}>Close</button>
-        {dialog === 'import' ? <button type="button" onClick={applyImport}>Import</button> :
+      <div className="yard-actions"><button type="button" onClick={() => setDialog(null)}>{t('Close')}</button>
+        {dialog === 'import' ? <button type="button" onClick={applyImport}>{t('Import')}</button> :
           <button type="button" onClick={() => {
-            if (!navigator.clipboard) { setError('Clipboard unavailable. Select and copy the text.'); return; }
-            void navigator.clipboard.writeText(text).then(() => setError('Copied.')).catch(() => setError('Clipboard unavailable. Select and copy the text.'));
-          }}>Copy</button>}
+            if (!navigator.clipboard) { setError(t('Clipboard unavailable. Select and copy the text.')); return; }
+            void navigator.clipboard.writeText(text).then(() => setError(t('Copied.'))).catch(() => setError(t('Clipboard unavailable. Select and copy the text.')));
+          }}>{t('Copy')}</button>}
       </div>
     </div></div>}
   </section>;
@@ -83,10 +87,11 @@ const appearanceKeys: PreferenceKey[] = ['appearanceTheme', 'appearanceLightChro
   'useFontSmoothing', 'usePointerCursors', 'reduced-motion-preference', 'dock-icon-preference'];
 
 export function AppearanceSection(props: PreferenceProps & { platform: string; backdropSupported: boolean; onDirtyChange: (dirty: boolean) => void }) {
+  const { t } = useI18n();
   const [variant, setVariant] = useState<ThemeVariant>('light');
   const reset = () => { for (const key of appearanceKeys) props.preferences.edit(key, preferenceDefinitions[key].defaultValue); };
   return <>
-    <div className="yard-section-heading"><h2>Appearance</h2><button type="button" onClick={reset}>Restore defaults</button></div>
+    <div className="yard-section-heading"><h2>{t('Appearance')}</h2><button type="button" onClick={reset}>{t('Restore defaults')}</button></div>
     <div className="yard-setting-group">
       <Select {...props} setting="appearanceTheme" label="Appearance" options={[
         { value: 'system', label: 'System' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' },
@@ -105,10 +110,10 @@ export function AppearanceSection(props: PreferenceProps & { platform: string; b
         { value: 'app-default', label: 'Default' }, { value: 'codex-system', label: 'Codex' }, { value: 'space-system', label: 'Space' },
       ]} />}
     </div>
-    <div className="yard-segmented" aria-label="Edit theme variant">
-      {(['light', 'dark'] as const).map(value => <button type="button" key={value} aria-pressed={variant === value} onClick={() => setVariant(value)}>{value === 'light' ? 'Light' : 'Dark'}</button>)}
+    <div className="yard-segmented" aria-label={t('Edit theme variant')}>
+      {(['light', 'dark'] as const).map(value => <button type="button" key={value} aria-pressed={variant === value} onClick={() => setVariant(value)}>{t(value === 'light' ? 'Light' : 'Dark')}</button>)}
     </div>
     <ThemeEditor {...props} key={variant} variant={variant} />
-    {!props.backdropSupported && <p className="yard-muted">Transparent windows are unavailable on this platform.</p>}
+    {!props.backdropSupported && <p className="yard-muted">{t('Transparent windows are unavailable on this platform.')}</p>}
   </>;
 }
