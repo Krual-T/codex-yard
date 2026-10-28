@@ -1,6 +1,7 @@
 // Browser transport for the pinned renderer's mcp-sandbox-rpc MessagePort API.
 // The official HTML kit supplies styling, ready/height/error notifications,
 // annotations and downloads. This frame owns no files, credentials or app RPC.
+function startLegacyVisualization() {
 type Value = Record<string, unknown>;
 type Handler = (...args: unknown[]) => unknown;
 const ports: MessagePort[] = [];
@@ -128,3 +129,187 @@ ports.push(reply.port1);
 reply.port1.onmessage = event => { host = event.data as Record<string, MessagePort>; reply.port1.close(); };
 reply.port1.start();
 window.parent.postMessage({ type: 'init', ports: api, replyPort: reply.port2 }, location.origin, [...Object.values(api), reply.port2]);
+}
+
+function startOwnedVisualization(initId: string) {
+  type Value = Record<string, unknown>;
+  const object = (value: unknown): Value => value != null && typeof value === 'object' && !Array.isArray(value) ? value as Value : {};
+  const sandboxWindow = window as Window & { openai?: Value };
+  const channel = new MessageChannel();
+  const port = channel.port1;
+  const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: number }>();
+  let sequence = 0;
+  let disposed = false;
+  let rendered = false;
+  let annotating = false;
+  let globals: Value = {};
+  let themeSheet: CSSStyleSheet | null = null;
+
+  function send(value: Value) {
+    if (!disposed) port.postMessage(value);
+  }
+  function request(method: string, payload: unknown): Promise<unknown> {
+    if (disposed) return Promise.reject(new Error('Visualization connection is closed'));
+    if (pending.size >= 32) return Promise.reject(new Error('Too many visualization requests'));
+    const id = ++sequence;
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        pending.delete(id);
+        reject(new Error('Visualization request timed out'));
+      }, 30_000);
+      pending.set(id, { resolve, reject, timer });
+      try { send({ type: 'request', id, method, payload }); }
+      catch (error) {
+        clearTimeout(timer);
+        pending.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+  function updateGlobals(values: Value) {
+    Object.assign(globals, values);
+    if (sandboxWindow.openai) Object.assign(sandboxWindow.openai, values);
+    window.dispatchEvent(new CustomEvent('openai:set_globals', { detail: { globals: { ...globals } } }));
+  }
+  function setTheme(value: unknown) {
+    if (value !== 'dark' && value !== 'light') return;
+    if (!themeSheet) {
+      themeSheet = new CSSStyleSheet();
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, themeSheet];
+    }
+    const dark = value === 'dark';
+    themeSheet.replaceSync(`:where(:root) {
+      color-scheme: ${value};
+      --background: ${dark ? '#20272a' : '#ffffff'};
+      --foreground: ${dark ? '#f2f4f4' : '#1c252a'};
+      --card: ${dark ? '#30393d' : '#f1f4f3'};
+      --card-foreground: var(--foreground);
+      --popover: var(--card); --popover-foreground: var(--foreground);
+      --primary: ${dark ? '#89c9ec' : '#176b91'};
+      --primary-foreground: ${dark ? '#14272d' : '#ffffff'};
+      --secondary: var(--card); --secondary-foreground: var(--foreground);
+      --muted: ${dark ? '#465155' : '#e3e9e7'};
+      --muted-foreground: ${dark ? '#b5c2c2' : '#536568'};
+      --accent: ${dark ? '#294643' : '#d6eee4'}; --accent-foreground: var(--foreground);
+      --destructive: ${dark ? '#ffae9c' : '#a83625'};
+      --border: ${dark ? '#647276' : '#c3cecb'}; --input: var(--border); --ring: var(--primary);
+      --font-size-base: 16px; --radius: 6px;
+      --blue: #418bb2; --orange: #c76840; --green: #388265; --red: #c14b41;
+      --purple: #8170a8; --yellow: #b88c19;
+      --viz-series-1: var(--primary); --viz-series-2: #c76840; --viz-series-3: #388265;
+      --viz-series-4: #b45d83; --viz-series-5: #8170a8; --viz-series-6: #478b87;
+      --viz-bg: transparent; --viz-panel: var(--card); --viz-border: var(--border);
+      --viz-text: var(--foreground); --viz-muted: var(--muted-foreground); --viz-accent: var(--primary);
+      --viz-accent-text: var(--primary-foreground); --viz-accent-bg: var(--accent);
+      --viz-font-size: var(--font-size-base); --viz-warning: var(--destructive);
+    }
+    :where(body) {
+      --color-background-primary: var(--background); --color-text-primary: var(--foreground);
+      --color-border-secondary: var(--border);
+    }`);
+    if (document.documentElement) document.documentElement.style.colorScheme = value;
+    updateGlobals({ theme: value, visualizationTheme: value });
+  }
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    port.close();
+    for (const item of pending.values()) {
+      clearTimeout(item.timer);
+      item.reject(new Error('Visualization connection is closed'));
+    }
+    pending.clear();
+  }
+  function measure() {
+    const body = document.body;
+    if (!body) return;
+    const contentHeight = Math.max(body.scrollHeight, body.getBoundingClientRect().height);
+    send({ type: 'height', height: Math.ceil(contentHeight) });
+  }
+  function render(message: Value) {
+    if (rendered || typeof message.html !== 'string') throw new Error('Invalid visualization document');
+    rendered = true;
+    globals = { theme: message.theme, visualizationTheme: message.theme, displayMode: 'inline',
+      widgetState: message.widgetState, maxHeight: 10_000, maxWidth: null,
+      safeArea: { top: 0, right: 0, bottom: 0, left: 0 } };
+    sandboxWindow.openai = {
+      ...globals,
+      callTool: (name: unknown, args: unknown) => {
+        if (name === '__codex_inline_visualization_ready__') { send({ type: 'ready' }); return Promise.resolve(); }
+        if (name === '__codex_inline_visualization_height__') {
+          send({ type: 'height', height: object(args).height }); return Promise.resolve();
+        }
+        if (name === '__codex_inline_visualization_error__') {
+          send({ type: 'error', message: String(object(args).message ?? 'Visualization error').slice(0, 1000) });
+          return Promise.resolve();
+        }
+        if (name === '__codex_inline_visualization_download__') return request('download', args);
+        return Promise.reject(new Error('Visualization tool is not available'));
+      },
+      sendFollowUpMessage: (value: unknown) => request('follow-up', value),
+      requestDisplayMode: (value: unknown) => request('display-mode', value),
+      openExternal: (value: unknown) => request('open-external', value),
+      setWidgetState: (value: unknown) => {
+        updateGlobals({ widgetState: value });
+        return request('widget-state', value);
+      },
+    };
+    setTheme(message.theme);
+    document.open();
+    window.addEventListener('pagehide', () => { send({ type: 'leaving' }); dispose(); }, { once: true });
+    window.addEventListener('error', event => send({ type: 'error', message: String(event.message || 'Visualization error').slice(0, 1000) }));
+    window.addEventListener('unhandledrejection', event => send({ type: 'error', message: String(event.reason?.message ?? event.reason ?? 'Visualization error').slice(0, 1000) }));
+    window.addEventListener('click', event => {
+      if (!event.isTrusted) return;
+      const target = event.target;
+      if (annotating && target instanceof Element) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        annotating = false;
+        const selection = window.getSelection()?.toString().trim();
+        const excerpt = (selection || target.getAttribute('aria-label') || target.textContent || target.tagName).trim().slice(0, 500);
+        send({ type: 'annotation-target', excerpt });
+        return;
+      }
+      const anchor = event.composedPath().find(node => node instanceof HTMLAnchorElement && node.hasAttribute('download'));
+      if (!(anchor instanceof HTMLAnchorElement)) return;
+      let url: URL;
+      try { url = new URL(anchor.href); } catch { return; }
+      if (url.protocol !== 'blob:' && url.protocol !== 'data:') return;
+      event.preventDefault();
+      void fetch(url.href).then(response => response.blob()).then(blob => request('download', { blob, name: anchor.download })).catch(() => {});
+    }, true);
+    document.write(message.html);
+    document.close();
+    setTheme(message.theme);
+    const observer = new ResizeObserver(measure);
+    if (document.body) observer.observe(document.body);
+    new MutationObserver(measure).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    measure();
+    send({ type: 'ready' });
+  }
+  port.onmessage = event => {
+    const message = object(event.data);
+    if (message.type === 'response' && typeof message.id === 'number') {
+      const item = pending.get(message.id);
+      if (!item) return;
+      clearTimeout(item.timer);
+      pending.delete(message.id);
+      if (message.ok === true) item.resolve(message.value);
+      else item.reject(new Error(typeof message.error === 'string' ? message.error : 'Visualization request failed'));
+    } else if (message.type === 'render') {
+      try { render(message); } catch (error) { send({ type: 'error', message: error instanceof Error ? error.message : String(error) }); }
+    } else if (message.type === 'theme') setTheme(message.theme);
+    else if (message.type === 'display-mode') updateGlobals({ displayMode: message.mode });
+    else if (message.type === 'annotate') annotating = message.enabled === true;
+    else if (message.type === 'dispose') dispose();
+  };
+  port.start();
+  window.addEventListener('pagehide', dispose, { once: true });
+  window.parent.postMessage({ type: 'yard-visualization:init', initId }, location.origin, [channel.port2]);
+}
+
+const parameters = new URLSearchParams(location.search);
+const ownedInitId = parameters.get('yard_viz_init');
+if (ownedInitId && /^[a-f0-9]{32}$/i.test(ownedInitId)) startOwnedVisualization(ownedInitId);
+else startLegacyVisualization();
