@@ -89,13 +89,13 @@ test('a lost write receipt preserves its unknown outcome and is never replayed a
   assert.equal(h.calls.filter(call => call.method === 'fs/writeFile').length, 1);
 });
 
-test('a daemon write that outlives its timeout blocks new writes after an old read and service restart', async t => {
+for (const failure of ['timeout', 'unclassified failure'] as const) test(`a daemon write that outlives ${failure} blocks new writes after an old read and service restart`, async t => {
   let release!: () => void, late!: Promise<unknown>;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const h = await fixture(t, request => async (...args) => {
     if (args[1] === 'fs/writeFile') {
       late = gate.then(() => request(...args));
-      throw Object.assign(new Error('synthetic daemon timeout'), { uncertain: true });
+      throw failure === 'timeout' ? Object.assign(new Error('synthetic daemon timeout'), { uncertain: true }) : new Error('synthetic unclassified daemon failure');
     }
     return request(...args);
   });

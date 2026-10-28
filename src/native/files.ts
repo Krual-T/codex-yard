@@ -250,6 +250,7 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
           const definitelyFailed = !issued || !returned && typeof error === 'object' && error !== null && 'uncertain' in error && error.uncertain === false;
           try { await receiptState(id, definitelyFailed ? 'failed' : 'unknown'); }
           catch { throw Object.assign(new Error('文件保存记录无法更新，结果未知；已阻止后续写入。'), { uncertain: true }); }
+          if (!definitelyFailed) throw Object.assign(new Error('文件保存结果未知；已阻止后续写入：' + (error instanceof Error ? error.message : String(error))), { uncertain: true, cause: error });
         }
         throw error;
       } finally { liveSaves.delete(id); }
