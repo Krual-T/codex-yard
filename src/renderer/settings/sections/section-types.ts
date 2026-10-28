@@ -31,6 +31,7 @@ export interface SettingRowProps {
   label: ReactNode;
   description?: ReactNode;
   control: ReactNode | ((labels: ControlLabels) => ReactNode);
+  className?: string;
   variant?: 'nested';
   size?: 'compact';
 }
