@@ -11,7 +11,9 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     import * as React from 'react';
     import { createRoot } from 'react-dom/client';
     import { StandaloneComposer } from './src/renderer/composer/StandaloneComposer.tsx';
-    const state={calls:[],changes:[],submissions:[],consumed:[],fail:false,setThread:null,setPrefill:null};
+    const state={calls:[],changes:[],submissions:[],consumed:[],fail:false,failStorage:false,setThread:null,setPrefill:null};
+    const originalSetItem=Storage.prototype.setItem;
+    Storage.prototype.setItem=function(key,value){if(state.failStorage && key.startsWith('codex-yard.composer.v2:'))throw Error('fixture storage failure');return originalSetItem.call(this,key,value);};
     const hosts=[{hostId:'local',displayName:'Local'},{hostId:'ssh-fixture',displayName:'SSH fixture'}];
     const client={
       async host(endpoint,params={}){
@@ -26,7 +28,7 @@ test('composer chooses real host roots through its parent and keeps drafts parti
         if(method==='config/read')return {config:{}};
         if(method==='thread/queue/list')return {data:[],nextCursor:null};
         throw Error('unexpected RPC');
-      },subscribe(){return ()=>{};}
+      },subscribe(){return ()=>{};},async reply(){throw Error('unexpected approval in composer fixture');}
     };
     function App(){
       const [context,setContext]=React.useState({hostId:'local',cwd:'/work/one',threadId:null,draftId:'new-draft'});
@@ -54,8 +56,13 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     await target.selectOption({ label: 'Local: /work/two' });
     await page.waitForFunction(() => (window as any).fixture.changes.length === 1);
     assert.equal(await editor.inputValue(), 'local draft');
-    await page.evaluate(() => (window as any).fixture.setPrefill({id:'one-time',draft:{text:'',images:[],files:[],references:[{id:'r',text:'local reference'}]}}));
+    await page.evaluate(() => { const fixture=(window as any).fixture; fixture.failStorage=true; fixture.setPrefill({id:'one-time',draft:{text:'',images:[],files:[],references:[{id:'r',text:'local reference'}]}}); });
     await page.getByText('local reference').waitFor();
+    await page.getByRole('alert').filter({ hasText: '草稿未能保存到浏览器' }).waitFor();
+    await page.evaluate(() => (window as any).fixture.setPrefill((value: any) => ({ ...value })));
+    assert.equal(await page.evaluate(() => (window as any).fixture.consumed.length), 0);
+    await page.evaluate(() => { (window as any).fixture.failStorage = false; });
+    await editor.fill('local draft after recovery');
     await page.waitForFunction(() => (window as any).fixture.consumed.includes('one-time'));
     await target.selectOption({ label: 'SSH fixture: /remote/project' });
     await page.waitForFunction(() => (window as any).fixture.changes.length === 2);
@@ -70,12 +77,12 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     assert.equal(submission.draft.text, 'remote draft');
     assert.deepEqual(submission.action, { type: 'send' });
     await target.selectOption({ label: 'Local: /work/two' });
-    await page.waitForFunction(() => (document.querySelector('textarea[aria-label="和 Codex 一起工作"]') as HTMLTextAreaElement)?.value === 'local draft');
+    await page.waitForFunction(() => (document.querySelector('textarea[aria-label="和 Codex 一起工作"]') as HTMLTextAreaElement)?.value === 'local draft after recovery');
     await page.getByText('local reference').waitFor();
     await page.evaluate(() => { (window as any).fixture.fail = true; });
     await target.selectOption({ label: 'SSH fixture: /remote/project' });
     await page.getByRole('alert').filter({ hasText: 'fixture rejected' }).waitFor();
-    assert.equal(await editor.inputValue(), 'local draft');
+    assert.equal(await editor.inputValue(), 'local draft after recovery');
     await page.evaluate(() => (window as any).fixture.setThread('existing-thread'));
     await page.waitForFunction(() => (document.querySelector('select[aria-label="运行位置"]') as HTMLSelectElement)?.disabled);
     const calls = await page.evaluate(() => (window as any).fixture.calls);

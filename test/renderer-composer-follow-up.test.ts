@@ -15,7 +15,8 @@ test('follow-up setting and alternate shortcut dispatch queue and steer to the c
     const client={
       async host(endpoint,params={}){state.calls.push({endpoint,params});if(endpoint==='get-setting'){if(params.key==='followUpQueueMode'&&state.blockFollow)return new Promise(resolve=>{state.release=()=>resolve({value:state.settings[params.key]});});return {value:state.settings[params.key]};}throw Error('unexpected host');},
       async rpc(method){if(method==='model/list')return {data:[],nextCursor:null};if(method==='config/read')return {config:{}};if(method==='thread/queue/list')return {data:[],nextCursor:null};throw Error('unexpected RPC');},
-      subscribe(listener){state.subscribers.add(listener);return ()=>state.subscribers.delete(listener);}
+      subscribe(listener){state.subscribers.add(listener);return ()=>state.subscribers.delete(listener);},
+      async reply(){throw Error('unexpected approval in composer fixture');}
     };
     function App(){
       const [turn,setTurn]=React.useState('turn-1');state.setTurn=setTurn;

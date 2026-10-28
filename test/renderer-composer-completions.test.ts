@@ -33,9 +33,9 @@ test('workspace and skill completions use the selected host and produce real sub
           }
           throw Error('unexpected host ' + endpoint);
         },
-        subscribe(){return ()=>{};}
+        subscribe(){return ()=>{};}, async reply(){throw Error('unexpected approval in composer fixture');}
       };
-      let props={client,context:{hostId:'local',threadId:'t',cwd:'/workspace'},busy:true,
+      let props={client,context:{hostId:'local',threadId:'t',draftId:'t',cwd:'/workspace'},busy:true,
         async onSubmit(draft,options,action){if(action.type==='queue') return client.rpc('thread/queue/add',{threadId:props.context.threadId,input:draftToInput(draft,props.context.hostId),clientUserMessageId:'fixture'},props.context.hostId);state.submitted.push({draft,options,input:draftToInput(draft,props.context.hostId)});}, async onInterrupt(){}};
       const root=createRoot(document.getElementById('root'));
       window.fixture={state,render(changes={}){props={...props,...changes,context:{...props.context,...changes.context}};root.render(React.createElement(StandaloneComposer,props));}};
@@ -91,7 +91,7 @@ test('workspace and skill completions use the selected host and produce real sub
     await page.evaluate(() => { (window as any).fixture.state.blockLocal = true; });
     await editor.fill('@st');
     await page.waitForFunction(() => typeof (window as any).fixture.state.release === 'function');
-    await page.evaluate(() => (window as any).fixture.render({context:{hostId:'ssh-fixture',threadId:'remote',cwd:'/remote'}}));
+    await page.evaluate(() => (window as any).fixture.render({context:{hostId:'ssh-fixture',threadId:'remote',draftId:'remote',cwd:'/remote'}}));
     await editor.fill('@re');
     await page.getByRole('option', { name: /remote\.ts/ }).waitFor();
     await page.evaluate(() => (window as any).fixture.state.release());

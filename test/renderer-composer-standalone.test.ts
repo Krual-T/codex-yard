@@ -50,9 +50,10 @@ test('standalone composer preserves drafts, routes settings and controls the aut
           if (endpoint === 'workspace-files') return {text:'fixture file preview'};
           throw Error('Unexpected fixture host operation: ' + endpoint);
         },
-        subscribe(listener) { state.subscribers.add(listener); return () => state.subscribers.delete(listener); }
+        subscribe(listener) { state.subscribers.add(listener); return () => state.subscribers.delete(listener); },
+        async reply() { throw Error('unexpected approval in composer fixture'); }
       };
-      let props = {client,context:{hostId:'local',threadId:'thread-a',cwd:'/fixture/a'},busy:false,activeTurnId:'turn-active',
+      let props = {client,context:{hostId:'local',threadId:'thread-a',draftId:'thread-a',cwd:'/fixture/a'},busy:false,activeTurnId:'turn-active',
         initialOptions:{approvalPolicy:{granular:{sandbox_approval:true,rules:false,skill_approval:true,request_permissions:false,mcp_elicitations:true}},approvalsReviewer:'guardian_subagent',permissionProfileId:'fixture-profile'},
         onSubmit(draft,options,action) { if(action.type==='queue') return client.rpc('thread/queue/add',{threadId:props.context.threadId,input:draftToInput(draft,props.context.hostId),clientUserMessageId:crypto.randomUUID()},props.context.hostId); state.submissions.push({draft:structuredClone(draft),options:structuredClone(options),action}); return new Promise((resolve,reject)=>{resolveSubmit=resolve;rejectSubmit=reject;}); },
         async onStartQueued(id) { await client.rpc('thread/resume',{threadId:props.context.threadId},props.context.hostId); await client.rpc('thread/queue/start',{threadId:props.context.threadId,queuedSubmissionId:id},props.context.hostId); },
@@ -104,14 +105,14 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.evaluate(() => (window as any).fixture.resolveSubmit());
     await page.getByRole('button', { name: '发送', exact: true }).waitFor();
     assert.equal(await editor.inputValue(), 'newer edit');
-    await page.evaluate(() => (window as any).fixture.render({ context: { threadId: 'thread-b' } }));
+    await page.evaluate(() => (window as any).fixture.render({ context: { threadId: 'thread-b', draftId: 'thread-b' } }));
     await editor.fill('other thread');
-    await page.evaluate(() => (window as any).fixture.render({ context: { threadId: 'thread-a' } }));
+    await page.evaluate(() => (window as any).fixture.render({ context: { threadId: 'thread-a', draftId: 'thread-a' } }));
     await page.waitForFunction(() => (document.querySelector('textarea[aria-label="和 Codex 一起工作"]') as HTMLTextAreaElement)?.value === 'newer edit');
     await page.evaluate(() => (window as any).fixture.render({ prefill: {id:'ref-1',draft:{text:'',images:[],files:[],references:[{id:'r1',text:'fixture reference'}]}} }));
     await page.getByText('fixture reference').waitFor();
-    await page.evaluate(() => (window as any).fixture.render({ context: {threadId:'thread-b'} }));
-    await page.evaluate(() => (window as any).fixture.render({ context: {threadId:'thread-a'} }));
+    await page.evaluate(() => (window as any).fixture.render({ context: {threadId:'thread-b',draftId:'thread-b'} }));
+    await page.evaluate(() => (window as any).fixture.render({ context: {threadId:'thread-a',draftId:'thread-a'} }));
     await page.getByText('fixture reference').waitFor();
     assert.equal(await page.getByText('fixture reference').count(), 1);
     await page.getByRole('button', { name: '移除引用' }).click();
@@ -206,7 +207,7 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     const localInput = await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'thread/queue/add').at(-1).params.input);
     assert.ok(localInput.some((item: any) => item.type === 'localImage' && item.path === '/fixture/fixture.png'));
     assert.ok(localInput.some((item: any) => item.type === 'text' && item.text.includes('/fixture/fixture.txt')));
-    await page.evaluate(() => (window as any).fixture.render({context:{hostId:'ssh-fixture',threadId:'remote-thread'}}));
+    await page.evaluate(() => (window as any).fixture.render({context:{hostId:'ssh-fixture',threadId:'remote-thread',draftId:'remote-thread'}}));
     await page.locator('input[type=file]').setInputFiles([{ name: 'remote.txt', mimeType: 'text/plain', buffer: Buffer.from('remote fixture') }]);
     await page.getByText('remote.txt').waitFor();
     await page.locator('input[type=file]').setInputFiles([{ name: 'remote.png', mimeType: 'image/png', buffer: png }]);
@@ -216,7 +217,7 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     assert.match(remote[1].params.path, /^\/fixture\/codex\/attachments\/[0-9a-f-]+\/remote\.txt$/);
     await page.reload();
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
-    await page.evaluate(() => (window as any).fixture.render({context:{hostId:'ssh-fixture',threadId:'remote-thread'},busy:true}));
+    await page.evaluate(() => (window as any).fixture.render({context:{hostId:'ssh-fixture',threadId:'remote-thread',draftId:'remote-thread'},busy:true}));
     await page.getByText('remote.txt').waitFor();
     await page.getByRole('img', { name: 'remote.png' }).waitFor();
     await editor.fill('remote input');

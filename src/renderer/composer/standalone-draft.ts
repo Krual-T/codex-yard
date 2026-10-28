@@ -35,8 +35,8 @@ export function normalizeDraft(draft: ComposerDraft): Draft {
   };
 }
 export function draftKey(context: ComposerContext): string {
-  const id = context.draftId ?? context.legacyDraftKey ?? context.threadId ?? `${context.placement ?? 'main'}:new`;
-  return 'codex-yard.composer.v2:' + JSON.stringify([context.hostId, id]);
+  if (!context.draftId) throw new Error('Composer draftId is required');
+  return 'codex-yard.composer.v2:' + JSON.stringify([context.hostId, context.draftId]);
 }
 function isDocument(value: unknown): value is ComposerDocument {
   if (!record(value) || typeof value.type !== 'string' || (value.text !== undefined && typeof value.text !== 'string')
@@ -99,7 +99,7 @@ function plainDocument(document: ComposerDocument, expected?: string): string | 
     let text = '';
     for (const child of paragraph.content ?? []) {
       if (child.type === 'text' && typeof child.text === 'string' && only(child, ['type', 'text'])) text += child.text;
-      else if (child.type === 'hardBreak' && only(child, ['type'])) text += '\n';
+      else if ((child.type === 'hard_break' || child.type === 'hardBreak') && only(child, ['type'])) text += '\n';
       else return null;
     }
     paragraphs.push(text);
@@ -109,13 +109,8 @@ function plainDocument(document: ComposerDocument, expected?: string): string | 
   return expected !== undefined && choices.includes(expected) ? expected : null;
 }
 function documentFromText(text: string): ComposerDocument {
-  const lines = text.split('\n');
-  const content: ComposerDocument[] = [];
-  lines.forEach((line, index) => {
-    if (index) content.push({ type: 'hardBreak' });
-    if (line) content.push({ type: 'text', text: line });
-  });
-  return { type: 'doc', content: [{ type: 'paragraph', ...(content.length ? { content } : {}) }] };
+  return { type: 'doc', content: text.split('\n').map(line => ({ type: 'paragraph',
+    ...(line ? { content: [{ type: 'text', text: line }] } : {}) })) };
 }
 
 function legacyKeys(context: ComposerContext, atoms: Record<string, unknown>): string[] {
@@ -125,14 +120,21 @@ function legacyKeys(context: ComposerContext, atoms: Record<string, unknown>): s
   if (context.hostId !== 'local' && !context.legacyDraftKey) return keys;
   const bindings = record(atoms['client-thread-bindings-v1']) ? atoms['client-thread-bindings-v1'] : {};
   const identities = record(atoms['draft-thread-identities-v1']) ? atoms['draft-thread-identities-v1'] : {};
+  add(context.draftId);
   if (context.threadId) {
-    for (const [clientId, threadId] of Object.entries(bindings)) if (threadId === context.threadId) add(clientId);
-    add('local:' + context.threadId);
-    add(context.threadId);
+    if (context.legacyDraftKey || context.draftId === context.threadId || context.draftId === 'local:' + context.threadId
+      || bindings[context.draftId] === context.threadId) {
+      add('local:' + context.threadId);
+      add(context.threadId);
+    }
   } else {
     const location = context.placement === 'side-chat' || context.placement === 'mini' ? 'panel-new-conversation' : 'new-conversation';
-    add(location);
-    if (typeof identities[location] === 'string' && bindings[identities[location]] == null) add(identities[location]);
+    const identity = identities[location];
+    const matchesIdentity = typeof identity === 'string' && (context.draftId === identity || context.legacyDraftKey === identity);
+    if (context.draftId === location || context.legacyDraftKey === location || matchesIdentity) {
+      add(location);
+      if (typeof identity === 'string' && bindings[identity] == null) add(identity);
+    }
   }
   return keys;
 }
@@ -148,8 +150,7 @@ function readLegacy(context: ComposerContext): StoredDraft | null {
     const v1 = record(atoms['composer-prompt-drafts-v1']) ? atoms['composer-prompt-drafts-v1'] : {};
     const retained = record(atoms['composer-retained-documents-v1']) ? atoms['composer-retained-documents-v1'] : {};
     const promptKey = keys.find(key => key in v2) ?? keys.find(key => key in v1);
-    const retainedKeys = context.threadId && context.hostId === 'local' ? ['local:' + context.threadId, ...keys] : keys;
-    const retainedKey = retainedKeys.find(key => key in retained);
+    const retainedKey = keys.find(key => key in retained);
     if (promptKey === undefined && retainedKey === undefined) return null;
     const raw = promptKey === undefined ? undefined : v2[promptKey] ?? v1[promptKey];
     const draft = record(raw) && 'draft' in raw ? raw.draft : raw;
@@ -187,7 +188,9 @@ function readLegacy(context: ComposerContext): StoredDraft | null {
 export function loadDraft(context: ComposerContext): StoredDraft {
   const key = draftKey(context);
   const oldKey = 'codex-yard.composer.v1:' + JSON.stringify([context.hostId, context.threadId, context.threadId == null ? context.cwd : null]);
-  const old = context.threadId || !context.draftId ? readDraft(oldKey) : null;
+  const oldThreadId = context.threadId && (context.draftId === context.threadId || context.draftId === 'local:' + context.threadId
+    || context.legacyDraftKey === context.threadId || context.legacyDraftKey === 'local:' + context.threadId);
+  const old = oldThreadId || context.legacyDraftKey === oldKey ? readDraft(oldKey) : null;
   return readDraft(key) ?? old ?? readLegacy(context) ?? { revision: createId(), draft: emptyDraft(), prefills: [] };
 }
 export function textEditIssue(draft: Draft): string | null {

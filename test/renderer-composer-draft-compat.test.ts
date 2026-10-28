@@ -1,7 +1,21 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { activatePending, draftKey, draftToInput, emptyDraft, loadDraft, mergePrefill, normalizeDraft, textEditIssue, updateDraftText, writeDraft } from '../src/renderer/composer/standalone-draft.ts';
-import type { ComposerContext, ComposerDraft } from '../src/renderer/workbench-contract.ts';
+import type { ComposerContext, ComposerDraft, StandaloneComposerProps, WorkbenchClient } from '../src/renderer/workbench-contract.ts';
+
+function contractTypeChecks(submit: StandaloneComposerProps['onSubmit'], client: WorkbenchClient) {
+  // @ts-expect-error Draft identity is mandatory.
+  const missingIdentity: ComposerContext = { hostId: 'local', threadId: null, cwd: '/workspace' };
+  // @ts-expect-error Every submit must say which action is intended.
+  void submit(emptyDraft(), {});
+  // @ts-expect-error Steer must identify its target turn.
+  void submit(emptyDraft(), {}, { type: 'steer' });
+  const { reply, ...withoutReply } = client;
+  // @ts-expect-error Workbench clients must be able to reply to approvals.
+  const incomplete: WorkbenchClient = withoutReply;
+  void [missingIdentity, reply, incomplete];
+}
+void contractTypeChecks;
 
 class MemoryStorage implements Storage {
   private values = new Map<string, string>();
@@ -34,25 +48,46 @@ test('legacy binding and retained plain document restore without modifying nativ
     'composer-retained-documents-v1': { 'local:thread-1': { document, plainTextMode: true, prompt: 'Saved draft' } }, unrelated: { keep: true } };
   const raw = JSON.stringify(atoms);
   saved.setItem('native-atoms', raw);
-  const draft = loadDraft(context).draft;
+  const draft = loadDraft({ ...context, legacyDraftKey: 'client-1' }).draft;
   assert.equal(draft.text, 'Saved draft');
   assert.deepEqual(draft.document, document);
   assert.equal(textEditIssue(draft), null);
   const changed = updateDraftText(draft, 'Changed\nline');
   assert.equal(changed.text, 'Changed\nline');
+  assert.deepEqual(changed.document, { type: 'doc', content: [
+    { type: 'paragraph', content: [{ type: 'text', text: 'Changed' }] },
+    { type: 'paragraph', content: [{ type: 'text', text: 'line' }] },
+  ] });
   assert.deepEqual(changed.preserved, draft.preserved);
   assert.equal(writeDraft(draftKey(context), { revision: 'new', draft: changed, prefills: [] }), true);
   assert.equal(saved.getItem('native-atoms'), raw);
   assert.equal(loadDraft({ ...context, cwd: '/other' }).draft.text, 'Changed\nline');
 });
 
+test('original hard_break nodes are editable only when their text is unambiguous', () => {
+  const draft = normalizeDraft({ text: 'first\nsecond', images: [], files: [], document: { type: 'doc', content: [
+    { type: 'paragraph', content: [{ type: 'text', text: 'first' }, { type: 'hard_break' }, { type: 'text', text: 'second' }] },
+  ] } });
+  assert.equal(textEditIssue(draft), null);
+  assert.equal(updateDraftText(draft, 'next').text, 'next');
+});
+
 test('legacy new-draft identity and v1 fallback are supported without sharing cwd identity', () => {
   const saved = storage();
   saved.setItem('native-atoms', JSON.stringify({ 'draft-thread-identities-v1': { 'new-conversation': 'client-new' },
     'client-thread-bindings-v1': {}, 'composer-prompt-drafts-v1': { 'client-new': 'Legacy new message' } }));
-  const value = loadDraft({ hostId: 'local', threadId: null, cwd: '/workspace', draftId: 'new-1' });
+  const value = loadDraft({ hostId: 'local', threadId: null, cwd: '/workspace', draftId: 'client-new' });
   assert.equal(value.draft.text, 'Legacy new message');
   assert.equal(textEditIssue(value.draft), null);
+  assert.equal(loadDraft({ hostId: 'local', threadId: null, cwd: '/workspace', draftId: 'other-new' }).draft.text, '');
+});
+
+test('an absent legacy identity does not claim the shared new-conversation draft', () => {
+  const saved = storage();
+  saved.setItem('native-atoms', JSON.stringify({ 'composer-prompt-drafts-v1': { 'new-conversation': 'Legacy draft' } }));
+  const fresh: ComposerContext = { hostId: 'local', threadId: null, cwd: '/workspace', draftId: 'new-unique' };
+  assert.equal(loadDraft(fresh).draft.text, '');
+  assert.equal(loadDraft({ ...fresh, legacyDraftKey: 'new-conversation' }).draft.text, 'Legacy draft');
 });
 
 test('rich documents and opaque legacy metadata remain preserved and cannot be overwritten by text editing', () => {
@@ -62,7 +97,7 @@ test('rich documents and opaque legacy metadata remain preserved and cannot be o
   ] }] };
   const record = { draft: { prompt: { document, plainTextMode: false }, pullRequestChecks: [{ id: 'keep' }] } };
   saved.setItem('native-atoms', JSON.stringify({ 'composer-prompt-drafts-v2': { 'local:thread-1': record } }));
-  const draft = loadDraft(context).draft;
+  const draft = loadDraft({ ...context, legacyDraftKey: 'local:thread-1' }).draft;
   assert.ok(textEditIssue(draft));
   assert.deepEqual(draft.document, document);
   assert.deepEqual(updateDraftText(draft, 'replacement'), draft);
@@ -77,10 +112,23 @@ test('conflicting retained and prompt documents remain distinct and block editin
   saved.setItem('native-atoms', JSON.stringify({ 'client-thread-bindings-v1': { client: 'thread-1' },
     'composer-prompt-drafts-v2': { client: { prompt, pullRequestChecks: [] } },
     'composer-retained-documents-v1': { 'local:thread-1': retained } }));
-  const draft = loadDraft(context).draft;
+  const draft = loadDraft({ ...context, legacyDraftKey: 'client' }).draft;
   assert.match(textEditIssue(draft) ?? '', /不同版本/);
   assert.deepEqual((draft.preserved as { draft: { prompt: unknown } }).draft.prompt, prompt);
   assert.deepEqual((draft.preserved as { retained: unknown }).retained, retained);
+});
+
+test('legacy thread drafts are restored only for an explicit matching identity', () => {
+  const saved = storage();
+  const legacyKey = 'codex-yard.composer.v1:' + JSON.stringify(['local', 'thread-1', null]);
+  saved.setItem(legacyKey, JSON.stringify({ revision: 'old', draft: emptyDraft(), prefills: [] }));
+  saved.setItem('native-atoms', JSON.stringify({ 'client-thread-bindings-v1': { 'original-client': 'thread-1' },
+    'composer-prompt-drafts-v1': { 'original-client': 'Original client draft' } }));
+  assert.equal(loadDraft({ ...context, draftId: 'new-client' }).draft.text, '');
+  assert.equal(loadDraft({ ...context, draftId: 'original-client' }).draft.text, 'Original client draft');
+  assert.equal(loadDraft({ ...context, legacyDraftKey: 'original-client' }).draft.text, 'Original client draft');
+  assert.equal(loadDraft({ ...context, legacyDraftKey: legacyKey }).revision, 'old');
+  assert.throws(() => draftKey({ ...context, draftId: '' }), /draftId is required/);
 });
 
 test('ordered input, hints, references and file IDs survive normalization and serialization', () => {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ClipboardEvent, KeyboardEvent } from 'react';
-import type { ComposerDraft, StandaloneComposerProps, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
+import type { ComposerDraft, StandaloneComposerProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { activatePending, createId, draftKey, draftToInput, hasContent, loadDraft, mergePrefill, readDraft, textEditIssue, updateDraftText, writeDraft } from './standalone-draft.ts';
 import type { Draft } from './standalone-draft.ts';
 import { importAttachments } from './standalone-files.ts';
@@ -75,11 +75,14 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   }, [key]);
   useEffect(() => {
     if (!prefill) return;
-    if (current.current.prefills.includes(prefill.id)) { onPrefillConsumed?.(prefill.id); return; }
+    if (current.current.prefills.includes(prefill.id)) {
+      if (readDraft(key)?.prefills.includes(prefill.id)) onPrefillConsumed?.(prefill.id);
+      return;
+    }
     const saved = changeDraft(value => mergePrefill(value, prefill.draft), prefill.id);
     if (saved) onPrefillConsumed?.(prefill.id);
     editor.current?.focus();
-  }, [prefill, changeDraft, onPrefillConsumed]);
+  }, [prefill, changeDraft, onPrefillConsumed, key, storageError]);
 
   const addFiles = async (files: File[]) => {
     if (!files.length || uploadInFlight.current || editIssue || structuredInput) return;
@@ -108,16 +111,20 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       setError('此草稿包含队列协议无法保存的上下文，已保留草稿。'); return;
     }
     if (busy && !context.threadId) { setError('会话尚未创建，请稍后再排队。'); return; }
-    if (busy && followUp === 'steer' && !activeTurnId) { setError('当前任务尚无可确认的 turn ID。'); return; }
+    let action: SubmitAction;
+    if (!busy) action = { type: 'send' };
+    else if (followUp === 'queue') action = { type: 'queue' };
+    else {
+      if (!activeTurnId) { setError('当前任务尚无可确认的 turn ID。'); return; }
+      action = { type: 'steer', turnId: activeTurnId };
+    }
     try { draftToInput(current.current.draft, context.hostId); }
     catch (reason) { setError(message(reason)); return; }
     const captured = current.current;
     submitInFlight.current = true; setSending(true); setError('');
     try {
       const submitted: ComposerDraft = captured.draft;
-      await onSubmit(submitted, options, busy
-        ? followUp === 'steer' ? { type: 'steer', turnId: activeTurnId ?? undefined } : { type: 'queue' }
-        : { type: 'send' });
+      await onSubmit(submitted, options, action);
       if (busy && followUp === 'queue' && mounted.current) setQueueVersion(value => value + 1);
       const persisted = readDraft(key);
       if (current.current.revision === captured.revision && (!persisted || persisted.revision === captured.revision)) {
