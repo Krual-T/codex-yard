@@ -16,7 +16,7 @@ export function RemoteWorktreesSection({ client, hostId, onDirtyChange, onSaving
   const dirty = settings.dirty;
   useEffect(() => { void settings.load(); return () => settings.dispose(); }, [settings]);
   useLayoutEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
-  useLayoutEffect(() => { onSavingChange(state.saving); }, [state.saving, onSavingChange]);
+  useLayoutEffect(() => { onSavingChange(state.saving || state.draftSaving); }, [state.saving, state.draftSaving, onSavingChange]);
   return <>
     <h2>{t('Worktrees')}</h2>
     <p className="yard-muted">Worktree preferences for {hostId}.</p>
@@ -26,7 +26,14 @@ export function RemoteWorktreesSection({ client, hostId, onDirtyChange, onSaving
       onClick={() => { void settings.load(); }}>{t('Reload')}</button></p>}
     {state.writeError && <p className="yard-setting-error" role="alert">{state.writeError} <button type="button" className="yard-link" disabled={state.loading || state.saving}
       onClick={() => { void settings.load(); }}>{t('Reload')}</button></p>}
+    {state.draftStorageError && <p className="yard-setting-error" role="alert">Could not save the newer edit in this browser: {state.draftStorageError}{' '}
+      <button type="button" onClick={() => { void settings.retryDraftPersistence(); }}>Retry saving edit</button></p>}
     {state.warning && <p role="status">{state.warning}</p>}
+    {state.conflicts.map(field => <div className="yard-setting-error" role="alert" key={field}>
+      <p>{field === 'root' ? 'Worktree root' : field === 'autoCleanup' ? 'Automatic deletion' : 'Auto-delete limit'} changed elsewhere. Current: {String(state.saved?.[field])}; your edit: {String(state.draft?.[field])}.</p>
+      <div className="yard-actions"><button type="button" disabled={state.saving} onClick={() => settings.resolveConflict(field, 'current')}>{t('Use current value')}</button>
+        <button type="button" disabled={state.saving} onClick={() => settings.resolveConflict(field, 'draft')}>{t('Keep my change')}</button></div>
+    </div>)}
     <div className="yard-setting-group">
       {state.draft && <Row label="Worktree root" description="Directory for managed worktrees; leave blank for the default.">
         <input type="text" aria-label={t('Worktree root')} value={state.draft.root} disabled={state.saving}
@@ -46,7 +53,7 @@ export function RemoteWorktreesSection({ client, hostId, onDirtyChange, onSaving
     </div>
     {dirty && <div className="yard-inline-save"><span>{t('Unsaved worktree settings')}</span><div className="yard-actions">
       <button type="button" disabled={state.saving} onClick={() => settings.discard()}>{t('Discard')}</button>
-      <button type="button" disabled={state.loading || state.saving || Boolean(state.writeError)} onClick={() => { void settings.save(); }}>{t(state.saving ? 'Saving...' : 'Save')}</button>
+      <button type="button" disabled={state.loading || state.saving || Boolean(state.writeError) || state.conflicts.length > 0} onClick={() => { void settings.save(); }}>{t(state.saving ? 'Saving...' : 'Save')}</button>
     </div></div>}
     {confirmDisable && <div className="yard-dialog-backdrop"><div className="yard-dialog" role="dialog" aria-modal="true" aria-labelledby="yard-remote-worktree-confirm">
       <h2 id="yard-remote-worktree-confirm">{t('Disable automatic worktree deletion?')}</h2><p>{t('Old worktrees will remain until they are removed manually.')}</p>

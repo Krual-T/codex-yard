@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import { AgentSettings } from '../src/renderer/settings/agent-settings.ts';
+import { fixtureConfigurationHost, fixtureOperations } from './renderer-settings-sections-config-fixture.ts';
 
 class FakeClient implements WorkbenchClient {
+  operations = fixtureOperations(this);
   config: { approval_policy: unknown; sandbox_mode: string; profile: string | null } = { approval_policy: 'on-request', sandbox_mode: 'read-only', profile: null };
   requirements: { allowedApprovalPolicies: unknown[] | null; allowedSandboxModes: string[] | null } = { allowedApprovalPolicies: null, allowedSandboxModes: null };
   version = 'v1';
@@ -16,6 +18,7 @@ class FakeClient implements WorkbenchClient {
   async host<T>(method: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ method, params });
     if (method === 'codex-home') return { codexHome: '/fixture/codex' } as T;
+    if (method === 'configuration-write' && params) return await fixtureConfigurationHost(this, params) as T;
     throw new Error('Unknown host endpoint');
   }
   async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
@@ -38,7 +41,7 @@ class FakeClient implements WorkbenchClient {
 }
 
 test('agent writes approved user defaults with the selected host and verified version', async () => {
-  const client = new FakeClient(), agent = new AgentSettings(client, 'ssh:fixture');
+  const client = new FakeClient(), agent = new AgentSettings(client, 'ssh:fixture', client.operations);
   await agent.load();
   agent.edit('approval', 'never'); agent.edit('sandbox', 'workspace-write');
   assert.equal(await agent.save(), true);
@@ -50,7 +53,7 @@ test('agent writes approved user defaults with the selected host and verified ve
 });
 
 test('agent requirements restrict choices and are checked again before a write', async () => {
-  const client = new FakeClient(), agent = new AgentSettings(client, 'local');
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
   client.requirements.allowedApprovalPolicies = ['on-request'];
   await agent.load(); agent.edit('approval', 'never');
   assert.equal(agent.dirty, false);
@@ -64,7 +67,7 @@ test('agent requirements restrict choices and are checked again before a write',
 
 test('agent retains drafts on missing version, offline writes and concurrent changes', async () => {
   for (const scenario of ['missing', 'offline', 'conflict'] as const) {
-    const client = new FakeClient(), agent = new AgentSettings(client, 'local');
+    const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
     client.missingVersion = scenario === 'missing';
     await agent.load(); agent.edit('sandbox', 'workspace-write');
     client.reject = scenario === 'offline'; client.conflict = scenario === 'conflict';
@@ -75,8 +78,21 @@ test('agent retains drafts on missing version, offline writes and concurrent cha
   }
 });
 
+test('agent restores a newer edit separately from an unknown original request', async () => {
+  const client = new FakeClient(), first = new AgentSettings(client, 'local', client.operations);
+  await first.load(); first.edit('sandbox', 'workspace-write'); client.reject = true;
+  assert.equal(await first.save(), false);
+  first.edit('approval', 'never'); await first.retryDraftPersistence();
+  const record = await client.operations.find('local', 'agent');
+  assert.deepEqual(record?.params.edits, [{ keyPath: 'sandbox_mode', value: 'workspace-write', mergeStrategy: 'upsert' }]);
+  const second = new AgentSettings(client, 'local', client.operations); await second.load();
+  assert.deepEqual(second.getSnapshot().values, { approval: 'never', sandbox: 'workspace-write' });
+  client.reject = false; assert.equal(await second.save(), false);
+  assert.equal(client.calls.filter(call => call.method === 'config/batchWrite').length, 1);
+});
+
 test('advanced approval is preserved and changes elsewhere block writes', async () => {
-  const client = new FakeClient(), agent = new AgentSettings(client, 'local');
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
   client.config.approval_policy = { granular: { rules: true } };
   await agent.load(); agent.edit('sandbox', 'workspace-write');
   client.config.approval_policy = { granular: { rules: false } };
@@ -87,7 +103,7 @@ test('advanced approval is preserved and changes elsewhere block writes', async 
 });
 
 test('unverifiable requirements do not permit new agent choices', async () => {
-  const client = new FakeClient(), agent = new AgentSettings(client, 'local');
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
   client.requirements.allowedSandboxModes = 'read-only' as unknown as string[];
   await agent.load(); agent.edit('sandbox', 'workspace-write');
   assert.equal(agent.dirty, false);
@@ -95,7 +111,7 @@ test('unverifiable requirements do not permit new agent choices', async () => {
 });
 
 test('agent reload retains only an edited approval and adopts a concurrent sandbox restriction', async () => {
-  const client = new FakeClient(), agent = new AgentSettings(client, 'local');
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
   client.config.approval_policy = 'never'; client.config.sandbox_mode = 'workspace-write';
   await agent.load(); agent.edit('approval', 'on-request');
   client.config.sandbox_mode = 'read-only'; client.version = 'external-version';
@@ -111,7 +127,7 @@ test('agent reload retains only an edited approval and adopts a concurrent sandb
 });
 
 test('agent same-field conflict requires an explicit choice even after repeated reloads', async () => {
-  const client = new FakeClient(), agent = new AgentSettings(client, 'local');
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
   await agent.load(); agent.edit('approval', 'never');
   client.config.approval_policy = 'untrusted'; client.version = 'external-version';
   await agent.load();
@@ -126,7 +142,7 @@ test('agent same-field conflict requires an explicit choice even after repeated 
 });
 
 test('a concurrent sandbox edit cannot be overwritten without review', async () => {
-  const client = new FakeClient(), agent = new AgentSettings(client, 'local');
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
   await agent.load(); agent.edit('sandbox', 'workspace-write');
   client.config.sandbox_mode = 'danger-full-access'; client.version = 'v2';
   await agent.load();
@@ -143,7 +159,7 @@ test('a concurrent sandbox edit cannot be overwritten without review', async () 
 });
 
 test('agent profile changes cannot redirect a pending sandbox edit', async () => {
-  const client = new FakeClient(), agent = new AgentSettings(client, 'local');
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
   await agent.load(); agent.edit('sandbox', 'workspace-write');
   client.config.profile = 'other'; client.version = 'external-version';
   assert.equal(await agent.save(), false);

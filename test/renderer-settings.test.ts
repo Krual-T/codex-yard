@@ -79,10 +79,10 @@ test('standalone settings guard navigation, locate controls and save appearance 
     args: ['--no-sandbox', '--disable-background-networking'] });
   try {
     const page = await browser.newPage();
-    await page.route('**/*', route => route.abort());
+    await page.route('**/*', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="root"></div>' }));
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
-    await page.setContent('<div id="root"></div>');
+    await page.goto('http://settings-fixture.invalid/');
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
 
     const language = page.getByRole('combobox', { name: 'Language' });

@@ -43,6 +43,15 @@ test('settings waits for host-bound scope and retains pending hook and skill edi
           if (method === 'get-settings') return {values:{}};
           if (method.startsWith('get-')) return {exists:false};
           if (method === 'codex-home') return {codexHome:'/fixture'};
+          if (method === 'configuration-write' && params.action === 'submit') {
+            const {hostId,operationId,method:writeMethod,params:writeParams} = params;
+            calls.push({method:writeMethod,params:writeParams,hostId});
+            return new Promise(resolve => { pendingWrite = () => {
+              const result = writeMethod === 'config/batchWrite' ? {status:'ok'} : {effectiveEnabled:false};
+              const terminal = writeMethod === 'config/batchWrite' ? {kind:'ok'} : {kind:'effectiveEnabled',value:false};
+              resolve({outcome:'success',result,operation:{operationId,hostId,method:writeMethod,state:'succeeded',terminal}});
+            }; });
+          }
           throw Error('Unexpected host request: ' + method);
         },
         rpc:async (method, params, hostId) => {
@@ -53,7 +62,6 @@ test('settings waits for host-bound scope and retains pending hook and skill edi
           if (method === 'plugin/read') return {plugin:{marketplaceName:'fixture',summary:{id:'fixture',name:'fixture',installed:true,enabled:true,
             interface:{displayName:'Fixture plugin'}},description:null,skills:[],hooks:[],apps:[],appTemplates:[],mcpServers:[],scheduledTasks:null}};
           if (method === 'config/read') return {config:{},layers:[{name:{type:'user',file:'/fixture/config.toml',profile:null},version:'v1'}]};
-          if (method === 'config/batchWrite' || method === 'skills/config/write') return new Promise(resolve => { pendingWrite = () => resolve(method === 'config/batchWrite' ? {status:'ok'} : {effectiveEnabled:false}); });
           throw Error('Unexpected RPC: ' + method);
         },
       };
@@ -80,10 +88,10 @@ test('settings waits for host-bound scope and retains pending hook and skill edi
     args: ['--no-sandbox', '--disable-background-networking'] });
   try {
     const page = await browser.newPage();
-    await page.route('**/*', route => route.abort());
+    await page.route('**/*', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="root"></div>' }));
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
-    await page.setContent('<div id="root"></div>');
+    await page.goto('http://settings-fixture.invalid/');
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     const main = page.getByRole('main');
     const idle = () => page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
@@ -153,17 +161,18 @@ test('settings waits for host-bound scope and retains pending hook and skill edi
     await idle();
     const callsBeforeLate = (await scopedCalls()).length;
     await page.evaluate(() => window.scopeStatusHarness.resolveWrite());
+    await page.waitForFunction(() => document.querySelector('[aria-label="Configuration save recovery"]')?.textContent?.includes('Result: ok'));
     await idle();
     assert.equal((await scopedCalls()).length, callsBeforeLate);
     await page.evaluate(() => window.scopeStatusHarness.setStatus('ready'));
-    await main.getByText(/previous hook save has an unknown result/i).first().waitFor();
+    await main.getByText('Current hook state on the host:').waitFor();
     assert.equal(await page.getByRole('button', { name: 'Save', exact: true }).isDisabled(), true);
     assert.equal(await hook.isChecked(), false);
     assert.equal((await page.evaluate(() => window.scopeStatusHarness.calls.filter(call => call.method === 'config/batchWrite'))).length, 1);
     const skillPage = await browser.newPage();
-    await skillPage.route('**/*', route => route.abort());
+    await skillPage.route('**/*', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="root"></div>' }));
     skillPage.on('pageerror', error => errors.push(error.message));
-    await skillPage.setContent('<div id="root"></div>');
+    await skillPage.goto('http://settings-fixture.invalid/');
     await skillPage.addScriptTag({ content: bundle.outputFiles[0]!.text });
     await skillPage.getByRole('button', { name: 'Skills', exact: true }).click();
     await skillPage.evaluate(() => window.scopeStatusHarness.setStatus('ready'));
@@ -181,16 +190,17 @@ test('settings waits for host-bound scope and retains pending hook and skill edi
     await skillPage.getByRole('main').getByRole('status').waitFor();
     await skillPage.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     await skillPage.evaluate(() => window.scopeStatusHarness.resolveWrite());
+    await skillPage.waitForFunction(() => document.querySelector('[aria-label="Configuration save recovery"]')?.textContent?.includes('Result: effectiveEnabled'));
     await skillPage.evaluate(() => window.scopeStatusHarness.setStatus('ready'));
-    await skillPage.getByRole('main').getByText(/previous save has an unknown result/i).waitFor();
+    await skillPage.getByRole('main').getByText('Current skill state on the host:').waitFor();
     assert.equal(await skillPage.getByRole('button', { name: 'Save', exact: true }).isDisabled(), true);
     assert.equal(await skill.isChecked(), false);
     assert.equal((await skillPage.evaluate(() => window.scopeStatusHarness.calls.filter(call => call.method === 'skills/config/write'))).length, 1);
 
     const detailPage = await browser.newPage();
-    await detailPage.route('**/*', route => route.abort());
+    await detailPage.route('**/*', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="root"></div>' }));
     detailPage.on('pageerror', error => errors.push(error.message));
-    await detailPage.setContent('<div id="root"></div>');
+    await detailPage.goto('http://settings-fixture.invalid/');
     await detailPage.addScriptTag({ content: bundle.outputFiles[0]!.text });
     await detailPage.evaluate(() => {
       window.scopeStatusHarness.setScope({ hostId: 'ssh-fixture', paths: ['/fixture/remote'] }, null);

@@ -2,6 +2,7 @@ import type { WorkbenchClient } from '../workbench-contract.ts';
 import { userConfigTarget } from './config-target.ts';
 import type { ConfigTarget } from './config-target.ts';
 import { validScopePath } from './scope.ts';
+import { createSettingsWriteId, latestSettingsDraft, SettingsConfigOperations, SettingsWriteError, settingsConfigOperations } from './config-operations.ts';
 
 type Handler = { type: 'command'; command: string; async: boolean } | { type: 'mcpTool'; server: string; tool: string }
   | { type: 'prompt' | 'agent' } | { type: 'unknown'; label: string };
@@ -15,6 +16,7 @@ export interface HookDraft { key: string; enabled: boolean }
 export interface HookSnapshot {
   loading: boolean; saving: boolean; hooks: HookEntry[]; warnings: string[]; drafts: HookDraft[];
   error: string | null; targetError: string | null; needsRefresh: boolean; writeUncertain: boolean; latest: HookEntry[] | null;
+  draftStorageError: string | null; draftSaving: boolean;
 }
 const unknownWrite = 'The previous hook save has an unknown result. The host must confirm it has ended before another save.';
 const text = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -67,17 +69,32 @@ export class HookSettings {
   private readonly client: WorkbenchClient;
   private readonly hostId: string;
   private readonly cwds: readonly string[];
+  private readonly operations: SettingsConfigOperations;
+  private restored = false;
+  private readonly editorId = createSettingsWriteId();
+  private draftWrites: Promise<void> = Promise.resolve();
+  private draftWriteCount = 0;
   private readonly listeners = new Set<() => void>();
   private generation = 0;
   private writeInFlight = false;
   private target: ConfigTarget | null = null;
   private profile: string | null = null;
   private latestRead: HookRead | null = null;
-  private snapshot: HookSnapshot = { loading: true, saving: false, hooks: [], warnings: [], drafts: [], error: null, targetError: null, needsRefresh: false, writeUncertain: false, latest: null };
-  constructor(client: WorkbenchClient, hostId: string, cwds: readonly string[]) { this.client = client; this.hostId = hostId; this.cwds = [...cwds]; }
+  private snapshot: HookSnapshot = { loading: true, saving: false, hooks: [], warnings: [], drafts: [], error: null, targetError: null, needsRefresh: false, writeUncertain: false, latest: null, draftStorageError: null, draftSaving: false };
+  constructor(client: WorkbenchClient, hostId: string, cwds: readonly string[], operations = settingsConfigOperations(client)) {
+    this.client = client; this.hostId = hostId; this.cwds = [...cwds]; this.operations = operations;
+  }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<HookSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
+  retryDraftPersistence() {
+    const draft = structuredClone({ drafts: this.snapshot.drafts });
+    this.draftWriteCount++; this.update({ draftSaving: true });
+    this.draftWrites = this.draftWrites.then(() => this.operations.saveDraft(this.hostId, 'hooks-settings', this.cwds, this.editorId, draft))
+      .then(() => this.update({ draftStorageError: null }), error => this.update({ draftStorageError: text(error) }))
+      .finally(() => { if (--this.draftWriteCount === 0) this.update({ draftSaving: false }); });
+    return this.draftWrites;
+  }
   get dirty() { return this.snapshot.drafts.length > 0; }
   dispose() {
     this.generation++;
@@ -118,11 +135,27 @@ export class HookSettings {
     const generation = ++this.generation;
     this.update({ loading: true, error: null });
     try {
+      const previous = await this.operations.find(this.hostId, 'hooks-settings', this.cwds);
+      if (generation !== this.generation) return;
+      const unresolved = !!previous && (previous.phase === 'pending' || previous.phase === 'unknown' || previous.phase === 'blocked' || !!previous.operation?.storageError);
+      const savedDraft = previous && latestSettingsDraft(previous);
+      if (!this.restored && previous && record(savedDraft) && Array.isArray(savedDraft.drafts)) {
+        const drafts = savedDraft.drafts;
+        if (drafts.every((item: unknown) => record(item) && typeof item.key === 'string' && typeof item.enabled === 'boolean')) {
+          this.snapshot = { ...this.snapshot, drafts: drafts as HookDraft[], needsRefresh: true, writeUncertain: unresolved };
+        } else throw new Error('The saved hook edits cannot be read.');
+      } else if (!this.restored && previous) {
+        throw new Error('The saved hook edits cannot be read.');
+      } else if (this.snapshot.writeUncertain && previous && !unresolved) {
+        this.snapshot = { ...this.snapshot, writeUncertain: false, needsRefresh: true };
+      }
+      this.restored = true;
       const read = await this.read();
       if (generation !== this.generation) return;
       if (this.dirty && (this.snapshot.needsRefresh || this.changed(read))) {
         this.latestRead = read;
-        this.update({ loading: false, latest: read.hooks, warnings: read.warnings, targetError: read.targetError,
+        this.update({ loading: false, hooks: this.snapshot.hooks.length ? this.snapshot.hooks : read.hooks,
+          latest: read.hooks, warnings: read.warnings, targetError: read.targetError,
           error: this.snapshot.writeUncertain ? unknownWrite : 'Hook settings changed or the last save could not be confirmed. Review the current state before saving.' });
       } else {
         this.latestRead = null; this.target = read.target; this.profile = read.profile;
@@ -137,6 +170,7 @@ export class HookSettings {
     const drafts = this.snapshot.drafts.filter(item => item.key !== key);
     if (hook.enabled !== enabled) drafts.push({ key, enabled });
     this.update({ drafts, error: null });
+    void this.retryDraftPersistence();
   }
   discard() {
     if (this.snapshot.saving || this.snapshot.writeUncertain) return;
@@ -145,6 +179,7 @@ export class HookSettings {
     if (latest) { this.target = latest.target; this.profile = latest.profile; this.latestRead = null; }
     this.update({ drafts: [], hooks: latest?.hooks ?? this.snapshot.hooks, warnings: latest?.warnings ?? this.snapshot.warnings,
       targetError: latest ? latest.targetError : this.snapshot.targetError, error: null, latest: null, needsRefresh: false });
+    void this.retryDraftPersistence();
     if (refresh) void this.load();
   }
   useLatest() {
@@ -157,6 +192,7 @@ export class HookSettings {
     this.target = latest.target; this.profile = latest.profile; this.latestRead = null;
     const drafts = this.snapshot.drafts.filter(draft => latest.hooks.find(hook => hook.key === draft.key)?.enabled !== draft.enabled);
     this.update({ hooks: latest.hooks, warnings: latest.warnings, targetError: latest.targetError, drafts, latest: null, needsRefresh: false, error: null });
+    void this.retryDraftPersistence();
   }
   async save(): Promise<boolean> {
     if (!this.dirty || this.snapshot.saving || this.snapshot.loading || this.snapshot.latest || this.snapshot.needsRefresh || this.snapshot.writeUncertain) return false;
@@ -166,6 +202,9 @@ export class HookSettings {
     this.update({ saving: true, error: null });
     let writeStarted = false, writeFinished = false;
     try {
+      await this.draftWrites;
+      if (this.snapshot.draftStorageError) throw new Error('The newer edit could not be saved in the browser.');
+      if (generation !== this.generation) return false;
       const before = await this.read();
       if (generation !== this.generation) return false;
       if (this.changed(before)) {
@@ -177,9 +216,13 @@ export class HookSettings {
       writeStarted = true;
       this.writeInFlight = true;
       let result: { status: 'ok' | 'okOverridden' };
+      let operationId: string;
       try {
-        result = await this.client.rpc<{ status: 'ok' | 'okOverridden' }>('config/batchWrite',
-          { edits, filePath: null, expectedVersion: target.version, reloadUserConfig: true }, this.hostId);
+        const submitted = await this.operations.submit(this.hostId, 'config/batchWrite',
+          { edits, filePath: null, expectedVersion: target.version, reloadUserConfig: true },
+          { section: 'hooks-settings', scope: this.cwds, draft: { drafts } }, () => generation === this.generation);
+        result = submitted.result as { status: 'ok' | 'okOverridden' };
+        operationId = submitted.operationId;
       } finally { this.writeInFlight = false; }
       writeFinished = true;
       if (generation !== this.generation) return false;
@@ -192,13 +235,15 @@ export class HookSettings {
         this.update({ saving: false, latest: after.hooks, warnings: after.warnings, targetError: after.targetError, needsRefresh: true,
           error: 'The host reported different hook settings after saving. Review the current state.' }); return false;
       }
+      await this.operations.finish(operationId);
+      if (generation !== this.generation) return false;
       this.target = after.target; this.profile = after.profile; this.latestRead = null;
       this.update({ saving: false, hooks: after.hooks, warnings: after.warnings, targetError: after.targetError,
         drafts: [], latest: null, needsRefresh: false, error: null });
       return true;
     } catch (error) {
       if (generation === this.generation) {
-        const writeUncertain = writeStarted && !writeFinished;
+        const writeUncertain = error instanceof SettingsWriteError ? error.uncertain : writeStarted && !writeFinished;
         this.update({ saving: false, needsRefresh: true, writeUncertain,
           error: writeUncertain ? unknownWrite : `Could not confirm save: ${text(error)}. Your edits are preserved; refresh before retrying.` });
       }

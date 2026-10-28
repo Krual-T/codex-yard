@@ -36,12 +36,12 @@ export function HookSection({ client, hostId, projectScope, memory, revision, on
     return () => { settings.dispose(); onSavingChange(false); };
   }, [settings, scopeChanged, onSavingChange]);
   useEffect(() => {
-    if (scopeChanged && !settings.dirty && !state.saving && !state.loading && !state.writeUncertain) {
+    if (scopeChanged && !settings.dirty && !state.saving && !state.draftSaving && !state.loading && !state.writeUncertain) {
       setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); setScopeError(null);
     }
-  }, [scopeChanged, incomingKey, projectScope, settings, state.drafts, state.saving, state.loading, state.writeUncertain]);
+  }, [scopeChanged, incomingKey, projectScope, settings, state.drafts, state.saving, state.draftSaving, state.loading, state.writeUncertain]);
   useLayoutEffect(() => { onDirtyChange(settings.dirty); }, [settings, state.drafts, onDirtyChange]);
-  useLayoutEffect(() => { onSavingChange(state.saving); }, [state.saving, onSavingChange]);
+  useLayoutEffect(() => { onSavingChange(state.saving || state.draftSaving); }, [state.saving, state.draftSaving, onSavingChange]);
   const locked = state.loading || state.saving || state.writeUncertain || state.latest !== null || scopeChanged;
   return <>
     <div className="yard-section-heading"><h2>{t('Hooks')}</h2><button type="button" disabled={state.loading || state.saving} onClick={() => { void settings.load(); }}>{t('Refresh')}</button></div>
@@ -59,6 +59,8 @@ export function HookSection({ client, hostId, projectScope, memory, revision, on
     {scopeChanged && settings.dirty && <div className="yard-setting-error" role="alert"><p>{t('The selected project changed. Your hook edits remain in the previous scope.')}</p>
       <button type="button" disabled={state.saving || state.writeUncertain} onClick={() => { settings.discard(); setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); }}>{t('Discard edits and switch scope')}</button></div>}
     {state.error && <p className="yard-setting-error" role="alert">{translateKnown(t, state.error)}</p>}
+    {state.draftStorageError && <p className="yard-setting-error" role="alert">Could not save the newer edit in this browser: {state.draftStorageError}{' '}
+      <button type="button" onClick={() => { void settings.retryDraftPersistence(); }}>Retry saving edit</button></p>}
     {state.targetError && <p className="yard-setting-error">{state.targetError}</p>}
     {state.warnings.map((warning, index) => <p className="yard-setting-error" key={`${warning}:${index}`}>{warning}</p>)}
     {state.loading && <p role="status">{t('Loading hooks...')}</p>}

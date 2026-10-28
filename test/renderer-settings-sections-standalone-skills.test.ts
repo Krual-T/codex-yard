@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import { canEditSkill, SkillSettings } from '../src/renderer/settings/skills.ts';
+import { fixtureConfigurationHost, fixtureOperations } from './renderer-settings-sections-config-fixture.ts';
 
 const local = { name: 'review', description: 'Review changes', path: '/project/.agents/skills/review/SKILL.md', scope: 'repo', enabled: true, pluginId: null };
 const plugin = { name: 'bundle:review', description: 'Plugin review', path: '/plugin/review/SKILL.md', scope: 'user', enabled: true, pluginId: 'bundle' };
 class FakeClient implements WorkbenchClient {
+  operations = fixtureOperations(this);
   skills = [{ ...local }, { ...plugin }];
   writes: { params: Record<string, unknown>; hostId?: string }[] = [];
   failRead = false; failWriteAt = 0; lostWriteAt = 0; override = false;
@@ -13,7 +15,10 @@ class FakeClient implements WorkbenchClient {
   beforeWrite?: () => Promise<void>;
   subscribe(_listener: (event: WorkbenchEvent) => void) { return () => {}; }
   async reply(): Promise<void> { throw new Error('Unexpected approval'); }
-  async host<T>(): Promise<T> { throw new Error('Unexpected host call'); }
+  async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
+    if (endpoint === 'configuration-write' && params) return await fixtureConfigurationHost(this, params) as T;
+    throw new Error('Unexpected host call');
+  }
   async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
     assert.equal(hostId, 'ssh:one');
     if (method === 'skills/list') {
@@ -35,7 +40,7 @@ class FakeClient implements WorkbenchClient {
     throw new Error(`Unexpected ${method}`);
   }
 }
-const setup = async () => { const client = new FakeClient(), settings = new SkillSettings(client, 'ssh:one', ['/project']); await settings.load(); return { client, settings }; };
+const setup = async () => { const client = new FakeClient(), settings = new SkillSettings(client, 'ssh:one', ['/project'], client.operations); await settings.load(); return { client, settings }; };
 const id = (name: string, path: string) => JSON.stringify([path, name]);
 
 test('skill writes use original path and namespaced selectors and refresh the authoritative result', async () => {
@@ -49,6 +54,7 @@ test('skill writes use original path and namespaced selectors and refresh the au
   ]);
   assert.equal(settings.dirty, false);
   assert.deepEqual(settings.getSnapshot().skills.map(skill => skill.enabled), [false, false]);
+  assert.equal(await client.operations.find('ssh:one', 'skills-settings', ['/project']), null);
 });
 
 test('changed state is reviewed before a write and missing or ambiguous selectors cannot be adopted', async () => {
@@ -80,9 +86,21 @@ test('lost or partial replies remain fenced after refresh and review within the 
   assert.equal(await settings.save(), false); assert.equal(client.writes.length, 2);
   settings.discard(); await settings.load();
   settings.edit(id(plugin.name, plugin.path), false);
-  assert.equal(settings.dirty, false);
+  assert.equal(settings.dirty, true);
   assert.equal(settings.getSnapshot().writeUncertain, true);
   assert.equal(client.writes.length, 2);
+});
+
+test('partial skill writes restore the complete draft and never replay the unknown operation', async () => {
+  const { client, settings } = await setup();
+  settings.edit(id(local.name, local.path), false); settings.edit(id(plugin.name, plugin.path), false);
+  client.lostWriteAt = 2;
+  assert.equal(await settings.save(), false);
+  const resumed = new SkillSettings(client, 'ssh:one', ['/project'], client.operations); await resumed.load();
+  assert.deepEqual(resumed.getSnapshot().drafts, [{ id: id(local.name, local.path), enabled: false }, { id: id(plugin.name, plugin.path), enabled: false }]);
+  assert.equal(resumed.getSnapshot().writeUncertain, true);
+  resumed.useLatest(); assert.equal(await resumed.save(), false); assert.equal(client.writes.length, 2);
+  assert.equal(await client.operations.find('ssh:one', 'skills-settings', ['/other']), null);
 });
 
 test('different effective responses preserve edits until refresh and review', async () => {
@@ -128,7 +146,7 @@ test('suspending during skill preflight prevents the write and preserves the dra
   assert.equal(client.writes.length, 0); assert.equal(settings.dirty, true);
 });
 
-test('suspending after a skill write was sent keeps it fenced even after a late success', async () => {
+test('a late durable skill receipt permits explicit review after suspension', async () => {
   const { client, settings } = await setup();
   let release = () => {}, entered = () => {};
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -140,6 +158,24 @@ test('suspending after a skill write was sent keeps it fenced even after a late 
   assert.equal(settings.getSnapshot().writeUncertain, true);
   release(); assert.equal(await saving, false);
   await settings.load(); settings.useLatest();
-  assert.equal(settings.getSnapshot().writeUncertain, true);
-  assert.equal(settings.dirty, true); assert.equal(await settings.save(), false); assert.equal(client.writes.length, 1);
+  assert.equal(settings.getSnapshot().writeUncertain, false);
+  assert.equal(settings.dirty, false); assert.equal(await settings.save(), false); assert.equal(client.writes.length, 1);
+});
+
+test('a newer skill edit survives controller replacement without changing the original submission', async () => {
+  const { client, settings } = await setup();
+  let release = () => {}, entered = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  client.beforeWrite = async () => { entered(); await gate; };
+  settings.edit(id(local.name, local.path), false);
+  const saving = settings.save(); await waiting; settings.dispose(); release(); await saving;
+  await settings.load(); settings.useLatest();
+  settings.edit(id(local.name, local.path), true); await settings.retryDraftPersistence();
+  const record = await client.operations.find('ssh:one', 'skills-settings', ['/project']);
+  assert.deepEqual(record?.origin.draft, { drafts: [{ id: id(local.name, local.path), enabled: false }] });
+  assert.deepEqual(record?.workingDrafts?.at(-1)?.draft, { drafts: [{ id: id(local.name, local.path), enabled: true }] });
+  const resumed = new SkillSettings(client, 'ssh:one', ['/project'], client.operations); await resumed.load();
+  assert.deepEqual(resumed.getSnapshot().drafts, [{ id: id(local.name, local.path), enabled: true }]);
+  assert.equal(client.writes.length, 1);
 });

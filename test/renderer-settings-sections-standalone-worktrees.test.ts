@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 import { readRemoteWorktreePreferences, RemoteWorktreeSettings } from '../src/renderer/settings/worktrees.ts';
+import { fixtureConfigurationHost, fixtureOperations } from './renderer-settings-sections-config-fixture.ts';
 
 test('remote worktrees use the selected host and accept an absent desktop table as defaults', async () => {
   let response: unknown = { config: { desktop: { 'git-worktree-root': '/remote/worktrees', 'worktree-auto-cleanup-enabled': false, 'worktree-keep-count': 7 } } };
@@ -25,6 +26,7 @@ test('remote worktrees use the selected host and accept an absent desktop table 
 });
 
 class RemoteClient implements WorkbenchClient {
+  operations = fixtureOperations(this);
   desktop: Record<string, unknown> = {};
   version = 'v1';
   layers: unknown = null;
@@ -34,6 +36,7 @@ class RemoteClient implements WorkbenchClient {
   subscribe() { return () => {}; }
   async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ method: endpoint, params });
+    if (endpoint === 'configuration-write' && params) return await fixtureConfigurationHost(this, params) as T;
     if (endpoint !== 'codex-home') throw new Error('Unexpected host access');
     return { codexHome: '/fixture/remote' } as T;
   }
@@ -55,7 +58,7 @@ class RemoteClient implements WorkbenchClient {
 }
 
 test('remote worktree edits write only the selected host desktop keys with a verified version', async () => {
-  const client = new RemoteClient(), settings = new RemoteWorktreeSettings(client, 'ssh:fixture');
+  const client = new RemoteClient(), settings = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations);
   await settings.load();
   settings.edit({ root: ' /remote/worktrees ', autoCleanup: false, keepCount: '4' });
   assert.equal(await settings.save(), true);
@@ -72,7 +75,7 @@ test('remote worktree edits write only the selected host desktop keys with a ver
 });
 
 test('remote worktree failures, conflicts and missing versions preserve the draft', async () => {
-  const client = new RemoteClient(), settings = new RemoteWorktreeSettings(client, 'ssh:fixture');
+  const client = new RemoteClient(), settings = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations);
   await settings.load(); settings.edit({ root: 'relative' });
   assert.equal(await settings.save(), false);
   assert.match(settings.getSnapshot().error ?? '', /absolute path/);
@@ -86,5 +89,38 @@ test('remote worktree failures, conflicts and missing versions preserve the draf
   assert.equal(settings.getSnapshot().draft?.root, '/remote/worktrees');
   assert.match(settings.getSnapshot().writeError ?? '', /Cannot save/);
   assert.equal(await settings.save(), false);
+  assert.equal(client.calls.filter(call => call.method === 'config/batchWrite').length, 1);
+});
+
+test('remote worktree reload adopts unedited fields and requires review for an edited conflict', async () => {
+  const client = new RemoteClient(), settings = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations);
+  await settings.load(); settings.edit({ root: '/remote/first' });
+  client.desktop['worktree-keep-count'] = 3; client.version = 'v2';
+  await settings.load();
+  assert.equal(settings.getSnapshot().draft?.keepCount, '3');
+  assert.equal(await settings.save(), true);
+  const edits = client.calls.find(call => call.method === 'config/batchWrite')?.params?.edits;
+  assert.deepEqual(edits, [{ keyPath: 'desktop.git-worktree-root', value: '/remote/first', mergeStrategy: 'replace' }]);
+  settings.edit({ root: '/remote/mine' });
+  client.desktop['git-worktree-root'] = '/remote/theirs'; client.version = 'v3';
+  await settings.load();
+  assert.deepEqual(settings.getSnapshot().conflicts, ['root']);
+  assert.equal(await settings.save(), false);
+  settings.resolveConflict('root', 'draft');
+  assert.equal(await settings.save(), true);
+  assert.equal(client.desktop['git-worktree-root'], '/remote/mine');
+});
+
+test('remote worktree recovery retains newer fields without replaying the original request', async () => {
+  const client = new RemoteClient(), first = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations);
+  await first.load(); first.edit({ root: '/remote/first' }); client.conflict = true;
+  assert.equal(await first.save(), false);
+  first.edit({ keepCount: '4' }); await first.retryDraftPersistence();
+  const record = await client.operations.find('ssh:fixture', 'worktrees');
+  assert.deepEqual(record?.params.edits, [{ keyPath: 'desktop.git-worktree-root', value: '/remote/first', mergeStrategy: 'replace' }]);
+  const second = new RemoteWorktreeSettings(client, 'ssh:fixture', client.operations); await second.load();
+  assert.equal(second.getSnapshot().draft?.root, '/remote/first');
+  assert.equal(second.getSnapshot().draft?.keepCount, '4');
+  client.conflict = false; assert.equal(await second.save(), false);
   assert.equal(client.calls.filter(call => call.method === 'config/batchWrite').length, 1);
 });

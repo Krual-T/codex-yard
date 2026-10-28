@@ -7,6 +7,10 @@ export interface ConfigTarget { file: string; filePath: string | null; profile: 
 export type ConfigTargetResult = { target: ConfigTarget; error: null } | { target: null; error: string };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+export function isConfigTarget(value: unknown): value is ConfigTarget {
+  return isRecord(value) && typeof value.file === 'string' && typeof value.version === 'string'
+    && (value.filePath === null || typeof value.filePath === 'string') && (value.profile === null || typeof value.profile === 'string');
+}
 const normalizePath = (path: string) => {
   const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
   return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;

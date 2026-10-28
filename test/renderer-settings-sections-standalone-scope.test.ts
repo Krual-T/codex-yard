@@ -5,8 +5,10 @@ import { HookSettings } from '../src/renderer/settings/hooks.ts';
 import { readPlugins } from '../src/renderer/settings/plugins.ts';
 import { settingsScope } from '../src/renderer/settings/scope.ts';
 import { SkillSettings } from '../src/renderer/settings/skills.ts';
+import { fixtureOperations } from './renderer-settings-sections-config-fixture.ts';
 
 class Client implements WorkbenchClient {
+  operations = fixtureOperations(this);
   calls: { method: string; params?: Record<string, unknown>; hostId?: string }[] = [];
   subscribe(_listener: (event: WorkbenchEvent) => void) { return () => {}; }
   async reply(): Promise<void> { throw new Error('Unexpected approval'); }
@@ -37,8 +39,8 @@ test('settings scope chooses matching project roots or the real matching session
 
 test('hook, skill and plugin reads use all explicit paths on the selected host', async () => {
   const client = new Client(), paths = ['/one', '/two'];
-  await new HookSettings(client, 'ssh:one', paths).load();
-  await new SkillSettings(client, 'ssh:one', paths).load();
+  await new HookSettings(client, 'ssh:one', paths, client.operations).load();
+  await new SkillSettings(client, 'ssh:one', paths, client.operations).load();
   await readPlugins(client, 'ssh:one', paths, true);
   assert.deepEqual(client.calls.filter(call => ['hooks/list', 'skills/list', 'plugin/list'].includes(call.method)), [
     { method: 'hooks/list', params: { cwds: paths }, hostId: 'ssh:one' },
@@ -48,7 +50,7 @@ test('hook, skill and plugin reads use all explicit paths on the selected host',
 });
 
 test('missing or invalid scope does not send an implicit list request', async () => {
-  const client = new Client(), hooks = new HookSettings(client, 'ssh:one', []), skills = new SkillSettings(client, 'ssh:one', []);
+  const client = new Client(), hooks = new HookSettings(client, 'ssh:one', [], client.operations), skills = new SkillSettings(client, 'ssh:one', [], client.operations);
   await hooks.load(); await skills.load();
   assert.match(hooks.getSnapshot().error ?? '', /working directory/);
   assert.match(skills.getSnapshot().error ?? '', /working directory/);

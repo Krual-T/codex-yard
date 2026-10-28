@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import { canEditHook, HookSettings } from '../src/renderer/settings/hooks.ts';
+import { fixtureConfigurationHost, fixtureOperations } from './renderer-settings-sections-config-fixture.ts';
 
 const trusted = { key: 'event."review"', eventName: 'sessionStart', matcher: null, source: 'user', sourcePath: '/fixture/hooks.json',
   trustStatus: 'trusted', isManaged: false, enabled: true, timeoutSec: 60, handlerType: 'command', command: 'echo fixture', async: false,
   currentHash: 'private-internal-value' };
 const untrusted = { ...trusted, key: 'new', trustStatus: 'untrusted' };
 class FakeClient implements WorkbenchClient {
+  operations = fixtureOperations(this);
   hooks = [{ ...trusted }, { ...untrusted }];
   version = 'v1'; profile: string | null = null; failRead = false; lost = false; override = false;
   late: (() => void) | null = null;
@@ -17,6 +19,7 @@ class FakeClient implements WorkbenchClient {
   subscribe(_listener: (event: WorkbenchEvent) => void) { return () => {}; }
   async reply(): Promise<void> { throw new Error('Unexpected approval'); }
   async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
+    if (endpoint === 'configuration-write' && params) return await fixtureConfigurationHost(this, params) as T;
     assert.equal(endpoint, 'codex-home'); assert.equal(params?.hostId, 'ssh:one'); return { codexHome: '/fixture' } as T;
   }
   async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
@@ -51,7 +54,7 @@ class FakeClient implements WorkbenchClient {
     throw new Error(`Unexpected ${method}`);
   }
 }
-const setup = async () => { const client = new FakeClient(), settings = new HookSettings(client, 'ssh:one', ['/project']); await settings.load(); return { client, settings }; };
+const setup = async () => { const client = new FakeClient(), settings = new HookSettings(client, 'ssh:one', ['/project'], client.operations); await settings.load(); return { client, settings }; };
 
 test('only trusted editable hooks can change and saves target the verified base user config', async () => {
   const { client, settings } = await setup(); client.profile = 'profile.with.dots';
@@ -102,6 +105,18 @@ test('a late original write remains fenced after an earlier unchanged refresh', 
   assert.equal(settings.dirty, true); assert.equal(client.writes.length, 1);
 });
 
+test('hook original draft and scope survive a new controller after a lost reply', async () => {
+  const { client, settings } = await setup(); settings.edit(trusted.key, false); client.lost = true;
+  assert.equal(await settings.save(), false);
+  const resumed = new HookSettings(client, 'ssh:one', ['/project'], client.operations);
+  await resumed.load();
+  assert.deepEqual(resumed.getSnapshot().drafts, [{ key: trusted.key, enabled: false }]);
+  assert.equal(resumed.getSnapshot().writeUncertain, true);
+  resumed.useLatest(); assert.equal(await resumed.save(), false);
+  assert.equal(client.writes.length, 1);
+  assert.equal(await client.operations.find('ssh:one', 'hooks-settings', ['/other']), null);
+});
+
 test('suspending during hook preflight prevents the write and preserves the draft', async () => {
   const { client, settings } = await setup();
   let release = () => {}, entered = () => {};
@@ -118,7 +133,7 @@ test('suspending during hook preflight prevents the write and preserves the draf
   assert.equal(client.writes.length, 0); assert.equal(settings.dirty, true);
 });
 
-test('suspending after a hook write was sent keeps it fenced even after a late success', async () => {
+test('a late durable hook receipt permits explicit review after suspension', async () => {
   const { client, settings } = await setup();
   let release = () => {}, entered = () => {};
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -129,9 +144,29 @@ test('suspending after a hook write was sent keeps it fenced even after a late s
   settings.dispose();
   assert.equal(settings.getSnapshot().writeUncertain, true);
   release(); assert.equal(await saving, false);
-  await settings.load(); settings.useLatest(); settings.discard();
-  assert.equal(settings.getSnapshot().writeUncertain, true);
-  assert.equal(settings.dirty, true); assert.equal(await settings.save(), false); assert.equal(client.writes.length, 1);
+  await settings.load();
+  assert.equal(settings.getSnapshot().writeUncertain, false);
+  assert.ok(settings.getSnapshot().latest);
+  settings.useLatest();
+  assert.equal(settings.dirty, false); assert.equal(await settings.save(), false); assert.equal(client.writes.length, 1);
+});
+
+test('a newer hook edit survives controller replacement without changing the original submission', async () => {
+  const { client, settings } = await setup();
+  let release = () => {}, entered = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  client.beforeWrite = async () => { entered(); await gate; };
+  settings.edit(trusted.key, false);
+  const saving = settings.save(); await waiting; settings.dispose(); release(); await saving;
+  await settings.load(); settings.useLatest();
+  settings.edit(trusted.key, true); await settings.retryDraftPersistence();
+  const record = await client.operations.find('ssh:one', 'hooks-settings', ['/project']);
+  assert.deepEqual(record?.origin.draft, { drafts: [{ key: trusted.key, enabled: false }] });
+  assert.deepEqual(record?.workingDrafts?.at(-1)?.draft, { drafts: [{ key: trusted.key, enabled: true }] });
+  const resumed = new HookSettings(client, 'ssh:one', ['/project'], client.operations); await resumed.load();
+  assert.deepEqual(resumed.getSnapshot().drafts, [{ key: trusted.key, enabled: true }]);
+  assert.equal(client.writes.length, 1);
 });
 
 test('a changed trust state or override cannot silently apply a pending edit', async () => {
@@ -148,7 +183,7 @@ test('omitted optional matcher and command async use protocol defaults', async (
   const withoutOptionals = { ...trusted } as Partial<typeof trusted>;
   delete withoutOptionals.matcher; delete withoutOptionals.async;
   client.hooks = [withoutOptionals as typeof trusted];
-  const settings = new HookSettings(client, 'ssh:one', ['/project']);
+  const settings = new HookSettings(client, 'ssh:one', ['/project'], client.operations);
   await settings.load();
   assert.equal(settings.getSnapshot().error, null);
   assert.equal(settings.getSnapshot().hooks[0].matcher, null);

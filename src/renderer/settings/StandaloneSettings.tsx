@@ -8,6 +8,8 @@ import { ArchivedSection } from './ArchivedSection.tsx';
 import { CatalogSection } from './CatalogSection.tsx';
 import type { CatalogKind } from './catalog.ts';
 import { ConnectionsSection } from './ConnectionsSection.tsx';
+import { ConfigurationRecovery } from './ConfigurationRecovery.tsx';
+import { settingsConfigOperations } from './config-operations.ts';
 import { GeneralSection } from './GeneralSection.tsx';
 import { GitSection } from './GitSection.tsx';
 import { HookSection } from './HookSection.tsx';
@@ -90,6 +92,8 @@ export function StandaloneSettings(props: SettingsIntegrationProps) {
 
 function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, projectRoots, sessionCwd, scopeStatus, InstructionEditor, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
   const { t, locale } = useI18n();
+  const configurationOperations = useMemo(() => settingsConfigOperations(client), [client]);
+  const recovery = useSyncExternalStore(configurationOperations.subscribe, configurationOperations.getSnapshot, configurationOperations.getSnapshot);
   const route = readSettingsRoute(location, hostId);
   const { section, hostId: selectedHost } = route;
   const projectScope = settingsScope(selectedHost, projectRoots, sessionCwd);
@@ -111,8 +115,8 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
   const [confirmLeave, setConfirmLeave] = useState(false);
   const pending = useRef<{ promise: Promise<boolean>; resolve: (allowed: boolean) => void } | null>(null);
   const transition = useRef(0);
-  const dirty = preferences.dirty || otherDirty;
-  const anySaving = saving || otherSaving || preferenceKeys.some(key => snapshot[key].saving);
+  const dirty = preferences.dirty || otherDirty || !!recovery.localRetry.length || !!recovery.draftRetry.length;
+  const anySaving = saving || otherSaving || recovery.draftPending > 0 || preferenceKeys.some(key => snapshot[key].saving);
   const flags = useRef({ dirty, saving: anySaving });
   flags.current = { dirty, saving: anySaving };
 
@@ -263,6 +267,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
     </aside>
     <main className="yard-settings-main" aria-label={locale.startsWith('en') ? `${title} settings` : `${t('Settings')}: ${title}`}>
       <div className="yard-settings-content" ref={content}>
+        <ConfigurationRecovery client={client} />
         {needsScope && scopeState !== 'ready' ? scopeState === 'error' ?
           <p className="yard-setting-error" role="alert">{t('Selected project or session')}: {t('Unavailable')}{scopeStatus?.error ? `: ${scopeStatus.error}` : ''}{' '}
             <button type="button" className="yard-link" onClick={() => scopeStatus?.retry()}>{t('Retry')}</button></p> :

@@ -13,7 +13,7 @@ export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: 
   const dirty = modelSettings.dirty;
   useEffect(() => { void modelSettings.load(); return () => modelSettings.dispose(); }, [modelSettings]);
   useLayoutEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
-  useLayoutEffect(() => { onSavingChange(state.saving); }, [state.saving, onSavingChange]);
+  useLayoutEffect(() => { onSavingChange(state.saving || state.draftSaving); }, [state.saving, state.draftSaving, onSavingChange]);
   const selected = resolveConfiguredModel(state.models, state.model);
   const efforts = Array.isArray(selected?.supportedReasoningEfforts) ? selected.supportedReasoningEfforts : [];
   return <>
@@ -21,6 +21,8 @@ export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: 
     <p className="yard-muted">{t('Default model and reasoning effort for')} {hostId === 'local' ? t('the local host') : hostId}.</p>
     {state.error && <p className="yard-setting-error" role="alert">{translateKnown(t, state.error)} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void modelSettings.load(); }}>{t('Reload')}</button></p>}
     {state.writeError && <p className="yard-setting-error" role="alert">{state.writeError} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void modelSettings.load(); }}>{t('Reload')}</button></p>}
+    {state.draftStorageError && <p className="yard-setting-error" role="alert">Could not save the newer edit in this browser: {state.draftStorageError}{' '}
+      <button type="button" onClick={() => { void modelSettings.retryDraftPersistence(); }}>Retry saving edit</button></p>}
     {state.warning && <p role="status">{state.warning}</p>}
     {state.conflicts.map(field => <div key={field} className="yard-setting-error" role="alert">
       <p>{t(field === 'model' ? 'Model' : 'Reasoning effort')} {t('changed elsewhere.')} {t('Current:')} {(field === 'model' ? state.savedModel : state.savedEffort) ?? t('Default')}; {t('Your edit:')} {(field === 'model' ? state.model : state.effort) ?? t('Default')}.</p>

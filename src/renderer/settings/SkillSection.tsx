@@ -36,12 +36,12 @@ export function SkillSection({ client, hostId, projectScope, memory, revision, o
     return () => { unsubscribe(); settings.dispose(); onSavingChange(false); };
   }, [client, hostId, settings, scopeChanged, onSavingChange]);
   useEffect(() => {
-    if (scopeChanged && !settings.dirty && !state.saving && !state.loading && !state.writeUncertain) {
+    if (scopeChanged && !settings.dirty && !state.saving && !state.draftSaving && !state.loading && !state.writeUncertain) {
       setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); setScopeError(null);
     }
-  }, [scopeChanged, incomingKey, projectScope, settings, state.drafts, state.saving, state.loading, state.writeUncertain]);
+  }, [scopeChanged, incomingKey, projectScope, settings, state.drafts, state.saving, state.draftSaving, state.loading, state.writeUncertain]);
   useLayoutEffect(() => { onDirtyChange(settings.dirty); }, [settings, state.drafts, onDirtyChange]);
-  useLayoutEffect(() => { onSavingChange(state.saving); }, [state.saving, onSavingChange]);
+  useLayoutEffect(() => { onSavingChange(state.saving || state.draftSaving); }, [state.saving, state.draftSaving, onSavingChange]);
   const locked = state.loading || state.saving || state.latest !== null || state.needsRefresh || state.writeUncertain || scopeChanged;
   const search = query.trim().toLocaleLowerCase();
   const visible = state.skills.filter(skill => [skill.name, skill.displayName, skill.description, skill.scope, skill.path]
@@ -63,6 +63,8 @@ export function SkillSection({ client, hostId, projectScope, memory, revision, o
       <button type="button" disabled={state.saving || state.writeUncertain} onClick={() => { settings.discard(); setScope({ origin: incomingKey, paths: projectScope.paths }); setCwd(''); }}>{t('Discard edits and switch scope')}</button></div>}
     <label className="yard-plugin-search">{t('Search skills')}<input type="search" value={query} onChange={event => setQuery(event.target.value)} /></label>
     {state.error && <p className="yard-setting-error" role="alert">{state.error}</p>}
+    {state.draftStorageError && <p className="yard-setting-error" role="alert">Could not save the newer edit in this browser: {state.draftStorageError}{' '}
+      <button type="button" onClick={() => { void settings.retryDraftPersistence(); }}>Retry saving edit</button></p>}
     {state.warnings.map((warning, index) => <p className="yard-setting-error" key={`${warning}:${index}`}>{warning}</p>)}
     {state.loading && <p role="status">{t('Loading skills...')}</p>}
     {!state.loading && !state.error && !visible.length && <p className="yard-muted">{t(search ? 'No matching skills.' : 'No skills found.')}</p>}

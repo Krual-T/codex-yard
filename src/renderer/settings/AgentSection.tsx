@@ -48,7 +48,7 @@ export function AgentSection({ client, hostId, onDirtyChange, onSavingChange }: 
   const state = useSyncExternalStore(agent.subscribe, agent.getSnapshot, agent.getSnapshot), dirty = agent.dirty;
   useEffect(() => { void agent.load(); return () => agent.dispose(); }, [agent]);
   useLayoutEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
-  useLayoutEffect(() => { onSavingChange(state.saving); }, [state.saving, onSavingChange]);
+  useLayoutEffect(() => { onSavingChange(state.saving || state.draftSaving); }, [state.saving, state.draftSaving, onSavingChange]);
   const approvalLabels: Record<string, string> = { 'on-request': t('Ask when requested'), never: t('Never ask'), untrusted: t('Untrusted commands'), 'on-failure': t('On failure'), __advanced__: t('Advanced policy') };
   const sandboxLabels: Record<string, string> = { 'read-only': t('Read only'), 'workspace-write': t('Workspace write'), 'danger-full-access': t('Full access') };
   return <>
@@ -56,6 +56,8 @@ export function AgentSection({ client, hostId, onDirtyChange, onSavingChange }: 
     <p className="yard-muted">{t('Defaults for')} {hostId === 'local' ? t('the local host') : hostId}{state.profile ? `, ${t('profile')} ${state.profile}` : ''}. {t('Project and managed configuration may override these values.')}</p>
     {state.error && <p className="yard-setting-error" role="alert">{translateKnown(t, state.error)} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void agent.load(); }}>{t('Reload')}</button></p>}
     {state.writeError && <p className="yard-setting-error" role="alert">{state.writeError}</p>}
+    {state.draftStorageError && <p className="yard-setting-error" role="alert">Could not save the newer edit in this browser: {state.draftStorageError}{' '}
+      <button type="button" onClick={() => { void agent.retryDraftPersistence(); }}>Retry saving edit</button></p>}
     {state.warning && <p role="status">{state.warning}</p>}
     {state.conflicts.map(field => {
       const labels = field === 'approval' ? approvalLabels : sandboxLabels;
