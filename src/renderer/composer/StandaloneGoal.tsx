@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useI18n } from '../i18n/index.tsx';
+import type { GoalQueueMessageKey } from '../i18n/goal-queue-messages.ts';
 import type { ComposerDocument, WorkbenchClient, WorkbenchEvent } from '../workbench-contract.ts';
 import { StandaloneRichEditor } from './StandaloneRichEditor.tsx';
 import { readRichDocument } from './rich-document.ts';
@@ -46,9 +48,9 @@ function parseResponse(value: unknown, threadId: string): Goal | null {
   return result.goal === null ? null : parseGoal(result.goal, threadId);
 }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-const statusLabels: Record<string, string> = {
-  active: '进行中', paused: '已暂停', blocked: '受阻', usageLimited: '使用额度受限',
-  budgetLimited: '目标预算已用尽', complete: '已完成',
+const statusLabels: Record<string, GoalQueueMessageKey> = {
+  active: 'Active', paused: 'Paused', blocked: 'Blocked', usageLimited: 'Usage limited',
+  budgetLimited: 'Goal budget exhausted', complete: 'Completed',
 };
 
 /** A thread's goal lives on the CLI. Mounting this component only reads it. */
@@ -57,6 +59,7 @@ export function StandaloneGoal(props: StandaloneGoalProps) {
 }
 
 function GoalPane({ client, hostId, threadId, readOnly }: StandaloneGoalProps) {
+  const { t, locale } = useI18n('zh-CN');
   const [goal, setGoal] = useState<Goal | null>();
   const [edit, setEdit] = useState<Edit | null>(null);
   const [editorError, setEditorError] = useState('');
@@ -74,9 +77,9 @@ function GoalPane({ client, hostId, threadId, readOnly }: StandaloneGoalProps) {
       const result = parseResponse(await client.rpc('thread/goal/get', { threadId }, hostId), threadId);
       if (mounted.current && current === sequence.current) { setGoal(result); setError(''); }
     } catch (reason) {
-      if (mounted.current && current === sequence.current) setError('无法读取目标：' + errorMessage(reason));
+      if (mounted.current && current === sequence.current) setError(t('Could not read goal:') + errorMessage(reason));
     }
-  }, [client, hostId, threadId]);
+  }, [client, hostId, threadId, t]);
 
   useEffect(() => {
     mounted.current = true;
@@ -116,7 +119,7 @@ function GoalPane({ client, hostId, threadId, readOnly }: StandaloneGoalProps) {
       if (closeEdit) setEdit(null);
     } catch (reason) {
       if (mounted.current) {
-        setError('操作未确认，请重新读取目标后再决定：' + errorMessage(reason));
+        setError(t('Action unconfirmed; reload the goal before deciding:') + errorMessage(reason));
       }
     } finally {
       mutating.current = false;
@@ -124,56 +127,58 @@ function GoalPane({ client, hostId, threadId, readOnly }: StandaloneGoalProps) {
     }
   };
   const conflict = edit !== null && goal !== undefined && (goal?.objective ?? null) !== edit.base;
-  const formattedTokens = goal ? new Intl.NumberFormat().format(goal.tokensUsed) : '';
-  return <section className="standalone-goal" aria-label="会话目标">
-    <header className="standalone-goal__header"><strong>目标</strong>
-      <button type="button" onClick={() => void refresh()} disabled={pending}>刷新</button>
+  const number = new Intl.NumberFormat(locale);
+  const formattedTokens = goal ? number.format(goal.tokensUsed) + (goal.tokenBudget === null ? '' : ` / ${number.format(goal.tokenBudget)}`) : '';
+  return <section className="standalone-goal" aria-label={t('Conversation goal')}>
+    <header className="standalone-goal__header"><strong>{t('Goal')}</strong>
+      <button type="button" onClick={() => void refresh()} disabled={pending}>{t('Refresh')}</button>
     </header>
-    {goal === undefined && !error ? <div role="status">正在读取目标…</div> : null}
+    {goal === undefined && !error ? <div role="status">{t('Loading goal...')}</div> : null}
     {goal ? <>
-      <div className="standalone-goal__status">{statusLabels[goal.status] ?? goal.status}</div>
+      <div className="standalone-goal__status">{statusLabels[goal.status] ? t(statusLabels[goal.status]) : goal.status}</div>
       {!edit ? <div className="standalone-goal__objective">{goal.objective}</div> : null}
       <div className="standalone-goal__progress">
-        <span>已用 {formattedTokens}{goal.tokenBudget === null ? '' : ` / ${new Intl.NumberFormat().format(goal.tokenBudget)}`} tokens</span>
-        <span>耗时 {Math.floor(goal.timeUsedSeconds / 60)} 分 {Math.floor(goal.timeUsedSeconds % 60)} 秒</span>
+        <span>{t('Used {used} tokens').replace('{used}', formattedTokens)}</span>
+        <span>{t('Elapsed {minutes} min {seconds} sec').replace('{minutes}', number.format(Math.floor(goal.timeUsedSeconds / 60)))
+          .replace('{seconds}', number.format(Math.floor(goal.timeUsedSeconds % 60)))}</span>
       </div>
       {!readOnly && !edit ? <div className="standalone-goal__actions">
-        <button type="button" disabled={pending} onClick={() => { setEditorError(''); setEdit({ base: goal.objective, text: goal.objective }); }}>编辑目标</button>
+        <button type="button" disabled={pending} onClick={() => { setEditorError(''); setEdit({ base: goal.objective, text: goal.objective }); }}>{t('Edit goal')}</button>
         {goal.status === 'active'
-          ? <button type="button" disabled={pending} onClick={() => void mutate('thread/goal/set', { status: 'paused' })}>暂停目标</button>
-          : <button type="button" disabled={pending} onClick={() => void mutate('thread/goal/set', { status: 'active' })}>继续目标</button>}
-        {!confirmClear ? <button type="button" disabled={pending} onClick={() => setConfirmClear(true)}>清除目标</button>
-          : <><button type="button" disabled={pending} onClick={() => void mutate('thread/goal/clear', {})}>确认清除</button>
-            <button type="button" disabled={pending} onClick={() => setConfirmClear(false)}>取消</button></>}
+          ? <button type="button" disabled={pending} onClick={() => void mutate('thread/goal/set', { status: 'paused' })}>{t('Pause goal')}</button>
+          : <button type="button" disabled={pending} onClick={() => void mutate('thread/goal/set', { status: 'active' })}>{t('Resume goal')}</button>}
+        {!confirmClear ? <button type="button" disabled={pending} onClick={() => setConfirmClear(true)}>{t('Clear goal')}</button>
+          : <><button type="button" disabled={pending} onClick={() => void mutate('thread/goal/clear', {})}>{t('Confirm clear')}</button>
+            <button type="button" disabled={pending} onClick={() => setConfirmClear(false)}>{t('Cancel')}</button></>}
       </div> : null}
     </> : null}
-    {goal === null && !readOnly && !edit ? <button type="button" disabled={pending} onClick={() => { setEditorError(''); setEdit({ base: null, text: '' }); }}>新建目标</button> : null}
+    {goal === null && !readOnly && !edit ? <button type="button" disabled={pending} onClick={() => { setEditorError(''); setEdit({ base: null, text: '' }); }}>{t('New goal')}</button> : null}
     {edit ? <div className="standalone-goal__editor">
       {edit.document ? <StandaloneRichEditor document={edit.document} currentDocument={() => currentDocument.current}
-        ariaLabel="目标内容" readOnly={pending || readOnly} enableCompletions={false} allowMentions={false}
+        ariaLabel={t('Goal content')} readOnly={pending || readOnly} enableCompletions={false} allowMentions={false}
         onChange={document => {
           const parsed = readRichDocument(document);
-          if (!parsed) { setEditorError('无法保留此格式，当前目标未更改。'); return; }
+          if (!parsed) { setEditorError(t('Could not preserve this format; the goal was not changed.')); return; }
           currentDocument.current = document;
           setEdit(current => current?.document ? { ...current, document, text: serializeGoalDocument(parsed) } : current);
         }} onKeyDown={() => false} onCompletionContext={() => {}}
-        onImages={() => setEditorError('目标暂不支持在富文本中插入图片。')}
-        onInvalid={message => setEditorError(message ?? '此内容不能无损粘贴到目标中。')} />
-        : <textarea aria-label="目标内容" value={edit.text} disabled={pending || readOnly} onChange={event => setEdit({ ...edit, text: event.target.value })} />}
+        onImages={() => setEditorError(t('Images are not supported in goal rich text.'))}
+        onInvalid={message => setEditorError(message ?? t('This content cannot be pasted into the goal without loss.'))} />
+        : <textarea aria-label={t('Goal content')} value={edit.text} disabled={pending || readOnly} onChange={event => setEdit({ ...edit, text: event.target.value })} />}
       <button type="button" disabled={pending || readOnly} onClick={() => {
         if (edit.document) { currentDocument.current = undefined; setEditorError(''); setEdit({ base: edit.base, text: edit.text }); return; }
         const document = goalMarkdownDocument(edit.text);
-        if (!document) { setEditorError('此目标不能无损转换为富文本，请继续编辑 Markdown 原文。'); return; }
+        if (!document) { setEditorError(t('This goal cannot be converted without loss; edit the Markdown instead.')); return; }
         currentDocument.current = document; setEditorError(''); setEdit({ ...edit, document });
-      }}>{edit.document ? 'Markdown 原文' : '富文本编辑'}</button>
+      }}>{t(edit.document ? 'Markdown source' : 'Rich text editing')}</button>
       {editorError ? <div role="alert">{editorError}</div> : null}
-      {conflict ? <div role="alert">目标已在其他位置更改；当前输入已保留。<button type="button" onClick={() => { currentDocument.current = undefined; setEditorError(''); setEdit({ base: goal?.objective ?? null, text: goal?.objective ?? '' }); }}>载入最新目标</button></div> : null}
+      {conflict ? <div role="alert">{t('The goal changed elsewhere; your edits were retained.')}<button type="button" onClick={() => { currentDocument.current = undefined; setEditorError(''); setEdit({ base: goal?.objective ?? null, text: goal?.objective ?? '' }); }}>{t('Load latest goal')}</button></div> : null}
       <div className="standalone-goal__actions">
         {edit.base === null ? <>
-          <button type="button" disabled={pending || readOnly || conflict || !edit.text.trim()} onClick={() => void mutate('thread/goal/set', { objective: edit.text.trim(), status: 'paused' }, true)}>创建暂停目标</button>
-          <button type="button" disabled={pending || readOnly || conflict || !edit.text.trim()} onClick={() => void mutate('thread/goal/set', { objective: edit.text.trim(), status: 'active' }, true)}>创建并开始</button>
-        </> : <button type="button" disabled={pending || readOnly || conflict || !edit.text.trim() || edit.text.trim() === edit.base} onClick={() => void mutate('thread/goal/set', { objective: edit.text.trim() }, true)}>保存目标</button>}
-        <button type="button" disabled={pending} onClick={() => setEdit(null)}>取消编辑</button>
+          <button type="button" disabled={pending || readOnly || conflict || !edit.text.trim()} onClick={() => void mutate('thread/goal/set', { objective: edit.text.trim(), status: 'paused' }, true)}>{t('Create paused goal')}</button>
+          <button type="button" disabled={pending || readOnly || conflict || !edit.text.trim()} onClick={() => void mutate('thread/goal/set', { objective: edit.text.trim(), status: 'active' }, true)}>{t('Create and start')}</button>
+        </> : <button type="button" disabled={pending || readOnly || conflict || !edit.text.trim() || edit.text.trim() === edit.base} onClick={() => void mutate('thread/goal/set', { objective: edit.text.trim() }, true)}>{t('Save goal')}</button>}
+        <button type="button" disabled={pending} onClick={() => setEdit(null)}>{t('Cancel editing')}</button>
       </div>
     </div> : null}
     {error ? <div role="alert">{error}</div> : null}

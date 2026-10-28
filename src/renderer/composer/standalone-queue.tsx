@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useI18n } from '../i18n/index.tsx';
+import type { I18n } from '../i18n/index.tsx';
 import { subscribeBrowserAtoms } from '../storage/ui-atoms.ts';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { createId } from './standalone-draft.ts';
@@ -38,9 +40,9 @@ function editableText(entry: QueueEntry): string | null {
   if (!text || typeof text.text !== 'string' || !Array.isArray(text.text_elements) || text.text_elements.length) return null;
   return text.text;
 }
-function summary(entry: QueueEntry): string {
+function summary(entry: QueueEntry, t: I18n['t']): string {
   const text = entry.input.filter(item => item.type === 'text' && typeof item.text === 'string').map(item => item.text).join(' ');
-  return text || (entry.input.length ? '附件消息' : '空消息');
+  return text || t(entry.input.length ? 'Attachment message' : 'Empty message');
 }
 async function historyClientIds(client: WorkbenchClient, hostId: string, threadId: string, wanted: Set<string>): Promise<Set<string>> {
   const found = new Set<string>(), cursors = new Set<string>();
@@ -64,6 +66,7 @@ export function StandaloneQueue({ client, hostId, threadId, busy, refreshVersion
   return <QueueSession key={JSON.stringify([hostId, threadId])} {...{ client, hostId, threadId, busy, refreshVersion, onStartQueued }} />;
 }
 function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQueued }: QueueProps) {
+  const { t, locale } = useI18n('zh-CN');
   const [unknown, setUnknown] = useState<UnknownQueueStart[]>([]);
   const unknownRef = useRef<UnknownQueueStart[]>([]);
   const [storageState, setStorageState] = useState<'loading' | 'ready' | 'error'>('loading');
@@ -116,8 +119,8 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
           if (confirmed.length) void loadUnknown();
         } catch { /* A missing or unavailable history cannot prove the outcome. */ }
       }
-    } catch (reason) { if (current === generation.current) setError('无法读取队列：' + message(reason)); }
-  }, [client, hostId, threadId, loadUnknown, removeMarker]);
+    } catch (reason) { if (current === generation.current) setError(t('Could not read queue:') + message(reason)); }
+  }, [client, hostId, threadId, loadUnknown, removeMarker, t]);
   useEffect(() => {
     mounted.current = true;
     void loadUnknown().then(ready => { if (ready) void refresh(); });
@@ -136,7 +139,7 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
     if (mutation.current) return;
     mutation.current = true; setPending(true); setError('');
     try { await action(); await refresh(); }
-    catch (reason) { await refresh(); setError('操作未确认，请检查队列后再试：' + message(reason)); }
+    catch (reason) { await refresh(); setError(t('Action unconfirmed; check the queue before retrying:') + message(reason)); }
     finally { mutation.current = false; setPending(false); }
   };
   const start = (entry: QueueEntry) => run(async () => {
@@ -184,39 +187,39 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
     await client.rpc('thread/queue/reorder', { threadId, queuedSubmissionIds: ids }, hostId);
   });
   if (!entries.length && !error && !unknown.length && !edit && storageState === 'ready') return null;
-  return <section className="standalone-queue" aria-label="待发送消息">
-    <div className="standalone-queue__heading">待发送消息 <span>{entries.length}</span></div>
+  return <section className="standalone-queue" aria-label={t('Queued messages')}>
+    <div className="standalone-queue__heading">{t('Queued messages')} <span>{new Intl.NumberFormat(locale).format(entries.length)}</span></div>
     {entries.map((entry, index) => {
       const editConflict = edit?.id === entry.id && (edit.clientUserMessageId !== entry.clientUserMessageId || edit.baseInput !== JSON.stringify(entry.input));
       return <div className="standalone-queue__row" key={entry.id}>
       {edit?.id === entry.id ? <div className="standalone-queue__edit">
-        <textarea aria-label="编辑待发送消息" value={edit.text} onChange={event => setEdit({ ...edit, text: event.target.value })} />
-        {editConflict ? <div role="alert">队列消息已更改；当前编辑保留，请取消后重新编辑。</div> : null}
+        <textarea aria-label={t('Edit queued message')} value={edit.text} onChange={event => setEdit({ ...edit, text: event.target.value })} />
+        {editConflict ? <div role="alert">{t('The queued message changed; cancel and edit again. Your edits are retained.')}</div> : null}
         <button type="button" disabled={pending || storageState !== 'ready' || unknown.some(item => item.id === entry.id) || editConflict || !edit.text.trim()} onClick={() => void run(async () => {
           const input = entry.input.map(item => item === entry.input.find(part => part.type === 'text') ? { ...item, text: edit.text } : item);
           await client.rpc('thread/queue/update', { threadId, queuedSubmissionId: entry.id, input }, hostId);
           setEdit(null);
-        })}>保存</button><button type="button" disabled={pending} onClick={() => setEdit(null)}>取消</button>
-      </div> : <span className="standalone-queue__text">{summary(entry)}</span>}
+        })}>{t('Save')}</button><button type="button" disabled={pending} onClick={() => setEdit(null)}>{t('Cancel')}</button>
+      </div> : <span className="standalone-queue__text">{summary(entry, t)}</span>}
       <div className="standalone-queue__actions">
-        <button type="button" title="上移" aria-label="上移待发送消息" disabled={pending || storageState !== 'ready' || !!unknown.length || index === 0} onClick={() => void reorder(index, index - 1)}>↑</button>
-        <button type="button" title="下移" aria-label="下移待发送消息" disabled={pending || storageState !== 'ready' || !!unknown.length || index === entries.length - 1} onClick={() => void reorder(index, index + 1)}>↓</button>
-        <button type="button" title="编辑" aria-label="编辑待发送消息" disabled={pending || storageState !== 'ready' || unknown.some(item => item.id === entry.id) || editableText(entry) == null} onClick={() => setEdit({ id: entry.id, clientUserMessageId: entry.clientUserMessageId, baseInput: JSON.stringify(entry.input), text: editableText(entry) ?? '' })}>编辑</button>
-        <button type="button" title="删除" aria-label="删除待发送消息" disabled={pending || storageState !== 'ready' || unknown.some(item => item.id === entry.id)} onClick={() => void run(async () => {
+        <button type="button" title={t('Move up')} aria-label={t('Move queued message up')} disabled={pending || storageState !== 'ready' || !!unknown.length || index === 0} onClick={() => void reorder(index, index - 1)}>↑</button>
+        <button type="button" title={t('Move down')} aria-label={t('Move queued message down')} disabled={pending || storageState !== 'ready' || !!unknown.length || index === entries.length - 1} onClick={() => void reorder(index, index + 1)}>↓</button>
+        <button type="button" title={t('Edit')} aria-label={t('Edit queued message')} disabled={pending || storageState !== 'ready' || unknown.some(item => item.id === entry.id) || editableText(entry) == null} onClick={() => setEdit({ id: entry.id, clientUserMessageId: entry.clientUserMessageId, baseInput: JSON.stringify(entry.input), text: editableText(entry) ?? '' })}>{t('Edit')}</button>
+        <button type="button" title={t('Delete')} aria-label={t('Delete queued message')} disabled={pending || storageState !== 'ready' || unknown.some(item => item.id === entry.id)} onClick={() => void run(async () => {
           const result = await client.rpc<{ deleted: boolean }>('thread/queue/delete', { threadId, queuedSubmissionId: entry.id }, hostId);
           if (!result.deleted) throw new Error('消息已不存在');
-        })}>删除</button>
-        <button type="button" title={busy ? '等待当前任务完成' : '立即发送'} aria-label="立即发送待发送消息" disabled={pending || busy || !onStartQueued || storageState !== 'ready' || unknown.some(item => item.id === entry.id)} onClick={() => void start(entry)}>发送</button>
+        })}>{t('Delete')}</button>
+        <button type="button" title={t(busy ? 'Wait for current task' : 'Send now')} aria-label={t('Send queued message now')} disabled={pending || busy || !onStartQueued || storageState !== 'ready' || unknown.some(item => item.id === entry.id)} onClick={() => void start(entry)}>{t('Send')}</button>
       </div>
     </div>; })}
     {edit && !entries.some(entry => entry.id === edit.id) ? <div className="standalone-queue__edit" role="status">
-      队列消息已不在列表中；未保存的编辑保留在此。
-      <textarea aria-label="编辑待发送消息" value={edit.text} onChange={event => setEdit({ ...edit, text: event.target.value })} />
-      <button type="button" onClick={() => setEdit(null)}>关闭编辑</button>
+      {t('This message is no longer in the queue; your unsaved edits are retained.')}
+      <textarea aria-label={t('Edit queued message')} value={edit.text} onChange={event => setEdit({ ...edit, text: event.target.value })} />
+      <button type="button" onClick={() => setEdit(null)}>{t('Close editing')}</button>
     </div> : null}
-    {unknown.length ? <div role="status">{unknown.length} 条消息的发送结果未知。请检查会话；不会自动重发。<button type="button" onClick={() => void refresh()}>重新核对</button></div> : null}
-    {storageState === 'loading' ? <div role="status">正在读取队列发送状态…</div> : null}
-    {storageState === 'error' ? <div role="alert">无法读取或保存队列发送状态，已暂停队列操作。<button type="button" onClick={() => void loadUnknown().then(ready => { if (ready) void refresh(); })}>重试读取</button></div> : null}
+    {unknown.length ? <div role="status">{t('{count} messages have an unknown send outcome. Check the conversation; they will not be resent automatically.').replace('{count}', new Intl.NumberFormat(locale).format(unknown.length))}<button type="button" onClick={() => void refresh()}>{t('Check again')}</button></div> : null}
+    {storageState === 'loading' ? <div role="status">{t('Loading queue send status...')}</div> : null}
+    {storageState === 'error' ? <div role="alert">{t('Queue send status could not be read or saved; queue actions are paused.')}<button type="button" onClick={() => void loadUnknown().then(ready => { if (ready) void refresh(); })}>{t('Retry reading')}</button></div> : null}
     {error ? <div role="alert">{error}</div> : null}
   </section>;
 }

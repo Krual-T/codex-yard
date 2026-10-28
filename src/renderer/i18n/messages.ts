@@ -1,4 +1,6 @@
 import type { WorkspaceMessageKey } from './workspace-messages.ts';
+import type { ComposerMessageKey } from './composer-messages.ts';
+import type { GoalQueueMessageKey } from './goal-queue-messages.ts';
 
 export const messageKeys = [
   'Settings', 'Settings navigation', 'Close settings', 'Close', 'Back', 'Host', 'Settings host', 'Local', 'Search settings',
@@ -30,7 +32,7 @@ export const messageKeys = [
   'Interface text is currently shown in English for this language.',
 ] as const;
 
-export type MessageKey = typeof messageKeys[number] | WorkspaceMessageKey;
+export type MessageKey = typeof messageKeys[number] | WorkspaceMessageKey | ComposerMessageKey | GoalQueueMessageKey;
 export type Messages = Partial<Record<MessageKey, string>>;
 
 export const simplifiedChinese: Messages = {

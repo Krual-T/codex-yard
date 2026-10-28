@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Ref } from 'react';
 import type { SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
+import { useI18n } from '../i18n/index.tsx';
 import type { ApprovalPolicy, ApprovalsReviewer, SandboxMode } from '../../../lib/codex-protocol.ts';
 
 interface Model { value: string; label: string; default: boolean; defaultEffort: string | null; efforts: string[] }
@@ -34,9 +35,6 @@ function sandbox(value: unknown): SandboxMode | undefined {
 function reviewer(value: unknown): ApprovalsReviewer | undefined {
   return value === 'user' || value === 'auto_review' || value === 'guardian_subagent' ? value : undefined;
 }
-function approvalLabel(value: ApprovalPolicy | undefined): string | undefined {
-  return value && typeof value === 'object' ? '自定义审批' : value;
-}
 async function models(client: WorkbenchClient, hostId: string): Promise<Model[]> {
   const result: Model[] = [], seen = new Set<string>();
   let cursor: string | null = null;
@@ -60,6 +58,7 @@ async function models(client: WorkbenchClient, hostId: string): Promise<Model[]>
 }
 
 export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRef, value, onChange }: OptionsProps) {
+  const { t } = useI18n('zh-CN');
   const [available, setAvailable] = useState<Model[]>([]);
   const [defaults, setDefaults] = useState<SubmitOptions>({});
   const [loading, setLoading] = useState(true);
@@ -86,31 +85,35 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRe
   const configured = threadId == null ? defaults : {};
   const selected = available.find(item => item.value === (value.model ?? configured.model));
   const change = (part: Partial<SubmitOptions>) => onChange(part);
-  return <fieldset className="standalone-composer__options" disabled={busy} title={busy ? '排队消息使用会话设置' : undefined} aria-label="会话选项">
-    <label>模型 <select ref={modelRef} aria-label="模型" value={value.model ?? ''} disabled={loading || !available.length} onChange={event => {
+  const configuredLabel = (setting: string | undefined | null) => setting ? `${t('Configured default')} (${setting})` : t('Session default');
+  const approvalLabel = (policy: ApprovalPolicy | undefined) => policy && typeof policy === 'object' ? t('Custom approval') : policy;
+  return <fieldset className="standalone-composer__options" disabled={busy} title={busy ? t('Queued messages use conversation settings') : undefined} aria-label={t('Conversation options')}>
+    <label>{t('Model')} <select ref={modelRef} aria-label={t('Model')}
+      title={value.model ? selected?.label ?? value.model : configuredLabel(configured.model ? selected?.label ?? configured.model : undefined)}
+      value={value.model ?? ''} disabled={loading || !available.length} onChange={event => {
       const model = available.find(item => item.value === (event.target.value || configured.model));
       const effort = model?.efforts.includes(value.effort ?? '') ? value.effort : model?.defaultEffort ?? model?.efforts[0] ?? null;
       change({ model: event.target.value || undefined, effort: event.target.value ? effort : undefined });
     }}>
       {!selected && value.model ? <option value={value.model}>{value.model}</option> : null}
-      <option value="">{loading ? '加载中' : configured.model ? '配置默认 (' + (selected?.label ?? configured.model) + ')' : '会话默认'}</option>
+      <option value="">{loading ? t('Loading') : configuredLabel(configured.model ? selected?.label ?? configured.model : undefined)}</option>
       {available.map(model => <option key={model.value} value={model.value}>{model.label}</option>)}
     </select></label>
-    <label>强度 <select aria-label="推理强度" value={value.effort ?? ''} disabled={loading || !selected?.efforts.length}
+    <label>{t('Effort')} <select aria-label={t('Reasoning effort')} value={value.effort ?? ''} disabled={loading || !selected?.efforts.length}
       onChange={event => change({ effort: event.target.value || null })}>
-      <option value="">{configured.effort ? '配置默认 (' + configured.effort + ')' : '会话默认'}</option>
+      <option value="">{configuredLabel(configured.effort)}</option>
       {value.effort && !selected?.efforts.includes(value.effort) ? <option value={value.effort}>{value.effort}</option> : null}
       {selected?.efforts.map(effort => <option key={effort} value={effort}>{effort}</option>)}
     </select></label>
-    <label>审批 <select aria-label="审批策略" value={typeof value.approvalPolicy === 'object' ? '__granular__' : value.approvalPolicy ?? ''} onChange={event => change({ approvalPolicy: approval(event.target.value) })}>
-      {typeof value.approvalPolicy === 'object' ? <option value="__granular__">自定义审批</option> : null}
-      <option value="">{configured.approvalPolicy ? '配置默认 (' + approvalLabel(configured.approvalPolicy) + ')' : '会话默认'}</option><option value="untrusted">不受信任时</option><option value="on-request">按请求</option><option value="never">从不</option>
+    <label>{t('Approval')} <select aria-label={t('Approval policy')} value={typeof value.approvalPolicy === 'object' ? '__granular__' : value.approvalPolicy ?? ''} onChange={event => change({ approvalPolicy: approval(event.target.value) })}>
+      {typeof value.approvalPolicy === 'object' ? <option value="__granular__">{t('Custom approval')}</option> : null}
+      <option value="">{configuredLabel(approvalLabel(configured.approvalPolicy))}</option><option value="untrusted">{t('When untrusted')}</option><option value="on-request">{t('On request')}</option><option value="never">{t('Never')}</option>
     </select></label>
-    <label>权限 <select aria-label="沙箱权限" value={value.sandboxMode ?? ''} onChange={event => change({ sandboxMode: sandbox(event.target.value), permissionProfileId: undefined })}>
-      <option value="">{configured.sandboxMode ? '配置默认 (' + configured.sandboxMode + ')' : '会话默认'}</option><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option>
+    <label>{t('Sandbox')} <select aria-label={t('Sandbox permissions')} value={value.sandboxMode ?? ''} onChange={event => change({ sandboxMode: sandbox(event.target.value), permissionProfileId: undefined })}>
+      <option value="">{configuredLabel(configured.sandboxMode)}</option><option value="read-only">{t('Read only')}</option><option value="workspace-write">{t('Workspace write')}</option><option value="danger-full-access">{t('Full access')}</option>
     </select></label>
-    <label><input type="checkbox" checked={(value.serviceTier === undefined ? configured.serviceTier : value.serviceTier) === 'fast'} onChange={event => change({ serviceTier: event.target.checked ? 'fast' : null })} />快速</label>
-    <label><input type="checkbox" checked={value.mode === 'plan'} onChange={event => change({ mode: event.target.checked ? 'plan' : 'default' })} />计划</label>
+    <label><input type="checkbox" checked={(value.serviceTier === undefined ? configured.serviceTier : value.serviceTier) === 'fast'} onChange={event => change({ serviceTier: event.target.checked ? 'fast' : null })} />{t('Fast')}</label>
+    <label><input type="checkbox" checked={value.mode === 'plan'} onChange={event => change({ mode: event.target.checked ? 'plan' : 'default' })} />{t('Plan')}</label>
     {error ? <span role="alert">{error}</span> : null}
   </fieldset>;
 }

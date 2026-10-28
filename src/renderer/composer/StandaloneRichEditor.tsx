@@ -4,6 +4,7 @@ import { toggleMark } from 'prosemirror-commands';
 import { EditorState } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import type { ComposerDocument } from '../workbench-contract.ts';
+import { useI18n } from '../i18n/index.tsx';
 import { composerSchema, readRichDocument } from './rich-document.ts';
 import { insertRichCompletion, richCompletionContext, richEditorPlugins, syncRichSelection } from './rich-editor-actions.ts';
 import type { RichCompletionContext, RichCompletionQuery } from './rich-editor-actions.ts';
@@ -54,11 +55,14 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
 }
 
 export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function StandaloneRichEditor(props, ref) {
+  const { t } = useI18n('zh-CN');
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const composing = useRef(false);
   const latest = useRef(props);
   latest.current = props;
+  const latestTranslation = useRef(t);
+  latestTranslation.current = t;
   const [linkOpen, setLinkOpen] = useState(false);
   const [href, setHref] = useState('');
   useImperativeHandle(ref, () => ({
@@ -76,7 +80,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     const editor = new EditorView(host.current, {
       state: EditorState.create({ doc, plugins: richEditorPlugins() }),
       editable: () => !latest.current.readOnly,
-      attributes: { role: 'textbox', 'aria-label': latest.current.ariaLabel ?? '和 Codex 一起工作', 'aria-multiline': 'true',
+      attributes: { role: 'textbox', 'aria-label': latest.current.ariaLabel ?? latestTranslation.current('Work with Codex'), 'aria-multiline': 'true',
         ...(latest.current.enableCompletions === false ? {} : { 'aria-autocomplete': 'list' }) },
       handleDOMEvents: {
         keydown: (editor, event) => {
@@ -115,7 +119,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
           latest.current.onImages(files);
           return true;
         }
-        if (files.length) { latest.current.onInvalid('无法同时粘贴文字和图片，请分别输入文本并添加图片。'); return true; }
+        if (files.length) { latest.current.onInvalid(latestTranslation.current('Text and images cannot be pasted together.')); return true; }
         const html = event.clipboardData?.getData('text/html');
         if (html && !supportedClipboardHTML(html, latest.current.allowMentions !== false)) { latest.current.onInvalid(); return true; }
         return false;
@@ -134,23 +138,23 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
 
   useLayoutEffect(() => {
     view.current?.setProps({ attributes: {
-      role: 'textbox', 'aria-label': props.ariaLabel ?? '和 Codex 一起工作', 'aria-multiline': 'true',
+      role: 'textbox', 'aria-label': props.ariaLabel ?? t('Work with Codex'), 'aria-multiline': 'true',
       ...(props.enableCompletions === false ? {} : { 'aria-autocomplete': 'list' }),
       ...(props.completionListId ? { 'aria-controls': props.completionListId } : {}),
       ...(props.completionSelectedId ? { 'aria-activedescendant': props.completionSelectedId } : {}),
     }, editable: () => !props.readOnly });
-  }, [props.ariaLabel, props.readOnly, props.enableCompletions, props.completionListId, props.completionSelectedId]);
+  }, [props.ariaLabel, props.readOnly, props.enableCompletions, props.completionListId, props.completionSelectedId, t]);
 
   const mark = (name: 'strong' | 'em' | 'code') => {
     const editor = view.current, type = composerSchema.marks[name];
     if (editor && type && !props.readOnly) { syncRichSelection(editor); toggleMark(type)(editor.state, editor.dispatch, editor); editor.focus(); }
   };
   return <>
-    <div className="standalone-composer__rich-toolbar" role="toolbar" aria-label="文本格式">
-      <button type="button" title="粗体" aria-label="粗体" disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('strong')}><Bold size={16} /></button>
-      <button type="button" title="斜体" aria-label="斜体" disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('em')}><Italic size={16} /></button>
-      <button type="button" title="行内代码" aria-label="行内代码" disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('code')}><Code2 size={16} /></button>
-      <button type="button" title="链接" aria-label="链接" disabled={props.readOnly} onMouseDown={event => { event.preventDefault(); if (view.current) syncRichSelection(view.current); }} onClick={() => setLinkOpen(open => !open)}><LinkIcon size={16} /></button>
+    <div className="standalone-composer__rich-toolbar" role="toolbar" aria-label={t('Text formatting')}>
+      <button type="button" title={t('Bold')} aria-label={t('Bold')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('strong')}><Bold size={16} /></button>
+      <button type="button" title={t('Italic')} aria-label={t('Italic')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('em')}><Italic size={16} /></button>
+      <button type="button" title={t('Inline code')} aria-label={t('Inline code')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('code')}><Code2 size={16} /></button>
+      <button type="button" title={t('Link')} aria-label={t('Link')} disabled={props.readOnly} onMouseDown={event => { event.preventDefault(); if (view.current) syncRichSelection(view.current); }} onClick={() => setLinkOpen(open => !open)}><LinkIcon size={16} /></button>
       {linkOpen ? <form onSubmit={event => {
         event.preventDefault();
         const editor = view.current, type = composerSchema.marks.link;
@@ -159,7 +163,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
           editor.dispatch(editor.state.tr.addMark(from, to, type.create({ href: href.trim() })));
           setLinkOpen(false); setHref(''); editor.focus();
         }
-      }}><input aria-label="链接地址" value={href} disabled={props.readOnly} onChange={event => setHref(event.target.value)} /><button type="submit" disabled={props.readOnly}>应用</button></form> : null}
+      }}><input aria-label={t('Link address')} value={href} disabled={props.readOnly} onChange={event => setHref(event.target.value)} /><button type="submit" disabled={props.readOnly}>{t('Apply')}</button></form> : null}
     </div>
     <div ref={host} className="standalone-composer__rich" />
   </>;

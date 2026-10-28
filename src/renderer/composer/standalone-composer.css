@@ -29,7 +29,7 @@
 .standalone-composer__options label, .standalone-composer__enter { white-space: nowrap; }
 .standalone-composer__target { min-width: 0; }
 .standalone-composer__target label { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
-.standalone-composer select { max-width: 155px; border: 0; background: transparent; padding: 3px; }
+.standalone-composer select { max-width: 155px; border: 0; background: transparent; padding: 3px; text-overflow: ellipsis; }
 .standalone-composer .standalone-composer__submit { color: var(--yard-bg, #fff); background: var(--yard-fg, #222); }
 .standalone-composer .standalone-composer__submit:hover:not(:disabled) { background: color-mix(in srgb, var(--yard-fg, #222) 80%, var(--yard-bg, #fff)); }
 .standalone-composer__attachments { align-items: flex-start; padding: 8px 8px 0; }

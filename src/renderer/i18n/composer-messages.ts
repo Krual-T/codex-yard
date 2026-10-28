@@ -1,0 +1,142 @@
+export const composerMessageKeys = [
+  'Session default', 'Configured default', 'Loading', 'Custom approval', 'When untrusted', 'On request', 'Never',
+  'Read only', 'Workspace write', 'Full access', 'Fast', 'Plan', 'Queued messages use conversation settings',
+  'Send method', 'Stop current task', 'Send to current task', 'Sending...', 'Current task has no confirmed turn ID',
+  'Uploading attachments...', 'Saving draft...', 'Retry saving', 'Image attachment', 'Image preview unavailable',
+  'View retained content', 'Select draft version', 'Draft with attachments or retained data', 'Switch draft',
+  'Other pages or legacy data contain {count} independent drafts.', 'Contents were retained separately to preserve formatting.',
+  'Loading suggestions...', 'Could not load suggestions:', 'No matches', 'Skill', 'Text formatting', 'Bold', 'Italic',
+  'Inline code', 'Link', 'Link address', 'Apply', 'Run location', 'No workspace selected', 'Could not read workspaces:',
+  'Could not switch workspace:', 'Image upload failed:', 'Could not remove reference; draft retained:',
+  'The content cannot be pasted together with images.', 'Text and images cannot be pasted together.', 'Select model', 'This draft cannot be sent without losing content.',
+  'The queue cannot retain this draft context.', 'The conversation has not been created yet.',
+  'Could not persist the submitted version.', 'Sent, but draft cleanup failed:', 'Send unconfirmed; draft retained:',
+  'Could not stop:', 'Could not switch drafts:', 'Images are not supported for this structured draft.',
+  'Unsupported document changes were not saved.', 'File is binary and cannot be previewed as text.', 'Could not preview:',
+  'Queue message', 'Effort', 'Approval', 'Sandbox', 'Local target', 'Reading...', 'Ctrl/Command + Enter for multiline',
+] as const;
+export type ComposerMessageKey = typeof composerMessageKeys[number];
+type Catalog = Partial<Record<ComposerMessageKey, string>>;
+
+const simplified: Catalog = {
+  'Queue message': '排队', 'Effort': '强度', 'Approval': '审批', 'Sandbox': '沙箱', 'Local target': '本地', 'Reading...': '正在读取…',
+  'Ctrl/Command + Enter for multiline': '多行时 Ctrl/⌘ + Enter',
+  'Session default': '会话默认', 'Configured default': '配置默认', 'Loading': '加载中', 'Custom approval': '自定义审批',
+  'When untrusted': '不受信任时', 'On request': '按请求', 'Never': '从不', 'Read only': '只读', 'Workspace write': '工作区写入',
+  'Full access': '完全访问', 'Fast': '快速', 'Plan': '计划', 'Queued messages use conversation settings': '排队消息使用会话设置',
+  'Send method': '发送方式', 'Stop current task': '停止当前任务', 'Send to current task': '发送到当前任务', 'Sending...': '发送中',
+  'Current task has no confirmed turn ID': '当前任务尚无可确认的 turn ID', 'Uploading attachments...': '正在上传附件…',
+  'Saving draft...': '正在保存草稿…', 'Retry saving': '重试保存', 'Image attachment': '图片附件', 'Image preview unavailable': '图片预览不可用',
+  'View retained content': '查看保留的内容', 'Select draft version': '选择草稿版本', 'Draft with attachments or retained data': '包含附件或保留数据的草稿',
+  'Switch draft': '切换草稿', 'Other pages or legacy data contain {count} independent drafts.': '其他页面或旧数据中有 {count} 份独立草稿。',
+  'Contents were retained separately to preserve formatting.': '份内容已单独保留，避免合并时丢失格式。',
+  'Loading suggestions...': '加载中…', 'Could not load suggestions:': '无法读取建议：', 'No matches': '无匹配结果', 'Skill': '技能',
+  'Text formatting': '文本格式', 'Bold': '粗体', 'Italic': '斜体', 'Inline code': '行内代码', 'Link': '链接', 'Link address': '链接地址',
+  'Apply': '应用', 'Run location': '运行位置', 'No workspace selected': '未选择工作区', 'Could not read workspaces:': '无法读取工作区：',
+  'Could not switch workspace:': '无法切换工作区：', 'Image upload failed:': '附件上传失败：',
+  'Could not remove reference; draft retained:': '移除引用失败，草稿已保留：', 'The content cannot be pasted together with images.': '此内容不能直接粘贴，请分别输入文本并添加图片。',
+  'Text and images cannot be pasted together.': '无法同时粘贴文字和图片，请分别输入文本并添加图片。', 'Select model': '选择模型',
+  'This draft cannot be sent without losing content.': '当前内容无法无损发送，已保留原始草稿。', 'The queue cannot retain this draft context.': '此草稿包含队列协议无法保存的上下文，已保留草稿。',
+  'The conversation has not been created yet.': '会话尚未创建，请稍后再排队。', 'Could not persist the submitted version.': '提交版本未能持久化。',
+  'Sent, but draft cleanup failed:': '发送已确认，但草稿清理失败，原内容已保留：', 'Send unconfirmed; draft retained:': '发送未确认，草稿已保留。请检查会话后再重试：',
+  'Could not stop:': '停止失败：', 'Could not switch drafts:': '无法切换草稿：', 'Images are not supported for this structured draft.': '此结构化草稿暂不支持添加图片。',
+  'Unsupported document changes were not saved.': '编辑内容包含不支持的文档结构，已保留上一次草稿。',
+  'File is binary and cannot be previewed as text.': '此文件是二进制文件，无法以文本预览。', 'Could not preview:': '无法预览：',
+};
+const traditional: Catalog = {
+  'Queue message': '排隊', 'Effort': '強度', 'Approval': '審批', 'Sandbox': '沙箱', 'Local target': '本機', 'Reading...': '正在讀取…',
+  'Ctrl/Command + Enter for multiline': '多行時 Ctrl/⌘ + Enter',
+  'Session default': '對話預設值', 'Configured default': '設定預設值', 'Loading': '載入中', 'Custom approval': '自訂核准',
+  'When untrusted': '不受信任時', 'On request': '依請求', 'Never': '永不', 'Read only': '唯讀', 'Workspace write': '工作區寫入',
+  'Full access': '完整存取', 'Fast': '快速', 'Plan': '計畫', 'Queued messages use conversation settings': '佇列訊息使用對話設定',
+  'Send method': '傳送方式', 'Stop current task': '停止目前任務', 'Send to current task': '傳送至目前任務', 'Sending...': '傳送中',
+  'Current task has no confirmed turn ID': '目前任務沒有可確認的回合 ID', 'Uploading attachments...': '正在上傳附件…',
+  'Saving draft...': '正在儲存草稿…', 'Retry saving': '重試儲存', 'Image attachment': '圖片附件', 'Image preview unavailable': '無法預覽圖片',
+  'View retained content': '查看保留內容', 'Select draft version': '選擇草稿版本', 'Draft with attachments or retained data': '包含附件或保留資料的草稿',
+  'Switch draft': '切換草稿', 'Other pages or legacy data contain {count} independent drafts.': '其他頁面或舊資料中有 {count} 份獨立草稿。',
+  'Contents were retained separately to preserve formatting.': '份內容已分別保留，以免合併時遺失格式。',
+  'Loading suggestions...': '載入中…', 'Could not load suggestions:': '無法讀取建議：', 'No matches': '沒有符合結果', 'Skill': '技能',
+  'Text formatting': '文字格式', 'Bold': '粗體', 'Italic': '斜體', 'Inline code': '行內程式碼', 'Link': '連結', 'Link address': '連結地址',
+  'Apply': '套用', 'Run location': '執行位置', 'No workspace selected': '未選擇工作區', 'Could not read workspaces:': '無法讀取工作區：',
+  'Could not switch workspace:': '無法切換工作區：', 'Image upload failed:': '附件上傳失敗：',
+  'Could not remove reference; draft retained:': '移除參照失敗，草稿已保留：', 'The content cannot be pasted together with images.': '請分別輸入文字並新增圖片。',
+  'Text and images cannot be pasted together.': '無法同時貼上文字和圖片，請分別輸入文字並新增圖片。', 'Select model': '選擇模型',
+  'This draft cannot be sent without losing content.': '無法無損傳送此內容，原始草稿已保留。', 'The queue cannot retain this draft context.': '佇列無法保留此草稿的上下文，草稿已保留。',
+  'The conversation has not been created yet.': '對話尚未建立，請稍後再加入佇列。', 'Could not persist the submitted version.': '無法儲存提交版本。',
+  'Sent, but draft cleanup failed:': '已確認傳送，但清理草稿失敗，原內容已保留：', 'Send unconfirmed; draft retained:': '傳送尚未確認，草稿已保留：',
+  'Could not stop:': '停止失敗：', 'Could not switch drafts:': '無法切換草稿：', 'Images are not supported for this structured draft.': '此結構化草稿暫不支援圖片。',
+  'Unsupported document changes were not saved.': '文件包含不支援的結構，已保留上一份草稿。',
+  'File is binary and cannot be previewed as text.': '此檔案為二進位格式，無法以文字預覽。', 'Could not preview:': '無法預覽：',
+};
+const japanese: Catalog = {
+  'Queue message': 'キューに追加', 'Effort': '推論強度', 'Approval': '承認', 'Sandbox': 'サンドボックス', 'Local target': 'ローカル', 'Reading...': '読み込み中…',
+  'Session default': '会話の既定値', 'Configured default': '設定の既定値', 'Loading': '読み込み中', 'Custom approval': 'カスタム承認',
+  'When untrusted': '信頼されていない場合', 'On request': '要求時', 'Never': 'しない', 'Read only': '読み取り専用', 'Workspace write': 'ワークスペースへの書き込み',
+  'Full access': 'フルアクセス', 'Fast': '高速', 'Plan': '計画', 'Queued messages use conversation settings': 'キュー内のメッセージには会話設定を使用します',
+  'Send method': '送信方法', 'Stop current task': '現在のタスクを停止', 'Send to current task': '現在のタスクに送信', 'Sending...': '送信中...',
+  'Uploading attachments...': '添付ファイルをアップロード中...', 'Saving draft...': '下書きを保存中...', 'Retry saving': '保存を再試行',
+  'Image attachment': '画像の添付', 'Image preview unavailable': '画像をプレビューできません', 'Skill': 'スキル', 'Text formatting': 'テキストの書式',
+  'Bold': '太字', 'Italic': '斜体', 'Inline code': 'インラインコード', 'Link': 'リンク', 'Link address': 'リンク先', 'Apply': '適用',
+  'Run location': '実行場所', 'No workspace selected': 'ワークスペースが選択されていません', 'No matches': '一致する結果がありません',
+};
+const korean: Catalog = {
+  'Queue message': '대기열에 추가', 'Effort': '추론 강도', 'Approval': '승인', 'Sandbox': '샌드박스', 'Local target': '로컬', 'Reading...': '읽는 중…',
+  'Session default': '대화 기본값', 'Configured default': '설정 기본값', 'Loading': '불러오는 중', 'Custom approval': '사용자 지정 승인',
+  'When untrusted': '신뢰할 수 없는 경우', 'On request': '요청 시', 'Never': '사용 안 함', 'Read only': '읽기 전용', 'Workspace write': '작업 공간 쓰기',
+  'Full access': '전체 접근', 'Fast': '빠르게', 'Plan': '계획', 'Queued messages use conversation settings': '대기 메시지는 대화 설정을 사용합니다',
+  'Send method': '전송 방식', 'Stop current task': '현재 작업 중지', 'Send to current task': '현재 작업에 보내기', 'Sending...': '보내는 중...',
+  'Uploading attachments...': '첨부 파일 업로드 중...', 'Saving draft...': '초안 저장 중...', 'Retry saving': '저장 다시 시도',
+  'Image attachment': '이미지 첨부', 'Image preview unavailable': '이미지를 미리 볼 수 없습니다', 'Skill': '스킬', 'Text formatting': '텍스트 서식',
+  'Bold': '굵게', 'Italic': '기울임꼴', 'Inline code': '인라인 코드', 'Link': '링크', 'Link address': '링크 주소', 'Apply': '적용',
+  'Run location': '실행 위치', 'No workspace selected': '선택된 작업 공간이 없습니다', 'No matches': '일치하는 결과가 없습니다',
+};
+const spanish: Catalog = {
+  'Queue message': 'Poner en cola', 'Effort': 'Esfuerzo', 'Approval': 'Aprobación', 'Sandbox': 'Entorno aislado', 'Local target': 'Local', 'Reading...': 'Leyendo...',
+  'Session default': 'Predeterminado de la conversación', 'Configured default': 'Predeterminado en la configuración', 'Loading': 'Cargando', 'Custom approval': 'Aprobación personalizada',
+  'When untrusted': 'Si no es de confianza', 'On request': 'Al solicitarlo', 'Never': 'Nunca', 'Read only': 'Solo lectura', 'Workspace write': 'Escritura en el espacio de trabajo',
+  'Full access': 'Acceso completo', 'Fast': 'Rápido', 'Plan': 'Plan', 'Queued messages use conversation settings': 'Los mensajes en cola usan la configuración de la conversación',
+  'Send method': 'Método de envío', 'Stop current task': 'Detener tarea actual', 'Send to current task': 'Enviar a la tarea actual', 'Sending...': 'Enviando...',
+  'Uploading attachments...': 'Subiendo archivos adjuntos...', 'Saving draft...': 'Guardando borrador...', 'Retry saving': 'Reintentar guardar',
+  'Image attachment': 'Imagen adjunta', 'Image preview unavailable': 'Vista previa no disponible', 'Skill': 'Habilidad', 'Text formatting': 'Formato de texto',
+  'Bold': 'Negrita', 'Italic': 'Cursiva', 'Inline code': 'Código en línea', 'Link': 'Enlace', 'Link address': 'Dirección del enlace', 'Apply': 'Aplicar',
+  'Run location': 'Lugar de ejecución', 'No workspace selected': 'No hay espacio de trabajo seleccionado', 'No matches': 'Sin resultados',
+};
+const french: Catalog = {
+  'Queue message': 'Mettre en attente', 'Effort': 'Effort', 'Approval': 'Approbation', 'Sandbox': 'Bac à sable', 'Local target': 'Local', 'Reading...': 'Lecture...',
+  'Session default': 'Valeur par défaut de la conversation', 'Configured default': 'Valeur configurée par défaut', 'Loading': 'Chargement', 'Custom approval': 'Approbation personnalisée',
+  'When untrusted': 'Si non approuvé', 'On request': 'Sur demande', 'Never': 'Jamais', 'Read only': 'Lecture seule', 'Workspace write': 'Écriture dans l’espace de travail',
+  'Full access': 'Accès complet', 'Fast': 'Rapide', 'Plan': 'Plan', 'Queued messages use conversation settings': 'Les messages en attente utilisent les paramètres de la conversation',
+  'Send method': 'Méthode d’envoi', 'Stop current task': 'Arrêter la tâche en cours', 'Send to current task': 'Envoyer à la tâche en cours', 'Sending...': 'Envoi...',
+  'Uploading attachments...': 'Envoi des pièces jointes...', 'Saving draft...': 'Enregistrement du brouillon...', 'Retry saving': 'Réessayer l’enregistrement',
+  'Image attachment': 'Image jointe', 'Image preview unavailable': 'Aperçu de l’image indisponible', 'Skill': 'Compétence', 'Text formatting': 'Mise en forme du texte',
+  'Bold': 'Gras', 'Italic': 'Italique', 'Inline code': 'Code en ligne', 'Link': 'Lien', 'Link address': 'Adresse du lien', 'Apply': 'Appliquer',
+  'Run location': 'Lieu d’exécution', 'No workspace selected': 'Aucun espace de travail sélectionné', 'No matches': 'Aucun résultat',
+};
+const german: Catalog = {
+  'Queue message': 'In Warteschlange', 'Effort': 'Aufwand', 'Approval': 'Genehmigung', 'Sandbox': 'Sandbox', 'Local target': 'Lokal', 'Reading...': 'Wird gelesen...',
+  'Session default': 'Standard der Unterhaltung', 'Configured default': 'Konfigurierter Standard', 'Loading': 'Wird geladen', 'Custom approval': 'Benutzerdefinierte Genehmigung',
+  'When untrusted': 'Bei nicht vertrauenswürdigen Aktionen', 'On request': 'Auf Anfrage', 'Never': 'Nie', 'Read only': 'Nur lesen', 'Workspace write': 'Schreiben im Arbeitsbereich',
+  'Full access': 'Vollzugriff', 'Fast': 'Schnell', 'Plan': 'Plan', 'Queued messages use conversation settings': 'Nachrichten in der Warteschlange verwenden die Unterhaltungseinstellungen',
+  'Send method': 'Sendemethode', 'Stop current task': 'Aktuelle Aufgabe stoppen', 'Send to current task': 'An aktuelle Aufgabe senden', 'Sending...': 'Wird gesendet...',
+  'Uploading attachments...': 'Anhänge werden hochgeladen...', 'Saving draft...': 'Entwurf wird gespeichert...', 'Retry saving': 'Speichern erneut versuchen',
+  'Image attachment': 'Bildanhang', 'Image preview unavailable': 'Bildvorschau nicht verfügbar', 'Skill': 'Fähigkeit', 'Text formatting': 'Textformatierung',
+  'Bold': 'Fett', 'Italic': 'Kursiv', 'Inline code': 'Inline-Code', 'Link': 'Link', 'Link address': 'Linkadresse', 'Apply': 'Anwenden',
+  'Run location': 'Ausführungsort', 'No workspace selected': 'Kein Arbeitsbereich ausgewählt', 'No matches': 'Keine Treffer',
+};
+const portuguese: Catalog = {
+  'Queue message': 'Adicionar à fila', 'Effort': 'Esforço', 'Approval': 'Aprovação', 'Sandbox': 'Sandbox', 'Local target': 'Local', 'Reading...': 'Lendo...',
+  'Session default': 'Padrão da conversa', 'Configured default': 'Padrão configurado', 'Loading': 'Carregando', 'Custom approval': 'Aprovação personalizada',
+  'When untrusted': 'Quando não for confiável', 'On request': 'Quando solicitado', 'Never': 'Nunca', 'Read only': 'Somente leitura', 'Workspace write': 'Gravação no espaço de trabalho',
+  'Full access': 'Acesso completo', 'Fast': 'Rápido', 'Plan': 'Plano', 'Queued messages use conversation settings': 'Mensagens na fila usam as configurações da conversa',
+  'Send method': 'Método de envio', 'Stop current task': 'Parar tarefa atual', 'Send to current task': 'Enviar à tarefa atual', 'Sending...': 'Enviando...',
+  'Uploading attachments...': 'Enviando anexos...', 'Saving draft...': 'Salvando rascunho...', 'Retry saving': 'Tentar salvar novamente',
+  'Image attachment': 'Imagem anexada', 'Image preview unavailable': 'Prévia da imagem indisponível', 'Skill': 'Habilidade', 'Text formatting': 'Formatação de texto',
+  'Bold': 'Negrito', 'Italic': 'Itálico', 'Inline code': 'Código em linha', 'Link': 'Link', 'Link address': 'Endereço do link', 'Apply': 'Aplicar',
+  'Run location': 'Local de execução', 'No workspace selected': 'Nenhum espaço de trabalho selecionado', 'No matches': 'Nenhum resultado',
+};
+
+export function composerMessagesFor(locale: string): Catalog {
+  const language = locale.toLowerCase().split('-')[0];
+  if (language === 'zh') return /(?:^|-)(?:tw|hk|mo|hant)(?:-|$)/i.test(locale) ? traditional : simplified;
+  return ({ ja: japanese, ko: korean, es: spanish, fr: french, de: german, pt: portuguese } as Record<string, Catalog>)[language!] ?? {};
+}

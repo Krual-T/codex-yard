@@ -2,6 +2,8 @@ import { messageKeys, simplifiedChinese, traditionalChinese } from './messages.t
 import type { MessageKey, Messages } from './messages.ts';
 import { french, german, japanese, korean, portuguese, spanish } from './other-messages.ts';
 import { workspaceMessageKeys, workspaceMessagesFor } from './workspace-messages.ts';
+import { composerMessageKeys, composerMessagesFor } from './composer-messages.ts';
+import { goalQueueMessageKeys, goalQueueMessagesFor } from './goal-queue-messages.ts';
 
 export interface I18n {
   locale: string;
@@ -19,7 +21,7 @@ function messagesFor(locale: string): Messages {
 export function createI18n(locale: string): I18n {
   let safeLocale: string;
   try { safeLocale = Intl.getCanonicalLocales(locale)[0] ?? 'en-US'; } catch { safeLocale = 'en-US'; }
-  const messages = { ...messagesFor(safeLocale), ...workspaceMessagesFor(safeLocale) };
+  const messages = { ...messagesFor(safeLocale), ...workspaceMessagesFor(safeLocale), ...composerMessagesFor(safeLocale), ...goalQueueMessagesFor(safeLocale) };
   return {
     locale: safeLocale,
     t: key => messages[key] ?? key,
@@ -28,7 +30,7 @@ export function createI18n(locale: string): I18n {
   };
 }
 
-const knownMessages = new Set<string>([...messageKeys, ...workspaceMessageKeys]);
+const knownMessages = new Set<string>([...messageKeys, ...workspaceMessageKeys, ...composerMessageKeys, ...goalQueueMessageKeys]);
 export function translateKnown(t: I18n['t'], value: string): string {
   return knownMessages.has(value) ? t(value as MessageKey) : value;
 }

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ComposerContext, WorkbenchClient } from '../workbench-contract.ts';
+import { useI18n } from '../i18n/index.tsx';
 
 export interface ComposerHost { hostId: string; displayName: string }
 export interface ComposerTarget { hostId: string; cwd: string }
@@ -17,6 +18,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function StandaloneTarget({ client, context, hosts, disabled, onTargetChange }: TargetProps) {
+  const { t } = useI18n('zh-CN');
   const [roots, setRoots] = useState<Root[]>([]);
   const [loading, setLoading] = useState(true);
   const [changing, setChanging] = useState(false);
@@ -26,7 +28,7 @@ export function StandaloneTarget({ client, context, hosts, disabled, onTargetCha
   const availableHosts = useMemo(() => {
     const result = new Map<string, ComposerHost>();
     for (const host of hosts ?? []) if (host.hostId && host.displayName) result.set(host.hostId, host);
-    if (!result.has(context.hostId)) result.set(context.hostId, { hostId: context.hostId, displayName: context.hostId === 'local' ? '本地' : context.hostId });
+    if (!result.has(context.hostId)) result.set(context.hostId, { hostId: context.hostId, displayName: context.hostId });
     return [...result.values()];
   }, [hostKey, context.hostId]);
   useEffect(() => {
@@ -56,14 +58,14 @@ export function StandaloneTarget({ client, context, hosts, disabled, onTargetCha
     if (!target || selected === current || changing || disabled || context.threadId !== null) return;
     setChanging(true); setError('');
     try { await onTargetChange({ hostId: target.hostId, cwd: target.cwd }); }
-    catch (reason) { setError('无法切换工作区：' + String(reason instanceof Error ? reason.message : reason)); }
+    catch (reason) { setError(t('Could not switch workspace:') + String(reason instanceof Error ? reason.message : reason)); }
     finally { setChanging(false); }
   };
   return <div className="standalone-composer__target">
-    <label>运行位置 <select aria-label="运行位置" value={current} disabled={disabled || changing || loading || context.threadId !== null}
+    <label>{t('Run location')} <select aria-label={t('Run location')} value={current} disabled={disabled || changing || loading || context.threadId !== null}
       onChange={event => void change(event.target.value)}>
-      {options.map(option => <option key={key(option)} value={key(option)}>{option.hostName}: {option.cwd || '未选择工作区'}</option>)}
+      {options.map(option => <option key={key(option)} value={key(option)}>{option.hostId === 'local' && option.hostName === 'local' ? t('Local target') : option.hostName}: {option.cwd || t('No workspace selected')}</option>)}
     </select></label>
-    {error ? <span role="alert">{error} <button type="button" onClick={() => setVersion(value => value + 1)}>重试</button></span> : null}
+    {error ? <span role="alert">{error} <button type="button" onClick={() => setVersion(value => value + 1)}>{t('Retry')}</button></span> : null}
   </div>;
 }
