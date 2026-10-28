@@ -10,7 +10,7 @@
 
 这是一个实验阶段的独立项目，以 **Codex App 26.1013.40934** 为历史交互参考。保留的第三方宠物图片附有[来源与声明](public/pets/NOTICE.md)，npm 依赖保留各自随包分发的许可证。[第三方组件说明](THIRD_PARTY.md)
 
-本分支仍在完成 React + TypeScript 迁移。默认页面已使用自有源码；最终功能集成、剩余参考快照删除及干净检出验收正在进行。[当前实现设计](docs/standalone-renderer-design.md)记录具体契约与验证边界。
+本分支仍在完成 React + TypeScript 迁移。默认页面已使用自有源码，参考快照已删除；最终功能集成及干净检出验收正在进行。[当前实现设计](docs/standalone-renderer-design.md)记录具体契约与验证边界。
 
 ## 当前功能与后续方向
 

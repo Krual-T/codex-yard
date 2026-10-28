@@ -22,9 +22,9 @@ do not perform real model inference. Tests of actual Codex protocol behavior
 must record the CLI/daemon version and distinguish scripted local providers from
 account-backed inference.
 
-Complete migration acceptance still requires deleting the entire
-`vendor/codex-app/` directory and validating a clean checkout with the desktop
-installation unavailable. That acceptance includes installation, build, actual
+The entire `vendor/codex-app/` directory has been removed from the source.
+Complete migration acceptance still requires validating a clean checkout with
+the desktop installation unavailable. That acceptance includes installation, build, actual
 `npm start`, the existing Web features and the distribution contents. Until
 those checks finish, a working owned renderer is an intermediate result.
 

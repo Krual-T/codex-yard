@@ -10,7 +10,7 @@ The browser entry, React components, state, TypeScript host and Node tool adapte
 
 This is an experimental, independent project. **Codex App 26.1013.40934** is its historical UI behavior reference. Retained third-party pet images have their own [notice](public/pets/NOTICE.md); package dependencies keep their distributed licenses. See [third-party components](THIRD_PARTY.md).
 
-This branch is completing the React + TypeScript migration. The default renderer is project-authored; final integration, removal of the remaining reference snapshot and validation from a clean checkout are still in progress. See the [current implementation design](docs/standalone-renderer-design.md).
+This branch is completing the React + TypeScript migration. The default renderer is project-authored and the reference snapshot has been removed. Final feature integration and validation from a clean checkout are still in progress. See the [current implementation design](docs/standalone-renderer-design.md).
 
 ## Current capabilities
 
