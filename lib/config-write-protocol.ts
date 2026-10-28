@@ -34,8 +34,15 @@ export interface ConfigWriteStatus extends ConfigWriteRecord {
   storageError?: true;
 }
 
+export interface ConfigReadSource {
+  hostId: string;
+  generation: string;
+  homeDirectory: string;
+  codexHome: string;
+}
+
 export type ConfigurationWriteRequest =
-  | { hostId: string; action: 'submit'; operationId: string; method: ConfigWriteMethod; params: Record<string, unknown> }
+  | { hostId: string; action: 'submit'; operationId: string; method: ConfigWriteMethod; params: Record<string, unknown>; source: ConfigReadSource }
   | { hostId: string; action: 'status'; operationId: string }
   | { hostId: string; action: 'retry-persistence'; operationId: string; receipt?: ConfigWriteReceipt };
 

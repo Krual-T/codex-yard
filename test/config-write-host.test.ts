@@ -18,12 +18,14 @@ import { createFakeCodex, NO_REPLY } from './fake-codex.ts';
 type Context = { allowed: boolean };
 const context: Context = { allowed: true };
 const execFileAsync = promisify(execFile);
+const source = (hostId = 'local') => ({ hostId, generation: 'fixture-generation', homeDirectory: '/fixture', codexHome: '/fixture/codex' });
+const bound = (connection: ConfigWriteConnection) => ({ connection, socket: connection.socket });
 const batchParams = () => ({ filePath: null, expectedVersion: 'fixture-v1', reloadUserConfig: true,
   edits: [{ keyPath: 'hooks.state.fixture.enabled', value: false, mergeStrategy: 'upsert' }] });
 const batch = (operationId: string, hostId = 'local') => ({ hostId, action: 'submit' as const, operationId,
-  method: 'config/batchWrite' as const, params: batchParams() });
+  method: 'config/batchWrite' as const, params: batchParams(), source: source(hostId) });
 const skill = (operationId: string, hostId = 'local') => ({ hostId, action: 'submit' as const, operationId,
-  method: 'skills/config/write' as const, params: { name: 'fixture:skill', enabled: false } });
+  method: 'skills/config/write' as const, params: { name: 'fixture:skill', enabled: false }, source: source(hostId) });
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp('/tmp/yard-config-host-'), home = join(root, 'codex'), statePath = join(root, 'state.json');
@@ -55,7 +57,7 @@ async function fixture(t: TestContext) {
     validateHost(hostId, value) {
       if (!value.allowed || hostId !== 'local' && hostId !== 'ssh-fixture') throw new Error('PRIVATE_AUTH_DETAIL');
     },
-    async connect(hostId) { connectCalls.push(hostId); return connectHook(hostId); },
+    async connect(hostId) { connectCalls.push(hostId); return bound(await connectHook(hostId)); },
   });
   async function submit(request: Extract<ConfigurationWriteRequest, { action: 'submit' }>) {
     const result = await host.handle(request, context);
@@ -101,8 +103,12 @@ test('host validates requests and observes missing operations without connecting
   const h = await fixture(t);
   assert.equal(await h.status('missing'), null);
   assert.deepEqual(await h.retry('missing'), { operation: null });
-  await assert.rejects(h.host.handle(batch('id'), { allowed: false }), /unavailable or unauthorized/);
-  await assert.rejects(h.host.handle(batch('id', 'unregistered'), context), /unavailable or unauthorized/);
+  const unauthorized = await h.host.handle(batch('unauthorized'), { allowed: false });
+  assert.ok('outcome' in unauthorized); assert.equal(unauthorized.outcome, 'not-started');
+  assert.deepEqual(unauthorized.operation?.terminal, { kind: 'not-sent' });
+  const unregistered = await h.host.handle(batch('unregistered', 'unregistered'), context);
+  assert.ok('outcome' in unregistered); assert.equal(unregistered.outcome, 'not-started');
+  assert.deepEqual(unregistered.operation?.terminal, { kind: 'not-sent' });
   await assert.rejects(h.host.handle({ ...batch('id'), method: 'config/value/write' }, context), /Invalid configuration/);
   await assert.rejects(h.host.handle({ ...batch('id'), params: { ...batchParams(), operationId: 'id' } }, context), /Invalid configuration/);
   assert.deepEqual(h.connectCalls, []);
@@ -304,7 +310,7 @@ test('a proven pre-dispatch failure is not-started and preserves an existing not
   const connection: ConfigWriteConnection = { connected: true, socket: {},
     async requestWithCursor() { throw new RpcError('PRIVATE_NOT_SENT', { status: 503, code: 'OBSERVER_LIMIT' }); } };
   let connects = 0;
-  const host = createConfigWriteHost<Context>({ writes, validateHost() {}, connect: async () => { connects++; return connection; } });
+  const host = createConfigWriteHost<Context>({ writes, validateHost() {}, connect: async () => { connects++; return bound(connection); } });
   const response = await host.handle(batch('not-sent'), context) as ConfigurationWriteSubmitResponse;
   assert.equal(response.outcome, 'not-started');
   if (response.outcome !== 'not-started') return;
@@ -338,7 +344,7 @@ test('failure to persist the pending reservation never dispatches the original w
     if (++saves === 2) throw new Error('PRIVATE_PENDING_SAVE_DETAIL');
     await h.options.persist();
   } });
-  const host = createConfigWriteHost<Context>({ writes, validateHost() {}, connect: h.openConnection });
+  const host = createConfigWriteHost<Context>({ writes, validateHost() {}, connect: async () => bound(await h.openConnection()) });
   const result = await host.handle(batch('pending-save-failed'), context);
   assert.ok('outcome' in result);
   assert.equal(result.outcome, 'not-started');
@@ -464,10 +470,11 @@ test('an original browser receipt restores the terminal after the signing proces
     const connection = { connected: true, socket: {}, async requestWithCursor() {
       calls++; return { result: { status: 'okOverridden' }, eventCursor: 1 };
     } };
-    const host = createConfigWriteHost({ writes, validateHost() {}, connect: async () => connection });
+    const host = createConfigWriteHost({ writes, validateHost() {}, connect: async () => ({ connection, socket: connection.socket }) });
     if (phase === 'issue') {
       const result = await host.handle({ hostId: 'local', action: 'submit', operationId: 'restart-process',
-        method: 'config/batchWrite', params: { filePath: null } }, {});
+        method: 'config/batchWrite', params: { filePath: null },
+        source: { hostId: 'local', generation: 'fixture-generation', homeDirectory: '/fixture', codexHome: '/fixture/codex' } }, {});
       if (result.outcome !== 'success' || !result.operation.storageError || !result.operation.recoveryReceipt) throw new Error('missing observed receipt');
       await writeFile(browserPath, JSON.stringify(result.operation.recoveryReceipt));
       process.stdout.write(JSON.stringify({ outcome: result.outcome, calls }));
@@ -573,7 +580,7 @@ test('the shared mutation interval coordinates file reservations with configurat
   } });
   const entered = gate(), hold = gate();
   const host = createConfigWriteHost<Context>({ writes, validateHost() {}, connect: async () => {
-    entered.release(); await hold.promise; return h.openConnection();
+    entered.release(); await hold.promise; return bound(await h.openConnection());
   } });
   const reserveFile = () => mutations.run(() => {
     if (writes.activeForFile()) return false;
@@ -609,7 +616,7 @@ test('configuration requests request original-socket late observation and ignore
     callback = options?.onLateTerminal;
     throw new RpcError('fixture timeout', { uncertain: true });
   } };
-  const host = createConfigWriteHost<Context>({ writes, validateHost() {}, connect: async () => connection });
+  const host = createConfigWriteHost<Context>({ writes, validateHost() {}, connect: async () => bound(connection) });
   const first = await host.handle(batch('old-socket'), context);
   assert.ok('outcome' in first); assert.equal(first.outcome, 'unknown');
   socket = {};

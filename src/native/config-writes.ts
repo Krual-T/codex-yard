@@ -19,8 +19,7 @@ export interface ConfigWriteConnection {
 }
 
 export interface ConfigWriteIdentity { operationId: string; hostId: string; method: ConfigWriteMethod }
-export interface ConfigWriteInput extends ConfigWriteIdentity { params: Record<string, unknown>; connection: ConfigWriteConnection }
-export type ConfigWriteTargetInput = Omit<ConfigWriteInput, 'operationId'>;
+export interface ConfigWriteTargetInput extends Omit<ConfigWriteIdentity, 'operationId'> { params: Record<string, unknown>; connection: ConfigWriteConnection }
 export interface ConfigWriteTarget { hostKey: string; target: string; binding: string; scope?: 'global' }
 
 interface ConfigWritesOptions {
@@ -40,7 +39,7 @@ export type ConfigWriteSubmission =
   | { outcome: 'existing'; operation: ConfigWriteStatus }
   | { outcome: 'not-started'; operation: ConfigWriteStatus }
   | { outcome: 'started'; operation: ConfigWriteStatus; completion: Promise<ConfigWriteCompletion> };
-export type ConfigWritePreflight =
+type ConfigWritePrior =
   | { outcome: 'blocked'; operation: ConfigWriteStatus }
   | { outcome: 'existing'; operation: ConfigWriteStatus }
   | null;
@@ -261,7 +260,7 @@ export function createConfigWrites(options: ConfigWritesOptions) {
     }
     return value;
   }
-  function prior(current: StoredRecord[], input: ConfigWriteIdentity): ConfigWritePreflight {
+  function prior(current: StoredRecord[], input: ConfigWriteIdentity): ConfigWritePrior {
     const existing = original(current, input);
     if (existing) return { outcome: 'existing', operation: project(existing) };
     const blocker = current.find(value => active(value) && (value.scope === 'global' || value.method === undefined
@@ -270,9 +269,6 @@ export function createConfigWrites(options: ConfigWritesOptions) {
   }
   function validateIdentity(input: ConfigWriteIdentity) {
     if (!input || !validId(input.operationId) || !validId(input.hostId) || !methods.has(input.method)) throw new Error('Invalid configuration write request.');
-  }
-  async function preflight(input: ConfigWriteIdentity): Promise<ConfigWritePreflight> {
-    validateIdentity(input); return options.mutations.run(() => prior(records(), input));
   }
   async function begin(input: ConfigWriteIdentity): Promise<Prepared | Exclude<ConfigWriteSubmission, { outcome: 'started' }>> {
     validateIdentity(input);
@@ -374,15 +370,5 @@ export function createConfigWrites(options: ConfigWritesOptions) {
     })();
     return { outcome: 'started', operation, completion };
   }
-  function submit(input: ConfigWriteInput): Promise<ConfigWriteSubmission> {
-    if (!input || !validId(input.operationId) || !validId(input.hostId) || !methods.has(input.method) || !record(input.params)
-      || !input.connection || typeof input.connection.requestWithCursor !== 'function') return Promise.reject(new Error('Invalid configuration write request.'));
-    const params = structuredClone(input.params), connection = input.connection, originalSocket = connection.socket;
-    return begin({ operationId: input.operationId, hostId: input.hostId, method: input.method }).then(async prepared => {
-      if (prepared.outcome !== 'prepared') return prepared;
-      if (!connection.connected || connection.socket !== originalSocket) return { outcome: 'not-started', operation: await prepared.notSent() };
-      return prepared.start(params, connection);
-    });
-  }
-  return { begin, preflight, submit, status, retryTerminalSave, activeForFile };
+  return { begin, status, retryTerminalSave, activeForFile };
 }

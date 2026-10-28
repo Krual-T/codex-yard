@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { CodexConnection, RpcError } from '../lib/codex.ts';
-import { createConfigWrites } from '../src/native/config-writes.ts';
+import { createTestConfigWrites as createConfigWrites } from './config-write-fixture.ts';
 import type { ConfigWriteConnection, ConfigWriteMethod, ConfigWriteStatus } from '../src/native/config-writes.ts';
 import { createPreferenceWrites } from '../src/native/preference-writes.ts';
 import { createStateMutations } from '../src/native/state-mutations.ts';

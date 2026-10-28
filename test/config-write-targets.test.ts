@@ -8,7 +8,7 @@ import type { TestContext } from 'node:test';
 import { promisify } from 'node:util';
 import { CodexConnection } from '../lib/codex.ts';
 import { createConfigWriteTargets } from '../src/native/config-write-targets.ts';
-import { createConfigWrites } from '../src/native/config-writes.ts';
+import { createTestConfigWrites as createConfigWrites } from './config-write-fixture.ts';
 import type { ConfigWriteConnection } from '../src/native/config-writes.ts';
 import { createStateMutations } from '../src/native/state-mutations.ts';
 import type { HostPaths, SshHost } from '../src/native/ssh.ts';

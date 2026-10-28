@@ -1,18 +1,26 @@
-import type { ConfigWriteErrorCategory, ConfigWriteReceipt, ConfigWriteStatus, ConfigurationWriteError, ConfigurationWriteRequest,
+import type { ConfigReadSource, ConfigWriteErrorCategory, ConfigWriteReceipt, ConfigWriteStatus, ConfigurationWriteError, ConfigurationWriteRequest,
   ConfigurationWriteResponse, ConfigurationWriteRetryResponse, ConfigurationWriteSubmitResponse } from '../../lib/config-write-protocol.ts';
 import type { ConfigWriteConnection, createConfigWrites } from './config-writes.ts';
 
 type SubmitRequest = Extract<ConfigurationWriteRequest, { action: 'submit' }>;
+type ParsedSubmit = Omit<SubmitRequest, 'source'> & { source: ConfigReadSource | null };
+type ParsedRequest = Exclude<ConfigurationWriteRequest, { action: 'submit' }> | ParsedSubmit;
 type Writes = ReturnType<typeof createConfigWrites>;
 interface Options<Context> {
   writes: Writes;
   validateHost(hostId: string, context: Context): void | Promise<void>;
-  connect(hostId: string, context: Context): Promise<ConfigWriteConnection>;
+  connect(hostId: string, context: Context, source: ConfigReadSource): Promise<{ connection: ConfigWriteConnection; socket: unknown }>;
 }
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0');
 
-function parseRequest(value: unknown): ConfigurationWriteRequest {
+function readSource(value: unknown, hostId: string): ConfigReadSource | null {
+  if (!record(value) || value.hostId !== hostId || !validId(value.generation)
+    || !validId(value.homeDirectory) || !validId(value.codexHome)) return null;
+  return { hostId, generation: value.generation, homeDirectory: value.homeDirectory, codexHome: value.codexHome };
+}
+
+function parseRequest(value: unknown): ParsedRequest {
   if (!record(value) || !validId(value.hostId) || !validId(value.operationId)) throw new Error('Invalid configuration write request.');
   const { hostId, operationId, action } = value;
   if (action === 'status') return { hostId, operationId, action };
@@ -20,7 +28,7 @@ function parseRequest(value: unknown): ConfigurationWriteRequest {
     ...(value.receipt === undefined ? {} : { receipt: value.receipt as ConfigWriteReceipt }) };
   if (action !== 'submit' || value.method !== 'config/batchWrite' && value.method !== 'skills/config/write'
     || !record(value.params) || Object.hasOwn(value.params, 'operationId')) throw new Error('Invalid configuration write request.');
-  try { return { hostId, operationId, action, method: value.method, params: structuredClone(value.params) }; }
+  try { return { hostId, operationId, action, method: value.method, params: structuredClone(value.params), source: readSource(value.source, hostId) }; }
   catch { throw new Error('Invalid configuration write request.'); }
 }
 
@@ -43,19 +51,32 @@ export function createConfigWriteHost<Context>(options: Options<Context>) {
     return operation;
   }
 
-  async function submit(request: SubmitRequest, context: Context): Promise<ConfigurationWriteSubmitResponse> {
-    const { operationId, hostId, method, params } = request;
+  async function submit(request: ParsedSubmit, context: Context, hostAllowed: boolean): Promise<ConfigurationWriteSubmitResponse> {
+    const { operationId, hostId, method, params, source } = request;
     let prepared;
     try { prepared = await options.writes.begin({ operationId, hostId, method }); }
     catch { throw new Error('Cannot verify the configuration operation identity or records; it may belong to another host or method.'); }
-    if (prepared.outcome === 'existing' || prepared.outcome === 'blocked') return prepared;
+    if (prepared.outcome === 'existing' || prepared.outcome === 'blocked') {
+      if (!hostAllowed) throw new Error('The selected configuration host is unavailable or unauthorized.');
+      return prepared;
+    }
     if (prepared.outcome === 'not-started') return { outcome: 'not-started', operation: prepared.operation,
       error: { message: 'The configuration write could not be prepared.', uncertain: false } };
+    if (!hostAllowed || !source) {
+      const operation = await prepared.notSent();
+      return { outcome: 'not-started', operation, error: { message: hostAllowed
+        ? 'The original configuration source is unavailable or invalid. Reload the settings before saving.'
+        : 'The selected configuration host is unavailable or unauthorized.', uncertain: false } };
+    }
     let connection: ConfigWriteConnection;
-    try { connection = await options.connect(hostId, context); }
+    try {
+      const selected = await options.connect(hostId, context, source);
+      connection = selected.connection;
+      if (!selected.socket || !connection?.connected || connection.socket !== selected.socket) throw new Error('Configuration source changed.');
+    }
     catch {
       const operation = await prepared.notSent();
-      return { outcome: 'not-started', operation, error: { message: 'The configuration write could not be prepared.', uncertain: false } };
+      return { outcome: 'not-started', operation, error: { message: 'The original configuration source is unavailable or changed. Reload the settings before saving.', uncertain: false } };
     }
     let submitted;
     try { submitted = await prepared.start(params, connection); }
@@ -106,9 +127,10 @@ export function createConfigWriteHost<Context>(options: Options<Context>) {
     const request = parseRequest(value);
     if (request.action === 'status') return { operation: await status(request.hostId, request.operationId) };
     if (request.action === 'retry-persistence') return retry(request.hostId, request.operationId, request.receipt);
+    let hostAllowed = true;
     try { await options.validateHost(request.hostId, context); }
-    catch { throw new Error('The selected configuration host is unavailable or unauthorized.'); }
-    return submit(request, context);
+    catch { hostAllowed = false; }
+    return submit(request, context, hostAllowed);
   }
   return { handle };
 }
