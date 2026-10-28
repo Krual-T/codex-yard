@@ -7,7 +7,8 @@ import { chromium } from 'playwright-core';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import * as jsxRuntime from 'react/jsx-runtime';
-import type { ComposerController, MainComposerViewDependencies, MainComposerViewProps } from '../src/renderer/composer/composer-types.ts';
+import type { MainComposerViewDependencies, MainComposerViewProps } from '../src/renderer/composer/composer-types.ts';
+import { createComposerControllerFixture } from './renderer-composer-fixture.ts';
 
 const source = readFileSync(new URL(
   '../vendor/codex-app/26.1013.40934/webview/assets/app-initial-a68277f60b93.js', import.meta.url,
@@ -64,7 +65,7 @@ test('main composer preserves the original view composition and editor callbacks
     h_d: deps.DictationControls, Bc: mergeRefs, Wc: classNames,
   }) as React.ComponentType<MainComposerViewProps>;
   const migrated = createView(React, deps);
-  const controller = {} as ComposerController;
+  const controller = createComposerControllerFixture();
   const submit = () => {};
   const mention = () => {};
   const suggestion = () => {};

@@ -3,6 +3,7 @@ import type * as React from 'react';
 export interface ComposerDocument {
   content: { size: number };
   textBetween(from: number, to: number, separator: string): string;
+  descendants(visitor: (node: { isTextblock: boolean }, position: number) => boolean | void): void;
 }
 
 export interface ComposerTransaction {
@@ -15,17 +16,60 @@ export interface ComposerController {
   view: {
     dom: HTMLElement;
     isDestroyed: boolean;
-    state: { doc: ComposerDocument; schema: unknown; tr: ComposerTransaction };
+    state: {
+      doc: ComposerDocument;
+      schema: unknown;
+      tr: ComposerTransaction;
+      selection: { $from: { parent: { type: { name: string } } } };
+    };
     dispatch(transaction: ComposerTransaction): void;
+    hasFocus(): boolean;
+    nodeDOM(position: number): Node | null;
+  };
+  eventEmitter: {
+    addListener(event: 'composer-suggestion-ui-event', listener: (event: unknown) => void): void;
+    removeListener(event: 'composer-suggestion-ui-event', listener: (event: unknown) => void): void;
+  };
+  inlineMentionIconRegistry: {
+    subscribe(listener: () => void): () => void;
+    getSnapshot(): readonly unknown[];
   };
   initialInputFocused?: boolean | null;
-  consumeLocationPromptPrefill(locationKey: string): void;
+  getText(document?: ComposerDocument): string;
+  setText(text: string): void;
+  focus(position?: 'end'): void;
+  setPlaceholder(placeholder: string | undefined): void;
+  setInputActive(active: boolean): void;
+  clearInitialInputFocus(): void;
+  addSubmitHandler(handler: (durationMs?: number) => void): () => void;
+  cancelPendingSubmit(): void;
+  setSubmitReady(ready: boolean): void;
+  hasStandaloneBrowserAutocompleteMention(): boolean;
+  dismissStandaloneBrowserAutocompleteMentionOnBlur(): void;
+  cancelBrowserAutocompleteMentionDismissal(): void;
+  getBrowserAutocompleteMentionDismissalSnapshot(): boolean;
+  completeBrowserAutocompleteMentionDismissal(): void;
+  updateLink(element: Element, text: string, href: string | null): void;
+  consumeLocationPromptPrefill(locationKey: string): boolean;
   setEnterBehavior(behavior: string): void;
   setPlainTextMode(enabled: boolean): void;
   destroy(): void;
 }
 
-export type ComposerTextKind = 'plain' | 'prompt' | 'literal';
+export type ComposerTextKind = 'plain' | 'prompt' | 'literal' | 'literal-prompt' | 'sites-prompt';
+
+export interface ComposerControllerOptions {
+  addInitialContentToHistory?: boolean;
+  enableCodeBlocks?: boolean;
+  enableFileMentions?: boolean;
+  enableRichText?: boolean;
+  enableSelectedTextLinks?: boolean;
+  enableSkillMentions?: boolean;
+  enableSlashCommands?: boolean | { triggers?: string[] };
+  enterBehavior?: string;
+  restoreMarkdownLinksAsTextLinks?: boolean;
+  restorePathLinksAsFileMentions?: boolean;
+}
 
 export interface ComposerInitialContent {
   defaultText?: string;
@@ -41,7 +85,7 @@ export interface PendingComposerInput {
 export interface ComposerControllerProviderProps {
   children?: React.ReactNode | ((controller: ComposerController | null) => React.ReactNode);
   composerController?: ComposerController | null;
-  controllerOptions?: object;
+  controllerOptions?: ComposerControllerOptions;
   defaultText?: string;
   defaultTextKind?: ComposerTextKind;
   initialDocument?: ComposerDocument;
@@ -53,7 +97,7 @@ export interface ComposerControllerProviderProps {
   renderWhilePending?: boolean;
 }
 
-export interface ComposerControllerCreateOptions {
+export interface ComposerControllerCreateOptions extends ComposerControllerOptions {
   enableCodeBlocks: boolean;
   enableRichText: boolean;
   enableSelectedTextLinks: boolean;
@@ -143,10 +187,35 @@ export interface ComposerDictationControls {
   sendButton?: React.ReactNode;
 }
 
+export interface ComposerLegacyDictation {
+  transcriptionAction?: 'insert' | 'send' | null;
+  waveformCanvasRef?: React.Ref<HTMLCanvasElement>;
+  stopDictation(action: 'abort' | 'insert' | 'send'): void;
+  leadingAccessory?: React.ReactNode;
+  primaryIcon?: React.ReactNode;
+  noHorizontalPadding?: boolean;
+  tooltipPortalContainer?: HTMLElement | null;
+  chatgpt?: boolean;
+  sendDisabled?: boolean;
+}
+
+export interface ComposerRealtimeVoice {
+  isMicrophoneMuted: boolean;
+  isMuted: boolean;
+  modelPicker?: React.ReactNode;
+  phase: 'starting' | 'active' | 'stopping';
+  sendAction?: React.ReactNode;
+  toggleMicrophoneMute(): void;
+  toggleMute(): void;
+  waveformCanvasRef?: React.Ref<HTMLCanvasElement>;
+  stop(): void;
+  tooltipPortalContainer?: HTMLElement | null;
+}
+
 export interface ComposerVoiceProps {
   recording?: React.ReactNode;
-  legacyDictation?: object | null;
-  realtime?: object | null;
+  legacyDictation?: ComposerLegacyDictation | null;
+  realtime?: ComposerRealtimeVoice | null;
   hideEditor?: boolean;
   dictation?: ComposerDictationControls | (ComposerDictationControls & { controls: React.ReactNode }) | null;
   dictationEnabled?: boolean;
@@ -217,7 +286,7 @@ export interface MainComposerViewDependencies {
     FooterAction: React.ComponentType<PartProps>;
     FooterActions: React.ComponentType<PartProps & { spacing: 'none' }>;
   };
-  LegacyDictation: React.ComponentType<object & { noBottomMargin: boolean }>;
-  RealtimeVoice: React.ComponentType<object & { noBottomMargin: boolean }>;
+  LegacyDictation: React.ComponentType<ComposerLegacyDictation & { noBottomMargin: boolean }>;
+  RealtimeVoice: React.ComponentType<ComposerRealtimeVoice & { noBottomMargin: boolean }>;
   DictationControls: React.ComponentType<ComposerDictationControls>;
 }

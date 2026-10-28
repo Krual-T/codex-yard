@@ -11,7 +11,8 @@ import type {
   ComposerDraftScopeDependencies,
   ComposerDraftScopeProps,
 } from '../src/renderer/composer/composer-draft-scope.tsx';
-import type { ComposerController, ComposerControllerProviderProps, ComposerDocument } from '../src/renderer/composer/composer-types.ts';
+import type { ComposerControllerProviderProps, ComposerDocument } from '../src/renderer/composer/composer-types.ts';
+import { createComposerControllerFixture } from './renderer-composer-fixture.ts';
 
 async function loadFactory(): Promise<typeof import('../src/renderer/composer/composer-draft-scope.tsx').createComposerDraftScopeComponent> {
   const result = await build({
@@ -50,8 +51,8 @@ test('the fixed Mpt draft and rendering boundaries can be replaced without break
 
 test('draft scope preserves saved documents, callbacks, and the local portal', async () => {
   const create = await loadFactory();
-  const document = { content: { size: 5 }, textBetween: () => 'draft' } as ComposerDocument;
-  const controller = {} as ComposerController;
+  const document: ComposerDocument = { content: { size: 5 }, textBetween: () => 'draft', descendants: () => {} };
+  const controller = createComposerControllerFixture();
   const calls: Array<unknown[]> = [];
   let savedText = 'draft';
   let protectedDraft = false;

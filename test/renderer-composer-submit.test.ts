@@ -20,7 +20,7 @@ interface RegisteredShortcut {
 test('submit controls preserve shortcut routing, queue, dictation and keyboard priority', () => {
   const events: Array<unknown[]> = [];
   const registry = new Map<ComposerShortcut, RegisteredShortcut>();
-  const document = { content: { size: 1 }, textBetween: () => 'x' } as ComposerDocument;
+  const document: ComposerDocument = { content: { size: 1 }, textBetween: () => 'x', descendants: () => {} };
   let focused = true;
   let multiline = false;
   let shouldSteer = false;
