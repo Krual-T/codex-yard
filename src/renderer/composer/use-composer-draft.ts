@@ -39,7 +39,10 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   const queue = useRef<Promise<void>>(Promise.resolve());
   const lastWrite = useRef<Promise<boolean>>(Promise.resolve(true));
   const dirty = useRef(false);
+  // Intermediate revisions in the local write queue are not independent drafts.
+  const pendingAncestors = useRef(new Set<string>());
   const durableRevision = useRef<string | null>(null);
+  const refreshVersions = useRef<(() => void) | null>(null);
   const changeCallback = useRef(onChange);
   changeCallback.current = onChange;
   const enqueue = useCallback(<T,>(operation: () => Promise<T>): Promise<T> => {
@@ -59,8 +62,11 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       const view = await writeComposerDraftVersion(owner, previous.revision, next);
       if (active.current === controller) {
         durableRevision.current = next.revision;
-        if (current.current.revision === next.revision) { dirty.current = false; setSaving(false); }
-        setVersions(view.versions); setStorageError(''); publish(controller, next);
+        if (current.current.revision === next.revision) {
+          dirty.current = false; pendingAncestors.current.clear(); setSaving(false); setVersions(view.versions);
+          refreshVersions.current?.();
+        }
+        setStorageError(''); publish(controller, next);
       }
       return true;
     }).catch(reason => {
@@ -77,6 +83,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     const previous = current.current;
     const next = { ...previous, revision: createId(), draft: update(previous.draft),
       prefills: prefillId ? [...previous.prefills, prefillId] : previous.prefills };
+    pendingAncestors.current.add(previous.revision);
     current.current = next;
     dirty.current = true;
     setSaving(true);
@@ -166,24 +173,25 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       }
       setLoaded(true);
     }).catch(reason => { if (valid()) setStorageError('无法恢复草稿，当前内容已保留：' + message(reason)); });
+    const refresh = () => {
+      if (dirty.current) return;
+      const serial = ++versionRead, observed = current.current;
+      void readComposerDraftVersions(owner).then(view => {
+        if (!valid() || serial !== versionRead || dirty.current || current.current !== observed) return;
+        setVersions(view.versions);
+        if (finished && !view.versions.some(value => value.revision === observed.revision) && view.versions.length === 1) {
+          const next = view.versions[0]!;
+          current.current = next; setStored(next); durableRevision.current = next.revision;
+          lastWrite.current = Promise.resolve(true); publish(controller, next);
+        }
+      }).catch(reason => { if (valid()) setStorageError('无法读取草稿版本：' + message(reason)); });
+    };
+    refreshVersions.current = refresh;
     const unsubscribe = subscribeBrowserAtoms(keys => {
       if (keys.some(key => legacyKeys.has(key)) && !finished) { generation.current += 1; setRetry(value => value + 1); return; }
-      if (keys.includes(composerDraftAtomKey)) {
-        const serial = ++versionRead, observed = current.current;
-        void readComposerDraftVersions(owner).then(view => {
-          if (!valid() || serial !== versionRead) return;
-          setVersions(view.versions);
-          if (finished && !dirty.current && current.current === observed
-            && !view.versions.some(value => value.revision === observed.revision) && view.versions.length === 1) {
-            const next = view.versions[0]!;
-            current.current = next; setStored(next); durableRevision.current = next.revision;
-            lastWrite.current = Promise.resolve(true); publish(controller, next);
-          }
-        })
-          .catch(reason => { if (valid()) setStorageError('无法读取草稿版本：' + message(reason)); });
-      }
+      if (keys.includes(composerDraftAtomKey)) refresh();
     });
-    return () => { disposed = true; unsubscribe(); };
+    return () => { disposed = true; if (refreshVersions.current === refresh) refreshVersions.current = null; unsubscribe(); };
   }, [controller, legacyIdentity, retry, initial, owner, persist, publish]);
   useLayoutEffect(() => { onController?.(controller); return () => onController?.(null); }, [controller, onController]);
 
@@ -228,5 +236,6 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     return () => window.removeEventListener('beforeunload', beforeUnload);
   }, []);
   return { owner, controller, current, stored, changeDraft, retain, clear, selectVersion,
-    conflicts: versions.filter(value => value.revision !== stored.revision), storageError, saving, loaded, retry: () => setRetry(value => value + 1), lastWrite };
+    conflicts: versions.filter(value => value.revision !== stored.revision && !pendingAncestors.current.has(value.revision)),
+    storageError, saving, loaded, retry: () => setRetry(value => value + 1), lastWrite };
 }
