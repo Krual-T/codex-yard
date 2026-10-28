@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { mkdir, mkdtemp, open, realpath, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, realpath, rename, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -77,8 +77,12 @@ function filename(value: unknown) {
   return value;
 }
 
-export const fileEndpoints = new Set(['workspace-directory-entries', 'remote-workspace-directory-entries', 'read-file', 'read-file-metadata', 'read-file-binary', 'paths-exist', 'workspace-files', 'workspace-file-save', 'ensure-directory', 'visualization-read']);
+export const fileEndpoints = new Set(['workspace-directory-entries', 'remote-workspace-directory-entries', 'read-file', 'read-file-metadata', 'read-file-binary', 'paths-exist', 'workspace-files', 'workspace-file-save', 'workspace-file-save-status', 'ensure-directory', 'visualization-read']);
 export const fileMethods = new Set(['fs/readFile', 'fs/readDirectory', 'fs/getMetadata', 'fs/createDirectory', 'fs/writeFile']);
+
+type SaveState = 'pending' | 'unknown' | 'saved' | 'conflict' | 'failed';
+interface SaveReceipt { id: string; hostId: string; target: string; state: SaveState }
+const saveStates = new Set<SaveState>(['pending', 'unknown', 'saved', 'conflict', 'failed']);
 
 export function createFiles(options: { dataDir: string; workspace: string; hosts: Map<string, SshHost>; request: FileRequest; remoteCommand?: RemoteFileCommand }) {
   const controllers = new Set<AbortController>();
@@ -86,7 +90,43 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
   const attachmentDirectories = new Map<string, Set<string>>();
   const creatingAttachments = new Set<string>();
   const fileWrites = new Map<string, Promise<void>>();
+  const liveSaves = new Set<string>();
+  let receipts: SaveReceipt[] | undefined;
+  let receiptQueue: Promise<void> = Promise.resolve();
   let closed = false;
+  // Persist the path fence before the daemon write; transport timeouts discard late replies.
+  async function journal<T>(action: (current: SaveReceipt[]) => { value: T; next?: SaveReceipt[] }): Promise<T> {
+    const run = receiptQueue.then(async () => {
+      if (!receipts) {
+        let raw: unknown;
+        try { raw = JSON.parse(await readFile(join(options.dataDir, 'workspace-file-saves.json'), 'utf8')); }
+        catch (error) { if (missing(error)) raw = []; else throw error; }
+        if (!Array.isArray(raw) || !raw.every(item => item && typeof item.id === 'string' && typeof item.hostId === 'string'
+          && typeof item.target === 'string' && saveStates.has(item.state))) throw new Error('文件保存记录无法读取；已阻止写入。');
+        receipts = raw as SaveReceipt[];
+      }
+      const result = action(receipts);
+      if (result.next) {
+        await mkdir(options.dataDir, { recursive: true, mode: 0o700 });
+        const temporary = join(options.dataDir, `workspace-file-saves.${randomBytes(12).toString('hex')}.tmp`);
+        const file = await open(temporary, 'wx', 0o600);
+        try { await file.writeFile(JSON.stringify(result.next)); await file.sync(); } finally { await file.close(); }
+        await rename(temporary, join(options.dataDir, 'workspace-file-saves.json'));
+        const directory = await open(options.dataDir, 'r');
+        try { await directory.sync(); } finally { await directory.close(); }
+        receipts = result.next;
+      }
+      return result.value;
+    });
+    receiptQueue = run.then(() => {}, () => {});
+    return run;
+  }
+  async function receiptState(id: string, state: SaveState) {
+    await journal(current => {
+      if (!current.some(item => item.id === id && item.state === 'pending')) throw new Error('文件保存记录已改变；已阻止后续写入。');
+      return { value: undefined, next: current.map(item => item.id === id ? { ...item, state } : item) };
+    });
+  }
   function host(value: unknown) {
     const hostId = value == null ? 'local' : value;
     if (typeof hostId !== 'string' || hostId !== 'local' && !options.hosts.has(hostId)) throw new Error('未登记的执行主机：' + String(hostId));
@@ -164,33 +204,73 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     const [realRoot, realTarget] = await Promise.all([canonical(hostId, root), canonical(hostId, target)]);
     if (!within(realRoot, realTarget) || realRoot === realTarget) throw new Error('保存路径超出当前工作目录。');
     const key = JSON.stringify([hostId, realTarget]);
+    const id = params.operationId == null ? randomBytes(16).toString('hex') : params.operationId;
+    if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(id)) throw new Error('无效的文件保存操作标识。');
+    const existing = await journal(current => ({ value: current.find(item => item.hostId === hostId && item.target === realTarget
+      && (item.state === 'pending' || item.state === 'unknown')) }));
+    if (existing) return { outcome: 'blocked' as const, operationId: existing.id };
     const result = (fileWrites.get(key) ?? Promise.resolve()).then(async () => {
       if (closed) throw new Error('文件服务已关闭，未保存。');
-      const [directory, before, currentRoot, currentTarget] = await Promise.all([
-        daemonMetadata(hostId, root), daemonMetadata(hostId, target), canonical(hostId, root), canonical(hostId, target),
-      ]);
-      if (!directory.isDirectory || !before.isFile || before.isSymlink) throw new Error('只能保存当前工作目录内已存在的普通文件，符号链接不写入。');
-      if (currentRoot !== realRoot || currentTarget !== realTarget) return { outcome: 'conflict' as const };
-      const currentBytes = await bytes(hostId, target, previewLimit);
-      // Compare original bytes, including BOM and mixed line endings, before
-      // the existing daemon write. External writers are not an atomic CAS.
-      if (!currentBytes.equals(originalBytes)) return { outcome: 'conflict' as const };
-      const latest = await daemonMetadata(hostId, target);
-      if (!latest.isFile || latest.isSymlink || latest.modifiedAtMs !== before.modifiedAtMs
-        || latest.createdAtMs !== before.createdAtMs || await canonical(hostId, target) !== realTarget) return { outcome: 'conflict' as const };
-      await options.request(hostId, 'fs/writeFile', { path: target, dataBase64: nextBytes.toString('base64') }, true);
+      const blocked = await journal(current => {
+        const duplicate = current.find(item => item.id === id);
+        if (duplicate && (duplicate.hostId !== hostId || duplicate.target !== realTarget)) throw new Error('文件保存操作标识已用于其他文件。');
+        const prior = duplicate ?? current.find(item => item.hostId === hostId && item.target === realTarget && (item.state === 'pending' || item.state === 'unknown'));
+        return prior ? { value: prior } : { value: undefined, next: [...current, { id, hostId, target: realTarget, state: 'pending' }] };
+      });
+      if (blocked) return { outcome: 'blocked' as const, operationId: blocked.id };
+      liveSaves.add(id);
+      let issued = false, returned = false, finalized = false;
       try {
-        if (await canonical(hostId, target) !== realTarget || (await daemonMetadata(hostId, target)).isSymlink
-          || !(await bytes(hostId, target, previewLimit)).equals(nextBytes)) throw new Error('保存后文件内容或路径已改变。');
+        const [directory, before, currentRoot, currentTarget] = await Promise.all([
+          daemonMetadata(hostId, root), daemonMetadata(hostId, target), canonical(hostId, root), canonical(hostId, target),
+        ]);
+        if (!directory.isDirectory || !before.isFile || before.isSymlink) throw new Error('只能保存当前工作目录内已存在的普通文件，符号链接不写入。');
+        if (currentRoot !== realRoot || currentTarget !== realTarget) { await receiptState(id, 'conflict'); finalized = true; return { outcome: 'conflict' as const }; }
+        const currentBytes = await bytes(hostId, target, previewLimit);
+        // Compare original bytes, including BOM and mixed line endings, before
+        // the existing daemon write. External writers are not an atomic CAS.
+        if (!currentBytes.equals(originalBytes)) { await receiptState(id, 'conflict'); finalized = true; return { outcome: 'conflict' as const }; }
+        const latest = await daemonMetadata(hostId, target);
+        if (!latest.isFile || latest.isSymlink || latest.modifiedAtMs !== before.modifiedAtMs
+          || latest.createdAtMs !== before.createdAtMs || await canonical(hostId, target) !== realTarget) { await receiptState(id, 'conflict'); finalized = true; return { outcome: 'conflict' as const }; }
+        issued = true;
+        await options.request(hostId, 'fs/writeFile', { path: target, dataBase64: nextBytes.toString('base64') }, true);
+        returned = true;
+        try {
+          if (await canonical(hostId, target) !== realTarget || (await daemonMetadata(hostId, target)).isSymlink
+            || !(await bytes(hostId, target, previewLimit)).equals(nextBytes)) throw new Error('保存后文件内容或路径已改变。');
+        } catch (error) {
+          await receiptState(id, 'conflict'); finalized = true;
+          throw Object.assign(new Error('文件保存结果待核对，勿重复写入：' + (error instanceof Error ? error.message : String(error))), { uncertain: true });
+        }
+        await receiptState(id, 'saved'); finalized = true;
+        return { outcome: 'saved' as const };
       } catch (error) {
-        throw Object.assign(new Error('文件保存结果待核对，勿重复写入：' + (error instanceof Error ? error.message : String(error))), { uncertain: true });
-      }
-      return { outcome: 'saved' as const };
+        if (!finalized) {
+          const definitelyFailed = !issued || !returned && typeof error === 'object' && error !== null && 'uncertain' in error && error.uncertain === false;
+          try { await receiptState(id, definitelyFailed ? 'failed' : 'unknown'); }
+          catch { throw Object.assign(new Error('文件保存记录无法更新，结果未知；已阻止后续写入。'), { uncertain: true }); }
+        }
+        throw error;
+      } finally { liveSaves.delete(id); }
     });
     const settled = result.then(() => {}, () => {});
     fileWrites.set(key, settled);
     void settled.then(() => { if (fileWrites.get(key) === settled) fileWrites.delete(key); });
     return result;
+  }
+  async function saveStatus(params: ObjectValue, hostId: string) {
+    if (typeof params.operationId !== 'string' || typeof params.cwd !== 'string' || !posix.isAbsolute(params.cwd)
+      || typeof params.path !== 'string' || !params.path || params.path.includes('\0')) throw new Error('查询保存状态需要操作标识、工作目录和路径。');
+    const root = path(params.cwd, hostId);
+    const target = path(params.path.startsWith('file:') ? params.path : posix.resolve(root, params.path), hostId);
+    if (!within(root, target) || root === target) throw new Error('查询路径必须位于当前工作目录内。');
+    const [realRoot, realTarget] = await Promise.all([canonical(hostId, root), canonical(hostId, target)]);
+    if (!within(realRoot, realTarget) || realRoot === realTarget) throw new Error('查询路径超出当前工作目录。');
+    return journal(current => {
+      const item = current.find(receipt => receipt.id === params.operationId && receipt.hostId === hostId && receipt.target === realTarget);
+      return { value: { outcome: !item ? 'missing' : item.state === 'pending' && !liveSaves.has(item.id) ? 'unknown' : item.state } };
+    });
   }
   async function directory(params: ObjectValue, hostId: string, unbounded = false) {
     const root = path(unbounded ? params.directoryPath : params.workspaceRoot, hostId);
@@ -226,6 +306,7 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
   async function fetchFile(endpoint: string, params: ObjectValue): Promise<unknown> {
     const hostId = host(params.hostId);
     if (endpoint === 'workspace-file-save') return saveWorkspaceFile(params, hostId);
+    if (endpoint === 'workspace-file-save-status') return saveStatus(params, hostId);
     if (endpoint === 'ensure-directory') {
       if (typeof params.path !== 'string' || !posix.isAbsolute(params.path)) throw new Error('需要绝对目录');
       await options.request(hostId, 'fs/createDirectory', { path: path(params.path, hostId), recursive: true }, true);

@@ -42,6 +42,7 @@ test('CodeMirror editor keeps file bytes, history and language isolated across s
           if (state.mode === 'unknown-applied') throw new Error('synthetic disconnect after write');
           return {outcome:'saved'};
         }
+        if (endpoint === 'workspace-file-save-status') return {outcome:'saved'};
         throw new Error('Unsupported synthetic endpoint: ' + endpoint);
       }, subscribe() { return () => {}; }};
       let props = {client, scopeId:'thread-a',hostId:'test-host',cwd:'/workspace',
@@ -78,7 +79,8 @@ test('CodeMirror editor keeps file bytes, history and language isolated across s
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
-    await page.setContent('<!doctype html><html><head></head><body style="margin:0"><div id="root" style="height:700px"></div></body></html>');
+    await page.route('http://127.0.0.1:47831/**', route => route.fulfill({ contentType:'text/html', body:'<!doctype html><html><head></head><body style="margin:0"><div id="root" style="height:700px"></div></body></html>' }));
+    await page.goto('http://127.0.0.1:47831/');
     await page.addStyleTag({ content: css });
     await page.addScriptTag({ content: javascript });
     const editor = page.getByRole('textbox', { name: 'File: /workspace/a.ts' });
@@ -103,7 +105,7 @@ test('CodeMirror editor keeps file bytes, history and language isolated across s
     await page.getByRole('button', { name:'Redo', exact:true }).click();
     await page.getByRole('button', { name:'Save file' }).click();
     await page.getByRole('alert').filter({hasText:'Save result is unknown'}).waitFor();
-    assert.deepEqual(await page.evaluate(() => (window as any).panelFixture.state.writes[0]), {
+    assert.deepEqual(await page.evaluate(() => { const { operationId: _id, ...write } = (window as any).panelFixture.state.writes[0]; return write; }), {
       hostId:'test-host', cwd:'/workspace', path:'/workspace/a.ts', expectedContents:original, contents:edited,
     });
     await page.evaluate(() => (window as any).panelFixture.dispatch({from:0,insert:'// draft\n'}));
@@ -112,8 +114,9 @@ test('CodeMirror editor keeps file bytes, history and language isolated across s
     assert.equal(await page.evaluate(() => (window as any).panelFixture.state.writes.length), 1);
     await page.evaluate(() => { (window as any).panelFixture.state.mode = 'saved'; });
     await page.getByRole('button', { name:'Save file' }).click();
-    await page.waitForFunction(() => (document.querySelector('[aria-label="Save file"]') as HTMLButtonElement)?.disabled);
-    assert.deepEqual(await page.evaluate(() => (window as any).panelFixture.state.writes[1]), {
+    await page.waitForFunction(() => (window as any).panelFixture.state.writes.length === 2
+      && !document.querySelector('[role="tab"][aria-selected="true"] [aria-label="Unsaved changes"]'));
+    assert.deepEqual(await page.evaluate(() => { const { operationId: _id, ...write } = (window as any).panelFixture.state.writes[1]; return write; }), {
       hostId:'test-host', cwd:'/workspace', path:'/workspace/a.ts', expectedContents:edited, contents:'\ufeff// draft\r\n' + edited.slice(1),
     });
 

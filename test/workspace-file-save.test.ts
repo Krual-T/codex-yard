@@ -39,18 +39,20 @@ test('workspace saves compare full original bytes and retain BOM and mixed line 
   assert.deepEqual(writes.map(call => [call.hostId, call.mutating]), [['local', true], ['ssh-fixture', true]]);
 });
 
-test('same-file saves serialize, and the second stale baseline conflicts rather than overwriting the first', async t => {
+test('a same-file save is blocked while the original write is pending and a stale retry conflicts', async t => {
   let entered!: () => void, release!: () => void;
   const writing = new Promise<void>(resolve => { entered = resolve; }), waiting = new Promise<void>(resolve => { release = resolve; });
   const h = await fixture(t, request => async (...args) => {
     if (args[1] === 'fs/writeFile') { entered(); await waiting; }
     return request(...args);
   });
-  const before = await readFile(h.path, 'utf8'), first = h.save(before, 'first accepted');
+  const before = await readFile(h.path, 'utf8'), first = h.save(before, 'first accepted', { operationId: 'first' });
   await writing;
   const second = h.save(before, 'stale second', { path: join(h.cwd, 'sub', '..', 'file.txt') });
+  assert.deepEqual(await second, { outcome: 'blocked', operationId: 'first' });
   release();
-  assert.deepEqual(await Promise.all([first, second]), [{ outcome: 'saved' }, { outcome: 'conflict' }]);
+  assert.deepEqual(await first, { outcome: 'saved' });
+  assert.deepEqual(await h.save(before, 'stale retry'), { outcome: 'conflict' });
   assert.equal(await readFile(h.path, 'utf8'), 'first accepted');
   assert.equal(h.calls.filter(call => call.method === 'fs/writeFile').length, 1);
 });
@@ -80,10 +82,86 @@ test('a lost write receipt preserves its unknown outcome and is never replayed a
     return result;
   });
   const before = await readFile(h.path, 'utf8');
-  await assert.rejects(h.save(before, 'applied once'), error => (error as { uncertain?: boolean }).uncertain === true);
+  await assert.rejects(h.save(before, 'applied once', { operationId: 'lost' }), error => (error as { uncertain?: boolean }).uncertain === true);
   assert.equal(await readFile(h.path, 'utf8'), 'applied once');
-  assert.deepEqual(await h.save(before, 'do not replay'), { outcome: 'conflict' });
+  assert.deepEqual(await h.save(before, 'do not replay'), { outcome: 'blocked', operationId: 'lost' });
+  assert.deepEqual(await h.files.fetch('workspace-file-save-status', { hostId: 'local', cwd: h.cwd, path: h.path, operationId: 'lost' }), { outcome: 'unknown' });
   assert.equal(h.calls.filter(call => call.method === 'fs/writeFile').length, 1);
+});
+
+test('a daemon write that outlives its timeout blocks new writes after an old read and service restart', async t => {
+  let release!: () => void, late!: Promise<unknown>;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const h = await fixture(t, request => async (...args) => {
+    if (args[1] === 'fs/writeFile') {
+      late = gate.then(() => request(...args));
+      throw Object.assign(new Error('synthetic daemon timeout'), { uncertain: true });
+    }
+    return request(...args);
+  });
+  const before = await readFile(h.path, 'utf8');
+  await assert.rejects(h.save(before, 'late original', { operationId: 'original' }), { uncertain: true });
+  assert.equal(await readFile(h.path, 'utf8'), before);
+  assert.deepEqual(await h.save(before, 'new version', { operationId: 'newer' }), { outcome: 'blocked', operationId: 'original' });
+  const restarted = createFiles({ dataDir: h.root, workspace: h.cwd, hosts: new Map(), request: async (...args) => fileDaemonFixture()(args[1], args[2]) });
+  t.after(() => restarted.close());
+  assert.deepEqual(await restarted.fetch('workspace-file-save-status', { hostId: 'local', cwd: h.cwd, path: h.path, operationId: 'original' }), { outcome: 'unknown' });
+  assert.deepEqual(await restarted.fetch('workspace-file-save', { hostId: 'local', cwd: h.cwd, path: h.path,
+    operationId: 'after-restart', expectedContents: before, contents: 'newer after restart' }), { outcome: 'blocked', operationId: 'original' });
+  release(); await late;
+  assert.equal(await readFile(h.path, 'utf8'), 'late original');
+  assert.deepEqual(await restarted.fetch('workspace-file-save-status', { hostId: 'local', cwd: h.cwd, path: h.path, operationId: 'original' }), { outcome: 'unknown' });
+  assert.deepEqual(await restarted.fetch('workspace-file-save', { hostId: 'local', cwd: h.cwd, path: h.path,
+    operationId: 'still-blocked', expectedContents: 'late original', contents: 'do not overwrite' }), { outcome: 'blocked', operationId: 'original' });
+  assert.equal(h.calls.filter(call => call.method === 'fs/writeFile').length, 1);
+});
+
+test('a pending write becomes checkable only after its original daemon receipt and readback', async t => {
+  let entered!: () => void, release!: () => void;
+  const writing = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const h = await fixture(t, request => async (...args) => {
+    if (args[1] === 'fs/writeFile') { entered(); await gate; }
+    return request(...args);
+  });
+  const before = await readFile(h.path, 'utf8');
+  const first = h.save(before, 'first version', { operationId: 'pending' });
+  await writing;
+  const query = { hostId: 'local', cwd: h.cwd, path: h.path, operationId: 'pending' };
+  assert.deepEqual(await h.files.fetch('workspace-file-save-status', query), { outcome: 'pending' });
+  assert.equal(await readFile(h.path, 'utf8'), before);
+  assert.deepEqual(await h.files.fetch('workspace-file-save-status', { ...query, hostId: 'ssh-fixture' }), { outcome: 'missing' });
+  const second = h.save('first version', 'second version', { operationId: 'second' });
+  assert.deepEqual(await second, { outcome: 'blocked', operationId: 'pending' });
+  release();
+  assert.deepEqual(await first, { outcome: 'saved' });
+  assert.deepEqual(await h.files.fetch('workspace-file-save-status', query), { outcome: 'saved' });
+  assert.deepEqual(await h.save('first version', 'duplicate', { operationId: 'pending' }), { outcome: 'blocked', operationId: 'pending' });
+  assert.deepEqual(await h.save('first version', 'second version', { operationId: 'second' }), { outcome: 'saved' });
+  assert.equal(await readFile(h.path, 'utf8'), 'second version');
+});
+
+test('a pending save does not block an independent file on the same host', async t => {
+  let entered!: () => void, release!: () => void;
+  const writing = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const h = await fixture(t, request => async (...args) => {
+    if (args[1] === 'fs/writeFile' && String(args[2].path).endsWith('/file.txt')) { entered(); await gate; }
+    return request(...args);
+  });
+  const secondPath = join(h.cwd, 'other.txt'); await writeFile(secondPath, 'other');
+  const before = await readFile(h.path, 'utf8'), first = h.save(before, 'pending', { operationId: 'first' });
+  await writing;
+  assert.deepEqual(await h.save('other', 'independent', { path: secondPath, operationId: 'other' }), { outcome: 'saved' });
+  assert.equal(await readFile(secondPath, 'utf8'), 'independent');
+  release();
+  assert.deepEqual(await first, { outcome: 'saved' });
+});
+
+test('an unreadable save journal fails closed before issuing a daemon write', async t => {
+  const h = await fixture(t), before = await readFile(h.path, 'utf8');
+  await writeFile(join(h.root, 'workspace-file-saves.json'), '{invalid');
+  await assert.rejects(h.save(before, 'must not write', { operationId: 'corrupt' }));
+  assert.equal(await readFile(h.path, 'utf8'), before);
+  assert.equal(h.calls.filter(call => call.method === 'fs/writeFile').length, 0);
 });
 
 test('readback disagreement reports an unknown save and preserves the actual current file', async t => {
@@ -93,7 +171,8 @@ test('readback disagreement reports an unknown save and preserves the actual cur
     return result;
   });
   const before = await readFile(h.path, 'utf8');
-  await assert.rejects(h.save(before, 'attempt'), error => (error as { uncertain?: boolean }).uncertain === true);
+  await assert.rejects(h.save(before, 'attempt', { operationId: 'readback' }), error => (error as { uncertain?: boolean }).uncertain === true);
   assert.equal(await readFile(h.path, 'utf8'), 'changed externally');
+  assert.deepEqual(await h.files.fetch('workspace-file-save-status', { hostId: 'local', cwd: h.cwd, path: h.path, operationId: 'readback' }), { outcome: 'conflict' });
   assert.equal(h.calls.filter(call => call.method === 'fs/writeFile').length, 1);
 });

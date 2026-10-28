@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
-import type { Browser, BrowserContext, Locator } from 'playwright-core';
+import type { Browser, BrowserContext, Locator, Page } from 'playwright-core';
 import { history, isolateHistory, redo, undo } from '@codemirror/commands';
 import { EditorState } from '@codemirror/state';
 import type { Transaction } from '@codemirror/state';
@@ -149,12 +149,15 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
+  let page: Page | undefined, completed = false;
   t.after(async () => {
+    if (!completed && page) await page.screenshot({ path: join(root, 'failure.png') }).catch(() => {});
     await context?.close();
     await browser?.close();
     await app?.close();
     await fake.close();
-    await rm(root, { recursive: true, force: true });
+    if (completed) await rm(root, { recursive: true, force: true });
+    else console.error(`Workspace panel browser failure artifacts: ${root}`);
   });
   const fileRpc = fileDaemonFixture();
   for (const method of fileMethods) fake.handlers.set(method, params => fileRpc(method, record(params)));
@@ -166,7 +169,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
       import { createRoot } from 'react-dom/client';
       import { EditorView } from '@codemirror/view';
       import { WorkspacePanels } from './src/renderer/panels/WorkspacePanels.tsx';
-      const state = { calls: [], references: [], dirty: [], consumed: [], closed: 0, delayedPath: null, release: null, writes: [], writeOutcome: 'unknown' };
+      const state = { calls: [], references: [], dirty: [], consumed: [], closed: 0, delayedPath: null, release: null, writes: [], writeOutcome: 'unknown', saveStatus: 'unknown' };
       const socket = new WebSocket(location.origin.replace('http', 'ws') + '/native-host');
       const opened = new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
       const pending = new Map(); let sequence = 0;
@@ -188,8 +191,10 @@ test('workspace file panels use the real host with a disposable synthetic daemon
           if (endpoint === 'workspace-file-save') {
             state.writes.push(structuredClone(params));
             if (state.writeOutcome === 'known-failure') throw Object.assign(new Error('synthetic unsupported endpoint'), {uncertain:false});
+            state.saveStatus = state.writeOutcome === 'unknown-applied' ? 'saved' : 'unknown';
             return window.fixtureSave(params, state.writeOutcome);
           }
+          if (endpoint === 'workspace-file-save-status') return {outcome:state.saveStatus};
           const id = 'host-' + ++sequence;
           const result = await send({type:'fetch', requestId:id, url:'vscode://codex/' + endpoint, body:JSON.stringify(params)}, id);
           if (endpoint === 'workspace-files' && params.operation === 'read' && params.path === state.delayedPath) {
@@ -230,7 +235,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ['--no-sandbox'],
     env: { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache') } });
   context = await browser.newContext({ viewport: { width: 1100, height: 760 }, acceptDownloads: true });
-  const page = await context.newPage();
+  page = await context.newPage();
   page.setDefaultTimeout(7_000);
   const errors: string[] = [];
   const browserConsole: string[] = [];
@@ -345,8 +350,12 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   assert.equal(fake.calls('fs/writeFile').length, 0);
   assert.equal(await page.getByRole('button', { name: 'Save file' }).isDisabled(), true);
   await page.getByRole('button', { name: 'Check save result' }).click();
-  await page.getByRole('button', { name: 'Check save result' }).waitFor({ state: 'detached' });
+  await page.getByRole('alert').filter({ hasText: 'still unknown' }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Save file' }).isDisabled(), true);
   assert.equal(await page.evaluate(() => (window as any).fixture.state.writes.length), 1);
+  await page.evaluate(() => { (window as any).fixture.state.saveStatus = 'failed'; });
+  await page.getByRole('button', { name: 'Check save result' }).click();
+  await page.getByRole('button', { name: 'Check save result' }).waitFor({ state: 'detached' });
 
   await page.evaluate(() => (window as any).fixture.render({scopeId:'draft-b',request:null}));
   assert.equal(await page.getByRole('tab', { name: /notes.txt/ }).count(), 0);
@@ -370,7 +379,7 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   await page.getByRole('button', { name: 'Save file' }).click();
   await page.getByRole('alert').filter({ hasText: 'File changed on disk' }).waitFor();
   assert.equal(await editorValue(editor), 'unsaved edit');
-  assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.writes[1]), {
+  assert.deepEqual(await page.evaluate(() => { const { operationId: _id, ...write } = (window as any).fixture.state.writes[1]; return write; }), {
     hostId: 'local', cwd: project, path: join(project, 'notes.txt'), expectedContents: original, contents: 'unsaved edit',
   });
   assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.kind === 'rpc' && call.method === 'fs/writeFile').length), 0);
@@ -380,8 +389,10 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   await mixedEditor.waitFor();
   await selectEditor(mixedEditor, 4, 7);
   await page.keyboard.insertText('TWO');
+  const mixedWrites = await page.evaluate(() => (window as any).fixture.state.writes.length);
   await page.getByRole('button', { name: 'Save file' }).click();
-  await page.waitForFunction(() => (document.querySelector('[aria-label="Save file"]') as HTMLButtonElement)?.disabled);
+  await page.waitForFunction(count => (window as any).fixture.state.writes.length > count
+    && !document.querySelector('[role="tab"][aria-selected="true"] [aria-label="Unsaved changes"]'), mixedWrites);
   assert.equal(await readFile(join(project, 'mixed.txt'), 'utf8'), 'one\r\nTWO\nthree\rfour\r\n');
 
   await page.evaluate(() => { (window as any).fixture.state.writeOutcome = 'unknown-applied'; });
@@ -399,7 +410,8 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   assert.equal(await editorValue(mixedEditor), 'ABone\nTWO\nthree\nfour\n');
   await page.evaluate(() => { (window as any).fixture.state.writeOutcome = 'saved'; });
   await page.getByRole('button', { name: 'Save file' }).click();
-  await page.waitForFunction(() => (document.querySelector('[aria-label="Save file"]') as HTMLButtonElement)?.disabled);
+  await page.waitForFunction(count => (window as any).fixture.state.writes.length > count
+    && !document.querySelector('[role="tab"][aria-selected="true"] [aria-label="Unsaved changes"]'), writesBeforeCheck);
   assert.equal(await readFile(join(project, 'mixed.txt'), 'utf8'), 'ABone\r\nTWO\nthree\rfour\r\n');
 
   await page.evaluate(() => { (window as any).fixture.state.writeOutcome = 'known-failure'; });
@@ -536,4 +548,5 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   await page.getByRole('button', { name: 'Close panel' }).click();
   assert.equal(await page.evaluate(() => (window as any).fixture.state.closed), 0);
   assert.deepEqual(errors, []);
+  completed = true;
 });
