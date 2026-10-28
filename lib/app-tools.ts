@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { access, chmod, lstat, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { createConnection, createServer } from 'node:net';
 import type { Socket } from 'node:net';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { errorMessage, isRecord } from './codex-protocol.ts';
 import type { RpcId } from './codex-protocol.ts';
@@ -50,6 +50,11 @@ export async function createAppTools({ tools, callTool, adapterPath = process.en
     await access(adapterPath, constants.R_OK);
     if (!(await stat(adapterPath)).isFile()) throw new Error('不是文件');
   } catch (cause) {
+    const parts = adapterPath.split(sep);
+    if (isRecord(cause) && cause.code === 'ENOENT' && parts.at(-5) === 'vendor' &&
+        parts.at(-4) === 'codex-app' && parts.at(-3) && parts.at(-2) === 'codex-app-tools' && parts.at(-1) === 'server.mjs') {
+      throw new Error(`无法读取旧版 Codex App Tools 适配器：${adapterPath}。请移除 AGENTS_APP_TOOLS_ADAPTER 或 adapterPath 的旧覆盖以使用自有默认适配器，或指定可读取的适配器文件。`, { cause });
+    }
     throw new Error(`无法读取 Codex App Tools 适配器：${adapterPath}。`, { cause });
   }
   if (!Array.isArray(tools) || typeof callTool !== 'function') throw new TypeError('需要工具目录和 callTool 处理函数。');
