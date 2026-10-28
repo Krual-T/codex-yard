@@ -12,7 +12,7 @@ import type { SendIntent } from '../src/renderer/app/send-recovery.ts';
 import { StandaloneComposer } from '../src/renderer/composer/StandaloneComposer.tsx';
 import type { ComposerDraftController, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
 import { bindComposerDraftToThread, clearComposerDraftRevision, composerDraftAtomKey, readComposerDraftVersions,
-  retainComposerDraftVersion } from '../src/renderer/composer/composer-draft-store.ts';
+  retainComposerDraftVersion, writeComposerDraftVersion } from '../src/renderer/composer/composer-draft-store.ts';
 import { draftToInput, normalizeDraft } from '../src/renderer/composer/standalone-draft.ts';
 import { readBrowserAtom, subscribeBrowserAtoms, updateBrowserAtom } from '../src/renderer/storage/ui-atoms.ts';
 import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
@@ -43,6 +43,11 @@ export interface Fixture {
   snapshotBlocked(): boolean;
   releaseSnapshot(): void;
   rejectNextCommit(): void;
+  holdNextCommit(): void;
+  commitBlocked(): boolean;
+  releaseCommit(): void;
+  forkVersion(owner: BrowserOwner, revision: string, text: string): Promise<void>;
+  replaceVersion(snapshot: ComposerDraftSnapshot, revision: string, text: string): Promise<void>;
   dirty(): boolean;
   canLeave(): Promise<boolean>;
   closes(): number;
@@ -71,6 +76,7 @@ const recovery = new SendRecoveryStore(client);
 let attemptCount = 0;
 let snapshotGate: Promise<void> | undefined, releaseGate: (() => void) | undefined, snapshotBlocked = false;
 let rejectCommit = false, dirty = false, closeCount = 0, recoveryBarrier: (() => Promise<void>) | null = null;
+let commitGate: Promise<void> | undefined, releaseCommitGate: (() => void) | undefined, commitBlocked = false;
 const anchor = { kind: 'element' as const, pageUrl: 'https://fixture.invalid/page', framePath: [], title: 'Fixture element',
   immediateText: 'Example', role: 'button', name: 'Example', selector: '#fixture', elementPath: '#fixture', nearbyText: 'Example',
   rect: { x: 1, y: 2, width: 20, height: 10 }, elementMetadata: { tag: 'button', future: 'kept' } };
@@ -165,6 +171,17 @@ function App() {
       snapshotBlocked: () => snapshotBlocked,
       releaseSnapshot() { releaseGate?.(); snapshotGate = undefined; releaseGate = undefined; },
       rejectNextCommit() { rejectCommit = true; },
+      holdNextCommit() { commitBlocked = false; commitGate = new Promise(resolve => { releaseCommitGate = resolve; }); },
+      commitBlocked: () => commitBlocked,
+      releaseCommit() { releaseCommitGate?.(); releaseCommitGate = undefined; },
+      async forkVersion(value, revision, text) {
+        const snapshot = controller.current?.snapshot();
+        if (!snapshot) throw new Error('Fixture draft missing');
+        await writeComposerDraftVersion(value, 'fixture-no-such-revision', { revision, draft: normalizeDraft({ ...snapshot.draft, text }), prefills: [] });
+      },
+      async replaceVersion(snapshot, revision, text) {
+        await writeComposerDraftVersion(snapshot.owner, snapshot.revision, { revision, draft: normalizeDraft({ ...snapshot.draft, text }), prefills: [] });
+      },
       dirty: () => dirty,
       async canLeave() { try { await recoveryBarrier?.(); return true; } catch { return false; } },
       closes: () => closeCount,
@@ -190,8 +207,10 @@ function App() {
     return ready;
   }, [bindings]);
   const acceptCommitted = React.useCallback(async (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => {
+    const current = controller.current, gate = commitGate;
+    if (gate) { commitGate = undefined; commitBlocked = true; await gate; }
     if (rejectCommit) { rejectCommit = false; return false; }
-    return await controller.current?.acceptCommittedVersion(before, after) ?? false;
+    return await current?.acceptCommittedVersion(before, after) ?? false;
   }, []);
   const receiveController = React.useCallback((value: ComposerDraftController | null) => {
     controller.current = value; setControllerReady(value !== null);

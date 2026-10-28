@@ -28,7 +28,7 @@ export interface StandaloneBrowserProps {
   onRecoveryBarrier?(barrier: (() => Promise<void>) | null): void;
   /** Flush the active composer and return its exact durable owner and revision. */
   getDraftSnapshot?(owner: BrowserOwner): Promise<ComposerDraftSnapshot>;
-  /** Adopt an already committed version only if the controller still displays before. */
+  /** Adopt or verify an already committed version against the active controller and durable versions. */
   onDraftVersionCommitted?(before: ComposerDraftSnapshot, after: ComposerDraftSnapshot): Promise<boolean>;
   /** Return an owner only when the existing atoms prove the complete legacy identity. */
   resolveLegacyOwner?: ResolveLegacyBrowserOwner;
@@ -52,10 +52,10 @@ interface BrowserEdits {
   projections: Record<string, PendingProjection>;
   edit(owner: BrowserOwner, reference: BrowserReference, text: string): void;
   discard(key: string): void;
-  begin(): void;
-  end(): void;
+  begin(owner: BrowserOwner, resolving?: boolean): () => void;
+  busy(owner: BrowserOwner): boolean;
   hold(owner: BrowserOwner, snapshot: ComposerDraftSnapshot): void;
-  release(owner: BrowserOwner): void;
+  release(owner: BrowserOwner, snapshot: ComposerDraftSnapshot): boolean;
   projection(owner: BrowserOwner): PendingProjection | undefined;
   barrier(): Promise<void>;
 }
@@ -82,7 +82,9 @@ function CommentEditor({ owner, reference, saved, consumed, attached, getSnapsho
   const [error, setError] = React.useState('');
   const update = async (value: string | null) => {
     if (busyRef.current) return;
-    busyRef.current = true; edits.begin();
+    let finish: () => void;
+    try { finish = edits.begin(owner); } catch (failure) { setError((failure as Error).message); return; }
+    busyRef.current = true;
     setBusy(true); setError('');
     try {
       const before = await getSnapshot();
@@ -93,15 +95,17 @@ function CommentEditor({ owner, reference, saved, consumed, attached, getSnapsho
       await accept(before, after);
     }
     catch (failure) { setError((failure as Error).message); }
-    finally { busyRef.current = false; edits.end(); setBusy(false); }
+    finally { busyRef.current = false; finish(); setBusy(false); }
   };
   const add = async () => {
     if (busyRef.current) return;
-    busyRef.current = true; edits.begin();
+    let finish: () => void;
+    try { finish = edits.begin(owner); } catch (failure) { setError((failure as Error).message); return; }
+    busyRef.current = true;
     setBusy(true); setError('');
     try { const before = await getSnapshot(); await accept(before, await attachBrowserComment(owner, reference, before, isCurrent)); }
     catch (failure) { setError((failure as Error).message); }
-    finally { busyRef.current = false; edits.end(); setBusy(false); }
+    finally { busyRef.current = false; finish(); setBusy(false); }
   };
   const pendingConflict = !!pending && !sameBrowserValue(base, reference.original);
   const contextValue = pendingConflict ? base.localBrowserContext : reference.context.localBrowserContext;
@@ -164,7 +168,9 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
   const accept = React.useCallback(async (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => {
     if (before.revision === after.revision) return;
     edits.hold(owner, after);
-    try { if (await committedRef.current?.(before, after)) { edits.release(owner); return; } } catch { /* The transaction already committed. */ }
+    try {
+      if (active.current && await committedRef.current?.(before, after) && active.current && edits.release(owner, after)) return;
+    } catch { /* The transaction already committed. */ }
     throw new Error('批注和新草稿版本已保存，请在草稿版本中核对并选择；当前编辑已保留。');
   }, [ownerKey, edits.hold, edits.release]);
   React.useEffect(() => bridge.subscribe(target, setState), [bridge, target]);
@@ -221,7 +227,7 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
     return () => { live = false; unsubscribe(); };
   }, [bridge, target, ownerKey, visible, resolveLegacyOwner]);
   const quote = React.useCallback(async (_target: BrowserTarget, pageId: number) => {
-    edits.begin();
+    const finish = edits.begin(owner);
     try {
     const version = bridge.selectionVersion(target);
     const anchor = await bridge.selectedElement(target, pageId);
@@ -231,8 +237,8 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
     const result = await addBrowserCommentToDraft(owner, anchor, before, isCurrent);
     await accept(before, result.snapshot);
     return anchor.title;
-    } finally { edits.end(); }
-  }, [bridge, target, ownerKey, getSnapshot, accept, edits.begin, edits.end]);
+    } finally { finish(); }
+  }, [bridge, target, ownerKey, getSnapshot, accept, edits.begin]);
   const command = (type: string, url?: string) => {
     setError('');
     void bridge.request({ ...target, operation: 'command', command: { type, ...(url === undefined ? {} : { url }) } })
@@ -256,15 +262,15 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
   const pendingElsewhere = Object.entries(edits.edits).filter(([, value]) => browserOwnerKey(value.owner) !== ownerKey || !visibleIds.has(value.reference.id));
   const projection = edits.projections[ownerKey];
   const otherProjections = Object.values(edits.projections).filter(value => browserOwnerKey(value.owner) !== ownerKey);
-  React.useEffect(() => {
-    if (!visible || !projection || !sameBrowserValue(draft, projection.snapshot.draft) || !snapshotRef.current) return;
-    let live = true;
-    void snapshotRef.current(owner).then(current => {
-      if (live && active.current && sameBrowserValue(current, projection.snapshot)
-        && sameBrowserValue(edits.projection(owner)?.snapshot, projection.snapshot)) edits.release(owner);
-    }).catch(() => {});
-    return () => { live = false; };
-  }, [ownerKey, draft, visible, projection, edits.projection, edits.release]);
+  const discardProjection = (value: PendingProjection) => {
+    let finish: (() => void) | undefined;
+    try {
+      finish = edits.begin(value.owner, true);
+      if (!edits.release(value.owner, value.snapshot)) throw new Error('待接收快照已变化，请重新核对。');
+      setError('');
+    } catch (failure) { setError((failure as Error).message); }
+    finally { finish?.(); }
+  };
   return <section aria-label="浏览器" style={{ display: visible ? 'flex' : 'none', flexDirection: 'column', height: '100%', minHeight: 0 }}>
     <header style={{ display: 'flex', gap: 6, alignItems: 'center', padding: 8 }}>
       <strong>Chrome</strong>
@@ -290,19 +296,29 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
       {projection ? <section role="status"><strong>批注和新草稿版本已保存，请在草稿版本中核对并选择。</strong>
         <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(projection.snapshot)}</pre>
         <CopyButton value={displayValue(projection.snapshot)} label="复制已保存版本" />
-        <button onClick={() => {
-          edits.begin();
+        <button disabled={edits.busy(owner)} onClick={() => {
           void (async () => {
-            const current = await snapshotRef.current?.(owner);
-            if (!current || !sameBrowserValue(current, projection.snapshot)) throw new Error('当前草稿尚未选择该已保存版本。');
-            edits.release(owner); setError('');
-          })().catch(failure => setError((failure as Error).message)).finally(() => edits.end());
+            const finish = edits.begin(owner, true);
+            try {
+              const current = edits.projection(owner), committed = committedRef.current;
+              if (!active.current || !committed || !current || !sameBrowserValue(current.snapshot, projection.snapshot)
+                || !await committed(projection.snapshot, projection.snapshot) || !active.current
+                || !edits.release(owner, projection.snapshot)) {
+                throw new Error('当前草稿未能确认此活动版本，请核对、复制或明确放弃待接收快照。');
+              }
+              setError('');
+            } finally { finish(); }
+          })().catch(failure => setError((failure as Error).message));
         }}>核对已保存的草稿版本</button>
+        <button disabled={edits.busy(owner)} onClick={() => discardProjection(projection)}>放弃此待接收快照</button>
+        <span>放弃不会更改已保存的草稿或批注。</span>
       </section> : null}
       {otherProjections.map(value => <section key={browserOwnerKey(value.owner)} role="status">
         <strong>其他草稿有已保存但尚未接收的版本</strong><p>{value.owner.hostId} / {value.owner.threadId ?? '新会话'} / {value.owner.draftId}</p>
         <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(value.snapshot)}</pre>
         <CopyButton value={displayValue(value.snapshot)} label="复制已保存版本" />
+        <button disabled={edits.busy(value.owner)} onClick={() => discardProjection(value)}>放弃此待接收快照</button>
+        <span>放弃不会更改已保存的草稿或批注。</span>
       </section>)}
       {pendingElsewhere.length ? <section aria-label="待处理的批注编辑"><strong>待处理的批注编辑</strong>
         {pendingElsewhere.map(([key, value]) => <div key={key}>
@@ -336,9 +352,12 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
               <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(item)}</pre>
               {collisions.length ? <details><summary>核对目标中的同 ID 批注</summary><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(collisions)}</pre></details> : null}
               {candidate ? <button onClick={() => {
-                setLegacyError(''); edits.begin();
-                void claimLegacyBrowserComment(owner, entry.owner, entry.value as unknown[], index, collisions.length > 0, () => active.current)
-                  .catch(failure => { if (active.current) setLegacyError((failure as Error).message); }).finally(() => edits.end());
+                setLegacyError('');
+                void (async () => {
+                  const finish = edits.begin(owner);
+                  try { await claimLegacyBrowserComment(owner, entry.owner, entry.value as unknown[], index, collisions.length > 0, () => active.current); }
+                  finally { finish(); }
+                })().catch(failure => { if (active.current) setLegacyError((failure as Error).message); });
               }}>{collisions.length ? '保留两份并认领批注' : '认领可添加的批注'}</button> : <span>此旧记录无法识别，已保留。</span>}
             </div>;
           }) : <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(entry.value)}</pre>}
@@ -351,11 +370,11 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
 export function StandaloneBrowser(props: StandaloneBrowserProps) {
   const pending = React.useRef<Record<string, PendingEdit>>({});
   const projections = React.useRef<Record<string, PendingProjection>>({});
-  const inFlight = React.useRef(0);
+  const inFlight = React.useRef(new Map<string, symbol>());
   const dirtyCallback = React.useRef(props.onDirtyChange);
   const [, render] = React.useReducer((value: number) => value + 1, 0);
   React.useLayoutEffect(() => { dirtyCallback.current = props.onDirtyChange; }, [props.onDirtyChange]);
-  const dirty = React.useCallback(() => inFlight.current > 0 || Object.keys(pending.current).length > 0
+  const dirty = React.useCallback(() => inFlight.current.size > 0 || Object.keys(pending.current).length > 0
     || Object.keys(projections.current).length > 0, []);
   const changed = React.useCallback(() => { dirtyCallback.current?.(dirty()); render(); }, [dirty]);
   const edit = React.useCallback((owner: BrowserOwner, reference: BrowserReference, text: string) => {
@@ -368,16 +387,29 @@ export function StandaloneBrowser(props: StandaloneBrowserProps) {
     if (!Object.hasOwn(pending.current, key)) return;
     const next = { ...pending.current }; delete next[key]; pending.current = next; changed();
   }, [changed]);
-  const begin = React.useCallback(() => { inFlight.current += 1; changed(); }, [changed]);
-  const end = React.useCallback(() => { inFlight.current -= 1; changed(); }, [changed]);
+  const begin = React.useCallback((owner: BrowserOwner, resolving = false) => {
+    const key = browserOwnerKey(owner);
+    if (inFlight.current.has(key)) throw new Error('此草稿的浏览器操作正在处理，请稍后重试。');
+    if (!resolving && projections.current[key]) throw new Error('请先处理此草稿的待接收快照，再修改浏览器引用。');
+    const token = Symbol();
+    inFlight.current.set(key, token); changed();
+    return () => {
+      if (inFlight.current.get(key) !== token) return;
+      inFlight.current.delete(key); changed();
+    };
+  }, [changed]);
+  const busy = React.useCallback((owner: BrowserOwner) => inFlight.current.has(browserOwnerKey(owner)), []);
   const hold = React.useCallback((owner: BrowserOwner, snapshot: ComposerDraftSnapshot) => {
-    projections.current = { ...projections.current, [browserOwnerKey(owner)]: { owner: structuredClone(owner), snapshot: structuredClone(snapshot) } };
+    const key = browserOwnerKey(owner);
+    if (projections.current[key]) throw new Error('此草稿已有待接收快照。');
+    projections.current = { ...projections.current, [key]: { owner: structuredClone(owner), snapshot: structuredClone(snapshot) } };
     changed();
   }, [changed]);
-  const release = React.useCallback((owner: BrowserOwner) => {
+  const release = React.useCallback((owner: BrowserOwner, snapshot: ComposerDraftSnapshot) => {
     const key = browserOwnerKey(owner);
-    if (!Object.hasOwn(projections.current, key)) return;
+    if (!sameBrowserValue(projections.current[key]?.snapshot, snapshot)) return false;
     const next = { ...projections.current }; delete next[key]; projections.current = next; changed();
+    return true;
   }, [changed]);
   const projection = React.useCallback((owner: BrowserOwner) => projections.current[browserOwnerKey(owner)], []);
   const barrier = React.useCallback(async () => {
@@ -392,7 +424,7 @@ export function StandaloneBrowser(props: StandaloneBrowserProps) {
     window.addEventListener('beforeunload', beforeUnload);
     return () => window.removeEventListener('beforeunload', beforeUnload);
   }, [dirty]);
-  const edits: BrowserEdits = { edits: pending.current, projections: projections.current, edit, discard, begin, end, hold, release, projection, barrier };
+  const edits: BrowserEdits = { edits: pending.current, projections: projections.current, edit, discard, begin, busy, hold, release, projection, barrier };
   const owner = { hostId: props.hostId, threadId: props.threadId, draftId: props.draftId };
   const key = JSON.stringify([browserOwnerKey(owner), props.browserTabId]);
   return <BrowserPanel key={key} client={props.client} owner={owner} browserTabId={props.browserTabId} draft={props.draft} visible={props.visible}

@@ -29,6 +29,8 @@ interface Harness {
   references(): Reference[];
   readReferences(): Promise<Reference[]>;
   commentStore(): Promise<{ legacyRaw: string | null; entries: Record<string, unknown> }>;
+  dirty(): boolean;
+  canLeave(): Promise<boolean>;
 }
 declare global { interface Window { browserHarness: Harness } }
 
@@ -250,6 +252,11 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     await page.getByRole('button', { name: '引用所选元素' }).click();
     for (let i = 0; i < 100 && !selectedPending; i++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(selectedPending, true);
+    assert.equal(await page.evaluate(() => window.browserHarness.dirty()), true, 'Quote is registered before its selection resolves');
+    assert.equal(await page.evaluate(() => window.browserHarness.canLeave()), false);
+    await page.getByRole('button', { name: '删除引用' }).click();
+    await page.getByText('此草稿的浏览器操作正在处理', { exact: false }).waitFor();
+    assert.equal((await page.evaluate(() => window.browserHarness.readReferences())).length, 1);
     const remote = { ...identity, hostId: 'ssh-fixture', draftId: 'draft-b' };
     await page.evaluate(value => window.browserHarness.mount(value), remote);
     await page.waitForFunction(() => window.browserHarness.identity()?.hostId === 'ssh-fixture');

@@ -211,6 +211,7 @@ test('R1 confirmation and removal preserve shared R2 and an explicitly selected 
   await first.getByText('选择草稿版本').click();
   await first.getByRole('button', { name: 'Page A', exact: true }).click();
   await first.waitForFunction(() => window.browserConsumption.snapshot()?.draft.references?.[0]?.text.includes('shared R2'));
+  await recovery.getByRole('button', { name: '核对已保存的草稿版本' }).click();
   await first.waitForFunction(() => !window.browserConsumption.dirty());
   const r2 = (await first.evaluate(target => window.browserConsumption.comments(target), owner)).comments;
   const r2Ref = browserReferences(owner, r2)[0]!;

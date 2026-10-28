@@ -24,10 +24,13 @@ interface Harness {
   references(): BrowserReference[];
   readReferences(): Promise<BrowserReference[]>;
   commentStore(): Promise<{ legacyRaw: string | null; entries: Record<string, unknown> }>;
+  dirty(): boolean;
+  canLeave(): Promise<boolean>;
 }
 declare global { interface Window { browserHarness: Harness } }
 
 const pageSession = crypto.randomUUID();
+let browserDirty = false, recoveryBarrier: (() => Promise<void>) | null = null;
 const client: WorkbenchClient = {
   async reply() { throw new Error('Unexpected server response'); },
   async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
@@ -104,6 +107,8 @@ function App() {
       references() { return snapshot.key === key ? snapshot.references : []; },
       async readReferences() { return identity ? browserReferences(identity, await readBrowserComments(identity)) : []; },
       async commentStore() { return await readBrowserAtom('codex-yard.browser-comments.v1') as { legacyRaw: string | null; entries: Record<string, unknown> }; },
+      dirty() { return browserDirty; },
+      async canLeave() { try { await recoveryBarrier?.(); return true; } catch { return false; } },
     };
   });
   const getSnapshot = async (owner: BrowserOwner) => {
@@ -120,6 +125,7 @@ function App() {
       onSubmit={async () => { throw new Error('Fixture does not perform inference'); }} onInterrupt={async () => {}} /></div>
     <StandaloneBrowser client={client} {...identity} draft={draft} visible={shown} allowNavigation
       onClose={() => setIdentity(null)} getDraftSnapshot={getSnapshot}
+      onDirtyChange={value => { browserDirty = value; }} onRecoveryBarrier={value => { recoveryBarrier = value; }}
       onDraftVersionCommitted={async (before, after) => {
         return await controller.current?.acceptCommittedVersion(before, after) ?? false;
       }} />
