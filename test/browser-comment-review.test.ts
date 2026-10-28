@@ -196,7 +196,17 @@ test('R1 confirmation and removal preserve shared R2 and an explicitly selected 
   await first.getByLabel('浏览器引用批注').fill('shared R2');
   await first.getByRole('button', { name: '保存批注' }).click();
   await first.getByText('批注和新草稿版本已保存', { exact: false }).first().waitFor();
-  assert.match(await first.locator('section[aria-label="浏览器引用"]').innerText(), /shared R2/);
+  const recovery = first.locator('section[role="status"]').filter({ hasText: '批注和新草稿版本已保存' });
+  const displayed = JSON.parse(await recovery.locator('pre').innerText());
+  assert.deepEqual(displayed.owner, owner);
+  assert.equal(displayed.draft.text, 'Page A');
+  assert.match(displayed.draft.references[0].text, /shared R2/);
+  assert.equal(typeof displayed.revision, 'string');
+  await first.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+    writeText: async (value: string) => { (window as unknown as { copied: string }).copied = value; },
+  } }));
+  await recovery.getByRole('button', { name: '复制已保存版本' }).click();
+  assert.deepEqual(JSON.parse(await first.evaluate(() => (window as unknown as { copied: string }).copied)), displayed);
   assert.equal(await first.evaluate(() => window.browserConsumption.canLeave()), false);
   await first.getByText('选择草稿版本').click();
   await first.getByRole('button', { name: 'Page A', exact: true }).click();
@@ -223,4 +233,15 @@ test('R1 confirmation and removal preserve shared R2 and an explicitly selected 
   state = await second.evaluate(target => window.browserConsumption.comments(target), owner);
   assert.deepEqual(state.consumed, [original]);
   assert.deepEqual(state.deleted, []);
+  const beforeRemoval = (await second.evaluate(() => window.browserConsumption.snapshot()))!.revision;
+  await second.getByRole('button', { name: '移除引用', exact: true }).click();
+  await second.waitForFunction(() => window.browserConsumption.snapshot()?.draft.references?.length === 0);
+  const afterRemoval = (await second.evaluate(() => window.browserConsumption.snapshot()))!;
+  assert.notEqual(afterRemoval.revision, beforeRemoval);
+  const branches = await second.evaluate(target => window.browserConsumption.versions(target), owner);
+  assert.equal(branches.versions.filter(version => version.draft.text === 'Page B').length, 1);
+  assert.equal(branches.versions.find(version => version.draft.text === 'Page B')?.revision, afterRemoval.revision);
+  state = await second.evaluate(target => window.browserConsumption.comments(target), owner);
+  assert.deepEqual(state.comments, []);
+  assert.deepEqual(state.deleted, [r2Ref]);
 }));

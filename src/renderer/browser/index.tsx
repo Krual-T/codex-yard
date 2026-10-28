@@ -288,7 +288,8 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
     <div style={{ flex: 1, minHeight: 200 }}><ChromeSurface target={target} bridge={bridge} visible={visible} onQuote={quote} /></div>
     <section aria-label="浏览器引用" style={{ maxHeight: '40%', overflow: 'auto', padding: '0 8px' }}>
       {projection ? <section role="status"><strong>批注和新草稿版本已保存，请在草稿版本中核对并选择。</strong>
-        <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(projection.snapshot.draft.references)}</pre>
+        <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(projection.snapshot)}</pre>
+        <CopyButton value={displayValue(projection.snapshot)} label="复制已保存版本" />
         <button onClick={() => {
           edits.begin();
           void (async () => {
@@ -300,7 +301,8 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
       </section> : null}
       {otherProjections.map(value => <section key={browserOwnerKey(value.owner)} role="status">
         <strong>其他草稿有已保存但尚未接收的版本</strong><p>{value.owner.hostId} / {value.owner.threadId ?? '新会话'} / {value.owner.draftId}</p>
-        <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(value.snapshot.draft.references)}</pre>
+        <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayValue(value.snapshot)}</pre>
+        <CopyButton value={displayValue(value.snapshot)} label="复制已保存版本" />
       </section>)}
       {pendingElsewhere.length ? <section aria-label="待处理的批注编辑"><strong>待处理的批注编辑</strong>
         {pendingElsewhere.map(([key, value]) => <div key={key}>

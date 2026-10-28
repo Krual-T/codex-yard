@@ -174,16 +174,21 @@ test('confirmed browser references consume only the submitted version across pag
       'The actual prepare transaction rejects a stale deleted reference without reserving a send');
     await second.evaluate(() => window.browserConsumption.showBrowser(false));
     await mount(second, changedOwner);
-    const chooseNewer = async () => {
-      const choices = second.getByText('选择草稿版本').locator('..');
-      if (!await choices.evaluate(element => (element as HTMLDetailsElement).open)) await second.getByText('选择草稿版本').click();
-      await second.getByRole('button', { name: 'Newer C after submit' }).click();
+    const chooseNewer = async (requirePruned = false) => {
+      await second.waitForFunction(requireNoReferences => {
+        const selected = window.browserConsumption.snapshot();
+        if (selected?.draft.text === 'Newer C after submit' && (!requireNoReferences || selected.draft.references?.length === 0)) return true;
+        const choices = [...document.querySelectorAll('details')].find(item => item.querySelector('summary')?.textContent === '选择草稿版本');
+        const target = choices && [...choices.querySelectorAll('button')].find(item => item.textContent === 'Newer C after submit');
+        if (!choices || !target) return false;
+        choices.open = true; target.click(); return true;
+      }, requirePruned);
     };
     if ((await second.evaluate(() => window.browserConsumption.snapshot()))?.draft.text !== 'Newer C after submit') await chooseNewer();
     await second.waitForFunction(async owner => (await window.browserConsumption.versions(owner)).versions.some(value =>
       value.draft.text === 'Newer C after submit' && value.draft.references?.length === 0), changedOwner);
     if ((await second.evaluate(() => window.browserConsumption.snapshot()))?.draft.references?.length !== 0) {
-      await chooseNewer();
+      await chooseNewer(true);
     }
     try {
       await second.waitForFunction(() => window.browserConsumption.snapshot()?.draft.text === 'Newer C after submit'
