@@ -171,7 +171,47 @@ test('contradictory qualified evidence prevents an incomplete resolver from assi
   assert.deepEqual(memberships[threadProjectIdentityKey({ hostId: remote, threadId: 'same' })],
     { hostId: remote, threadId: 'same', assignment: null, projectless: true });
   await h.request('reset', { hostId: remote });
-  assert.equal(member(h.state().memberships, 'local', 'same')?.projectless, true);
+  assert.equal(member(h.state().memberships, 'local', 'same'), undefined);
+  assert.deepEqual(h.state().unresolved.projectless, ['same']);
+});
+
+test('explicit clears remain authoritative when legacy resolves and after storage reload', async () => {
+  let resolved = false;
+  const compatibility = { resolveLegacyThreadHosts: (id: string) => resolved && id === 'fixture' ? ['local'] : undefined };
+  const h = harness({
+    'thread-project-assignments': { fixture: localProject, other: localProject },
+    'projectless-thread-ids': ['fixture', 'other'],
+    'thread-projectless-output-directories': { fixture: '/old-output', other: '/other-output' },
+    'thread-workspace-root-hints': { fixture: '/old-workspace', other: '/other-workspace' },
+  }, compatibility);
+  await h.request('setMembership', { hostId: 'local', threadId: 'fixture', assignment: null, projectless: false });
+  await h.request('updateProjectlessThread', { hostId: 'local', threadId: 'fixture', outputDirectory: null, workspaceRoot: null });
+  assert.equal(member(h.state().memberships, 'local', 'fixture'), undefined);
+  assert.deepEqual(h.state().unresolved.assignments, { fixture: localProject, other: localProject });
+  resolved = true;
+  for (const state of [h.state(), readThreadProjectState(JSON.parse(JSON.stringify(h.globals)), compatibility)]) {
+    assert.equal(member(state.memberships, 'local', 'fixture'), undefined);
+    assert.equal(hint(state.outputDirectories, 'local', 'fixture'), undefined);
+    assert.equal(hint(state.workspaceRoots, 'local', 'fixture'), undefined);
+    assert.deepEqual(state.unresolved.assignments, { other: localProject });
+    assert.deepEqual(state.unresolved.projectless, ['other']);
+    assert.deepEqual(state.unresolved.outputDirectories, { other: '/other-output' });
+    assert.deepEqual(state.unresolved.workspaceRoots, { other: '/other-workspace' });
+  }
+  for (const key of ['thread-project-assignments', 'projectless-thread-ids', 'thread-projectless-output-directories', 'thread-workspace-root-hints']) {
+    const legacy = (h.globals[key] as ObjectValue).legacy;
+    assert.ok(Array.isArray(legacy) ? legacy.includes('fixture') && legacy.includes('other') : Object.hasOwn(legacy as object, 'fixture') && Object.hasOwn(legacy as object, 'other'));
+  }
+});
+
+test('clear markers retain host identity and can be replaced by later explicit updates', async () => {
+  const h = harness({ 'remote-projects': projects });
+  await h.request('setMembership', { hostId: remote, threadId: 'chat', assignment: null, projectless: false });
+  await h.request('setProjectless', { threadId: 'chat', projectless: true });
+  assert.equal(member(h.state().memberships, remote, 'chat')?.projectless, true);
+  assert.equal(member(h.state().memberships, 'local', 'chat'), undefined);
+  await h.request('setAssignment', { hostId: remote, threadId: 'chat', assignment: remoteProject });
+  assert.deepEqual(member(h.state().memberships, remote, 'chat')?.assignment, remoteProject);
 });
 
 test('unreadable qualified entries suppress legacy views and cannot be overwritten', async () => {
@@ -282,6 +322,9 @@ test('host and thread keys are data, including prototype names and delimiter-lik
   const identity = { hostId: '__proto__', threadId: '__proto__' };
   await h.request('setProjectless', { ...identity, projectless: true });
   assert.equal(member(h.state().memberships, identity.hostId, identity.threadId)?.projectless, true);
+  await h.request('setMembership', { hostId: '__proto__', threadId: 'toString', assignment: null, projectless: false });
+  await h.request('setProjectless', { threadId: 'toString', projectless: true });
+  assert.equal(member(h.state().memberships, '__proto__', 'toString')?.projectless, true);
   assert.equal(Object.prototype.hasOwnProperty.call(Object.prototype, 'projectless'), false);
   assert.notEqual(threadProjectIdentityKey({ hostId: 'a:b', threadId: 'c' }), threadProjectIdentityKey({ hostId: 'a', threadId: 'b:c' }));
 });

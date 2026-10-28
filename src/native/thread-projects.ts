@@ -46,6 +46,7 @@ const workspaceKey = 'thread-workspace-root-hints';
 type StoreKey = typeof assignmentKey | typeof projectlessKey | typeof outputKey | typeof workspaceKey;
 type Store = { $codexYardThreadProjects: 1; legacy: unknown; hosts: ObjectValue };
 type Stores = Record<StoreKey, Store>;
+type InternalSnapshot = ThreadProjectSnapshot & { qualifiedIdentities: ThreadIdentity[] };
 
 // JSON tuples are unambiguous even when either ID contains punctuation.
 export function threadProjectIdentityKey(identity: ThreadIdentity): string {
@@ -143,9 +144,10 @@ function sameAssignment(left: ProjectAssignment | null, right: ProjectAssignment
   return a.projectKind === b.projectKind && a.projectId === b.projectId && a.projectOrigin === b.projectOrigin && a.hostId === b.hostId;
 }
 
-function snapshot(globals: ObjectValue, stores: Stores, options: ThreadProjectCompatibility, onlyThreadId?: string): ThreadProjectSnapshot {
+function snapshot(globals: ObjectValue, stores: Stores, options: ThreadProjectCompatibility, onlyThreadId?: string): InternalSnapshot {
   options = withQualifiedEvidence(options, stores);
   const memberships = new Map<string, IdentifiedMembership>();
+  const qualifiedIdentities = new Map<string, ThreadIdentity>(), invalidMemberships = new Set<string>();
   const outputs = new Map<string, ThreadProjectHint>(), workspaces = new Map<string, ThreadProjectHint>();
   const unresolved: ThreadProjectSnapshot['unresolved'] = {
     assignments: {}, projectless: [], outputDirectories: {}, workspaceRoots: {}, unreadable: {}, qualified: [],
@@ -191,30 +193,38 @@ function snapshot(globals: ObjectValue, stores: Stores, options: ThreadProjectCo
       if (!hostId.trim() || !isObject(value)) { unresolved.qualified.push({ field: key, hostId, value }); continue; }
       for (const [threadId, entry] of entries(value)) {
         const identity = { hostId, threadId }, identityKey = threadProjectIdentityKey(identity);
+        qualifiedIdentities.set(identityKey, identity);
         if (key === assignmentKey) {
           const item = parsedAssignment(entry);
-          if (!item || item.projectKind === 'local' && hostId !== 'local' ||
+          if (entry === null) membership(hostId, threadId).assignment = null;
+          else if (!item || item.projectKind === 'local' && hostId !== 'local' ||
               item.projectKind === 'remote' && (hostId === 'local' || item.hostId !== undefined && item.hostId !== hostId)) {
             membership(hostId, threadId).assignment = null;
+            invalidMemberships.add(identityKey);
             unresolved.qualified.push({ field: key, ...identity, value: entry });
           } else membership(hostId, threadId).assignment = item.projectKind === 'remote' ? { ...item, hostId } : item;
         } else if (key === projectlessKey && typeof entry === 'boolean') membership(hostId, threadId).projectless = entry;
         else if (key !== projectlessKey && typeof entry === 'string') {
           (key === outputKey ? outputs : workspaces).set(identityKey, { ...identity, value: entry });
+        } else if (key !== projectlessKey && entry === null) {
+          (key === outputKey ? outputs : workspaces).delete(identityKey);
         } else {
-          if (key === projectlessKey) membership(hostId, threadId).projectless = false;
+          if (key === projectlessKey) { membership(hostId, threadId).projectless = false; invalidMemberships.add(identityKey); }
           else (key === outputKey ? outputs : workspaces).delete(identityKey);
           unresolved.qualified.push({ field: key, ...identity, value: entry });
         }
       }
     }
   }
-  return { memberships: [...memberships.values()], outputDirectories: [...outputs.values()], workspaceRoots: [...workspaces.values()], unresolved };
+  return { memberships: [...memberships.values()].filter(item => item.assignment !== null || item.projectless ||
+    invalidMemberships.has(threadProjectIdentityKey(item))), outputDirectories: [...outputs.values()], workspaceRoots: [...workspaces.values()],
+    unresolved, qualifiedIdentities: [...qualifiedIdentities.values()] };
 }
 
 // Consumers must render unresolved legacy data separately; it has no inferred host.
 export function readThreadProjectState(globals: ObjectValue, options: ThreadProjectCompatibility = {}): ThreadProjectSnapshot {
-  return snapshot(globals, storesFrom(globals), cachedCompatibility(options));
+  const { qualifiedIdentities: _qualifiedIdentities, ...state } = snapshot(globals, storesFrom(globals), cachedCompatibility(options));
+  return state;
 }
 
 function parseUpdate(value: unknown, requireAssignment: boolean, requireProjectless: boolean): MembershipUpdate {
@@ -238,10 +248,10 @@ function unresolvedForThread(state: ThreadProjectSnapshot, threadId: string, mem
     (!membershipOnly && (Object.hasOwn(unresolved.outputDirectories, threadId) || Object.hasOwn(unresolved.workspaceRoots, threadId) ||
       Object.hasOwn(unresolved.unreadable, outputKey) || Object.hasOwn(unresolved.unreadable, workspaceKey)));
 }
-function normalizedUpdate(item: MembershipUpdate, state: ThreadProjectSnapshot, globals: ObjectValue,
+function normalizedUpdate(item: MembershipUpdate, state: InternalSnapshot, globals: ObjectValue,
   options: ThreadProjectCompatibility, validHost: (hostId: string) => void): MembershipUpdate & ThreadIdentity {
   const known = new Set(candidates(options, item.threadId));
-  for (const entry of [...state.memberships, ...state.outputDirectories, ...state.workspaceRoots, ...state.unresolved.qualified]) {
+  for (const entry of [...state.memberships, ...state.outputDirectories, ...state.workspaceRoots, ...state.unresolved.qualified, ...state.qualifiedIdentities]) {
     if (entry.threadId === item.threadId && entry.hostId) known.add(entry.hostId);
   }
   let target: string | undefined;
@@ -266,12 +276,16 @@ function normalizedUpdate(item: MembershipUpdate, state: ThreadProjectSnapshot, 
   return { ...item, hostId, ...(item.assignment?.projectKind === 'remote' ? { assignment: { ...item.assignment, hostId } } : {}) };
 }
 
-function writeQualified(store: Store, identity: ThreadIdentity, value: unknown, remove: boolean) {
+function writeQualified(store: Store, identity: ThreadIdentity, value: unknown) {
   const existing = Object.hasOwn(store.hosts, identity.hostId) ? store.hosts[identity.hostId] : undefined;
   if (existing !== undefined && !isObject(existing)) throw new Error('已保存的主机项目数据无法解析');
   const entries = existing ?? {};
-  if (remove) delete entries[identity.threadId]; else put(entries, identity.threadId, value);
-  if (Object.keys(entries).length) put(store.hosts, identity.hostId, entries); else delete store.hosts[identity.hostId];
+  put(entries, identity.threadId, value);
+  put(store.hosts, identity.hostId, entries);
+}
+function hasQualified(store: Store, identity: ThreadIdentity) {
+  const entries = Object.hasOwn(store.hosts, identity.hostId) ? store.hosts[identity.hostId] : undefined;
+  return Object.hasOwn(record(entries), identity.threadId);
 }
 function removeLegacyMapEntry(store: Store, threadId: string) {
   if (!isObject(store.legacy) || !Object.hasOwn(store.legacy, threadId)) return;
@@ -334,27 +348,27 @@ export function createThreadProjects(globals: ObjectValue, persist: () => Promis
       }
       if (!before.has(identityKey)) before.set(identityKey, { ...identity, assignment: null, projectless: false });
       if (item.assignment !== undefined) ensureWritable(state, assignmentKey, identity);
-      if (item.assignment !== undefined && !sameAssignment(current.assignment, item.assignment)) {
+      if (item.assignment !== undefined && (!hasQualified(stores[assignmentKey], identity) || !sameAssignment(current.assignment, item.assignment))) {
         const store = stores[assignmentKey], rawLegacy = record(store.legacy)[item.threadId];
         if (legacyAssignment(globals, withQualifiedEvidence(options, stores), item.threadId, rawLegacy)?.hostId === item.hostId) {
           removeLegacyMapEntry(store, item.threadId);
         }
-        writeQualified(store, identity, item.assignment, item.assignment === null); dirty.add(assignmentKey);
+        writeQualified(store, identity, item.assignment); dirty.add(assignmentKey);
       }
       if (item.projectless !== undefined) ensureWritable(state, projectlessKey, identity);
-      if (item.projectless !== undefined && current.projectless !== item.projectless) {
+      if (item.projectless !== undefined && (!hasQualified(stores[projectlessKey], identity) || current.projectless !== item.projectless)) {
         const store = stores[projectlessKey];
         if (legacyHintHost(withQualifiedEvidence(options, stores), item.threadId) === item.hostId) removeLegacyProjectless(store, item.threadId);
-        writeQualified(store, identity, true, !item.projectless); dirty.add(projectlessKey);
+        writeQualified(store, identity, item.projectless); dirty.add(projectlessKey);
       }
       if (item.projectless === true && !config.hints) revived.add(identityKey);
       if (config.hints) for (const hint of config.hints) {
         state = snapshot(globals, stores, options, raw.threadId);
         ensureWritable(state, hint.key, identity);
-        if (hintAt(state, hint.key, identity) === (hint.value ?? undefined)) continue;
+        if (hasQualified(stores[hint.key], identity) && hintAt(state, hint.key, identity) === (hint.value ?? undefined)) continue;
         const store = stores[hint.key];
         if (legacyHintHost(withQualifiedEvidence(options, stores), item.threadId) === item.hostId) removeLegacyMapEntry(store, item.threadId);
-        writeQualified(store, identity, hint.value, hint.value === null); dirty.add(hint.key);
+        writeQualified(store, identity, hint.value); dirty.add(hint.key);
       }
     }
     const after = snapshot(globals, stores, options), memberships: Record<string, IdentifiedMembership> = {};
