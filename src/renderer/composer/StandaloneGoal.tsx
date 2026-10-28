@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { WorkbenchClient, WorkbenchEvent } from '../workbench-contract.ts';
+import type { ComposerDocument, WorkbenchClient, WorkbenchEvent } from '../workbench-contract.ts';
+import { StandaloneRichEditor } from './StandaloneRichEditor.tsx';
+import { readRichDocument } from './rich-document.ts';
+import { goalMarkdownDocument, serializeGoalDocument } from './standalone-goal-markdown.ts';
 import './standalone-goal.css';
 
 export interface StandaloneGoalProps {
@@ -19,7 +22,7 @@ interface Goal {
   createdAt: number;
   updatedAt: number;
 }
-interface Edit { base: string | null; text: string }
+interface Edit { base: string | null; text: string; document?: ComposerDocument }
 
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -56,12 +59,14 @@ export function StandaloneGoal(props: StandaloneGoalProps) {
 function GoalPane({ client, hostId, threadId, readOnly }: StandaloneGoalProps) {
   const [goal, setGoal] = useState<Goal | null>();
   const [edit, setEdit] = useState<Edit | null>(null);
+  const [editorError, setEditorError] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   const [confirmClear, setConfirmClear] = useState(false);
   const sequence = useRef(0);
   const mounted = useRef(false);
   const mutating = useRef(false);
+  const currentDocument = useRef<ComposerDocument | undefined>(undefined);
 
   const refresh = useCallback(async () => {
     const current = ++sequence.current;
@@ -133,7 +138,7 @@ function GoalPane({ client, hostId, threadId, readOnly }: StandaloneGoalProps) {
         <span>耗时 {Math.floor(goal.timeUsedSeconds / 60)} 分 {Math.floor(goal.timeUsedSeconds % 60)} 秒</span>
       </div>
       {!readOnly && !edit ? <div className="standalone-goal__actions">
-        <button type="button" disabled={pending} onClick={() => setEdit({ base: goal.objective, text: goal.objective })}>编辑目标</button>
+        <button type="button" disabled={pending} onClick={() => { setEditorError(''); setEdit({ base: goal.objective, text: goal.objective }); }}>编辑目标</button>
         {goal.status === 'active'
           ? <button type="button" disabled={pending} onClick={() => void mutate('thread/goal/set', { status: 'paused' })}>暂停目标</button>
           : <button type="button" disabled={pending} onClick={() => void mutate('thread/goal/set', { status: 'active' })}>继续目标</button>}
@@ -142,10 +147,27 @@ function GoalPane({ client, hostId, threadId, readOnly }: StandaloneGoalProps) {
             <button type="button" disabled={pending} onClick={() => setConfirmClear(false)}>取消</button></>}
       </div> : null}
     </> : null}
-    {goal === null && !readOnly && !edit ? <button type="button" disabled={pending} onClick={() => setEdit({ base: null, text: '' })}>新建目标</button> : null}
+    {goal === null && !readOnly && !edit ? <button type="button" disabled={pending} onClick={() => { setEditorError(''); setEdit({ base: null, text: '' }); }}>新建目标</button> : null}
     {edit ? <div className="standalone-goal__editor">
-      <textarea aria-label="目标内容" value={edit.text} disabled={pending || readOnly} onChange={event => setEdit({ ...edit, text: event.target.value })} />
-      {conflict ? <div role="alert">目标已在其他位置更改；当前输入已保留。<button type="button" onClick={() => setEdit({ base: goal?.objective ?? null, text: goal?.objective ?? '' })}>载入最新目标</button></div> : null}
+      {edit.document ? <StandaloneRichEditor document={edit.document} currentDocument={() => currentDocument.current}
+        ariaLabel="目标内容" readOnly={pending || readOnly} enableCompletions={false} allowMentions={false}
+        onChange={document => {
+          const parsed = readRichDocument(document);
+          if (!parsed) { setEditorError('无法保留此格式，当前目标未更改。'); return; }
+          currentDocument.current = document;
+          setEdit(current => current?.document ? { ...current, document, text: serializeGoalDocument(parsed) } : current);
+        }} onKeyDown={() => false} onCompletionContext={() => {}}
+        onImages={() => setEditorError('目标暂不支持在富文本中插入图片。')}
+        onInvalid={message => setEditorError(message ?? '此内容不能无损粘贴到目标中。')} />
+        : <textarea aria-label="目标内容" value={edit.text} disabled={pending || readOnly} onChange={event => setEdit({ ...edit, text: event.target.value })} />}
+      <button type="button" disabled={pending || readOnly} onClick={() => {
+        if (edit.document) { currentDocument.current = undefined; setEditorError(''); setEdit({ base: edit.base, text: edit.text }); return; }
+        const document = goalMarkdownDocument(edit.text);
+        if (!document) { setEditorError('此目标不能无损转换为富文本，请继续编辑 Markdown 原文。'); return; }
+        currentDocument.current = document; setEditorError(''); setEdit({ ...edit, document });
+      }}>{edit.document ? 'Markdown 原文' : '富文本编辑'}</button>
+      {editorError ? <div role="alert">{editorError}</div> : null}
+      {conflict ? <div role="alert">目标已在其他位置更改；当前输入已保留。<button type="button" onClick={() => { currentDocument.current = undefined; setEditorError(''); setEdit({ base: goal?.objective ?? null, text: goal?.objective ?? '' }); }}>载入最新目标</button></div> : null}
       <div className="standalone-goal__actions">
         {edit.base === null ? <>
           <button type="button" disabled={pending || readOnly || conflict || !edit.text.trim()} onClick={() => void mutate('thread/goal/set', { objective: edit.text.trim(), status: 'paused' }, true)}>创建暂停目标</button>

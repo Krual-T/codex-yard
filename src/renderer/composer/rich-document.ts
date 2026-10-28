@@ -134,13 +134,15 @@ export function readRichDocument(document: ComposerDocument): ProseMirrorNode | 
   } catch { return null; }
 }
 
-export function serializeRichDocument(document: ProseMirrorNode): string {
+export function serializeRichDocument(document: ProseMirrorNode, options?: { standardParagraphs?: boolean; tightLists?: boolean; escapeExtraCharacters?: RegExp }): string {
+  const selected = options?.escapeExtraCharacters
+    ? new MarkdownSerializer(serializer.nodes, serializer.marks, { escapeExtraCharacters: options.escapeExtraCharacters }) : serializer;
   // The original rich serializer joins a document consisting of paragraphs with single newlines.
-  if (document.childCount && Array.from({ length: document.childCount }, (_, i) => document.child(i))
+  if (!options?.standardParagraphs && document.childCount && Array.from({ length: document.childCount }, (_, i) => document.child(i))
     .every(node => node.type.name === 'paragraph')) {
-    return Array.from({ length: document.childCount }, (_, i) => serializer.serialize(composerSchema.nodes.doc!.create(null, document.child(i)))).join('\n');
+    return Array.from({ length: document.childCount }, (_, i) => selected.serialize(composerSchema.nodes.doc!.create(null, document.child(i)))).join('\n');
   }
-  return serializer.serialize(document);
+  return selected.serialize(document, { tightLists: options?.tightLists });
 }
 
 export function richDocumentSkills(document: ProseMirrorNode): { name: string; path: string }[] {

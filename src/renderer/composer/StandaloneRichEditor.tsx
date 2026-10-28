@@ -23,9 +23,13 @@ interface RichEditorProps {
   onCompletionContext(context: RichCompletionContext | null): void;
   completionListId?: string;
   completionSelectedId?: string;
+  ariaLabel?: string;
+  readOnly?: boolean;
+  allowMentions?: boolean;
+  enableCompletions?: boolean;
 }
 
-function supportedClipboardHTML(html: string): boolean {
+function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
   const document = new DOMParser().parseFromString(html, 'text/html');
   const tags = new Set(['div', 'span', 'p', 'br', 'strong', 'b', 'em', 'i', 'code', 'pre', 'blockquote',
     'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a']);
@@ -35,6 +39,7 @@ function supportedClipboardHTML(html: string): boolean {
   return Array.from(document.body.querySelectorAll('*')).every(element => {
     if (!tags.has(element.localName) || !Array.from(element.attributes).every(attribute => attributes.has(attribute.name))) return false;
     const mention = element.getAttribute('data-mention');
+    if (mention !== null && !allowMentions) return false;
     if (mention !== null && (element.localName !== 'span' || mention !== 'file' && mention !== 'skill')) return false;
     if (!element.hasAttribute('data-composer-attrs')) return mention === null;
     const spec = mention === 'file' ? composerSchema.nodes.atMention?.spec : mention === 'skill' ? composerSchema.nodes.skillMention?.spec
@@ -69,7 +74,9 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     if (!host.current || !doc) return;
     const editor = new EditorView(host.current, {
       state: EditorState.create({ doc, plugins: richEditorPlugins() }),
-      attributes: { role: 'textbox', 'aria-label': '和 Codex 一起工作', 'aria-multiline': 'true', 'aria-autocomplete': 'list' },
+      editable: () => !latest.current.readOnly,
+      attributes: { role: 'textbox', 'aria-label': latest.current.ariaLabel ?? '和 Codex 一起工作', 'aria-multiline': 'true',
+        ...(latest.current.enableCompletions === false ? {} : { 'aria-autocomplete': 'list' }) },
       handleDOMEvents: {
         keydown: (editor, event) => editor.composing || composing.current || event.isComposing || event.keyCode === 229,
         focus: editor => { latest.current.onCompletionContext(composing.current ? null : richCompletionContext(editor)); return false; },
@@ -104,7 +111,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         }
         if (files.length) { latest.current.onInvalid('无法同时粘贴文字和图片，请分别输入文本并添加图片。'); return true; }
         const html = event.clipboardData?.getData('text/html');
-        if (html && !supportedClipboardHTML(html)) { latest.current.onInvalid(); return true; }
+        if (html && !supportedClipboardHTML(html, latest.current.allowMentions !== false)) { latest.current.onInvalid(); return true; }
         return false;
       },
     });
@@ -119,33 +126,34 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     editor.updateState(EditorState.create({ doc, plugins: editor.state.plugins }));
   }, [props.document, props.currentDocument]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     view.current?.setProps({ attributes: {
-      role: 'textbox', 'aria-label': '和 Codex 一起工作', 'aria-multiline': 'true', 'aria-autocomplete': 'list',
+      role: 'textbox', 'aria-label': props.ariaLabel ?? '和 Codex 一起工作', 'aria-multiline': 'true',
+      ...(props.enableCompletions === false ? {} : { 'aria-autocomplete': 'list' }),
       ...(props.completionListId ? { 'aria-controls': props.completionListId } : {}),
       ...(props.completionSelectedId ? { 'aria-activedescendant': props.completionSelectedId } : {}),
-    } });
-  }, [props.completionListId, props.completionSelectedId]);
+    }, editable: () => !props.readOnly });
+  }, [props.ariaLabel, props.readOnly, props.enableCompletions, props.completionListId, props.completionSelectedId]);
 
   const mark = (name: 'strong' | 'em' | 'code') => {
     const editor = view.current, type = composerSchema.marks[name];
-    if (editor && type) { toggleMark(type)(editor.state, editor.dispatch, editor); editor.focus(); }
+    if (editor && type && !props.readOnly) { toggleMark(type)(editor.state, editor.dispatch, editor); editor.focus(); }
   };
   return <>
     <div className="standalone-composer__rich-toolbar" role="toolbar" aria-label="文本格式">
-      <button type="button" title="粗体" aria-label="粗体" onMouseDown={event => event.preventDefault()} onClick={() => mark('strong')}><Bold size={16} /></button>
-      <button type="button" title="斜体" aria-label="斜体" onMouseDown={event => event.preventDefault()} onClick={() => mark('em')}><Italic size={16} /></button>
-      <button type="button" title="行内代码" aria-label="行内代码" onMouseDown={event => event.preventDefault()} onClick={() => mark('code')}><Code2 size={16} /></button>
-      <button type="button" title="链接" aria-label="链接" onMouseDown={event => event.preventDefault()} onClick={() => setLinkOpen(open => !open)}><LinkIcon size={16} /></button>
+      <button type="button" title="粗体" aria-label="粗体" disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('strong')}><Bold size={16} /></button>
+      <button type="button" title="斜体" aria-label="斜体" disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('em')}><Italic size={16} /></button>
+      <button type="button" title="行内代码" aria-label="行内代码" disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('code')}><Code2 size={16} /></button>
+      <button type="button" title="链接" aria-label="链接" disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => setLinkOpen(open => !open)}><LinkIcon size={16} /></button>
       {linkOpen ? <form onSubmit={event => {
         event.preventDefault();
         const editor = view.current, type = composerSchema.marks.link;
-        if (editor && type && href.trim() && !editor.state.selection.empty) {
+        if (editor && type && !props.readOnly && href.trim() && !editor.state.selection.empty) {
           const { from, to } = editor.state.selection;
           editor.dispatch(editor.state.tr.addMark(from, to, type.create({ href: href.trim() })));
           setLinkOpen(false); setHref(''); editor.focus();
         }
-      }}><input aria-label="链接地址" value={href} onChange={event => setHref(event.target.value)} /><button type="submit">应用</button></form> : null}
+      }}><input aria-label="链接地址" value={href} disabled={props.readOnly} onChange={event => setHref(event.target.value)} /><button type="submit" disabled={props.readOnly}>应用</button></form> : null}
     </div>
     <div ref={host} className="standalone-composer__rich" />
   </>;

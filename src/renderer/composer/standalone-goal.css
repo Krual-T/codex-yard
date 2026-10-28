@@ -4,7 +4,14 @@
 .standalone-goal__status, .standalone-goal__progress { color: var(--yard-muted, #666); margin-top: 8px; }
 .standalone-goal__objective { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 8px; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
 .standalone-goal__editor textarea { box-sizing: border-box; width: 100%; min-height: 100px; margin-top: 8px; padding: 8px; resize: vertical; color: inherit; background: transparent; border: 1px solid var(--yard-border, #c9c9c9); border-radius: 4px; font: inherit; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
+.standalone-goal__editor .standalone-composer__rich-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; margin-top: 8px; }
+.standalone-goal__editor .standalone-composer__rich-toolbar form { display: flex; align-items: center; min-width: 0; }
+.standalone-goal__editor .standalone-composer__rich-toolbar input { min-width: 0; max-width: 220px; color: inherit; background: var(--yard-surface, #fff); border: 1px solid var(--yard-border, #c9c9c9); border-radius: 4px; }
+.standalone-goal__editor .ProseMirror { box-sizing: border-box; min-height: 100px; max-height: 320px; overflow: auto; padding: 8px; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--yard-border, #c9c9c9); border-radius: 4px; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
+.standalone-goal__editor .ProseMirror p { margin: 0; }
+.standalone-goal__editor .ProseMirror pre { overflow-x: auto; }
+.standalone-goal__editor .ProseMirror :is(code, pre) { font-family: var(--yard-code-font, monospace); font-size: var(--yard-code-size, 12px); }
 .standalone-goal button { color: inherit; font: inherit; border: 0; border-radius: 4px; padding: 5px 8px; background: transparent; cursor: pointer; }
 .standalone-goal button:hover:not(:disabled) { background: color-mix(in srgb, var(--yard-fg, #222) 10%, transparent); }
 .standalone-goal button:disabled { opacity: .5; cursor: default; }
-.standalone-goal :is(button, textarea):focus-visible { outline: 2px solid var(--yard-accent, #3159b5); outline-offset: 2px; }
+.standalone-goal :is(button, textarea, input, .ProseMirror):focus-visible { outline: 2px solid var(--yard-accent, #3159b5); outline-offset: 2px; }
