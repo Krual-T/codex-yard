@@ -70,8 +70,8 @@ await mkdir(dataDir);
 await writeFile(join(dataDir, 'native-state.json'), JSON.stringify({ globals: { 'local-projects': {
   first: { id: 'project-a', name: 'First project', rootPaths: [temporary] },
   second: { id: temporary, name: 'Second project', rootPaths: [temporary] },
-} }, settings: { appearanceTheme: 'dark',
-  appearanceDarkChromeTheme: { ...defaultThemes.dark, surface: '#152535', ink: '#edf5fc', fonts: { ui: 'Arial', content: 'Georgia', code: 'Courier New' } } } }));
+} }, settings: { appearanceTheme: 'dark', localeOverride: 'en-US',
+  appearanceDarkChromeTheme: { ...defaultThemes.dark, surface: '#152535', ink: '#edf5fc', fonts: { ui: 'Arial, sans-serif', content: 'Georgia, serif', code: 'Courier New, monospace' } } } }));
 const context = await chromium.launchPersistentContext(join(temporary, 'browser'), { executablePath: '/usr/bin/google-chrome',
   headless: true, args: ['--no-sandbox', '--disable-background-networking', '--remote-debugging-port=0'], viewport: { width: 1360, height: 900 } });
 const debugPort = Number((await readFile(join(temporary, 'browser/DevToolsActivePort'), 'utf8')).split('\n')[0]);
@@ -107,6 +107,8 @@ try {
     content: getComputedStyle(document.querySelector('.yard-conversation')!).fontFamily,
     code: getComputedStyle(document.querySelector('.yard-conversation code')!).fontFamily }));
   assert.match(actualFonts.ui, /Arial/); assert.match(actualFonts.content, /Georgia/); assert.match(actualFonts.code, /Courier New/);
+  assert.match(actualFonts.ui, /sans-serif/); assert.match(actualFonts.content, /serif/); assert.match(actualFonts.code, /monospace/);
+  assert.equal(actualFonts.ui.includes('"Arial, sans-serif"'), false, 'The saved list must not become a single quoted family.');
   checks.push('owned entry, stored full history, Markdown and persisted theme/fonts');
   const componentNames = await page.evaluate(() => {
     const root = document.querySelector('[data-owned-renderer]')!;
@@ -168,9 +170,9 @@ try {
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
   let restoredBeforeGuard = false;
-  const guardAnswered = new Promise<void>(resolve => page.once('dialog', async dialog => {
-    restoredBeforeGuard = new URL(page.url()).pathname === '/settings/general'; await dialog.dismiss(); resolve();
-  }));
+  const guardAnswered = page.waitForEvent('dialog').then(async dialog => {
+    restoredBeforeGuard = new URL(page.url()).pathname === '/settings/general'; await dialog.dismiss();
+  });
   await page.evaluate(() => history.back());
   await guardAnswered;
   await page.waitForFunction(() => location.pathname === '/settings/general');
@@ -635,6 +637,19 @@ try {
   checks.push('actual App Chrome panel selects a disposable real Chrome target through official MCP; real DevTools element reaches composer and transactional removal');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  await page.getByRole('combobox', { name: 'Language', exact: true }).selectOption('zh-CN');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.waitForFunction(() => document.documentElement.lang === 'zh-CN');
+  await page.getByRole('heading', { name: '通用', exact: true }).waitFor();
+  await page.getByRole('button', { name: '新建对话', exact: true }).waitFor();
+  await page.reload();
+  await page.getByRole('heading', { name: '通用', exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => document.documentElement.lang), 'zh-CN');
+  await page.getByRole('combobox', { name: '语言', exact: true }).selectOption('en-US');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await page.waitForFunction(() => document.documentElement.lang === 'en-US');
+  await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  checks.push('saved locale changes actual settings, sidebar and document together and survives full reload; CSS font lists retain their fallback semantics');
   assert.deepEqual(errors, []);
   assert(!requests.some(url => /vendor|codex-app\/|assets\/app-initial|renderer-migration/.test(url)));
   const metafile = JSON.parse(await readFile('.local/renderer-metafile.json', 'utf8'));

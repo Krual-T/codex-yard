@@ -107,7 +107,7 @@ export async function createNativeWorkbench(options: Options = {}) {
   const hostPaths = new Map<string, HostPaths>([['local', { homeDirectory: homedir(), codexHome }]]);
   const fileConnections = new Map<string, CodexConnection>();
   const files = createFiles({ dataDir, workspace, hosts: sshHosts, remoteCommand: options.remoteFileCommand,
-    async request(hostId, method, params, mutating = false) {
+    async request(hostId, method, params, mutating = false, onLateTerminal) {
       validHost(hostId);
       let connection = hostId === 'local' ? control : fileConnections.get(hostId);
       if (!connection) {
@@ -115,7 +115,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         fileConnections.set(hostId, connection);
       }
       await connection.connect();
-      return connection.request(method, params, { mutating });
+      return connection.request(method, params, { mutating, onLateTerminal });
     },
   });
   function validHost(hostId: string) { if (hostId !== 'local' && !sshHosts.has(hostId)) throw new Error('未登记的执行主机：' + hostId); }
@@ -632,12 +632,14 @@ export async function createNativeWorkbench(options: Options = {}) {
       case 'get-settings': await stateMutations.flush(); return { values: settings, configuredValues: settings };
       case 'codex-command-keymap-state': return { bindings: [], keymapPath: null, supported: false,
         primaryNumberShortcutTarget: settings['primary-number-shortcut-target'] ?? 'tabs' };
-      case 'get-setting': await stateMutations.flush(); return { value: settings[String(params.key)] };
-      case 'set-setting': return writePreference('setting', String(params.key ?? ''), params.value);
-      case 'get-global-state': await stateMutations.flush(); return { value: globals[String(params.key)] };
-      case 'set-global-state': return writePreference('global', String(params.key ?? ''), params.value);
+      case 'get-setting': await stateMutations.flush(); return { value: settings[String(params.key)], exists: Object.hasOwn(settings, String(params.key)) };
+      case 'set-setting': return writePreference('setting', String(params.key ?? ''), params.value, params.expected);
+      case 'get-global-state': await stateMutations.flush(); return { value: globals[String(params.key)], exists: Object.hasOwn(globals, String(params.key)) };
+      case 'set-global-state': return writePreference('global', String(params.key ?? ''), params.value, params.expected);
       case 'os-info': return { platform: 'linux', osVersion: 'Web', osRelease: 'Web', isSystemBackdropSupported: false, isVsCodeRunningInsideWsl: false, isCodexRunningInsideWsl: false };
-      case 'locale-info': return { ideLocale: 'zh-CN', systemLocale: 'zh-CN' };
+      // The Web host has no IDE/device UI locale; the requesting browser owns
+      // auto detection. Persisted localeOverride continues to take precedence.
+      case 'locale-info': return { ideLocale: null, systemLocale: null };
       case 'codex-home':
       case 'home-directory': {
         if (hostId !== 'local') await connectedFor(client, connections, hostId);

@@ -16,8 +16,8 @@ export async function findSubmission(connection: Connection, threadId: string, c
         || typeof record(value).clientUserMessageId !== 'string' || !record(value).clientUserMessageId)) throw new Error('无法核对队列，原提交状态已保留。');
       const queued = page.data.find(value => record(value).clientUserMessageId === clientUserMessageId);
       if (queued) return { turnId: null, queuedSubmissionId: record(queued).id as string };
-      if (page.nextCursor !== null && typeof page.nextCursor !== 'string') throw new Error('队列游标无效，原提交状态已保留。');
-      cursor = page.nextCursor as string | null;
+      if (page.nextCursor != null && typeof page.nextCursor !== 'string') throw new Error('队列游标无效，原提交状态已保留。');
+      cursor = page.nextCursor as string | null | undefined ?? null;
       if (cursor !== null && cursors.has(cursor)) throw new Error('队列分页未前进，原提交状态已保留。');
       if (cursor !== null) cursors.add(cursor);
     } while (cursor !== null);

@@ -1,4 +1,4 @@
-import type { ComposerDraft, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
+import type { ComposerDraft, SubmissionCollaborationMode, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import type { ThreadSummary } from '../../../lib/codex-protocol.ts';
 import { readBrowserAtom, updateBrowserAtom } from '../storage/ui-atoms.ts';
 
@@ -17,6 +17,8 @@ export interface SendIntent extends SendVersion {
   cwd: string;
   projectId?: string;
   additionalContext?: Record<string, { kind: 'untrusted'; value: string }>;
+  /** undefined is a legacy/unresolved request; null records an omitted override. */
+  collaborationMode?: SubmissionCollaborationMode | null;
   /** Immutable submitted version, not another editable draft. */
   draft: ComposerDraft;
   options: SubmitOptions;
@@ -24,7 +26,6 @@ export interface SendIntent extends SendVersion {
   stage: SendStage;
   error?: string;
   turnId?: string;
-  queuedSubmissionId?: string;
   /** Only an actual thread/start response grants this empty-history phase. */
   created?: { thread: ThreadSummary; settings: SubmitOptions };
 }
@@ -58,8 +59,11 @@ function snapshot(value: unknown): SendRecoverySnapshot {
       || request.action.type === 'steer' && (typeof request.action.turnId !== 'string' || !request.action.turnId))) {
       throw new Error('提交动作无法安全读取，原值已保留。');
     }
-    if (request.queuedSubmissionId !== undefined && (typeof request.queuedSubmissionId !== 'string' || !request.queuedSubmissionId
-      || !object(request.action) || request.action.type !== 'queue')) throw new Error('队列回执无法安全读取，原值已保留。');
+    if (request.collaborationMode !== undefined && request.collaborationMode !== null
+      && (!object(request.collaborationMode) || !['plan', 'default'].includes(String(request.collaborationMode.mode))
+        || !object(request.collaborationMode.settings) || typeof request.collaborationMode.settings.model !== 'string' || !request.collaborationMode.settings.model
+        || !(request.collaborationMode.settings.reasoning_effort === null || typeof request.collaborationMode.settings.reasoning_effort === 'string')
+        || request.collaborationMode.settings.developer_instructions !== null)) throw new Error('模式请求无法安全读取，原值已保留。');
     if (request.created !== undefined && (!object(request.created) || !object(request.created.thread)
       || request.created.thread.id !== request.threadId || !object(request.created.settings))) throw new Error('新会话创建回执无效，原值已保留。');
   }
@@ -91,7 +95,7 @@ export class SendRecoveryStore {
     const intent: SendIntent & { attemptId: string } = { ...structuredClone(version), id: crypto.randomUUID(), attemptId: crypto.randomUUID(), clientUserMessageId: crypto.randomUUID(),
       threadId: version.owner.threadId, cwd, draft: structuredClone(draft), options: structuredClone(options), action: structuredClone(action),
       overrides: structuredClone(overrides), stage: 'prepared', ...(projectId ? { projectId } : {}),
-      ...(additionalContext && Object.keys(additionalContext).length ? { additionalContext: structuredClone(additionalContext) } : {}) };
+      additionalContext: structuredClone(additionalContext ?? {}) };
     await this.change(state => {
       if (Object.values(state.requests).some(value => sendOwnerKey(value.owner) === sendOwnerKey(version.owner))) {
         throw new Error('此草稿还有待核对的发送结果，请先处理恢复记录。');
@@ -138,6 +142,16 @@ export class SendRecoveryStore {
     if (!intent.threadId || !['prepared', 'ready', 'failed'].includes(intent.stage)) throw new Error('发送阶段尚未核对，未重复发送。');
     intent.stage = 'sending'; delete intent.error;
   }); }
+  resolvedCollaboration(id: string, mode: SubmissionCollaborationMode | null, attemptId: string | undefined) {
+    return this.update(id, intent => {
+      this.assertAttempt(intent, attemptId);
+      if (!['prepared', 'ready', 'failed'].includes(intent.stage)) throw new Error('发送阶段已改变，模式请求未重写。');
+      if (intent.collaborationMode !== undefined && JSON.stringify(intent.collaborationMode) !== JSON.stringify(mode)) {
+        throw new Error('原提交模式已确定，未替换原请求。');
+      }
+      intent.collaborationMode = structuredClone(mode);
+    });
+  }
   failed(id: string, error: unknown, attemptId: string | undefined) { return this.update(id, intent => {
     // A prior page's error cannot downgrade the new attempt or a known success.
     if (!attemptId || intent.attemptId !== attemptId || intent.stage === 'confirmed') return;
@@ -159,7 +173,7 @@ export class SendRecoveryStore {
     if (intent.action?.type !== 'queue' || !intent.threadId || typeof queuedSubmissionId !== 'string' || !queuedSubmissionId || !['sending', 'unknown'].includes(intent.stage)) {
       throw new Error('队列提交身份无法确认，原稿已保留。');
     }
-    intent.stage = 'confirmed'; intent.queuedSubmissionId = queuedSubmissionId; delete intent.error;
+    intent.stage = 'confirmed'; delete intent.error;
   }); }
   async check(id: string) {
     const intent = (await this.read()).requests[id];
@@ -184,7 +198,7 @@ export class SendRecoveryStore {
         current.stage = 'confirmed'; current.turnId = result.turnId; delete current.error;
         delete state.creations[sendThreadKey(current.owner.hostId, current.threadId!)];
       } else if (intent.action?.type === 'queue' && result.queuedSubmissionId) {
-        current.stage = 'confirmed'; current.queuedSubmissionId = result.queuedSubmissionId; delete current.error;
+        current.stage = 'confirmed'; delete current.error;
       } else {
         current.stage = 'unknown'; current.error = '完整历史尚未找到原请求；结果仍未知，原稿已保留，不会重发。';
       }

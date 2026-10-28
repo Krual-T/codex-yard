@@ -62,6 +62,19 @@ test('transactional atom import, concurrent writes, rollback and malformed data 
       assert.equal(await page.evaluate(() => localStorage.getItem('native-atoms')), legacy, 'The imported source stays untouched.');
       await page.waitForFunction(() => (window as any).atomEvents.length >= 400);
     }
+    const competing = await Promise.allSettled(pages.map((page, writer) => page.evaluate(async writer => {
+      const modulePath = '/atoms.js';
+      return (await import(modulePath)).browserAtom('set-persisted-atom', {
+        key: 'conditional-preference', expected: { exists: false }, value: { writer },
+      });
+    }, writer)));
+    assert.equal(competing.filter(result => result.status === 'fulfilled').length, 1);
+    assert.equal(competing.filter(result => result.status === 'rejected').length, 1);
+    const winner = competing.findIndex(result => result.status === 'fulfilled');
+    assert.deepEqual(await fresh.evaluate(async () => {
+      const modulePath = '/atoms.js';
+      return (await import(modulePath)).browserAtom('get-persisted-atom', { key: 'conditional-preference' });
+    }), { value: { writer: winner }, exists: true });
     for (const malformed of [null, [], 'text', 2]) {
       const unchanged = await fresh.evaluate(async malformed => {
         const modulePath = '/atoms.js';

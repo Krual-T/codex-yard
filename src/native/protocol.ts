@@ -15,21 +15,33 @@ export function record(value: unknown): ObjectValue {
   return value != null && typeof value === 'object' && !Array.isArray(value) ? value as ObjectValue : {};
 }
 
+function equalJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
+  const left = a as ObjectValue, right = b as ObjectValue;
+  return Object.keys(left).length === Object.keys(right).length
+    && Object.keys(left).every(key => Object.hasOwn(right, key) && equalJson(left[key], right[key]));
+}
+
+/** Compare inside the store's commit interval, including an absent saved key. */
+export function assertPreferenceExpectation(value: unknown, exists: boolean, expected: unknown): void {
+  if (expected === undefined) return;
+  const observation = record(expected);
+  if (typeof observation.exists !== 'boolean') throw new Error('Invalid preference observation.');
+  if (observation.exists !== exists || exists && !equalJson(value, observation.value)) {
+    throw new Error('The saved preference changed. Reload and review your edit before saving.');
+  }
+}
+
 export function updatedAtom(previous: unknown, message: ObjectValue): unknown {
   if (!message.recordUpdate) return message.value;
   const update = record(message.recordUpdate), value = { ...record(previous) };
-  const equal = (a: unknown, b: unknown): boolean => {
-    if (a === b) return true;
-    if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
-    const left = a as ObjectValue, right = b as ObjectValue;
-    return Object.keys(left).length === Object.keys(right).length && Object.keys(left).every(key => Object.hasOwn(right, key) && equal(left[key], right[key]));
-  };
   const time = (entry: unknown) => typeof update.timestampField === 'string' ? Number(record(entry)[update.timestampField] || 0) : 0;
   // Native app-initial's jwt record-update contract: entries contain operations,
   // including compare-before-write, create/update-only and retention limits.
   for (const [key, operation] of Object.entries(record(update.entries))) {
     const entry = record(operation);
-    if (entry.expectedValue !== undefined && !equal(value[key], entry.expectedValue)) continue;
+    if (entry.expectedValue !== undefined && !equalJson(value[key], entry.expectedValue)) continue;
     if (operation == null || 'delete' in entry) { delete value[key]; continue; }
     if (entry.createOnly && Object.hasOwn(value, key) || time(value[key]) > time(entry.value)) continue;
     if (entry.updateOnly && !Object.hasOwn(value, key)) continue;

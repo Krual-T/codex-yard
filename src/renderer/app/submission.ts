@@ -1,5 +1,5 @@
 import type { ThreadSettingsResponse, ThreadSummary, TurnSummary } from '../../../lib/codex-protocol.ts';
-import type { ComposerDraft, MessageEditOrigin, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
+import type { ComposerDraft, MessageEditOrigin, SubmissionCollaborationMode, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { draftToInput } from '../composer/standalone-draft.ts';
 
 export interface SubmissionContext {
@@ -15,6 +15,9 @@ export interface SubmissionContext {
   overrides?: Partial<SubmitOptions>;
   /** Immutable model-visible widget state captured for this submission. */
   additionalContext?: Record<string, { kind: 'untrusted'; value: string }>;
+  collaborationMode?: SubmissionCollaborationMode | null;
+  /** Actual thread/start settings retained by an older, not-yet-resolved intent. */
+  createdOptions?: Pick<SubmitOptions, 'model' | 'effort'>;
   /** A durable submission intent; hooks complete before issuing each write. */
   send?: {
     clientUserMessageId: string;
@@ -23,6 +26,7 @@ export interface SubmissionContext {
     sending(): Promise<unknown>;
     confirmed(turnId: string): Promise<unknown>;
     queued?(queuedSubmissionId: string): Promise<unknown>;
+    resolvedCollaboration?(mode: SubmissionCollaborationMode | null): Promise<unknown>;
   };
 }
 
@@ -101,17 +105,27 @@ export async function submitDraft(client: WorkbenchClient, context: SubmissionCo
     // be readable; install the route/listener from this authoritative response.
     await selectCreatedThread(result.thread, result);
   }
-  let model = options.model ?? settings.model;
-  if (changes.mode && !model) {
-    const response = await client.rpc<{ config: { model?: string } }>('config/read', { cwd: context.cwd, includeLayers: false }, context.hostId);
-    model = response.config.model;
-    if (!model) throw new Error('无法确定此模式使用的模型，草稿已保留。');
+  let collaborationMode = context.collaborationMode;
+  if (collaborationMode === undefined) {
+    collaborationMode = null;
+    if (changes.mode) {
+      let model = options.model ?? settings.model ?? context.createdOptions?.model;
+      if (!model) {
+        const response = await client.rpc<{ config: { model?: string } }>('config/read', { cwd: context.cwd, includeLayers: false }, context.hostId);
+        model = response.config.model;
+        if (!model) throw new Error('无法确定此模式使用的模型，草稿已保留。');
+      }
+      collaborationMode = { mode: changes.mode, settings: { model,
+        reasoning_effort: Object.hasOwn(options, 'effort') ? options.effort ?? null
+          : settings.reasoningEffort ?? context.createdOptions?.effort ?? null, developer_instructions: null } };
+    }
   }
+  // Persist the resolved values (including omission) before the first write.
+  await context.send?.resolvedCollaboration?.(collaborationMode);
   const turnParams = { threadId: id, input, clientUserMessageId,
     ...sharedOptions(changes), ...permissions(changes, context.cwd, false),
     ...(changes.effort !== undefined ? { effort: changes.effort } : {}),
-    ...(changes.mode ? { collaborationMode: { mode: changes.mode, settings: { model,
-      reasoning_effort: options.effort ?? settings.reasoningEffort ?? null, developer_instructions: null } } } : {}),
+    ...(collaborationMode ? { collaborationMode } : {}),
     ...(origin ? { turnTrigger: 'edit_user_message' } : {}),
     ...(Object.keys(additionalContext).length ? { additionalContext } : {}) };
   // The edit controller durably records each phase; the host verifies full history.

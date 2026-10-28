@@ -33,6 +33,8 @@ import { browserOwnerKey } from '../browser/comments.ts';
 import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference } from './browser-draft.ts';
 import { StandaloneVisualization, readVisualizationModelContext } from '../visualizations/index.tsx';
 import { homeDraftIdentity, selectHomeDraftIdentity } from './home-draft-identity.ts';
+import { I18nProvider, resolveLocale } from '../i18n/index.tsx';
+import { themeFontFamily } from './theme-fonts.ts';
 import './app.css';
 
 type ThreadRow = ThreadSummary & { preview?: string; updatedAt?: number; createdAt?: number };
@@ -147,6 +149,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const routeRef = useRef(current); routeRef.current = current;
   const backFromSettings = useRef('/');
   const projectGeneration = useRef(0);
+  const preferenceGeneration = useRef(0);
   const reloadProjects = useCallback(async () => {
     const generation = ++projectGeneration.current;
     const state = await client.host<ProjectState>('thread-project-state');
@@ -164,15 +167,20 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   };
   const refreshList = useCallback(() => listRef.current.refresh(), []);
   const reloadPreferences = useCallback(async () => {
-    const [{ values }, reduced] = await Promise.all([
+    const generation = ++preferenceGeneration.current;
+    const [{ values }, reduced, locales] = await Promise.all([
       client.host<{ values: Record<string, unknown> }>('get-settings'),
       client.host<{ value?: string }>('get-global-state', { key: 'reduced-motion-preference' }),
+      client.host<{ ideLocale?: string; systemLocale?: string }>('locale-info'),
     ]);
+    if (generation !== preferenceGeneration.current) return;
     const dark = values.appearanceTheme === 'dark' || values.appearanceTheme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches;
     const resolved = applyAppearance(values, dark);
+    document.documentElement.lang = resolveLocale(values.localeOverride,
+      [locales.ideLocale, locales.systemLocale, ...navigator.languages, navigator.language].filter((value): value is string => !!value));
     const codeFontSize = typeof values.codeFontSize === 'number' && Number.isFinite(values.codeFontSize) ? values.codeFontSize : 12;
     setPanelAppearance({ theme: resolved.mode, codeFontSize, codeLineHeight: codeFontSize * 1.5,
-      codeFontFamily: resolved.theme.fonts.code ? JSON.stringify(resolved.theme.fonts.code) : undefined });
+      codeFontFamily: themeFontFamily(resolved.theme.fonts, 'code', 'ui-monospace, monospace') });
     const style = document.documentElement.style;
     setPreviewAppearance({ theme: resolved.mode, locale: document.documentElement.lang,
       variables: { ...Object.fromEntries(Array.from(style).filter(name => name.startsWith('--')).map(name => [name, style.getPropertyValue(name)])),
@@ -252,7 +260,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const media = matchMedia('(prefers-color-scheme: dark)'), reduced = matchMedia('(prefers-reduced-motion: reduce)');
     const preferences = () => { void reloadPreferences().catch(cause => setError(String(cause))); };
     media.addEventListener('change', preferences); reduced.addEventListener('change', preferences);
-    return () => { unsubscribe(); controller.dispose(); if (navigation.current === controller) navigation.current = null; media.removeEventListener('change', preferences); reduced.removeEventListener('change', preferences); };
+    window.addEventListener('languagechange', preferences);
+    return () => { unsubscribe(); controller.dispose(); if (navigation.current === controller) navigation.current = null; media.removeEventListener('change', preferences); reduced.removeEventListener('change', preferences); window.removeEventListener('languagechange', preferences); };
   }, [client, reloadPreferences, reloadProjects]);
   useEffect(() => {
     let active = true;
@@ -397,7 +406,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     if (inFlight.current) throw new Error('正在提交，请稍候。');
     if (loading) throw new Error('会话仍在加载，请稍候。');
     inFlight.current = true; setSubmitting(true); setError('');
-    let intent = retry;
+    // A displayed recovery snapshot grants no authority over another page's
+    // attempt. Only prepare/attempt may return a token owned by this invocation.
+    let intent: SendIntent | undefined;
     let expectedNavigation = navigationGeneration.current;
     const hostId = current.hostId;
     const activeCwd = retry?.cwd ?? (thread?.cwd || cwd || workspace);
@@ -407,7 +418,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       }
     };
     try {
-      const additionalContext = retry?.additionalContext ?? (!origin && current.threadId && action.type !== 'queue'
+      const additionalContext = retry ? retry.additionalContext : (!origin && current.threadId && action.type !== 'queue'
         ? Object.fromEntries((await readVisualizationModelContext(client, hostId, current.threadId)).map(value =>
           ['visualization:' + JSON.stringify([value.path, value.field]), { kind: 'untrusted' as const, value: JSON.stringify(value) }])) : undefined);
       requireCurrent(current.threadId);
@@ -437,7 +448,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       };
       if (retry?.created && retry.threadId) await assignCreatedProject(retry.threadId);
       const result = await submitDraft(client, { hostId, threadId: current.threadId, cwd: activeCwd, initialOptions: initialOptions ?? undefined,
-        overrides: description?.overrides, additionalContext: intent?.additionalContext ?? additionalContext,
+        overrides: description?.overrides, additionalContext: intent ? intent.additionalContext : additionalContext,
+        collaborationMode: intent?.collaborationMode, createdOptions: intent?.created?.settings,
         ...(intent ? { send: { clientUserMessageId: intent.clientUserMessageId,
           creating: async () => { requireCurrent(null); await sendStore.creating(intent!.id, intent!.attemptId); },
           created: async (created: ThreadSummary, settings: ThreadSettingsResponse) => {
@@ -455,6 +467,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           },
           confirmed: async (turnId: string) => { await sendStore.confirmed(intent!.id, turnId, intent!.attemptId); },
           queued: async (queuedSubmissionId: string) => { await sendStore.queued(intent!.id, queuedSubmissionId, intent!.attemptId); },
+          resolvedCollaboration: async mode => { await sendStore.resolvedCollaboration(intent!.id, mode, intent!.attemptId); },
         } } : {}),
         activeTurnId: thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null, readOnly: current.readOnly, thread },
       draft, options, action, async (created, settings) => {
@@ -591,7 +604,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     } catch (cause) { setError(String(cause)); }
   };
 
-  return <div className="yard-app" data-sidebar-open={sidebar} data-owned-renderer="true">
+  return <I18nProvider locale={previewAppearance.locale}><div className="yard-app" data-sidebar-open={sidebar} data-owned-renderer="true">
     {sidebar && <StandaloneSidebar hostId={current.hostId} currentThread={current.threadId ? { hostId: current.hostId, threadId: current.threadId } : null}
       projectState={projectState} fallbackWorkspace={workspace} rows={list.rows} nextCursor={list.nextCursor} loading={list.loading} error={list.error}
       search={search} archived={archived} onSearchChange={setSearch} onArchivedChange={setArchived} onClose={() => setSidebar(false)}
@@ -681,5 +694,5 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     {requests[0] && <ApprovalDialog key={requests[0].ref.generation + ':' + requests[0].id} request={requests[0]} onRespond={result => respond(requests[0]!, result)} onUnsupported={async () => {
       const request = requests[0]!; await client.reply(request.ref, { error: { code: -32601, message: '当前 Web 宿主不支持此请求。' } }); setRequests(previous => previous.filter(item => item !== request));
     }} />}
-  </div>;
+  </div></I18nProvider>;
 }

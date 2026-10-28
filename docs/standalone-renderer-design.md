@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v9，2026-10-28，完整功能和快照退役仍在实施。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v10，2026-10-28，完整功能和快照退役仍在实施。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -93,6 +93,16 @@ Chrome和可视化通过App实际工具栏及消息链接进入同一侧面板�
 独立审阅80a09a61 v6的共享attempt/check、queue/steer身份与project fallback已在v8实施，C正按冻结2746d18d复审。上述编辑、旧稿、导航和文件来源在S05实际接入，不将局部定向通过视为全体关闭。审批4a0b8774第二轮仍需修改，完整ref父级状态与原Web特殊模式继续由B和共享App按归属实施。
 
 ## 实施与验收
+
+S06将提交权限限于本次prepare/attempt真正返回的token；旧恢复快照本身不授予改写另一页sending阶段的权限。冻结的additionalContext显式包含空对象；解析后的collaborationMode（含model、nullable effort及无覆盖的null）在首次turn/start前保存，恢复时不读取当前模型或widget状态来替换原请求。队列末页允许nextCursor省略，仍继续精确clientId历史核对；不再写入无生产消费者的queuedSubmissionId，旧额外字段继续容纳。实际App两页竞争验证旧prepared token不能降另一页状态或重复turn/start。
+
+偏好仍只存在原native-state提交区间或原浏览器IDB事务中。set-setting、set-global-state、set-persisted-atom支持expected:{exists,value}；比较原键存在性及JSON值后才写入，冲突不落盘、不广播。读取返回exists；get-settings以values原始键为准。旧非编辑消费者可省略expected，设置编辑器必须保留原观察基线，不能把dirty旧对象配外部新版本静默覆盖；该消费者接线与冲突交互仍由设置后续组完成。设置重置删除宿主键，失败恢复原存在性。
+
+应用根从localeOverride及实际host/browser语言派生同一个I18nProvider和html.lang。Web宿主没有IDE/设备界面语言，返回空来源而非服务器硬编码语言。主题消费者保留CSS字体列表与fallback语义，保存的ui/content/code Face通过本机local字体加载；缺失字体继续使用保存的fallback，不下载外部字体。本组整页证明字体列表、实际明暗正文与设置/侧栏/文档语言保存刷新；全部语言文本及本地face选择仍按F22后续核实。
+
+文件来源已加入规范目标路径、原连接/原RPC晚到终态、关闭期间同步冻结及相关记录原子丢弃。服务端直接把原onLateTerminal传回原连接，不以新连接同ID或一次读回解除未知写入。外部进程和规范路径祖先替换不具有原子CAS保证。Leader正独立复审F/7d64837e，未把该未提交server接线算作已验。
+
+本组typecheck通过；必要全量418项中417通过、一项设置测试仍把Language select当textbox，保留失败并沿原D修订。新增20项提交/偏好定向与实际浏览器事务1项通过；自有App合成peer整页19组/errors=[]，含两页atom、编辑/队列/steer恢复、目标、文件/终端、Chrome真实官方MCP和可视化、语言完整刷新及三档宽度。首轮验收脚本在未保存文件流程中途刷新导致无界等待，已保留中止材料并修驱动顺序，不改产品或原断言。实际CLI、完整F00–F23、Mini/侧聊入口及整个vendor删除后的干净来源验收仍未关闭。
 
 第一批走通自有页面启动、会话列表/read、消息、输入/中断、通知和审批链，再按 inventory 完成侧栏、队列、菜单、设置、面板、Chrome、输出及附属窗口。设计冻结后由原 C 会话按 technical_design_reviewer 的原文职责做只读协议委派审阅；实际代码与文档仍须逐批审阅。
 

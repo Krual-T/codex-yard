@@ -65,6 +65,11 @@ export interface SubmitOptions {
   serviceTier?: string | null;
   mode?: 'default' | 'plan';
 }
+/** The resolved mode request is frozen before its first turn/start. */
+export interface SubmissionCollaborationMode {
+  mode: 'default' | 'plan';
+  settings: { model: string; reasoning_effort: string | null; developer_instructions: null };
+}
 export type SubmitAction = { type: 'send' } | { type: 'queue' } | { type: 'steer'; turnId: string };
 export interface MessageEditOrigin {
   hostId: string;

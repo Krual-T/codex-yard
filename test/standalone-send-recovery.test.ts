@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SendRecoveryStore, sendThreadKey } from '../src/renderer/app/send-recovery.ts';
+import type { SendIntent } from '../src/renderer/app/send-recovery.ts';
 import { findSentMessage } from '../src/native/message-edit.ts';
 import { findSubmission } from '../src/native/message-submission-status.ts';
 import { submitDraft } from '../src/renderer/app/submission.ts';
@@ -57,6 +58,14 @@ test('queue checks find exact identities across pages or consumed history, never
   assert.ok(calls.every(method => ['thread/queue/list', 'thread/turns/list', 'thread/items/list'].includes(method)));
   await assert.rejects(findSubmission({ request: async () => ({ data: [], nextCursor: 'same' }) }, 'thread', 'absent', 'queue'), /未前进/);
   await assert.rejects(findSubmission({ request: async () => ({ data: [{ id: '', clientUserMessageId: 'exact' }], nextCursor: null }) }, 'thread', 'exact', 'queue'), /无法核对/);
+  const omittedCursorCalls: string[] = [];
+  assert.deepEqual(await findSubmission({ async request(method) {
+    omittedCursorCalls.push(method);
+    return method === 'thread/queue/list' ? { data: [] } : method === 'thread/turns/list'
+      ? { data: [{ id: 'consumed' }], nextCursor: null }
+      : { data: [{ item: { id: 'user', type: 'userMessage', clientId: 'exact' } }], nextCursor: null };
+  } }, 'thread', 'exact', 'queue'), { turnId: 'consumed' });
+  assert.deepEqual(omittedCursorCalls, ['thread/queue/list', 'thread/turns/list', 'thread/items/list']);
 });
 
 test('a positive queue receipt confirms only its original attempt and invalid status responses preserve uncertainty', async () => {
@@ -67,7 +76,8 @@ test('a positive queue receipt confirms only its original attempt and invalid st
   await assert.rejects(h.store.check(intent.id), /回执无效/);
   assert.equal((await h.store.read()).requests[intent.id].stage, 'unknown');
   h.client.host = async <T>() => ({ turnId: null, queuedSubmissionId: 'actual-queued-id' }) as T;
-  assert.equal((await h.store.check(intent.id)).queuedSubmissionId, 'actual-queued-id');
+  assert.equal((await h.store.check(intent.id)).stage, 'confirmed');
+  assert.equal(Object.hasOwn((await h.store.read()).requests[intent.id], 'queuedSubmissionId'), false);
   assert.equal((await h.store.read()).requests[intent.id].stage, 'confirmed');
   assert.deepEqual((await h.store.read()).requests[intent.id].draft, draft);
 });
@@ -137,6 +147,53 @@ test('a submitted widget context stays immutable when the live widget changes an
   assert.deepEqual(JSON.parse(restored.additionalContext!.widget.value), { modelContent: { choice: 7 } });
   assert.equal(restored.stage, 'unknown');
   assert.deepEqual(h.calls, []);
+});
+
+test('an initially empty context is frozen and obsolete queue receipt fields remain readable', async () => {
+  const h = fixture(), intent = await h.store.prepare(version, '/fixture', draft, {}, {});
+  assert.deepEqual(intent.additionalContext, {});
+  const state = await h.store.read();
+  (state.requests[intent.id] as unknown as Record<string, unknown>).queuedSubmissionId = 'legacy-extra';
+  h.seed(state);
+  assert.equal((await h.store.read()).requests[intent.id].id, intent.id);
+});
+
+test('a first-turn retry retains resolved mode/model/effort before its first RPC even after config changes', async () => {
+  for (const effort of [undefined, null]) {
+    const h = fixture(), options = { mode: 'plan' as const, ...(effort === undefined ? {} : { effort }) };
+    let intent: SendIntent = await h.store.prepare(version, '/fixture', draft, options, options);
+    const calls: { method: string; params: Record<string, unknown> }[] = [];
+    let rejectTurn = true;
+    const client: WorkbenchClient = { ...h.client, async rpc<T>(method: string, params: Record<string, unknown> = {}) {
+      calls.push({ method, params });
+      if (method === 'thread/start') return { thread: { id: 'created', name: null, cwd: '/fixture', status: { type: 'idle' }, turns: [] },
+        model: 'original-resolved-model', reasoningEffort: 'high' } as T;
+      if (method === 'config/read') throw new Error('A retry must not consult the changed config.');
+      assert.deepEqual((await h.store.read()).requests[intent.id].collaborationMode, params.collaborationMode);
+      if (rejectTurn) throw Object.assign(new Error('definitely rejected'), { uncertain: false });
+      return { turn: { id: 'started' } } as T;
+    } };
+    const run = () => submitDraft(client, { hostId: version.owner.hostId, threadId: intent.threadId, cwd: '/fixture',
+      activeTurnId: null, readOnly: false, thread: null, overrides: intent.overrides,
+      collaborationMode: intent.collaborationMode, createdOptions: intent.created?.settings,
+      send: { clientUserMessageId: intent.clientUserMessageId,
+        creating: () => h.store.creating(intent.id, intent.attemptId),
+        created: (thread, settings) => h.store.created(intent.id, thread.id, { thread, settings: { model: settings.model ?? undefined, effort: settings.reasoningEffort } }, intent.attemptId),
+        resolvedCollaboration: mode => h.store.resolvedCollaboration(intent.id, mode, intent.attemptId),
+        sending: () => h.store.sending(intent.id, intent.attemptId), confirmed: id => h.store.confirmed(intent.id, id, intent.attemptId) } },
+      draft, intent.options, { type: 'send' }, async () => {});
+    await assert.rejects(run(), /definitely rejected/);
+    const resolved = (await h.store.read()).requests[intent.id].collaborationMode;
+    assert.deepEqual(resolved, { mode: 'plan', settings: { model: 'original-resolved-model', reasoning_effort: effort === null ? null : 'high', developer_instructions: null } });
+    await h.store.failed(intent.id, Object.assign(new Error('rejected'), { uncertain: false }), intent.attemptId);
+    intent = await new SendRecoveryStore(client, h.storage).attempt(intent.id);
+    rejectTurn = false;
+    await run();
+    assert.deepEqual(calls.map(call => call.method), ['thread/start', 'turn/start', 'turn/start']);
+    assert.deepEqual(calls[1].params.collaborationMode, calls[2].params.collaborationMode);
+    assert.equal(calls[1].params.clientUserMessageId, calls[2].params.clientUserMessageId);
+    assert.equal((await h.store.read()).requests[intent.id].stage, 'confirmed');
+  }
 });
 
 test('unrecognized recovery data is retained and a late check cannot recreate a dismissed record', async () => {
