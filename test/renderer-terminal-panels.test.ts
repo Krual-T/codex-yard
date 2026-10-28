@@ -31,16 +31,21 @@ test('terminal panels use the page-owned host session and never replay input aft
   });
   const fileRpc = fileDaemonFixture();
   for (const method of fileMethods) fake.handlers.set(method, params => fileRpc(method, record(params)));
-  let shellHandle = '';
+  const shellHandles = new Map<number, string>();
+  let nextShellPid = 1234;
   fake.handlers.set('process/spawn', (params, peer) => {
     const handle = String(params.processHandle);
     if (!params.tty) {
-      for (const processHandle of [handle, shellHandle]) peer.send({ method: 'process/exited', params: { processHandle, exitCode: 0 } });
+      const shellHandle = shellHandles.get(Number((params.command as string[])[3]));
+      for (const processHandle of [handle, shellHandle].filter((value): value is string => value !== undefined)) {
+        peer.send({ method: 'process/exited', params: { processHandle, exitCode: 0 } });
+      }
       return {};
     }
-    shellHandle = handle;
+    const pid = nextShellPid++;
+    shellHandles.set(pid, handle);
     peer.send({ method: 'process/outputDelta', params: { processHandle: handle, stream: 'stdout',
-      deltaBase64: Buffer.from(`\x1e${handle}\x1f/bin/bash\x1f1234\x1f\u001b[31mREADY\u001b[0m\r\n`).toString('base64') } });
+      deltaBase64: Buffer.from(`\x1e${handle}\x1f/bin/bash\x1f${pid}\x1f\u001b[31mREADY\u001b[0m\r\n`).toString('base64') } });
     return {};
   });
   fake.handlers.set('process/writeStdin', (params, peer) => {
@@ -150,7 +155,7 @@ test('terminal panels use the page-owned host session and never replay input aft
   await page.evaluate(() => (window as any).fixture.reveal());
   await page.locator('.xterm-rows').getByText('READY').waitFor();
   assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 1);
-  await page.evaluate(() => (window as any).fixture.render({request:{id:'show-existing',kind:'terminal'}}));
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'show-existing',kind:'terminal',reuse:true}}));
   await page.waitForFunction(() => (window as any).fixture.state.consumed.includes('show-existing'));
   assert.equal(await page.getByRole('tab', { name: 'Terminal' }).count(), 1);
   assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 1);
@@ -176,12 +181,12 @@ test('terminal panels use the page-owned host session and never replay input aft
   await page.getByRole('status').filter({ hasText: 'Connection lost' }).waitFor();
   await page.keyboard.type('discard');
   await page.evaluate(() => (window as any).fixture.reconnect());
-  await page.evaluate(() => (window as any).fixture.render({request:{id:'explicit-reconnect',kind:'terminal'}}));
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'explicit-reconnect',kind:'terminal',reuse:true}}));
   await page.waitForFunction(() => (window as any).fixture.state.events.filter((message: any) => message.type === 'terminal-event' && message.event?.type === 'attached').length === 2);
   await page.locator('.xterm-rows').getByText('READY').waitFor();
   assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 2);
   assert.equal(inputs(), 'abc');
-  await page.evaluate(() => (window as any).fixture.render({request:{id:'show-reconnected',kind:'terminal'}}));
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'show-reconnected',kind:'terminal',reuse:true}}));
   await page.waitForFunction(() => (window as any).fixture.state.consumed.includes('show-reconnected'));
   assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 2);
   await page.evaluate(() => { (window as any).fixture.state.delayClose = true; });
@@ -199,9 +204,9 @@ test('terminal panels use the page-owned host session and never replay input aft
   await page.getByRole('tab', { name: 'Terminal' }).waitFor();
   await page.evaluate(() => { (window as any).fixture.failCurrent(); (window as any).fixture.state.delayClose = true; });
   await page.getByRole('button', { name: 'New terminal' }).waitFor();
-  await page.evaluate(() => (window as any).fixture.render({request:{id:'restart-delayed',kind:'terminal'}}));
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'restart-delayed',kind:'terminal',reuse:true}}));
   await page.waitForFunction(() => Boolean((window as any).fixture.state.releaseClose));
-  await page.evaluate(() => (window as any).fixture.render({request:{id:'restart-duplicate',kind:'terminal'}}));
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'restart-duplicate',kind:'terminal',reuse:true}}));
   await page.waitForFunction(() => (window as any).fixture.state.consumed.includes('restart-duplicate'));
   await page.evaluate(() => (window as any).fixture.render({scopeId:'thread-a',request:null}));
   await page.evaluate(() => { (window as any).fixture.state.delayClose = false; (window as any).fixture.state.releaseClose(); });
@@ -219,7 +224,25 @@ test('terminal panels use the page-owned host session and never replay input aft
   assert.equal(await page.getByRole('tab', { name: 'Terminal' }).count(), 1);
   await page.evaluate(() => { (window as any).fixture.state.failClose = false; });
   await page.getByRole('button', { name: 'Close terminal' }).click();
-  await page.waitForFunction(() => (window as any).fixture.state.calls.some((call: any) => call.params.operation === 'close'));
+  await page.getByRole('tab', { name: 'Terminal' }).waitFor({ state: 'detached' });
+
+  await page.evaluate(() => (window as any).fixture.render({scopeId:'thread-a',request:{id:'tabs-one',kind:'terminal'}}));
+  await page.waitForFunction(() => (window as any).fixture.state.consumed.includes('tabs-one'));
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'tabs-two',kind:'terminal'}}));
+  await page.waitForFunction(() => (window as any).fixture.state.events.filter((message: any) => message.type === 'terminal-event' && message.event?.type === 'attached').length === 6);
+  const terminalTabs = page.getByRole('tab', { name: 'Terminal' });
+  assert.equal(await terminalTabs.count(), 2);
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 6);
+  await terminalTabs.first().click();
+  await page.evaluate(() => (window as any).fixture.render({request:{id:'focus-first',kind:'terminal',reuse:true}}));
+  await page.waitForFunction(() => (window as any).fixture.state.consumed.includes('focus-first'));
+  assert.equal(await terminalTabs.first().getAttribute('aria-selected'), 'true');
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 6);
+  const terminalTabContainers = page.locator('.yard-panel-tab').filter({ has: page.getByRole('tab', { name: 'Terminal' }) });
+  await terminalTabContainers.last().getByRole('button', { name: 'Close terminal' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.yard-panel-tab [role="tab"]').length === 2);
+  await terminalTabContainers.first().getByRole('button', { name: 'Close terminal' }).click();
+  await terminalTabs.first().waitFor({ state: 'detached' });
 
   await page.evaluate(() => (window as any).fixture.existing('existing-session'));
   const countBeforeAttach = fake.calls('process/spawn').filter(call => call.params.tty).length;

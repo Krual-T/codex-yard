@@ -19,7 +19,8 @@ import './workspace-panels.css';
 
 interface RequestScope { id: string; scopeId: string; hostId: string; cwd: string }
 export type FilePanelRequest = RequestScope & { kind: 'file'; path: string; line?: number; column?: number };
-export type TerminalPanelRequest = RequestScope & { kind: 'terminal' };
+/** `reuse` selects an existing terminal for a global reveal shortcut; ordinary requests create a new tab. */
+export type TerminalPanelRequest = RequestScope & { kind: 'terminal'; reuse?: boolean };
 export type DiffPanelRequest = RequestScope & { kind: 'diff'; path?: string; diff?: string };
 export type WorkspacePanelRequest = FilePanelRequest | TerminalPanelRequest | DiffPanelRequest;
 export interface WorkspacePanelAppearance {
@@ -235,7 +236,8 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     if (request.scopeId !== scopeId || request.hostId !== hostId || request.cwd !== cwd) return;
     if (request.kind === 'file') openFile(request.path, request.line, request.column);
     else if (request.kind === 'terminal') {
-      const existing = terminals.find(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd);
+      const candidates = request.reuse ? terminals.filter(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd) : [];
+      const existing = candidates.find(tab => tab.key === selectedRef.current) ?? candidates.at(-1);
       const key = existing?.key ?? JSON.stringify(['terminal', scopeId, hostId, cwd, request.id]);
       if (!existing) setTerminals(previous => [...previous, { key, scopeId, hostId, cwd, threadId }]);
       select(key);
