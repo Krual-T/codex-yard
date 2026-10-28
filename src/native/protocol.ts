@@ -60,8 +60,24 @@ export function updatedAtom(previous: unknown, message: ObjectValue): unknown {
 const sessionKeys = ['model', 'model_provider', 'model_reasoning_effort', 'profile', 'approval_policy',
   'sandbox_mode', 'service_tier', 'approvals_reviewer', 'default_permissions'];
 export function publicConfig(result: unknown) {
-  const config = record(record(result).config);
-  return { config: Object.fromEntries(sessionKeys.filter(key => key in config).map(key => [key, config[key]])), origins: {}, layers: null };
+  const response = record(result), config = record(response.config);
+  const values = Object.fromEntries(sessionKeys.filter(key => key in config).map(key => [key, config[key]]));
+  const desktop = record(config.desktop);
+  if (config.desktop && typeof config.desktop === 'object') values.desktop = Object.fromEntries(
+    ['git-worktree-root', 'worktree-auto-cleanup-enabled', 'worktree-keep-count']
+      .filter(key => Object.hasOwn(desktop, key)).map(key => [key, desktop[key]]));
+  const metadata = (value: unknown) => {
+    const layer = record(value), name = record(layer.name);
+    if (name.type !== 'user' || typeof name.file !== 'string' || typeof layer.version !== 'string'
+      || name.profile !== null && name.profile !== undefined && typeof name.profile !== 'string') return null;
+    return { name: { type: 'user', file: name.file, profile: name.profile ?? null }, version: layer.version };
+  };
+  const origins = record(response.origins);
+  return { config: values, origins: Object.fromEntries(sessionKeys.flatMap(key => {
+    const origin = metadata(origins[key]); return origin ? [[key, origin]] : [];
+  })), layers: Array.isArray(response.layers) ? response.layers.flatMap(value => {
+    const layer = metadata(value); return layer ? [layer] : [];
+  }) : null };
 }
 
 export const readMethods = new Set([
