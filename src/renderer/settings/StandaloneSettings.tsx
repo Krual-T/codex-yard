@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { StandaloneSettingsProps } from '../workbench-contract.ts';
-import { I18nProvider, resolveLocale, translateKnown, useI18n } from '../i18n/index.tsx';
+import { translateKnown, useI18n } from '../i18n/index.tsx';
 import { AgentSection } from './AgentSection.tsx';
 import { AppearanceSection } from './AppearanceSection.tsx';
 import { ArchivedSection } from './ArchivedSection.tsx';
@@ -23,6 +23,7 @@ import { VoiceSection } from './VoiceSection.tsx';
 import { hostPath, readSettingsRoute, sectionPath } from './routing.ts';
 import { scopeKey, settingsScope } from './scope.ts';
 import type { SettingsProjectRoots, SettingsSessionCwd } from './scope.ts';
+import { settingsSearchItems } from './search.ts';
 import './standalone-settings.css';
 
 export interface SettingsSection { id: string; title: string; group: string }
@@ -61,22 +62,6 @@ export type SettingsIntegrationProps = StandaloneSettingsProps & {
   projectRoots: SettingsProjectRoots | null;
   sessionCwd: SettingsSessionCwd | null;
 };
-const searchLabels: Record<string, string[]> = {
-  'general-settings': ['Default terminal location', 'Prevent sleep while running', 'Automatically archive inactive chats', 'Suggestions', 'Language',
-    'Educational tips', 'Plain text composer', 'Show context window usage', 'Send message', 'Follow-up messages'],
-  appearance: ['Interface font size', 'Code font size', 'Reduce motion', 'Diff markers', 'Pointer cursors', 'Font smoothing', 'Dock icon',
-    'Accent', 'Background', 'Text', 'Added lines', 'Removed lines', 'Skill color', 'Contrast', 'Transparent window', 'Interface font',
-    'Content font', 'Code font', 'Code theme', 'Import theme', 'Export theme'],
-  models: ['Model', 'Reasoning effort'],
-  agent: ['Approval policy', 'Sandbox mode', 'Experimental features'],
-  personalization: ['Codex instructions', 'Codex memories', 'Custom instructions', 'ChatGPT memory'],
-  voice: ['Microphone', 'Voice chat', 'Dictation'],
-  usage: ['Account', 'Usage limits'],
-  'git-settings': ['Branch prefix', 'Always force push', 'Create draft pull requests', 'Pull request merge method', 'Disable Git-based diffs',
-    'Review delivery', 'Commit instructions', 'Pull request instructions', 'Pull request watch instructions', 'Auto-merge when ready'],
-  worktrees: ['Worktree root', 'Always fetch upstream before creating worktrees', 'Automatically delete old worktrees', 'Auto-delete limit'],
-  'keyboard-shortcuts': ['Number shortcuts', 'Open web link in default browser'],
-};
 const remainingSections: Record<string, string> = {
   'local-environments': 'Project setup scripts cannot be managed from this page yet.',
   'browser-use': 'Browser preferences, site access, extensions, history and downloads cannot be managed from this page yet.',
@@ -89,32 +74,11 @@ const remainingSections: Record<string, string> = {
   'open-source-licenses': 'Third-party notices cannot be loaded from this page yet.',
 };
 
-function browserLanguages(): readonly string[] {
-  if (typeof navigator === 'undefined') return [];
-  return navigator.languages?.length ? [...navigator.languages] : navigator.language ? [navigator.language] : [];
-}
-
 export function StandaloneSettings(props: SettingsIntegrationProps) {
   const { client } = props;
   const preferences = useMemo(() => new Preferences(client), [client]);
   const snapshot = useSyncExternalStore(preferences.subscribe, preferences.getSnapshot, preferences.getSnapshot);
-  const [languages, setLanguages] = useState(browserLanguages);
-  const [hostLanguages, setHostLanguages] = useState<readonly string[]>([]);
-  useEffect(() => {
-    const changed = () => setLanguages(browserLanguages());
-    window.addEventListener('languagechange', changed);
-    return () => window.removeEventListener('languagechange', changed);
-  }, []);
-  useEffect(() => {
-    let active = true;
-    setHostLanguages([]);
-    void client.host<{ ideLocale?: unknown; systemLocale?: unknown }>('locale-info').then(info => {
-      if (active) setHostLanguages([info?.ideLocale, info?.systemLocale].filter((value): value is string => typeof value === 'string' && value.length > 0));
-    }).catch(() => { if (active) setHostLanguages([]); });
-    return () => { active = false; };
-  }, [client]);
-  const locale = resolveLocale(snapshot.localeOverride.saved, [...hostLanguages, ...languages]);
-  return <I18nProvider locale={locale}><SettingsPage {...props} preferences={preferences} snapshot={snapshot} /></I18nProvider>;
+  return <SettingsPage {...props} preferences={preferences} snapshot={snapshot} />;
 }
 
 function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, projectRoots, sessionCwd, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
@@ -131,7 +95,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
   const [otherSaving, setOtherSaving] = useState(false);
   const [editorRevision, setEditorRevision] = useState(0);
   const [search, setSearch] = useState('');
-  const [searchTarget, setSearchTarget] = useState<{ section: string; label: string } | null>(null);
+  const [searchTarget, setSearchTarget] = useState<{ section: string; id: string; hostId: string } | null>(null);
   const content = useRef<HTMLDivElement>(null);
   const [confirmLeave, setConfirmLeave] = useState(false);
   const pending = useRef<{ promise: Promise<boolean>; resolve: (allowed: boolean) => void } | null>(null);
@@ -187,15 +151,23 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
     return () => window.removeEventListener('beforeunload', preventUnload);
   }, [dirty, anySaving]);
   useEffect(() => {
-    if (!searchTarget || searchTarget.section !== section) return;
-    const rows = content.current?.querySelectorAll<HTMLElement>('.yard-setting-row') ?? [];
-    const row = Array.from(rows).find(item => item.dataset.settingLabel === searchTarget.label);
-    if (row) {
-      row.scrollIntoView({ block: 'center' });
-      row.querySelector<HTMLElement>('input, select, textarea, button')?.focus();
-    }
-    setSearchTarget(null);
-  }, [searchTarget, section]);
+    if (!searchTarget || searchTarget.section !== section || searchTarget.hostId !== selectedHost || !content.current) return;
+    const root = content.current;
+    const findTarget = () => {
+      const target = searchTarget.id === '__heading__' ? root.querySelector<HTMLElement>('h2') :
+        Array.from(root.querySelectorAll<HTMLElement>('[data-setting-id]')).find(item => item.dataset.settingId === searchTarget.id);
+      if (!target) return;
+      target.scrollIntoView({ block: 'center' });
+      const control = target.matches('input, select, textarea, button') ? target :
+        target.querySelector<HTMLElement>('input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled)');
+      if (control) control.focus(); else { target.tabIndex = -1; target.focus(); }
+      setSearchTarget(null);
+    };
+    const observer = new MutationObserver(findTarget);
+    observer.observe(root, { childList: true, subtree: true });
+    findTarget();
+    return () => observer.disconnect();
+  }, [searchTarget, section, selectedHost]);
   useEffect(() => {
     if (!location.hash) return;
     let id = location.hash.slice(1);
@@ -211,14 +183,14 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
     const id = ++transition.current;
     void requestLeave().then(allowed => { if (allowed && transition.current === id) action(); });
   };
-  const navigate = (next: string, label?: string) => {
+  const navigate = (next: string, targetId?: string) => {
     const action = () => {
       if (next !== section) {
         const path = sectionPath(next, route);
         onNavigate(path, { state: location.state });
       }
       setSearch('');
-      if (label) setSearchTarget({ section: next, label });
+      setSearchTarget(targetId ? { section: next, id: targetId, hostId: selectedHost } : null);
     };
     if (next === section) action(); else guard(action);
   };
@@ -227,9 +199,13 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
   const query = search.trim().toLocaleLowerCase(locale);
   const results = query ? settingsSections.flatMap(item => {
     const matches = (value: string) => value.toLocaleLowerCase(locale).includes(query) || translateKnown(t, value).toLocaleLowerCase(locale).includes(query);
-    const labels = (searchLabels[item.id] ?? []).filter(matches);
-    if (matches(item.title)) labels.unshift(item.title);
-    return labels.map(label => ({ section: item.id, title: translateKnown(t, item.title), label, display: translateKnown(t, label), isTitle: label === item.title }));
+    const entries = (settingsSearchItems[item.id] ?? []).filter(entry => matches(entry.label) &&
+      !(item.id === 'general-settings' && entry.id === 'prevent-sleep' && platform === 'windows') &&
+      !(item.id === 'appearance' && ['font-smoothing', 'dock-icon'].includes(entry.id) && platform !== 'macOS') &&
+      !(item.id === 'appearance' && entry.id === 'transparent-window' && !backdropSupported));
+    if (matches(item.title)) entries.unshift({ id: '__heading__', label: item.title });
+    return entries.map(entry => ({ section: item.id, title: translateKnown(t, item.title), id: entry.id,
+      display: translateKnown(t, entry.label), isTitle: entry.id === '__heading__' }));
   }) : [];
   const isCatalog = (value: string): value is CatalogKind => ['skills-settings', 'hooks-settings', 'mcp-settings', 'plugins-settings'].includes(value);
   return <div className="yard-settings">
@@ -253,7 +229,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
         <input type="search" aria-label={t('Search settings')} value={search} onChange={event => setSearch(event.target.value)} />
       </label>
       {query && <div className="yard-search-results" aria-label={t('Settings search results')}>
-        {results.length ? results.map(result => <button type="button" key={`${result.section}:${result.label}`} onClick={() => navigate(result.section, result.label)}>
+        {results.length ? results.map(result => <button type="button" key={`${result.section}:${result.id}`} onClick={() => navigate(result.section, result.id)}>
           <span>{result.display}</span>{!result.isTitle && <small>{result.title}</small>}</button>) : <p>{t('No settings found.')}</p>}
       </div>}
       <label className="yard-mobile-section">{t('Section')}

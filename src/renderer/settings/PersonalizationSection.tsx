@@ -30,7 +30,7 @@ export function PersonalizationSection({ client, hostId, onDirtyChange, onSaving
     {state.error && <p className="yard-setting-error" role="alert">{state.error} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={refresh}>Refresh</button></p>}
     {state.loading && <p role="status">Loading instructions...</p>}
     {state.files?.find(file => file.name === 'AGENTS.override.md')?.saved?.trim() && <p role="status">AGENTS.override.md takes precedence over AGENTS.md.</p>}
-    {state.files?.map(file => <section className="yard-instruction-editor" key={file.name}>
+    {state.files?.map(file => <section className="yard-instruction-editor" key={file.name} data-setting-id={file.name === 'AGENTS.md' ? 'instructions' : undefined}>
       <label htmlFor={`yard-instructions-${file.name}`}><strong>{file.name}</strong></label>
       <p className="yard-muted"><code>{file.path}</code>{file.saved === null ? ' (not created)' : ''}</p>
       <textarea id={`yard-instructions-${file.name}`} aria-label={file.name} value={file.draft} disabled={state.loading || state.saving}

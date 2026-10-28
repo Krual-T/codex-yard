@@ -30,7 +30,7 @@ function ExperimentalFeatures({ client, hostId }: { client: WorkbenchClient; hos
     };
     void read(); return () => { active = false; };
   }, [client, hostId, revision]);
-  return <><h3>Experimental features</h3>
+  return <><h3 data-setting-id="experimental" tabIndex={-1}>Experimental features</h3>
     {state.loading ? <p>Loading experimental features...</p> : state.error ? <p className="yard-setting-error" role="alert">Could not load experimental features: {state.error} <button className="yard-link" type="button" onClick={() => setRevision(value => value + 1)}>Retry</button></p> :
       state.features.length ? <><p className="yard-muted">Changing experimental features is not available for this connection.</p><div className="yard-setting-group">
         {state.features.map(feature => <Row key={feature.name} label={feature.displayName || feature.name} description={feature.description}><span>{feature.enabled ? 'On' : 'Off'}</span></Row>)}

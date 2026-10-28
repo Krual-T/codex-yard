@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
 import type { PreferenceEntry, PreferenceKey, PreferenceSnapshot, PreferenceValues, Preferences } from './preferences.ts';
+import { settingSearchId } from './search.ts';
 
 export interface PreferenceProps { preferences: Preferences; snapshot: PreferenceSnapshot }
 
@@ -8,7 +9,7 @@ export function Row({ label, description, children, error, retry }: {
   label: string; description?: ReactNode; children?: ReactNode; error?: string | null; retry?: () => void;
 }) {
   const { t } = useI18n();
-  return <div className="yard-setting-row" data-setting-label={label} id={label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}>
+  return <div className="yard-setting-row" data-setting-id={settingSearchId(label)} id={label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}>
     <div className="yard-setting-copy"><div className="yard-setting-label">{translateKnown(t, label)}</div>
       {description && <div className="yard-setting-description">{typeof description === 'string' ? translateKnown(t, description) : description}</div>}
       {error && <div className="yard-setting-error" role="alert">{error} {retry && <button type="button" className="yard-link" onClick={retry}>{t('Retry')}</button>}</div>}

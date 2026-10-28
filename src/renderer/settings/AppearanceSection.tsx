@@ -36,8 +36,8 @@ function ThemeEditor({ variant, onDirtyChange, ...props }: PreferenceProps & { v
   };
   return <section className="yard-theme-editor">
     <div className="yard-section-heading"><h3>{themeLabel}</h3>
-      <div className="yard-actions"><button type="button" onClick={() => { setText(''); setError(''); setDialog('import'); }} disabled={disabled || entryState(codeEntry).disabled}>{t('Import')}</button>
-        <button type="button" onClick={openExport} disabled={disabled || entryState(codeEntry).disabled}>{t('Export')}</button></div>
+      <div className="yard-actions"><button type="button" data-setting-id="theme-import" onClick={() => { setText(''); setError(''); setDialog('import'); }} disabled={disabled || entryState(codeEntry).disabled}>{t('Import')}</button>
+        <button type="button" data-setting-id="theme-export" onClick={openExport} disabled={disabled || entryState(codeEntry).disabled}>{t('Export')}</button></div>
     </div>
     <div className="yard-theme-preview" style={{ backgroundColor: theme.surface, color: theme.ink, borderColor: theme.accent }}>
       <span style={{ color: theme.accent }}>Aa</span><span>{t('Theme preview')}</span><code>const color = true;</code>
