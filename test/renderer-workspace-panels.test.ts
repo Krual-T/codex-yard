@@ -243,6 +243,12 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') browserConsole.push(message.text()); });
   page.on('request', request => requestedUrls.push(request.url()));
+  await page.addInitScript(() => {
+    const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
+    (window as any).previewUrls = {created: [] as string[], revoked: [] as string[]};
+    URL.createObjectURL = blob => { const url = create(blob); (window as any).previewUrls.created.push(url); return url; };
+    URL.revokeObjectURL = url => { (window as any).previewUrls.revoked.push(url); revoke(url); };
+  });
   await page.exposeFunction('fixtureSave', async (params: { hostId: string; cwd: string; path: string; expectedContents: string; contents: string }, mode: string) => {
     assert.equal(params.hostId, 'local');
     assert.equal(params.cwd, project);
@@ -473,19 +479,25 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   const image = page.getByRole('img', { name: join(project, 'image.png') });
   await image.waitFor();
   await page.waitForFunction(() => Boolean(document.querySelector('img')?.naturalWidth));
+  const imageUrl = await image.getAttribute('src');
   await page.getByRole('button', { name: 'sound.wav', exact: true }).click();
+  await page.waitForFunction(url => (window as any).previewUrls.revoked.includes(url), imageUrl);
   const audio = page.getByLabel(`Audio: ${join(project, 'sound.wav')}`);
   await audio.waitFor();
   await audio.evaluate(async element => { (element as HTMLAudioElement).muted = true; await (element as HTMLAudioElement).play(); });
   await page.waitForFunction(() => (document.querySelector('audio')?.currentTime ?? 0) > 0);
   assert.equal(await audio.evaluate(element => (element as HTMLAudioElement).duration), 2);
+  const audioUrl = await audio.getAttribute('src');
   await page.getByRole('button', { name: 'clip.mp4', exact: true }).click();
+  await page.waitForFunction(url => (window as any).previewUrls.revoked.includes(url), audioUrl);
   const video = page.getByLabel(`Video: ${join(project, 'clip.mp4')}`);
   await video.waitFor();
   await video.evaluate(async element => { (element as HTMLVideoElement).muted = true; await (element as HTMLVideoElement).play(); });
   await page.waitForFunction(() => Boolean(document.querySelector('video')?.videoWidth && document.querySelector('video')!.currentTime > 0));
   assert.equal(await video.evaluate(element => (element as HTMLVideoElement).videoWidth), 64);
+  const videoUrl = await video.getAttribute('src');
   await page.getByRole('button', { name: 'broken.wav', exact: true }).click();
+  await page.waitForFunction(url => (window as any).previewUrls.revoked.includes(url), videoUrl);
   await page.getByRole('alert').filter({ hasText: 'Media preview failed' }).waitFor();
   await page.getByRole('button', { name: 'report.pdf', exact: true }).click();
   await page.getByLabel('PDF page 1').waitFor();
@@ -519,6 +531,12 @@ test('workspace file panels use the real host with a disposable synthetic daemon
   const patch = '@@ -1,3 +1,3 @@\n first\n-old\n+new\n third\n';
   await page.evaluate(diff => (window as any).fixture.render({ request: { id: 'diff-1', kind: 'diff', path: 'diff-target.txt', diff } }), patch);
   await page.getByLabel('Diff').getByText('+new', { exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Switch to split diff' }).click();
+  await page.getByRole('button', { name: 'Enable word wrap' }).click();
+  await page.getByRole('tab', { name: /notes.txt/ }).click();
+  await page.getByRole('tab', { name: /diff-target.txt changes/ }).click();
+  assert.equal(await page.getByRole('button', { name: 'Switch to unified diff' }).count(), 1);
+  assert.equal(await page.getByRole('button', { name: 'Disable word wrap' }).count(), 1);
   if (screenshotDir) await page.screenshot({ path: join(screenshotDir, 'diff.png') });
   await page.getByRole('button', { name: 'Add file to conversation' }).click();
   assert.equal(await page.evaluate(() => (window as any).fixture.state.references.at(-1).files[0].path), join(project, 'diff-target.txt'));

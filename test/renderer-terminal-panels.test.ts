@@ -59,6 +59,7 @@ test('terminal panels use the page-owned host session and never replay input aft
       import { createRoot } from 'react-dom/client';
       import { WorkspacePanels } from './src/renderer/panels/WorkspacePanels.tsx';
       import { TerminalPanel } from './src/renderer/terminal/TerminalPanel.tsx';
+      import { I18nProvider } from './src/renderer/i18n/index.tsx';
       const state = { calls: [], events: [], failClose: false, delayClose: false, releaseClose: null }, listeners = new Set(), pending = new Map();
       let socket, opened, seq = 0;
       function connect() {
@@ -93,12 +94,14 @@ test('terminal panels use the page-owned host session and never replay input aft
         async rpc() { throw new Error('unexpected RPC'); }, async reply() { throw new Error('unexpected reply'); },
       };
       const root = createRoot(document.getElementById('root'));
+      let locale = 'en-US';
       let props = {client,scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},appearance:{theme:'dark',codeFontSize:13,codeLineHeight:20},
         request:{id:'one',scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},kind:'terminal'},onRequestConsumed:()=>{},onClose:()=>{}};
       window.fixture = { state, disconnect() { socket.close(); }, reconnect: connect,
         render(changes) { const next = {...props,...changes};
           if (changes.request) next.request = {scopeId:next.scopeId,hostId:next.hostId,cwd:next.cwd,...changes.request};
-          props = next; root.render(React.createElement(WorkspacePanels,props)); },
+          props = next; root.render(React.createElement(I18nProvider,{locale},React.createElement(WorkspacePanels,props))); },
+        setLocale(value) { locale = value; this.render({}); },
         async existing(id) { await client.host('terminal',{operation:'create',args:[{sessionId:id,hostId:'local',cwd:${JSON.stringify(root)}}]}); },
         attach(id) { root.render(React.createElement(TerminalPanel,{client,hostId:'local',cwd:${JSON.stringify(root)},sessionId:id})); },
         unmount() { root.unmount(); },
@@ -126,6 +129,11 @@ test('terminal panels use the page-owned host session and never replay input aft
   const screenshotDir = process.env.AGENTS_PANEL_SCREENSHOTS;
   if (screenshotDir) { await mkdir(screenshotDir, { recursive: true }); await page.screenshot({ path: join(screenshotDir, 'terminal.png') }); }
   assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 1);
+  await page.evaluate(() => (window as any).fixture.setLocale('zh-CN'));
+  await page.getByRole('tab', { name:'终端' }).waitFor();
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, 1);
+  await page.evaluate(() => (window as any).fixture.setLocale('en-US'));
+  await page.getByRole('tab', { name:'Terminal' }).waitFor();
   assert.ok(await page.locator('.xterm-rows span').evaluateAll(spans => spans.some(span => span.textContent?.includes('READY') && getComputedStyle(span).color !== 'rgb(229, 232, 232)')));
   await page.locator('.xterm-helper-textarea').focus();
   await page.keyboard.type('abc');

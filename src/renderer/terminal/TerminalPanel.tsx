@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import type { TerminalEvent } from '../../native/terminal-protocol.ts';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { errorMessage } from '../files/file-service.ts';
+import { panelError, usePanelText } from '../panels/panel-i18n.ts';
 import '@xterm/xterm/css/xterm.css';
 
 export interface TerminalPanelProps {
@@ -24,6 +25,7 @@ export interface TerminalPanelProps {
 export interface TerminalPanelHandle { close(): Promise<boolean> }
 
 export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visible = true, theme = 'dark', fontSize = 13, lineHeight = 20, fontFamily, ref }: TerminalPanelProps) {
+  const t = usePanelText();
   const element = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<() => void>(() => {});
@@ -163,9 +165,9 @@ export function TerminalPanel({ client, hostId, cwd, threadId, sessionId, visibl
   }, [attempt, theme, fontSize, lineHeight, fontFamily]);
   useEffect(() => { if (visible) fitRef.current(); }, [visible]);
   return <div className="yard-terminal-panel">
-    <div className="yard-terminal-header"><span role="status">{status}</span>
-      {canRestart ? <button type="button" onClick={() => void closeRef.current().then(closed => { if (closed) setAttempt(value => value + 1); })}>New terminal</button> : null}
+    <div className="yard-terminal-header"><span role="status">{panelError(t, status)}</span>
+      {canRestart ? <button type="button" onClick={() => void closeRef.current().then(closed => { if (closed) setAttempt(value => value + 1); })}>{t('New terminal')}</button> : null}
     </div>
-    <div className="yard-terminal-screen" ref={element} aria-label="Terminal" />
+    <div className="yard-terminal-screen" ref={element} aria-label={t('Terminal')} />
   </div>;
 }

@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, File, Folder, FolderOpen, RefreshCw } from 'lucide-react';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { errorMessage, resolveFilePath } from './file-service.ts';
+import { panelError, usePanelText } from '../panels/panel-i18n.ts';
 
 interface DirectoryEntry { name: string; path: string; type: 'directory' | 'file'; isSymlink: boolean }
 interface DirectoryState { loading: boolean; entries?: DirectoryEntry[]; error?: string }
 interface Props { client: WorkbenchClient; hostId: string; cwd: string; onOpen(path: string): void }
 
 export function DirectoryTree({ client, hostId, cwd, onOpen }: Props) {
+  const t = usePanelText();
   const [directories, setDirectories] = useState<Record<string, DirectoryState>>({});
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['']));
   const generation = useRef(0);
@@ -53,9 +55,9 @@ export function DirectoryTree({ client, hostId, cwd, onOpen }: Props) {
 
   function renderDirectory(path: string, depth: number) {
     const directory = directories[path];
-    if (directory?.loading) return <div className="yard-files-tree-status" style={{ paddingLeft: 12 + depth * 14 }}>Loading...</div>;
+    if (directory?.loading) return <div className="yard-files-tree-status" style={{ paddingLeft: 12 + depth * 14 }}>{t('Loading...')}</div>;
     if (directory?.error) return <div className="yard-files-tree-error" role="alert" style={{ paddingLeft: 12 + depth * 14 }}>
-      {directory.error} <button type="button" onClick={() => load(path)}>Retry</button>
+      {panelError(t, directory.error)} <button type="button" onClick={() => load(path)}>{t('Retry')}</button>
     </div>;
     return directory?.entries?.map(entry => {
       const isOpen = expanded.has(entry.path);
@@ -72,8 +74,8 @@ export function DirectoryTree({ client, hostId, cwd, onOpen }: Props) {
   }
 
   return <div className="yard-files-tree">
-    <div className="yard-files-tree-heading"><span title={cwd}>Files</span>
-      <button type="button" className="yard-panel-icon" title="Refresh files" aria-label="Refresh files" onClick={refresh}><RefreshCw /></button>
+    <div className="yard-files-tree-heading"><span title={cwd}>{t('Files')}</span>
+      <button type="button" className="yard-panel-icon" title={t('Refresh files')} aria-label={t('Refresh files')} onClick={refresh}><RefreshCw /></button>
     </div>
     <div className="yard-files-tree-list">{renderDirectory('', 0)}</div>
   </div>;

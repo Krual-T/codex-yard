@@ -3,10 +3,12 @@ import { ChevronLeft, ChevronRight, Minus, Plus } from 'lucide-react';
 import { getDocument, GlobalWorkerOptions, TextLayer } from 'pdfjs-dist';
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
 import { errorMessage } from './file-service.ts';
+import { panelError, usePanelText } from '../panels/panel-i18n.ts';
 
 GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
 export function PdfViewer({ bytes }: { bytes: Uint8Array<ArrayBuffer> }) {
+  const t = usePanelText();
   const [document, setDocument] = useState<PDFDocumentProxy>();
   const [page, setPage] = useState(1);
   const [scale, setScale] = useState(1);
@@ -25,7 +27,7 @@ export function PdfViewer({ bytes }: { bytes: Uint8Array<ArrayBuffer> }) {
     void task.promise.then(pdf => { if (active) setDocument(pdf); }).catch(reason => {
       if (active) setError(errorMessage(reason));
     });
-    return () => { active = false; void task.destroy(); };
+    return () => { active = false; void task.destroy().catch(() => {}); };
   }, [bytes]);
 
   useEffect(() => {
@@ -57,24 +59,24 @@ export function PdfViewer({ bytes }: { bytes: Uint8Array<ArrayBuffer> }) {
   }, [document, page, scale]);
 
   return <div className="yard-pdf-viewer">
-    <div className="yard-pdf-toolbar" aria-label="PDF controls">
-      <button type="button" className="yard-panel-icon" title="Previous page" aria-label="Previous page"
+    <div className="yard-pdf-toolbar" aria-label={t('PDF controls')}>
+      <button type="button" className="yard-panel-icon" title={t('Previous page')} aria-label={t('Previous page')}
         disabled={!document || page <= 1} onClick={() => setPage(value => value - 1)}><ChevronLeft /></button>
-      <span aria-label="PDF page">{page} / {document?.numPages ?? '-'}</span>
-      <button type="button" className="yard-panel-icon" title="Next page" aria-label="Next page"
+      <span aria-label={t('PDF page')}>{page} / {document?.numPages ?? '-'}</span>
+      <button type="button" className="yard-panel-icon" title={t('Next page')} aria-label={t('Next page')}
         disabled={!document || page >= document.numPages} onClick={() => setPage(value => value + 1)}><ChevronRight /></button>
-      <button type="button" className="yard-panel-icon" title="Zoom out" aria-label="Zoom out"
+      <button type="button" className="yard-panel-icon" title={t('Zoom out')} aria-label={t('Zoom out')}
         disabled={scale <= 0.5} onClick={() => setScale(value => Math.max(0.5, value - 0.25))}><Minus /></button>
-      <span aria-label="PDF zoom">{Math.round(scale * 100)}%</span>
-      <button type="button" className="yard-panel-icon" title="Zoom in" aria-label="Zoom in"
+      <span aria-label={t('PDF zoom')}>{Math.round(scale * 100)}%</span>
+      <button type="button" className="yard-panel-icon" title={t('Zoom in')} aria-label={t('Zoom in')}
         disabled={scale >= 3} onClick={() => setScale(value => Math.min(3, value + 0.25))}><Plus /></button>
     </div>
-    {error ? <div className="yard-file-error" role="alert">PDF preview: {error}</div> : null}
+    {error ? <div className="yard-file-error" role="alert">{t('PDF preview: ')}{panelError(t, error)}</div> : null}
     <div className="yard-pdf-scroll">
       {document ? <div className="yard-pdf-page" ref={pageRef} key={`${page}:${scale}`}>
-        <canvas ref={canvasRef} aria-label={`PDF page ${page}`} />
+        <canvas ref={canvasRef} aria-label={t('PDF page {page}', {page})} />
         <div ref={textRef} className="yard-pdf-text-layer" />
-      </div> : !error ? <div className="yard-file-status" role="status">Loading PDF...</div> : null}
+      </div> : !error ? <div className="yard-file-status" role="status">{t('Loading PDF...')}</div> : null}
     </div>
   </div>;
 }

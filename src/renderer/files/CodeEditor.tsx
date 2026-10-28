@@ -3,11 +3,12 @@ import { Redo2, Search, Undo2 } from 'lucide-react';
 import { history, historyKeymap, defaultKeymap, indentWithTab, redo, redoDepth, undo, undoDepth } from '@codemirror/commands';
 import { defaultHighlightStyle, bracketMatching, HighlightStyle, indentOnInput, LanguageDescription, syntaxHighlighting } from '@codemirror/language';
 import { languages } from '@codemirror/language-data';
-import { getSearchQuery, openSearchPanel, search, searchKeymap, searchPanelOpen } from '@codemirror/search';
+import { closeSearchPanel, getSearchQuery, openSearchPanel, search, searchKeymap, searchPanelOpen, SearchQuery, setSearchQuery } from '@codemirror/search';
 import { Compartment, EditorState, Prec } from '@codemirror/state';
 import { EditorView, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from '@codemirror/view';
 import { editorText } from './file-service.ts';
 import { fileFormat, fileText } from './editor-format.ts';
+import { panelError, usePanelText } from '../panels/panel-i18n.ts';
 
 interface Props {
   path: string;
@@ -15,6 +16,7 @@ interface Props {
   theme: 'light' | 'dark';
   visible: boolean;
   readOnly: boolean;
+  wrap?: boolean;
   location?: { line: number; column?: number; id: number };
   findRequest?: number;
   onFindRequestConsumed?(id: number): void;
@@ -32,8 +34,11 @@ const darkHighlightStyle = HighlightStyle.define(defaultHighlightStyle.specs.map
   return color ? { ...spec, color } : spec;
 }));
 const editorTheme = (dark: boolean) => [EditorView.theme({}, { dark }), syntaxHighlighting(dark ? darkHighlightStyle : defaultHighlightStyle)];
+const searchPhrases = ['Find', 'Replace', 'next', 'previous', 'all', 'match case', 'regexp', 'by word', 'replace',
+  'replace all', 'close', 'Go to line', 'go', 'current match', 'on line', 'replaced match on line $', 'replaced $ matches'];
 
 export function CodeEditor(props: Props) {
+  const t = usePanelText();
   const container = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const callbacks = useRef(props);
@@ -43,6 +48,9 @@ export function CodeEditor(props: Props) {
   const language = useRef(new Compartment());
   const editable = useRef(new Compartment());
   const theme = useRef(new Compartment());
+  const wrapping = useRef(new Compartment());
+  const phrases = useRef(new Compartment());
+  const attributes = useRef(new Compartment());
   const [historyState, setHistoryState] = useState({ undo: false, redo: false });
   const [languageError, setLanguageError] = useState('');
   const [findStatus, setFindStatus] = useState<string>();
@@ -82,9 +90,11 @@ export function CodeEditor(props: Props) {
           format.extension, history(), lineNumbers(), highlightActiveLineGutter(), highlightActiveLine(),
           bracketMatching(), indentOnInput(), search({ top: true }),
           EditorState.allowMultipleSelections.of(true),
-          EditorView.contentAttributes.of({ 'aria-label': `File: ${props.path}`, role: 'textbox', 'aria-multiline': 'true', spellcheck: 'false' }),
+          attributes.current.of(EditorView.contentAttributes.of({ 'aria-label': t('File: {path}', { path: props.path }), role: 'textbox', 'aria-multiline': 'true', spellcheck: 'false' })),
+          phrases.current.of(EditorState.phrases.of(Object.fromEntries(searchPhrases.map(key => [key, t(key)])))),
           editable.current.of([EditorState.readOnly.of(props.readOnly), EditorView.editable.of(!props.readOnly)]),
           theme.current.of(editorTheme(props.theme === 'dark')),
+          wrapping.current.of(props.wrap ? EditorView.lineWrapping : []),
           language.current.of([]),
           Prec.highest(keymap.of([
             { key: 'Mod-s', scope: 'editor search-panel', run: () => { callbacks.current.onSave(); return true; }, preventDefault: true },
@@ -123,6 +133,40 @@ export function CodeEditor(props: Props) {
   useEffect(() => {
     view.current?.dispatch({ effects: theme.current.reconfigure(editorTheme(props.theme === 'dark')) });
   }, [props.theme]);
+  useEffect(() => {
+    view.current?.dispatch({ effects: wrapping.current.reconfigure(props.wrap ? EditorView.lineWrapping : []) });
+  }, [props.wrap]);
+  useEffect(() => {
+    const instance = view.current;
+    if (!instance) return;
+    const open = searchPanelOpen(instance.state);
+    const stateQuery = getSearchQuery(instance.state);
+    const focused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const searchPanel = instance.dom.querySelector('.cm-search');
+    const input = focused instanceof HTMLInputElement && searchPanel?.contains(focused) ? focused : null;
+    const field = (name: string) => searchPanel?.querySelector<HTMLInputElement>(`input[name="${name}"]`);
+    const query = searchPanel ? new SearchQuery({
+      search: field('search')?.value ?? stateQuery.search, replace: field('replace')?.value ?? stateQuery.replace,
+      caseSensitive: field('case')?.checked ?? stateQuery.caseSensitive, regexp: field('re')?.checked ?? stateQuery.regexp,
+      wholeWord: field('word')?.checked ?? stateQuery.wholeWord, literal: stateQuery.literal, test: stateQuery.test,
+    }) : stateQuery;
+    const name = focused && searchPanel?.contains(focused) ? focused.getAttribute('name') : null;
+    const start = input?.selectionStart, end = input?.selectionEnd;
+    if (open) closeSearchPanel(instance);
+    instance.dispatch({ effects: [
+      phrases.current.reconfigure(EditorState.phrases.of(Object.fromEntries(searchPhrases.map(key => [key, t(key)])))),
+      attributes.current.reconfigure(EditorView.contentAttributes.of({ 'aria-label': t('File: {path}', { path: props.path }), role: 'textbox', 'aria-multiline': 'true', spellcheck: 'false' })),
+    ] });
+    if (open) {
+      openSearchPanel(instance);
+      instance.dispatch({ effects: setSearchQuery.of(query) });
+      const replacement = name ? instance.dom.querySelector<HTMLElement>(`.cm-search [name="${CSS.escape(name)}"]`) : null;
+      if (replacement) {
+        replacement.focus();
+        if (replacement instanceof HTMLInputElement && start != null && end != null) replacement.setSelectionRange(start, end);
+      } else if (focused?.isConnected) focused.focus({ preventScroll: true });
+    }
+  }, [props.path, t]);
   useEffect(() => { if (props.visible) view.current?.requestMeasure(); }, [props.visible]);
   useEffect(() => {
     const instance = view.current;
@@ -143,14 +187,14 @@ export function CodeEditor(props: Props) {
 
   return <div className="yard-text-viewer">
     <div className="yard-file-find">
-      <button type="button" className="yard-panel-icon" title="Undo" aria-label="Undo" disabled={props.readOnly || !historyState.undo}
+      <button type="button" className="yard-panel-icon" title={t('Undo')} aria-label={t('Undo')} disabled={props.readOnly || !historyState.undo}
         onClick={() => { if (view.current) { undo(view.current); view.current.focus(); } }}><Undo2 /></button>
-      <button type="button" className="yard-panel-icon" title="Redo" aria-label="Redo" disabled={props.readOnly || !historyState.redo}
+      <button type="button" className="yard-panel-icon" title={t('Redo')} aria-label={t('Redo')} disabled={props.readOnly || !historyState.redo}
         onClick={() => { if (view.current) { redo(view.current); view.current.focus(); } }}><Redo2 /></button>
-      <button type="button" className="yard-panel-icon" title="Find and replace" aria-label="Find in file"
+      <button type="button" className="yard-panel-icon" title={t('Find and replace')} aria-label={t('Find in file')}
         onClick={() => { if (view.current) openSearchPanel(view.current); }}><Search /></button>
-      {findStatus !== undefined ? <span role="status" aria-live="polite">{findStatus}</span> : null}
-      {languageError ? <span role="status">{languageError}</span> : null}
+      {findStatus !== undefined ? <span role="status" aria-live="polite">{t(findStatus)}</span> : null}
+      {languageError ? <span role="status">{panelError(t, languageError)}</span> : null}
     </div>
     <div ref={container} className="yard-file-editor" />
   </div>;

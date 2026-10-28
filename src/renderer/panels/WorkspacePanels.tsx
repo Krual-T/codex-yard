@@ -14,6 +14,7 @@ import type { ComposerDraft, WorkbenchClient } from '../workbench-contract.ts';
 import { claimFileRecovery, discardFileRecovery, discardFileRecoveries, readFileRecovery, reconcileFileRecovery,
   sameFileRecovery, updateFileRecovery } from './file-save-recovery.ts';
 import type { FileSaveRecovery, RecoveryPhase } from './file-save-recovery.ts';
+import { panelError as localizeError, usePanelText } from './panel-i18n.ts';
 import './workspace-panels.css';
 
 interface RequestScope { id: string; scopeId: string; hostId: string; cwd: string }
@@ -72,6 +73,7 @@ const unresolved = (recovery?: FileSaveRecovery) => recovery?.phase === 'pending
 const isDirty = (tab: FileTab) => tab.content?.kind === 'text' && (tab.draft !== tab.saved || unresolved(tab.recovery) || !!tab.storageError);
 
 export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appearance, request, onRequestConsumed, onClose, onReference, onDirtyChange, onRecoveryBarrier }: WorkspacePanelsProps) {
+  const t = usePanelText();
   const [tabs, setTabs] = useState<FileTab[]>([]);
   const [terminals, setTerminals] = useState<TerminalTab[]>([]);
   const terminalHandles = useRef(new Map<string, TerminalPanelHandle>());
@@ -227,10 +229,10 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     const tab = tabsRef.current.find(item => item.key === key);
     if (!tab || tab.saving || closingRef.current) return;
     const localOnly = !!tab.storageError || recoveryFailures.current.has(key);
-    if ((isDirty(tab) || localOnly) && !window.confirm(localOnly
-      ? `Close ${fileName(tab.path)} on this page? Local edits may be lost; stored recovery records will not be changed.` : unresolved(tab.recovery)
-      ? `Close ${fileName(tab.path)}? The unknown save and retained edits will remain available.`
-      : `Discard unsaved changes to ${fileName(tab.path)}?`)) return;
+    if ((isDirty(tab) || localOnly) && !window.confirm(t(localOnly
+      ? 'Close {name} on this page? Local edits may be lost; stored recovery records will not be changed.' : unresolved(tab.recovery)
+      ? 'Close {name}? The unknown save and retained edits will remain available.'
+      : 'Discard unsaved changes to {name}?', {name: fileName(tab.path)}))) return;
     if (!freeze()) return;
     try {
       await recoveryQueues.current.get(key);
@@ -274,7 +276,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
   }
 
   function reload(tab: FileTab) {
-    if (closingRef.current || tab.saving || unresolved(tab.recovery) || tab.storageError || isDirty(tab) && !window.confirm(`Discard unsaved changes to ${fileName(tab.path)}?`)) return;
+    if (closingRef.current || tab.saving || unresolved(tab.recovery) || tab.storageError || isDirty(tab) && !window.confirm(t('Discard unsaved changes to {name}?', {name: fileName(tab.path)}))) return;
     const loadId = ++sequence.current;
     updateTabs(previous => previous.map(item => item.key === tab.key ? { ...item, loadId, loading: true, error: undefined } : item));
     void queueRecovery(tab.key, async () => { if (tab.recovery) await discardFileRecovery(tab.key, tab.recovery); })
@@ -424,9 +426,9 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
   async function closePanel(onlyThisPage = false) {
     if (closingRef.current || tabsRef.current.some(tab => tab.saving)) return;
     const localOnly = onlyThisPage || tabsRef.current.some(tab => tab.storageError || recoveryFailures.current.has(tab.key));
-    if ((tabsRef.current.some(isDirty) || localOnly) && !window.confirm(localOnly
+    if ((tabsRef.current.some(isDirty) || localOnly) && !window.confirm(t(localOnly
       ? 'Close this panel on this page? Local edits may be lost; stored recovery records will not be changed.' : tabsRef.current.some(tab => unresolved(tab.recovery))
-      ? 'Close the panel? Other unsaved edits will be discarded. Unknown saves and their retained edits will remain available.' : 'Discard unsaved file changes?')) return;
+      ? 'Close the panel? Other unsaved edits will be discarded. Unknown saves and their retained edits will remain available.' : 'Discard unsaved file changes?'))) return;
     const original = tabsRef.current.map(({ key, loadId, revision }) => ({ key, loadId, revision }));
     setPanelError(undefined);
     if (!freeze()) return;
@@ -472,39 +474,39 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
   const lineHeight = Number.isFinite(appearance.codeLineHeight) && appearance.codeLineHeight > 0 ? appearance.codeLineHeight : 18;
   const style = { '--yard-panel-code-size': `${fontSize}px`, '--yard-panel-code-line-height': `${lineHeight}px`,
     ...(appearance.codeFontFamily ? { '--yard-panel-code-font': appearance.codeFontFamily } : {}) } as CSSProperties;
-  return <section className="yard-workspace-panels" data-theme={appearance.theme} style={style} aria-label="Workspace files" onKeyDownCapture={event => {
+  return <section className="yard-workspace-panels" data-theme={appearance.theme} style={style} aria-label={t('Workspace files')} onKeyDownCapture={event => {
     if (active?.content?.kind === 'text' && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
       event.preventDefault(); event.stopPropagation();
       setFindRequest({ key: active.key, id: ++sequence.current });
     }
   }}>
     <div className="yard-panel-header">
-      <button type="button" className="yard-panel-icon" title={showFiles ? 'Hide files' : 'Show files'} aria-label={showFiles ? 'Hide files' : 'Show files'} disabled={closing} onClick={() => setShowFiles(value => !value)}>
+      <button type="button" className="yard-panel-icon" title={t(showFiles ? 'Hide files' : 'Show files')} aria-label={t(showFiles ? 'Hide files' : 'Show files')} disabled={closing} onClick={() => setShowFiles(value => !value)}>
         {showFiles ? <PanelLeftClose /> : <PanelLeftOpen />}
       </button>
-      <div ref={tabList} className="yard-panel-tabs" role="tablist" aria-label="Open workspace tabs" inert={closing}>
+      <div ref={tabList} className="yard-panel-tabs" role="tablist" aria-label={t('Open workspace tabs')} inert={closing}>
         {visible.map(tab => <div className={`yard-panel-tab${tab.key === selected ? ' is-active' : ''}`} key={tab.key}>
           <button type="button" role="tab" aria-selected={tab.key === selected} title={tab.path} onClick={() => select(tab.key)}>
-            <span>{fileName(tab.path)}</span>{isDirty(tab) ? <span aria-label="Unsaved changes" className="yard-panel-dirty" /> : null}
+            <span>{fileName(tab.path)}</span>{isDirty(tab) ? <span aria-label={t('Unsaved changes')} className="yard-panel-dirty" /> : null}
           </button>
-          <button type="button" className="yard-panel-tab-close" title={`Close ${fileName(tab.path)}`} aria-label={`Close ${fileName(tab.path)}`}
+          <button type="button" className="yard-panel-tab-close" title={t('Close {name}', {name: fileName(tab.path)})} aria-label={t('Close {name}', {name: fileName(tab.path)})}
             disabled={tab.saving} onClick={() => void closeTab(tab.key)}><X /></button>
         </div>)}
         {visibleTerminals.map(tab => <div className={`yard-panel-tab${tab.key === selected ? ' is-active' : ''}`} key={tab.key}>
-          <button type="button" role="tab" aria-selected={tab.key === selected} onClick={() => select(tab.key)}><span>Terminal</span></button>
-          <button type="button" className="yard-panel-tab-close" title="Close terminal" aria-label="Close terminal" disabled={closing} onClick={() => void closeTerminal(tab.key)}><X /></button>
+          <button type="button" role="tab" aria-selected={tab.key === selected} onClick={() => select(tab.key)}><span>{t('Terminal')}</span></button>
+          <button type="button" className="yard-panel-tab-close" title={t('Close terminal')} aria-label={t('Close terminal')} disabled={closing} onClick={() => void closeTerminal(tab.key)}><X /></button>
         </div>)}
         {visibleDiffs.map(tab => <div className={`yard-panel-tab${tab.key === selected ? ' is-active' : ''}`} key={tab.key}>
-          <button type="button" role="tab" aria-selected={tab.key === selected} title={tab.path ?? 'Changes'} onClick={() => select(tab.key)}>
-            <span>{tab.path ? `${fileName(tab.path)} changes` : 'Changes'}</span>
+          <button type="button" role="tab" aria-selected={tab.key === selected} title={tab.path ?? t('Changes')} onClick={() => select(tab.key)}>
+            <span>{tab.path ? t('{name} changes', {name: fileName(tab.path)}) : t('Changes')}</span>
           </button>
-          <button type="button" className="yard-panel-tab-close" title="Close diff" aria-label="Close diff" onClick={() => closeDiff(tab.key)}><X /></button>
+          <button type="button" className="yard-panel-tab-close" title={t('Close diff')} aria-label={t('Close diff')} onClick={() => closeDiff(tab.key)}><X /></button>
         </div>)}
       </div>
-      <button type="button" className="yard-panel-icon" title="Close panel" aria-label="Close panel" disabled={closing || tabs.some(tab => tab.saving)} onClick={() => void closePanel()}><X /></button>
+      <button type="button" className="yard-panel-icon" title={t('Close panel')} aria-label={t('Close panel')} disabled={closing || tabs.some(tab => tab.saving)} onClick={() => void closePanel()}><X /></button>
     </div>
-    {panelError ? <div className="yard-file-error" role="alert">{panelError}{' '}
-      <button type="button" disabled={closing} onClick={() => void closePanel(true)}>Close panel here only</button>
+    {panelError ? <div className="yard-file-error" role="alert">{localizeError(t, panelError)}{' '}
+      <button type="button" disabled={closing} onClick={() => void closePanel(true)}>{t('Close panel here only')}</button>
     </div> : null}
     <div className="yard-panel-body" inert={closing}>
       {showFiles ? <DirectoryTree key={scopeKey} client={client} hostId={hostId} cwd={cwd} onOpen={openFile} /> : null}
@@ -514,26 +516,30 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
             theme={appearance.theme} fontSize={fontSize} lineHeight={lineHeight} fontFamily={appearance.codeFontFamily}
             ref={handle => { if (handle) terminalHandles.current.set(tab.key, handle); else terminalHandles.current.delete(tab.key); }} />
         </div>)}
-        {activeDiff ? <DiffViewer diff={activeDiff.diff} path={activeDiff.path ? resolveFilePath(activeDiff.cwd, activeDiff.path) : undefined} onOpenFile={openFile} onReference={onReference} /> : null}
+        {diffs.map(tab => <div className="yard-diff-container" key={tab.key} hidden={tab.key !== activeDiff?.key}>
+          <DiffViewer diff={tab.diff} path={tab.path ? resolveFilePath(tab.cwd, tab.path) : undefined}
+            onOpenFile={tab.key === activeDiff?.key ? openFile : undefined} onReference={tab.key === activeDiff?.key ? onReference : undefined} />
+        </div>)}
         {active ? <>
           <div className="yard-file-toolbar">
             <span className="yard-file-path" title={active.path}>{active.path}</span>
-            {active.content?.kind === 'text' ? <button type="button" className="yard-panel-icon" title="Save file" aria-label="Save file"
+            {active.content?.kind === 'text' ? <button type="button" className="yard-panel-icon" title={t('Save file')} aria-label={t('Save file')}
               disabled={!isDirty(active) || active.saving || active.loading || unresolved(active.recovery) || active.storageError} onClick={() => void save(active)}><Save /></button> : null}
-            <button type="button" className="yard-panel-icon" title="Reload file" aria-label="Reload file" disabled={active.saving || active.loading || unresolved(active.recovery) || active.storageError} onClick={() => reload(active)}><RotateCw /></button>
-            <button type="button" className="yard-panel-icon" title="Download file" aria-label="Download file" onClick={() => void download(active)}><Download /></button>
-            {onReference ? <button type="button" className="yard-panel-icon" title="Add file to conversation" aria-label="Add file to conversation"
+            <button type="button" className="yard-panel-icon" title={t('Reload file')} aria-label={t('Reload file')} disabled={active.saving || active.loading || unresolved(active.recovery) || active.storageError} onClick={() => reload(active)}><RotateCw /></button>
+            <button type="button" className="yard-panel-icon" title={t('Download file')} aria-label={t('Download file')} onClick={() => void download(active)}><Download /></button>
+            {onReference ? <button type="button" className="yard-panel-icon" title={t('Add file to conversation')} aria-label={t('Add file to conversation')}
               onClick={() => onReference({ text: '', images: [], files: [{ path: active.path, name: fileName(active.path) }] })}><Plus /></button> : null}
           </div>
-          {active.error ? <div className="yard-file-error" role="alert">{active.error}</div> : null}
-          {active.storageError ? <div className="yard-file-check"><button type="button" onClick={() => void retryRecovery(active.key)}>Review recovery</button></div> : null}
-          {unresolved(active.recovery) ? <div className="yard-file-check"><button type="button" disabled={active.saving || active.storageError} onClick={() => void checkSave(active)}>Check save result</button></div> : null}
-          {active.loading ? <div className="yard-file-status" role="status">Loading...</div> : active.content?.kind === 'binary' ?
-            <FileViewer key={`${active.key}:${active.loadId}`} path={active.path} content={active.content} text="" theme={appearance.theme} visible readOnly
-              onChange={() => {}} onSave={() => {}} /> : !active.content ? <div className="yard-file-status"><button type="button" onClick={() => reload(active)}>Retry</button></div> : null}
-        </> : !activeTerminal && !activeDiff ? <div className="yard-file-status">Select a file</div> : null}
+          {active.error ? <div className="yard-file-error" role="alert">{localizeError(t, active.error)}</div> : null}
+          {active.storageError ? <div className="yard-file-check"><button type="button" onClick={() => void retryRecovery(active.key)}>{t('Review recovery')}</button></div> : null}
+          {unresolved(active.recovery) ? <div className="yard-file-check"><button type="button" disabled={active.saving || active.storageError} onClick={() => void checkSave(active)}>{t('Check save result')}</button></div> : null}
+          {active.loading ? <div className="yard-file-status" role="status">{t('Loading...')}</div> : active.content?.kind === 'binary' ?
+            <FileViewer key={`${active.key}:${active.loadId}`} client={client} hostId={active.hostId} cwd={active.cwd} threadId={threadId} path={active.path} content={active.content} text="" theme={appearance.theme} visible readOnly
+              onChange={() => {}} onSave={() => {}} /> : !active.content ? <div className="yard-file-status"><button type="button" onClick={() => reload(active)}>{t('Retry')}</button></div> : null}
+        </> : !activeTerminal && !activeDiff ? <div className="yard-file-status">{t('Select a file')}</div> : null}
         {tabs.filter(tab => tab.content?.kind === 'text' && !tab.loading).map(tab => <div className="yard-editor-container" key={`${tab.key}:${tab.loadId}`} hidden={tab.key !== active?.key}>
-          <FileViewer path={tab.path} content={tab.content!} text={tab.draft} location={tab.location} theme={appearance.theme} visible={tab.key === active?.key}
+          <FileViewer client={client} hostId={tab.hostId} cwd={tab.cwd} threadId={tab.scopeId === scopeId ? threadId : undefined}
+            onOpenFile={tab.key === active?.key ? openFile : undefined} path={tab.path} content={tab.content!} text={tab.draft} location={tab.location} theme={appearance.theme} visible={tab.key === active?.key}
             findRequest={findRequest?.key === tab.key ? findRequest.id : undefined}
             onFindRequestConsumed={id => setFindRequest(previous => previous?.id === id ? undefined : previous)}
             readOnly={closing}
