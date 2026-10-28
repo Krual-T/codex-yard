@@ -326,6 +326,25 @@ test('reapplying a theme keeps external untouched and unknown fields', async () 
   assert.deepEqual(Object.getOwnPropertyDescriptor(result, '__proto__')?.value, { keep: 'changed' });
 });
 
+test('a missing or null theme rebases edits against the displayed default while retaining the raw baseline', async () => {
+  for (const storedNull of [false, true]) {
+    const client = new FakeClient();
+    if (storedNull) client.settings.appearanceLightChromeTheme = null;
+    const first = new Preferences(client), second = new Preferences(client);
+    await Promise.all([first.load(), second.load()]);
+    first.edit('appearanceLightChromeTheme', { ...structuredClone(defaultThemes.light), surface: '#eeeeee' });
+    second.edit('appearanceLightChromeTheme', { ...structuredClone(defaultThemes.light), accent: '#123456' });
+    assert.deepEqual(second.getSnapshot().appearanceLightChromeTheme.editBase, storedNull ? { exists: true, value: null } : { exists: false });
+    assert.equal(await first.save(), true);
+    await second.reload('appearanceLightChromeTheme');
+    assert.equal(second.getSnapshot().appearanceLightChromeTheme.conflict, true);
+    second.resolveConflict('appearanceLightChromeTheme', 'draft');
+    assert.equal(await second.save(), true);
+    const result = client.settings.appearanceLightChromeTheme as typeof defaultThemes.light;
+    assert.equal(result.accent, '#123456'); assert.equal(result.surface, '#eeeeee');
+  }
+});
+
 test('a missing existence response cannot be used as a write baseline', async () => {
   const client = new FakeClient(), prefs = new Preferences(client);
   const original = client.host.bind(client);
