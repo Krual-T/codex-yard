@@ -218,6 +218,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       [locales.ideLocale, locales.systemLocale, ...navigator.languages, navigator.language].filter((value): value is string => !!value));
     const codeFontSize = typeof values.codeFontSize === 'number' && Number.isFinite(values.codeFontSize) ? values.codeFontSize : 12;
     setPanelAppearance({ theme: resolved.mode, codeFontSize, codeLineHeight: codeFontSize * 1.5,
+      codeThemeId: typeof values[resolved.mode === 'dark' ? 'appearanceDarkCodeThemeId' : 'appearanceLightCodeThemeId'] === 'string'
+        ? values[resolved.mode === 'dark' ? 'appearanceDarkCodeThemeId' : 'appearanceLightCodeThemeId'] as string : 'codex',
+      diffMarkerStyle: values.appearanceDiffMarkerStyle === 'symbols' ? 'symbols' : 'color',
       codeFontFamily: themeFontFamily(resolved.theme.fonts, 'code', 'ui-monospace, monospace') });
     const style = document.documentElement.style;
     setPreviewAppearance({ theme: resolved.mode, locale: document.documentElement.lang,
@@ -431,7 +434,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     await reloadSends();
   };
   const submit = async (draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, origin?: MessageEditOrigin,
-    description?: ComposerSubmissionDescription, retry?: SendIntent) => {
+    description?: ComposerSubmissionDescription, retry?: SendIntent,
+    visualizationSubmission?: { hostId: string; threadId: string; path: string; signal: AbortSignal }) => {
     if (inFlight.current) throw new Error('正在提交，请稍候。');
     if (loading) throw new Error('会话仍在加载，请稍候。');
     inFlight.current = true; setSubmitting(true); setError('');
@@ -443,6 +447,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const allowFirstTurn = !origin && action.type === 'send';
     const activeCwd = retry?.cwd ?? (thread?.cwd || cwd || workspace);
     const requireCurrent = (threadId: string | null) => {
+      if (visualizationSubmission && (visualizationSubmission.signal.aborted
+        || visualizationSubmission.hostId !== hostId || visualizationSubmission.threadId !== threadId
+        || !visualizationSubmission.path)) {
+        throw Object.assign(new Error('可视化来源已改变，未发送新的输入。'), { uncertain: false });
+      }
       if (navigationGeneration.current !== expectedNavigation || routeRef.current.hostId !== hostId || routeRef.current.threadId !== threadId || routeRef.current.readOnly) {
         throw Object.assign(new Error('会话已切换，原输入未发送并已保留。'), { uncertain: false });
       }
@@ -463,8 +472,12 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           throw new Error('提交草稿身份已改变，未发送。');
         }
         if (!retry) {
-          const stored = await readComposerDraft(description.owner, description.revision);
-          if (!stored || JSON.stringify(stored.draft) !== JSON.stringify(draft)) throw new Error('原提交版本未能核对，未发送。');
+          // The confirmed widget action supplies an immutable submission. Its
+          // intent uses this owner without replacing the editable composer.
+          if (!visualizationSubmission) {
+            const stored = await readComposerDraft(description.owner, description.revision);
+            if (!stored || JSON.stringify(stored.draft) !== JSON.stringify(draft)) throw new Error('原提交版本未能核对，未发送。');
+          }
           requireCurrent(current.threadId);
           intent = await sendStore.prepare(description, activeCwd, draft, options, description.overrides,
             selectedProject?.hostId === hostId ? selectedProject.id : undefined, additionalContext, action);
@@ -746,7 +759,16 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           onDraftChange={updateBrowserDraft} onClose={() => setPanelOpen(false)} />}
         {panelOpen && !settings && panelKind === 'visualization' && visualization?.hostId === current.hostId && visualization.threadId === current.threadId
           && <StandaloneVisualization client={client} {...visualization} theme={previewAppearance.theme} themeVariables={previewAppearance.variables}
-            locale={previewAppearance.locale} onPrefill={addReference} onClose={() => setPanelOpen(false)} />}
+            locale={previewAppearance.locale} onPrefill={addReference} onFollowUp={async (request, signal) => {
+              if (leaving || navigationLocked.current || signal.aborted || current.readOnly || !composerIsCurrent
+                || request.hostId !== current.hostId || request.threadId !== current.threadId) {
+                throw new Error('可视化所属会话尚未就绪，输入未发送。');
+              }
+              const activeTurn = threadRef.current?.turns.find(turn => turn.status === 'inProgress');
+              await submit(structuredClone(request.draft), initialOptions ?? {}, activeTurn ? { type: 'steer', turnId: activeTurn.id } : { type: 'send' },
+                undefined, { owner: { ...composerOwner }, revision: crypto.randomUUID(), overrides: {} }, undefined,
+                { hostId: request.hostId, threadId: request.threadId, path: request.path, signal });
+            }} onClose={() => setPanelOpen(false)} />}
       </aside>
       </div>
     </main>
