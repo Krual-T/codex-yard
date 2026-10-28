@@ -230,9 +230,10 @@ try {
   assert.deepEqual(manifest.errors, []); assert.equal(JSON.parse(manifest.data!).display, 'standalone'); results.manifest = manifest; await cdp.detach();
   console.log('Owned startup motion, Codex Yard icons and manifest passed');
 
+  await editor.fill('YARD_VISUAL_RUN. Execute exactly one shell command: sleep 25. Then reply VISUAL_FEEDBACK_OK.');
   await until(async () => !await page!.getByRole('button', { name: 'Send', exact: true }).isDisabled(), 'Ready composer');
   const completed = waitForCompletion('UI turn');
-  await editor.fill('YARD_VISUAL_RUN. Execute exactly one shell command: sleep 25. Then reply VISUAL_FEEDBACK_OK.'); await editor.press('Enter');
+  await editor.press('Enter');
   const spinner = threadRow().locator('.lucide-loader-circle'); await spinner.waitFor({ timeout: 15000 });
   const samples = [];
   for (let index = 0; index < 6; index++) {
