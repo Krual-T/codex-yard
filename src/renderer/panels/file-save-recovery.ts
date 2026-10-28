@@ -11,9 +11,15 @@ export interface FileSaveRecovery {
   draft: string;
   revision: number;
   query?: { cwd: string; path: string };
-  terminalOutcome?: 'saved' | 'conflict' | 'failed';
-  targetMatch?: 'same' | 'different' | 'unknown';
   guardOperationId?: string;
+}
+
+export class FileRecoveryChangedError extends Error {
+  readonly key: string;
+  constructor(key: string) {
+    super('File recovery changed in another page. Keep or copy this edit before closing.');
+    this.key = key;
+  }
 }
 
 const phases = new Set<RecoveryPhase>(['pending', 'unknown', 'saved', 'conflict', 'failed']);
@@ -27,8 +33,6 @@ function recovery(value: unknown): FileSaveRecovery | undefined {
     || typeof item.saved !== 'string' || typeof item.draft !== 'string' || !Number.isSafeInteger(item.revision) || item.revision! < 0
     || item.query !== undefined && (!item.query || typeof item.query.cwd !== 'string' || !item.query.cwd.startsWith('/')
       || typeof item.query.path !== 'string' || !item.query.path.startsWith('/'))
-    || item.terminalOutcome !== undefined && !['saved', 'conflict', 'failed'].includes(item.terminalOutcome)
-    || item.targetMatch !== undefined && !['same', 'different', 'unknown'].includes(item.targetMatch)
     || item.guardOperationId !== undefined && typeof item.guardOperationId !== 'string') {
     throw new Error('The saved file recovery record is invalid.');
   }
@@ -99,12 +103,15 @@ export async function discardFileRecovery(key: string, expected: FileSaveRecover
   await updateBrowserAtom(keyFor(key), value => checkedDiscard(value, expected));
 }
 
-export async function discardFileRecoveries(records: { key: string; expected: FileSaveRecovery }[]) {
+export async function discardFileRecoveries(records: { key: string; expected: FileSaveRecovery; retain?: boolean }[]) {
   if (records.length === 0) return;
-  if (records.length === 1) return discardFileRecovery(records[0]!.key, records[0]!.expected);
   await updateBrowserAtoms(atoms => {
     const updates: Record<string, unknown> = {};
-    for (const { key, expected } of records) updates[keyFor(key)] = checkedDiscard(atoms[keyFor(key)], expected);
-    return { value: undefined, updates };
+    for (const { key, expected, retain } of records) {
+      const value = atoms[keyFor(key)];
+      if (!sameFileRecovery(recovery(value), expected)) throw new FileRecoveryChangedError(key);
+      if (!retain) updates[keyFor(key)] = checkedDiscard(value, expected);
+    }
+    return { value: undefined, ...(Object.keys(updates).length ? { updates } : {}) };
   });
 }

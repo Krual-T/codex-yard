@@ -269,7 +269,7 @@ test('file recovery retains the original pending operation and later edits acros
     assert.notEqual(newReceiptId, oldReceiptId);
     assert.equal(await readFile(receiptPath, 'utf8'), 'XYbase\n');
     await page.evaluate(() => (window as any).fixture.release());
-    await page.getByRole('alert').filter({ hasText: 'recovery could not be updated' }).waitFor();
+    await page.getByRole('alert').filter({ hasText: 'Could not retain file recovery' }).waitFor();
     assert.equal(await page.evaluate(() => (window as any).fixture.text()), 'XYbase\n');
     assert.equal(await newerPage.evaluate(async path => (await (window as any).fixture.fileRecovery('receipt-a', path)).id, receiptPath), newReceiptId);
     assert.equal(writes, 4);
@@ -361,12 +361,15 @@ test('file recovery retains the original pending operation and later edits acros
     await page.keyboard.type('during transaction');
     assert.equal(await page.evaluate(() => (window as any).fixture.text()), 'XYbase\n');
     await newerPage.evaluate(() => (window as any).fixture.releaseAtoms());
-    await page.getByRole('alert').filter({ hasText: /atomically|another page/i }).waitFor();
+    await page.getByRole('alert').filter({ hasText: /atomically|another page/i }).first().waitFor();
     assert.equal(await page.getByRole('button', { name: 'Close panel here only' }).isVisible(), true);
     assert.deepEqual(await page.evaluate(async path => (window as any).fixture.fileRecovery('close', path), closeA), beforeA);
     assert.equal(await page.evaluate(async path => (await (window as any).fixture.fileRecovery('close', path)).id, closeB), 'other-page-record');
     assert.equal(await page.evaluate(() => (window as any).fixture.closed()), 0);
     await newerPage.evaluate(({ path, before }) => (window as any).fixture.changeRecovery('close', path, before), { path: closeB, before: beforeB });
+    await page.getByRole('tab', { name: /close-b.txt/ }).click();
+    await page.getByRole('button', { name: 'Review recovery' }).click();
+    await page.getByRole('button', { name: 'Review recovery' }).waitFor({ state: 'detached' });
     await page.getByRole('button', { name: 'Close panel', exact: true }).click();
     await page.waitForFunction(() => (window as any).fixture.closed() === 1);
     assert.equal(await page.evaluate(async path => (window as any).fixture.fileRecovery('close', path), closeA), undefined);
@@ -494,16 +497,18 @@ test('file recovery retains the original pending operation and later edits acros
     await page.getByRole('button', { name: 'Check save result' }).click();
     await page.getByRole('alert').filter({ hasText: 'File changed on disk' }).waitFor();
     const aliasTerminal = await page.evaluate(async ({ cwd, path }) => (window as any).fixture.recoveryAt('alias-other', cwd, path), { cwd: aliasA, path: directPath });
-    assert.equal(aliasTerminal.terminalOutcome, 'conflict');
-    assert.equal(aliasTerminal.targetMatch, 'same');
+    assert.equal(aliasTerminal.phase, 'conflict');
+    assert.equal((await page.evaluate(({ cwd, path, id, queryCwd, queryPath }) => (window as any).fixture.client.host('workspace-file-save-status',
+      {hostId:'local',cwd,path,operationId:id,queryCwd,queryPath}), {cwd:aliasA,path:directPath,id:aliasId,queryCwd:project,queryPath:aliasPath})).targetMatch, 'same');
     assert.equal(await page.getByRole('button', { name: 'Save file' }).isDisabled(), true);
     await page.evaluate(({ cwd }) => (window as any).fixture.render({scopeId:'alias-original',cwd,request:null}), { cwd: project });
     await page.getByRole('textbox', { name: `File: ${aliasPath}` }).waitFor();
     await page.getByRole('button', { name: 'Check save result' }).click();
     await page.getByRole('alert').filter({ hasText: 'File changed on disk' }).waitFor();
     const switched = await page.evaluate(async path => (window as any).fixture.fileRecovery('alias-original', path), aliasPath);
-    assert.equal(switched.terminalOutcome, 'conflict');
-    assert.equal(switched.targetMatch, 'different');
+    assert.equal(switched.phase, 'conflict');
+    assert.equal((await page.evaluate(({ cwd, path, id }) => (window as any).fixture.client.host('workspace-file-save-status',
+      {hostId:'local',cwd,path,operationId:id}), {cwd:project,path:aliasPath,id:aliasId})).targetMatch, 'different');
     assert.equal(await page.evaluate(() => (window as any).fixture.text()), 'Abase\n');
     assert.equal(await page.getByRole('button', { name: 'Save file' }).isDisabled(), true);
     await page.getByRole('textbox', { name: `File: ${aliasPath}` }).press('Control+s');
@@ -552,8 +557,9 @@ test('file recovery retains the original pending operation and later edits acros
     await newerPage.getByRole('alert').filter({ hasText: 'File changed on disk' }).waitFor();
     const heldConflict = await newerPage.evaluate(async path => (window as any).fixture.fileRecovery('held-conflict', path), heldPath);
     assert.equal(heldConflict.phase, 'conflict');
-    assert.equal(heldConflict.terminalOutcome, 'saved');
-    assert.equal(heldConflict.targetMatch, 'different');
+    const heldStatus = await newerPage.evaluate(({ cwd, path, id }) => (window as any).fixture.client.host('workspace-file-save-status',
+      {hostId:'local',cwd,path,operationId:id}), {cwd:project,path:heldPath,id:heldConflict.checkId});
+    assert.equal(heldStatus.outcome, 'saved'); assert.equal(heldStatus.targetMatch, 'different');
     assert.equal(heldConflict.draft, 'XYbase\n');
     assert.equal(await readFile(join(heldB, 'file.txt'), 'utf8'), heldConflict.saved);
     await page.evaluate(() => (window as any).fixture.release());
