@@ -6,7 +6,7 @@ import { permissionCatalog } from './permissions.ts';
 import type { PermissionCatalogOptions } from './permissions.ts';
 import { errorMessage, isRecord } from './codex-protocol.ts';
 import type { InitializeResponse, ModelSummary, PermissionProfile, RequestOptions, RpcId, RpcMessage, RpcResponses,
-  RpcResult, SessionConfig, SessionSettings, ThreadSettingsResponse } from './codex-protocol.ts';
+  RpcResult, SessionConfig, SessionSettings, ThreadSettingsResponse, LateRpcTerminal } from './codex-protocol.ts';
 export type { RequestOptions, RpcMessage, RpcResponses, RpcResult } from './codex-protocol.ts';
 
 // config/read contains credentials and provider/MCP environment. Only these
@@ -63,7 +63,11 @@ interface PendingRequest {
   reject: (error: RpcError) => void;
   timer: ReturnType<typeof setTimeout>;
   mutating: boolean;
+  timedOut?: boolean;
+  onLateTerminal?: RequestOptions['onLateTerminal'];
 }
+const maxLateObservers = 16;
+const lateObserverLifetimeMs = 5 * 60_000;
 export class CodexConnection extends EventEmitter<{ message: [RpcMessage]; status: [] }> {
   readonly socketPath: string;
   readonly timeout: number;
@@ -169,8 +173,23 @@ export class CodexConnection extends EventEmitter<{ message: [RpcMessage]; statu
     if (!message.method && (typeof message.id === 'string' || typeof message.id === 'number')) {
       const pending = this.pending.get(message.id);
       if (!pending) return;
+      if (pending.timedOut) {
+        const hasResult = Object.hasOwn(message, 'result');
+        const validError = isRecord(message.error) && typeof message.error.message === 'string'
+          && (typeof message.error.code === 'string' || typeof message.error.code === 'number');
+        if (hasResult === validError || Object.hasOwn(message, 'error') && !validError) return;
+      }
       this.pending.delete(message.id);
       clearTimeout(pending.timer);
+      if (pending.timedOut) {
+        const error = isRecord(message.error) ? message.error : {};
+        const terminal: LateRpcTerminal = message.error
+          ? { outcome: 'error', error: { message: typeof error.message === 'string' ? error.message : 'Codex 返回了无效错误。',
+            ...(typeof error.code === 'number' || typeof error.code === 'string' ? { code: error.code } : {}), data: error.data } }
+          : { outcome: 'success', result: message.result };
+        try { void Promise.resolve(pending.onLateTerminal?.(terminal)).catch(() => {}); } catch { /* The caller retains its unknown state. */ }
+        return;
+      }
       if (message.error) {
         const error = isRecord(message.error) ? message.error : {};
         pending.reject(new RpcError(typeof error.message === 'string' ? error.message : 'Codex 返回了无效错误。', {
@@ -199,25 +218,34 @@ export class CodexConnection extends EventEmitter<{ message: [RpcMessage]; statu
 
   requestWithCursor<M extends keyof RpcResponses>(method: M, params?: unknown, options?: RequestOptions): Promise<RpcResult<RpcResponses[M]>>;
   requestWithCursor<T = unknown>(method: string, params?: unknown, options?: RequestOptions): Promise<RpcResult<T>>;
-  requestWithCursor(method: string, params?: unknown, { mutating = false, timeoutMs = this.timeout }: RequestOptions = {}): Promise<RpcResult<unknown>> {
+  requestWithCursor(method: string, params?: unknown, { mutating = false, timeoutMs = this.timeout, onLateTerminal }: RequestOptions = {}): Promise<RpcResult<unknown>> {
     const socket = this.socket;
     if (socket?.readyState !== WebSocket.OPEN) {
       return Promise.reject(new RpcError('尚未连接现有 Codex。', { status: 503 }));
     }
+    if (onLateTerminal && [...this.pending.values()].filter(item => item.onLateTerminal).length >= maxLateObservers) {
+      return Promise.reject(new RpcError('待核对的请求过多，未发送新请求。', { code: 'OBSERVER_LIMIT', status: 503 }));
+    }
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(id);
+        const pending = this.pending.get(id);
+        if (pending?.onLateTerminal) {
+          pending.timedOut = true;
+          pending.timer = setTimeout(() => { this.pending.delete(id); }, lateObserverLifetimeMs);
+          pending.timer.unref();
+        } else this.pending.delete(id);
         reject(new RpcError(mutating ? '请求结果待确认，请重新读取会话后核对，避免重复发送。' : 'Codex 响应超时，请重试读取。', {
           code: 'TIMEOUT', status: 504, uncertain: mutating,
         }));
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer, mutating });
+      this.pending.set(id, { resolve, reject, timer, mutating, onLateTerminal });
       try {
         socket.send(JSON.stringify({ id, method, params }), error => {
           if (!error || !this.pending.has(id)) return;
+          const pending = this.pending.get(id)!;
           this.pending.delete(id);
-          clearTimeout(timer);
+          clearTimeout(pending.timer);
           reject(new RpcError(error.message, { uncertain: mutating }));
         });
       } catch (error) {

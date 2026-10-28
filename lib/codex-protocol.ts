@@ -99,7 +99,14 @@ export interface RpcResponses {
 }
 export interface RpcMessage { id?: RpcId; method: string; params: unknown; seq: number }
 export interface RpcResult<T> { result: T; eventCursor: number }
-export interface RequestOptions { mutating?: boolean; timeoutMs?: number }
+export type LateRpcTerminal = { outcome: 'success'; result: unknown }
+  | { outcome: 'error'; error: { message: string; code?: string | number; data?: unknown } };
+export interface RequestOptions {
+  mutating?: boolean;
+  timeoutMs?: number;
+  /** Observe this connection's original reply after the caller's timeout, never a disconnect. */
+  onLateTerminal?: (terminal: LateRpcTerminal) => void | Promise<void>;
+}
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);

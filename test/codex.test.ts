@@ -80,6 +80,57 @@ test('RPC errors preserve daemon code and data; read/write timeouts have distinc
   assert.equal(connection.pending.size, 0);
 });
 
+test('only the original live connection delivers a bounded late terminal after the waiting timeout', async t => {
+  const { peer, connection } = await fixture(t);
+  peer.handlers.set('fixture/late', () => NO_REPLY);
+  const received: unknown[] = [];
+  for (const terminal of [{ result: { written: true } }, { error: { code: -32001, message: 'denied' } }]) {
+    let arrived!: () => void;
+    const observed = new Promise<void>(resolve => { arrived = resolve; });
+    const call = connection.request('fixture/late', {}, { mutating: true, timeoutMs: 20,
+      onLateTerminal: value => { received.push(value); arrived(); } });
+    const request = await peer.waitForCall('fixture/late', received.length + 1);
+    await assert.rejects(call, { code: 'TIMEOUT', uncertain: true });
+    assert.equal(connection.pending.size, 1);
+    connection.receive(Buffer.from(JSON.stringify({ id: request!.id, error: { message: 'malformed' } })));
+    assert.equal(connection.pending.size, 1);
+    peer.send({ id: request!.id, ...terminal });
+    await observed;
+    assert.equal(connection.pending.size, 0);
+  }
+  assert.deepEqual(received, [{ outcome: 'success', result: { written: true } },
+    { outcome: 'error', error: { code: -32001, message: 'denied', data: undefined } }]);
+
+  const stale = connection.request('fixture/late', {}, { mutating: true, timeoutMs: 20,
+    onLateTerminal: () => { throw new Error('disconnected observer must not run'); } });
+  const request = await peer.waitForCall('fixture/late', 3);
+  await assert.rejects(stale, { code: 'TIMEOUT' });
+  peer.disconnect();
+  await once(connection, 'status');
+  assert.equal(connection.pending.size, 0);
+  await connection.connect();
+  connection.receive(Buffer.from(JSON.stringify({ id: request!.id, result: {} })));
+  assert.equal(connection.pending.size, 0);
+});
+
+test('late observers are capped and observer failures cannot reject the transport', async t => {
+  const { peer, connection } = await fixture(t);
+  peer.handlers.set('fixture/capped', () => NO_REPLY);
+  const calls = Array.from({ length: 16 }, () => connection.request('fixture/capped', {}, {
+    mutating: true, timeoutMs: 40, onLateTerminal: async () => { throw new Error('observer failed'); },
+  }));
+  const settled = Promise.allSettled(calls);
+  await assert.rejects(connection.request('fixture/capped', {}, { mutating: true, onLateTerminal: () => {} }), { code: 'OBSERVER_LIMIT', uncertain: false });
+  await settled;
+  assert.equal(connection.pending.size, 16);
+  const first = await peer.waitForCall('fixture/capped');
+  peer.send({ id: first!.id, result: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  peer.disconnect();
+  await once(connection, 'status');
+  assert.equal(connection.pending.size, 0);
+});
+
 test('disconnect rejects every pending RPC, preserves write uncertainty, and never reconnects implicitly', async t => {
   const { peer, connection } = await fixture(t);
   peer.handlers.set('fixture/pending', () => NO_REPLY);

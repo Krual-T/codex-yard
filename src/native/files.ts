@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, open, readFile, realpath, rename, stat } from 'node:fs/
 import { basename, dirname, extname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { LateRpcTerminal } from '../../lib/codex-protocol.ts';
 import type { SshHost } from './ssh.ts';
 import type { ObjectValue } from './protocol.ts';
 import { previewLimit } from './file-limits.ts';
@@ -14,7 +15,8 @@ const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 interface Metadata { isFile: boolean; isDirectory: boolean; sizeBytes: number; mtimeMs: number; createdAtMs: number | null }
 interface DaemonMetadata { isFile: boolean; isDirectory: boolean; isSymlink: boolean; modifiedAtMs: number; createdAtMs: number }
 interface DaemonEntry { fileName: string; isDirectory: boolean; isFile: boolean }
-export type FileRequest = (hostId: string, method: string, params: ObjectValue, mutating?: boolean) => Promise<unknown>;
+export type FileRequest = (hostId: string, method: string, params: ObjectValue, mutating?: boolean,
+  onLateTerminal?: (terminal: LateRpcTerminal) => void | Promise<void>) => Promise<unknown>;
 export type RemoteFileCommand = (host: SshHost, command: string, maxBytes: number, signal: AbortSignal) => Promise<Buffer>;
 
 // Permission errors and daemon timeouts must not become an absent path.
@@ -81,7 +83,7 @@ export const fileEndpoints = new Set(['workspace-directory-entries', 'remote-wor
 export const fileMethods = new Set(['fs/readFile', 'fs/readDirectory', 'fs/getMetadata', 'fs/createDirectory', 'fs/writeFile']);
 
 type SaveState = 'pending' | 'unknown' | 'saved' | 'conflict' | 'failed';
-interface SaveReceipt { id: string; hostId: string; target: string; state: SaveState }
+interface SaveReceipt { id: string; hostId: string; target: string; state: SaveState; requestRoot?: string; requestTarget?: string }
 const saveStates = new Set<SaveState>(['pending', 'unknown', 'saved', 'conflict', 'failed']);
 
 export function createFiles(options: { dataDir: string; workspace: string; hosts: Map<string, SshHost>; request: FileRequest; remoteCommand?: RemoteFileCommand }) {
@@ -94,7 +96,7 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
   let receipts: SaveReceipt[] | undefined;
   let receiptQueue: Promise<void> = Promise.resolve();
   let closed = false;
-  // Persist the path fence before the daemon write; transport timeouts discard late replies.
+  // Persist the path fence before the daemon write.
   async function journal<T>(action: (current: SaveReceipt[]) => { value: T; next?: SaveReceipt[] }): Promise<T> {
     const run = receiptQueue.then(async () => {
       if (!receipts) {
@@ -215,18 +217,39 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
         const duplicate = current.find(item => item.id === id);
         if (duplicate && (duplicate.hostId !== hostId || duplicate.target !== realTarget)) throw new Error('文件保存操作标识已用于其他文件。');
         const prior = duplicate ?? current.find(item => item.hostId === hostId && item.target === realTarget && (item.state === 'pending' || item.state === 'unknown'));
-        return prior ? { value: prior } : { value: undefined, next: [...current, { id, hostId, target: realTarget, state: 'pending' }] };
+        return prior ? { value: prior } : { value: undefined, next: [...current, {
+          id, hostId, target: realTarget, requestRoot: root, requestTarget: target, state: 'pending',
+        }] };
       });
       if (blocked) return { outcome: 'blocked' as const, operationId: blocked.id };
       liveSaves.add(id);
       let issued = false, returned = false, finalized = false;
+      let releaseLate!: () => void;
+      const afterInitial = new Promise<void>(resolve => { releaseLate = resolve; });
+      const onLateTerminal = async (terminal: LateRpcTerminal) => {
+        await afterInitial;
+        if (closed) return;
+        let state: SaveState = 'failed';
+        if (terminal.outcome === 'success') {
+          try {
+            state = await canonical(hostId, target) === realTarget && !(await daemonMetadata(hostId, target)).isSymlink
+              && (await bytes(hostId, realTarget, previewLimit)).equals(nextBytes) ? 'saved' : 'conflict';
+          } catch { state = 'conflict'; }
+        }
+        await journal(current => {
+          if (closed) return { value: undefined };
+          const item = current.find(value => value.id === id && value.hostId === hostId && value.target === realTarget);
+          if (!item || item.state !== 'unknown') return { value: undefined };
+          return { value: undefined, next: current.map(value => value === item ? { ...value, state } : value) };
+        });
+      };
       try {
         const [directory, before, currentRoot, currentTarget] = await Promise.all([
           daemonMetadata(hostId, root), daemonMetadata(hostId, target), canonical(hostId, root), canonical(hostId, target),
         ]);
         if (!directory.isDirectory || !before.isFile || before.isSymlink) throw new Error('只能保存当前工作目录内已存在的普通文件，符号链接不写入。');
         if (currentRoot !== realRoot || currentTarget !== realTarget) { await receiptState(id, 'conflict'); finalized = true; return { outcome: 'conflict' as const }; }
-        const currentBytes = await bytes(hostId, target, previewLimit);
+        const currentBytes = await bytes(hostId, realTarget, previewLimit);
         // Compare original bytes, including BOM and mixed line endings, before
         // the existing daemon write. External writers are not an atomic CAS.
         if (!currentBytes.equals(originalBytes)) { await receiptState(id, 'conflict'); finalized = true; return { outcome: 'conflict' as const }; }
@@ -234,11 +257,11 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
         if (!latest.isFile || latest.isSymlink || latest.modifiedAtMs !== before.modifiedAtMs
           || latest.createdAtMs !== before.createdAtMs || await canonical(hostId, target) !== realTarget) { await receiptState(id, 'conflict'); finalized = true; return { outcome: 'conflict' as const }; }
         issued = true;
-        await options.request(hostId, 'fs/writeFile', { path: target, dataBase64: nextBytes.toString('base64') }, true);
+        await options.request(hostId, 'fs/writeFile', { path: realTarget, dataBase64: nextBytes.toString('base64') }, true, onLateTerminal);
         returned = true;
         try {
           if (await canonical(hostId, target) !== realTarget || (await daemonMetadata(hostId, target)).isSymlink
-            || !(await bytes(hostId, target, previewLimit)).equals(nextBytes)) throw new Error('保存后文件内容或路径已改变。');
+            || !(await bytes(hostId, realTarget, previewLimit)).equals(nextBytes)) throw new Error('保存后文件内容或路径已改变。');
         } catch (error) {
           await receiptState(id, 'conflict'); finalized = true;
           throw Object.assign(new Error('文件保存结果待核对，勿重复写入：' + (error instanceof Error ? error.message : String(error))), { uncertain: true });
@@ -253,7 +276,7 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
           if (!definitelyFailed) throw Object.assign(new Error('文件保存结果未知；已阻止后续写入：' + (error instanceof Error ? error.message : String(error))), { uncertain: true, cause: error });
         }
         throw error;
-      } finally { liveSaves.delete(id); }
+      } finally { liveSaves.delete(id); releaseLate(); }
     });
     const settled = result.then(() => {}, () => {});
     fileWrites.set(key, settled);
@@ -266,10 +289,15 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     const root = path(params.cwd, hostId);
     const target = path(params.path.startsWith('file:') ? params.path : posix.resolve(root, params.path), hostId);
     if (!within(root, target) || root === target) throw new Error('查询路径必须位于当前工作目录内。');
+    const recorded = await journal(current => ({ value: current.find(receipt => receipt.id === params.operationId && receipt.hostId === hostId
+      && receipt.requestRoot === root && receipt.requestTarget === target) }));
+    if (recorded) return { outcome: recorded.state === 'pending' && !liveSaves.has(recorded.id) ? 'unknown' : recorded.state };
+    // Legacy receipts have no submitted-path fields; preserve their former lookup.
     const [realRoot, realTarget] = await Promise.all([canonical(hostId, root), canonical(hostId, target)]);
     if (!within(realRoot, realTarget) || realRoot === realTarget) throw new Error('查询路径超出当前工作目录。');
     return journal(current => {
-      const item = current.find(receipt => receipt.id === params.operationId && receipt.hostId === hostId && receipt.target === realTarget);
+      const item = current.find(receipt => receipt.id === params.operationId && receipt.hostId === hostId
+        && receipt.requestRoot === undefined && receipt.target === realTarget);
       return { value: { outcome: !item ? 'missing' : item.state === 'pending' && !liveSaves.has(item.id) ? 'unknown' : item.state } };
     });
   }

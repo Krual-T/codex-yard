@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
@@ -8,6 +8,8 @@ import type { TestContext } from 'node:test';
 import { createFiles } from '../src/native/files.ts';
 import type { FileRequest } from '../src/native/files.ts';
 import { fileDaemonFixture } from './file-daemon-fixture.ts';
+import { CodexConnection } from '../lib/codex.ts';
+import { createFakeCodex } from './fake-codex.ts';
 
 const run = promisify(execFile);
 async function fixture(t: TestContext, wrap?: (request: FileRequest) => FileRequest) {
@@ -175,4 +177,50 @@ test('readback disagreement reports an unknown save and preserves the actual cur
   assert.equal(await readFile(h.path, 'utf8'), 'changed externally');
   assert.deepEqual(await h.files.fetch('workspace-file-save-status', { hostId: 'local', cwd: h.cwd, path: h.path, operationId: 'readback' }), { outcome: 'conflict' });
   assert.equal(h.calls.filter(call => call.method === 'fs/writeFile').length, 1);
+});
+
+for (const lateError of [false, true]) test(`the original RPC ${lateError ? 'error' : 'success'} settles its own timed-out write after a directory link changes`, async t => {
+  const root = await mkdtemp('/tmp/yard-file-late-rpc-'), cwd = join(root, 'workspace');
+  const a = join(cwd, 'a'), b = join(cwd, 'b'), link = join(cwd, 'link');
+  await mkdir(a, { recursive: true }); await mkdir(b);
+  await writeFile(join(a, 'file.txt'), 'old a'); await writeFile(join(b, 'file.txt'), 'old b');
+  await symlink(a, link);
+  const peer = await createFakeCodex(root), connection = new CodexConnection(peer.socketPath);
+  const daemon = fileDaemonFixture();
+  peer.handlers.set('fs/getMetadata', params => daemon('fs/getMetadata', params));
+  let release!: () => void, entered!: () => void, settled!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const writing = new Promise<void>(resolve => { entered = resolve; });
+  const late = new Promise<void>(resolve => { settled = resolve; });
+  peer.handlers.set('fs/writeFile', async params => {
+    if (params.path === join(a, 'file.txt')) {
+      entered(); await gate;
+      if (lateError) throw Object.assign(new Error('write rejected'), { code: -32001 });
+    }
+    return daemon('fs/writeFile', params);
+  });
+  await connection.connect();
+  const files = createFiles({ dataDir: root, workspace: cwd, hosts: new Map(),
+    request: async (_host, method, params, mutating, onLateTerminal) => connection.request(method, params, {
+      mutating, timeoutMs: method === 'fs/writeFile' ? 70 : 5000,
+      ...(onLateTerminal ? { onLateTerminal: async value => { try { await onLateTerminal(value); } finally { settled(); } } } : {}),
+    }),
+  });
+  t.after(async () => { release(); files.close(); connection.close(); await peer.close(); await rm(root, { recursive: true, force: true }); });
+  const path = join(link, 'file.txt');
+  const first = files.fetch('workspace-file-save', { hostId: 'local', cwd, path, operationId: 'original', expectedContents: 'old a', contents: 'new a' });
+  const rejected = assert.rejects(first, { uncertain: true });
+  await writing; await rejected;
+  assert.equal(await readFile(join(a, 'file.txt'), 'utf8'), 'old a');
+  assert.deepEqual(await files.fetch('workspace-file-save', { hostId: 'local', cwd, path, operationId: 'blocked', expectedContents: 'old a', contents: 'must wait' }),
+    { outcome: 'blocked', operationId: 'original' });
+  await unlink(link); await symlink(b, link);
+  const status = { hostId: 'local', cwd, path, operationId: 'original' };
+  assert.deepEqual(await files.fetch('workspace-file-save-status', status), { outcome: 'unknown' });
+  assert.deepEqual(await files.fetch('workspace-file-save', { hostId: 'local', cwd, path, operationId: 'other', expectedContents: 'old b', contents: 'new b' }), { outcome: 'saved' });
+  release(); await late;
+  assert.equal(await readFile(join(a, 'file.txt'), 'utf8'), lateError ? 'old a' : 'new a');
+  assert.equal(await readFile(join(b, 'file.txt'), 'utf8'), 'new b');
+  assert.deepEqual(await files.fetch('workspace-file-save-status', status), { outcome: lateError ? 'failed' : 'conflict' });
+  assert.deepEqual(peer.calls('fs/writeFile').map(call => call.params.path), [join(a, 'file.txt'), join(b, 'file.txt')]);
 });
