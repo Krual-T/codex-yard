@@ -63,9 +63,18 @@ export function parseUserContent(item: ThreadItemSummary): UserContentPart[] {
 
 export function editableDraft(item: ThreadItemSummary): ComposerDraft | null {
   if (!Array.isArray(item.content) || item.content.some((value: unknown) =>
-    value === null || typeof value !== 'object' || Array.isArray(value))) return null;
+    value === null || typeof value !== 'object' || Array.isArray(value))
+    || (item.document != null && !isComposerDocument(item.document))
+    || (item.hints != null && !Array.isArray(item.hints))
+    || (item.format != null && typeof item.format !== 'string')) return null;
   let input: Record<string, unknown>[];
-  try { input = structuredClone(item.content) as Record<string, unknown>[]; }
+  let document: ComposerDocument | undefined;
+  let hints: unknown[] | undefined;
+  try {
+    input = structuredClone(item.content) as Record<string, unknown>[];
+    document = isComposerDocument(item.document) ? structuredClone(item.document) : undefined;
+    hints = Array.isArray(item.hints) ? structuredClone(item.hints) : undefined;
+  }
   catch { return null; }
   const parts = parseUserContent(item);
   const textParts = parts.filter((part) => part.kind === 'text');
@@ -81,8 +90,8 @@ export function editableDraft(item: ThreadItemSummary): ComposerDraft | null {
   return {
     text: textParts.map((part) => part.text).join('\n'), images, files: [], input,
     ...(skills.length ? { skills } : {}),
-    ...(isComposerDocument(item.document) ? { document: structuredClone(item.document) } : {}),
-    ...(Array.isArray(item.hints) ? { hints: structuredClone(item.hints) } : {}),
+    ...(document ? { document } : {}),
+    ...(hints ? { hints } : {}),
   };
 }
 

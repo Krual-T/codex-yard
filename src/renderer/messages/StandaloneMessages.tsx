@@ -1,14 +1,36 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { ArrowDown, ChevronDown, ChevronLeft, ChevronRight, GitFork, Pencil, Search, X } from 'lucide-react';
 import type { ThreadItemSummary, TurnSummary } from '../../../lib/codex-protocol.ts';
-import type { StandaloneMessagesProps, WorkbenchClient } from '../workbench-contract.ts';
+import type { ComposerDraft, MessageEditOrigin, StandaloneMessagesProps, WorkbenchClient } from '../workbench-contract.ts';
 import { StandaloneMarkdown } from '../markdown/StandaloneMarkdown.tsx';
 import { ToolItem } from '../tools/ToolItem.tsx';
 import { CopyButton } from './CopyButton.tsx';
 import { ImageViewer, MessageImage } from './MessageImage.tsx';
 import { asArray, asRecord, asString, displayJson, editableDraft, parseUserContent } from './message-data.ts';
 import type { ImageSource } from './message-data.ts';
+import { applyTextEdits, editSourceSignature, latestEditTarget, textEdits } from './message-edit.ts';
+import type { TextEdit } from './message-edit.ts';
 import './standalone-messages.css';
+
+type EditingSession = {
+  id: number;
+  identity: string;
+  turnId: string;
+  itemId: string;
+  turnIndex: number;
+  itemIndex: number;
+  snapshot: ThreadItemSummary;
+  draft: ComposerDraft;
+  origin: MessageEditOrigin;
+  signature: string;
+  edits: TextEdit[];
+  addedText: string;
+  error: string;
+  pending: boolean;
+};
+type StartEdit = Omit<EditingSession, 'id' | 'edits' | 'addedText' | 'error' | 'pending'>;
+type UpdateEdit = (id: number, update: (session: EditingSession) => EditingSession) => void;
 
 type RenderItemProps = {
   item: ThreadItemSummary;
@@ -24,47 +46,127 @@ type RenderItemProps = {
   onOpenVisualization: StandaloneMessagesProps['onOpenVisualization'];
   onOpenBrowser: StandaloneMessagesProps['onOpenBrowser'];
   onOpenImages: (images: ImageSource[], index: number) => void;
+  editRestriction: string | null;
+  editing: EditingSession | null;
+  identity: string;
+  turnIndex: number;
+  itemIndex: number;
+  onStartEdit: (session: StartEdit) => void;
+  onUpdateEdit: UpdateEdit;
+  onEndEdit: (id: number) => void;
   searchMatch: boolean;
 };
 
-function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenImages, searchMatch }: RenderItemProps) {
+type UserMessageEditorProps = {
+  item: ThreadItemSummary;
+  editing: EditingSession;
+  restriction: string | null;
+  onEdit: NonNullable<StandaloneMessagesProps['onEdit']>;
+  onUpdateEdit: UpdateEdit;
+  onCancel: () => void;
+  renderPart: (index: number) => ReactNode;
+};
+
+const unavailableEdit: NonNullable<StandaloneMessagesProps['onEdit']> = async () => {
+  throw new Error('Message editing is unavailable.');
+};
+
+function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, onCancel, renderPart }: UserMessageEditorProps) {
+  const { id, draft, origin, signature, edits, addedText, error, pending } = editing;
+  const submitting = useRef(false);
+  const currentSignature = useMemo(() => editSourceSignature(item), [item]);
+  const changedSource = signature !== currentSignature;
+  const blocked = restriction ?? (changedSource ? 'This message changed while editing. Cancel and reopen the editor.' : null);
+  const rows = new Map(edits.map((edit, position) => [edit.index, { edit, position }]));
+  const textarea = (value: string, onChange: (value: string) => void, label: string, autoFocus: boolean) =>
+    <label className="yard-edit-text"><span className="yard-screen-reader">{label}</span>
+      <textarea aria-label={label} autoFocus={autoFocus} rows={Math.max(3, Math.min(12, value.split('\n').length + 1))}
+        value={value} disabled={pending} onChange={(event) => { onChange(event.target.value); }} />
+      <span className="yard-edit-print-text" aria-hidden="true">{value}</span></label>;
+  return <form className="yard-message-edit" onKeyDown={(event) => {
+    if (event.key === 'Escape' && !pending) { event.preventDefault(); onCancel(); }
+  }} onSubmit={(event) => {
+    event.preventDefault();
+    if (submitting.current) return;
+    if (pending || blocked) return;
+    const result = applyTextEdits(draft, edits, addedText);
+    const nextDraft = result.draft;
+    if (!nextDraft) { onUpdateEdit(id, (current) => ({ ...current, error: result.error })); return; }
+    if (!nextDraft.text.trim() && !nextDraft.input?.some((entry) => entry.type !== 'text')) {
+      onUpdateEdit(id, (current) => ({ ...current, error: 'Enter a message before sending.' }));
+      return;
+    }
+    submitting.current = true;
+    onUpdateEdit(id, (current) => ({ ...current, pending: true, error: '' }));
+    void Promise.resolve().then(() => onEdit(nextDraft, structuredClone(origin))).then(onCancel).catch((reason: unknown) => {
+      const message = reason instanceof Error ? reason.message || 'Edit failed.' : typeof reason === 'string' && reason ? reason : 'Edit failed.';
+      onUpdateEdit(id, (current) => ({ ...current, pending: false, error: message }));
+    }).finally(() => { submitting.current = false; });
+  }}>
+    {!edits.length && textarea(addedText, (text) => onUpdateEdit(id, (current) => ({ ...current, addedText: text, error: '' })), 'Edit message text', true)}
+    {draft.input?.map((_, index) => {
+      const row = rows.get(index);
+      if (!row) return <div key={index}>{renderPart(index)}</div>;
+      return <div key={index}>{textarea(row.edit.text, (text) => onUpdateEdit(id, (current) => ({ ...current, error: '',
+        edits: current.edits.map((edit) => edit.index === index ? { ...edit, text } : edit) })),
+        edits.length === 1 ? 'Edit message text' : `Edit message text ${row.position + 1} of ${edits.length}`, row.position === 0)}</div>;
+    })}
+    {blocked && <div className="yard-action-error" role="alert">{blocked}</div>}
+    {error && <div className="yard-action-error" role="alert">{error}</div>}
+    <div className="yard-edit-controls"><button type="button" onClick={onCancel} disabled={pending}>Cancel</button>
+      <button type="submit" disabled={pending || Boolean(blocked)}>{pending ? 'Sending...' : 'Send'}</button></div>
+  </form>;
+}
+
+function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenImages,
+  editRestriction, editing, identity, turnIndex, itemIndex, onStartEdit, onUpdateEdit, onEndEdit, searchMatch }: RenderItemProps) {
   const [expanded, setExpanded] = useState(false);
   const [actionError, setActionError] = useState('');
-  const parts = useMemo(() => parseUserContent(item), [item]);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const restoreFocus = useRef(false);
+  const parts = useMemo(() => parseUserContent(editing ? { ...item, content: editing.draft.input } : item), [item, editing]);
   const openSingleImage = useCallback((image: ImageSource) => onOpenImages([image], 0), [onOpenImages]);
   const images = parts.flatMap((part) => part.kind === 'image' ? [part.image] : []);
-  const draft = useMemo(() => onEdit ? editableDraft(item) : null, [item, onEdit]);
+  const draft = useMemo(() => onEdit && !editRestriction ? editableDraft(item) : null, [item, onEdit, editRestriction]);
   const text = parts.flatMap((part) => part.kind === 'text' ? [part.text] : []).join('\n');
   const long = text.length > 1200;
+  const editNote = onEdit && editRestriction !== 'Only the latest user message can be edited.'
+    ? editRestriction ?? (draft ? null : 'This message cannot be edited without losing content.') : null;
+  useLayoutEffect(() => {
+    if (!editing && restoreFocus.current) { editButton.current?.focus(); restoreFocus.current = false; }
+  }, [editing]);
   let imageIndex = 0;
+  const renderedParts = parts.map((part, index) => {
+    if (part.kind === 'text') return <div key={index} className={long && !expanded && !searchMatch ? 'yard-user-text is-collapsed' : 'yard-user-text'}>
+      <StandaloneMarkdown text={part.text} client={client} hostId={hostId} threadId={threadId} cwd={cwd} onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenImage={openSingleImage} /></div>;
+    if (part.kind === 'image') {
+      const current = imageIndex++;
+      return <MessageImage key={index} source={part.image} client={client} hostId={hostId} cwd={cwd} onOpen={() => onOpenImages(images, current)} />;
+    }
+    if (part.kind === 'reference') return <div className="yard-reference" key={index}>{part.referenceType}: {part.name} <span>{part.path}</span></div>;
+    return <details className="yard-unsupported-input" key={index}><summary>Unsupported message content</summary><pre>{displayJson(part.value)}</pre></details>;
+  });
   return <div className="yard-user-message"><div className="yard-message-label">You</div>
-    <div className="yard-user-bubble"><div className="yard-user-body">
-      {parts.map((part, index) => {
-        if (part.kind === 'text') return <div key={index} className={long && !expanded && !searchMatch ? 'yard-user-text is-collapsed' : 'yard-user-text'}>
-          <StandaloneMarkdown text={part.text} client={client} hostId={hostId} threadId={threadId} cwd={cwd} onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenImage={openSingleImage} /></div>;
-        if (part.kind === 'image') {
-          const current = imageIndex++;
-          return <MessageImage key={index} source={part.image} client={client} hostId={hostId} cwd={cwd} onOpen={() => onOpenImages(images, current)} />;
-        }
-        if (part.kind === 'reference') return <div className="yard-reference" key={index}>{part.referenceType}: {part.name} <span>{part.path}</span></div>;
-        return <details className="yard-unsupported-input" key={index}><summary>Unsupported message content</summary><pre>{displayJson(part.value)}</pre></details>;
-      })}
-    </div>{long && !searchMatch && <button className="yard-expand" type="button" onClick={() => setExpanded(!expanded)}
-      aria-expanded={expanded}>{expanded ? 'Show less' : 'Show more'} <ChevronDown size={15} /></button>}</div>
-    <div className="yard-message-actions"><CopyButton text={text} label="Copy message" />
-      {onEdit && <button type="button" className="yard-icon-button" title={draft ? 'Edit message' : 'This message cannot be edited without losing content'}
-        aria-label="Edit message" disabled={!draft} onClick={() => {
-          if (!draft) return;
-          const origin = { turnId, itemId: item.id, ...(typeof item.format === 'string' ? { format: item.format } : {}),
-            ...(Array.isArray(item.hints) ? { hints: structuredClone(item.hints) } : {}) };
+    <div className="yard-user-bubble">{editing ? <UserMessageEditor item={item} editing={editing} onUpdateEdit={onUpdateEdit}
+      restriction={onEdit ? editRestriction : 'Message editing is unavailable.'} onEdit={onEdit ?? unavailableEdit}
+      onCancel={() => { restoreFocus.current = true; onEndEdit(editing.id); }} renderPart={(index) => renderedParts[index]} /> : <>
+      <div className="yard-user-body">{renderedParts}</div>{long && !searchMatch && <button className="yard-expand" type="button" onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}>{expanded ? 'Show less' : 'Show more'} <ChevronDown size={15} /></button>}</>}</div>
+    {!editing && <div className="yard-message-actions"><CopyButton text={text} label="Copy message" />
+      {onEdit && <button ref={editButton} type="button" className="yard-icon-button" title={editRestriction ?? (draft ? 'Edit message' : 'This message cannot be edited without losing content')}
+        aria-label="Edit message" disabled={!draft || Boolean(editRestriction)} onClick={() => {
+          if (!draft || editRestriction) return;
           setActionError('');
-          void Promise.resolve().then(() => onEdit(structuredClone(draft), origin)).catch((reason: unknown) => setActionError(reason instanceof Error ? reason.message : 'Edit failed.'));
+          onStartEdit({ identity, turnId, itemId: item.id, turnIndex, itemIndex, draft, signature: editSourceSignature(item),
+            snapshot: { ...item, content: draft.input, document: draft.document ?? item.document, hints: draft.hints ?? item.hints },
+            origin: { turnId, itemId: item.id, format: typeof item.format === 'string' ? item.format : 'plain', hints: structuredClone(draft.hints ?? []) } });
         }}><Pencil size={16} /></button>}
       {onFork && <button type="button" className="yard-icon-button" title="Fork from this turn" aria-label="Fork from this turn" onClick={() => {
         setActionError('');
         void Promise.resolve().then(() => onFork(turnId)).catch((reason: unknown) => setActionError(reason instanceof Error ? reason.message : 'Fork failed.'));
       }}><GitFork size={16} /></button>}
-    </div>
+    </div>}
+    {!editing && editNote && <div className="yard-edit-note" role="status">{editNote}</div>}
     {actionError && <div className="yard-action-error" role="alert">{actionError}</div>}
   </div>;
 }
@@ -111,6 +213,8 @@ function MessageItem(props: RenderItemProps) {
     onOpenBrowser={onOpenBrowser} onOpenImage={markdownProps.onOpenImage} />;
 }
 
+const MemoMessageItem = memo(MessageItem);
+
 function TurnStatus({ turn }: { turn: TurnSummary }) {
   if (turn.status === 'completed') return null;
   return <div className={`yard-turn-status is-${turn.status}`} role={turn.status === 'failed' ? 'alert' : 'status'}>
@@ -141,14 +245,46 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
   const [matchIndex, setMatchIndex] = useState(-1);
   const [following, setFollowing] = useState(true);
   const [viewer, setViewer] = useState<ViewerState | null>(null);
+  const [editing, setEditing] = useState<EditingSession | null>(null);
+  const nextEditId = useRef(0);
   const scroller = useRef<HTMLDivElement>(null);
   const nodes = useRef(new Map<string, HTMLElement>());
   const searchOpened = useRef(new Set<HTMLDetailsElement>());
   const followRef = useRef(true);
-  const threadId = useRef(thread?.id);
+  const threadIdentity = JSON.stringify([hostId, thread?.id]);
+  const currentThread = useRef(threadIdentity);
   const openImages = useCallback((images: ImageSource[], index: number) => setViewer({ images, index }), []);
   const closeViewer = useCallback(() => setViewer(null), []);
   const setViewerIndex = useCallback((index: number) => setViewer((current) => current ? { ...current, index } : null), []);
+  const startEdit = useCallback((session: StartEdit) => {
+    const id = ++nextEditId.current;
+    setEditing((current) => current ?? { ...session, id, edits: textEdits(session.draft), addedText: '', error: '', pending: false });
+  }, []);
+  const updateEdit = useCallback<UpdateEdit>((id, update) => {
+    setEditing((current) => current?.id === id ? update(current) : current);
+  }, []);
+  const endEdit = useCallback((id: number) => setEditing((current) => current?.id === id ? null : current), []);
+  const editTarget = useMemo(() => thread ? latestEditTarget(thread) : null, [thread]);
+  const editingHere = editing?.identity === threadIdentity ? editing : null;
+  let displayTurns = thread?.turns ?? [];
+  let sourceMissing = false;
+  if (thread && editingHere) {
+    const turnIndex = thread.turns.findIndex((turn) => turn.id === editingHere.turnId);
+    const itemIndex = turnIndex < 0 ? -1 : thread.turns[turnIndex]!.items.findIndex((item) => item.id === editingHere.itemId && item.type === 'userMessage');
+    sourceMissing = itemIndex < 0;
+    if (sourceMissing) {
+      displayTurns = [...thread.turns];
+      if (turnIndex < 0) {
+        displayTurns.splice(Math.min(editingHere.turnIndex, displayTurns.length), 0,
+          { id: editingHere.turnId, status: 'completed', itemsView: 'summary', items: [editingHere.snapshot] });
+      } else {
+        const turn = displayTurns[turnIndex]!;
+        const items = [...turn.items];
+        items.splice(Math.min(editingHere.itemIndex, items.length), 0, editingHere.snapshot);
+        displayTurns[turnIndex] = { ...turn, items };
+      }
+    }
+  }
   const hasQuery = Boolean(query.trim());
   const searchable = useMemo<SearchHit[]>(() => !hasQuery ? [] : thread?.turns.flatMap((turn) => [
     ...turn.items.map((item) => ({ key: itemKey(turn.id, item.id), text: searchText(item).toLocaleLowerCase() })),
@@ -163,8 +299,8 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
   useLayoutEffect(() => {
     const element = scroller.current;
     if (!element) return;
-    if (threadId.current !== thread?.id) {
-      threadId.current = thread?.id;
+    if (currentThread.current !== threadIdentity) {
+      currentThread.current = threadIdentity;
       followRef.current = true;
       setFollowing(true);
       setViewer(null);
@@ -228,16 +364,26 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
         if (summary?.parentElement instanceof HTMLDetailsElement) searchOpened.current.delete(summary.parentElement);
       }
     }} data-thread-find-target="conversation">
-      {!thread ? <div className="yard-message-empty">Select a conversation</div> : thread.turns.length === 0 ? <div className="yard-message-empty">No messages yet</div> :
-        <div className="yard-message-list">{thread.turns.map((turn) => <section className="yard-turn" key={turn.id} data-turn-id={turn.id}>
-          {turn.items.map((item) => {
-            const key = itemKey(turn.id, item.id);
+      {!thread ? <div className="yard-message-empty">Select a conversation</div> : displayTurns.length === 0 ? <div className="yard-message-empty">No messages yet</div> :
+        <div className="yard-message-list">{displayTurns.map((turn, turnIndex) => <section className="yard-turn" key={JSON.stringify([hostId, thread.id, turn.id])} data-turn-id={turn.id}>
+          {turn.items.map((item, itemIndex) => {
+            const syntheticDraft = sourceMissing && item === editingHere?.snapshot;
+            const duplicateId = syntheticDraft && turn.items.some((entry) => entry !== item && entry.id === item.id);
+            const key = duplicateId ? JSON.stringify([turn.id, item.id, 'edit-draft']) : itemKey(turn.id, item.id);
             const searchMatch = hitKeys.has(key);
-            return <article className="yard-message-item" key={item.id} data-message-id={item.id} data-search-current={selected?.key === key || undefined}
+            const itemEditing = editingHere?.turnId === turn.id && editingHere.itemId === item.id
+              && (!sourceMissing || syntheticDraft) ? editingHere : null;
+            const isTarget = editTarget?.turnId === turn.id && editTarget.itemId === item.id;
+            const editRestriction = itemEditing && sourceMissing ? 'The original message is no longer available. The edited draft is retained.'
+              : !isTarget ? 'Only the latest user message can be edited.'
+              : editTarget.restriction ?? (editing && !itemEditing ? 'Finish the current message edit first.' : null);
+            return <article className="yard-message-item" key={duplicateId ? `${item.id}:edit-draft` : item.id} data-message-id={item.id} data-search-current={selected?.key === key || undefined}
               ref={(node) => { if (node) nodes.current.set(key, node); else nodes.current.delete(key); }}>
-              <MessageItem item={item} turnId={turn.id} threadId={thread.id} client={client} hostId={hostId} cwd={thread.cwd} onEdit={onEdit} onFork={onFork}
+              <MemoMessageItem item={item} turnId={turn.id} threadId={thread.id} client={client} hostId={hostId} cwd={thread.cwd} onEdit={onEdit} onFork={onFork}
                 onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenVisualization={onOpenVisualization} onOpenBrowser={onOpenBrowser}
-                onOpenImages={openImages} searchMatch={searchMatch} /></article>;
+                onOpenImages={openImages} editRestriction={editRestriction} editing={itemEditing} identity={threadIdentity}
+                turnIndex={turnIndex} itemIndex={itemIndex} onStartEdit={startEdit} onUpdateEdit={updateEdit} onEndEdit={endEdit}
+                searchMatch={searchMatch} /></article>;
           })}{turn.status !== 'completed' && <div data-search-current={selected?.key === itemKey(turn.id, null) || undefined}
             ref={(node) => { const key = itemKey(turn.id, null); if (node) nodes.current.set(key, node); else nodes.current.delete(key); }}><TurnStatus turn={turn} /></div>}
         </section>)}</div>}

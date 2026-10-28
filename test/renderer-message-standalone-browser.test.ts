@@ -12,6 +12,18 @@ declare global {
         locations: unknown[]; visualizations: unknown[]; browser: unknown[]; copies: string[] };
       stream: () => void;
       finish: (status: string) => void;
+      editMode: (mode: 'reject' | 'pending' | 'resolve') => void;
+      resolveEdit: () => void;
+      rejectEdit: () => void;
+      setBusy: (busy: boolean) => void;
+      setItemsView: (view: string) => void;
+      changeSource: () => void;
+      enableEdit: (enabled: boolean) => void;
+      usePlainThread: () => void;
+      setHost: (host: string) => void;
+      navigateAway: () => void;
+      navigateBack: () => void;
+      removeTurn: () => void;
       clipboard: (mode: 'missing' | 'denied' | 'failed') => void;
     };
   }
@@ -33,6 +45,7 @@ test('standalone messages render CLI items and retain interactions while streami
       const gif = 'R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
       let retried = false;
       const client = { rpc: async () => { throw Error('unexpected rpc'); }, subscribe: () => () => {},
+        reply: async () => { throw Error('unexpected approval'); },
         host: async (endpoint, params) => { calls.host.push({ endpoint, params });
           if (params.path.endsWith('/retry.gif') && !retried) { retried = true; throw Error('missing image'); }
           return { contentsBase64: gif, mimeType: 'image/gif' };
@@ -48,10 +61,12 @@ test('standalone messages render CLI items and retain interactions while streami
         + '\`\`\`js\\nconst answer = 42;\\n\`\`\`\\n\\n'
         + '\`\`\`mermaid\\nflowchart LR\\n  A --> B\\n\`\`\`\\n\\n' + directive + ' ' + directiveWithMarkup
         + '\\n\\n' + invalidDirective + '\\n\\n\`\`\`text\\n' + directive + '\\n\`\`\`';
-      let thread = { id: 'thread', cwd: '/work', name: null, status: { type: 'active', activeFlags: [] }, turns: [
-        { id: 'turn-one', status: 'inProgress', items: [
+      let thread = { id: 'thread', cwd: '/work', name: null, status: { type: 'idle' }, turns: [
+        { id: 'turn-one', status: 'completed', itemsView: 'full', items: [
           { id: 'user', type: 'userMessage', content: [{ type: 'text', text: 'Long user input ' + 'x'.repeat(1250), text_elements: [] },
             { type: 'localImage', path: 'good.gif' }, { type: 'localImage', path: 'retry.gif' }] },
+        ] },
+        { id: 'turn-two', status: 'completed', itemsView: 'full', items: [
           { id: 'opaque', type: 'userMessage', format:'markdown', hints:['search'], content: [
             { type: 'text', text:'Before', text_elements:[{byteRange:{start:0,end:6},placeholder:'Before',context:{browser:'element'}}] },
             { type: 'image', fileId: 'opaque-file', detail:'high' },
@@ -76,7 +91,13 @@ test('standalone messages render CLI items and retain interactions while streami
           { id: 'assistant', type: 'agentMessage', text: markdown, phase: 'final_answer', questions: [{title:'Which option?', options:['First','Second']}] },
         ] }
       ] };
-      const onEdit = (draft, origin) => calls.edits.push({draft, origin});
+      let editMode = 'reject', resolveEdit = () => {}, rejectEdit = () => {}, editEnabled = true, hostId = 'ssh-test', savedThread;
+      const onEdit = (draft, origin) => {
+        calls.edits.push({draft, origin});
+        if (editMode === 'reject') return Promise.reject(Error('Synthetic edit failure'));
+        if (editMode === 'pending') return new Promise((resolve, reject) => { resolveEdit = resolve; rejectEdit = reject; });
+        return Promise.resolve();
+      };
       const onFork = id => calls.forks.push(id);
       const onOpenFile = path => calls.files.push(path);
       const onOpenFileAt = value => calls.locations.push(value);
@@ -84,16 +105,25 @@ test('standalone messages render CLI items and retain interactions while streami
       const onOpenBrowser = value => calls.browser.push(value);
       const root = createRoot(document.getElementById('root'));
       const render = () => root.render(React.createElement(React.Fragment, null,
-        React.createElement(StandaloneMessages, { client, hostId:'ssh-test', thread, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser }),
+        React.createElement(StandaloneMessages, { client, hostId, thread, onEdit:editEnabled ? onEdit : undefined, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser }),
         React.createElement('div', {id:'raw'}, React.createElement(StandaloneMarkdown, {client, hostId:'ssh-test', cwd:'/work', allowBasicHtml:true,
           text:'<b>safe</b><script>window.bad = true</script><img src="javascript:alert(1)" onerror="window.bad=true">'})),
         React.createElement('div', {id:'fallback'}, React.createElement(StandaloneMarkdown, {client, hostId:'ssh-test', cwd:'/work', onOpenFile,
           text:'[fallback](rel.ts#L4)'}))));
       window.standaloneHarness = { calls, stream() {
-        const turn = thread.turns[0];
-        thread = {...thread, turns:[{...turn, items:turn.items.map(item => item.id === 'assistant' ? {...item,text:item.text+'\\n\\nStreaming more.'}
-          : item.id === 'command' ? {...item,aggregatedOutput:'needle-output\\nsecond line'} : item)}]}; render();
-      }, finish(status) { thread = {...thread, turns:[{...thread.turns[0],status,error:status === 'failed' ? {message:'Synthetic failure'} : null}]}; render(); },
+        thread = {...thread, turns:thread.turns.map(turn => turn.id !== 'turn-two' ? turn : {...turn, items:turn.items.map(item => item.id === 'assistant' ? {...item,text:item.text+'\\n\\nStreaming more.'}
+          : item.id === 'command' ? {...item,aggregatedOutput:'needle-output\\nsecond line'} : item)})}; render();
+      }, finish(status) { thread = {...thread, turns:thread.turns.map(turn => turn.id !== 'turn-two' ? turn : {...turn,status,error:status === 'failed' ? {message:'Synthetic failure'} : null})}; render(); },
+      editMode(mode) { editMode = mode; }, resolveEdit() { resolveEdit(); }, rejectEdit() { rejectEdit(Error('Synthetic revert failure')); },
+      setBusy(busy) { thread = {...thread,status:busy ? {type:'active',activeFlags:[]} : {type:'idle'}}; render(); },
+      setItemsView(view) { thread = {...thread,turns:thread.turns.map(turn => turn.id === 'turn-two' ? {...turn,itemsView:view} : turn)}; render(); },
+      changeSource() { thread = {...thread,turns:thread.turns.map(turn => turn.id !== 'turn-two' ? turn : {...turn,items:turn.items.map(item => item.id === 'opaque' ? {...item,hints:['changed'],content:item.content.map(part => part.type === 'skill' ? {...part,name:'changed'} : part)} : item)})}; render(); },
+      enableEdit(enabled) { editEnabled = enabled; render(); },
+      usePlainThread() { thread = {...thread, status:{type:'idle'}, turns:thread.turns.filter(turn => turn.id === 'turn-one')}; render(); },
+      setHost(host) { hostId = host; render(); },
+      navigateAway() { savedThread = thread; thread = {...thread, id:'other-thread', turns:[]}; render(); },
+      navigateBack() { thread = savedThread; render(); },
+      removeTurn() { thread = {...thread,turns:[]}; render(); },
       clipboard(mode) {
         Object.defineProperty(navigator, 'clipboard', { configurable:true, value: mode === 'missing' ? undefined : {writeText:async () => {throw Error('denied')}} });
         document.execCommand = command => { if (command !== 'copy') return false; calls.copies.push(document.activeElement.value); return mode !== 'failed'; };
@@ -125,23 +155,63 @@ test('standalone messages render CLI items and retain interactions while streami
     assert.equal(await user.getByRole('button', { name: 'Open good.gif' }).isVisible(), true);
     await user.getByRole('button', { name: 'Show more' }).click();
     assert.equal(await user.locator('.yard-user-text').evaluate((element) => element.classList.contains('is-collapsed')), false);
-    await user.getByRole('button', { name: 'Edit message' }).click();
+    assert.equal(await user.getByRole('button', { name: 'Edit message' }).isDisabled(), true);
     await user.getByRole('button', { name: 'Fork from this turn' }).click();
-    assert.equal((await page.evaluate(() => window.standaloneHarness.calls.edits)).length, 1);
+    assert.equal((await page.evaluate(() => window.standaloneHarness.calls.edits)).length, 0);
     assert.deepEqual(await page.evaluate(() => window.standaloneHarness.calls.forks), ['turn-one']);
     const opaque = page.locator('[data-message-id="opaque"]');
     await opaque.getByRole('button', { name: 'Edit message' }).click();
+    await opaque.getByRole('textbox', { name: 'Edit message text 2 of 2' }).fill('Cancelled');
+    await opaque.getByRole('button', { name: 'Cancel' }).click();
+    assert.equal(await opaque.getByRole('button', { name: 'Edit message' }).evaluate((element) => document.activeElement === element), true);
+    assert.equal((await page.evaluate(() => window.standaloneHarness.calls.edits)).length, 0);
+    await opaque.getByRole('button', { name: 'Edit message' }).click();
+    await opaque.getByRole('textbox', { name: 'Edit message text 1 of 2' }).press('Escape');
+    assert.equal(await opaque.getByRole('button', { name: 'Edit message' }).evaluate((element) => document.activeElement === element), true);
+    await opaque.getByRole('button', { name: 'Edit message' }).click();
+    await opaque.getByRole('textbox', { name: 'Edit message text 1 of 2' }).fill('中Before');
+    await opaque.getByRole('textbox', { name: 'Edit message text 2 of 2' }).fill('After edited');
+    await opaque.getByRole('button', { name: 'Send', exact: true }).click();
+    await opaque.getByRole('alert').getByText('Synthetic edit failure').waitFor();
+    assert.equal(await opaque.getByRole('textbox', { name: 'Edit message text 2 of 2' }).inputValue(), 'After edited');
+    await page.evaluate(() => window.standaloneHarness.editMode('pending'));
+    await opaque.getByRole('button', { name: 'Send', exact: true }).click();
+    await opaque.getByRole('button', { name: 'Sending...' }).waitFor();
+    assert.equal(await opaque.getByRole('button', { name: 'Sending...' }).isDisabled(), true);
+    assert.equal(await opaque.getByRole('button', { name: 'Cancel' }).isDisabled(), true);
+    await page.evaluate(() => window.standaloneHarness.resolveEdit());
+    await opaque.getByRole('button', { name: 'Edit message' }).waitFor();
     const edits = await page.evaluate(() => window.standaloneHarness.calls.edits) as { draft: { input: Record<string, unknown>[]; images: { fileId?: string; src: string }[]; skills: unknown[]; hints: unknown[] }; origin: unknown }[];
-    assert.deepEqual(edits[1]?.origin, { turnId: 'turn-one', itemId: 'opaque', format: 'markdown', hints: ['search'] });
+    assert.equal(edits.length, 2);
+    assert.deepEqual(edits[1]?.origin, { turnId: 'turn-two', itemId: 'opaque', format: 'markdown', hints: ['search'] });
     assert.deepEqual(edits[1]?.draft.input, [
-      { type: 'text', text: 'Before', text_elements: [{ byteRange: { start: 0, end: 6 }, placeholder: 'Before', context: { browser: 'element' } }] },
-      { type: 'image', fileId: 'opaque-file', detail: 'high' }, { type: 'text', text: 'After', text_elements: [] },
+      { type: 'text', text: '中Before', text_elements: [{ byteRange: { start: 3, end: 9 }, placeholder: 'Before', context: { browser: 'element' } }] },
+      { type: 'image', fileId: 'opaque-file', detail: 'high' }, { type: 'text', text: 'After edited', text_elements: [] },
       { type: 'skill', name: 'check', path: '/skill' }, { type: 'mention', name: 'project', path: '/project' },
       { type: 'localAudio', path: '/audio.wav' },
     ]);
     assert.deepEqual(edits[1]?.draft.images, [{ id: 'image-1', src: '', fileId: 'opaque-file', name: 'Image' }]);
     assert.deepEqual(edits[1]?.draft.skills, [{ name: 'check', path: '/skill' }]);
     assert.deepEqual(edits[1]?.draft.hints, ['search']);
+    await page.evaluate(() => window.standaloneHarness.setBusy(true));
+    assert.equal(await opaque.getByRole('button', { name: 'Edit message' }).isDisabled(), true);
+    await opaque.getByText('Wait for the active turn to finish before editing.').waitFor();
+    await page.evaluate(() => window.standaloneHarness.setBusy(false));
+    await page.evaluate(() => window.standaloneHarness.setItemsView('summary'));
+    assert.equal(await opaque.getByRole('button', { name: 'Edit message' }).isDisabled(), true);
+    await page.evaluate(() => window.standaloneHarness.setItemsView('full'));
+    await opaque.getByRole('button', { name: 'Edit message' }).click();
+    await page.evaluate(() => window.standaloneHarness.changeSource());
+    await opaque.getByRole('alert').getByText('This message changed while editing.', { exact: false }).waitFor();
+    await opaque.getByText('skill: check', { exact: false }).waitFor();
+    assert.equal(await opaque.getByText('skill: changed', { exact: false }).count(), 0);
+    assert.equal(await opaque.getByRole('button', { name: 'Send', exact: true }).isDisabled(), true);
+    await opaque.getByRole('button', { name: 'Cancel' }).click();
+    await opaque.getByRole('button', { name: 'Edit message' }).click();
+    await page.evaluate(() => window.standaloneHarness.enableEdit(false));
+    await opaque.getByRole('alert').getByText('Message editing is unavailable.').waitFor();
+    await opaque.getByRole('button', { name: 'Cancel' }).click();
+    await page.evaluate(() => window.standaloneHarness.enableEdit(true));
     await opaque.getByText('Image file ID cannot be resolved by this host.').waitFor();
     await user.getByText('missing image').waitFor();
     await user.getByRole('button', { name: 'Retry' }).click();
@@ -277,6 +347,49 @@ test('standalone messages render CLI items and retain interactions while streami
     await page.getByText('Interrupted', { exact: true }).waitFor();
     await page.setViewportSize({ width: 375, height: 800 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    await page.evaluate(() => { window.standaloneHarness.editMode('resolve'); window.standaloneHarness.usePlainThread(); });
+    await user.getByRole('button', { name: 'Edit message' }).click();
+    await user.getByRole('textbox', { name: 'Edit message text' }).fill('Updated plain message');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    await page.emulateMedia({ media: 'print' });
+    assert.equal(await user.locator('.yard-edit-print-text').innerText(), 'Updated plain message');
+    assert.equal(await user.getByRole('button', { name: 'Send', exact: true }).isVisible(), false);
+    await page.emulateMedia({ media: 'screen' });
+    await user.getByRole('button', { name: 'Send', exact: true }).click();
+    await user.getByRole('button', { name: 'Edit message' }).waitFor();
+    const lastEdit = (await page.evaluate(() => window.standaloneHarness.calls.edits)).at(-1) as { origin: unknown; draft: { input: unknown[] } };
+    assert.deepEqual(lastEdit.origin, { turnId: 'turn-one', itemId: 'user', format: 'plain', hints: [] });
+    assert.deepEqual(lastEdit.draft.input, [{ type: 'text', text: 'Updated plain message', text_elements: [] },
+      { type: 'localImage', path: 'good.gif' }, { type: 'localImage', path: 'retry.gif' }]);
+    await user.getByRole('button', { name: 'Open good.gif' }).click();
+    await page.getByRole('dialog', { name: 'Image preview' }).waitFor();
+    await page.evaluate(() => window.standaloneHarness.setHost('ssh-other'));
+    await page.getByRole('dialog', { name: 'Image preview' }).waitFor({ state: 'hidden' });
+    await user.getByRole('button', { name: 'Edit message' }).click();
+    await user.getByRole('textbox', { name: 'Edit message text' }).fill('Retained while switching threads');
+    await page.evaluate(() => window.standaloneHarness.navigateAway());
+    await page.getByText('No messages yet').waitFor();
+    await page.evaluate(() => window.standaloneHarness.navigateBack());
+    assert.equal(await user.getByRole('textbox', { name: 'Edit message text' }).inputValue(), 'Retained while switching threads');
+    await page.evaluate(() => window.standaloneHarness.editMode('pending'));
+    await user.getByRole('button', { name: 'Send', exact: true }).click();
+    await user.getByRole('button', { name: 'Sending...' }).waitFor();
+    await page.evaluate(() => window.standaloneHarness.navigateAway());
+    await page.getByText('No messages yet').waitFor();
+    await page.evaluate(() => window.standaloneHarness.rejectEdit());
+    await page.evaluate(() => window.standaloneHarness.navigateBack());
+    await user.getByText('Synthetic revert failure').waitFor();
+    assert.equal(await user.getByRole('textbox', { name: 'Edit message text' }).inputValue(), 'Retained while switching threads');
+    await user.getByRole('button', { name: 'Send', exact: true }).click();
+    await user.getByRole('button', { name: 'Sending...' }).waitFor();
+    await page.evaluate(() => window.standaloneHarness.removeTurn());
+    await user.getByText('The original message is no longer available.', { exact: false }).waitFor();
+    assert.equal(await user.getByRole('textbox', { name: 'Edit message text' }).inputValue(), 'Retained while switching threads');
+    await page.evaluate(() => window.standaloneHarness.rejectEdit());
+    await user.getByText('Synthetic revert failure').waitFor();
+    assert.equal(await user.getByRole('button', { name: 'Send', exact: true }).isDisabled(), true);
+    await user.getByRole('button', { name: 'Cancel' }).click();
+    await page.getByText('No messages yet').waitFor();
     assert.deepEqual(errors, []);
     await page.close();
   } finally {
