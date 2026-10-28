@@ -20,8 +20,7 @@ class FakeClient implements WorkbenchClient {
     throw new Error('unsupported host endpoint');
   }
   currentLayer() {
-    const profile = this.config.profile;
-    return { name: { type: 'user', file: `${this.home}/${profile ? `${profile}.config.toml` : 'config.toml'}`, profile }, version: this.version };
+    return { name: { type: 'user', file: `${this.home}/config.toml`, profile: null }, version: this.version };
   }
   async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
     this.calls.push({ method, params, hostId });
@@ -34,8 +33,7 @@ class FakeClient implements WorkbenchClient {
       if (this.reject) throw new Error('offline');
       if (this.conflictOnWrite) this.version = 'concurrent-version';
       if (params?.expectedVersion !== this.version) throw new Error('Configuration was modified since last read');
-      const expectedFile = this.config.profile ? this.currentLayer().name.file : null;
-      if (params?.filePath !== expectedFile) throw new Error('Wrong target file');
+      if (params?.filePath !== null) throw new Error('Wrong target file');
       for (const edit of params?.edits as { keyPath: string; value: string }[]) {
         if (edit.keyPath === 'model') this.config.model = edit.value;
         if (edit.keyPath === 'model_reasoning_effort') this.config.model_reasoning_effort = edit.value;
@@ -64,18 +62,18 @@ test('model settings paginate and write the selected host default user file with
   assert.equal(settings.dirty, false);
 });
 
-test('a matching named profile file is targeted without splitting a dotted name', async () => {
+test('a legacy profile value does not redirect base user model writes', async () => {
   const client = new FakeClient(); client.config.profile = 'work.name';
   const settings = new ModelSettings(client, 'local');
   await settings.load(); settings.setModel('beta');
   assert.equal(await settings.save(), true);
   const write = client.calls.find(call => call.method === 'config/batchWrite');
-  assert.equal(write?.params?.filePath, '/fixture/codex/work.name.config.toml');
+  assert.equal(write?.params?.filePath, null);
   assert.equal(write?.params?.expectedVersion, 'version-one');
   assert.deepEqual((write?.params?.edits as { keyPath: string }[]).map(edit => edit.keyPath), ['model', 'model_reasoning_effort']);
 });
 
-test('a profile without its own unambiguous user file cannot overwrite the base file', async () => {
+test('a synthetic named user layer cannot be treated as the base file', async () => {
   const client = new FakeClient(); client.config.profile = 'work.name';
   client.layers = [{ name: { type: 'user', file: '/fixture/codex/config.toml', profile: 'work.name' }, version: 'v' }];
   const settings = new ModelSettings(client, 'local');
@@ -89,6 +87,8 @@ test('a profile without its own unambiguous user file cannot overwrite the base 
 test('missing, mismatched or ambiguous metadata blocks a write and preserves the edit', async () => {
   for (const layers of [[], [{ name: { type: 'user', file: '/other/config.toml', profile: null }, version: 'v' }],
     [{ name: { type: 'user', file: '/fixture/codex/config.toml', profile: null }, version: '' }],
+    [{ name: { type: 'user', file: '/fixture/codex/config.toml', profile: null }, version: 'v' },
+      { name: { type: 'user', file: '/fixture/codex/config.toml' }, version: 'unknown' }],
     [{ name: { type: 'user', file: '/fixture/codex/config.toml', profile: null }, version: 'v' },
       { name: { type: 'user', file: '/fixture/codex/work.config.toml', profile: 'work' }, version: 'p' }]]) {
     const client = new FakeClient(); client.layers = layers;

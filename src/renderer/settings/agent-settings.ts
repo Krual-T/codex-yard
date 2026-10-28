@@ -48,7 +48,7 @@ export class AgentSettings {
   private async targetFor(read: ConfigRead) {
     try {
       const home = await this.client.host<{ codexHome?: unknown }>('codex-home', { hostId: this.hostId });
-      return userConfigTarget(read.layers, home?.codexHome, profileName(read.config.profile));
+      return userConfigTarget(read.layers, home?.codexHome);
     } catch { return { target: null, error: 'Cannot save: the selected host did not provide its configuration home and version.' }; }
   }
   private async requirements(): Promise<{ approvals: Approval[]; sandboxes: Sandbox[] }> {

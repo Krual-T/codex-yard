@@ -49,7 +49,7 @@ export class ModelSettings {
   private async targetFor(read: ConfigRead): Promise<ConfigTargetResult> {
     try {
       const home = await this.client.host<{ codexHome?: unknown }>('codex-home', { hostId: this.hostId });
-      return userConfigTarget(read.layers, home?.codexHome, asValue(read.config.profile));
+      return userConfigTarget(read.layers, home?.codexHome);
     } catch {
       return { target: null, error: 'Cannot save: the selected host did not provide its configuration home and version.' };
     }

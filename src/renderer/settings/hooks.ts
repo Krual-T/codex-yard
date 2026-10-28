@@ -91,7 +91,7 @@ export class HookSettings {
     if (configResult.status === 'fulfilled' && homeResult.status === 'fulfilled' && record(configResult.value?.config)
       && (configResult.value.config.profile == null || typeof configResult.value.config.profile === 'string')) {
       profile = typeof configResult.value.config.profile === 'string' && configResult.value.config.profile ? configResult.value.config.profile : null;
-      const resolved = userConfigTarget(baseLayers(configResult.value.layers), homeResult.value?.codexHome, null);
+      const resolved = userConfigTarget(baseLayers(configResult.value.layers), homeResult.value?.codexHome);
       target = resolved.target; targetError = resolved.error;
     } else targetError = 'Cannot save: the selected host did not provide its configuration home and version.';
     return { hooks, warnings, target, targetError, profile };

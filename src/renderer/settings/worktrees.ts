@@ -56,7 +56,7 @@ export class RemoteWorktreeSettings {
     const profile = rawProfile || null;
     try {
       const home = await this.client.host<{ codexHome?: unknown }>('codex-home', { hostId: this.hostId });
-      return { value, profile, target: userConfigTarget(result.layers, home?.codexHome, profile) };
+      return { value, profile, target: userConfigTarget(result.layers, home?.codexHome) };
     } catch {
       return { value, profile, target: { target: null, error: 'Cannot save: the selected host did not provide its configuration home and version.' } };
     }

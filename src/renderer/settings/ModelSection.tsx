@@ -16,7 +16,7 @@ export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: 
   const efforts = Array.isArray(selected?.supportedReasoningEfforts) ? selected.supportedReasoningEfforts : [];
   return <>
     <div className="yard-section-heading"><h2>Models</h2><button type="button" disabled={dirty || state.loading || state.saving} onClick={() => { void modelSettings.load(); }}>Refresh</button></div>
-    <p className="yard-muted">Default model and reasoning effort for {hostId === 'local' ? 'the local host' : hostId}{state.profile ? `, profile ${state.profile}` : ''}.</p>
+    <p className="yard-muted">Default model and reasoning effort for {hostId === 'local' ? 'the local host' : hostId}.</p>
     {state.error && <p className="yard-setting-error" role="alert">{state.error} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void modelSettings.load(); }}>Reload</button></p>}
     {state.writeError && <p className="yard-setting-error" role="alert">{state.writeError} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void modelSettings.load(); }}>Reload</button></p>}
     {state.warning && <p role="status">{state.warning}</p>}
