@@ -216,7 +216,7 @@ export function StandaloneSettings({ client, hostId, location, onNavigate, onClo
             section === 'models' ? <ModelSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
               section === 'git-settings' ? <GitSection preferences={preferences} snapshot={snapshot} suspended={confirmLeave} /> :
                 section === 'worktrees' ? <WorktreesSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
-                  preferences={preferences} snapshot={snapshot} onDirtyChange={setOtherDirty} /> :
+                  preferences={preferences} snapshot={snapshot} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
                   section === 'keyboard-shortcuts' ? <KeyboardSection client={client} preferences={preferences} snapshot={snapshot} platform={platform} /> :
               isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
                 section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving} /> :

@@ -17,7 +17,8 @@ export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: 
   return <>
     <div className="yard-section-heading"><h2>Models</h2><button type="button" disabled={dirty || state.loading || state.saving} onClick={() => { void modelSettings.load(); }}>Refresh</button></div>
     <p className="yard-muted">Default model and reasoning effort for {hostId === 'local' ? 'the local host' : hostId}{state.profile ? `, profile ${state.profile}` : ''}.</p>
-    {state.error && <p className="yard-setting-error" role="alert">{state.error} {!dirty && <button type="button" className="yard-link" onClick={() => { void modelSettings.load(); }}>Retry</button>}</p>}
+    {state.error && <p className="yard-setting-error" role="alert">{state.error} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void modelSettings.load(); }}>Reload</button></p>}
+    {state.writeError && <p className="yard-setting-error" role="alert">{state.writeError} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void modelSettings.load(); }}>Reload</button></p>}
     {state.warning && <p role="status">{state.warning}</p>}
     {state.loading ? <p>Loading models...</p> : <div className="yard-setting-group">
       <Row label="Model"><select aria-label="Model" value={state.model ?? ''} disabled={state.saving || state.models.length === 0}
@@ -35,7 +36,7 @@ export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: 
     </div>}
     {dirty && <div className="yard-inline-save"><span>Unsaved model settings</span><div className="yard-actions">
       <button type="button" disabled={state.saving} onClick={() => modelSettings.discard()}>Discard</button>
-      <button type="button" disabled={state.saving} onClick={() => { void modelSettings.save(); }}>{state.saving ? 'Saving...' : 'Save'}</button>
+      <button type="button" disabled={state.saving || Boolean(state.writeError)} onClick={() => { void modelSettings.save(); }}>{state.saving ? 'Saving...' : 'Save'}</button>
     </div></div>}
   </>;
 }
