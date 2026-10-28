@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent } from 'react';
 import type { ComposerDraft, StandaloneComposerProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
-import { activatePending, createId, documentFromText, draftKey, draftToInput, hasContent, loadDraft, mergePrefill, normalizeDraft, readDraft, richEditIssue, textEditIssue, updateDraftText, updateRichDraft, writeDraft } from './standalone-draft.ts';
-import type { Draft } from './standalone-draft.ts';
+import { readBrowserAtoms, subscribeBrowserAtoms } from '../storage/ui-atoms.ts';
+import { activatePending, createId, documentFromText, draftKey, draftToInput, emptyDraft, hasContent, legacyBlockedMessage, loadDraft, loadLocalDraft, mergePrefill, normalizeDraft, readDraft, richEditIssue, textEditIssue, updateDraftText, updateRichDraft, writeDraft } from './standalone-draft.ts';
+import type { Draft, StoredDraft } from './standalone-draft.ts';
 import { importAttachments } from './standalone-files.ts';
 import { useCompletions } from './standalone-completions.tsx';
 import type { Completion } from './standalone-completions.tsx';
@@ -51,6 +52,8 @@ export type StandaloneComposerRuntimeProps = StandaloneComposerProps & {
 };
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+const legacyAtomKeys = new Set(['composer-prompt-drafts-v2', 'composer-prompt-drafts-v1', 'composer-retained-documents-v1',
+  'client-thread-bindings-v1', 'draft-thread-identities-v1']);
 function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; hostId: string; path: string; name: string }) {
   const [preview, setPreview] = useState<string | null>(null);
   return <details onToggle={event => {
@@ -63,7 +66,8 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
 
 function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
   const key = draftKey(context);
-  const [initial] = useState(() => loadDraft(context));
+  const [initial] = useState<StoredDraft>(() => loadLocalDraft(context)
+    ?? { revision: createId(), draft: emptyDraft(), prefills: [], legacyPending: true });
   const current = useRef(initial);
   const [initialPersistedRevision] = useState(() => readDraft(key)?.revision ?? null);
   const persistedRevision = useRef(initialPersistedRevision);
@@ -74,6 +78,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const options = { ...initialOptions, ...overrides };
   const [error, setError] = useState('');
   const [storageError, setStorageError] = useState(false);
+  const [legacyError, setLegacyError] = useState('');
+  const [legacyRetry, setLegacyRetry] = useState(0);
   const [sending, setSending] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -83,6 +89,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const enterSetting = useEnterSetting(client);
   const followUpSetting = useFollowUpSetting(client);
   const mounted = useRef(false);
+  const legacyGeneration = useRef(0);
   const activeController = useRef<ComposerDraftController | null>(null);
   const draftChangeCallback = useRef(onDraftChange);
   draftChangeCallback.current = onDraftChange;
@@ -132,7 +139,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const changeDraft = useCallback((update: (draft: Draft) => Draft, prefillId?: string) => {
     if (!mounted.current) return false;
     const previous = current.current;
-    const next = { revision: createId(), draft: update(previous.draft),
+    const next = { ...previous, revision: createId(), draft: update(previous.draft),
       prefills: prefillId ? [...previous.prefills, prefillId] : previous.prefills };
     current.current = next;
     const saved = writeDraft(key, next);
@@ -179,6 +186,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     activeController.current = controller;
     return () => { if (activeController.current === controller) activeController.current = null; mounted.current = false; };
   }, [controller]);
+  const legacyIdentity = JSON.stringify([context.hostId, context.threadId, context.draftId, context.placement ?? null, context.legacyDraftKey ?? null]);
+  useLayoutEffect(() => { legacyGeneration.current += 1; }, [legacyIdentity]);
   useLayoutEffect(() => {
     onDraftController?.(controller);
     return () => onDraftController?.(null);
@@ -187,6 +196,40 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     const snapshot = controller.snapshot();
     if (snapshot) draftChangeCallback.current?.(snapshot);
   }, [controller, stored]);
+
+  useEffect(() => {
+    setLegacyError('');
+    if (!current.current.legacyPending && current.current.draft.blocked !== legacyBlockedMessage) return;
+    const generation = legacyGeneration.current;
+    let disposed = false, request = 0;
+    const valid = (serial: number) => !disposed && mounted.current && activeController.current === controller
+      && generation === legacyGeneration.current && serial === request;
+    const read = () => {
+      const serial = ++request;
+      void readBrowserAtoms().then(atoms => {
+        if (!valid(serial)) return;
+        const previous = current.current;
+        const recovered = loadDraft(context, atoms, previous);
+        if (recovered !== previous) {
+          if ((readDraft(key)?.revision ?? null) !== persistedRevision.current) {
+            throw new Error('草稿已在其他页面修改，当前内容已保留。');
+          }
+          const next = { ...recovered, revision: createId() };
+          if (!writeDraft(key, next)) throw new Error('恢复的草稿未能保存到浏览器，当前内容已保留。');
+          persistedRevision.current = next.revision;
+          current.current = next;
+          setStored(next); setStorageError(false);
+        }
+        setLegacyError('');
+        unsubscribe();
+      }).catch(reason => {
+        if (valid(serial)) setLegacyError('无法恢复旧草稿，当前内容已保留：' + message(reason));
+      });
+    };
+    const unsubscribe = subscribeBrowserAtoms(keys => { if (keys.some(key => legacyAtomKeys.has(key))) read(); });
+    read();
+    return () => { disposed = true; unsubscribe(); };
+  }, [legacyIdentity, controller, key, legacyRetry]);
 
   const removeReference = async (reference: ComposerReference) => {
     if (pendingReferences.current.get(reference.id) === controller) return;
@@ -414,6 +457,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     </div>
     {uploading ? <div role="status">正在上传附件…</div> : null}
     {storageError ? <div role="alert">草稿未能保存到浏览器，刷新前请检查浏览器存储空间。</div> : null}
+    {legacyError ? <div role="alert">{legacyError} <button type="button" onClick={() => setLegacyRetry(value => value + 1)}>重试恢复</button></div> : null}
     {enterSetting.error ? <div role="alert">{enterSetting.error}</div> : null}
     {busy && followUpSetting.error ? <div role="alert">{followUpSetting.error}</div> : null}
     {error ? <div role="alert">{error}</div> : null}

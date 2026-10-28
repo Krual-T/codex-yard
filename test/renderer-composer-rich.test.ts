@@ -110,7 +110,7 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
     await page.addStyleTag({ content: css });
     await page.addScriptTag({ content: script });
     const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' });
-    await editor.waitFor();
+    await page.locator('[contenteditable="true"][aria-label="和 Codex 一起工作"]').waitFor();
     assert.equal(await editor.getAttribute('contenteditable'), 'true');
     assert.equal(await page.locator('textarea[aria-label="和 Codex 一起工作"]').count(), 0);
     assert.equal(await editor.locator('[data-mention="file"]').innerText(), '@file');

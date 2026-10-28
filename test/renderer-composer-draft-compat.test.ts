@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { activatePending, draftKey, draftToInput, emptyDraft, loadDraft, mergePrefill, normalizeDraft, textEditIssue, updateDraftText, writeDraft } from '../src/renderer/composer/standalone-draft.ts';
+import { activatePending, draftKey, draftToInput, emptyDraft, loadDraft as loadDraftFromAtoms, mergePrefill, normalizeDraft, readDraft, textEditIssue, updateDraftText, writeDraft } from '../src/renderer/composer/standalone-draft.ts';
 import type { ComposerContext, ComposerDraft, StandaloneComposerProps, WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 
 function contractTypeChecks(submit: StandaloneComposerProps['onSubmit'], client: WorkbenchClient) {
@@ -32,6 +32,10 @@ function storage(): Storage {
   return result;
 }
 const context: ComposerContext = { hostId: 'local', threadId: 'thread-1', cwd: '/workspace', draftId: 'draft-1' };
+function loadDraft(value: ComposerContext) {
+  const raw = localStorage.getItem('native-atoms');
+  return loadDraftFromAtoms(value, raw ? JSON.parse(raw) : {});
+}
 
 test('draft identity is stable across cwd changes and distinct across drafts and hosts', () => {
   assert.equal(draftKey(context), draftKey({ ...context, cwd: '/other' }));
@@ -88,6 +92,22 @@ test('an absent legacy identity does not claim the shared new-conversation draft
   const fresh: ComposerContext = { hostId: 'local', threadId: null, cwd: '/workspace', draftId: 'new-unique' };
   assert.equal(loadDraft(fresh).draft.text, '');
   assert.equal(loadDraft({ ...fresh, legacyDraftKey: 'new-conversation' }).draft.text, 'Legacy draft');
+});
+
+test('pending recovery preserves even whitespace edits and the original opaque legacy data', () => {
+  storage();
+  const contextWithKey = { ...context, legacyDraftKey: 'client' };
+  const atoms = { 'composer-prompt-drafts-v2': { client: { prompt: 'Old', extra: { retained: true } } } };
+  const pending = { revision: 'new', draft: { ...emptyDraft(), text: '  ' }, prefills: ['prefill'], legacyPending: true };
+  assert.equal(writeDraft(draftKey(contextWithKey), pending), true);
+  assert.equal(readDraft(draftKey(contextWithKey))?.legacyPending, true);
+  const recovered = loadDraftFromAtoms(contextWithKey, atoms, pending);
+  assert.equal(recovered.legacyPending, undefined);
+  assert.equal(recovered.draft.text, '  ');
+  assert.equal(recovered.prefills[0], 'prefill');
+  assert.equal(recovered.draft.pendingDrafts?.[0]?.text, 'Old');
+  assert.deepEqual(recovered.draft.pendingDrafts?.[0], loadDraftFromAtoms(contextWithKey, atoms, null).draft);
+  assert.equal(activatePending(recovered.draft, true).pendingDrafts?.[0]?.text, '  ');
 });
 
 test('rich documents and opaque legacy metadata remain preserved and cannot be overwritten by text editing', () => {

@@ -12,7 +12,8 @@ export interface Draft extends ComposerDraft {
   pendingDrafts?: ComposerDraft[];
   blocked?: string;
 }
-export interface StoredDraft { revision: string; draft: Draft; prefills: string[] }
+export interface StoredDraft { revision: string; draft: Draft; prefills: string[]; legacyPending?: boolean }
+export const legacyBlockedMessage = '此草稿包含格式或上下文，当前编辑器不能无损编辑。';
 
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -77,11 +78,13 @@ export function readDraft(key: string): StoredDraft | null {
     if (raw === null) return null;
     let value: unknown;
     try { value = JSON.parse(raw); } catch { return invalidStored(raw); }
-    if (!record(value) || typeof value.revision !== 'string' || !strings(value.prefills) || !record(value.draft)) return invalidStored(value);
+    if (!record(value) || typeof value.revision !== 'string' || !strings(value.prefills) || !record(value.draft)
+      || value.legacyPending !== undefined && typeof value.legacyPending !== 'boolean') return invalidStored(value);
     // v1 drafts predate skills and the optional structured fields.
     const draft = { ...value.draft, skills: value.draft.skills ?? [] };
     if (!isDraft(draft)) return invalidStored(value);
-    return { revision: value.revision, draft, prefills: value.prefills };
+    return { revision: value.revision, draft, prefills: value.prefills,
+      ...(value.legacyPending === true ? { legacyPending: true } : {}) };
   } catch { return invalidStored('Browser storage is unavailable'); }
 }
 export function writeDraft(key: string, value: StoredDraft): boolean {
@@ -150,75 +153,86 @@ function legacyKeys(context: ComposerContext, atoms: Record<string, unknown>): s
   }
   return keys;
 }
-function readLegacy(context: ComposerContext): StoredDraft | null {
-  let rawAtoms: string | null;
-  try {
-    rawAtoms = localStorage.getItem('native-atoms');
-    if (rawAtoms === null) return null;
-    const atoms: unknown = JSON.parse(rawAtoms);
-    if (!record(atoms)) return invalidStored(atoms);
-    const keys = legacyKeys(context, atoms);
-    const v2 = record(atoms['composer-prompt-drafts-v2']) ? atoms['composer-prompt-drafts-v2'] : {};
-    const v1 = record(atoms['composer-prompt-drafts-v1']) ? atoms['composer-prompt-drafts-v1'] : {};
-    const retained = record(atoms['composer-retained-documents-v1']) ? atoms['composer-retained-documents-v1'] : {};
-    const promptKey = keys.find(key => key in v2) ?? keys.find(key => key in v1);
-    const retainedKey = keys.find(key => key in retained);
-    if (promptKey === undefined && retainedKey === undefined) return null;
-    const raw = promptKey === undefined ? undefined : v2[promptKey] ?? v1[promptKey];
-    const draft = record(raw) && 'draft' in raw ? raw.draft : raw;
-    const value = record(draft) && 'prompt' in draft ? draft.prompt : draft;
-    const retainedValue = retainedKey === undefined ? undefined : retained[retainedKey];
-    const source = record(retainedValue) && 'document' in retainedValue ? retainedValue : value;
-    const savedPrompt = record(retainedValue) && typeof retainedValue.prompt === 'string' ? retainedValue.prompt : undefined;
-    const promptText = typeof value === 'string' ? value : savedPrompt;
-    let text = promptText ?? '';
-    let document: ComposerDocument | undefined;
-    let blocked: string | undefined;
-    if (record(source) && 'document' in source) {
-      if (isDocument(source.document)) {
-        document = source.document;
-        const plain = plainDocument(document, promptText);
-        if (plain !== null && (promptText === undefined || plain === promptText)) text = plain;
-        else {
-          const rich = readRichDocument(document);
-          if (rich === null) blocked = '此草稿包含尚不支持的文档内容，已保留原始数据。';
-          else if (promptText === undefined) text = serializeRichDocument(rich);
-          else if (plain !== promptText && serializeRichDocument(rich) !== promptText) {
-            blocked = '此草稿的文档与保存的文本不一致，已保留两个版本。';
-          }
+function readLegacy(context: ComposerContext, atoms: Record<string, unknown>): StoredDraft | null {
+  const keys = legacyKeys(context, atoms);
+  const v2 = record(atoms['composer-prompt-drafts-v2']) ? atoms['composer-prompt-drafts-v2'] : {};
+  const v1 = record(atoms['composer-prompt-drafts-v1']) ? atoms['composer-prompt-drafts-v1'] : {};
+  const retained = record(atoms['composer-retained-documents-v1']) ? atoms['composer-retained-documents-v1'] : {};
+  const promptKey = keys.find(key => key in v2) ?? keys.find(key => key in v1);
+  const retainedKey = keys.find(key => key in retained);
+  if (promptKey === undefined && retainedKey === undefined) return null;
+  const raw = promptKey === undefined ? undefined : v2[promptKey] ?? v1[promptKey];
+  const draft = record(raw) && 'draft' in raw ? raw.draft : raw;
+  const value = record(draft) && 'prompt' in draft ? draft.prompt : draft;
+  const retainedValue = retainedKey === undefined ? undefined : retained[retainedKey];
+  const source = record(retainedValue) && 'document' in retainedValue ? retainedValue : value;
+  const savedPrompt = record(retainedValue) && typeof retainedValue.prompt === 'string' ? retainedValue.prompt : undefined;
+  const promptText = typeof value === 'string' ? value : savedPrompt;
+  let text = promptText ?? '';
+  let document: ComposerDocument | undefined;
+  let blocked: string | undefined;
+  if (record(source) && 'document' in source) {
+    if (isDocument(source.document)) {
+      document = source.document;
+      const plain = plainDocument(document, promptText);
+      if (plain !== null && (promptText === undefined || plain === promptText)) text = plain;
+      else {
+        const rich = readRichDocument(document);
+        if (rich === null) blocked = '此草稿包含尚不支持的文档内容，已保留原始数据。';
+        else if (promptText === undefined) text = serializeRichDocument(rich);
+        else if (plain !== promptText && serializeRichDocument(rich) !== promptText) {
+          blocked = '此草稿的文档与保存的文本不一致，已保留两个版本。';
         }
-      } else blocked = '此草稿的文档格式无法读取，已保留原始数据。';
-    } else if (value !== undefined && typeof value !== 'string') blocked = '此草稿包含未识别的内容，已保留原始数据。';
-    if (record(value) && 'document' in value && source !== value && record(source)
-      && JSON.stringify(value.document) !== JSON.stringify(source.document)) {
-      blocked = '此草稿包含不同版本的文档，均已保留。';
-    }
-    if (record(value) && Object.entries(value).some(([key, item]) => key !== 'document' && key !== 'plainTextMode' && !emptyMetadata(item))
-      || record(retainedValue) && Object.entries(retainedValue).some(([key, item]) => key !== 'document' && key !== 'plainTextMode' && key !== 'prompt' && !emptyMetadata(item))) {
-      blocked = '此草稿包含额外文档信息，当前编辑器不能无损编辑。';
-    }
-    if (record(draft) && Object.entries(draft).some(([key, item]) => key !== 'prompt' && !emptyMetadata(item))) {
-      blocked = '此草稿包含额外上下文，当前编辑器不能无损编辑。';
-    }
-    return { revision: createId(), prefills: [], draft: { ...emptyDraft(), text, document, blocked,
-      preserved: { promptKey, retainedKey, draft: raw, retained: retainedValue } } };
-  } catch { return invalidStored('无法读取旧版草稿存储。'); }
+      }
+    } else blocked = '此草稿的文档格式无法读取，已保留原始数据。';
+  } else if (value !== undefined && typeof value !== 'string') blocked = '此草稿包含未识别的内容，已保留原始数据。';
+  if (record(value) && 'document' in value && source !== value && record(source)
+    && JSON.stringify(value.document) !== JSON.stringify(source.document)) {
+    blocked = '此草稿包含不同版本的文档，均已保留。';
+  }
+  if (record(value) && Object.entries(value).some(([key, item]) => key !== 'document' && key !== 'plainTextMode' && !emptyMetadata(item))
+    || record(retainedValue) && Object.entries(retainedValue).some(([key, item]) => key !== 'document' && key !== 'plainTextMode' && key !== 'prompt' && !emptyMetadata(item))) {
+    blocked = '此草稿包含额外文档信息，当前编辑器不能无损编辑。';
+  }
+  if (record(draft) && Object.entries(draft).some(([key, item]) => key !== 'prompt' && !emptyMetadata(item))) {
+    blocked = '此草稿包含额外上下文，当前编辑器不能无损编辑。';
+  }
+  return { revision: createId(), prefills: [], draft: { ...emptyDraft(), text, document, blocked,
+    preserved: { promptKey, retainedKey, draft: raw, retained: retainedValue } } };
 }
-export function loadDraft(context: ComposerContext): StoredDraft {
+export function loadLocalDraft(context: ComposerContext): StoredDraft | null {
   const key = draftKey(context);
   const oldKey = 'codex-yard.composer.v1:' + JSON.stringify([context.hostId, context.threadId, context.threadId == null ? context.cwd : null]);
   const oldThreadId = context.threadId && (context.draftId === context.threadId || context.draftId === 'local:' + context.threadId
     || context.legacyDraftKey === context.threadId || context.legacyDraftKey === 'local:' + context.threadId);
   const old = oldThreadId || context.legacyDraftKey === oldKey ? readDraft(oldKey) : null;
-  const saved = readDraft(key) ?? old;
-  if (saved?.draft.blocked === '此草稿包含格式或上下文，当前编辑器不能无损编辑。') {
-    const legacy = readLegacy(context);
+  return readDraft(key) ?? old;
+}
+
+function isPristine(draft: Draft): boolean {
+  return draft.text === '' && !draft.images.length && !draft.files.length && !draft.references.length && !draft.skills.length
+    && Object.keys(draft).every(key => ['text', 'images', 'files', 'references', 'skills'].includes(key));
+}
+
+/** Reconcile a transactional legacy snapshot with the latest in-memory draft. */
+export function loadDraft(context: ComposerContext, atoms: Record<string, unknown>, saved = loadLocalDraft(context)): StoredDraft {
+  if (saved?.legacyPending) {
+    const legacy = readLegacy(context, atoms);
+    const { legacyPending: _pending, ...settled } = saved;
+    if (!legacy) return settled;
+    const draft = isPristine(saved.draft) ? legacy.draft : {
+      ...saved.draft, pendingDrafts: [...saved.draft.pendingDrafts ?? [], legacy.draft],
+    };
+    return { ...settled, draft };
+  }
+  if (saved?.draft.blocked === legacyBlockedMessage) {
+    const legacy = readLegacy(context, atoms);
     const candidate = { ...saved.draft, blocked: undefined };
     if (legacy && !legacy.draft.blocked && JSON.stringify(candidate.document) === JSON.stringify(legacy.draft.document)
       && candidate.text === legacy.draft.text && JSON.stringify(candidate.preserved) === JSON.stringify(legacy.draft.preserved)
       && !richEditIssue(candidate)) return { ...saved, draft: candidate };
   }
-  return saved ?? readLegacy(context) ?? { revision: createId(), draft: emptyDraft(), prefills: [] };
+  return saved ?? readLegacy(context, atoms) ?? { revision: createId(), draft: emptyDraft(), prefills: [] };
 }
 export function textEditIssue(draft: Draft): string | null {
   if (draft.blocked) return draft.blocked;
@@ -306,7 +320,7 @@ export function activatePending(draft: Draft, keepCurrent: boolean): Draft {
   if (!draft.pendingDrafts?.length) return keepCurrent ? draft : emptyDraft();
   const [next, ...remaining] = draft.pendingDrafts;
   const { pendingDrafts: _pending, ...current } = draft;
-  const parked = keepCurrent && hasContent(current) ? [...remaining, current] : remaining;
+  const parked = keepCurrent && !isPristine(current) ? [...remaining, current] : remaining;
   return { ...normalizeDraft(next!), ...(parked.length ? { pendingDrafts: parked } : {}) };
 }
 
