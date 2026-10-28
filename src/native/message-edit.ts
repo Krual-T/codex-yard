@@ -13,6 +13,8 @@ export interface EditMessageRequest {
   operation: 'submit' | 'retry-start' | 'check';
   /** The phase whose original write may still arrive after a timeout. */
   unknownPhase?: 'revertUnknown' | 'startUnknown';
+  /** A user-approved rebase must still refer to this exact completed message. */
+  expectedSource?: { clientUserMessageId: string; signature: string };
 }
 export interface EditMessageResult { stage: EditStage; turn?: TurnSummary; error?: string }
 
@@ -76,6 +78,9 @@ export async function editMessage(connection: Connection, hostId: string, thread
   if (index < 0 || new Set(expected).size !== expected.length) throw new Error('编辑来源历史无效，未修改会话。');
   const input = record(request.turnParams);
   if (!Array.isArray(input.input) || !input.input.length) throw new Error('编辑消息为空，未修改会话。');
+  const expectedSource = request.expectedSource === undefined ? null : record(request.expectedSource);
+  if (expectedSource && (typeof expectedSource.clientUserMessageId !== 'string' || !expectedSource.clientUserMessageId
+    || typeof expectedSource.signature !== 'string' || !expectedSource.signature)) throw new Error('编辑恢复的来源核对无效，未修改会话。');
   const current = await turns(connection, threadId);
   const metadata = record(record(await connection.request('thread/read', { threadId, includeTurns: false })).thread);
   const idle = record(metadata.status).type === 'idle' && current.every(turn => turn.status !== 'inProgress');
@@ -97,6 +102,13 @@ export async function editMessage(connection: Connection, hostId: string, thread
     for (const [offset, turn] of current.slice(index).entries()) {
       const users = (await items(connection, threadId, turn.id)).filter(item => item.type === 'userMessage');
       if (offset === 0 ? users.length !== 1 || users[0]!.id !== origin.itemId : users.length > 0) throw new Error('只能编辑最后一条已完成的用户消息。');
+      if (offset === 0 && expectedSource) {
+        const source = record(users[0]);
+        if (turn.status !== 'completed' || source.clientId !== expectedSource.clientUserMessageId
+          || JSON.stringify([source.content, source.document, source.format, source.hints]) !== expectedSource.signature) {
+          throw new Error('编辑恢复的原消息已改变或尚未完成，请重新核对；较新草稿已保留，未回退或发送。');
+        }
+      }
     }
     try { await connection.request('thread/revert', { threadId, beforeTurnId: origin.turnId }, { mutating: true }); }
     catch (error) { return failure(record(error).uncertain === true ? 'revertUnknown' : 'prepared', error); }

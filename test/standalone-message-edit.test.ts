@@ -102,3 +102,39 @@ test('edit origin and latest-user preconditions are checked before destructive w
   assert.equal((await page.edit('submit', { expectedTurnIds: ['before', 'source', 'later'] })).responseType, 'error');
   assert.equal(h.fake.calls('thread/revert').length, 0);
 });
+
+test('an explicitly rebased edit verifies the complete original source inside the host write interval', async t => {
+  const h = await fixture(t), page = await h.connect();
+  const source = h.thread.turns[1]!.items[0]!;
+  source.clientId = 'original-client-id';
+  source.document = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'original' }] }] };
+  source.format = 'markdown'; source.hints = ['original-hint'];
+  const expectedSource = { clientUserMessageId: 'original-client-id',
+    signature: JSON.stringify([source.content, source.document, source.format, source.hints]) };
+  const original = structuredClone(source);
+  for (const changed of [
+    { clientId: 'another-client-id' }, { content: [{ type: 'text', text: 'changed' }] },
+    { document: { type: 'doc', content: [] } }, { format: 'plain' }, { hints: ['changed-hint'] },
+  ]) {
+    Object.assign(source, original, changed);
+    const result = await page.edit('submit', { expectedSource });
+    assert.equal(result.responseType, 'error');
+    assert.match(String(result.error), /原消息已改变/);
+    assert.equal(h.fake.calls('thread/revert').length, 0);
+    assert.equal(h.fake.calls('turn/start').length, 0);
+  }
+  Object.assign(source, original);
+  h.thread.turns[1]!.status = 'failed';
+  assert.equal((await page.edit('submit', { expectedSource })).responseType, 'error');
+  assert.equal(h.fake.calls('thread/revert').length, 0);
+  h.thread.turns[1]!.status = 'completed';
+  h.fake.handlers.set('turn/start', () => { throw new Error('explicit refusal after the approved rebase'); });
+  assert.equal(record((await page.edit('submit', { expectedSource })).body).stage, 'reverted');
+  h.fake.handlers.delete('turn/start');
+  // The original no longer exists after revert. Retry/check retain their own
+  // original identity and must not require or repeat a source that was removed.
+  assert.equal(record((await page.edit('retry-start', { expectedSource })).body).stage, 'started');
+  assert.equal(record((await page.edit('check', { expectedSource })).body).stage, 'started');
+  assert.equal(h.fake.calls('thread/revert').length, 1);
+  assert.equal(h.fake.calls('turn/start').length, 2);
+});
