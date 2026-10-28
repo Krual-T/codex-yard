@@ -33,7 +33,19 @@ export type MessageEditRecovery = {
     snapshot: ThreadItemSummary;
     turnIndex: number;
     itemIndex: number;
+    /** A rebased edit must again be present in the current complete projection. */
+    requiresCurrentSource?: boolean;
   };
+};
+
+export type MessageEditRebaseMarker = { origin: MessageEditOrigin; submittedVersion: MessageEditRecoveryVersion };
+export type MessageEditRebaseCandidate = {
+  origin: MessageEditOrigin;
+  version: MessageEditRecoveryVersion;
+  operationId: string;
+  clientUserMessageId: string;
+  recovery: MessageEditRecovery;
+  thread: ThreadSummary;
 };
 
 export type StandaloneMessagesRecoveryProps = {
@@ -41,6 +53,9 @@ export type StandaloneMessagesRecoveryProps = {
   /** A null value clears only the specified origin and version. */
   onEditDraftChange?: (value: MessageEditRecovery | null, origin: MessageEditOrigin, version: MessageEditRecoveryVersion) => Promise<void>;
   onEditNavigationController?: (controller: MessageEditNavigationController | null) => void;
+  editRebase?: MessageEditRebaseMarker | null;
+  onPrepareEditRebase?: (origin: MessageEditOrigin, version: MessageEditRecoveryVersion) => Promise<MessageEditRebaseCandidate>;
+  onCommitEditRebase?: (candidate: MessageEditRebaseCandidate) => Promise<MessageEditRecovery>;
 };
 
 export type EditingSession = {
@@ -64,9 +79,12 @@ export type EditingSession = {
   pending: boolean;
   sent: boolean;
   navigationFrozen: boolean;
+  rebaseChecking: boolean;
+  rebaseCommitting: boolean;
+  requiresCurrentSource: boolean;
   revision: number;
 };
-export type StartEdit = Omit<EditingSession, 'id' | 'sessionId' | 'edits' | 'addedText' | 'removedAttachments' | 'attachmentRecoveryInvalid' | 'error' | 'saveError' | 'pending' | 'sent' | 'navigationFrozen' | 'revision'>;
+export type StartEdit = Omit<EditingSession, 'id' | 'sessionId' | 'edits' | 'addedText' | 'removedAttachments' | 'attachmentRecoveryInvalid' | 'error' | 'saveError' | 'pending' | 'sent' | 'navigationFrozen' | 'rebaseChecking' | 'rebaseCommitting' | 'requiresCurrentSource' | 'revision'>;
 export type UpdateEdit = (id: number, update: (session: EditingSession) => EditingSession) => void;
 
 function recoveryFor(session: EditingSession, draft?: ComposerDraft): MessageEditRecovery {
@@ -76,7 +94,8 @@ function recoveryFor(session: EditingSession, draft?: ComposerDraft): MessageEdi
     origin: session.origin,
     editor: { sessionId: session.sessionId, revision: session.revision, baseDraft: session.draft, edits: session.edits, addedText: session.addedText,
       removedAttachments: session.removedAttachments,
-      sourceSignature: session.signature, snapshot: session.snapshot, turnIndex: session.turnIndex, itemIndex: session.itemIndex },
+      sourceSignature: session.signature, snapshot: session.snapshot, turnIndex: session.turnIndex, itemIndex: session.itemIndex,
+      ...(session.requiresCurrentSource ? { requiresCurrentSource: true } : {}) },
   });
 }
 
@@ -88,7 +107,8 @@ const recoveryKey = (origin: MessageEditOrigin) => JSON.stringify([origin.hostId
 const newRecoveryId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
 const recoveryVersion = (session: EditingSession): MessageEditRecoveryVersion => ({ sessionId: session.sessionId, revision: session.revision });
 
-export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery, onEditDraftChange, onEditNavigationController }: StandaloneMessagesRecoveryProps & {
+export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery, onEditDraftChange, onEditNavigationController,
+  editRebase, onPrepareEditRebase, onCommitEditRebase }: StandaloneMessagesRecoveryProps & {
   hostId: string; thread: ThreadSummary | null; threadIdentity: string;
 }) {
   const [sessions, setSessions] = useState<Map<string, EditingSession>>(() => new Map());
@@ -99,9 +119,9 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
   const recoveryWrites = useRef<Promise<void>>(Promise.resolve());
   const queuedPublishes = useRef(new Map<string, { session: EditingSession }>());
   const frozenSessions = useRef(new Map<string, symbol>());
+  const rebaseChecks = useRef(new Map<number, symbol>());
   const activeIdentity = useRef(threadIdentity);
   const mounted = useRef(false);
-  useLayoutEffect(() => { activeIdentity.current = threadIdentity; }, [threadIdentity]);
   useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const nextEditId = useRef(0);
   const putSession = useCallback((identity: string, session: EditingSession | null) => {
@@ -111,6 +131,15 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
     setSessions(next);
   }, []);
   const findSession = useCallback((id: number) => Array.from(sessionsRef.current.values()).find((session) => session.id === id), []);
+  useLayoutEffect(() => {
+    const previous = activeIdentity.current;
+    activeIdentity.current = threadIdentity;
+    if (previous === threadIdentity) return;
+    const session = sessionsRef.current.get(previous);
+    if (session?.rebaseChecking && rebaseChecks.current.delete(session.id)) {
+      putSession(previous, { ...session, rebaseChecking: false });
+    }
+  }, [putSession, threadIdentity]);
   const notifyRecovery = useCallback((value: MessageEditRecovery | null, origin: MessageEditOrigin, version: MessageEditRecoveryVersion): Promise<void> => {
     const callback = recoveryCallback.current;
     if (!callback) return Promise.resolve();
@@ -147,14 +176,14 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
     if (sessionsRef.current.has(session.identity)) return;
     const id = ++nextEditId.current;
     const next = { ...session, id, sessionId: newRecoveryId(), edits: textEdits(session.draft), addedText: '', removedAttachments: [], attachmentRecoveryInvalid: false,
-      error: '', saveError: '', pending: false, sent: false, navigationFrozen: false, revision: 0 };
+      error: '', saveError: '', pending: false, sent: false, navigationFrozen: false, rebaseChecking: false, rebaseCommitting: false, requiresCurrentSource: false, revision: 0 };
     dismissedRecovery.current.delete(next.identity);
     putSession(next.identity, next);
     publishSession(next);
   }, [publishSession, putSession]);
   const updateEdit = useCallback<UpdateEdit>((id, update) => {
     const current = findSession(id);
-    if (!current || current.attachmentRecoveryInvalid || frozenSessions.current.has(current.identity)) return;
+    if (!current || current.pending || current.sent || current.attachmentRecoveryInvalid || frozenSessions.current.has(current.identity)) return;
     const result = update(current);
     const changed = result.edits !== current.edits || result.addedText !== current.addedText || result.removedAttachments !== current.removedAttachments;
     const next = changed ? { ...result, revision: current.revision + 1 } : result;
@@ -163,7 +192,7 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
   }, [findSession, publishSession, putSession]);
   const endEdit = useCallback((id: number, submitted = false) => {
     const current = findSession(id);
-    if (!current || frozenSessions.current.has(current.identity) || (current.pending && !submitted)) return;
+    if (!current || frozenSessions.current.has(current.identity) || current.rebaseChecking || (current.pending && !submitted)) return;
     putSession(current.identity, { ...current, pending: true, sent: submitted || current.sent, error: '', saveError: '' });
     void notifyRecovery(null, current.origin, recoveryVersion(current)).then(() => {
       const latest = findSession(id);
@@ -178,7 +207,7 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
   }, [findSession, notifyRecovery, putSession]);
   const submitEdit = useCallback((id: number, submit: NonNullable<StandaloneMessagesProps['onEdit']>) => {
     const current = findSession(id);
-    if (!current || current.pending || current.sent || current.attachmentRecoveryInvalid || frozenSessions.current.has(current.identity)) return;
+    if (!current || current.pending || current.sent || current.rebaseChecking || current.attachmentRecoveryInvalid || frozenSessions.current.has(current.identity)) return;
     const result = applyTextEdits(current.draft, current.edits, current.addedText, current.removedAttachments);
     const draft = result.draft;
     if (!draft) { putSession(current.identity, { ...current, error: result.error }); return; }
@@ -200,6 +229,59 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
         if (latest) putSession(latest.identity, { ...latest, pending: false, error: errorMessage(reason, 'Edit failed.') });
       });
   }, [endEdit, findSession, notifyRecovery, putSession]);
+  const cancelRebase = useCallback((id: number) => {
+    if (!rebaseChecks.current.delete(id)) return;
+    const current = findSession(id);
+    if (current) putSession(current.identity, { ...current, rebaseChecking: false, error: '' });
+  }, [findSession, putSession]);
+  const startRebase = useCallback((id: number) => {
+    const current = findSession(id);
+    if (!current || current.pending || current.sent || current.rebaseChecking || current.attachmentRecoveryInvalid
+      || frozenSessions.current.has(current.identity) || !onPrepareEditRebase || !onCommitEditRebase || !recoveryCallback.current) return;
+    const converted = applyTextEdits(current.draft, current.edits, current.addedText, current.removedAttachments);
+    if (!converted.draft) { putSession(current.identity, { ...current, error: converted.error }); return; }
+    const token = Symbol('message-edit-rebase'), version = recoveryVersion(current), origin = structuredClone(current.origin);
+    rebaseChecks.current.set(id, token);
+    putSession(current.identity, { ...current, rebaseChecking: true, error: '' });
+    void (async () => {
+      try {
+        await notifyRecovery(recoveryFor(current, converted.draft), origin, version);
+        const candidate = await onPrepareEditRebase(origin, version);
+        if (rebaseChecks.current.get(id) !== token) return;
+        const latest = findSession(id);
+        if (!latest || !mounted.current || activeIdentity.current !== current.identity || frozenSessions.current.has(current.identity)) return;
+        if (latest.revision !== version.revision || latest.sessionId !== version.sessionId
+          || recoveryKey(latest.origin) !== recoveryKey(origin)) throw new Error('The draft changed while checking. Your newer edit was preserved; check again.');
+        if (recoveryKey(candidate.origin) !== recoveryKey(origin) || candidate.version.sessionId !== version.sessionId
+          || candidate.version.revision !== version.revision) throw new Error('The checked edit no longer matches this draft.');
+        putSession(latest.identity, { ...latest, rebaseChecking: false, rebaseCommitting: true, pending: true });
+        await notifyRecovery(recoveryFor(latest), origin, version);
+        const recovered = await onCommitEditRebase(candidate);
+        const after = findSession(id), editor = recovered.editor;
+        if (!after || !mounted.current || after.sessionId !== version.sessionId || after.revision !== version.revision
+          || recoveryKey(after.origin) !== recoveryKey(origin)) return;
+        if (!editor || editor.sessionId !== version.sessionId || editor.revision !== version.revision + 1
+          || !editor.requiresCurrentSource || recovered.origin.hostId !== origin.hostId || recovered.origin.threadId !== origin.threadId) {
+          throw new Error('The recovered edit could not be confirmed. Reload the saved recovery.');
+        }
+        putSession(after.identity, { ...after, turnId: recovered.origin.turnId, itemId: recovered.origin.itemId,
+          turnIndex: editor.turnIndex, itemIndex: editor.itemIndex, snapshot: structuredClone(editor.snapshot),
+          origin: structuredClone(recovered.origin), signature: editor.sourceSignature, revision: editor.revision,
+          requiresCurrentSource: true, pending: false, rebaseChecking: false, rebaseCommitting: false, error: '', saveError: '' });
+      } catch (reason) {
+        if (rebaseChecks.current.get(id) !== token || !mounted.current) return;
+        const latest = findSession(id);
+        if (latest) putSession(latest.identity, { ...latest, pending: false, rebaseChecking: false, rebaseCommitting: false,
+          error: errorMessage(reason, 'Could not check the sent message. Your draft was preserved.') });
+      } finally {
+        if (rebaseChecks.current.get(id) === token) {
+          rebaseChecks.current.delete(id);
+          const latest = findSession(id);
+          if (mounted.current && latest?.rebaseChecking) putSession(latest.identity, { ...latest, rebaseChecking: false });
+        }
+      }
+    })();
+  }, [findSession, notifyRecovery, onCommitEditRebase, onPrepareEditRebase, putSession]);
   useEffect(() => {
     if (!editRecovery) { dismissedRecovery.current.delete(threadIdentity); return; }
     const { origin, draft, editor } = editRecovery;
@@ -220,7 +302,8 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
       edits: structuredClone(editor?.edits ?? textEdits(baseDraft)), addedText: editor?.addedText ?? '',
       removedAttachments: attachmentRecoveryInvalid ? [] : structuredClone(editor?.removedAttachments ?? []), attachmentRecoveryInvalid,
       error: '', saveError: '',
-      pending: false, sent: false, navigationFrozen: false, revision: hasVersion ? editor!.revision : 0 };
+      pending: false, sent: false, navigationFrozen: false, rebaseChecking: false, rebaseCommitting: false, requiresCurrentSource: editor?.requiresCurrentSource === true,
+      revision: hasVersion ? editor!.revision : 0 };
     putSession(threadIdentity, session);
     if (!hasVersion && !attachmentRecoveryInvalid) publishSession(session);
   }, [editRecovery, hostId, publishSession, putSession, thread, threadIdentity]);
@@ -234,8 +317,9 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
     const token = Symbol('message-edit-navigation');
     const origin = structuredClone(session.origin), version = recoveryVersion(session), sessionId = session.id;
     const snapshot = recoveryFor(session);
+    rebaseChecks.current.delete(session.id);
     frozenSessions.current.set(identity, token);
-    putSession(identity, { ...session, navigationFrozen: true });
+    putSession(identity, { ...session, navigationFrozen: true, rebaseChecking: false });
     function currentLease() {
       const current = sessionsRef.current.get(identity);
       if (!mounted.current || frozenSessions.current.get(identity) !== token || !current || current.id !== sessionId
@@ -277,5 +361,9 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
   const editingHere = sessions.get(threadIdentity) ?? null;
   const recoveryAvailable = Boolean(editingHere && (onEditDraftChange
     || (editRecovery && recoveryKey(editRecovery.origin) === recoveryKey(editingHere.origin))));
-  return { editingHere, recoveryAvailable, startEdit, updateEdit, endEdit, submitEdit };
+  const rebaseRequired = Boolean(editingHere && editRebase && recoveryKey(editRecovery?.origin ?? editRebase.origin) === recoveryKey(editingHere.origin)
+    && recoveryKey(editRebase.origin) === recoveryKey(editingHere.origin) && editingHere.sessionId === editRebase.submittedVersion.sessionId
+    && editingHere.revision > editRebase.submittedVersion.revision);
+  const canRebase = rebaseRequired && Boolean(onEditDraftChange && onPrepareEditRebase && onCommitEditRebase);
+  return { editingHere, recoveryAvailable, rebaseRequired, canRebase, startRebase, cancelRebase, startEdit, updateEdit, endEdit, submitEdit };
 }

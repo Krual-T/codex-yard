@@ -16,7 +16,7 @@ import { useMessageEditing } from './use-message-editing.ts';
 import type { EditingSession, StandaloneMessagesRecoveryProps, StartEdit, UpdateEdit } from './use-message-editing.ts';
 import './standalone-messages.css';
 
-export type { MessageEditNavigationController, MessageEditNavigationLease, MessageEditRecovery, MessageEditRecoveryVersion, StandaloneMessagesRecoveryProps } from './use-message-editing.ts';
+export type { MessageEditNavigationController, MessageEditNavigationLease, MessageEditRebaseCandidate, MessageEditRebaseMarker, MessageEditRecovery, MessageEditRecoveryVersion, StandaloneMessagesRecoveryProps } from './use-message-editing.ts';
 export type { MessageEditHistory } from './message-edit.ts';
 
 type RenderItemProps = {
@@ -42,6 +42,10 @@ type RenderItemProps = {
   onUpdateEdit: UpdateEdit;
   onEndEdit: (id: number) => void;
   onSubmitEdit: (id: number, onEdit: NonNullable<StandaloneMessagesProps['onEdit']>) => void;
+  rebaseRequired: boolean;
+  canRebase: boolean;
+  onStartRebase: (id: number) => void;
+  onCancelRebase: (id: number) => void;
   recoveryNote: string | null;
   searchMatch: boolean;
 };
@@ -54,6 +58,10 @@ type UserMessageEditorProps = {
   onUpdateEdit: UpdateEdit;
   onCancel: () => void;
   onSubmitEdit: RenderItemProps['onSubmitEdit'];
+  rebaseRequired: boolean;
+  canRebase: boolean;
+  onStartRebase: RenderItemProps['onStartRebase'];
+  onCancelRebase: RenderItemProps['onCancelRebase'];
   recoveryNote: string | null;
   renderPart: (index: number) => ReactNode;
   renderContext: (context: SerializedMessageContext, controls?: {
@@ -67,11 +75,13 @@ const unavailableEdit: NonNullable<StandaloneMessagesProps['onEdit']> = async ()
   throw new Error('Message editing is unavailable.');
 };
 
-function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, onCancel, onSubmitEdit, recoveryNote, renderPart, renderContext }: UserMessageEditorProps) {
-  const { id, draft, signature, edits, addedText, removedAttachments, error, saveError, pending, sent, navigationFrozen } = editing;
+function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, onCancel, onSubmitEdit, recoveryNote, renderPart, renderContext,
+  rebaseRequired, canRebase, onStartRebase, onCancelRebase }: UserMessageEditorProps) {
+  const { id, draft, signature, edits, addedText, removedAttachments, error, saveError, pending, sent, navigationFrozen, rebaseChecking, rebaseCommitting } = editing;
   const composing = useRef(false);
   const currentSignature = useMemo(() => editSourceSignature(item), [item]);
-  const changedSource = signature !== currentSignature;
+  const changedSource = signature !== currentSignature
+    || (editing.requiresCurrentSource && item.clientId !== editing.snapshot.clientId);
   const blocked = restriction ?? (changedSource ? 'This message changed while editing. Cancel and reopen the editor.' : null)
     ?? (editing.attachmentRecoveryInvalid ? 'The saved attachment changes are unrecognized. The original edit has been preserved.' : null);
   const rows = new Map(edits.map((edit, position) => [edit.index, { edit, position }]));
@@ -88,12 +98,12 @@ function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, o
       <span className="yard-edit-print-text" aria-hidden="true">{value}</span></label>;
   return <form className="yard-message-edit" onCompositionStart={() => { composing.current = true; }}
     onCompositionEnd={() => { composing.current = false; }} onKeyDown={(event) => {
-    if (event.key === 'Escape' && !event.nativeEvent.isComposing && event.keyCode !== 229 && !composing.current && !pending && !sent && !navigationFrozen) {
+    if (event.key === 'Escape' && !event.nativeEvent.isComposing && event.keyCode !== 229 && !composing.current && !pending && !sent && !navigationFrozen && !rebaseChecking) {
       event.preventDefault(); onCancel();
     }
   }} onSubmit={(event) => {
     event.preventDefault();
-    if (pending || sent || navigationFrozen || blocked) return;
+    if (pending || sent || navigationFrozen || rebaseChecking || rebaseRequired || blocked) return;
     onSubmitEdit(id, onEdit);
   }}>
     {!edits.length && textarea(addedText, (text) => onUpdateEdit(id, (current) => ({ ...current, addedText: text, error: '' })), 'Edit message text', true)}
@@ -126,16 +136,21 @@ function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, o
         edits.length === 1 ? 'Edit message text' : `Edit message text ${row.position + 1} of ${edits.length}`, row.position === 0)}</div>;
     })}
     {recoveryNote && <div className="yard-edit-recovery-note" role="status">{recoveryNote}</div>}
+    {rebaseRequired && <div className="yard-edit-recovery-note" role="status">An earlier version was sent. Your newer edit is still saved.
+      {rebaseChecking ? <> Checking the sent message. <button type="button" onClick={() => onCancelRebase(id)}>Cancel check</button></>
+        : canRebase ? <> <button type="button" disabled={pending || navigationFrozen} onClick={() => onStartRebase(id)}>Continue editing from the sent message</button></>
+          : ' Reopening this edit requires the recovery service.'}</div>}
     {blocked && !sent && <div className="yard-action-error" role="alert">{blocked}</div>}
     {saveError && <div className="yard-action-error" role="alert">{saveError}</div>}
     {error && <div className="yard-action-error" role="alert">{error}</div>}
-    <div className="yard-edit-controls"><button type="button" onClick={onCancel} disabled={pending || navigationFrozen}>{sent ? 'Clear recovery' : 'Cancel'}</button>
-      {!sent && <button type="submit" disabled={pending || navigationFrozen || Boolean(blocked)}>{pending ? 'Sending...' : 'Send'}</button>}</div>
+    <div className="yard-edit-controls"><button type="button" onClick={onCancel} disabled={pending || navigationFrozen || rebaseChecking}>{sent ? 'Clear recovery' : 'Cancel'}</button>
+      {!sent && <button type="submit" disabled={pending || navigationFrozen || rebaseChecking || rebaseRequired || Boolean(blocked)}>{rebaseCommitting ? 'Saving...' : pending ? 'Sending...' : 'Send'}</button>}</div>
   </form>;
 }
 
 function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenImages,
-  editRestriction, editing, identity, turnIndex, itemIndex, onStartEdit, onUpdateEdit, onEndEdit, onSubmitEdit, recoveryNote, searchMatch }: RenderItemProps) {
+  editRestriction, editing, identity, turnIndex, itemIndex, onStartEdit, onUpdateEdit, onEndEdit, onSubmitEdit, recoveryNote, searchMatch,
+  rebaseRequired, canRebase, onStartRebase, onCancelRebase }: RenderItemProps) {
   const [expanded, setExpanded] = useState(false);
   const [actionError, setActionError] = useState('');
   const editButton = useRef<HTMLButtonElement>(null);
@@ -200,7 +215,8 @@ function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFo
     <div className="yard-user-bubble">{editing ? <UserMessageEditor item={item} editing={editing} onUpdateEdit={onUpdateEdit}
       restriction={onEdit ? editRestriction : 'Message editing is unavailable.'} onEdit={onEdit ?? unavailableEdit}
       onCancel={() => { restoreFocus.current = true; onEndEdit(editing.id); }} onSubmitEdit={onSubmitEdit}
-      recoveryNote={recoveryNote} renderPart={(index) => renderedParts[index]} renderContext={renderContext} /> : <>
+      recoveryNote={recoveryNote} renderPart={(index) => renderedParts[index]} renderContext={renderContext}
+      rebaseRequired={rebaseRequired} canRebase={canRebase} onStartRebase={onStartRebase} onCancelRebase={onCancelRebase} /> : <>
       <div ref={body} className="yard-user-body">{renderedParts}</div>{long && !searchMatch && <button className="yard-expand" type="button" onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}>{expanded ? 'Show less' : 'Show more'} <ChevronDown size={15} /></button>}</>}</div>
     {!editing && <div className="yard-message-actions">{text.trim() && <CopyButton text={text} label="Copy message" content={() => body.current ? messageCopyContent(body.current) : { plainText: text, htmlText: '' }} />}
@@ -294,7 +310,8 @@ function searchText(value: unknown): string {
 }
 
 export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser,
-  editRecovery, onEditDraftChange, onEditNavigationController, editHistory }: StandaloneMessagesProps & StandaloneMessagesRecoveryProps & { editHistory?: MessageEditHistory }) {
+  editRecovery, onEditDraftChange, onEditNavigationController, editRebase, onPrepareEditRebase, onCommitEditRebase,
+  editHistory }: StandaloneMessagesProps & StandaloneMessagesRecoveryProps & { editHistory?: MessageEditHistory }) {
   const [query, setQuery] = useState('');
   const [matchIndex, setMatchIndex] = useState(-1);
   const [following, setFollowing] = useState(true);
@@ -304,8 +321,8 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
   const searchOpened = useRef(new Set<HTMLDetailsElement>());
   const followRef = useRef(true);
   const threadIdentity = JSON.stringify([hostId, thread?.id]);
-  const { editingHere, recoveryAvailable, startEdit, updateEdit, endEdit, submitEdit } = useMessageEditing({
-    hostId, thread, threadIdentity, editRecovery, onEditDraftChange, onEditNavigationController,
+  const { editingHere, recoveryAvailable, rebaseRequired, canRebase, startRebase, cancelRebase, startEdit, updateEdit, endEdit, submitEdit } = useMessageEditing({
+    hostId, thread, threadIdentity, editRecovery, onEditDraftChange, onEditNavigationController, editRebase, onPrepareEditRebase, onCommitEditRebase,
   });
   const currentThread = useRef(threadIdentity);
   const openImages = useCallback((images: ImageSource[], index: number) => setViewer({ images, index }), []);
@@ -420,7 +437,9 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
             const itemEditing = editingHere?.turnId === turn.id && editingHere.itemId === item.id
               && (!sourceMissing || syntheticDraft) ? editingHere : null;
             const isTarget = editTarget?.turnId === turn.id && editTarget.itemId === item.id;
-            const editRestriction = itemEditing && sourceMissing ? (recoveryAvailable ? null : 'The original message is no longer available. The edited draft is retained.')
+            const editRestriction = itemEditing && sourceMissing ? (itemEditing.requiresCurrentSource
+              ? 'Reload the complete conversation before sending this recovered edit.'
+              : recoveryAvailable ? null : 'The original message is no longer available. The edited draft is retained.')
               : !isTarget ? 'Only the latest user message can be edited.'
               : editTarget.restriction ?? (editingHere && !itemEditing ? 'Finish the current message edit first.' : null);
             const recoveryNote = itemEditing && sourceMissing && recoveryAvailable
@@ -431,7 +450,8 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
                 onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenVisualization={onOpenVisualization} onOpenBrowser={onOpenBrowser}
                 onOpenImages={openImages} editRestriction={editRestriction} editing={itemEditing} identity={threadIdentity}
                 turnIndex={turnIndex} itemIndex={itemIndex} onStartEdit={startEdit} onUpdateEdit={updateEdit} onEndEdit={endEdit}
-                onSubmitEdit={submitEdit} recoveryNote={recoveryNote}
+                onSubmitEdit={submitEdit} recoveryNote={recoveryNote} rebaseRequired={Boolean(itemEditing && rebaseRequired)}
+                canRebase={Boolean(itemEditing && canRebase && onEdit)} onStartRebase={startRebase} onCancelRebase={cancelRebase}
                 searchMatch={searchMatch} /></article>;
           })}{turn.status !== 'completed' && <div data-search-current={selected?.key === itemKey(turn.id, null) || undefined}
             ref={(node) => { const key = itemKey(turn.id, null); if (node) nodes.current.set(key, node); else nodes.current.delete(key); }}><TurnStatus turn={turn} /></div>}
