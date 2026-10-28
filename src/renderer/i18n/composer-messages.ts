@@ -26,6 +26,8 @@ export const composerMessageKeys = [
   'This draft contains formatting that cannot be edited without loss.',
   'This draft contains hints that cannot be edited without loss.',
   'This message contains formatted or segmented content that cannot be edited without loss.',
+  'This app input contains retained context and cannot be edited here.',
+  'Could not insert completion.',
   'This skill reference contains extra information that cannot be edited without loss.',
   'Existing formatting is retained while plain text mode is on.', 'Could not read plain text preference:',
   'Default setting changed elsewhere:', 'Current value', 'Your change', 'Use current value', 'Keep my change',
@@ -52,6 +54,8 @@ const simplified: Catalog = {
   'This draft contains formatting that cannot be edited without loss.': '此草稿包含格式，当前编辑器不能无损编辑。',
   'This draft contains hints that cannot be edited without loss.': '此草稿包含提示信息，当前编辑器不能无损编辑。',
   'This message contains formatted or segmented content that cannot be edited without loss.': '此消息包含格式化或分段内容，当前编辑器不能无损编辑。',
+  'This app input contains retained context and cannot be edited here.': '此应用输入包含保留的上下文，无法在此编辑。',
+  'Could not insert completion.': '无法插入补全内容。',
   'This skill reference contains extra information that cannot be edited without loss.': '此技能引用包含额外信息，当前编辑器不能无损编辑。',
   'Queue message': '排队', 'Effort': '强度', 'Approval': '审批', 'Sandbox': '沙箱', 'Local target': '本地', 'Reading...': '正在读取…',
   'Ctrl/Command + Enter for multiline': '多行时 Ctrl/⌘ + Enter',
@@ -90,6 +94,8 @@ const traditional: Catalog = {
   'This draft contains formatting that cannot be edited without loss.': '此草稿包含格式，目前無法無損編輯。',
   'This draft contains hints that cannot be edited without loss.': '此草稿包含提示資訊，目前無法無損編輯。',
   'This message contains formatted or segmented content that cannot be edited without loss.': '此訊息包含格式化或分段內容，目前無法無損編輯。',
+  'This app input contains retained context and cannot be edited here.': '此應用程式輸入包含保留的上下文，無法在此編輯。',
+  'Could not insert completion.': '無法插入補全內容。',
   'This skill reference contains extra information that cannot be edited without loss.': '此技能參照包含額外資訊，目前無法無損編輯。',
   'Queue message': '排隊', 'Effort': '強度', 'Approval': '審批', 'Sandbox': '沙箱', 'Local target': '本機', 'Reading...': '正在讀取…',
   'Ctrl/Command + Enter for multiline': '多行時 Ctrl/⌘ + Enter',
@@ -116,6 +122,8 @@ const traditional: Catalog = {
   'File is binary and cannot be previewed as text.': '此檔案為二進位格式，無法以文字預覽。', 'Could not preview:': '無法預覽：',
 };
 const japanese: Catalog = {
+  'This app input contains retained context and cannot be edited here.': 'このアプリ入力には保持されたコンテキストが含まれており、ここでは編集できません。',
+  'Could not insert completion.': '補完を挿入できませんでした。',
   'Queue message': 'キューに追加', 'Effort': '推論強度', 'Approval': '承認', 'Sandbox': 'サンドボックス', 'Local target': 'ローカル', 'Reading...': '読み込み中…',
   'Session default': '会話の既定値', 'Configured default': '設定の既定値', 'Loading': '読み込み中', 'Custom approval': 'カスタム承認',
   'When untrusted': '信頼されていない場合', 'On request': '要求時', 'Never': 'しない', 'Read only': '読み取り専用', 'Workspace write': 'ワークスペースへの書き込み',
@@ -127,6 +135,8 @@ const japanese: Catalog = {
   'Run location': '実行場所', 'No workspace selected': 'ワークスペースが選択されていません', 'No matches': '一致する結果がありません',
 };
 const korean: Catalog = {
+  'This app input contains retained context and cannot be edited here.': '이 앱 입력에는 보존된 컨텍스트가 포함되어 있어 여기서 편집할 수 없습니다.',
+  'Could not insert completion.': '자동 완성을 삽입할 수 없습니다.',
   'Queue message': '대기열에 추가', 'Effort': '추론 강도', 'Approval': '승인', 'Sandbox': '샌드박스', 'Local target': '로컬', 'Reading...': '읽는 중…',
   'Session default': '대화 기본값', 'Configured default': '설정 기본값', 'Loading': '불러오는 중', 'Custom approval': '사용자 지정 승인',
   'When untrusted': '신뢰할 수 없는 경우', 'On request': '요청 시', 'Never': '사용 안 함', 'Read only': '읽기 전용', 'Workspace write': '작업 공간 쓰기',
@@ -138,6 +148,8 @@ const korean: Catalog = {
   'Run location': '실행 위치', 'No workspace selected': '선택된 작업 공간이 없습니다', 'No matches': '일치하는 결과가 없습니다',
 };
 const spanish: Catalog = {
+  'This app input contains retained context and cannot be edited here.': 'Esta entrada de la aplicación contiene contexto conservado y no se puede editar aquí.',
+  'Could not insert completion.': 'No se pudo insertar la sugerencia.',
   'Queue message': 'Poner en cola', 'Effort': 'Esfuerzo', 'Approval': 'Aprobación', 'Sandbox': 'Entorno aislado', 'Local target': 'Local', 'Reading...': 'Leyendo...',
   'Session default': 'Predeterminado de la conversación', 'Configured default': 'Predeterminado en la configuración', 'Loading': 'Cargando', 'Custom approval': 'Aprobación personalizada',
   'When untrusted': 'Si no es de confianza', 'On request': 'Al solicitarlo', 'Never': 'Nunca', 'Read only': 'Solo lectura', 'Workspace write': 'Escritura en el espacio de trabajo',
@@ -149,6 +161,8 @@ const spanish: Catalog = {
   'Run location': 'Lugar de ejecución', 'No workspace selected': 'No hay espacio de trabajo seleccionado', 'No matches': 'Sin resultados',
 };
 const french: Catalog = {
+  'This app input contains retained context and cannot be edited here.': 'Cette entrée de l’application contient un contexte conservé et ne peut pas être modifiée ici.',
+  'Could not insert completion.': 'Impossible d’insérer la suggestion.',
   'Queue message': 'Mettre en attente', 'Effort': 'Effort', 'Approval': 'Approbation', 'Sandbox': 'Bac à sable', 'Local target': 'Local', 'Reading...': 'Lecture...',
   'Session default': 'Valeur par défaut de la conversation', 'Configured default': 'Valeur configurée par défaut', 'Loading': 'Chargement', 'Custom approval': 'Approbation personnalisée',
   'When untrusted': 'Si non approuvé', 'On request': 'Sur demande', 'Never': 'Jamais', 'Read only': 'Lecture seule', 'Workspace write': 'Écriture dans l’espace de travail',
@@ -160,6 +174,8 @@ const french: Catalog = {
   'Run location': 'Lieu d’exécution', 'No workspace selected': 'Aucun espace de travail sélectionné', 'No matches': 'Aucun résultat',
 };
 const german: Catalog = {
+  'This app input contains retained context and cannot be edited here.': 'Diese App-Eingabe enthält erhaltenen Kontext und kann hier nicht bearbeitet werden.',
+  'Could not insert completion.': 'Der Vorschlag konnte nicht eingefügt werden.',
   'Queue message': 'In Warteschlange', 'Effort': 'Aufwand', 'Approval': 'Genehmigung', 'Sandbox': 'Sandbox', 'Local target': 'Lokal', 'Reading...': 'Wird gelesen...',
   'Session default': 'Standard der Unterhaltung', 'Configured default': 'Konfigurierter Standard', 'Loading': 'Wird geladen', 'Custom approval': 'Benutzerdefinierte Genehmigung',
   'When untrusted': 'Bei nicht vertrauenswürdigen Aktionen', 'On request': 'Auf Anfrage', 'Never': 'Nie', 'Read only': 'Nur lesen', 'Workspace write': 'Schreiben im Arbeitsbereich',
@@ -171,6 +187,8 @@ const german: Catalog = {
   'Run location': 'Ausführungsort', 'No workspace selected': 'Kein Arbeitsbereich ausgewählt', 'No matches': 'Keine Treffer',
 };
 const portuguese: Catalog = {
+  'This app input contains retained context and cannot be edited here.': 'Esta entrada do aplicativo contém contexto preservado e não pode ser editada aqui.',
+  'Could not insert completion.': 'Não foi possível inserir a sugestão.',
   'Queue message': 'Adicionar à fila', 'Effort': 'Esforço', 'Approval': 'Aprovação', 'Sandbox': 'Sandbox', 'Local target': 'Local', 'Reading...': 'Lendo...',
   'Session default': 'Padrão da conversa', 'Configured default': 'Padrão configurado', 'Loading': 'Carregando', 'Custom approval': 'Aprovação personalizada',
   'When untrusted': 'Quando não for confiável', 'On request': 'Quando solicitado', 'Never': 'Nunca', 'Read only': 'Somente leitura', 'Workspace write': 'Gravação no espaço de trabalho',

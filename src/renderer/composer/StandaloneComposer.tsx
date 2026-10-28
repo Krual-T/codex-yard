@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ClipboardEvent } from 'react';
 import type { ComposerDraft, StandaloneComposerProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
-import { useI18n } from '../i18n/index.tsx';
-import { activatePending, createId, documentFromText, draftToInput, hasContent, mergePrefill, recoverLegacyDraft, richEditIssue, textEditIssue, updateDraftText, updateRichDraft } from './standalone-draft.ts';
+import { translateKnown, useI18n } from '../i18n/index.tsx';
+import { activatePending, canEditStructuredDraft, createId, documentFromText, draftToInput, editStructuredDraftText, hasContent, isStructuredAppInput, mergePrefill, recoverLegacyDraft, removeStructuredImage, removeStructuredSkill, richEditIssue, structuredEditIssue, textEditIssue, updateDraftText, updateRichDraft } from './standalone-draft.ts';
 import { localizeDraftIssue } from './standalone-draft-issues.ts';
 import { useComposerDraft } from './use-composer-draft.ts';
 import type { ComposerDraftController, ComposerDraftExternalOperation, ComposerDraftLease } from './use-composer-draft.ts';
@@ -18,8 +18,8 @@ import { usePlainTextSetting } from './standalone-plain-text-setting.ts';
 import type { FollowUpAction } from './standalone-follow-up.ts';
 import { StandaloneTarget } from './standalone-target.tsx';
 import type { ComposerHost, ComposerTarget } from './standalone-target.tsx';
-import { StandaloneRichEditor } from './StandaloneRichEditor.tsx';
-import type { RichEditorHandle } from './StandaloneRichEditor.tsx';
+import { StandaloneRichEditor, StandaloneStructuredInputEditor } from './StandaloneRichEditor.tsx';
+import type { RichEditorHandle, StructuredInputEditorHandle } from './StandaloneRichEditor.tsx';
 import type { RichCompletionContext } from './rich-editor-actions.ts';
 import { FilePenLine } from 'lucide-react';
 import './standalone-composer.css';
@@ -92,6 +92,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const [defaultPending, setDefaultPending] = useState(false);
   const [queueVersion, setQueueVersion] = useState(0);
   const [cursor, setCursor] = useState(0);
+  const [segmentSelection, setSegmentSelection] = useState<{ index: number; cursor: number } | null>(null);
+  const segmentSkillHistory = useRef<{ index: number; before: string; after: string; skill: { name: string; path: string }; applied: boolean }[]>([]);
   const [richContext, setRichContext] = useState<RichCompletionContext | null>(null);
   const enterSetting = useEnterSetting(client);
   const followUpSetting = useFollowUpSetting(client);
@@ -118,6 +120,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const notifyDefaultPending = useCallback((value: boolean) => { defaultPendingRef.current = value; setDefaultPending(value); }, []);
   const editor = useRef<HTMLTextAreaElement>(null);
   const richEditor = useRef<RichEditorHandle>(null);
+  const structuredEditor = useRef<StructuredInputEditorHandle>(null);
   const picker = useRef<HTMLInputElement>(null);
   const modelPicker = useRef<HTMLSelectElement>(null);
   freezeGuard.current = afterDrain => {
@@ -134,15 +137,21 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     setError(t('Could not switch drafts:') + explanation);
     return false;
   };
-  const editIssue = draft.document ? richEditIssue(draft) : textEditIssue(draft);
+  const originalEditIssue = draft.document ? richEditIssue(draft) : textEditIssue(draft);
+  const segmented = originalEditIssue === structuredEditIssue && canEditStructuredDraft(draft);
+  const editIssue = segmented ? null : originalEditIssue;
   const recoverableLegacy = editIssue && recoverLegacyDraft(draft);
-  const plainModeUnavailable = !!draft.document && !draft.input
+  const plainModeUnavailable = !!draft.document
     && (plainTextSetting.loading || !plainTextSetting.available || !!plainTextSetting.error);
-  const richActive = !!draft.document && !editIssue;
+  const richActive = !!draft.document && !editIssue && !segmented;
   const structuredInput = draft.input !== undefined;
+  const selectedSegment = segmentSelection && draft.input?.[segmentSelection.index];
+  const segmentText = selectedSegment?.type === 'text' && typeof selectedSegment.text === 'string' && !isStructuredAppInput(selectedSegment)
+    ? selectedSegment.text : '';
   const completions = useCompletions(client, context.hostId, context.cwd,
-    richActive ? richContext?.text ?? '' : editIssue || structuredInput ? '' : draft.text,
-    richActive ? richContext?.cursor ?? 0 : cursor, busy, richActive ? 'rich:' + richContext?.blockStart : 'plain');
+    richActive ? richContext?.text ?? '' : segmented ? segmentText : editIssue ? '' : draft.text,
+    richActive ? richContext?.cursor ?? 0 : segmented ? segmentSelection?.cursor ?? 0 : cursor,
+    busy, richActive ? 'rich:' + richContext?.blockStart : segmented ? 'segment:' + segmentSelection?.index : 'plain');
   const onRichContext = useCallback((next: RichCompletionContext | null) => setRichContext(previous =>
     previous?.text === next?.text && previous?.cursor === next?.cursor && previous?.blockStart === next?.blockStart ? previous : next), []);
   useEffect(() => {
@@ -227,11 +236,11 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     }
     void changeDraft(value => mergePrefill(value, prefill.draft), prefill.id)
       .then(saved => { if (saved && activeController.current === controller) onPrefillConsumed?.(prefill.id); });
-    requestAnimationFrame(() => { if (richEditor.current) richEditor.current.focus(); else editor.current?.focus(); });
+    requestAnimationFrame(() => { if (richEditor.current) richEditor.current.focus(); else if (structuredEditor.current) structuredEditor.current.focus(); else editor.current?.focus(); });
   }, [prefill, changeDraft, onPrefillConsumed, storageError, controller, current, lastWrite, loaded, frozen]);
 
   const addFiles = (files: File[], retainIfBlocked = true): boolean => {
-    if (!files.length || editIssue || structuredInput) return false;
+    if (!files.length || editIssue) return false;
     const finish = beginOperation();
     if (!finish) {
       if (retainIfBlocked && activeController.current === controller) {
@@ -270,7 +279,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/'));
     if (!files.length) return;
     event.preventDefault();
-    if (editIssue || structuredInput || event.clipboardData.getData('text/plain')) {
+    if (editIssue || event.clipboardData.getData('text/plain')) {
       setError(t('The content cannot be pasted together with images.')); return;
     }
     void addFiles(files);
@@ -278,12 +287,13 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const submit = async (followUp: FollowUpAction = followUpSetting.value) => {
     if (submitInFlight.current || uploadsInFlight.current || failedUploads.current.length || unresolved || !hasContent(current.current.draft)) return;
     if (defaultPending) { setError(t('Resolve the default model change before sending.')); return; }
-    if (current.current.draft.blocked
-      || current.current.draft.document && richEditIssue(current.current.draft)) {
+    const currentIssue = current.current.draft.document && richEditIssue(current.current.draft);
+    if (current.current.draft.blocked || currentIssue && !(currentIssue === structuredEditIssue
+      && canEditStructuredDraft(current.current.draft))) {
       setError(t('This draft cannot be sent without losing content.')); return;
     }
     const readyPlainTextMode = plainTextSetting.readyValue();
-    if (current.current.draft.document && !current.current.draft.input && readyPlainTextMode === undefined) {
+    if (current.current.draft.document && readyPlainTextMode === undefined) {
       setError(t('Could not read plain text preference:') + (plainTextSetting.error ?? t('Loading...'))); return;
     }
     if (busy && followUp === 'queue' && (current.current.draft.hints?.length || current.current.draft.references.some(reference => reference.context !== undefined || reference.original !== undefined))) {
@@ -328,13 +338,48 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       let cleaned = false;
       try { await clear(captured.revision); cleaned = true; }
       finally { finishCleanup(cleaned); }
-      if (mounted.current) requestAnimationFrame(() => { if (richEditor.current) richEditor.current.focus(); else editor.current?.focus(); });
+      if (mounted.current) requestAnimationFrame(() => { if (richEditor.current) richEditor.current.focus(); else if (structuredEditor.current) structuredEditor.current.focus(); else editor.current?.focus(); });
     } catch (reason) {
       if (activeController.current === controller) {
         if (busy && context.threadId) setQueueVersion(value => value + 1);
         setError(t(confirmed ? 'Sent, but draft cleanup failed:' : 'Send unconfirmed; draft retained:') + message(reason));
       }
     } finally { submitInFlight.current = false; if (mounted.current) setSending(false); }
+  };
+  const restoreCompletionSkill = (next: typeof draft, index: number, expected: string, text: string, inputType?: string) => {
+    const history = segmentSkillHistory.current.slice().reverse().find(item => item.index === index
+      && (inputType === 'historyUndo' && item.applied && item.after === expected && item.before === text
+        || inputType === 'historyRedo' && !item.applied && item.before === expected && item.after === text));
+    if (history) {
+      history.applied = inputType === 'historyRedo';
+      return { ...next, skills: history.applied
+        ? next.skills.some(skill => skill.path === history.skill.path) ? next.skills : [...next.skills, history.skill]
+        : next.skills.filter(skill => skill.name !== history.skill.name || skill.path !== history.skill.path) };
+    }
+    return next;
+  };
+  const editSegment = (index: number, expected: string, text: string, inputType?: string) => {
+    if (frozenRef.current) return;
+    if (inputType === 'historyUndo' || inputType === 'historyRedo') completions.show();
+    const before = current.current.draft, result = editStructuredDraftText(before, index, expected, text);
+    if (!result.draft) { setError(translateKnown(t, result.error)); return; }
+    const next = restoreCompletionSkill(result.draft, index, expected, text, inputType);
+    setError('');
+    void changeDraft(value => value === before ? next : value);
+  };
+  const removeImage = (id: string) => {
+    const before = current.current.draft;
+    const result = before.input ? removeStructuredImage(before, id)
+      : { draft: { ...before, images: before.images.filter(image => image.id !== id) } };
+    if (!result.draft) { setError(translateKnown(t, result.error)); return; }
+    setError(''); setSegmentSelection(null); segmentSkillHistory.current = []; void changeDraft(value => value === before ? result.draft : value);
+  };
+  const removeSkill = (name: string, path: string) => {
+    const before = current.current.draft;
+    const result = before.input ? removeStructuredSkill(before, name, path)
+      : { draft: { ...before, skills: before.skills.filter(skill => skill.name !== name || skill.path !== path) } };
+    if (!result.draft) { setError(translateKnown(t, result.error)); return; }
+    setError(''); setSegmentSelection(null); segmentSkillHistory.current = []; void changeDraft(value => value === before ? result.draft : value);
   };
   const chooseCompletion = (item: Completion) => {
     const query = completions.query;
@@ -356,9 +401,46 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       replacement = fence + path + fence + ' ';
     }
     const caret = query.start + replacement.length;
-    changeDraft(value => ({ ...value, text: value.text.slice(0, query.start) + replacement + value.text.slice(query.end),
-      skills: item.kind === 'skill' && !value.skills.some(skill => skill.path === item.path)
-        ? [...value.skills, { name: item.name, path: item.path }] : value.skills }));
+    if (segmented) {
+      const index = segmentSelection?.index, before = current.current.draft;
+      const entry = index === undefined ? undefined : before.input?.[index];
+      if (index === undefined || entry?.type !== 'text' || typeof entry.text !== 'string'
+        || entry.text.slice(query.start, query.end) !== query.token) { completions.dismiss(); return; }
+      const result = editStructuredDraftText(before, index, entry.text,
+        entry.text.slice(0, query.start) + replacement + entry.text.slice(query.end));
+      if (!result.draft) { setError(translateKnown(t, result.error)); completions.dismiss(); return; }
+      const after = entry.text.slice(0, query.start) + replacement + entry.text.slice(query.end);
+      if (!structuredEditor.current?.replace(index, query.start, query.end, replacement)
+        || current.current.draft.input?.[index]?.text !== after) {
+        setError(t('Could not insert completion.')); completions.dismiss(); return;
+      }
+      const next = current.current.draft;
+      if (item.kind === 'skill' && !next.skills.some(skill => skill.path === item.path)) {
+        const skill = { name: item.name, path: item.path };
+        segmentSkillHistory.current.push({ index, before: entry.text, after, skill, applied: true });
+        void changeDraft(value => value === next ? { ...value, skills: [...value.skills, skill] } : value);
+      }
+      setSegmentSelection({ index, cursor: caret });
+      if (item.kind === 'directory') completions.show(); else completions.dismiss();
+      requestAnimationFrame(() => { if (item.kind === 'command') modelPicker.current?.focus(); else structuredEditor.current?.focus(index, caret); });
+      return;
+    }
+    const before = current.current.draft;
+    if (before.text.slice(query.start, query.end) !== query.token) { completions.dismiss(); return; }
+    const after = before.text.slice(0, query.start) + replacement + before.text.slice(query.end);
+    const control = editor.current;
+    if (!control || updateDraftText(before, after).text !== after) { completions.dismiss(); return; }
+    control.focus(); control.setSelectionRange(query.start, query.end);
+    const inserted = replacement ? document.execCommand('insertText', false, replacement) : document.execCommand('delete');
+    if (!inserted || current.current.draft.text !== after) {
+      setError(t('Could not insert completion.')); completions.dismiss(); return;
+    }
+    const next = current.current.draft;
+    if (item.kind === 'skill' && !next.skills.some(skill => skill.path === item.path)) {
+      const skill = { name: item.name, path: item.path };
+      segmentSkillHistory.current.push({ index: -1, before: before.text, after, skill, applied: true });
+      void changeDraft(value => value === next ? { ...value, skills: [...value.skills, skill] } : value);
+    }
     setCursor(caret);
     if (item.kind === 'directory') completions.show(); else completions.dismiss();
     requestAnimationFrame(() => {
@@ -368,7 +450,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   };
   const keyDown = (event: globalThis.KeyboardEvent): boolean => {
     if (frozenRef.current) { event.preventDefault(); return true; }
-    if (event.isComposing || event.keyCode === 229) return false;
+    if (compositions.current.has('editor') || event.isComposing || event.keyCode === 229) return false;
     if (completions.query) {
       if (event.key === 'Escape') { event.preventDefault(); completions.dismiss(); return true; }
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -413,19 +495,19 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       {draft.images.length || draft.files.length || draft.references.length || draft.skills.length ? <div className="standalone-composer__attachments">
         {draft.images.map(image => <div className="standalone-composer__image" key={image.id}>
           {image.previewSrc ? <img src={image.previewSrc} alt={image.name ?? t('Image attachment')} /> : <span>{t('Image preview unavailable')}</span>}
-          <button type="button" title={t('Remove image')} aria-label={t('Remove image') + ' ' + (image.name ?? '')} disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, images: value.images.filter(item => item.id !== image.id) }))}>×</button>
+          <button type="button" title={t('Remove image')} aria-label={t('Remove image') + ' ' + (image.name ?? '')} disabled={!!editIssue} onClick={() => removeImage(image.id)}>×</button>
         </div>)}
         {draft.files.map(file => <div className="standalone-composer__file" key={file.path}>
           <FilePreview client={client} hostId={context.hostId} path={file.path} name={file.name} />
-          <button type="button" title={t('Remove file')} aria-label={t('Remove file') + ' ' + file.name} disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, files: value.files.filter(item => item.path !== file.path) }))}>×</button>
+          <button type="button" title={t('Remove file')} aria-label={t('Remove file') + ' ' + file.name} disabled={!!editIssue} onClick={() => changeDraft(value => ({ ...value, files: value.files.filter(item => item.path !== file.path) }))}>×</button>
         </div>)}
         {draft.references.map(reference => <div className="standalone-composer__reference" key={reference.id}>
           {referenceLabel(reference) === reference.text ? <span>{reference.text}</span> :
             <details><summary>{referenceLabel(reference)}</summary><pre>{reference.text}</pre></details>}
-          <button type="button" title={t('Remove reference')} aria-label={t('Remove reference')} disabled={!!editIssue || structuredInput || removing?.controller === controller && removing.ids.has(reference.id)} onClick={() => void removeReference(reference)}>×</button>
+          <button type="button" title={t('Remove reference')} aria-label={t('Remove reference')} disabled={!!editIssue || removing?.controller === controller && removing.ids.has(reference.id)} onClick={() => void removeReference(reference)}>×</button>
         </div>)}
         {draft.skills.map(skill => <div className="standalone-composer__reference" key={skill.path}>
-          <span>{t('Skill')}：{skill.name}</span><button type="button" title={t('Remove skill')} aria-label={t('Remove skill') + ' ' + skill.name} disabled={!!editIssue || structuredInput} onClick={() => changeDraft(value => ({ ...value, skills: value.skills.filter(item => item.path !== skill.path) }))}>×</button>
+          <span>{t('Skill')}：{skill.name}</span><button type="button" title={t('Remove skill')} aria-label={t('Remove skill') + ' ' + skill.name} disabled={!!editIssue} onClick={() => removeSkill(skill.name, skill.path)}>×</button>
         </div>)}
       </div> : null}
       {editIssue ? <div className="standalone-composer__retained" role="status">{localizeDraftIssue(editIssue, t)}
@@ -440,12 +522,31 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         onPendingLinkChange={value => { pendingLink.current = value; }}
         onCompletionContext={onRichContext} completionListId={completions.query ? completions.listId : undefined}
         completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
-        onImages={files => { if (structuredInput) setError(t('Images are not supported for this structured draft.')); else void addFiles(files); }}
+        onImages={files => { void addFiles(files); }}
         onInvalid={message => setError(message ?? t('Unsupported document changes were not saved.'))} /> :
+      segmented ? <>
+        <StandaloneStructuredInputEditor ref={structuredEditor} draft={draft} onEdit={editSegment}
+          activeIndex={segmentSelection?.index} completionListId={completions.query ? completions.listId : undefined}
+          completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
+          onSelection={(index, position) => setSegmentSelection({ index, cursor: position })}
+          onKeyDown={keyDown} onPaste={paste} onCompositionChange={value => {
+            setComposition('editor', value); if (value) setSegmentSelection(null);
+          }} />
+        <details className="standalone-composer__retained"><summary>{t('View retained content')}</summary>
+          <pre>{JSON.stringify({ input: draft.input, document: draft.document, hints: draft.hints, preserved: draft.preserved }, null, 2)}</pre></details>
+      </> :
       <textarea ref={editor} aria-label={t('Work with Codex')} placeholder={t('Message')} value={draft.text} readOnly={!!editIssue}
         aria-autocomplete="list" aria-controls={completions.query ? completions.listId : undefined}
         aria-activedescendant={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
-        onChange={event => { const text = event.target.value; setCursor(event.target.selectionStart); changeDraft(value => updateDraftText(value, text)); }}
+        onChange={event => {
+          const text = event.currentTarget.value, inputType = (event.nativeEvent as InputEvent).inputType;
+          if (inputType === 'historyUndo' || inputType === 'historyRedo') completions.show();
+          setCursor(event.currentTarget.selectionStart);
+          void changeDraft(value => {
+            const next = updateDraftText(value, text);
+            return next.text === text ? restoreCompletionSkill(next, -1, value.text, text, inputType) : next;
+          });
+        }}
         onCompositionStart={() => setComposition('editor', true)}
         onCompositionEnd={() => { requestAnimationFrame(() => { if (mounted.current) setComposition('editor', false); }); }}
         onSelect={event => setCursor(event.currentTarget.selectionStart)} onKeyDown={event => { keyDown(event.nativeEvent); }} onPaste={paste} />}
@@ -462,12 +563,12 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         <input ref={picker} type="file" multiple hidden onChange={event => {
           pickerOpen.current = false; const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ''; void addFiles(files);
         }} />
-        <button type="button" aria-label={t('Add attachment')} title={t('Add attachment')} disabled={uploading || !!editIssue || structuredInput} onClick={() => {
+        <button type="button" aria-label={t('Add attachment')} title={t('Add attachment')} disabled={uploading || !!editIssue} onClick={() => {
           if (!picker.current || frozenRef.current) return;
           pickerOpen.current = true;
           try { picker.current.click(); } catch (reason) { pickerOpen.current = false; setError(t('Image upload failed:') + message(reason)); }
         }}>＋</button>
-        {!draft.document && !plainTextSetting.value ? <button type="button" aria-label={t('Rich text editor')} title={t('Rich text editor')} disabled={!!editIssue}
+        {!draft.document && !plainTextSetting.value ? <button type="button" aria-label={t('Rich text editor')} title={t('Rich text editor')} disabled={!!editIssue || structuredInput}
           onClick={() => { changeDraft(value => ({ ...value, document: documentFromText(value.text) }));
             requestAnimationFrame(() => richEditor.current?.focus()); }}><FilePenLine size={16} /></button> : null}
         {onTargetChange ? <StandaloneTarget client={client} context={context} hosts={hosts} disabled={busy || sending || uploading || !!removing || switchingTarget}

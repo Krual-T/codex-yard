@@ -1,6 +1,7 @@
 import type { ComposerContext, ComposerDocument, ComposerDraft, ComposerImage } from '../workbench-contract.ts';
-import { applyTextEdits, textEdits } from '../messages/message-edit.ts';
-import { isOrdinaryRichText, readRichDocument, richDocumentSkills, serializePlainDocument, serializeRichDocument } from './rich-document.ts';
+import { applyTextEdits, canRemoveImageAttachment, textEdits } from '../messages/message-edit.ts';
+import { composerSchema, isOrdinaryRichText, readRichDocument, richDocumentSkills, serializePlainDocument, serializeRichDocument } from './rich-document.ts';
+import type { Node as ProseMirrorNode } from 'prosemirror-model';
 
 export interface DraftImage extends ComposerImage { previewSrc: string }
 export interface DraftSkill { name: string; path: string }
@@ -15,6 +16,7 @@ export interface Draft extends ComposerDraft {
 }
 export interface StoredDraft { revision: string; draft: Draft; prefills: string[]; legacyPending?: boolean }
 export const legacyBlockedMessage = '此草稿包含格式或上下文，当前编辑器不能无损编辑。';
+export const structuredEditIssue = '此消息包含格式化或分段内容，当前编辑器不能无损编辑。';
 
 const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -315,8 +317,9 @@ export function textEditIssue(draft: Draft): string | null {
   if (draft.hints?.length) return '此草稿包含提示信息，当前编辑器不能无损编辑。';
   if (draft.input) {
     const text = draft.input.filter(item => item.type === 'text');
-    if (text.length > 1 || text.some(item => typeof item.text !== 'string' || !Array.isArray(item.text_elements) || item.text_elements.length)) {
-      return '此消息包含格式化或分段内容，当前编辑器不能无损编辑。';
+    if (text.length > 1 || text.some(item => typeof item.text !== 'string' || !Array.isArray(item.text_elements)
+      || item.text_elements.length || item.text !== draft.text) || !text.length && draft.text) {
+      return structuredEditIssue;
     }
   }
   return null;
@@ -326,7 +329,8 @@ export function richEditIssue(draft: Draft): string | null {
   const document = draft.document && readRichDocument(draft.document);
   if (!document) return '此草稿包含尚不支持的文档内容，已保留原始数据。';
   const serialized = legacyPlainTextMode(draft) === true ? serializePlainDocument(document, true) : serializeRichDocument(document);
-  if (serialized !== draft.text && (legacyPlainTextMode(draft) === true || plainDocument(draft.document!, draft.text) !== draft.text)) {
+  if (serialized !== draft.text && (legacyPlainTextMode(draft) === true || plainDocument(draft.document!, draft.text) !== draft.text)
+    && !(draft.input && serializePlainDocument(document) === draft.text)) {
     return '此草稿的文档与保存的文本不一致，已保留两个版本。';
   }
   if (draft.hints?.length) return '此草稿包含提示信息，当前编辑器不能无损编辑。';
@@ -334,7 +338,7 @@ export function richEditIssue(draft: Draft): string | null {
     const text = draft.input.filter(item => item.type === 'text');
     if (text.length > 1 || text.some(item => typeof item.text !== 'string' || !Array.isArray(item.text_elements)
       || item.text_elements.length || item.text !== draft.text) || !text.length && draft.text) {
-      return '此消息包含格式化或分段内容，当前编辑器不能无损编辑。';
+      return structuredEditIssue;
     }
     const skills = richDocumentSkills(document);
     if (draft.input.some(item => item.type === 'skill' && skills.some(skill => skill.name === item.name && skill.path === item.path)
@@ -374,10 +378,18 @@ export function isStructuredAppInput(entry: Record<string, unknown>): boolean {
 
 /** This is a projection of the existing draft, not another editable draft store. */
 export function canEditStructuredDraft(draft: Draft): boolean {
-  if (draft.blocked || draft.document || draft.hints?.length || !draft.input
+  if (draft.blocked || draft.hints?.length || !draft.input
     || draft.input.some(entry => entry.type === 'text' && typeof entry.text !== 'string')) return false;
   const edits = textEdits(draft);
-  return edits.length > 0 && edits.map(item => item.text).join('\n') === draft.text;
+  if (!edits.length || edits.map(item => item.text).join('\n') !== draft.text) return false;
+  if (draft.document) {
+    const document = readRichDocument(draft.document);
+    if (!document) return false;
+    const saved = legacyPlainTextMode(draft) === true ? serializePlainDocument(document, true) : serializeRichDocument(document);
+    if (saved !== draft.text && plainDocument(draft.document, draft.text) !== draft.text
+      && serializePlainDocument(document) !== draft.text) return false;
+  }
+  return true;
 }
 
 /** Update one original protocol text item without flattening the surrounding ordered input. */
@@ -406,6 +418,48 @@ export function editStructuredDraftText(draft: Draft, index: number, expectedTex
   } catch {
     return { error: 'This input could not be copied without losing its original content.' };
   }
+}
+
+function removeOrderedInput(draft: Draft, index: number, removedImageId?: string): StructuredDraftEdit {
+  if (!draft.input?.[index]) return { error: 'The original input no longer matches this attachment.' };
+  const images: DraftImage[] = [];
+  for (const image of draft.images) {
+    if (image.id === removedImageId) continue;
+    const match = /^image-(\d+)$/.exec(image.id);
+    if (!match) { images.push(image); continue; }
+    const original = Number(match[1]);
+    if (!Number.isSafeInteger(original) || image.id !== `image-${original}` || !canRemoveImageAttachment(draft, original)) {
+      return { error: 'An image no longer matches its original attachment. The original content was retained.' };
+    }
+    images.push(original > index ? { ...image, id: `image-${original - 1}` } : image);
+  }
+  return { draft: { ...draft, images, input: draft.input.filter((_item, position) => position !== index) } };
+}
+
+/** Remove an image from its original ordered input only when the association is unambiguous. */
+export function removeStructuredImage(draft: Draft, id: string): StructuredDraftEdit {
+  const images = draft.images.filter(image => image.id === id);
+  if (images.length !== 1) return { error: 'This image no longer has a unique draft identity.' };
+  // Message editing creates these projection IDs from the original input index.
+  // Uploads have independent IDs and must never remove a matching original item.
+  if (!/^image-\d+$/.test(id)) return { draft: { ...draft, images: draft.images.filter(item => item.id !== id) } };
+  const index = Number(id.slice(6));
+  if (!Number.isSafeInteger(index) || id !== `image-${index}` || !canRemoveImageAttachment(draft, index)) {
+    return { error: 'This image no longer matches its original attachment. The original content was retained.' };
+  }
+  return removeOrderedInput(draft, index, id);
+}
+
+export function removeStructuredSkill(draft: Draft, name: string, path: string): StructuredDraftEdit {
+  const skills = draft.skills.filter(skill => skill.name === name && skill.path === path);
+  const indexes = (draft.input ?? []).flatMap((item, index) =>
+    item.type === 'skill' && item.name === name && item.path === path ? [index] : []);
+  const document = draft.document && readRichDocument(draft.document);
+  if (skills.length !== 1 || indexes.length > 1 || document && richDocumentSkills(document).some(skill => skill.name === name && skill.path === path)) {
+    return { error: 'This skill cannot be removed without changing other retained content.' };
+  }
+  const result = indexes.length ? removeOrderedInput(draft, indexes[0]!) : { draft };
+  return result.draft ? { draft: { ...result.draft, skills: result.draft.skills.filter(skill => skill.name !== name || skill.path !== path) } } : result;
 }
 export function mergePrefill(current: Draft, incoming: ComposerDraft): Draft {
   const next = normalizeDraft(incoming);
@@ -446,12 +500,79 @@ export function activatePending(draft: Draft, keepCurrent: boolean): Draft {
 
 export interface DraftInputOptions { plainTextMode?: boolean }
 
+/** Map ranges only where the formatted and plain strings share one unambiguous character alignment. */
+function remapFormattedRanges(item: Record<string, unknown>, before: string, after: string): Record<string, unknown> {
+  if (before === after) return item;
+  if (isStructuredAppInput(item) || Object.keys(item).some(key => !['type', 'text', 'text_elements'].includes(key))) {
+    throw new Error('格式化文本包含无法安全转换的原始上下文，已保留原始草稿。');
+  }
+  if (item.text_elements === undefined || Array.isArray(item.text_elements) && !item.text_elements.length) return { ...item, text: after };
+  const source = Array.from(before), target = Array.from(after);
+  const short = source.length <= target.length ? source : target, long = source.length <= target.length ? target : source;
+  const first: number[] = [], last: number[] = [];
+  let position = 0;
+  for (const character of short) {
+    while (position < long.length && long[position] !== character) position++;
+    if (position === long.length) throw new Error('格式化文本无法无损对应消息引用范围，已保留原始草稿。');
+    first.push(position++);
+  }
+  position = long.length - 1;
+  for (let index = short.length - 1; index >= 0; index--) {
+    while (position >= 0 && long[position] !== short[index]) position--;
+    last[index] = position--;
+  }
+  if (first.some((value, index) => value !== last[index])) throw new Error('格式化文本的引用位置不唯一，已保留原始草稿。');
+  const mapping = source.length <= target.length ? first : source.map(() => -1);
+  if (source.length > target.length) first.forEach((sourceIndex, targetIndex) => { mapping[sourceIndex] = targetIndex; });
+  const encoder = new TextEncoder();
+  const offsets = (characters: string[]) => characters.reduce<number[]>((result, character) => {
+    result.push(result.at(-1)! + encoder.encode(character).length); return result;
+  }, [0]);
+  const sourceOffsets = offsets(source), targetOffsets = offsets(target);
+  const elements = item.text_elements as Record<string, unknown>[];
+  const next = elements.map(element => {
+    const range = element.byteRange as Record<string, unknown>;
+    if (Object.keys(element).some(key => !['byteRange', 'placeholder'].includes(key))
+      || Object.keys(range).some(key => !['start', 'end'].includes(key))
+      || element.placeholder !== null && typeof element.placeholder !== 'string') {
+      throw new Error('格式化文本包含未识别的引用信息，已保留原始草稿。');
+    }
+    const start = sourceOffsets.indexOf(range.start as number), end = sourceOffsets.indexOf(range.end as number);
+    if (start < 0 || end <= start) throw new Error('格式化文本的引用范围无法无损映射，已保留原始草稿。');
+    const mapped = mapping.slice(start, end), targetStart = mapped[0];
+    if (targetStart === undefined || targetStart < 0 || mapped.some((value, index) => value !== targetStart + index)) {
+      throw new Error('格式化文本与引用内容重叠，已保留原始草稿。');
+    }
+    return { ...element, byteRange: { ...range, start: targetOffsets[targetStart], end: targetOffsets[targetStart + mapped.length] } };
+  });
+  return { ...item, text: after, text_elements: next };
+}
+
+function formatOrderedDocument(input: Record<string, unknown>[], document: ProseMirrorNode, plain: boolean): void {
+  const indexes = input.flatMap((item, index) => item.type === 'text' ? [index] : []);
+  const full = plain ? serializePlainDocument(document) : serializeRichDocument(document);
+  if (indexes.map(index => input[index]!.text).join('\n') === full) return;
+  if (document.childCount !== indexes.length || Array.from({ length: document.childCount }, (_, index) => document.child(index))
+    .some(node => node.type.name !== 'paragraph')) throw new Error('文档格式与消息分段无法无损对应，已保留原始草稿。');
+  const formatted: string[] = [];
+  for (let position = 0; position < indexes.length; position++) {
+    const paragraph = composerSchema.nodes.doc!.create(null, document.child(position));
+    const rich = serializeRichDocument(paragraph), text = serializePlainDocument(paragraph), index = indexes[position]!, item = input[index]!;
+    if (item.text !== text && item.text !== rich) throw new Error('文档格式与消息分段无法无损对应，已保留原始草稿。');
+    const selected = plain ? text : rich;
+    input[index] = remapFormattedRanges(item, item.text as string, selected);
+    formatted.push(selected);
+  }
+  if (formatted.join('\n') !== full) throw new Error('文档格式与消息分段无法无损对应，已保留原始草稿。');
+}
+
 export function draftToInput(draft: ComposerDraft, hostId: string, options?: DraftInputOptions): Record<string, unknown>[] {
   const rich = draft.document && readRichDocument(draft.document);
   const legacyPlain = legacyPlainTextMode(draft) === true;
   const savedText = rich && (legacyPlain ? serializePlainDocument(rich, true) : serializeRichDocument(rich));
   const plainText = draft.document && plainDocument(draft.document, draft.text);
-  if (draft.document && (!rich || savedText !== draft.text && (legacyPlain || plainText !== draft.text))) {
+  if (draft.document && (!rich || savedText !== draft.text && (legacyPlain || plainText !== draft.text)
+    && !(draft.input && serializePlainDocument(rich) === draft.text))) {
     throw new Error('草稿文档无法与待发送文本无损对应，已保留原始草稿。');
   }
   if (draft.hints?.length) throw new Error('此草稿包含尚不支持的提示信息，已保留原始数据。');
@@ -495,6 +616,7 @@ export function draftToInput(draft: ComposerDraft, hostId: string, options?: Dra
       }
     }
   }
+  if (rich && draft.input) formatOrderedDocument(input, rich, options?.plainTextMode ?? legacyPlain);
   const original = input.slice(), matched = new Set<number>();
   let submittedText = draft.text;
   if (rich && !draft.input) {

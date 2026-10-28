@@ -1,6 +1,6 @@
 import { Schema } from 'prosemirror-model';
 import type { Node as ProseMirrorNode } from 'prosemirror-model';
-import { defaultMarkdownSerializer, MarkdownSerializer } from 'prosemirror-markdown';
+import { defaultMarkdownParser, defaultMarkdownSerializer, MarkdownSerializer } from 'prosemirror-markdown';
 import type { ComposerDocument } from '../workbench-contract.ts';
 
 const string = { validate: 'string' };
@@ -52,8 +52,10 @@ export const composerSchema = new Schema({
       markdownSourceStart: { default: null, validate: 'number|null' }, markdownSourceEnd: { default: null, validate: 'number|null' } },
       inline: true, group: 'inline', atom: true, selectable: false,
       parseDOM: [{ tag: 'span[data-mention="rich-link"]', getAttrs: dom => copiedAttrs(dom as HTMLElement, ['displayText', 'href', 'sourceAppId']) }],
-      toDOM: node => ['span', { class: 'standalone-composer__mention', 'data-mention': 'rich-link', 'data-composer-attrs': JSON.stringify(node.attrs) },
-        node.attrs.displayText] },
+      toDOM: node => ['span', { class: 'standalone-composer__mention', 'data-mention': 'rich-link', 'data-composer-attrs': JSON.stringify(node.attrs),
+        title: node.attrs.href, ...(node.attrs.isLoading ? { 'aria-busy': 'true' }
+          : { role: 'button', tabindex: '0', 'aria-haspopup': 'dialog', 'aria-expanded': 'false' }) },
+        node.attrs.isLoading ? node.attrs.loadingDisplayText ?? node.attrs.displayText : node.attrs.displayText] },
     chatGptSystemHint: { attrs: { label: string, systemHint: string }, inline: true, group: 'inline', atom: true, selectable: false,
       parseDOM: [{ tag: 'span[data-system-hint-type][data-system-hint-label]', getAttrs: dom => {
         const element = dom as HTMLElement;
@@ -88,6 +90,19 @@ function markdownDestination(path: string): string {
   return path.replace(/[\\()"\x00-\x1f]/g, character => character.charCodeAt(0) < 32
     ? '%' + character.charCodeAt(0).toString(16).padStart(2, '0').toUpperCase() : '\\' + character);
 }
+
+/** Accept only a whole, unformatted literal link whose parsed destination and label match this node. */
+function verifiedLiteralLink(source: unknown, label: unknown, href: unknown): string | null {
+  if (typeof source !== 'string' || !/^\[(?:\\.|[^\]\\\r\n])+\]\((?:<[^<>\r\n]+>|[^()\s\r\n]+)\)$/.test(source)) return null;
+  try {
+    const document = defaultMarkdownParser.parse(source);
+    const paragraph = document?.childCount === 1 ? document.child(0) : null;
+    const text = paragraph?.type.name === 'paragraph' && paragraph.childCount === 1 ? paragraph.child(0) : null;
+    const link = text?.marks.length === 1 && text.marks[0]?.type.name === 'link' ? text.marks[0] : null;
+    return text?.isText && text.text === label && !!link && link.attrs.href === href && link.attrs.title == null
+      && typeof href === 'string' && !href.startsWith('codex-text-link://') ? source : null;
+  } catch { return null; }
+}
 const serializer = new MarkdownSerializer({
   paragraph: base.paragraph!, text: base.text!, hard_break: state => state.write('\\\n'), heading: base.heading!, blockquote: base.blockquote!,
   regular_list_item: base.list_item!,
@@ -106,7 +121,8 @@ const serializer = new MarkdownSerializer({
   atMention: (state, node) => state.write('[' + state.esc(node.attrs.label) + '](' + markdownDestination(node.attrs.path) + ')'),
   skillMention: (state, node) => state.write('[' + state.esc(node.attrs.promptLinkLabel || '$' + node.attrs.name) + ']('
     + markdownDestination(node.attrs.path) + ')'),
-  richLink: (state, node) => state.write('[' + state.esc(node.attrs.displayText) + '](' + markdownDestination(node.attrs.href) + ')'),
+  richLink: (state, node) => state.write(verifiedLiteralLink(node.attrs.literalMarkdownSource, node.attrs.displayText, node.attrs.href)
+    ?? '[' + state.esc(node.attrs.displayText) + '](' + markdownDestination(node.attrs.href) + ')'),
   chatGptSystemHint: (state, node) => state.write('[' + state.esc(node.attrs.label) + '](chatgpt-system-hint://' + node.attrs.systemHint + ')'),
 }, { ...defaultMarkdownSerializer.marks, link: {
   ...defaultLink,
@@ -135,9 +151,14 @@ function validJSON(node: ComposerDocument): boolean {
   if (node.type === 'ordered_list' && node.attrs?.startingNumber !== undefined
     && (!Number.isInteger(node.attrs.startingNumber) || (node.attrs.startingNumber as number) < 1)) return false;
   if (node.type === 'skillMention' && (!node.attrs?.path || !node.attrs?.name)) return false;
-  if (node.type === 'richLink' && (node.attrs?.isLoading === true || node.attrs?.loadingDisplayText != null
-    || node.attrs?.literalMarkdownSource != null || node.attrs?.literalMarkdownOccurrenceId != null
-    || node.attrs?.markdownSourceStart != null || node.attrs?.markdownSourceEnd != null)) return false;
+  if (node.type === 'richLink') {
+    const attrs = node.attrs;
+    if (attrs?.literalMarkdownSource != null && !verifiedLiteralLink(attrs.literalMarkdownSource, attrs.displayText, attrs.href)) return false;
+    if (['literalMarkdownOccurrenceId', 'markdownSourceStart', 'markdownSourceEnd'].some(key => attrs?.[key] != null
+      && (!Number.isSafeInteger(attrs[key]) || (attrs[key] as number) < 0))) return false;
+    if (typeof attrs?.markdownSourceStart === 'number' && typeof attrs.markdownSourceEnd === 'number'
+      && attrs.markdownSourceStart > attrs.markdownSourceEnd) return false;
+  }
   if (node.type === 'chatGptSystemHint' && (typeof node.attrs?.label !== 'string' || !node.attrs.label
     || typeof node.attrs.systemHint !== 'string' || !systemHints.has(node.attrs.systemHint))) return false;
   if (node.marks?.some(mark => {

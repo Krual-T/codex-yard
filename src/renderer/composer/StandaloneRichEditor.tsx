@@ -1,5 +1,5 @@
 import { Fragment as ReactFragment, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
-import { Bold, Code2, Italic, Link as LinkIcon } from 'lucide-react';
+import { Bold, Code2, Italic, Link as LinkIcon, X } from 'lucide-react';
 import { toggleMark } from 'prosemirror-commands';
 import { Fragment, Slice } from 'prosemirror-model';
 import { EditorState } from 'prosemirror-state';
@@ -18,15 +18,22 @@ export interface RichEditorHandle {
   focus(): void;
   insertCompletion(context: RichCompletionContext, query: RichCompletionQuery, item: Completion, cwd: string): boolean;
 }
-export interface StructuredInputEditorHandle { focus(): void }
+export interface StructuredInputEditorHandle {
+  focus(index?: number, position?: number): void;
+  replace(index: number, start: number, end: number, text: string): boolean;
+}
 export interface StructuredInputEditorProps {
   draft: Draft;
-  onEdit(index: number, expectedText: string, text: string): void;
+  onEdit(index: number, expectedText: string, text: string, inputType?: string): void;
+  onSelection?(index: number, cursor: number): void;
   onKeyDown(event: KeyboardEvent): boolean;
   onCompositionChange?(composing: boolean): void;
   onPaste?(event: ClipboardEvent<HTMLTextAreaElement>): void;
   readOnly?: boolean;
   ariaLabel?: string;
+  activeIndex?: number;
+  completionListId?: string;
+  completionSelectedId?: string;
 }
 
 /** Each control corresponds to one original text item; non-text items remain in the draft. */
@@ -37,29 +44,49 @@ export const StandaloneStructuredInputEditor = forwardRef<StructuredInputEditorH
     const latest = useRef(props);
     const composition = useRef(0);
     latest.current = props;
-    useImperativeHandle(ref, () => ({ focus: () => {
-      const values = Array.from(controls.current.values());
-      (values.find(control => !control.readOnly) ?? values[0])?.focus();
-    } }), []);
+    useImperativeHandle(ref, () => ({
+      focus: (index, position) => {
+        const values = Array.from(controls.current.values());
+        const control = (index === undefined ? undefined : controls.current.get(index))
+          ?? values.find(element => !element.readOnly) ?? values[0];
+        control?.focus();
+        if (control && position !== undefined) control.setSelectionRange(position, position);
+      },
+      replace: (index, start, end, text) => {
+        const control = controls.current.get(index);
+        if (!control || control.readOnly || !control.isConnected) return false;
+        control.focus(); control.setSelectionRange(start, end);
+        return text ? document.execCommand('insertText', false, text) : document.execCommand('delete');
+      },
+    }), []);
     useEffect(() => () => {
       if (composition.current) { composition.current = 0; latest.current.onCompositionChange?.(false); }
     }, []);
     const entries = (props.draft.input ?? []).flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
       ? [{ entry, index, text: entry.text }] : []);
-    return <>{entries.map(({ entry, index, text }, position) => <ReactFragment key={index}>
-      {isStructuredAppInput(entry) ? <div role="status">{t('Read only')}: This app input contains retained context.</div> : null}
+    return <>{entries.map(({ entry, index, text }, position) => <ReactFragment key={position}>
+      {isStructuredAppInput(entry) ? <div role="status">{t('This app input contains retained context and cannot be edited here.')}</div> : null}
       <textarea
         ref={element => { if (element) controls.current.set(index, element); else controls.current.delete(index); }}
         aria-label={(props.ariaLabel ?? t('Work with Codex')) + (entries.length > 1 ? ' ' + new Intl.NumberFormat(locale).format(position + 1) : '')}
+        aria-autocomplete="list" aria-controls={props.activeIndex === index ? props.completionListId : undefined}
+        aria-activedescendant={props.activeIndex === index ? props.completionSelectedId : undefined}
         placeholder={t('Message')} value={text} readOnly={props.readOnly || isStructuredAppInput(entry)}
-        onChange={event => props.onEdit(index, text, event.currentTarget.value)}
+        onChange={event => { props.onSelection?.(index, event.currentTarget.selectionStart);
+          props.onEdit(index, text, event.currentTarget.value, (event.nativeEvent as InputEvent).inputType); }}
+        onFocus={event => props.onSelection?.(index, event.currentTarget.selectionStart)}
+        onSelect={event => props.onSelection?.(index, event.currentTarget.selectionStart)}
         onKeyDown={event => { if (!event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) props.onKeyDown(event.nativeEvent); }}
         onPaste={props.onPaste}
         onCompositionStart={() => { composition.current++; props.onCompositionChange?.(true); }}
-        onCompositionEnd={() => {
+        onCompositionEnd={event => {
           const active = composition.current;
+          const control = event.currentTarget;
           requestAnimationFrame(() => {
-            if (active && composition.current === active) { composition.current = 0; latest.current.onCompositionChange?.(false); }
+            if (active && composition.current === active) {
+              composition.current = 0; latest.current.onCompositionChange?.(false);
+              if (control.isConnected) latest.current.onSelection?.(index, control.selectionStart);
+            }
           });
         }} />
     </ReactFragment>)}</>;
@@ -89,7 +116,8 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
   const document = new DOMParser().parseFromString(html, 'text/html');
   const tags = new Set(['div', 'span', 'p', 'br', 'strong', 'b', 'em', 'i', 'code', 'pre', 'blockquote',
     'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a']);
-  const attributes = new Set(['class', 'dir', 'href', 'title', 'start', 'contenteditable', 'spellcheck',
+  const attributes = new Set(['class', 'dir', 'href', 'title', 'start', 'contenteditable', 'spellcheck', 'role', 'tabindex',
+    'aria-busy', 'aria-expanded', 'aria-haspopup',
     'data-pm-slice', 'data-mention', 'data-composer-attrs', 'data-system-hint-type', 'data-system-hint-label']);
   if (document.querySelector('style, link, script')) return false;
   return Array.from(document.body.querySelectorAll('*')).every(element => {
@@ -133,6 +161,27 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
   const applyMode = useRef<(() => void) | null>(null);
   const [linkOpen, setLinkOpen] = useState(false);
   const [href, setHref] = useState('');
+  const [openedLink, setOpenedLink] = useState<{ element: HTMLElement; href: string; label: string } | null>(null);
+  const closeRichLink = (focus = true) => {
+    if (!openedLink) return;
+    openedLink.element.setAttribute('aria-expanded', 'false');
+    if (focus && openedLink.element.isConnected) openedLink.element.focus();
+    setOpenedLink(null);
+  };
+  const openRichLink = (target: EventTarget | null): boolean => {
+    const element = target instanceof Element ? target.closest<HTMLElement>('[data-mention="rich-link"][role="button"]') : null;
+    if (!element || !host.current?.contains(element)) return false;
+    if (openedLink?.element === element) { closeRichLink(); return true; }
+    try {
+      const attrs: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
+      if (!attrs || typeof attrs !== 'object' || !('href' in attrs) || typeof attrs.href !== 'string'
+        || !('displayText' in attrs) || typeof attrs.displayText !== 'string') return false;
+      openedLink?.element.setAttribute('aria-expanded', 'false');
+      element.setAttribute('aria-expanded', 'true');
+      setOpenedLink({ element, href: attrs.href, label: attrs.displayText });
+      return true;
+    } catch { return false; }
+  };
   useImperativeHandle(ref, () => ({
     focus: () => view.current?.focus(),
     insertCompletion: (context, query, item, cwd) => {
@@ -208,6 +257,19 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         if (html && !supportedClipboardHTML(html, latest.current.allowMentions !== false)) { latest.current.onInvalid(); return true; }
         return false;
       },
+      transformPastedHTML: html => {
+        const parsed = new DOMParser().parseFromString(html, 'text/html');
+        for (const element of parsed.querySelectorAll('[data-mention="rich-link"][data-composer-attrs]')) {
+          try {
+            const attrs: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
+            if (!attrs || typeof attrs !== 'object' || Array.isArray(attrs)) continue;
+            const copied = { ...attrs } as Record<string, unknown>;
+            for (const key of ['literalMarkdownSource', 'literalMarkdownOccurrenceId', 'markdownSourceStart', 'markdownSourceEnd', 'isLoading', 'loadingDisplayText']) delete copied[key];
+            element.setAttribute('data-composer-attrs', JSON.stringify(copied));
+          } catch { /* Invalid clipboard data is rejected by handlePaste. */ }
+        }
+        return parsed.body.innerHTML;
+      },
     });
     view.current = editor;
     let plain = !!latest.current.plainTextMode;
@@ -231,6 +293,12 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     if (!editor || !doc || editor.state.doc.eq(doc)) return;
     editor.updateState(EditorState.create({ doc, plugins: editor.state.plugins }));
   }, [props.document, props.currentDocument]);
+
+  useEffect(() => {
+    if (openedLink && !openedLink.element.isConnected) setOpenedLink(null);
+    else openedLink?.element.setAttribute('aria-expanded', 'true');
+    return () => { openedLink?.element.setAttribute('aria-expanded', 'false'); };
+  }, [props.document, openedLink]);
 
   useLayoutEffect(() => {
     view.current?.setProps({ attributes: {
@@ -265,6 +333,15 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         }
       }}><input aria-label={t('Link address')} value={href} disabled={props.readOnly} onChange={event => setHref(event.target.value)} /><button type="submit" disabled={props.readOnly}>{t('Apply')}</button></form> : null}
     </div>}
-    <div ref={host} className="standalone-composer__rich" />
+    <div ref={host} className="standalone-composer__rich" onClickCapture={event => {
+      if (openRichLink(event.target)) { event.preventDefault(); event.stopPropagation(); }
+    }} onKeyDownCapture={event => {
+      if ((event.key === 'Enter' || event.key === ' ') && openRichLink(event.target)) { event.preventDefault(); event.stopPropagation(); }
+    }} />
+    {openedLink ? <div role="dialog" aria-label={t('Link')}>
+      <span>{openedLink.label}</span>{' '}{/^https?:\/\//i.test(openedLink.href)
+        ? <a href={openedLink.href} target="_blank" rel="noopener noreferrer">{openedLink.href}</a> : <span>{openedLink.href}</span>}
+      <button type="button" title={t('Close')} aria-label={t('Close')} onClick={() => closeRichLink()}><X size={16} /></button>
+    </div> : null}
   </>;
 });

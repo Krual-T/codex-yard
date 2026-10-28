@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 import type { ComposerDocument } from '../src/renderer/workbench-contract.ts';
-import { canEditStructuredDraft, draftToInput, editStructuredDraftText, normalizeDraft } from '../src/renderer/composer/standalone-draft.ts';
+import { canEditStructuredDraft, draftToInput, editStructuredDraftText, normalizeDraft, removeStructuredImage, removeStructuredSkill } from '../src/renderer/composer/standalone-draft.ts';
 import { readRichDocument, serializePlainDocument, serializeRichDocument } from '../src/renderer/composer/rich-document.ts';
 
 const richLink: ComposerDocument = { type: 'richLink', attrs: {
@@ -25,13 +25,35 @@ test('original rich link subset retains its attributes and has matching plain an
   const draft = { text: serializeRichDocument(parsed), document, images: [], files: [] };
   assert.equal(draftToInput(draft, 'local', { plainTextMode: true })[0]?.text, 'See [Documentation](https://example.test/docs) now');
   assert.equal(draftToInput(draft, 'local', { plainTextMode: false })[0]?.text, 'See [Documentation](https://example.test/docs) **now**');
-  for (const extra of [{ isLoading: true }, { loadingDisplayText: 'pending' }, { literalMarkdownSource: '[Documentation](https://example.test/docs)' },
-    { literalMarkdownOccurrenceId: 1 }, { markdownSourceStart: 0 }, { markdownSourceEnd: 1 }, { future: 'keep' }]) {
+  for (const extra of [{ literalMarkdownSource: '[Different](https://example.test/docs)' },
+    { literalMarkdownSource: '[Documentation](https://example.test/docs "title")' },
+    { literalMarkdownOccurrenceId: -1 }, { markdownSourceStart: 2, markdownSourceEnd: 1 }, { future: 'keep' }]) {
     const unknown: ComposerDocument = { type: 'doc', content: [{ type: 'paragraph', content: [
       { ...richLink, attrs: { ...richLink.attrs, ...extra } },
     ] }] };
     assert.equal(readRichDocument(unknown), null);
   }
+});
+
+test('rich links retain verified literal source and occurrence positions for each node', () => {
+  const first = { ...richLink, attrs: { ...richLink.attrs,
+    literalMarkdownSource: '[Documentation](<https://example.test/docs>)', literalMarkdownOccurrenceId: 2,
+    markdownSourceStart: 4, markdownSourceEnd: 48 } };
+  const second = { ...richLink, attrs: { ...richLink.attrs,
+    literalMarkdownSource: '[Documentation](https://example.test/docs)', literalMarkdownOccurrenceId: 3,
+    markdownSourceStart: 49, markdownSourceEnd: 91, isLoading: true, loadingDisplayText: 'Loading link' } };
+  const source: ComposerDocument = { type: 'doc', content: [{ type: 'paragraph', content: [
+    { type: 'text', text: 'See ' }, first, { type: 'text', text: ' and ' }, second,
+  ] }] };
+  const parsed = readRichDocument(source);
+  assert.ok(parsed);
+  assert.equal(serializeRichDocument(parsed), 'See [Documentation](<https://example.test/docs>) and [Documentation](https://example.test/docs)');
+  assert.equal(serializePlainDocument(parsed), 'See [Documentation](https://example.test/docs) and [Documentation](https://example.test/docs)');
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.toJSON().content[0].content[1].attrs)), first.attrs);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.toJSON().content[0].content[3].attrs)), second.attrs);
+  const draft = { text: serializeRichDocument(parsed), document: source, images: [], files: [] };
+  assert.equal(draftToInput(draft, 'local', { plainTextMode: false })[0]?.text, draft.text);
+  assert.equal(draftToInput(draft, 'local', { plainTextMode: true })[0]?.text, serializePlainDocument(parsed));
 });
 
 function structuredDraft() {
@@ -90,6 +112,67 @@ test('structured text edits preserve ordered inputs and adjust only proven UTF-8
     assert.throws(() => draftToInput(unsafe, 'local'), /完整上下文/);
   }
   assert.equal(canEditStructuredDraft({ ...draft, hints: [{ unknown: true }] }), false);
+});
+
+test('ordered document formatting maps UTF-8 ranges without changing non-text items or draft metadata', () => {
+  const marked: ComposerDocument = { type: 'doc', content: [{ type: 'paragraph', content: [
+    { type: 'text', text: 'A😀B', marks: [{ type: 'strong' }] },
+  ] }] };
+  const input = [{ type: 'text', text: 'A😀B', text_elements: [
+    { byteRange: { start: 1, end: 5 }, placeholder: '😀' },
+  ] }, { type: 'mention', name: 'fixture', path: '/source', extra: 'keep' }];
+  const draft = { text: 'A😀B', document: marked, input, images: [], files: [] };
+  const original = structuredClone(draft);
+  assert.deepEqual(draftToInput(draft, 'local', { plainTextMode: false }), [
+    { type: 'text', text: '**A😀B**', text_elements: [{ byteRange: { start: 3, end: 7 }, placeholder: '😀' }] }, input[1],
+  ]);
+  assert.deepEqual(draftToInput(draft, 'local', { plainTextMode: true }), input);
+  const richDraft = { ...draft, text: '**A😀B**', input: [
+    { type: 'text', text: '**A😀B**', text_elements: [{ byteRange: { start: 3, end: 7 }, placeholder: '😀' }] }, input[1]!,
+  ] };
+  assert.deepEqual(draftToInput(richDraft, 'local', { plainTextMode: true }), input);
+  assert.deepEqual(draft, original);
+  const ambiguous: ComposerDocument = { type: 'doc', content: [{ type: 'paragraph', content: [
+    { type: 'text', text: '*', marks: [{ type: 'strong' }] },
+  ] }] };
+  const unsafe = { text: '*', document: ambiguous, input: [{ type: 'text', text: '*', text_elements: [
+    { byteRange: { start: 0, end: 1 }, placeholder: '*' },
+  ] }], images: [], files: [] };
+  assert.throws(() => draftToInput(unsafe, 'local', { plainTextMode: false }), /引用位置不唯一/);
+  assert.equal(unsafe.input[0]!.text, '*');
+  const extended = structuredClone(draft);
+  (extended.input[0]!.text_elements![0] as Record<string, unknown>).future = { offset: 1 };
+  assert.throws(() => draftToInput(extended, 'local', { plainTextMode: false }), /未识别的引用信息/);
+  assert.deepEqual(draftToInput(extended, 'local', { plainTextMode: true }), extended.input);
+  const protectedApp = { text: 'app', document: { type: 'doc', content: [{ type: 'paragraph', content: [
+    { type: 'text', text: 'app', marks: [{ type: 'strong' }] },
+  ] }] }, images: [], files: [], input: [{ type: 'text', text: 'app', text_elements: [{ byteRange: { start: 0, end: 3 },
+    placeholder: 'codex-untrusted-app-input:' + JSON.stringify({ version: 1, promptContextWithoutReviewedMessages: 'context' }) }] }] };
+  assert.throws(() => draftToInput(protectedApp, 'local', { plainTextMode: false }), /无法安全转换/);
+  assert.deepEqual(draftToInput(protectedApp, 'local', { plainTextMode: true }), protectedApp.input);
+});
+
+test('removing ordered attachments remaps message image identities without deleting a new matching upload', () => {
+  const draft = normalizeDraft({ text: 'text', files: [],
+    images: [{ id: 'image-1', src: 'https://example.test/same.png' }, { id: 'image-3', src: '', fileId: 'second' },
+      { id: 'new-upload', src: 'https://example.test/same.png' }], skills: [{ name: 'review', path: '/review' }],
+    input: [{ type: 'text', text: 'text', text_elements: [] }, { type: 'image', url: 'https://example.test/same.png', detail: 'high' },
+      { type: 'skill', name: 'review', path: '/review', source: 'retained' }, { type: 'image', fileId: 'second', detail: 'low' }] });
+  const removeUpload = removeStructuredImage(draft, 'new-upload');
+  assert.ok(removeUpload.draft);
+  assert.deepEqual(removeUpload.draft.input, draft.input);
+  const first = removeStructuredImage(removeUpload.draft, 'image-1');
+  assert.ok(first.draft);
+  assert.deepEqual(first.draft.images.map(image => image.id), ['image-2']);
+  assert.deepEqual(first.draft.input, [draft.input![0], draft.input![2], draft.input![3]]);
+  const skill = removeStructuredSkill(first.draft, 'review', '/review');
+  assert.ok(skill.draft);
+  assert.deepEqual(skill.draft.images.map(image => image.id), ['image-1']);
+  assert.deepEqual(skill.draft.input, [draft.input![0], draft.input![3]]);
+  const second = removeStructuredImage(skill.draft, 'image-1');
+  assert.ok(second.draft);
+  assert.deepEqual(second.draft.input, [draft.input![0]]);
+  assert.match(removeStructuredImage({ ...draft, images: [{ ...draft.images[0]!, fileId: 'wrong', src: '' }] }, 'image-1').error!, /no longer matches/);
 });
 
 test('retained rich link is editable and survives draft refresh and submission in the real composer', {
@@ -257,7 +340,7 @@ test('segmented editor uses the original draft controller for editing, undo, ref
     await protectedInput.waitFor();
     assert.equal(await protectedInput.isEditable(), false);
     assert.equal(await protectedInput.inputValue(), 'app');
-    await page.getByRole('status').filter({ hasText: 'This app input contains retained context' }).waitFor();
+    await page.getByRole('status').filter({ hasText: '此应用输入包含保留的上下文' }).waitFor();
     await page.evaluate(() => (window as any).fixture.editor.focus());
     assert.equal(await protectedInput.evaluate(element => window.document.activeElement === element), true);
     await protectedInput.selectText();
