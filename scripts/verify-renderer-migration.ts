@@ -50,7 +50,7 @@ async function mountedComponents(page: Page) {
     for (let visited = 0; queue.length && visited < 50_000; visited++) {
       const fiber = queue.pop()!;
       const name = fiber.type?.displayName ?? fiber.type?.name;
-      if (name && /CollapsibleUserMessageContent|SidebarRelativeTime|CompactRelativeTime/.test(name)) names.add(name);
+      if (name && /^(CollapsibleUserMessageContent|RelativeTime|CompactRelativeTime)$/.test(name)) names.add(name);
       if (fiber.child) queue.push(fiber.child);
       if (fiber.sibling) queue.push(fiber.sibling);
     }
@@ -76,12 +76,12 @@ try {
     await page.locator('[data-app-action-sidebar-thread-row]').first().hover();
     let components = await mountedComponents(page);
     const timestampDeadline = Date.now() + 10_000;
-    while (!components.includes('SidebarRelativeTime') && Date.now() < timestampDeadline) {
+    while (!components.includes('RelativeTime') && Date.now() < timestampDeadline) {
       await page.waitForTimeout(50);
       components = await mountedComponents(page);
     }
     assert.ok(components.includes('CollapsibleUserMessageContent'), 'The authored message component must be mounted in the existing page');
-    assert.ok(components.includes('SidebarRelativeTime'), 'The authored timestamp component must be mounted in the existing sidebar');
+    assert.ok(components.includes('RelativeTime'), 'The authored timestamp component must be mounted in the existing sidebar hover card');
     assert.equal(modules.length, 1, 'Both seams import one authored ESM module');
     checks.push(`${viewport.width}px: original page mounts ${components.join(', ')} from one authored module`);
     await page.screenshot({ path: join(output, `${viewport.width}-collapsed.png`) });

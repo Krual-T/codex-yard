@@ -7,7 +7,7 @@ the upstream App's original TSX source is not available.
 
 | Boundary | Authored source | Existing caller and retained dependencies |
 | --- | --- | --- |
-| Relative time presentation | `src/renderer/sidebar/relative-time.tsx` | `app-initial`'s `YEc` / exported `j$`; official clock `vIa`, locale `ca`, calendar calculation `VEc`, localized message `W`, and the original React object `AIa` |
+| Relative time presentation | `src/renderer/shared/relative-time.tsx` | `app-initial`'s `YEc` / exported `j$`; official clock `vIa`, locale `ca`, calendar calculation `VEc`, localized message `W`, and the original React object `AIa` |
 | User message disclosure | `src/renderer/messages/collapsible-user-message-content.tsx` | `collapsible-user-message-content`'s `C` / exported `t`; official measurement/collapse hook, print atom, search registration, Markdown preview context, button, localized messages, icons and React object `E` |
 
 The timestamp entry is shared by local and remote sidebar rows, pending worktree
@@ -24,7 +24,7 @@ hidden controls' accessibility handling.
 
 | Area | Responsibility |
 | --- | --- |
-| `src/renderer/sidebar/` | Stateless list presentation; upstream services supply time, locale and business data |
+| `src/renderer/shared/` | Shared presentation leaves; upstream services supply time, locale and business data |
 | `src/renderer/messages/` | Message display leaves; upstream services own conversation and disclosure state |
 | `src/renderer/components.ts` | Explicit exports of the two component factories |
 | `src/native/renderer-migration.ts` | The two pinned, uniquely matched function seams |
@@ -51,6 +51,11 @@ bundle. The `web-renderer-v2` namespace keeps older immutable resource caches
 from bypassing these seams; bootstrap, preloads and lazy imports use that same
 namespace.
 
+Adapted response modules and the authored bundle use `no-store`: their upstream
+filenames do not identify project-authored changes. Unchanged hashed vendor
+assets retain immutable caching. Only actually adapted responses are cached in
+the server's memory.
+
 ## Validation
 
 Run `npm run typecheck` and `npm test`. The portable suite covers the pinned seam
@@ -71,6 +76,10 @@ module load, the existing sidebar hover card, disclosure expansion/collapse, ups
 code copy, reload and desktop/tablet layouts. Account-backed validation and clean
 checkout startup are recorded separately with their actual CLI/backend versions;
 App 26.1013.40934 identifies the resource reference, not the daemon version.
+
+The shared time contract also covers a non-sidebar `<time>` consumer with
+`relative`/`elapsed` options, clock changes and English/French formatting. This
+contract check does not claim that every lazy page has been exercised.
 
 ## Later batches
 

@@ -303,16 +303,21 @@ export async function createNativeWorkbench(options: Options = {}) {
       const file = resolve(assetRoot, '.' + path);
       if (!file.startsWith(assetRoot + sep)) { response.writeHead(404); response.end(); return; }
       let content: Buffer = await readFile(file);
+      let adapted = false;
       if (webRenderer && path.endsWith('.js')) {
         const cached = migratedModules.get(path);
-        if (cached) content = cached;
+        if (cached) { content = cached; adapted = true; }
         else {
           const original = content;
           content = adaptMigratedRendererModule(path, adaptVisualizationModule(path, content));
-          if (content !== original) migratedModules.set(path, content);
+          adapted = content !== original;
+          if (adapted) migratedModules.set(path, content);
         }
       }
-      if (path.startsWith('/assets/') && /-[a-f0-9]{8,}\.[^.]+$/.test(path)) {
+      // Their URLs contain upstream hashes, not hashes of our adapted response.
+      // Revalidate them with the authored bundle on every page load.
+      if (adapted) response.setHeader('Cache-Control', 'no-store');
+      else if (path.startsWith('/assets/') && /-[a-f0-9]{8,}\.[^.]+$/.test(path)) {
         response.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       }
       if (/\.(js|mjs|css|svg|json|wasm)$/.test(path)) {
