@@ -28,9 +28,6 @@
     "test:tabs:ui": "node --use-env-proxy scripts/verify-workspace-tabs.ts",
     "test:tablet:ui": "node --use-env-proxy scripts/verify-tablet-sidebar.ts",
     "test:sidebar-copy-models:ui": "node --use-env-proxy scripts/verify-sidebar-copy-models.ts",
-    "test:renderer-migration:ui": "node --use-env-proxy scripts/verify-renderer-migration.ts",
-    "test:renderer-settings:ui": "node --use-env-proxy scripts/verify-renderer-settings.ts",
-    "test:renderer-messages:ui": "node --use-env-proxy scripts/verify-renderer-messages.ts",
     "test:terminal:ui": "node --use-env-proxy scripts/verify-terminal.ts"
   },
   "dependencies": {

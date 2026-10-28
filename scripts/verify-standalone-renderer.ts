@@ -20,6 +20,15 @@ const fake = await createFakeCodex(temporary);
 // Real CLI 0.164/0.163 cannot list/resume a newly created empty thread.
 // Only threads created by this fixture have this first-turn lifecycle.
 const createdEmpty = new Set<string>();
+const goals = new Map<string, Record<string, unknown>>();
+fake.handlers.set('thread/goal/get', params => ({ goal: goals.get(String(params.threadId)) ?? null }));
+fake.handlers.set('thread/goal/set', params => {
+  const threadId = String(params.threadId), previous = goals.get(threadId);
+  const goal = { threadId, objective: '', status: 'paused', tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0,
+    createdAt: 1, updatedAt: 2, ...previous, ...Object.fromEntries(Object.entries(params).filter(([key]) => ['objective', 'status', 'tokenBudget'].includes(key))) };
+  goals.set(threadId, goal); return { goal };
+});
+fake.handlers.set('thread/goal/clear', params => { goals.delete(String(params.threadId)); return { cleared: true }; });
 fake.handlers.set('thread/start', params => {
   const result = fake.defaultResult('thread/start', record(params)) as { thread: { id: string } };
   fake.threads.get(result.thread.id)!.name = 'Created ' + result.thread.id;
@@ -172,8 +181,9 @@ try {
   await page.waitForURL('**/local/owned-conversation'); await fileEditor.waitFor();
   assert.equal(await fileEditor.innerText(), 'one\ntwo\nthree edited');
   await page.getByRole('button', { name: 'Save file', exact: true }).click();
-  await page.getByRole('button', { name: 'Save file', exact: true }).waitFor({ state: 'visible' });
-  await page.waitForFunction(() => document.querySelector<HTMLButtonElement>('button[aria-label="Save file"]')?.disabled);
+  await page.waitForFunction(() => !document.querySelector('[aria-label="Unsaved changes"]')
+    && document.querySelector<HTMLButtonElement>('button[aria-label="Save file"]')?.disabled
+    && document.querySelector<HTMLButtonElement>('button[aria-label="Reload file"]')?.disabled === false);
   assert.equal(await readFile(notesPath, 'utf8'), '\ufeffone\r\ntwo\nthree edited');
   await page.getByRole('button', { name: 'Open turn changes', exact: true }).click();
   await page.getByLabel('Diff', { exact: true }).getByText('+two', { exact: true }).waitFor();
@@ -243,6 +253,55 @@ try {
   checks.push('two actual pages preserve concurrent native-atoms records, malformed atoms and quota failures');
 
   await page.setViewportSize({ width: 1360, height: 900 });
+  const goalRegion = page.getByRole('region', { name: '会话目标', exact: true });
+  const goalWritesBefore = fake.calls('thread/goal/set').length;
+  await goalRegion.getByRole('button', { name: '新建目标', exact: true }).click();
+  await goalRegion.getByLabel('目标内容', { exact: true }).fill('OWNED_GOAL **bold**\n\n- preserve list');
+  await goalRegion.getByRole('button', { name: '富文本编辑', exact: true }).click();
+  await goalRegion.locator('.ProseMirror strong').getByText('bold', { exact: true }).waitFor();
+  await goalRegion.getByRole('button', { name: '创建暂停目标', exact: true }).click();
+  await goalRegion.getByText('已暂停', { exact: true }).waitFor();
+  assert.equal(fake.calls('thread/goal/set').length, goalWritesBefore + 1);
+  assert.equal(fake.calls('thread/goal/set').at(-1)!.params.status, 'paused');
+  assert.equal(fake.calls('thread/goal/set').at(-1)!.params.origin, 'user');
+  await page.reload();
+  await goalRegion.getByText('OWNED_GOAL **bold**\n\n- preserve list', { exact: true }).waitFor();
+  await goalRegion.getByRole('button', { name: '清除目标', exact: true }).click();
+  await goalRegion.getByRole('button', { name: '确认清除', exact: true }).click();
+  await goalRegion.getByRole('button', { name: '新建目标', exact: true }).waitFor();
+  checks.push('actual App mounts owned goal controls and rich objective; explicit paused create, reload and clear use the original thread protocol without starting a turn');
+
+  if (!await page.getByRole('button', { name: 'Settings', exact: true }).isVisible()) await sidebarButton.click();
+  await page.getByRole('button', { name: 'Edit message', exact: true }).click();
+  await page.evaluate(async () => {
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open('codex-yard.ui-atoms.v1', 1);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result, transaction = db.transaction('atoms', 'readwrite'), store = transaction.objectStore('atoms');
+        let held = true;
+        (window as any).releaseUiWriteBarrier = () => { held = false; };
+        transaction.oncomplete = () => db.close();
+        const keepAlive = () => { const read = store.get('native-atoms'); read.onsuccess = () => { if (held) keepAlive(); }; };
+        keepAlive(); resolve();
+      };
+    });
+  });
+  const heldEditor = page.getByRole('textbox', { name: 'Edit message text', exact: true });
+  await heldEditor.fill('UNSENT_EDIT_BEFORE_NAVIGATION');
+  const editLocation = page.url();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  assert.equal(page.url(), editLocation, 'Navigation must wait for the actual pending UI transaction.');
+  assert.equal(await heldEditor.isDisabled(), true);
+  await page.evaluate(() => (window as any).releaseUiWriteBarrier());
+  await page.waitForURL('**/settings/general');
+  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await page.waitForURL('**/local/owned-conversation');
+  await heldEditor.waitFor(); assert.equal(await heldEditor.inputValue(), 'UNSENT_EDIT_BEFORE_NAVIGATION');
+  await page.locator('.yard-message-edit').getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('.yard-message-edit'));
+  checks.push('actual App freezes the message editor before navigation, awaits a blocked IndexedDB write and restores the exact unsent edit after returning');
+
   let rejectEditedStart = true;
   fake.handlers.set('turn/start', params => {
     if (rejectEditedStart) { rejectEditedStart = false; throw new Error('SYNTHETIC_EDIT_START_REJECTED'); }

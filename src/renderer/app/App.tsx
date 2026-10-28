@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import type { ThreadResponse, ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { ComposerDraft, MessageEditOrigin, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
 import { StandaloneComposer, bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from '../composer/StandaloneComposer.tsx';
 import type { ComposerDraftController, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
 import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
-import type { MessageEditRecovery } from '../messages/use-message-editing.ts';
+import type { MessageEditNavigationController, MessageEditNavigationLease, MessageEditRecovery } from '../messages/use-message-editing.ts';
+import { StandaloneGoal } from '../composer/StandaloneGoal.tsx';
 import { StandaloneSettings } from '../settings/StandaloneSettings.tsx';
 import { BrowserWorkbenchClient, isServerRequestEvent } from './client.ts';
 import { applyThreadEvent, isItemDelta, isThreadBusy } from './thread-state.ts';
@@ -84,6 +86,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [menu, setMenu] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [leaving, setLeaving] = useState(false);
+  const [navigationCommit, setNavigationCommit] = useState(0);
   const [initialOptions, setInitialOptions] = useState<SubmitOptions | null>(null);
   const [editRecovery, setEditRecovery] = useState<MessageEditRecovery | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
@@ -96,6 +99,16 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [panelRequest, setPanelRequest] = useState<WorkspacePanelRequest | null>(null);
   const [panelAppearance, setPanelAppearance] = useState<WorkspacePanelAppearance>({ theme: 'dark', codeFontSize: 12, codeLineHeight: 18 });
   const panelsDirty = useRef(false);
+  const panelRecoveryBarrier = useRef<(() => Promise<void>) | null>(null);
+  const receivePanelRecoveryBarrier = useCallback((barrier: (() => Promise<void>) | null) => { panelRecoveryBarrier.current = barrier; }, []);
+  const messageEditController = useRef<MessageEditNavigationController | null>(null);
+  const receiveMessageEditController = useCallback((controller: MessageEditNavigationController | null) => { messageEditController.current = controller; }, []);
+  const navigationLease = useRef<MessageEditNavigationLease | null>(null);
+  const navigationLocked = useRef(false);
+  useLayoutEffect(() => {
+    // Keep the original editor frozen until the new route actually commits.
+    navigationLease.current?.release(); navigationLease.current = null; navigationLocked.current = false;
+  }, [navigationCommit]);
   const editStore = useMemo(() => new MessageEditRecoveryStore(client), [client]);
   const sendStore = useMemo(() => new SendRecoveryStore(client), [client]);
   const [sendState, setSendState] = useState<SendRecoverySnapshot | null>(null);
@@ -170,17 +183,25 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   }, [client]);
 
   useEffect(() => {
-    const controller = createRouteNavigation(() => { navigationGeneration.current++; setLeaving(false); setCurrent(route()); setError(''); setMenu(false); }, async () => {
-      setLeaving(true);
+    const controller = createRouteNavigation(() => { navigationGeneration.current++; setLeaving(false); setCurrent(route()); setNavigationCommit(value => value + 1); setError(''); setMenu(false); }, async () => {
+      navigationLocked.current = true;
       let accepted = false;
       try {
+        navigationLease.current = messageEditController.current?.freeze() ?? null;
+        // Apply native inert before the first await so input cannot change while
+        // the message, composer and file transactions are being drained.
+        flushSync(() => setLeaving(true));
+        await navigationLease.current?.flush();
         const composer = composerController.current, snapshot = composer?.snapshot();
         if (snapshot && !await composer!.flush(snapshot.owner)) return false;
         if (settingsGuard.current && !await settingsGuard.current.requestLeave()) return false;
         accepted = !panelsDirty.current || window.confirm('Keep unsaved file changes and switch pages?');
+        if (accepted) await panelRecoveryBarrier.current?.();
         return accepted;
-      } catch (cause) { setError(String(cause)); return false; }
-      finally { if (!accepted) setLeaving(false); }
+      } catch (cause) { accepted = false; setError(String(cause)); return false; }
+      finally { if (!accepted) {
+        navigationLease.current?.release(); navigationLease.current = null; navigationLocked.current = false; setLeaving(false);
+      } }
     });
     navigation.current = controller;
     const unsubscribe = client.subscribe(event => {
@@ -609,9 +630,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       <div className="yard-chat-pane">
       {settings ? <StandaloneSettings client={client} hostId={current.hostId} location={{ pathname: current.pathname, search: current.search, hash: current.hash, state: current.state }} onNavigate={navigate} registerNavigationGuard={registerNavigationGuard} onClose={() => navigate(backFromSettings.current)} /> : <>
         {current.threadId && <header className="yard-conversation-header"><strong>{thread?.name || threads.find(item => item.id === current.threadId)?.name || 'Conversation'}</strong><span>{thread?.cwd}</span><button aria-label="Conversation menu" onClick={() => setMenu(value => !value)}>•••</button>{menu && <div className="yard-menu" role="menu">{['rename', 'fork', 'copy', 'archive'].map(name => <button role="menuitem" key={name} onClick={() => { void action(name); }}>{name === 'copy' ? 'Copy conversation link' : name[0]!.toUpperCase() + name.slice(1)}</button>)}</div>}</header>}
-        <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')}>
+        <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')} inert={leaving}>
           {streamGap && <p role="status" className="yard-stream-gap">任务正在运行。此页面未收到完整的活动内容；完成后将重新读取完整记录。</p>}
           {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} thread={thread} editRecovery={editRecovery} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
+            onEditNavigationController={receiveMessageEditController}
             onEditDraftChange={(value, origin, version) => editStore.save(value, origin, version)}
             onOpenFile={openFile} onOpenFileAt={location => {
               if (location.hostId !== current.hostId) { setError('文件所属主机已改变，请返回原会话打开。'); return; }
@@ -619,7 +641,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
             }} onOpenVisualization={showVisualization} onOpenBrowser={showBrowser}
             onEdit={current.readOnly ? undefined : (draft, origin) => submit(draft, initialOptions ?? {}, { type: 'send' }, origin)} onFork={turnId => action('fork', turnId)} /> : <div className="yard-home-heading"><img src="/brand/icon.svg" alt="" /><h1>What would you like to work on?</h1><p>{cwd || workspace}</p></div>}
         </section>
-        <div className="yard-composer-container" inert={leaving}>{current.readOnly ? <p role="status">此会话已归档。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p> : !sendState || current.threadId && (loading || !initialOptions) ? <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
+        <div className="yard-composer-container" inert={leaving}>
+          {current.threadId && !loading && <StandaloneGoal client={client} hostId={current.hostId} threadId={current.threadId} readOnly={current.readOnly} />}
+          {current.readOnly ? <p role="status">此会话已归档。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p> : !sendState || current.threadId && (loading || !initialOptions) ? <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
           onRemoveReference={(owner, reference) => removeBrowserDraftReference(browserDraftOwner(owner, sendState.bindings), reference)}
           onDraftController={receiveComposerController} initialOptions={initialOptions ?? undefined} hosts={hosts} onTargetChange={async target => {
           if (await navigate('/' + (target.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(target.hostId)))) {
@@ -634,9 +658,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         }} />}</div>
       </>}
       </div>
-      <aside className="yard-workspace-panel" hidden={!panelOpen || settings} aria-label="Workspace panel">
+      <aside className="yard-workspace-panel" hidden={!panelOpen || settings} aria-label="Workspace panel" inert={leaving}>
         <div hidden={panelKind !== 'workspace'} style={{ height: '100%' }}>{panelMounted && <WorkspacePanels client={client} scopeId={panelScope} hostId={current.hostId} threadId={current.threadId ?? undefined} cwd={panelCwd}
           appearance={panelAppearance} request={panelRequest} onRequestConsumed={id => setPanelRequest(previous => previous?.id === id ? null : previous)}
+          onRecoveryBarrier={receivePanelRecoveryBarrier}
           onClose={() => setPanelOpen(false)} onReference={addReference} onDirtyChange={dirty => { panelsDirty.current = dirty; }} />}</div>
         {browserMounted && <StandaloneBrowser client={client} {...browserOwner} browserTabId="primary"
           draft={composerController.current?.snapshot()?.draft ?? { text: '', images: [], files: [] }}
@@ -644,7 +669,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           navigationRequest={browserNavigation} onNavigationConsumed={id => setBrowserNavigation(previous => previous?.id === id ? null : previous)}
           onDraftChange={async (owner, update) => {
             const controller = composerController.current, snapshot = controller?.snapshot();
-            if (!controller || !snapshot || current.readOnly || leaving || browserOwnerKey(owner) !== browserOwnerKey(activeBrowserOwner.current)) throw new Error('草稿已切换，浏览器批注已保留。');
+            if (!controller || !snapshot || current.readOnly || navigationLocked.current || browserOwnerKey(owner) !== browserOwnerKey(activeBrowserOwner.current)) throw new Error('草稿已切换，浏览器批注已保留。');
             if (!await controller.update(snapshot.owner, update)) throw new Error('草稿已切换，浏览器批注已保留。');
           }} onClose={() => setPanelOpen(false)} />}
         {panelOpen && !settings && panelKind === 'visualization' && visualization?.hostId === current.hostId && visualization.threadId === current.threadId
