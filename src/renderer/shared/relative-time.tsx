@@ -20,13 +20,13 @@ export type RelativeTimeIntl = {
   ) => string;
 };
 
-export type SidebarRelativeTimeProps = {
+export type RelativeTimeProps = {
   dateString: string;
   format?: 'compact' | 'relative';
   dayBasis?: RelativeTimeDayBasis;
 };
 
-export type SidebarRelativeTimeDependencies = {
+export type RelativeTimeDependencies = {
   useNow: () => Date;
   useIntl: () => RelativeTimeIntl;
   getRelativeUnit: (dateString: string, now: Date, dayBasis: RelativeTimeDayBasis) => {
@@ -46,9 +46,9 @@ const compactMessages: Record<RelativeTimeUnit, RelativeTimeMessage> = {
 };
 
 // Mirrors YEc and ZEc while retaining the App's clock, calendar and locale services.
-export function createSidebarRelativeTimeComponent(
+export function createRelativeTimeComponent(
   React: typeof import('react'),
-  { useNow, useIntl, getRelativeUnit, FormattedMessage }: SidebarRelativeTimeDependencies,
+  { useNow, useIntl, getRelativeUnit, FormattedMessage }: RelativeTimeDependencies,
 ) {
   function CompactRelativeTime({ dateString, now, dayBasis }: {
     dateString: string;
@@ -61,11 +61,11 @@ export function createSidebarRelativeTimeComponent(
     return message == null ? undefined : intl.formatMessage(message, { value });
   }
 
-  return function SidebarRelativeTime({
+  return function RelativeTime({
     dateString,
     format = 'compact',
     dayBasis = 'calendar',
-  }: SidebarRelativeTimeProps): ReactNode {
+  }: RelativeTimeProps): ReactNode {
     const intl = useIntl();
     const now = useNow();
 

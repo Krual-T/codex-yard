@@ -3,22 +3,26 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { RelativeTimeIntl, RelativeTimeMessage, RelativeTimeUnit, SidebarRelativeTimeProps } from '../src/renderer/sidebar/relative-time.tsx';
+import type { RelativeTimeIntl, RelativeTimeMessage, RelativeTimeProps, RelativeTimeUnit } from '../src/renderer/shared/relative-time.tsx';
 
-test('relative time uses the injected clock, locale and calendar at the minute boundary', async () => {
+async function loadRelativeTimeComponent() {
   const built = await build({
-    entryPoints: ['src/renderer/sidebar/relative-time.tsx'],
+    entryPoints: ['src/renderer/shared/relative-time.tsx'],
     bundle: true,
     format: 'esm',
     platform: 'browser',
     write: false,
     metafile: true,
   });
-  assert.deepEqual(Object.keys(built.metafile.inputs), ['src/renderer/sidebar/relative-time.tsx']);
+  assert.deepEqual(Object.keys(built.metafile.inputs), ['src/renderer/shared/relative-time.tsx']);
   assert.deepEqual(Object.values(built.metafile.outputs).flatMap(output => output.imports), []);
   const url = `data:text/javascript;base64,${Buffer.from(built.outputFiles[0]!.contents).toString('base64')}`;
-  const { createSidebarRelativeTimeComponent } = await import(url) as typeof import('../src/renderer/sidebar/relative-time.tsx');
+  const module = await import(url) as typeof import('../src/renderer/shared/relative-time.tsx');
+  return module.createRelativeTimeComponent;
+}
 
+test('relative time uses the injected clock, locale and calendar at the minute boundary', async () => {
+  const createRelativeTimeComponent = await loadRelativeTimeComponent();
   const now = new Date('2026-10-28T10:00:00.000Z');
   const Clock = React.createContext(now);
   const messages: { message: RelativeTimeMessage; value: number }[] = [];
@@ -37,7 +41,7 @@ test('relative time uses the injected clock, locale and calendar at the minute b
   let unit: RelativeTimeUnit = 'minute';
   const unitCalls: unknown[][] = [];
   let intlHookCalls = 0;
-  const RelativeTime = createSidebarRelativeTimeComponent(React, {
+  const RelativeTime = createRelativeTimeComponent(React, {
     useNow: () => React.useContext(Clock),
     useIntl: () => {
       intlHookCalls += 1;
@@ -49,7 +53,7 @@ test('relative time uses the injected clock, locale and calendar at the minute b
     },
     FormattedMessage: ({ id, defaultMessage }) => React.createElement('span', { 'data-id': id }, defaultMessage),
   });
-  const render = (props: SidebarRelativeTimeProps, clock = now, locale = intl) => renderToStaticMarkup(
+  const render = (props: RelativeTimeProps, clock = now, locale = intl) => renderToStaticMarkup(
     React.createElement(Clock.Provider, { value: clock },
       React.createElement(Locale.Provider, { value: locale }, React.createElement(RelativeTime, props))),
   );
@@ -90,4 +94,46 @@ test('relative time uses the injected clock, locale and calendar at the minute b
   const translatedIntl = { ...intl, formatMessage: () => 'translated' };
   assert.equal(render({ dateString: minuteAgo }, later, translatedIntl), 'translated');
   assert.deepEqual(unitCalls.at(-1), [minuteAgo, later, 'calendar']);
+});
+
+test('an inbox activity timestamp uses elapsed relative time across clock and locale changes', async () => {
+  const createRelativeTimeComponent = await loadRelativeTimeComponent();
+  const dateString = '2026-10-28T08:00:00.000Z';
+  const now = new Date('2026-10-28T10:00:00.000Z');
+  const later = new Date('2026-10-28T11:00:00.000Z');
+  const Clock = React.createContext(now);
+  const makeIntl = (locale: string): RelativeTimeIntl => ({
+    formatMessage: () => { throw new Error('expected relative format'); },
+    formatRelativeTime: (value, unit, options) => new Intl.RelativeTimeFormat(locale, options).format(value, unit),
+  });
+  const english = makeIntl('en');
+  const french = makeIntl('fr');
+  const Locale = React.createContext(english);
+  const unitCalls: unknown[][] = [];
+  const RelativeTime = createRelativeTimeComponent(React, {
+    useNow: () => React.useContext(Clock),
+    useIntl: () => React.useContext(Locale),
+    getRelativeUnit: (...args) => {
+      unitCalls.push(args);
+      return { unit: 'hour', value: args[1] === now ? 2 : 3 };
+    },
+    FormattedMessage: () => { throw new Error('expected a time older than one minute'); },
+  });
+  const renderInboxActivity = (clock: Date, locale: RelativeTimeIntl) => renderToStaticMarkup(
+    React.createElement(Clock.Provider, { value: clock },
+      React.createElement(Locale.Provider, { value: locale },
+        React.createElement('time', { dateTime: dateString },
+          React.createElement(RelativeTime, { dateString, format: 'relative', dayBasis: 'elapsed' })))),
+  );
+  const expected = (locale: string, hours: number) =>
+    `<time dateTime="${dateString}">${new Intl.RelativeTimeFormat(locale, { numeric: 'always', style: 'narrow' }).format(-hours, 'hour')}</time>`;
+
+  assert.equal(renderInboxActivity(now, english), expected('en', 2));
+  assert.equal(renderInboxActivity(now, french), expected('fr', 2));
+  assert.equal(renderInboxActivity(later, french), expected('fr', 3));
+  assert.deepEqual(unitCalls, [
+    [dateString, now, 'elapsed'],
+    [dateString, now, 'elapsed'],
+    [dateString, later, 'elapsed'],
+  ]);
 });
