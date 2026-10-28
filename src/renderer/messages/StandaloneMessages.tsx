@@ -136,7 +136,7 @@ function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, o
         edits.length === 1 ? 'Edit message text' : `Edit message text ${row.position + 1} of ${edits.length}`, row.position === 0)}</div>;
     })}
     {recoveryNote && <div className="yard-edit-recovery-note" role="status">{recoveryNote}</div>}
-    {rebaseRequired && <div className="yard-edit-recovery-note" role="status">An earlier version was sent. Your newer edit is still saved.
+    {rebaseRequired && <div className="yard-edit-recovery-note" role="status">An earlier version was sent. Your newer edit has not been sent.
       {rebaseChecking ? <> Checking the sent message. <button type="button" onClick={() => onCancelRebase(id)}>Cancel check</button></>
         : canRebase ? <> <button type="button" disabled={pending || navigationFrozen} onClick={() => onStartRebase(id)}>Continue editing from the sent message</button></>
           : ' Reopening this edit requires the recovery service.'}</div>}

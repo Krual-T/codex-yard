@@ -14,6 +14,7 @@ declare global {
       saved(): { recovery: { origin: { turnId: string; itemId: string }; editor: { revision: number; edits: { text: string }[] } }; submission?: { stage: string } } | null;
       entered(): boolean;
       rejectStart(): void;
+      rejectSave(): void;
       refresh(): void;
       hideSource(): void;
       hide(): void;
@@ -69,6 +70,12 @@ test('real inline editor rebases a preserved draft and retries a known rejected 
     await page.evaluate(() => window.editRebaseHarness.hold());
     await rebase.click();
     await page.waitForFunction(() => window.editRebaseHarness.entered());
+    await page.evaluate(() => window.editRebaseHarness.rejectSave());
+    await original.getByRole('textbox', { name: 'Edit message text' }).fill('C @item');
+    await original.getByRole('alert').filter({ hasText: 'Synthetic recovery write failed' }).waitFor();
+    assert.equal(await original.getByRole('textbox', { name: 'Edit message text' }).inputValue(), 'C @item');
+    await original.getByText('Your newer edit has not been sent.', { exact: false }).waitFor();
+    await original.getByRole('textbox', { name: 'Edit message text' }).fill('C updated @item');
     await original.getByRole('textbox', { name: 'Edit message text' }).fill('C @item');
     await page.waitForFunction(() => window.editRebaseHarness.saved()?.recovery.editor.edits[0]?.text === 'C @item');
     await page.evaluate(() => window.editRebaseHarness.release());

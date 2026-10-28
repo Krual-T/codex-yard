@@ -21,9 +21,10 @@ let backend = structuredClone(initial), projection = structuredClone(initial), h
 let unchangedBackend: ThreadSummary | null = null;
 let saved: unknown, state: StoredMessageEdit | null = null, controller: MessageEditNavigationController | null = null;
 let gate: Promise<void> | null = null, releaseGate: (() => void) | null = null, entered = false;
-let submits = 0, commits = 0, completedChecks = 0, rejectFirstStart = false;
+let submits = 0, commits = 0, completedChecks = 0, rejectFirstStart = false, rejectNextSave = false;
 const calls: Record<string, unknown>[] = [];
 const storage: EditRecoveryStorage = { read: () => structuredClone(saved), update: async change => {
+  if (rejectNextSave) { rejectNextSave = false; throw new Error('Synthetic recovery write failed'); }
   saved = structuredClone(change(structuredClone(saved))); return saved;
 }, changed: () => { void sync(); } };
 const client: WorkbenchClient = {
@@ -79,6 +80,7 @@ function render() {
 Object.assign(window, { editRebaseHarness: {
   calls, commits: () => commits, checks: () => completedChecks, saved: () => structuredClone(state), entered: () => entered,
   rejectStart: () => { rejectFirstStart = true; },
+  rejectSave: () => { rejectNextSave = true; },
   refresh: () => { projection = structuredClone(backend); render(); },
   hideSource: () => { projection = { ...projection, turns: projection.turns.slice(0, 1) }; render(); },
   hide: () => { visible = false; render(); }, show: () => { visible = true; void sync(); },
