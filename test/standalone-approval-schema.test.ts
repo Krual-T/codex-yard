@@ -13,13 +13,13 @@ test('MCP form validates typed fields, constraints and exact selected values', (
     unused: { type: 'string' },
   } });
   assert.ok(parsed.form);
-  assert.deepEqual(initialApprovalValues(parsed.form), { confirmed: 'false', labels: [], ratio: '0' });
+  assert.deepEqual(initialApprovalValues(parsed.form), { confirmed: 'false', ratio: '0' });
   const missing = validateApprovalForm(parsed.form, initialApprovalValues(parsed.form));
   assert.deepEqual(Object.keys(missing.errors ?? {}).sort(), ['age', 'labels', 'name', 'plan']);
   const valid = validateApprovalForm(parsed.form, { name: '  Ada  ', age: '3', confirmed: 'false',
     plan: 'team', labels: ['b', 'a'], ratio: '.5', unused: '' });
   assert.ok(valid.content);
-  assert.deepEqual({ ...valid.content }, { name: '  Ada  ', age: 3, confirmed: false, plan: 'team', labels: ['b', 'a'], ratio: 0.5 });
+  assert.deepEqual({ ...valid.content }, { name: '  Ada  ', age: 3, confirmed: false, plan: 'team', labels: ['b', 'a'], ratio: 0.5, unused: '' });
   const invalid = validateApprovalForm(parsed.form, { name: ' ', age: '11', confirmed: 'yes', plan: 'other', labels: ['c'], ratio: 'NaN' });
   assert.deepEqual(Object.keys(invalid.errors ?? {}).sort(), ['age', 'confirmed', 'labels', 'name', 'plan', 'ratio']);
   for (const age of ['', ' ', 'NaN', 'Infinity', '3.5', '9007199254740992', '9007199254740991.1', '1e-9999', '-1']) {
@@ -51,11 +51,25 @@ test('MCP form supports legacy enums, formats and rejects schemas it cannot pres
   ]) assert.ok(parseApprovalForm(schema).error);
 });
 
-test('elicitation links require a plain absolute HTTP(S) URL', () => {
+test('elicitation links require a credential-free absolute HTTPS URL', () => {
   assert.equal(safeElicitationUrl('https://example.test/path?q=1'), 'https://example.test/path?q=1');
-  assert.equal(safeElicitationUrl('http://localhost:1234/'), 'http://localhost:1234/');
-  for (const url of [null, '', 'javascript:alert(1)', 'file:///etc/passwd', '/relative',
+  for (const url of [null, '', 'http://localhost:1234/', 'javascript:alert(1)', 'file:///etc/passwd', '/relative',
     'https://user:secret@example.test/', ' https://example.test', 'https://example.test/has space']) {
     assert.equal(safeElicitationUrl(url), null);
   }
+});
+
+test('missing strings and arrays remain distinct from explicitly supplied empty values', () => {
+  const parsed = parseApprovalForm({ type: 'object', required: ['empty', 'choice', 'items'], properties: {
+    empty: { type: 'string', default: '', minLength: 0 },
+    choice: { type: 'string', enum: ['', 'x'] },
+    items: { type: 'array', items: { type: 'string', enum: ['', 'x'] } },
+    optional: { type: 'string' },
+  } });
+  assert.ok(parsed.form);
+  assert.deepEqual(initialApprovalValues(parsed.form), { empty: '' });
+  assert.deepEqual(Object.keys(validateApprovalForm(parsed.form, { empty: '' }).errors ?? {}).sort(), ['choice', 'items']);
+  const result = validateApprovalForm(parsed.form, { empty: '', choice: '', items: [], optional: '  ' });
+  assert.deepEqual({ ...result.content }, { empty: '', choice: '', items: [], optional: '  ' });
+  assert.ok(validateApprovalForm(parsed.form, { empty: '', choice: '', items: [], optional: [] }).errors?.optional);
 });

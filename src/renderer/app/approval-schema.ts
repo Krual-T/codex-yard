@@ -26,7 +26,7 @@ function count(value: unknown): value is number {
 }
 
 function optionsFromEnum(value: unknown, names?: unknown): Option[] | null {
-  if (!Array.isArray(value) || value.length === 0 || !value.every((item) => typeof item === 'string' && item.length > 0)
+  if (!Array.isArray(value) || value.length === 0 || !value.every((item) => typeof item === 'string')
     || new Set(value).size !== value.length) return null;
   if (names !== undefined && (!Array.isArray(names) || names.length !== value.length
     || !names.every((name) => typeof name === 'string'))) return null;
@@ -38,7 +38,7 @@ function optionsFromConst(value: unknown): Option[] | null {
   const result: Option[] = [];
   for (const option of value) {
     if (!record(option) || !hasOnly(option, ['const', 'title']) || typeof option.const !== 'string'
-      || !option.const || typeof option.title !== 'string') return null;
+      || typeof option.title !== 'string') return null;
     result.push({ value: option.const, label: option.title });
   }
   return new Set(result.map((option) => option.value)).size === result.length ? result : null;
@@ -126,7 +126,7 @@ export function parseApprovalForm(value: unknown): FormParse {
 
 export function initialApprovalValues(form: ApprovalForm): ApprovalFormValues {
   return Object.fromEntries(form.fields.flatMap((field): [string, string | string[]][] => {
-    if (field.default === undefined) return field.kind === 'multi' ? [[field.key, []]] : [];
+    if (field.default === undefined) return [];
     return [[field.key, Array.isArray(field.default) ? [...field.default] : String(field.default)]];
   }));
 }
@@ -177,22 +177,27 @@ export function validateApprovalForm(form: ApprovalForm, values: ApprovalFormVal
   const content: Record<string, string | number | boolean | string[]> = Object.create(null) as Record<string, string | number | boolean | string[]>;
   const errors: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const field of form.fields) {
-    const value = values[field.key];
+    const value = Object.hasOwn(values, field.key) ? values[field.key] : undefined;
     if (field.kind === 'multi') {
-      const selected = Array.isArray(value) ? value : [];
+      if (value === undefined) {
+        if (field.required) errors[field.key] = 'This field is required.';
+        continue;
+      }
+      if (!Array.isArray(value)) { errors[field.key] = 'Choose valid options.'; continue; }
+      const selected = value;
       if (selected.some((item) => !field.options.some((option) => option.value === item))
         || new Set(selected).size !== selected.length) errors[field.key] = 'Choose valid options.';
-      else if (selected.length === 0 && !field.required) continue;
       else if (field.minItems !== undefined && selected.length < field.minItems) errors[field.key] = 'Select at least ' + field.minItems + ' options.';
       else if (field.maxItems !== undefined && selected.length > field.maxItems) errors[field.key] = 'Select at most ' + field.maxItems + ' options.';
       else content[field.key] = selected;
       continue;
     }
-    const text = typeof value === 'string' ? value : '';
-    if (!text.trim()) {
-      if (field.required) errors[field.key] = 'This field is required.';
+    if (typeof value !== 'string') {
+      if (value !== undefined) errors[field.key] = 'This field has an invalid value.';
+      else if (field.required) errors[field.key] = 'This field is required.';
       continue;
     }
+    const text = value;
     if (field.kind === 'select') {
       if (!field.options.some((option) => option.value === text)) errors[field.key] = 'Choose a valid option.';
       else content[field.key] = text;
@@ -223,6 +228,6 @@ export function safeElicitationUrl(value: unknown): string | null {
   if (typeof value !== 'string' || value !== value.trim() || /[\s\u0000-\u001f]/.test(value)) return null;
   try {
     const url = new URL(value);
-    return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password ? url.href : null;
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : null;
   } catch { return null; }
 }
