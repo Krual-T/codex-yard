@@ -1,0 +1,32 @@
+.standalone-composer { color: var(--color-text, #222); font: 13px system-ui, sans-serif; min-width: 0; }
+.standalone-composer__editor { border: 1px solid var(--color-border, #c9c9c9); border-radius: 8px; background: var(--color-surface, #fff); }
+.standalone-composer textarea { box-sizing: border-box; width: 100%; resize: vertical; color: inherit; background: transparent; font: inherit; }
+.standalone-composer__editor > textarea { display: block; min-height: 84px; max-height: 320px; border: 0; padding: 12px; outline: none; }
+.standalone-composer__editor:focus-within { border-color: #558077; }
+.standalone-composer button, .standalone-composer select { color: inherit; font: inherit; }
+.standalone-composer button { border: 0; border-radius: 4px; padding: 5px 8px; background: transparent; cursor: pointer; }
+.standalone-composer button:hover:not(:disabled) { background: #8882; }
+.standalone-composer button:disabled { cursor: default; opacity: .5; }
+.standalone-composer__footer, .standalone-composer__options, .standalone-composer__attachments, .standalone-queue__actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.standalone-composer__footer { padding: 6px 8px 8px; }
+.standalone-composer__options { flex: 1 1 360px; min-width: 0; border: 0; padding: 0; margin: 0; }
+.standalone-composer__options label, .standalone-composer__enter { white-space: nowrap; }
+.standalone-composer select { max-width: 155px; border: 0; background: transparent; padding: 3px; }
+.standalone-composer .standalone-composer__submit { color: white; background: #25675a; }
+.standalone-composer .standalone-composer__submit:hover:not(:disabled) { background: #1f594d; }
+.standalone-composer__attachments { align-items: flex-start; padding: 8px 8px 0; }
+.standalone-composer__image { position: relative; width: 64px; height: 64px; }
+.standalone-composer__image img { width: 64px; height: 64px; border-radius: 4px; object-fit: cover; }
+.standalone-composer__image button { position: absolute; top: 0; right: 0; color: white; background: #222b; padding: 1px 4px; }
+.standalone-composer__file, .standalone-composer__reference { display: flex; align-items: flex-start; min-width: 0; max-width: 100%; background: #8881; border-radius: 4px; padding: 3px 5px; }
+.standalone-composer__file details, .standalone-composer__reference span { min-width: 0; overflow-wrap: anywhere; }
+.standalone-composer__file pre { max-width: min(600px, 75vw); max-height: 200px; overflow: auto; white-space: pre-wrap; }
+.standalone-queue { border-bottom: 1px solid #8884; padding: 6px 0; }
+.standalone-queue__heading { font-weight: 600; padding: 4px; }
+.standalone-queue__heading span { color: #777; font-weight: 400; }
+.standalone-queue__row { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+.standalone-queue__text { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.standalone-queue__edit { flex: 1; min-width: 0; }
+.standalone-queue__edit textarea { min-height: 56px; }
+.standalone-queue__actions { justify-content: flex-end; }
+@media (max-width: 600px) { .standalone-queue__row { align-items: flex-start; flex-direction: column; } .standalone-queue__text { max-width: 100%; } }
