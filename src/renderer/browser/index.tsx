@@ -3,12 +3,12 @@ import { BrowserChrome } from '../../browser-reuse/browser-bridge.ts';
 import type { BrowserTarget, ChromePanelState } from '../../browser-reuse/protocol.ts';
 import { createChromeSurface } from '../../browser-reuse/webview.tsx';
 import type { ComposerDraft, WorkbenchClient } from '../workbench-contract.ts';
-import { addBrowserComment, browserOwnerKey, browserReferences, changeBrowserComment, readBrowserComments,
-  reconcileBrowserReferences, subscribeBrowserComments } from './comments.ts';
+import { addBrowserComment, addBrowserDraftReference, browserOwnerKey, browserReferences, changeBrowserComment, readBrowserCommentsSnapshot,
+  reconcileBrowserReferences, removeExplicitlyDeletedBrowserReferences, subscribeBrowserComments } from './comments.ts';
 import type { BrowserOwner, BrowserReference } from './comments.ts';
 
-export { acknowledgeBrowserReferences, adoptLegacyBrowserComments, browserOwnerKey, browserReferences,
-  changeBrowserComment, readBrowserComments, readLegacyBrowserComments, reconcileBrowserReferences, subscribeBrowserComments } from './comments.ts';
+export { adoptLegacyBrowserComments, browserOwnerKey, browserReferences, changeBrowserComment, readBrowserComments,
+  readLegacyBrowserComments, reconcileBrowserReferences, subscribeBrowserComments } from './comments.ts';
 export type { BrowserOwner, BrowserReference } from './comments.ts';
 
 export interface StandaloneBrowserProps {
@@ -19,7 +19,7 @@ export interface StandaloneBrowserProps {
   draftId: string;
   browserTabId: string;
   draft: ComposerDraft;
-  /** Apply the update to the latest draft only when its owner still matches. */
+  /** Wait for draft initialization, then update the latest draft only if its owner still matches. */
   onDraftChange(owner: BrowserOwner, update: (draft: ComposerDraft) => ComposerDraft): void | Promise<void>;
   visible: boolean;
   allowNavigation: boolean;
@@ -30,7 +30,8 @@ export interface StandaloneBrowserProps {
 
 const ChromeSurface = createChromeSurface(React);
 
-function CommentEditor({ owner, reference }: { owner: BrowserOwner; reference: BrowserReference }) {
+function CommentEditor({ owner, reference, consumed, attached, onAdd }: { owner: BrowserOwner; reference: BrowserReference;
+  consumed: boolean; attached: boolean; onAdd(): Promise<void> }) {
   const initialText = (value: Record<string, unknown>) => Array.isArray(value.content)
     ? value.content.filter((item): item is { content_type: string; text: string } =>
       item != null && typeof item === 'object' && item.content_type === 'text' && typeof item.text === 'string').map(item => item.text).join('\n') : '';
@@ -48,12 +49,20 @@ function CommentEditor({ owner, reference }: { owner: BrowserOwner; reference: B
     catch (failure) { setError((failure as Error).message); }
     finally { setBusy(false); }
   };
+  const add = async () => {
+    setBusy(true); setError('');
+    try { await onAdd(); }
+    catch (failure) { setError((failure as Error).message); }
+    finally { setBusy(false); }
+  };
   const context = reference.context.localBrowserContext as Record<string, unknown>;
   return <li style={{ borderTop: '1px solid #8884', padding: '8px 0', display: 'grid', gap: 6 }}>
     <strong>{String(context.targetDescription || 'Browser selection')}</strong>
     <span style={{ overflowWrap: 'anywhere' }}>{String(context.pageUrl || '')}</span>
+    {consumed ? <span>已提交</span> : null}
     <textarea aria-label="浏览器引用批注" value={text} onChange={event => { setText(event.target.value); setDirty(true); }} rows={2} />
     <div style={{ display: 'flex', gap: 8 }}>
+      {!attached ? <button disabled={busy} onClick={() => { void add(); }}>添加到草稿</button> : null}
       <button disabled={!dirty || busy} onClick={() => { void update(text); }}>保存批注</button>
       <button disabled={busy} onClick={() => { void update(null); }}>删除引用</button>
     </div>
@@ -61,8 +70,9 @@ function CommentEditor({ owner, reference }: { owner: BrowserOwner; reference: B
   </li>;
 }
 
-function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, navigationRequest, onNavigationConsumed, onDraftChange, onClose }: {
+function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNavigation, navigationRequest, onNavigationConsumed, onDraftChange, onClose }: {
   client: WorkbenchClient; owner: BrowserOwner; browserTabId: string; visible: boolean; allowNavigation: boolean;
+  draft: ComposerDraft;
   onDraftChange: StandaloneBrowserProps['onDraftChange']; onClose(): void;
   navigationRequest: StandaloneBrowserProps['navigationRequest']; onNavigationConsumed: StandaloneBrowserProps['onNavigationConsumed'];
 }) {
@@ -72,10 +82,12 @@ function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, n
   const [state, setState] = React.useState<ChromePanelState>();
   const [address, setAddress] = React.useState('');
   const [comments, setComments] = React.useState<unknown[]>([]);
+  const [consumed, setConsumed] = React.useState<BrowserReference[]>([]);
   const [error, setError] = React.useState('');
   const [commentsError, setCommentsError] = React.useState('');
   const active = React.useRef(false);
   const previous = React.useRef<BrowserReference[]>([]);
+  const previousDeleted = React.useRef<BrowserReference[]>([]);
   const onDraftChangeRef = React.useRef(onDraftChange);
   React.useLayoutEffect(() => { onDraftChangeRef.current = onDraftChange; }, [onDraftChange]);
   React.useEffect(() => bridge.subscribe(target, setState), [bridge, target]);
@@ -114,16 +126,19 @@ function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, n
       void (async () => {
         while (live && active.current && pending) {
           pending = false;
-          const nextComments = await readBrowserComments(owner);
+          const nextSnapshot = await readBrowserCommentsSnapshot(owner);
           if (!live || !active.current) return;
-          const next = browserReferences(owner, nextComments), before = previous.current;
-          // Another notification may arrive while the draft transaction is
-          // pending. Reconcile it after this version has committed, so a later
-          // deletion cannot miss a reference that is still being inserted.
-          if (before.length || next.length) await onDraftChangeRef.current(owner, draft => reconcileBrowserReferences(draft, before, next));
+          const next = browserReferences(owner, nextSnapshot.comments), before = previous.current;
+          // Process later notifications after this draft update has committed.
+          if (before.some(reference => !next.some(value => JSON.stringify(value) === JSON.stringify(reference)))
+            || JSON.stringify(previousDeleted.current) !== JSON.stringify(nextSnapshot.deleted)) {
+            await onDraftChangeRef.current(owner, value => removeExplicitlyDeletedBrowserReferences(
+              reconcileBrowserReferences(value, before, next), nextSnapshot.deleted));
+          }
           if (!live || !active.current) return;
           previous.current = next;
-          setComments(nextComments); setCommentsError('');
+          previousDeleted.current = nextSnapshot.deleted;
+          setComments(nextSnapshot.comments); setConsumed(nextSnapshot.consumed); setCommentsError('');
         }
       })().catch(failure => {
         if (live && active.current) setCommentsError((failure as Error).message);
@@ -138,7 +153,9 @@ function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, n
     const anchor = await bridge.selectedElement(target, pageId);
     const isCurrent = () => active.current && bridge.selectionIsCurrent(target, pageId, version);
     if (!isCurrent()) throw new Error('浏览器面板已切换，请重新引用');
-    await addBrowserComment(owner, anchor, isCurrent);
+    const reference = await addBrowserComment(owner, anchor, isCurrent);
+    if (!isCurrent()) throw new Error('浏览器面板已切换，批注已保留');
+    await onDraftChangeRef.current(owner, value => addBrowserDraftReference(value, reference));
     return anchor.title;
   }, [bridge, target, ownerKey]);
   const command = (type: string, url?: string) => {
@@ -166,7 +183,10 @@ function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, n
     <div style={{ flex: 1, minHeight: 200 }}><ChromeSurface target={target} bridge={bridge} visible={visible} onQuote={quote} /></div>
     <section aria-label="浏览器引用" style={{ maxHeight: '40%', overflow: 'auto', padding: '0 8px' }}>
       {references.length ? <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>{references.map(reference =>
-        <CommentEditor key={reference.id} owner={owner} reference={reference} />)}</ul> : null}
+        <CommentEditor key={reference.id} owner={owner} reference={reference}
+          consumed={consumed.some(value => JSON.stringify(value) === JSON.stringify(reference))}
+          attached={(draft.references ?? []).some(value => value.id === reference.id)}
+          onAdd={async () => { await onDraftChangeRef.current(owner, value => addBrowserDraftReference(value, reference)); }} />)}</ul> : null}
       {comments.length > references.length ? <p role="status">部分无法识别的浏览器批注已保留。</p> : null}
     </section>
   </section>;
@@ -175,7 +195,7 @@ function BrowserPanel({ client, owner, browserTabId, visible, allowNavigation, n
 export function StandaloneBrowser(props: StandaloneBrowserProps) {
   const owner = { hostId: props.hostId, threadId: props.threadId, draftId: props.draftId };
   const key = JSON.stringify([browserOwnerKey(owner), props.browserTabId]);
-  return <BrowserPanel key={key} client={props.client} owner={owner} browserTabId={props.browserTabId} visible={props.visible}
+  return <BrowserPanel key={key} client={props.client} owner={owner} browserTabId={props.browserTabId} draft={props.draft} visible={props.visible}
     allowNavigation={props.allowNavigation} navigationRequest={props.navigationRequest} onNavigationConsumed={props.onNavigationConsumed}
     onDraftChange={props.onDraftChange} onClose={props.onClose} />;
 }

@@ -1,8 +1,10 @@
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
-import { acknowledgeBrowserReferences, adoptLegacyBrowserComments, browserOwnerKey, browserReferences,
+import { adoptLegacyBrowserComments, browserOwnerKey, browserReferences,
   readBrowserComments, readLegacyBrowserComments, StandaloneBrowser, subscribeBrowserComments } from '../src/renderer/browser/index.tsx';
 import { readBrowserAtom } from '../src/renderer/storage/ui-atoms.ts';
+import { acknowledgeSubmittedBrowserReferences } from '../src/renderer/app/browser-draft.ts';
+import { SendRecoveryStore } from '../src/renderer/app/send-recovery.ts';
 import type { BrowserOwner, BrowserReference } from '../src/renderer/browser/index.tsx';
 import type { ComposerDraft, WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 
@@ -76,8 +78,14 @@ function App() {
       },
       async acknowledge(references) {
         if (!identity) throw new Error('No owner');
-        await acknowledgeBrowserReferences(identity, references, reference => active.current !== null && browserOwnerKey(active.current) === browserOwnerKey(identity)
-          && (latestDraft.current.references ?? []).some(item => JSON.stringify(item) === JSON.stringify(reference)));
+        const owner = { hostId: identity.hostId, threadId: identity.threadId, draftId: identity.draftId };
+        const recovery = new SendRecoveryStore(client);
+        const intent = await recovery.prepare({ owner, revision: crypto.randomUUID() }, '/fixture',
+          { ...latestDraft.current, references }, {}, {});
+        await recovery.sending(intent.id, intent.attemptId);
+        const confirmed = await recovery.confirmed(intent.id, 'fixture-turn', intent.attemptId);
+        await acknowledgeSubmittedBrowserReferences(confirmed, null, (await recovery.read()).bindings);
+        await recovery.dismiss(intent.id, confirmed);
       },
       references() { return snapshot.key === key ? snapshot.references : []; },
       async readReferences() { return identity ? browserReferences(identity, await readBrowserComments(identity)) : []; },

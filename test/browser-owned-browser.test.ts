@@ -189,6 +189,7 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     });
     await page.getByRole('button', { name: '保存批注' }).click();
     await page.waitForFunction(() => window.browserHarness.references()[0]?.text.includes('Unsaved edit'));
+    await page.getByRole('button', { name: '添加到草稿' }).click();
     await page.getByRole('button', { name: '引用所选元素' }).click();
     await page.waitForFunction(() => window.browserHarness.references().length === 2);
     await page.evaluate(() => window.browserHarness.setText('Explain this page'));
@@ -214,6 +215,8 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     await second.goto(origin);
     await second.evaluate(identity => window.browserHarness.mount(identity), identity);
     await second.waitForFunction(() => window.browserHarness.references().length === 2);
+    await second.getByRole('button', { name: '添加到草稿' }).first().click();
+    await second.getByRole('button', { name: '添加到草稿' }).first().click();
     const firstEditors = page.getByLabel('浏览器引用批注');
     const secondEditors = second.getByLabel('浏览器引用批注');
     await firstEditors.nth(0).fill('First page edit');
@@ -226,6 +229,8 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     await second.reload();
     await second.evaluate(identity => window.browserHarness.mount(identity), identity);
     await second.waitForFunction(() => window.browserHarness.references().length === 2);
+    await second.getByRole('button', { name: '添加到草稿' }).first().click();
+    await second.getByRole('button', { name: '添加到草稿' }).first().click();
     await second.waitForFunction(() => window.browserHarness.draft().references?.length === 2);
     assert.equal(await second.getByLabel('浏览器引用批注').nth(0).inputValue(), 'First page edit');
     await second.getByRole('button', { name: '删除引用' }).nth(1).click();
@@ -285,7 +290,9 @@ test('owned React Chrome uses the broker and preserves qualified references acro
     assert.equal((await page.evaluate(() => window.browserHarness.readReferences())).length, 1, 'A quote waiting for the transaction cannot outlive its owner');
     await page.waitForFunction(() => JSON.stringify(window.browserHarness.draft().references) === JSON.stringify(window.browserHarness.references()), undefined, { timeout: 5000 });
     await page.evaluate(() => window.browserHarness.acknowledge(window.browserHarness.references()));
-    await page.waitForFunction(() => window.browserHarness.references().length === 0 && window.browserHarness.draft().references?.length === 0);
+    await page.getByText('已提交').waitFor();
+    assert.equal((await page.evaluate(() => window.browserHarness.draft().references)).length, 1,
+      'Acknowledgement does not delete a later draft reference');
     const afterAcknowledgement = (await page.evaluate(() => window.browserHarness.commentStore())).entries;
     assert.ok(Object.values(afterAcknowledgement).some(value => Array.isArray(value) && value.some(item => item?.unknown === 'preserve')));
 

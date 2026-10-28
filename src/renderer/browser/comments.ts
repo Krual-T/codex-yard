@@ -3,7 +3,7 @@ import type { ComposerDraft } from '../workbench-contract.ts';
 import { readBrowserAtom, subscribeBrowserAtoms, updateBrowserAtom } from '../storage/ui-atoms.ts';
 
 const storageKey = 'workbench.browser-comments.v1';
-const atomKey = 'codex-yard.browser-comments.v1';
+export const browserCommentsAtomKey = 'codex-yard.browser-comments.v1';
 const ownerPrefix = 'codex-yard.browser-owner.v1:';
 
 interface CommentStore {
@@ -11,6 +11,8 @@ interface CommentStore {
   legacyRaw: string | null;
   entries?: Record<string, unknown>;
   importError?: string;
+  'codex-yard.browser-consumption.v1'?: unknown;
+  'codex-yard.browser-deletions.v1'?: unknown;
 }
 
 export interface BrowserOwner {
@@ -25,6 +27,19 @@ export interface BrowserReference {
   kind: 'browser';
   context: Record<string, unknown>;
   original: Record<string, unknown>;
+}
+
+export interface BrowserSubmission {
+  intentId: string;
+  owner: BrowserOwner;
+  revision: string;
+  references: readonly BrowserReference[];
+}
+
+export interface BrowserCommentsSnapshot {
+  comments: unknown[];
+  consumed: BrowserReference[];
+  deleted: BrowserReference[];
 }
 
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -58,10 +73,12 @@ function commentStore(value: unknown): CommentStore & { entries: Record<string, 
 }
 
 async function readStore(): Promise<CommentStore & { entries: Record<string, unknown> }> {
-  let value = await readBrowserAtom(atomKey);
-  if (value === undefined) value = await updateBrowserAtom(atomKey, previous => previous === undefined ? importLegacy() : previous);
+  let value = await readBrowserAtom(browserCommentsAtomKey);
+  if (value === undefined) value = await updateBrowserAtom(browserCommentsAtomKey, previous => previous === undefined ? importLegacy() : previous);
   return commentStore(value);
 }
+
+export async function ensureBrowserCommentStore(): Promise<void> { await readStore(); }
 
 function ownerComments(map: Record<string, unknown>, key: string): unknown[] {
   if (!Object.hasOwn(map, key)) return [];
@@ -73,6 +90,39 @@ export async function readBrowserComments(owner: BrowserOwner): Promise<unknown[
   return ownerComments((await readStore()).entries, browserOwnerKey(owner));
 }
 
+function ownerRecords(store: CommentStore, field: 'codex-yard.browser-consumption.v1' | 'codex-yard.browser-deletions.v1', key: string): unknown[] {
+  const value = store[field];
+  if (value === undefined) return [];
+  if (!record(value)) throw new Error('浏览器引用操作记录无法识别，原数据已保留。');
+  if (!Object.hasOwn(value, key)) return [];
+  if (!Array.isArray(value[key])) throw new Error('当前草稿的浏览器引用操作记录无法识别，原数据已保留。');
+  return value[key] as unknown[];
+}
+
+export async function readBrowserCommentsSnapshot(owner: BrowserOwner): Promise<BrowserCommentsSnapshot> {
+  const store = await readStore(), key = browserOwnerKey(owner), comments = ownerComments(store.entries, key);
+  const consumed = ownerRecords(store, 'codex-yard.browser-consumption.v1', key);
+  const deleted = ownerRecords(store, 'codex-yard.browser-deletions.v1', key).flatMap(value =>
+    record(value) && record(value.reference) ? [value.reference as unknown as BrowserReference] : []);
+  return { comments, consumed: browserReferences(owner, comments).filter(reference => consumed.some(value =>
+    record(value) && same(value.reference, reference))), deleted };
+}
+
+/** Apply inside the transaction that checks the immutable confirmed send. */
+export function recordSubmittedBrowserComments(value: unknown, owner: BrowserOwner, submission: BrowserSubmission): unknown {
+  const store = commentStore(value), key = browserOwnerKey(owner);
+  const old = ownerRecords(store, 'codex-yard.browser-consumption.v1', key), references = browserReferences(owner, ownerComments(store.entries, key));
+  const additions: unknown[] = [];
+  for (const reference of submission.references) {
+    if (!references.some(current => same(current, reference))) continue;
+    const marker = { intentId: submission.intentId, owner: submission.owner, revision: submission.revision, reference };
+    if (!old.some(item => same(item, marker)) && !additions.some(item => same(item, marker))) additions.push(marker);
+  }
+  if (!additions.length) return store;
+  const previous = store['codex-yard.browser-consumption.v1'];
+  return { ...store, 'codex-yard.browser-consumption.v1': { ...(record(previous) ? previous : {}), [key]: [...old, ...additions] } };
+}
+
 /** A bare legacy key requires independent evidence before it can be adopted. */
 export async function readLegacyBrowserComments(legacyOwner: string): Promise<unknown[] | null> {
   if (!legacyOwner || legacyOwner.startsWith(ownerPrefix)) throw new Error('旧批注身份无效');
@@ -81,19 +131,18 @@ export async function readLegacyBrowserComments(legacyOwner: string): Promise<un
 }
 
 export function subscribeBrowserComments(listener: () => void): () => void {
-  return subscribeBrowserAtoms(keys => { if (keys.includes(atomKey)) listener(); });
+  return subscribeBrowserAtoms(keys => { if (keys.includes(browserCommentsAtomKey)) listener(); });
 }
 
-async function updateMap<T>(update: (map: Record<string, unknown>) => T, isCurrent?: () => boolean): Promise<T> {
+async function updateMap<T>(update: (map: Record<string, unknown>, store: CommentStore) => T, isCurrent?: () => boolean): Promise<T> {
   await readStore();
   let result!: T;
-  await updateBrowserAtom(atomKey, previous => {
+  await updateBrowserAtom(browserCommentsAtomKey, previous => {
     if (isCurrent && !isCurrent()) throw new Error('草稿已切换，未保存浏览器引用');
-    const store = commentStore(previous);
-    const map = { ...store.entries };
-    result = update(map);
+    const original = commentStore(previous), map = { ...original.entries }, store = { ...original, entries: map };
+    result = update(map, store);
     if (isCurrent && !isCurrent()) throw new Error('草稿已切换，未保存浏览器引用');
-    return { ...store, entries: map };
+    return store;
   });
   return result;
 }
@@ -142,20 +191,34 @@ export function createBrowserComment(anchor: ChromeElementContext, line: number)
     localBrowserCommentMetadata: { commentId: id, kind: anchor.kind, hasAnnotationFeatures: true } };
 }
 
-export async function addBrowserComment(owner: BrowserOwner, anchor: ChromeElementContext, isCurrent?: () => boolean): Promise<void> {
+export async function addBrowserComment(owner: BrowserOwner, anchor: ChromeElementContext, isCurrent?: () => boolean): Promise<BrowserReference> {
   const key = browserOwnerKey(owner);
-  await updateMap(map => { const comments = ownerComments(map, key); map[key] = [...comments, createBrowserComment(anchor, comments.length + 1)]; }, isCurrent);
+  return updateMap(map => {
+    const comments = ownerComments(map, key), comment = createBrowserComment(anchor, comments.length + 1);
+    const reference = browserReferences(owner, [comment])[0];
+    if (!reference) throw new Error('无法创建浏览器引用');
+    map[key] = [...comments, comment];
+    return reference;
+  }, isCurrent);
 }
 
 export async function changeBrowserComment(owner: BrowserOwner, expected: Record<string, unknown>, text: string | null): Promise<void> {
   const key = browserOwnerKey(owner), id = commentId(expected);
   if (!id) throw new Error('无法编辑未识别的浏览器批注');
-  await updateMap(map => {
+  await updateMap((map, store) => {
     const comments = ownerComments(map, key);
     const indices = comments.flatMap((value, index) => commentId(value) === id ? [index] : []);
     if (indices.length !== 1 || !same(comments[indices[0]!], expected)) throw new Error('批注已在其他页面修改，请检查后重试');
     const index = indices[0]!;
-    if (text === null) { map[key] = comments.filter((_, i) => i !== index); return; }
+    if (text === null) {
+      const reference = browserReferences(owner, comments).find(value => same(value.original, expected));
+      if (!reference) throw new Error('无法核对要删除的浏览器引用，原批注已保留');
+      const field = 'codex-yard.browser-deletions.v1', old = ownerRecords(store, field, key);
+      const previous = store[field], marker = { reference };
+      store[field] = { ...(record(previous) ? previous : {}), [key]: old.some(value => same(value, marker)) ? old : [...old, marker] };
+      map[key] = comments.filter((_, i) => i !== index);
+      return;
+    }
     const content = [...expected.content as unknown[]];
     const textIndex = content.findIndex(item => record(item) && item.content_type === 'text' && typeof item.text === 'string');
     if (textIndex < 0) content.push({ content_type: 'text', text });
@@ -180,19 +243,7 @@ export async function adoptLegacyBrowserComments(owner: BrowserOwner, legacyOwne
   });
 }
 
-/** Call only after confirmed submission, while the parent can still verify its latest draft. */
-export async function acknowledgeBrowserReferences(owner: BrowserOwner, submitted: readonly BrowserReference[],
-  isCurrent: (reference: BrowserReference) => boolean): Promise<void> {
-  const key = browserOwnerKey(owner);
-  await updateMap(map => {
-    const comments = ownerComments(map, key), references = browserReferences(owner, comments);
-    const acknowledged = new Set(submitted.filter(reference => isCurrent(reference) && references.some(current => same(current, reference))).map(reference => reference.id));
-    const originals = references.filter(reference => acknowledged.has(reference.id)).map(reference => reference.original);
-    map[key] = comments.filter(comment => !originals.some(original => same(original, comment)));
-  });
-}
-
-/** Merge only snapshots which the parent draft has not independently changed. */
+/** Update existing references only; inserting a comment requires a user action. */
 export function reconcileBrowserReferences(draft: ComposerDraft, previous: readonly BrowserReference[], current: readonly BrowserReference[]): ComposerDraft {
   const old = new Map(previous.map(reference => [reference.id, reference]));
   const next = new Map(current.map(reference => [reference.id, reference]));
@@ -202,8 +253,22 @@ export function reconcileBrowserReferences(draft: ComposerDraft, previous: reado
     const after = next.get(reference.id);
     return after ? [after] : [];
   });
-  for (const reference of current) {
-    if (!old.has(reference.id) && !references.some(item => item.id === reference.id)) references.push(reference);
-  }
   return { ...draft, references };
+}
+
+export function removeExplicitlyDeletedBrowserReferences(draft: ComposerDraft, deleted: readonly BrowserReference[]): ComposerDraft {
+  return { ...draft, references: (draft.references ?? []).filter(reference => !deleted.some(value => same(value, reference))) };
+}
+
+/** Check inside the same transaction that reserves a send intent. */
+export function assertBrowserDraftReferencesNotDeleted(value: unknown, owner: BrowserOwner, draft: ComposerDraft): void {
+  const store = commentStore(value), deleted = ownerRecords(store, 'codex-yard.browser-deletions.v1', browserOwnerKey(owner));
+  if ((draft.references ?? []).some(reference => deleted.some(item => record(item) && same(item.reference, reference)))) {
+    throw new Error('浏览器引用已在其他页面删除，请先更新原草稿。');
+  }
+}
+
+export function addBrowserDraftReference(draft: ComposerDraft, reference: BrowserReference): ComposerDraft {
+  const references = draft.references ?? [];
+  return references.some(item => item.id === reference.id) ? draft : { ...draft, references: [...references, reference] };
 }
