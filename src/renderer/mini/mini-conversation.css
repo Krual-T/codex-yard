@@ -1,0 +1,5 @@
+.yard-mini-conversation { display: flex; flex-direction: column; min-width: 0; gap: 4px; }
+.yard-mini-conversation > p { margin: 4px 10px; overflow-wrap: anywhere; }
+.yard-mini-conversation-open { margin: 0 10px; padding: 4px 0; border: 0; background: transparent; color: inherit; text-align: left; font-weight: 600; }
+.yard-mini-conversation-messages { min-height: 0; max-height: 190px; overflow: auto; }
+.yard-mini-conversation .standalone-composer { min-width: 0; }
