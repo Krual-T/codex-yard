@@ -68,22 +68,28 @@ test('legacy home drafts are claimed once by the actual composer', {
         await blocker.evaluate(async () => { await (window as any).fixture.readBrowserAtoms(); await (window as any).fixture.hold(); });
         await Promise.all([a.evaluate(() => (window as any).fixture.render({ context: { draftId: 'home-a' } })),
           b.evaluate(() => (window as any).fixture.render({ context: { draftId: 'home-b' } }))]);
+        await a.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('live A');
+        await b.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('live B');
         await blocker.evaluate(() => (window as any).fixture.release());
-        await Promise.all([a.waitForFunction(() => (window as any).fixture.state.snapshots.length > 0),
-          b.waitForFunction(() => (window as any).fixture.state.snapshots.length > 0)]);
+        await Promise.all([a.waitForFunction(() => (window as any).fixture.state.snapshots.some((s: any) => s.draft.text === 'live A')),
+          b.waitForFunction(() => (window as any).fixture.state.snapshots.some((s: any) => s.draft.text === 'live B'))]);
         const [av, bv] = await Promise.all([versions(a, 'home-a'), versions(b, 'home-b')]);
         const winners = [av, bv].filter(view => view.versions.some((v: any) => v.draft.text === 'Legacy home'));
         assert.equal(winners.length, 1);
-        assert.deepEqual(winners[0].versions.map((v: any) => v.draft.text).sort(), ['Alias draft', 'Legacy home', 'Older home']);
+        assert.ok(av.versions.some((v: any) => v.draft.text === 'live A'));
+        assert.ok(bv.versions.some((v: any) => v.draft.text === 'live B'));
+        assert.deepEqual(winners[0].versions.map((v: any) => v.draft.text).filter((text: string) => !text.startsWith('live ')).sort(),
+          ['Alias draft', 'Legacy home', 'Older home']);
         const first = winners[0].versions.find((v: any) => v.draft.text === 'Legacy home');
         assert.deepEqual(first.draft.preserved.draft.extra, { keep: true });
         assert.match(first.draft.blocked, /额外上下文/);
-        assert.equal([av, bv].filter(view => view.versions.some((v: any) => v.draft.text === '')).length, 1);
+        assert.equal([av, bv].filter(view => view.versions.length === 1).length, 1);
         const winner = av.versions.some((v: any) => v.draft.text === 'Legacy home') ? a : b;
         const winnerId = winner === a ? 'home-a' : 'home-b';
-        await winner.getByText('其他页面或旧数据中有 2 份独立草稿。').waitFor();
+        await winner.getByText('其他页面或旧数据中有 3 份独立草稿。').waitFor();
         await winner.reload(); await winner.addScriptTag({ content: script }); await mount(winner, winnerId);
-        assert.equal((await versions(winner, winnerId)).versions.length, 3);
+        assert.equal(await winner.getByRole('textbox', { name: '和 Codex 一起工作' }).inputValue(), winnerId === 'home-a' ? 'live A' : 'live B');
+        assert.equal((await versions(winner, winnerId)).versions.length, 4);
         const attempts = await a.evaluate(async () => { const f = (window as any).fixture;
           return Promise.all([
             f.open({ hostId: 'local', threadId: null, draftId: 'explicit', legacyDraftKey: 'old-client' }),
@@ -126,6 +132,7 @@ test('legacy home drafts are claimed once by the actual composer', {
         'draft-thread-identities-v1': { 'new-conversation': 'bound-client' }, 'client-thread-bindings-v1': { 'bound-client': 'thread-1' } });
       try {
         const page = await pageFor(context, raw); await mount(page, 'original');
+        assert.equal(await page.getByRole('textbox', { name: '和 Codex 一起工作' }).inputValue(), 'Old home');
         await page.evaluate(() => (window as any).fixture.updateBrowserAtom((window as any).fixture.composerDraftAtomKey, (store: any) => {
           const claims = { ...store.claims }; delete claims['native-atoms:home:new-conversation']; return { ...store, claims };
         }));
