@@ -218,7 +218,7 @@ export class CodexConnection extends EventEmitter<{ message: [RpcMessage]; statu
 
   requestWithCursor<M extends keyof RpcResponses>(method: M, params?: unknown, options?: RequestOptions): Promise<RpcResult<RpcResponses[M]>>;
   requestWithCursor<T = unknown>(method: string, params?: unknown, options?: RequestOptions): Promise<RpcResult<T>>;
-  requestWithCursor(method: string, params?: unknown, { mutating = false, timeoutMs = this.timeout, onLateTerminal }: RequestOptions = {}): Promise<RpcResult<unknown>> {
+  requestWithCursor(method: string, params?: unknown, { mutating = false, timeoutMs = this.timeout, onLateTerminal, retainLateUntilDisconnect }: RequestOptions = {}): Promise<RpcResult<unknown>> {
     const socket = this.socket;
     if (socket?.readyState !== WebSocket.OPEN) {
       return Promise.reject(new RpcError('尚未连接现有 Codex。', { status: 503 }));
@@ -232,8 +232,10 @@ export class CodexConnection extends EventEmitter<{ message: [RpcMessage]; statu
         const pending = this.pending.get(id);
         if (pending?.onLateTerminal) {
           pending.timedOut = true;
-          pending.timer = setTimeout(() => { this.pending.delete(id); }, lateObserverLifetimeMs);
-          pending.timer.unref();
+          if (!retainLateUntilDisconnect) {
+            pending.timer = setTimeout(() => { this.pending.delete(id); }, lateObserverLifetimeMs);
+            pending.timer.unref();
+          }
         } else this.pending.delete(id);
         reject(new RpcError(mutating ? '请求结果待确认，请重新读取会话后核对，避免重复发送。' : 'Codex 响应超时，请重试读取。', {
           code: 'TIMEOUT', status: 504, uncertain: mutating,

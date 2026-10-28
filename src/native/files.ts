@@ -8,6 +8,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { LateRpcTerminal } from '../../lib/codex-protocol.ts';
 import type { SshHost } from './ssh.ts';
 import type { ObjectValue } from './protocol.ts';
+import type { StateMutations } from './state-mutations.ts';
 import { previewLimit } from './file-limits.ts';
 
 const downloadLimit = 64 * 1024 * 1024;
@@ -90,7 +91,8 @@ interface SaveReceipt {
 }
 const saveStates = new Set<SaveState>(['pending', 'unknown', 'saved', 'conflict', 'failed', 'blocked']);
 
-export function createFiles(options: { dataDir: string; workspace: string; hosts: Map<string, SshHost>; request: FileRequest; remoteCommand?: RemoteFileCommand }) {
+export function createFiles(options: { dataDir: string; workspace: string; hosts: Map<string, SshHost>; request: FileRequest; remoteCommand?: RemoteFileCommand;
+  mutations?: StateMutations; activeConfiguration?(): boolean }) {
   const controllers = new Set<AbortController>();
   const uploads = new Map<string, string>();
   const attachmentDirectories = new Map<string, Set<string>>();
@@ -100,18 +102,26 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
   let receipts: SaveReceipt[] | undefined;
   let receiptQueue: Promise<void> = Promise.resolve();
   let closed = false;
-  // Persist the path fence before the daemon write.
+  async function loadReceipts() {
+    if (!receipts) {
+      let raw: unknown;
+      try { raw = JSON.parse(await readFile(join(options.dataDir, 'workspace-file-saves.json'), 'utf8')); }
+      catch (error) { if (missing(error)) raw = []; else throw error; }
+      if (!Array.isArray(raw) || !raw.every(item => item && typeof item.id === 'string' && typeof item.hostId === 'string'
+        && typeof item.target === 'string' && saveStates.has(item.state))) throw new Error('文件保存记录无法读取；已阻止写入。');
+      receipts = raw as SaveReceipt[];
+    }
+    return receipts;
+  }
+  /** Called while the shared native mutation lock is held. No lock is reacquired. */
+  async function hasUnresolvedSaves() {
+    return (await loadReceipts()).some(item => item.state === 'pending' || item.state === 'unknown');
+  }
+  // Persist the path fence before the daemon write, atomically with configuration reservations.
   async function journal<T>(action: (current: SaveReceipt[]) => { value: T; next?: SaveReceipt[] }): Promise<T> {
-    const run = receiptQueue.then(async () => {
-      if (!receipts) {
-        let raw: unknown;
-        try { raw = JSON.parse(await readFile(join(options.dataDir, 'workspace-file-saves.json'), 'utf8')); }
-        catch (error) { if (missing(error)) raw = []; else throw error; }
-        if (!Array.isArray(raw) || !raw.every(item => item && typeof item.id === 'string' && typeof item.hostId === 'string'
-          && typeof item.target === 'string' && saveStates.has(item.state))) throw new Error('文件保存记录无法读取；已阻止写入。');
-        receipts = raw as SaveReceipt[];
-      }
-      const result = action(receipts);
+    const work = async () => {
+      await loadReceipts();
+      const result = action(receipts!);
       if (result.next) {
         try {
           await mkdir(options.dataDir, { recursive: true, mode: 0o700 });
@@ -123,11 +133,15 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
           try { await directory.sync(); } finally { await directory.close(); }
           receipts = result.next;
         } catch (error) {
+          // A rename may have succeeded before directory sync failed. Reload the
+          // authoritative journal before another reservation can inspect it.
+          receipts = undefined;
           throw Object.assign(new Error('文件保存记录无法更新，结果未知；已阻止后续写入。'), { uncertain: true, cause: error });
         }
       }
       return result.value;
-    });
+    };
+    const run = receiptQueue.then(() => options.mutations ? options.mutations.run(work) : work());
     receiptQueue = run.then(() => {}, () => {});
     return run;
   }
@@ -213,6 +227,19 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     if (!within(root, target) || root === target) throw new Error('保存路径必须位于当前工作目录内。');
     const [realRoot, realTarget] = await Promise.all([canonical(hostId, root), canonical(hostId, target)]);
     if (!within(realRoot, realTarget) || realRoot === realTarget) throw new Error('保存路径超出当前工作目录。');
+    if (hostId === 'local') {
+      const internal = await realpath(options.dataDir);
+      if (dirname(realTarget) === internal && /^(native-state|workspace-file-saves)(?:\.|$)/.test(basename(realTarget)))
+        throw new Error('Yard 内部恢复记录不能通过文件编辑器覆盖。');
+      const targetInfo = await stat(realTarget);
+      for (const name of ['native-state.json', 'workspace-file-saves.json']) {
+        let authority;
+        try { authority = await stat(join(internal, name)); }
+        catch (error) { if (missing(error)) continue; throw error; }
+        if (authority.dev === targetInfo.dev && authority.ino === targetInfo.ino)
+          throw new Error('Yard 内部恢复记录不能通过文件编辑器覆盖。');
+      }
+    }
     const key = JSON.stringify([hostId, realTarget]);
     const id = params.operationId == null ? randomBytes(16).toString('hex') : params.operationId;
     if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(id)) throw new Error('无效的文件保存操作标识。');
@@ -248,6 +275,7 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
         const blocked = blockedResult(prior);
         return { value: blocked, next: [...current, { ...receipt, state: 'blocked', blockedBy: { operationId: blocked.operationId, query: blocked.query } }] };
       }
+      if (reserve && options.activeConfiguration?.()) throw new Error('原配置写入尚未确定完成，文件未保存；请先核对配置恢复记录。');
       return reserve ? { value: undefined, next: [...current, { ...receipt, state: 'pending' }] } : { value: undefined };
     };
     const existing = await journal(current => decide(current, false));
@@ -535,5 +563,5 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     if (!codexHome) throw new Error('附件主机尚未连接');
     return attachmentRequest(method, params, hostId, codexHome);
   }
-  return { fetch: fetchFile, http, rpc, attachmentRequest, close() { closed = true; for (const controller of controllers) controller.abort(); uploads.clear(); attachmentDirectories.clear(); creatingAttachments.clear(); } };
+  return { fetch: fetchFile, http, rpc, attachmentRequest, hasUnresolvedSaves, close() { closed = true; for (const controller of controllers) controller.abort(); uploads.clear(); attachmentDirectories.clear(); creatingAttachments.clear(); } };
 }

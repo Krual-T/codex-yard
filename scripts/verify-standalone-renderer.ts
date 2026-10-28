@@ -19,6 +19,27 @@ if (!artifacts) throw new Error('Set YARD_TEST_ARTIFACTS to an isolated evidence
 await mkdir(artifacts, { recursive: true });
 const temporary = await mkdtemp('/tmp/yard-owned-ui-');
 const fake = await createFakeCodex(temporary);
+const fixtureCodexHome = join(temporary, 'codex'), fixtureConfigFile = join(fixtureCodexHome, 'config.toml');
+await mkdir(fixtureCodexHome);
+const modelConfiguration: Record<string, unknown> = { model: 'fixture-model', model_reasoning_effort: 'high' };
+let configurationVersion = 1;
+await writeFile(fixtureConfigFile, 'model = "fixture-model"\nmodel_reasoning_effort = "high"\n');
+fake.handlers.set('initialize', () => ({ ...fake.defaultResult('initialize', {}), codexHome: fixtureCodexHome }));
+fake.handlers.set('config/read', params => {
+  const result = fake.defaultResult('config/read', record(params));
+  return { ...result, config: { ...record(result.config), ...modelConfiguration },
+    layers: [{ name: { type: 'user', file: fixtureConfigFile, profile: null }, version: 'v' + configurationVersion }] };
+});
+fake.handlers.set('config/batchWrite', async params => {
+  assert.equal(params.expectedVersion, 'v' + configurationVersion);
+  assert.equal(params.filePath, null);
+  for (const edit of params.edits as Record<string, unknown>[]) {
+    assert(['model', 'model_reasoning_effort'].includes(String(edit.keyPath)));
+    modelConfiguration[String(edit.keyPath)] = edit.value;
+  }
+  await writeFile(fixtureConfigFile, Object.entries(modelConfiguration).map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join('\n') + '\n');
+  return { status: 'ok', filePath: fixtureConfigFile, version: 'v' + ++configurationVersion, overriddenMetadata: null };
+});
 const remoteRoot = join(temporary, 'remote'); await mkdir(remoteRoot);
 const remoteFake = await createFakeCodex(remoteRoot);
 const remoteHostId = 'remote-ssh-owned-check';
@@ -789,6 +810,24 @@ try {
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
   checks.push('settings keep exact source and return route in copied URLs/reload and resolve changed project membership from a second actual page');
+  const configWritesBefore = fake.calls('config/batchWrite').length;
+  await page.getByRole('button', { name: 'Models', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('low');
+  await page.locator('.yard-inline-save').getByRole('button', { name: 'Save', exact: true }).click();
+  await page.locator('.yard-inline-save').waitFor({ state: 'hidden' });
+  await page.reload();
+  await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).waitFor();
+  assert.equal(await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).inputValue(), 'low');
+  await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('high');
+  await page.locator('.yard-inline-save').getByRole('button', { name: 'Save', exact: true }).click();
+  await page.locator('.yard-inline-save').waitFor({ state: 'hidden' });
+  assert.equal(fake.calls('config/batchWrite').length - configWritesBefore, 2);
+  const configurationRecords = JSON.parse(await readFile(join(dataDir, 'native-state.json'), 'utf8')).configWriteOperations;
+  assert.equal(configurationRecords.filter((entry: Record<string, unknown>) => entry.method === 'config/batchWrite'
+    && entry.hostId === 'local' && entry.state === 'succeeded' && record(entry.terminal).kind === 'ok').length, 2);
+  checks.push('actual App model editor writes through original durable configuration operations and retains the verified base-layer value across reload');
+  await page.getByRole('button', { name: 'General', exact: true }).click();
+  await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
   await page.getByRole('combobox', { name: 'Language', exact: true }).selectOption('zh-CN');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.waitForFunction(() => document.documentElement.lang === 'zh-CN');

@@ -106,6 +106,8 @@ export interface RequestOptions {
   timeoutMs?: number;
   /** Observe this connection's original reply after the caller's timeout, never a disconnect. */
   onLateTerminal?: (terminal: LateRpcTerminal) => void | Promise<void>;
+  /** Keep a durable write's original observer until its reply or socket disconnect. */
+  retainLateUntilDisconnect?: true;
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

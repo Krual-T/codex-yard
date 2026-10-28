@@ -113,6 +113,32 @@ test('only the original live connection delivers a bounded late terminal after t
   assert.equal(connection.pending.size, 0);
 });
 
+test('durable write observers survive five minutes but retire with their original socket', { timeout: 5000 }, async t => {
+  const { peer, connection } = await fixture(t);
+  peer.handlers.set('fixture/durable-observer', () => NO_REPLY);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let observe!: (value: unknown) => void;
+  const observed = new Promise<unknown>(resolve => { observe = resolve; });
+  const request = connection.request('fixture/durable-observer', {}, { mutating: true, timeoutMs: 10,
+    retainLateUntilDisconnect: true, onLateTerminal: observe });
+  const rejected = assert.rejects(request, { code: 'TIMEOUT', uncertain: true });
+  const call = await peer.waitForCall('fixture/durable-observer');
+  assert.ok(call);
+  t.mock.timers.tick(10); await rejected;
+  t.mock.timers.tick(5 * 60_000 + 1);
+  assert.equal(connection.pending.size, 1);
+  peer.send({ id: call.id, result: { status: 'ok' } });
+  assert.deepEqual(await observed, { outcome: 'success', result: { status: 'ok' } });
+  assert.equal(connection.pending.size, 0);
+  const another = connection.request('fixture/durable-observer', {}, { mutating: true, timeoutMs: 10,
+    retainLateUntilDisconnect: true, onLateTerminal: () => { throw new Error('a disconnected socket must not observe'); } });
+  const anotherRejected = assert.rejects(another, { code: 'TIMEOUT' });
+  t.mock.timers.tick(10); await anotherRejected;
+  peer.disconnect(); await once(connection, 'status');
+  assert.equal(connection.pending.size, 0);
+  t.mock.timers.reset();
+});
+
 test('late observers are capped and observer failures cannot reject the transport', async t => {
   const { peer, connection } = await fixture(t);
   peer.handlers.set('fixture/capped', () => NO_REPLY);

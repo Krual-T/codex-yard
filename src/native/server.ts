@@ -4,7 +4,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
-import { readFile, writeFile, mkdir, mkdtemp, rename, realpath, chmod } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, open, rename, realpath, chmod } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,15 +106,33 @@ export async function createNativeWorkbench(options: Options = {}) {
   const sshHosts = new Map(catalog.hosts.map(host => [host.hostId, host]));
   const hostPaths = new Map<string, HostPaths>([['local', { homeDirectory: homedir(), codexHome }]]);
   const fileConnections = new Map<string, CodexConnection>();
+  const control = new CodexConnection(socketPath, { cwd: workspace });
+  const stateMutations = createStateMutations();
+  const ownedPaths = new WeakMap<CodexConnection, { paths?: HostPaths; sshHost: typeof catalog.hosts[number] }>();
+  const connectionSnapshots = new WeakMap<WebSocket, { connection: CodexConnection; hostId: string; paths: HostPaths; sshHost?: typeof catalog.hosts[number] }>();
+  async function ownedConnectionFor(hostId: string) {
+    validHost(hostId);
+    let connection = hostId === 'local' ? control : fileConnections.get(hostId);
+    if (!connection) {
+      const snapshot = { sshHost: { ...sshHosts.get(hostId)! }, paths: undefined as HostPaths | undefined };
+      connection = new CodexConnection('', { createConnection: () => (options.sshStream ?? createSshProxyStream)(snapshot.sshHost, paths => {
+        snapshot.paths = { ...paths }; hostPaths.set(hostId, paths);
+      }), connectTimeout: 20_000 });
+      ownedPaths.set(connection, snapshot);
+      fileConnections.set(hostId, connection);
+    }
+    await connection.connect();
+    const remote = ownedPaths.get(connection);
+    const paths = hostId === 'local' ? { homeDirectory: homedir(), codexHome } : remote?.paths;
+    if (connection.socket && paths) connectionSnapshots.set(connection.socket, {
+      connection, hostId, paths: { ...paths }, ...(remote ? { sshHost: { ...remote.sshHost } } : {}),
+    });
+    return connection;
+  }
   const files = createFiles({ dataDir, workspace, hosts: sshHosts, remoteCommand: options.remoteFileCommand,
+    mutations: stateMutations, activeConfiguration: () => configurationWrites.activeForFile() !== null,
     async request(hostId, method, params, mutating = false, onLateTerminal) {
-      validHost(hostId);
-      let connection = hostId === 'local' ? control : fileConnections.get(hostId);
-      if (!connection) {
-        connection = new CodexConnection('', { createConnection: () => (options.sshStream ?? createSshProxyStream)(sshHosts.get(hostId)!, paths => hostPaths.set(hostId, paths)), connectTimeout: 20_000 });
-        fileConnections.set(hostId, connection);
-      }
-      await connection.connect();
+      const connection = await ownedConnectionFor(hostId);
       return connection.request(method, params, { mutating, onLateTerminal });
     },
   });
@@ -138,13 +156,16 @@ export async function createNativeWorkbench(options: Options = {}) {
   const createdThreads = new Set<string>();
   const unsupported = new Set<string>();
   const httpRequests = new Set<AbortController>();
-  const control = new CodexConnection(socketPath, { cwd: workspace });
   let persistQueue = Promise.resolve();
   function persist() {
     const snapshot = JSON.stringify({ ...state, globals, settings }, null, 2) + '\n';
     persistQueue = persistQueue.catch(() => {}).then(async () => {
-      await writeFile(join(dataDir, 'native-state.json.tmp'), snapshot, { mode: 0o600 });
-      await rename(join(dataDir, 'native-state.json.tmp'), join(dataDir, 'native-state.json'));
+      const temporary = join(dataDir, `native-state.${crypto.randomUUID()}.tmp`);
+      const file = await open(temporary, 'wx', 0o600);
+      try { await file.writeFile(snapshot); await file.sync(); } finally { await file.close(); }
+      await rename(temporary, join(dataDir, 'native-state.json'));
+      const directory = await open(dataDir, 'r');
+      try { await directory.sync(); } finally { await directory.close(); }
     });
     return persistQueue;
   }
@@ -152,17 +173,19 @@ export async function createNativeWorkbench(options: Options = {}) {
     if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(message));
   }
   function broadcast(message: unknown) { for (const client of clients.keys()) send(client, message); }
-  const stateMutations = createStateMutations();
   const configurationWrites = createConfigWrites({ state, persist, mutations: stateMutations,
+    findFileBlocker: () => files.hasUnresolvedSaves(),
     resolveTarget: createConfigWriteTargets({
-      getSshHost: hostId => sshHosts.get(hostId),
-      getHostPaths: hostId => hostPaths.get(hostId),
+      getConnectionSnapshot: ({ hostId, connection, socket }) => {
+        const snapshot = socket instanceof WebSocket ? connectionSnapshots.get(socket) : undefined;
+        return snapshot?.connection === connection && snapshot.hostId === hostId ? snapshot : undefined;
+      },
       remoteCommand: options.remoteFileCommand,
     }),
   });
   const configurationWriteHost = createConfigWriteHost<{ client: WebSocket; connections: Map<string, CodexConnection> }>({
     writes: configurationWrites, validateHost: validHost,
-    connect: (hostId, context) => connectedFor(context.client, context.connections, hostId),
+    connect: hostId => ownedConnectionFor(hostId),
   });
   const addProject = createProjectCatalogWrites(globals, stateMutations, persist, broadcast);
   let projectCompatibility: import('./thread-projects.ts').ThreadProjectCompatibility = {};
@@ -557,11 +580,11 @@ export async function createNativeWorkbench(options: Options = {}) {
   }
 
   async function fetchHost(endpoint: string, params: ObjectValue, client: WebSocket, connections: Map<string, CodexConnection>): Promise<unknown> {
+    if (endpoint === 'configuration-write') return configurationWriteHost.handle(params, { client, connections });
     const hostId = typeof params.hostId === 'string' ? params.hostId : 'local';
     validHost(hostId);
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
     switch (endpoint) {
-      case 'configuration-write': return configurationWriteHost.handle(params, { client, connections });
       case 'chrome-browser': return browsers.get(client)!.request(params as unknown as ChromeRequest);
       case 'chrome-connections': return chromeClients.connections(params as unknown as ConnectionRequest);
       case 'refresh-remote-connections': return { remoteConnections: await remoteProfiles() };

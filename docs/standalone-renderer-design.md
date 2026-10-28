@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v14，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v15，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -59,7 +59,13 @@ composer-drafts.v3是同一UI atom根中的事务记录，首次导入精确旧v
 
 设置通过get/set-setting、get/set-global-state、get/set-persisted-atom和CLI config/read/batchWrite访问原来源。后两个atom端点由浏览器WorkbenchClient处理，复用updatedAtom和旧native-atoms key；读、条件检查、更新位于同一个IndexedDB readwrite事务，事务完成后才回成功，失败拒绝。成功后本页订阅及跨页BroadcastChannel只发送失效键，消费者异步重读唯一权威记录。UI偏好是全局host设置，CLI配置是执行host作用域；界面不接触token/env。config/read(includeLayers:true)取得实际user层file/version，缺可信版本不写，冲突保留编辑。实际CLI0.164及桌面0.163-alpha只提供可写base user层，不支持旧profile/profiles配置；当前模型与effort按该层真实file/version写顶层键，不发明目标。其他后端多层按真实身份选择，不以合成fixture当本机能力。
 
-共用native-state.json的项目、偏好、pet与SSH自动连接变更共享一个串行提交区间，包含读取旧值、修改内存、捕获快照、原子写入和失败回滚。不能只串行文件写入，否则会保存其他尚未提交的内存值。成功持久化后才广播；较晚编辑不被旧回执覆盖。原设置保存须连接真实消费者：composerEnterBehavior、followUpQueueMode、主题字体、终端位置等，不能只证明值写入。平台原先不支持的操作保留准确错误/空态，不能用“不支持”代替已有Web功能。
+共用native-state.json的项目、偏好、pet与SSH自动连接变更共享一个串行提交区间，包含读取旧值、修改内存、捕获快照、原子写入和失败回滚。不能只串行文件写入，否则会保存其他尚未提交的内存值。新临时文件以0600独占创建，写入并同步文件、rename、同步父目录后才确认持久成功。成功持久化后才广播；较晚编辑不被旧回执覆盖。原设置保存须连接真实消费者：composerEnterBehavior、followUpQueueMode、主题字体、终端位置等，不能只证明值写入。平台原先不支持的操作保留准确错误/空态，不能用“不支持”代替已有Web功能。
+
+模型、Agent、Hooks、Worktrees和Skills的配置变更统一调用configuration-write，原operationId在连接或异步准备前先持久记为preparing。提交校验当前注册host；status和retry-persistence只核对原记录身份，即使host已移除也不连接后端。宿主复用常驻control/SSH文件连接；原socket绑定当时的host、SSH参数和home快照，不读取另一页面后来覆盖的路径。页面关闭不关该连接，超时仅结束当前等待；原迟到观察保留到真实终态或socket断开，沿原16项上限，不重连重发。中断准备在重启后只允许显式本地收尾为未发送，unknown不能靠当前配置值、null或重连消除。
+
+配置预留和文件保存journal预留共用StateMutations；双方在同一提交区间检查另一类未决记录后持久预留，再释放锁执行原RPC。目前配置目标采用保守global scope，未决配置与未决文件保存相互阻止新写；读取、复制和下载仍可用，明确原终态后才开放新的显式操作。该围栏只覆盖同一Yard进程/dataDir，不能声称跨独立进程或外部客户端原子。文件面板不能覆盖本地native-state/journal及其符号、硬链接，正常只读投影保留；同OS账号通过外部进程主动修改权威文件不在该一致性保证内。
+
+终态保存失败时，宿主保留实际观察，并用该原操作的内存Ed25519私钥签发最小回执；pending记录只存公钥。页面在既有配置恢复atom中保存原ID/host/method/terminal/signature，宿主重启后验签并只补存原终态，不发配置RPC。原无公钥记录继续unknown，缺少有效回执不推定成功。明确拒绝只投影版本冲突、配置无效、只读层三个已知安全类别；原始配置、token和错误data不进入恢复记录。页面草稿、原提交与较新编辑分别保存在同一既有记录中，控制器在section卸载后仍处理原结果，并提供跨页核对与复制出口。
 
 host工具read_thread在真实server接线中使用turnLimit/cursor分页历史，按includeOutputs投影，默认最新10轮、每轮最新60项、不含输出，按maxOutputCharsPerItem（默认4000）截断输出并返回可继续读取较早turn/items的游标；不能把外层参数检查或mock handler测试当作真实实现。取消沿MCP适配器到host请求，断线不重放写入。
 
