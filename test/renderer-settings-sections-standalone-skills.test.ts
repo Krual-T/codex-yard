@@ -64,7 +64,7 @@ test('changed state is reviewed before a write and missing or ambiguous selector
   assert.equal(sameSelector.every(skill => !canEditSkill(skill, settings.getSnapshot().skills)), true);
 });
 
-test('lost or partial replies preserve all edits until refresh and explicit review', async () => {
+test('lost or partial replies remain fenced after refresh and review within the current page', async () => {
   const { client, settings } = await setup();
   settings.edit(id(local.name, local.path), false); settings.edit(id(plugin.name, plugin.path), false);
   client.failWriteAt = 2;
@@ -73,12 +73,14 @@ test('lost or partial replies preserve all edits until refresh and explicit revi
   assert.equal(await settings.save(), false);
   client.failRead = true; await settings.load(); assert.equal(settings.getSnapshot().drafts.length, 2);
   client.failRead = false; await settings.load(); assert.ok(settings.getSnapshot().latest);
-  settings.useLatest(); assert.deepEqual(settings.getSnapshot().drafts, [{ id: id(plugin.name, plugin.path), enabled: false }]);
-  client.lostWriteAt = 3;
-  assert.equal(await settings.save(), false); assert.equal(settings.dirty, true);
-  assert.match(settings.getSnapshot().error || '', /reply lost/);
-  await settings.load(); settings.useLatest(); assert.equal(settings.dirty, false);
-  assert.deepEqual(settings.getSnapshot().skills.map(skill => skill.enabled), [false, false]);
+  assert.equal(settings.getSnapshot().writeUncertain, true);
+  settings.useLatest(); assert.equal(settings.getSnapshot().drafts.length, 2);
+  assert.equal(await settings.save(), false); assert.equal(client.writes.length, 2);
+  settings.discard(); await settings.load();
+  settings.edit(id(plugin.name, plugin.path), false);
+  assert.equal(settings.dirty, false);
+  assert.equal(settings.getSnapshot().writeUncertain, true);
+  assert.equal(client.writes.length, 2);
 });
 
 test('different effective responses preserve edits until refresh and review', async () => {

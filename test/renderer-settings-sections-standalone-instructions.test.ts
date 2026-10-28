@@ -45,7 +45,7 @@ test('instruction drafts retain byte-order marks and save to the selected host w
   assert.equal(editor.dirty, false);
 });
 
-test('failed and lost-reply saves retain drafts until the current file is explicitly reviewed', async () => {
+test('a lost reply keeps the draft fenced after rereading even when the file matches', async () => {
   const client = new FakeClient(), editor = new Instructions(client, 'local');
   await editor.load(); editor.edit('AGENTS.md', 'Draft');
   client.lostReply = true;
@@ -57,10 +57,13 @@ test('failed and lost-reply saves retain drafts until the current file is explic
   client.lostReply = false; await editor.load();
   assert.equal(editor.getSnapshot().files?.[0].latest, 'Draft');
   editor.useLatest('AGENTS.md');
-  assert.equal(editor.dirty, false);
+  assert.equal(editor.dirty, true);
+  assert.equal(editor.getSnapshot().files?.[0].needsRefresh, true);
+  assert.equal(await editor.save('AGENTS.md'), false);
+  assert.equal(client.calls.filter(call => call.endpoint === 'codex-agents-md-save').length, 1);
 });
 
-test('conflicts and failed reloads preserve the draft and require a deliberate baseline update', async () => {
+test('unclassified failures and failed reloads preserve the draft without assuming the write ended', async () => {
   const client = new FakeClient(), editor = new Instructions(client, 'local');
   await editor.load(); editor.edit('AGENTS.md', 'My draft');
   client.files.set('/fixture/AGENTS.md', 'External edit');
@@ -72,6 +75,26 @@ test('conflicts and failed reloads preserve the draft and require a deliberate b
   assert.equal(editor.getSnapshot().files?.[0].latest, 'External edit');
   assert.equal(await editor.save('AGENTS.md'), false);
   editor.useLatest('AGENTS.md');
-  assert.equal(await editor.save('AGENTS.md'), true);
-  assert.equal(client.files.get('/fixture/AGENTS.md'), 'My draft');
+  assert.equal(await editor.save('AGENTS.md'), false);
+  assert.equal(editor.getSnapshot().files?.[0].draft, 'My draft');
+  assert.equal(client.files.get('/fixture/AGENTS.md'), 'External edit');
+  editor.discard('AGENTS.md'); editor.edit('AGENTS.md', 'Later draft');
+  assert.equal(await editor.save('AGENTS.md'), false);
+  assert.equal(client.calls.filter(call => call.endpoint === 'codex-agents-md-save').length, 1);
+});
+
+test('reading the old file cannot release an earlier write that may arrive later', async () => {
+  const client = new FakeClient(), editor = new Instructions(client, 'local');
+  await editor.load(); editor.edit('AGENTS.md', 'First draft'); client.offline = true;
+  assert.equal(await editor.save('AGENTS.md'), false);
+  client.offline = false; await editor.load();
+  assert.equal(editor.getSnapshot().files?.[0].latest, undefined);
+  editor.edit('AGENTS.md', 'Second draft');
+  assert.equal(await editor.save('AGENTS.md'), false);
+  client.files.set('/fixture/AGENTS.md', 'First draft');
+  await editor.load();
+  assert.equal(editor.getSnapshot().files?.[0].draft, 'Second draft');
+  assert.equal(editor.getSnapshot().files?.[0].latest, 'First draft');
+  assert.equal(await editor.save('AGENTS.md'), false);
+  assert.equal(client.calls.filter(call => call.endpoint === 'codex-agents-md-save').length, 1);
 });

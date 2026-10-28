@@ -38,10 +38,10 @@ export function PersonalizationSection({ client, hostId, onDirtyChange, onSaving
       {file.latest !== undefined && <div role="alert" className="yard-setting-error">
         <p>The file changed on the host. Review its current contents before saving your draft.</p>
         <details><summary>Current file on host</summary><pre className="yard-instructions">{file.latest === null ? '(File no longer exists)' : file.latest || '(Empty file)'}</pre></details>
-        <button type="button" onClick={() => instructions.useLatest(file.name)}>Use current file as save baseline</button>
-        <p>Saving afterward will replace the current file with your draft.</p>
+        <button type="button" disabled={file.needsRefresh} onClick={() => instructions.useLatest(file.name)}>Use current file as save baseline</button>
+        {!file.needsRefresh && <p>Saving afterward will replace the current file with your draft.</p>}
       </div>}
-      {file.needsRefresh && <p className="yard-setting-error">Refresh to check the current file before saving again.</p>}
+      {file.needsRefresh && <p className="yard-setting-error">The previous save has an unknown result. The host must confirm it has ended before another save.</p>}
       {file.draft !== (file.saved ?? '') && <div className="yard-inline-save"><span>Unsaved {file.name}</span><div className="yard-actions">
         <button type="button" disabled={state.loading || state.saving} onClick={() => instructions.discard(file.name)}>Discard</button>
         <button type="button" disabled={state.loading || state.saving || file.needsRefresh || file.latest !== undefined} onClick={() => { void instructions.save(file.name); }}>{state.saving ? 'Saving...' : 'Save'}</button>

@@ -9,7 +9,7 @@ interface SkillRead { skills: SkillEntry[]; warnings: string[] }
 export interface SkillDraft { id: string; enabled: boolean }
 export interface SkillSnapshot {
   loading: boolean; saving: boolean; skills: SkillEntry[]; warnings: string[]; drafts: SkillDraft[];
-  latest: SkillEntry[] | null; needsRefresh: boolean; error: string | null;
+  latest: SkillEntry[] | null; needsRefresh: boolean; writeUncertain: boolean; error: string | null;
 }
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -55,7 +55,7 @@ export class SkillSettings {
   private readonly hostId: string;
   private readonly cwds: readonly string[];
   private readonly listeners = new Set<() => void>();
-  private snapshot: SkillSnapshot = { loading: true, saving: false, skills: [], warnings: [], drafts: [], latest: null, needsRefresh: false, error: null };
+  private snapshot: SkillSnapshot = { loading: true, saving: false, skills: [], warnings: [], drafts: [], latest: null, needsRefresh: false, writeUncertain: false, error: null };
   private latestRead: SkillRead | null = null;
   private generation = 0;
   private invalidated = false;
@@ -94,13 +94,13 @@ export class SkillSettings {
           error: 'Skill settings changed or the last save could not be confirmed. Review the current state before saving.' });
       } else {
         this.latestRead = null;
-        this.update({ loading: false, skills: read.skills, warnings: read.warnings, latest: null, needsRefresh: false });
+        this.update({ loading: false, skills: read.skills, warnings: read.warnings, latest: null, needsRefresh: this.snapshot.writeUncertain });
       }
     } catch (error) { if (generation === this.generation) this.update({ loading: false, error: `Could not load skills: ${errorText(error)}` }); }
     finally { if (generation === this.generation) this.refreshIfInvalidated(); }
   }
   edit(id: string, enabled: boolean) {
-    if (this.snapshot.loading || this.snapshot.saving || this.snapshot.latest || this.snapshot.needsRefresh) return;
+    if (this.snapshot.loading || this.snapshot.saving || this.snapshot.latest || this.snapshot.needsRefresh || this.snapshot.writeUncertain) return;
     const skill = this.snapshot.skills.find(item => item.id === id);
     if (!skill || !canEditSkill(skill, this.snapshot.skills)) return;
     const drafts = this.snapshot.drafts.filter(item => item.id !== id);
@@ -112,12 +112,12 @@ export class SkillSettings {
     const latest = this.latestRead, refresh = this.snapshot.needsRefresh && !latest;
     this.latestRead = null;
     this.update({ drafts: [], skills: latest?.skills ?? this.snapshot.skills, warnings: latest?.warnings ?? this.snapshot.warnings,
-      latest: null, needsRefresh: refresh, error: null });
+      latest: null, needsRefresh: refresh || this.snapshot.writeUncertain, error: null });
     if (refresh) void this.load();
   }
   useLatest() {
     const latest = this.latestRead;
-    if (!latest) return;
+    if (!latest || this.snapshot.writeUncertain) return;
     if (this.snapshot.drafts.some(draft => {
       const skill = latest.skills.find(item => item.id === draft.id);
       return !skill || !canEditSkill(skill, latest.skills);
@@ -129,8 +129,9 @@ export class SkillSettings {
     this.update({ skills: latest.skills, warnings: latest.warnings, drafts, latest: null, needsRefresh: false, error: null });
   }
   async save(): Promise<boolean> {
-    if (!this.dirty || this.snapshot.saving || this.snapshot.loading || this.snapshot.latest || this.snapshot.needsRefresh) return false;
+    if (!this.dirty || this.snapshot.saving || this.snapshot.loading || this.snapshot.latest || this.snapshot.needsRefresh || this.snapshot.writeUncertain) return false;
     const generation = ++this.generation, drafts = this.snapshot.drafts;
+    let writeInFlight = false;
     this.update({ saving: true, error: null });
     try {
       const before = await readSkills(this.client, this.hostId, this.cwds);
@@ -143,7 +144,9 @@ export class SkillSettings {
       for (const draft of drafts) {
         const skill = before.skills.find(item => item.id === draft.id);
         if (!skill || !canEditSkill(skill, before.skills)) throw new Error('The skill selector is no longer unique');
+        writeInFlight = true;
         const result = await this.client.rpc<{ effectiveEnabled?: unknown }>('skills/config/write', { ...selector(skill), enabled: draft.enabled }, this.hostId);
+        writeInFlight = false;
         if (generation !== this.generation) return false;
         if (result?.effectiveEnabled !== draft.enabled) throw new Error('The host reported a different effective skill state');
       }
@@ -162,8 +165,9 @@ export class SkillSettings {
       this.update({ saving: false, skills: after.skills, warnings: after.warnings, drafts: [], latest: null, needsRefresh: false, error: null });
       return true;
     } catch (error) {
-      if (generation === this.generation) this.update({ saving: false, needsRefresh: true,
-        error: `Could not confirm save: ${errorText(error)}. Your edits are preserved; refresh before retrying.` });
+      if (generation === this.generation) this.update({ saving: false, needsRefresh: true, writeUncertain: writeInFlight,
+        error: writeInFlight ? `Could not confirm save: ${errorText(error)}. Your edits are preserved; the host must confirm the previous operation has ended before another save.` :
+          `Could not confirm save: ${errorText(error)}. Your edits are preserved; refresh and review the current state.` });
       return false;
     } finally { if (generation === this.generation) this.refreshIfInvalidated(); }
   }

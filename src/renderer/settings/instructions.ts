@@ -52,7 +52,7 @@ export class Instructions {
       const previous = this.snapshot.files;
       const files = names.map((name, index): InstructionFile => {
         const saved = values[index], old = previous?.find(file => file.name === name);
-        if (old && isDirty(old)) return { ...old, path: paths[index], latest: saved === old.saved ? undefined : saved, needsRefresh: false };
+        if (old && (isDirty(old) || old.needsRefresh)) return { ...old, path: paths[index], latest: saved === old.saved ? undefined : saved };
         return { name, path: paths[index], saved, draft: saved ?? '', latest: undefined, needsRefresh: false };
       });
       this.update({ loading: false, files });
@@ -66,12 +66,12 @@ export class Instructions {
     if (this.snapshot.loading || this.snapshot.saving) return;
     this.updateFile(name, file => {
       const saved = file.latest === undefined ? file.saved : file.latest;
-      return { ...file, saved, draft: saved ?? '', latest: undefined, needsRefresh: false };
+      return { ...file, saved, draft: saved ?? '', latest: undefined };
     });
   }
   useLatest(name: InstructionFileName) {
     if (this.snapshot.loading || this.snapshot.saving) return;
-    this.updateFile(name, file => file.latest === undefined ? file : { ...file, saved: file.latest, latest: undefined });
+    this.updateFile(name, file => file.latest === undefined || file.needsRefresh ? file : { ...file, saved: file.latest, latest: undefined });
   }
   async save(name: InstructionFileName): Promise<boolean> {
     const file = this.snapshot.files?.find(item => item.name === name);
@@ -89,7 +89,7 @@ export class Instructions {
     } catch (error) {
       if (generation !== this.generation) return false;
       this.updateFile(name, current => ({ ...current, needsRefresh: true }));
-      this.update({ saving: false, error: `Could not confirm save: ${errorMessage(error)}. Your draft is preserved; refresh before retrying.` });
+      this.update({ saving: false, error: `Could not confirm save: ${errorMessage(error)}. Your draft is preserved; the host must confirm the previous operation has ended before another save.` });
       return false;
     }
   }
