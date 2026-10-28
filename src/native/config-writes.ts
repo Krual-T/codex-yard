@@ -26,6 +26,8 @@ interface ConfigWritesOptions {
   state: Record<string, unknown>;
   persist(): Promise<unknown>;
   mutations: StateMutations;
+  /** Check inside the shared transaction; never reacquire it. */
+  assertStateAvailable?(): void;
   resolveTarget(input: ConfigWriteTargetInput): Promise<ConfigWriteTarget>;
   /** Called under mutations; must not reacquire that lock. */
   findFileBlocker(target: ConfigWriteTarget): boolean | Promise<boolean>;
@@ -44,7 +46,7 @@ type ConfigWritePrior =
   | { outcome: 'existing'; operation: ConfigWriteStatus }
   | null;
 type StoredRecord = ConfigWriteRecord & { receiptKey?: string; receiptPublicKey?: string };
-type ReceiptSigner = ConfigWriteIdentity & { publicKey: string; privateKey: KeyObject };
+type ReceiptSigner = ConfigWriteIdentity & { publicKey: string; privateKey: KeyObject; failedPreparation?: StoredRecord };
 type Observation = { state: 'unknown' } | { state: 'succeeded' | 'failed'; terminal: ConfigWriteTerminal };
 type Prepared = { outcome: 'prepared'; operation: ConfigWriteStatus;
   start(params: Record<string, unknown>, connection: ConfigWriteConnection): Promise<ConfigWriteSubmission>;
@@ -145,13 +147,14 @@ export function createConfigWrites(options: ConfigWritesOptions) {
   const signers = new Map<string, ReceiptSigner>();
 
   function records(): StoredRecord[] {
+    options.assertStateAvailable?.();
     const raw = options.state[stateKey];
-    if (raw === undefined) return [];
-    if (!Array.isArray(raw)) throw new Error('Configuration write records cannot be read; writes are blocked.');
+    if (raw !== undefined && !Array.isArray(raw)) throw new Error('Configuration write records cannot be read; writes are blocked.');
+    const values = (raw ?? []) as StoredRecord[];
     const ids = new Set<string>(), targets = new Set<string>(), bindings = new Set<string>();
     const activeHosts = new Set<string>(), aliasedHosts = new Set<string>();
     let activeCount = 0, globalActive = false;
-    for (const value of raw) {
+    for (const value of values) {
       if (!record(value) || !validId(value.operationId) || !validId(value.hostId) || !states.has(value.state as ConfigWriteState)
         || value.scope !== undefined && value.scope !== 'global' || value.method !== undefined && !methods.has(value.method as ConfigWriteMethod)
         || value.receiptKey !== undefined && !validKey(value.receiptKey)
@@ -183,7 +186,16 @@ export function createConfigWrites(options: ConfigWritesOptions) {
         if (binding !== target) aliasedHosts.add(value.hostKey);
       }
     }
-    return raw as StoredRecord[];
+    const missing: StoredRecord[] = [];
+    for (const [operationId, signer] of signers) {
+      if (!signer.failedPreparation || !observed.has(operationId)) continue;
+      const value = values.find(item => item.operationId === operationId);
+      if (!value) missing.push(signer.failedPreparation);
+      else if (value.hostId !== signer.hostId || value.method !== signer.method || value.receiptPublicKey !== signer.publicKey) {
+        throw new Error('The original configuration preparation no longer matches its receipt.');
+      }
+    }
+    return missing.length ? [...values, ...missing] : values;
   }
 
   async function save(next: StoredRecord[]) {
@@ -193,8 +205,10 @@ export function createConfigWrites(options: ConfigWritesOptions) {
     catch (error) { if (existed) options.state[stateKey] = previous; else delete options.state[stateKey]; throw error; }
   }
   function project(value: StoredRecord): ConfigWriteStatus {
-    const observation = observed.get(value.operationId), terminal = observation && 'terminal' in observation ? observation.terminal : undefined;
-    const receipt = terminal ? makeReceipt(value, terminal, signers.get(value.operationId)) : undefined;
+    const observation = observed.get(value.operationId), signer = signers.get(value.operationId);
+    const sameSigner = !signer || signer.hostId === value.hostId && signer.method === value.method && signer.publicKey === value.receiptPublicKey;
+    const terminal = sameSigner && observation && 'terminal' in observation ? observation.terminal : undefined;
+    const receipt = terminal ? makeReceipt(value, terminal, signer) : undefined;
     return { operationId: value.operationId, hostId: value.hostId,
       ...(value.hostKey === undefined ? {} : { hostKey: value.hostKey }), ...(value.target === undefined ? {} : { target: value.target }),
       ...(value.binding === undefined ? {} : { binding: value.binding }), ...(value.scope ? { scope: value.scope } : {}),
@@ -212,24 +226,45 @@ export function createConfigWrites(options: ConfigWritesOptions) {
   function activeForFile(): ConfigWriteStatus | null {
     const value = records().find(active); return value ? project(value) : null;
   }
-  async function persistObservation(operationId: string, observation: Observation): Promise<ConfigWriteStatus> {
+  async function persistObservation(operationId: string, observation: Observation, original?: StoredRecord): Promise<ConfigWriteStatus> {
     const current = records(), index = current.findIndex(value => value.operationId === operationId);
-    if (index < 0 || !active(current[index]!)) throw new Error('The original configuration write record is unavailable.');
+    if (index < 0) throw new Error('The original configuration write record is unavailable.');
+    const value = current[index]!;
+    if (original && (value.hostId !== original.hostId || value.method !== original.method || value.receiptPublicKey !== original.receiptPublicKey)) {
+      throw new Error('The original configuration write record no longer matches its receipt.');
+    }
+    if (!active(value)) {
+      if (!value.terminal || 'terminal' in observation && JSON.stringify(canonicalTerminal(value.terminal)) !== JSON.stringify(canonicalTerminal(observation.terminal))) {
+        throw new Error('The original configuration write terminal does not match.');
+      }
+      if (observed.get(operationId) === observation) { observed.delete(operationId); signers.delete(operationId); }
+      return project(value);
+    }
     const next = [...current]; next[index] = { ...next[index]!, ...observation };
-    try { await save(next); } catch (error) { observed.set(operationId, observation); throw error; }
-    observed.delete(operationId);
-    if ('terminal' in observation) signers.delete(operationId);
+    await save(next);
+    if (observed.get(operationId) === observation) {
+      observed.delete(operationId);
+      if ('terminal' in observation) signers.delete(operationId);
+    }
     return project(next[index]!);
   }
-  async function saveObservation(operationId: string, observation: Observation) {
-    return options.mutations.run(async () => {
-      try { return { operation: await persistObservation(operationId, observation) }; }
-      catch (persistenceError) {
-        const value = records().find(item => item.operationId === operationId);
-        if (!value || !observed.has(operationId)) throw persistenceError;
-        return { operation: project(value), persistenceError };
-      }
-    });
+  async function saveObservation(operationId: string, observation: Observation, original: StoredRecord) {
+    const previous = observed.get(operationId);
+    if (!previous || !('terminal' in previous)) observed.set(operationId, observation);
+    try {
+      return await options.mutations.run(async () => {
+        try { return { operation: await persistObservation(operationId, observed.get(operationId) ?? observation, original) }; }
+        catch (persistenceError) {
+          const value = records().find(item => item.operationId === operationId);
+          if (!value || !observed.has(operationId)) throw persistenceError;
+          return { operation: project(value), persistenceError };
+        }
+      });
+    } catch (persistenceError) {
+      // This is the captured request identity and direct observation, not a read of quarantined state.
+      const operation = project(original);
+      return { operation: operation.state === 'pending' ? { ...operation, state: 'unknown' as const } : operation, persistenceError };
+    }
   }
   async function retryTerminalSave(operationId: string, receipt?: unknown): Promise<ConfigWriteStatus> {
     if (!validId(operationId)) throw new Error('Invalid configuration write operation.');
@@ -237,10 +272,18 @@ export function createConfigWrites(options: ConfigWritesOptions) {
       const value = records().find(item => item.operationId === operationId);
       if (!value) throw new Error('The original configuration write record is unavailable.');
       let observation = observed.get(operationId);
+      const signer = signers.get(operationId);
+      if (observation && signer && (signer.hostId !== value.hostId || signer.method !== value.method || signer.publicKey !== value.receiptPublicKey)) {
+        throw new Error('The original configuration write record no longer matches its receipt.');
+      }
       if (receipt !== undefined) {
         const terminal = verifyReceipt(value, receipt);
         if (value.terminal) {
           if (JSON.stringify(canonicalTerminal(value.terminal)) !== JSON.stringify(terminal)) throw new Error('The original configuration receipt cannot be verified.');
+          if (observation && 'terminal' in observation && JSON.stringify(canonicalTerminal(observation.terminal)) !== JSON.stringify(terminal)) {
+            throw new Error('The original configuration receipt cannot be verified.');
+          }
+          observed.delete(operationId); signers.delete(operationId);
           return project(value);
         }
         if (observation && 'terminal' in observation && JSON.stringify(canonicalTerminal(observation.terminal)) !== JSON.stringify(terminal)) {
@@ -250,6 +293,7 @@ export function createConfigWrites(options: ConfigWritesOptions) {
       }
       if (!observation && value.state === 'preparing' && !live.has(operationId)) observation = { state: 'failed', terminal: { kind: 'not-sent' } };
       if (!observation) throw new Error('The original observation is unavailable.');
+      observed.set(operationId, observation);
       return persistObservation(operationId, observation);
     });
   }
@@ -282,7 +326,7 @@ export function createConfigWrites(options: ConfigWritesOptions) {
       signers.set(input.operationId, { ...input, publicKey: receiptPublicKey, privateKey });
       try { await save([...current, value]); }
       catch {
-        options.state[stateKey] = [...current, value];
+        signers.get(input.operationId)!.failedPreparation = value;
         observed.set(input.operationId, { state: 'failed', terminal: { kind: 'not-sent' } });
         return { outcome: 'not-started', operation: project(value) };
       }
@@ -291,7 +335,7 @@ export function createConfigWrites(options: ConfigWritesOptions) {
       const notSent = async () => {
         if (used) throw new Error('The original configuration preparation was already used.');
         used = true;
-        try { return (await saveObservation(input.operationId, { state: 'failed', terminal: { kind: 'not-sent' } })).operation; }
+        try { return (await saveObservation(input.operationId, { state: 'failed', terminal: { kind: 'not-sent' } }, value)).operation; }
         finally { live.delete(input.operationId); }
       };
       const start = async (params: Record<string, unknown>, connection: ConfigWriteConnection) => {
@@ -301,48 +345,19 @@ export function createConfigWrites(options: ConfigWritesOptions) {
         try { snapshot = structuredClone(params); socket = connection.socket; }
         catch {
           try { return { outcome: 'not-started' as const, operation: (await saveObservation(input.operationId,
-            { state: 'failed', terminal: { kind: 'not-sent' } })).operation }; }
+            { state: 'failed', terminal: { kind: 'not-sent' } }, value)).operation }; }
           finally { live.delete(input.operationId); }
         }
-        return prepare(input, snapshot, connection, socket);
+        return prepare(input, snapshot, connection, socket, value);
       };
       return { outcome: 'prepared', operation: project(value), start, notSent };
     });
   }
-  async function prepare(input: ConfigWriteIdentity, params: Record<string, unknown>, connection: ConfigWriteConnection, originalSocket: unknown): Promise<ConfigWriteSubmission> {
+  async function prepare(input: ConfigWriteIdentity, params: Record<string, unknown>, connection: ConfigWriteConnection, originalSocket: unknown,
+    preparation: StoredRecord): Promise<ConfigWriteSubmission> {
     const { operationId, hostId, method } = input;
-    let resolved: ConfigWriteTarget;
+    let original = preparation;
     let blocking: ConfigWriteStatus | undefined;
-    try {
-      if (!connection.connected || !originalSocket || connection.socket !== originalSocket) throw new Error('The original configuration connection is unavailable.');
-      resolved = await options.resolveTarget({ hostId, method, params: structuredClone(params), connection });
-      if (!resolved || !validId(resolved.hostKey) || resolved.scope !== undefined && resolved.scope !== 'global') throw new Error('The actual configuration host is unavailable.');
-      resolved = { ...resolved, target: normalizedTarget(resolved.target), binding: absoluteTarget(resolved.binding) };
-      if (!connection.connected || connection.socket !== originalSocket) throw new Error('The original configuration connection changed before the write.');
-      const ready = await options.mutations.run(async () => {
-        const current = records(), index = current.findIndex(value => value.operationId === operationId), own = current[index];
-        if (!own || own.state !== 'preparing' || !live.has(operationId)) throw new Error('The original configuration preparation is unavailable.');
-        const blocker = current.find(value => value.operationId !== operationId && active(value)
-          && (value.state === 'preparing' ? !live.has(value.operationId) || observed.has(value.operationId)
-            : value.method === undefined || value.scope === 'global' || resolved.scope === 'global' || value.hostKey === resolved.hostKey &&
-            (value.target === resolved.target || value.binding === resolved.binding || value.binding !== value.target || resolved.binding !== resolved.target)));
-        if (blocker) { blocking = project(blocker); return false; }
-        if (await options.findFileBlocker(resolved)) return false;
-        if (!connection.connected || connection.socket !== originalSocket) return false;
-        const next = [...current]; next[index] = { ...own, ...resolved, state: 'pending' };
-        await save(next);
-        return true;
-      });
-      if (!ready) throw new Error('The configuration target is blocked or the connection changed.');
-    } catch {
-      try {
-        const failed = await saveObservation(operationId, { state: 'failed', terminal: { kind: 'not-sent' } });
-        if (blocking && !failed.operation.storageError) return { outcome: 'blocked', operation: blocking };
-        return { outcome: 'not-started', operation: failed.operation };
-      } finally { live.delete(operationId); }
-    }
-    const operation = await status(operationId);
-    if (!operation) throw new Error('The original configuration write record is unavailable.');
     let releaseInitial!: () => void;
     const afterInitial = new Promise<void>(resolve => { releaseInitial = resolve; });
     const onLateTerminal = async (late: LateRpcTerminal) => {
@@ -351,24 +366,80 @@ export function createConfigWrites(options: ConfigWritesOptions) {
         : record(late.error) && typeof late.error.message === 'string' ? rejected(late.error.code, late.error.data) : null;
       if (!terminal) return;
       await afterInitial;
-      await saveObservation(operationId, { state: late.outcome === 'success' ? 'succeeded' : 'failed', terminal });
+      await saveObservation(operationId, { state: late.outcome === 'success' ? 'succeeded' : 'failed', terminal }, original);
     };
+    let dispatched: { operation: ConfigWriteStatus; response: Promise<{ result: RpcResult<unknown> } | { error: unknown }> };
+    try {
+      const resolve = async () => {
+        if (!connection.connected || !originalSocket || connection.socket !== originalSocket) throw new Error('The original configuration connection is unavailable.');
+        return options.resolveTarget({ hostId, method, params: structuredClone(params), connection });
+      };
+      // Target resolution can itself issue config/read, so it must finish before another state commit starts.
+      let resolved = options.assertStateAvailable ? await options.mutations.run(() => {
+        const own = records().find(value => value.operationId === operationId);
+        if (!own || own.state !== 'preparing' || !live.has(operationId) || own.hostId !== preparation.hostId
+          || own.method !== preparation.method || own.receiptPublicKey !== preparation.receiptPublicKey) {
+          throw new Error('The original configuration preparation is unavailable.');
+        }
+        return resolve();
+      }) : await resolve();
+      if (!resolved || !validId(resolved.hostKey) || resolved.scope !== undefined && resolved.scope !== 'global') throw new Error('The actual configuration host is unavailable.');
+      resolved = { ...resolved, target: normalizedTarget(resolved.target), binding: absoluteTarget(resolved.binding) };
+      if (!connection.connected || connection.socket !== originalSocket) throw new Error('The original configuration connection changed before the write.');
+      const ready = await options.mutations.run(async () => {
+        const current = records(), index = current.findIndex(value => value.operationId === operationId), own = current[index];
+        if (!own || own.state !== 'preparing' || !live.has(operationId) || own.hostId !== preparation.hostId
+          || own.method !== preparation.method || own.receiptPublicKey !== preparation.receiptPublicKey) {
+          throw new Error('The original configuration preparation is unavailable.');
+        }
+        const blocker = current.find(value => value.operationId !== operationId && active(value)
+          && (value.state === 'preparing' ? !live.has(value.operationId) || observed.has(value.operationId)
+            : value.method === undefined || value.scope === 'global' || resolved.scope === 'global' || value.hostKey === resolved.hostKey &&
+            (value.target === resolved.target || value.binding === resolved.binding || value.binding !== value.target || resolved.binding !== resolved.target)));
+        if (blocker) { blocking = project(blocker); return false; }
+        if (await options.findFileBlocker(resolved)) return false;
+        if (!connection.connected || connection.socket !== originalSocket) return false;
+        const next = [...current]; next[index] = { ...own, ...resolved, state: 'pending' };
+        original = structuredClone(next[index]!);
+        await save(next);
+        options.assertStateAvailable?.();
+        if (!connection.connected || connection.socket !== originalSocket) return false;
+        const operation = project(next[index]!);
+        let response: Promise<RpcResult<unknown>>;
+        try { response = Promise.resolve(connection.requestWithCursor(method, params, { mutating: true, onLateTerminal, retainLateUntilDisconnect: true })); }
+        catch (error) { response = Promise.reject(error); }
+        return { operation, response: response.then(result => ({ result }), error => ({ error })) };
+      });
+      if (!ready) throw new Error('The configuration target is blocked or the connection changed.');
+      dispatched = ready;
+    } catch {
+      try {
+        const failed = await saveObservation(operationId, { state: 'failed', terminal: { kind: 'not-sent' } }, original);
+        if (blocking && !failed.operation.storageError) return { outcome: 'blocked', operation: blocking };
+        return { outcome: 'not-started', operation: failed.operation };
+      } finally { live.delete(operationId); releaseInitial(); }
+    }
     const completion = (async (): Promise<ConfigWriteCompletion> => {
       try {
-        if (!connection.connected || connection.socket !== originalSocket) throw new RpcError('The original configuration connection changed before sending.', { status: 503 });
-        const response = await connection.requestWithCursor(method, params, { mutating: true, onLateTerminal, retainLateUntilDisconnect: true });
-        const terminal = terminalForResult(method, response?.result);
-        if (!terminal || !Number.isSafeInteger(response.eventCursor) || response.eventCursor < 0) throw new Error('The original configuration response was not a valid terminal.');
+        let response: RpcResult<unknown>, terminal: ConfigWriteTerminal;
+        try {
+          const result = await dispatched.response;
+          if ('error' in result) throw result.error;
+          response = result.result;
+          const received = terminalForResult(method, response?.result);
+          if (!received || !Number.isSafeInteger(response.eventCursor) || response.eventCursor < 0) throw new Error('The original configuration response was not a valid terminal.');
+          terminal = received;
+        } catch (error) {
+          const rejected = terminalForError(error);
+          live.delete(operationId);
+          if (rejected) return { outcome: 'error', error, ...await saveObservation(operationId, { state: 'failed', terminal: rejected }, original) };
+          return { outcome: 'unknown', error, ...await saveObservation(operationId, { state: 'unknown' }, original) };
+        }
         live.delete(operationId);
-        return { outcome: 'success', response, ...await saveObservation(operationId, { state: 'succeeded', terminal }) };
-      } catch (error) {
-        const terminal = terminalForError(error);
-        live.delete(operationId);
-        if (terminal) return { outcome: 'error', error, ...await saveObservation(operationId, { state: 'failed', terminal }) };
-        return { outcome: 'unknown', error, ...await saveObservation(operationId, { state: 'unknown' }) };
+        return { outcome: 'success', response, ...await saveObservation(operationId, { state: 'succeeded', terminal }, original) };
       } finally { live.delete(operationId); releaseInitial(); }
     })();
-    return { outcome: 'started', operation, completion };
+    return { outcome: 'started', operation: dispatched.operation, completion };
   }
   return { begin, status, retryTerminalSave, activeForFile };
 }
