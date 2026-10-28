@@ -101,6 +101,14 @@ test('tool persistence and risk follow declared metadata; bound database changes
   const bound = classifyElicitation({ ...database(deletion), _meta: { ...database(deletion)._meta, persist: 'always' } });
   assert.equal(bound.kind, 'tool');
   if (bound.kind === 'tool') { assert.deepEqual(bound.persistence, []); assert.equal(bound.riskLevel, 'high'); }
+  const browser = classifyElicitation({ mode:'form',serverName:'browser',requestedSchema:empty,
+    _meta:{origin:'https://example.test',persist:'session',tool_params:{target:'page'},
+      tool_params_display:[{name:'target',value:'page',display_name:'Page'}]} });
+  assert.equal(browser.kind, 'tool');
+  if (browser.kind === 'tool') assert.deepEqual(browser.parameters, {origin:'https://example.test',tool_params:{target:'page'},
+    tool_params_display:[{name:'target',value:'page',display_name:'Page'}]});
+  assert.equal(classifyElicitation({ mode:'form',serverName:'browser',requestedSchema:empty,
+    _meta:{origin:'https://example.test',persist:'session',tool_params_display:'invalid'} }).kind, 'unsupported');
 });
 
 test('approval details show invisible characters in field names and values', () => {
@@ -109,4 +117,55 @@ test('approval details show invisible characters in field names and values', () 
   assert.match(rendered, /orders\\u202Eadmin\\u00A0x\\u\{E0001\}/);
   assert.match(rendered, /\\\\u202E/);
   assert.doesNotMatch(rendered, /[\u200B\u202E\u00A0\u{E0001}]/u);
+});
+
+test('identity verification keeps the original challenge and rejects invalid display or metadata', () => {
+  const request = { mode: 'openai/userVerification', serverName: 'fixture', title: 'Confirm', description: 'Approve access', challenge: 'YQ', _meta: null };
+  assert.deepEqual(classifyElicitation(request), { kind: 'user-verification', title: 'Confirm', description: 'Approve access', challenge: 'YQ' });
+  for (const invalid of [{ challenge: 'Y' }, { challenge: 'YQ==' }, { challenge: 'YR' }, { title: '' },
+    { description: 'x'.repeat(4097) }, { _meta: { security_requirement: true } }])
+    assert.equal(classifyElicitation({ ...request, ...invalid }).kind, 'unsupported');
+});
+
+test('email-code approval requires the original origin, handle, source and one required boolean', () => {
+  const schema = { type: 'object', required: ['approved'], properties: { approved: { type: 'boolean' } } };
+  const meta = { codex_approval_kind: 'browser_email_otp', connector_id: 'browser-use', origin: 'https://example.test',
+    frame_origin: 'https://example.test', browser_auth_challenge_id: 'a'.repeat(32), otp_handle: 'a'.repeat(21) + 'A' };
+  const request = { mode: 'form', serverName: 'node_repl', requestedSchema: schema, _meta: meta };
+  assert.deepEqual(classifyElicitation(request), { kind: 'email-otp', origin: 'https://example.test' });
+  for (const invalid of [{ serverName: 'other' }, { requestedSchema: empty }, { requestedSchema: { ...schema, required: [] } },
+    { _meta: { ...meta, frame_origin: 'https://other.test' } }, { _meta: { ...meta, origin: 'https://example.test/path' } },
+    { _meta: { ...meta, otp_handle: 'bad' } }, { _meta: { ...meta, unknown_security: true } }])
+    assert.equal(classifyElicitation({ ...request, ...invalid }).kind, 'unsupported');
+});
+
+test('tool suggestion retains the actual operation without bypassing requested fields', () => {
+  const meta = { codex_approval_kind: 'tool_suggestion', tool_type: 'plugin', suggest_type: 'enable',
+    tool_id: 'fixture-plugin', tool_name: 'Fixture', suggest_reason: 'Required for this task', remote_plugin_id: 'remote', persist: 'always' };
+  const request = { mode: 'form', serverName: 'fixture', requestedSchema: empty, _meta: meta };
+  assert.deepEqual(classifyElicitation(request), { kind: 'tool-suggestion', toolType: 'plugin', action: 'enable', toolId: 'fixture-plugin',
+    toolName: 'Fixture', reason: 'Required for this task', remotePluginId: 'remote', persist: 'always' });
+  for (const invalid of [{ requestedSchema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } } },
+    { _meta: { ...meta, install_url: 'javascript:alert(1)' } }, { _meta: { ...meta, security_requirement: true } },
+    { _meta: { ...meta, suggest_type: 'execute' } }]) assert.equal(classifyElicitation({ ...request, ...invalid }).kind, 'unsupported');
+});
+
+test('browser sign-in validates the challenge, options and complete requested schema', () => {
+  const meta = { codex_approval_kind:'browser_auth', browser_auth_challenge_id:'a'.repeat(32), origin:'https://example.test', reason:'Sign in',
+    fields:[{id:'user',label:'User',type:'text',required:true},{id:'password',label:'Password',type:'password',required:true}],
+    options:[{id:'password-login',label:'Password',field_ids:['user','password']}], screenshot:{tabId:'2'} };
+  const request = {mode:'form',serverName:'node_repl',requestedSchema:empty,_meta:meta};
+  const view = classifyElicitation(request);
+  assert.equal(view.kind, 'browser-auth');
+  if (view.kind === 'browser-auth') {
+    assert.equal(view.targetTabId, '2');
+    assert.deepEqual(view.options[0]?.fieldIds, ['user','password']);
+  }
+  for (const invalid of [{ requestedSchema:{type:'object',required:['approved'],properties:{approved:{type:'boolean'}}} },
+    { _meta:{...meta,origin:'https://user:secret@example.test'} },
+    { _meta:{...meta,options:[{id:'x',label:'X',field_ids:['missing']}]} },
+    { _meta:{...meta,fields:[{id:'__proto__',label:'Password',type:'password',required:true}]} },
+    { _meta:{...meta,'openai/confirmation':{field:'approved'}} },
+    { _meta:{...meta,browser_auth_challenge_id:'short'} }])
+    assert.equal(classifyElicitation({ ...request, ...invalid }).kind, 'unsupported');
 });

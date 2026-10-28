@@ -1,11 +1,13 @@
 import { parseApprovalForm, safeElicitationUrl } from './approval-schema.ts';
 import type { ApprovalForm } from './approval-schema.ts';
+import { classifyApprovalSpecial } from './approval-special.ts';
+import type { ApprovalSpecial } from './approval-special.ts';
 
 type ConfirmationField = { label: string; value: string };
 type Confirmation = { field: string; title?: string; confirmLabel?: string; destructive?: boolean;
   fields: ConfirmationField[]; sections?: { title?: string; fields: ConfirmationField[] }[] };
 export type ApprovalPersistence = 'session' | 'always';
-export type Elicitation =
+export type Elicitation = ApprovalSpecial
   | { kind: 'form'; form: ApprovalForm; confirmation?: Confirmation }
   | { kind: 'tool'; connector: string; tool?: string; parameters: Record<string, unknown>; executionBound: boolean;
       persistence: ApprovalPersistence[]; riskLevel?: 'low' | 'high' }
@@ -161,6 +163,8 @@ export function classifyElicitation(params: Record<string, unknown>): Elicitatio
   const mode = params.mode;
   const meta = record(params._meta) ? params._meta : {};
   if (params._meta != null && !record(params._meta)) return { kind: 'unsupported', reason: 'This request has invalid metadata.' };
+  const special = classifyApprovalSpecial(params, meta);
+  if (special) return special;
   if (mode === 'url') {
     if (meta.codex_approval_kind !== undefined) return { kind: 'unsupported', reason: 'This special authentication request is not supported.' };
     const url = safeElicitationUrl(params.url);
@@ -200,11 +204,19 @@ export function classifyElicitation(params: Record<string, unknown>): Elicitatio
   }
   if (mode === 'form' && (params.serverName === 'browser' || params.serverName === 'browser-use')
     && meta.persist != null && typeof meta.origin === 'string' && meta.origin.trim()
-    && emptySpecialSchema(params) && allowedKeys(meta, ['origin', 'persist', 'riskLevel', 'subtitle'])) {
+    && emptySpecialSchema(params) && allowedKeys(meta, ['origin', 'persist', 'riskLevel', 'subtitle', 'tool_params', 'tool_params_display'])) {
     const persistent = persistence(meta.persist);
-    if (!persistent || meta.riskLevel != null && meta.riskLevel !== 'low' && meta.riskLevel !== 'high')
+    if (!persistent || meta.riskLevel != null && meta.riskLevel !== 'low' && meta.riskLevel !== 'high'
+      || meta.subtitle != null && typeof meta.subtitle !== 'string'
+      || meta.tool_params !== undefined && !record(meta.tool_params)
+      || meta.tool_params_display !== undefined && (!Array.isArray(meta.tool_params_display)
+        || !meta.tool_params_display.every(item => record(item) && allowedKeys(item, ['name', 'value', 'display_name'])
+          && typeof item.name === 'string' && Boolean(item.name.trim()) && Object.hasOwn(item, 'value')
+          && (item.display_name === undefined || typeof item.display_name === 'string' && Boolean(item.display_name.trim())))))
       return { kind: 'unsupported', reason: 'This approval has invalid security metadata.' };
-    return { kind: 'tool', connector: params.serverName, parameters: { origin: meta.origin }, executionBound: false,
+    return { kind: 'tool', connector: params.serverName, parameters: { origin: meta.origin,
+      ...(meta.tool_params !== undefined ? { tool_params: meta.tool_params } : {}),
+      ...(meta.tool_params_display !== undefined ? { tool_params_display: meta.tool_params_display } : {}) }, executionBound: false,
       persistence: persistent, ...(meta.riskLevel === 'low' || meta.riskLevel === 'high' ? { riskLevel: meta.riskLevel } : {}) };
   }
   if (mode === 'form' && (params.serverName === 'browser' || params.serverName === 'browser-use') && meta.persist != null)

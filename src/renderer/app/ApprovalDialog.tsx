@@ -6,6 +6,7 @@ import { initialApprovalValues, isApprovalFileUri, validateApprovalForm } from '
 import type { ApprovalField, ApprovalFormValues, ApprovalResourceOption } from './approval-schema.ts';
 import { classifyElicitation, displayApprovalParameters } from './approval-elicitation.ts';
 import type { ApprovalPersistence } from './approval-elicitation.ts';
+import type { ApprovalBrowserAuth, ApprovalToolSuggestion } from './approval-special.ts';
 
 export interface ServerRequest {
   hostId: string; id: string | number; method: string; params: Record<string, unknown>;
@@ -29,6 +30,14 @@ export interface ApprovalFilePickRequest {
   ref: ServerRequestRef; hostId: string; threadId: string | null; serverName: string;
   field: string; kind: 'file' | 'directory'; accept: string[]; multiple: boolean;
 }
+export interface ApprovalHostRequest { ref: ServerRequestRef; hostId: string; threadId: string; serverName: string }
+export interface ApprovalVerificationRequest extends ApprovalHostRequest { title: string; description: string; challenge: string; signal: AbortSignal }
+export interface ApprovalSuggestionRequest extends ApprovalHostRequest { suggestion: ApprovalToolSuggestion }
+export interface ApprovalOtpIdentity { ref: ServerRequestRef; threadId: string; displayName: string }
+export interface ApprovalBrowserAuthRequest extends ApprovalHostRequest {
+  origin: string; challengeId: string; targetTabId?: string;
+  fields: Record<string, { value: string }>; selectedOption?: string;
+}
 export interface ApprovalDialogProps {
   request: ServerRequest;
   onRespond(result: unknown): Promise<void>;
@@ -48,6 +57,14 @@ export interface ApprovalDialogProps {
   onCheckRequestValidity?(ref: ServerRequestRef): Promise<boolean>;
   /** Select resources in the original host namespace and return their file URIs. */
   onPickApprovalFiles?(request: ApprovalFilePickRequest): Promise<string[]>;
+  /** Complete the original signed verification transaction or its confirmed cancellation. */
+  onBeginUserVerification?(request: ApprovalVerificationRequest): Promise<void>;
+  /** Resolve only when this original host has connected, installed or enabled the tool. */
+  onApplyToolSuggestion?(request: ApprovalSuggestionRequest): Promise<void>;
+  /** Complete private fill and acknowledge the original request without resending credentials on retries. */
+  onSubmitBrowserAuth?(request: ApprovalBrowserAuthRequest): Promise<void>;
+  /** Resolved original-conversation agent identity, not an email address or a code. */
+  emailOtpIdentity?: ApprovalOtpIdentity;
   completionContext?: ApprovalCompletionContext;
   /** Resolve true only after the original host confirms that the connector is accessible. */
   onCheckConnectorAuthorization?(request: ApprovalConnectorAuthorization): Promise<boolean>;
@@ -207,6 +224,41 @@ function ElicitationField({ field, value, error, disabled, picking, onPick, onCh
   </div>;
 }
 
+function BrowserAuthFields({ view, disabled, available, onSubmit }: {
+  view: ApprovalBrowserAuth; disabled: boolean; available: boolean;
+  onSubmit(fields: Record<string, { value: string }>, selectedOption?: string): void;
+}) {
+  const [selected, setSelected] = useState('');
+  const [values, setValues] = useState<Record<string, string>>({});
+  const option = view.options.find(item => item.id === selected);
+  const fields = view.options.length ? view.fields.filter(field => option?.fieldIds.includes(field.id)) : view.fields;
+  const canSubmit = available && !disabled && (view.options.length > 0 ? Boolean(option) : fields.length > 0);
+  return <form autoComplete="off" onSubmit={event => {
+    event.preventDefault();
+    if (!canSubmit) return;
+    const entries = fields.flatMap(field => {
+      const value = own(values, field.id);
+      return value ? [[field.id, { value }] as const] : [];
+    });
+    if (!option && !entries.length) return;
+    const submission = Object.fromEntries(entries);
+    setValues({});
+    onSubmit(submission, option?.id);
+  }}>
+    <h3>Sign in to {new URL(view.origin).origin}</h3><p>{view.reason}</p>{view.riskLevel === 'high' && <p role="status">Elevated risk</p>}
+    {view.options.length > 0 && <fieldset disabled={disabled}><legend>Sign-in method</legend>
+      {view.options.map(item => <label key={item.id} style={{ display: 'block' }}><input type="radio" name="auth-option"
+        checked={selected === item.id} onChange={() => { setSelected(item.id); setValues({}); }} /> {item.label}</label>)}</fieldset>}
+    {fields.map(field => <label key={field.id} style={{ display: 'block', margin: '8px 0' }}>{field.label}
+      <input name={'browser-auth-field-' + field.id} type={field.type} required={field.required} autoComplete="off" disabled={disabled}
+        value={own(values, field.id) ?? ''} onChange={event => setValues(current => ({ ...current, [field.id]: event.target.value }))} />
+    </label>)}
+    {(view.hasQrCode || view.hasWebauthn) && <p>QR code and passkey sign-in require the original browser host.</p>}
+    {!available && <p>Private sign-in is unavailable on this host.</p>}
+    <button type="submit" disabled={!canSubmit}>Send sign-in details</button>
+  </form>;
+}
+
 function focusable(root: HTMLElement): HTMLElement[] {
   return [...root.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled):not([type="hidden"]),select:not(:disabled),textarea:not(:disabled),a[href],[tabindex]:not([tabindex="-1"])')]
     .filter((element) => element.getClientRects().length > 0);
@@ -278,15 +330,18 @@ export function ApprovalDialog(props: ApprovalDialogProps) {
 }
 
 function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscape, inputDismissMode = 'interrupt', stateRef, outcome, onOutcome,
-  inputDraft, onInputDraftChange, formDraft, onFormDraftChange, onCheckRequestValidity, onPickApprovalFiles, completionContext, onCheckConnectorAuthorization }: ApprovalDialogProps) {
+  inputDraft, onInputDraftChange, formDraft, onFormDraftChange, onCheckRequestValidity, onPickApprovalFiles, onBeginUserVerification,
+  onApplyToolSuggestion, onSubmitBrowserAuth, emailOtpIdentity, completionContext, onCheckConnectorAuthorization }: ApprovalDialogProps) {
   const dialog = useRef<HTMLElement>(null);
   const inFlight = useRef(false);
+  const verificationController = useRef<AbortController | null>(null);
   const checkingAuth = useRef(false);
   const mounted = useRef(false);
   const formId = useId();
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
   const [picking, setPicking] = useState<string | null>(null);
+  const [cancellingVerification, setCancellingVerification] = useState(false);
   const [localOutcome, setLocalOutcome] = useState<ApprovalOutcome>();
   const [error, setError] = useState('');
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -311,6 +366,7 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   const blocking = !input || request.params.isBlocking !== false;
   const sourceValid = request.hostId === request.ref.hostId && request.id === request.ref.id;
   const threadId = typeof request.params.threadId === 'string' ? request.params.threadId : '';
+  const serverName = typeof request.params.serverName === 'string' ? request.params.serverName : '';
   const turnId = typeof request.params.turnId === 'string' ? request.params.turnId : '';
   const source: ApprovalInputOrigin | null = sourceValid && threadId && turnId
     ? { ref: request.ref, hostId: request.ref.hostId, threadId, turnId } : null;
@@ -326,6 +382,9 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
     view.url, view.connectorId, view.linkId, view.reason, view.scopes, view.consent]) : '';
   const authorizationKeyRef = useRef(authorizationKey);
   authorizationKeyRef.current = authorizationKey;
+  const suggestionKey = view?.kind === 'tool-suggestion' ? JSON.stringify([threadId, turnId, serverName, view]) : '';
+  const suggestionKeyRef = useRef(suggestionKey);
+  suggestionKeyRef.current = suggestionKey;
   let warning = '';
   if (!sourceValid) warning = 'This request has inconsistent host or request identity.';
   else if (!managed) warning = 'Approval state is unavailable. Open this request in a connected conversation to respond.';
@@ -334,7 +393,7 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   else if (command && decisions?.unsupported) warning = 'Some approval decisions cannot be represented safely.';
   else if (view?.kind === 'unsupported') warning = view.reason;
 
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; verificationController.current?.abort(); }; }, []);
   useEffect(() => {
     const root = dialog.current;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -350,7 +409,7 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
     };
   }, [blocking]);
 
-  const send = async (action: () => Promise<void>) => {
+  const send = async (action: () => Promise<void>, retryKnownFailure = true, redactFailure = false) => {
     if (inFlight.current || lockedRef.current || !onOutcome) return;
     inFlight.current = true; setBusy(true); setError('');
     try {
@@ -360,19 +419,20 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
       onOutcome(request.ref, 'sent');
     }
     catch (cause) {
+      const detail = redactFailure ? 'The host transaction failed.' : cause instanceof Error ? cause.message : String(cause);
       let stillPending = false;
-      if (record(cause) && cause.uncertain === false && onCheckRequestValidity) {
+      if (retryKnownFailure && record(cause) && cause.uncertain === false && onCheckRequestValidity) {
         try { stillPending = await onCheckRequestValidity(request.ref); } catch { /* An unverified request stays locked. */ }
       }
       if (stillPending && mounted.current) {
         onOutcome(request.ref, 'ready');
         setLocalOutcome('ready');
         inFlight.current = false;
-        setError((cause instanceof Error ? cause.message : String(cause)) + ' The original request is still pending; you can retry.');
+        setError(detail + ' The original request is still pending; you can retry.');
       } else {
         setLocalOutcome('unknown');
         onOutcome(request.ref, 'unknown');
-        setError((cause instanceof Error ? cause.message : String(cause)) + ' Response could not be confirmed; check the original conversation before responding again.');
+        setError(detail + ' Response could not be confirmed; check the original conversation before responding again.');
       }
     }
     finally { if (mounted.current) setBusy(false); }
@@ -380,6 +440,36 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
   const respond = (result: unknown) => { void send(() => onRespond(result)); };
   const elicitationResponse = (action: 'accept' | 'decline' | 'cancel', content: unknown = null, persist?: ApprovalPersistence) =>
     ({ action, content, _meta: action === 'accept' && persist ? { persist } : null });
+  const otpIdentity = emailOtpIdentity?.ref.hostId === request.ref.hostId && emailOtpIdentity.ref.generation === request.ref.generation
+    && emailOtpIdentity.ref.id === request.ref.id && emailOtpIdentity.threadId === threadId && emailOtpIdentity.displayName.trim()
+    ? emailOtpIdentity.displayName : '';
+  const beginVerification = () => {
+    if (view?.kind !== 'user-verification' || !onBeginUserVerification || !threadId || !serverName || lockedRef.current || inFlight.current) return;
+    const { title, description, challenge } = view;
+    const controller = new AbortController();
+    verificationController.current = controller;
+    void send(() => onBeginUserVerification({ ref: request.ref, hostId: request.ref.hostId, threadId, serverName,
+      title, description, challenge, signal: controller.signal }), false, true).finally(() => {
+      if (verificationController.current === controller) verificationController.current = null;
+      if (mounted.current) setCancellingVerification(false);
+    });
+  };
+  const applySuggestion = () => {
+    if (view?.kind !== 'tool-suggestion' || !onApplyToolSuggestion || !onCheckRequestValidity || !threadId || !serverName) return;
+    void send(async () => {
+      await onApplyToolSuggestion({ ref: request.ref, hostId: request.ref.hostId, threadId, serverName, suggestion: view });
+      if (!mounted.current || suggestionKeyRef.current !== suggestionKey || !await onCheckRequestValidity(request.ref)
+        || !mounted.current || suggestionKeyRef.current !== suggestionKey)
+        throw new Error('The original request could not be verified after tool setup.');
+      await onRespond(elicitationResponse('accept', {}));
+    }, false);
+  };
+  const submitBrowserAuth = (fields: Record<string, { value: string }>, selectedOption?: string) => {
+    if (view?.kind !== 'browser-auth' || !onSubmitBrowserAuth || !threadId || !serverName) return;
+    void send(() => onSubmitBrowserAuth({ ref: request.ref, hostId: request.ref.hostId, threadId, serverName,
+      origin: view.origin, challengeId: view.challengeId, ...(view.targetTabId ? { targetTabId: view.targetTabId } : {}),
+      fields, ...(selectedOption ? { selectedOption } : {}) }), false, true);
+  };
   const checkConnectorAuthorization = async () => {
     if (view?.kind !== 'url' || !view.connectorId || view.consent || !threadId || !onCheckConnectorAuthorization
       || checkingAuth.current || locked) return;
@@ -397,7 +487,12 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
     } finally { checkingAuth.current = false; if (mounted.current) setChecking(false); }
   };
   const cancel = () => {
-    if (elicitation) respond(elicitationResponse('cancel'));
+    if (view?.kind === 'user-verification' && inFlight.current && verificationController.current) {
+      setCancellingVerification(true);
+      verificationController.current.abort();
+    } else if (elicitation) respond(view?.kind === 'user-verification'
+      ? { action: 'cancel', content: null, _meta: { 'openai/userVerificationReason': 'userCancelled' } }
+      : elicitationResponse('cancel'));
     else if (input) {
       if (inputDismissMode === 'reply-empty') respond({ answers: {} });
       else if (source && onInputEscape) void send(() => onInputEscape(source));
@@ -478,7 +573,8 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
     position: 'fixed', right: 12, bottom: 12, zIndex: 100, width: 'min(420px, calc(100vw - 24px))', pointerEvents: 'none',
   }}><section ref={dialog} tabIndex={-1} role="dialog" aria-modal={blocking ? 'true' : undefined}
     aria-labelledby={formId + '-title'} className="yard-dialog" style={{ minWidth: 0, width: 'min(100%, 680px)', overflowWrap: 'anywhere', pointerEvents: 'auto' }} onKeyDown={(event) => {
-      if (event.key === 'Escape' && !locked && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
+      if (event.key === 'Escape' && (!locked || view?.kind === 'user-verification' && busy && verificationController.current)
+        && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
         event.preventDefault();
         cancel();
         return;
@@ -508,6 +604,16 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
         {view.riskLevel === 'high' && <p role="status">Elevated risk</p>}
         {view.executionBound && <p>Review this specific database change before approving.</p>}
         <pre>{displayApprovalParameters(view.parameters)}</pre></>}
+      {view?.kind === 'user-verification' && <><h3>{view.title}</h3><p>{view.description}</p>
+        {!onBeginUserVerification && <p>Identity verification is unavailable on this host.</p>}</>}
+      {view?.kind === 'email-otp' && <><h3>{otpIdentity ? `Allow ${otpIdentity} to fill this verification code?` : 'Automatic filling is unavailable'}</h3>
+        <p>{otpIdentity ? `A code from connected email will be sent privately to ${view.origin}. ${otpIdentity} cannot see it.`
+          : 'Deny this request to enter the code yourself.'}</p>{view.riskLevel === 'high' && <p role="status">Elevated risk</p>}</>}
+      {view?.kind === 'tool-suggestion' && <><h3>{view.action === 'install' ? 'Install' : 'Enable'} {view.toolName}</h3>
+        <p>{view.reason}</p><p>{view.toolType}: {view.toolId}</p>{view.riskLevel === 'high' && <p role="status">Elevated risk</p>}
+        {!onApplyToolSuggestion && <p>Tool setup is unavailable on this host.</p>}</>}
+      {view?.kind === 'browser-auth' && <BrowserAuthFields key={JSON.stringify([threadId, serverName, view])} view={view} disabled={locked}
+        available={Boolean(onSubmitBrowserAuth && threadId && serverName)} onSubmit={submitBrowserAuth} />}
       {form && <form id={formId} noValidate onSubmit={(event) => { event.preventDefault(); submitForm(); }}>
         {view?.kind === 'form' && view.confirmation && <div>
           {view.confirmation.title && <h3>{view.confirmation.title}</h3>}
@@ -556,12 +662,20 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
         {choice.detail && <small style={{ display: 'block', overflowWrap: 'anywhere' }}>{choice.detail}</small>}</div>)}
     </fieldset>}
     <div style={{ flexWrap: 'wrap' }}>
-      {elicitation && <><button type="button" disabled={locked} onClick={() => respond(elicitationResponse('decline'))}>Decline</button>
-        <button type="button" disabled={locked} onClick={cancel}>Cancel</button>
+      {elicitation && <>{view?.kind !== 'user-verification' && <button type="button" disabled={locked} onClick={() => respond(elicitationResponse('decline'))}>Decline</button>}
+        <button type="button" disabled={locked && !(view?.kind === 'user-verification' && busy
+          && verificationController.current && !cancellingVerification)} onClick={cancel}>
+          {cancellingVerification ? 'Cancelling verification...' : 'Cancel'}</button>
         {form && <button type="submit" form={formId} disabled={locked}>{view?.kind === 'form' && view.confirmation?.confirmLabel || 'Submit'}</button>}
         {view?.kind === 'tool' && <button type="button" disabled={locked} onClick={() => respond(elicitationResponse('accept', {}))}>Approve</button>}
         {view?.kind === 'tool' && view.persistence.map(option => <button key={option} type="button" disabled={locked}
           onClick={() => respond(elicitationResponse('accept', {}, option))}>{option === 'session' ? 'Approve for session' : 'Always approve'}</button>)}
+        {view?.kind === 'user-verification' && <button type="button" disabled={locked || !onBeginUserVerification || !threadId || !serverName}
+          onClick={beginVerification}>Verify</button>}
+        {view?.kind === 'email-otp' && <button type="button" disabled={locked || !otpIdentity || !threadId}
+          onClick={() => respond(elicitationResponse('accept', { approved: true }))}>Allow</button>}
+        {view?.kind === 'tool-suggestion' && <button type="button" disabled={locked || !onApplyToolSuggestion || !onCheckRequestValidity || !threadId || !serverName}
+          onClick={applySuggestion}>Continue</button>}
         {view?.kind === 'url' && view.connectorId === undefined && <button type="button" disabled={locked} onClick={() => respond(elicitationResponse('accept', {}))}>Continue</button>}
         {view?.kind === 'url' && view.connectorId !== undefined && !view.consent && onCheckConnectorAuthorization
           && <button type="button" disabled={locked || checking || !threadId} onClick={() => { void checkConnectorAuthorization(); }}>Check connection</button>}</>}

@@ -10,6 +10,8 @@ declare global {
       show(method: string, params: Record<string, unknown>, options?: {
         completion?: boolean; wrongHost?: boolean; noInterrupt?: boolean; dismissEmpty?: boolean; completionHost?: string; authCheck?: boolean | 'delayed';
         unmanaged?: boolean; wrongState?: boolean; validity?: boolean; picker?: boolean | 'delayed' | 'invalid';
+        verification?: boolean | 'fail' | 'delayed'; suggestion?: boolean | 'fail' | 'delayed'; otpIdentity?: boolean | 'wrong' | 'wrong-thread';
+        browserAuth?: boolean | 'fail';
       }): void;
       update(params: Record<string, unknown>): void;
       hide(): void;
@@ -17,11 +19,13 @@ declare global {
       failNext(kind?: 'known' | 'unknown'): void;
       releaseAuth(): void;
       releasePick(): void;
+      releaseSuggestion(): void;
       calls: { ref: { hostId: string; generation: string; id: number }; result?: unknown; interrupt?: unknown; unsupported?: boolean }[];
       searches: { kind: string; params: Record<string, unknown>; hostId?: string }[];
       authChecks: unknown[];
       validityChecks: unknown[];
       filePicks: unknown[];
+      transactions: unknown[];
     };
   }
 }
@@ -34,8 +38,8 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     "import { createRoot } from 'react-dom/client';",
     "import { ApprovalDialog } from './src/renderer/app/ApprovalDialog.tsx';",
     "const root = createRoot(document.getElementById('root'));",
-    'const calls = [], searches = [], authChecks = [], validityChecks = [], filePicks = [], outcomes = new Map(), inputDrafts = new Map(), formDrafts = new Map();',
-    'let next = 0, current, fail = false, releaseAuth, releasePick;',
+    'const calls = [], searches = [], authChecks = [], validityChecks = [], filePicks = [], transactions = [], outcomes = new Map(), inputDrafts = new Map(), formDrafts = new Map();',
+    'let next = 0, current, fail = false, releaseAuth, releasePick, releaseSuggestion;',
     'const client = {',
     "  host: async (kind, params) => { searches.push({kind, params}); return {entries:[{type:'file', name:'readme.md', path:'readme.md'}]}; },",
     "  rpc: async (kind, params, hostId) => { searches.push({kind, params, hostId}); return {data:[{skills:[{enabled:true,name:'review',path:'/skills/review',description:'Review'}]}]}; },",
@@ -51,6 +55,10 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     '    onFormDraftChange:options.unmanaged ? undefined : (_ref, value) => formDrafts.set(key, structuredClone(value)),',
     '    onCheckRequestValidity:options.validity === undefined ? undefined : async ref => { validityChecks.push(structuredClone(ref)); return options.validity; },',
     "    onPickApprovalFiles:options.picker ? async request => { filePicks.push(structuredClone(request)); if (options.picker === 'delayed') return await new Promise(resolve => {releasePick=resolve;}); return [options.picker === 'invalid' ? 'https://bad.test/a' : 'file:///workspace/picked.png']; } : undefined,",
+    "    onBeginUserVerification:options.verification ? async request => { const {signal,...details}=request; transactions.push({kind:'verify',request:structuredClone(details)}); if (options.verification === 'delayed') await new Promise(resolve => signal.addEventListener('abort',() => {transactions.push({kind:'verify-cancel'}); resolve();},{once:true})); if (options.verification === 'fail') throw Object.assign(Error('Synthetic verification failure'),{uncertain:false}); } : undefined,",
+    "    onApplyToolSuggestion:options.suggestion ? async request => { transactions.push({kind:'suggestion',request:structuredClone(request)}); if (options.suggestion === 'delayed') await new Promise(resolve => {releaseSuggestion=resolve;}); if (options.suggestion === 'fail') throw Object.assign(Error('Synthetic setup failure'),{uncertain:false}); } : undefined,",
+    "    onSubmitBrowserAuth:options.browserAuth ? async request => { transactions.push({kind:'browser-auth',request:structuredClone(request)}); if (options.browserAuth === 'fail') throw Object.assign(Error('Synthetic sign-in failure'),{uncertain:false}); } : undefined,",
+    "    emailOtpIdentity:options.otpIdentity ? {ref: options.otpIdentity === 'wrong' ? {...ref,generation:'wrong'} : ref, threadId: options.otpIdentity === 'wrong-thread' ? 'other-thread' : 'thread-a', displayName:'Test agent'} : undefined,",
     "    completionContext:options.completion ? {client, hostId:options.completionHost ?? 'ssh-test',threadId:'thread-a',cwd:'/source-work'} : undefined,",
     "    inputDismissMode:options.dismissEmpty ? 'reply-empty' : 'interrupt',",
     "    onCheckConnectorAuthorization:options.authCheck ? async value => { authChecks.push(structuredClone(value)); if (options.authCheck === 'delayed') return await new Promise(resolve => {releaseAuth=resolve;}); return true; } : undefined,",
@@ -61,7 +69,7 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     "      if (fail) { const kind=fail; fail=false; throw Object.assign(Error('Synthetic interrupt failure'), {uncertain:kind !== 'known'}); } root.render(null); }",
     '  }));',
     '}',
-    "window.approvalHarness = { calls, searches, authChecks, validityChecks, filePicks, failNext(kind='unknown') {fail=kind;}, releaseAuth() {releaseAuth(true);}, releasePick() {releasePick(['file:///workspace/late.png']);}, hide() {root.render(null);}, reopen() {render();},",
+    "window.approvalHarness = { calls, searches, authChecks, validityChecks, filePicks, transactions, failNext(kind='unknown') {fail=kind;}, releaseAuth() {releaseAuth(true);}, releasePick() {releasePick(['file:///workspace/late.png']);}, releaseSuggestion() {releaseSuggestion();}, hide() {root.render(null);}, reopen() {render();},",
     '  update(params) {current.request.params={...current.request.params,...params}; render();},',
     '  show(method, params, options={}) { const id=++next, ref={hostId:"ssh-test",generation:"generation-"+id,id};',
     "    current={request:{ref,hostId:options.wrongHost?'wrong-host':ref.hostId,id,method,params:{threadId:'thread-a',turnId:'turn-a',...params}},options}; render(); } };",
@@ -78,6 +86,8 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     const show = (method: string, params: Record<string, unknown>, options?: {
       completion?: boolean; wrongHost?: boolean; noInterrupt?: boolean; dismissEmpty?: boolean; completionHost?: string; authCheck?: boolean | 'delayed';
       unmanaged?: boolean; wrongState?: boolean; validity?: boolean; picker?: boolean | 'delayed' | 'invalid';
+      verification?: boolean | 'fail' | 'delayed'; suggestion?: boolean | 'fail' | 'delayed'; otpIdentity?: boolean | 'wrong' | 'wrong-thread';
+      browserAuth?: boolean | 'fail';
     }) =>
       page.evaluate(([m, p, o]) => window.approvalHarness.show(m, p, o), [method, params, options] as const);
     const calls = () => page.evaluate(() => window.approvalHarness.calls);
@@ -389,6 +399,116 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     await show('item/fileChange/requestApproval', {}, {wrongHost:true});
     await dialog.getByText('This request has inconsistent host or request identity.').waitFor();
     assert.equal(await dialog.getByRole('button', {name:'Approve',exact:true}).isDisabled(), true);
+
+    const verification = { mode:'openai/userVerification', serverName:'fixture', title:'Verify identity', description:'Confirm access', challenge:'YQ', _meta:null };
+    await show('mcpServer/elicitation/request', verification);
+    assert.equal(await dialog.getByRole('button', {name:'Verify'}).isDisabled(), true);
+    await dialog.getByRole('button', {name:'Cancel'}).click();
+    assert.deepEqual((await calls()).at(-1)?.result, {action:'cancel',content:null,_meta:{'openai/userVerificationReason':'userCancelled'}});
+    await show('mcpServer/elicitation/request', verification, {verification:true});
+    const beforeVerify = (await calls()).length;
+    await dialog.getByRole('button', {name:'Verify'}).click();
+    await dialog.getByText('Response sent; waiting for the request to resolve.').waitFor();
+    assert.equal((await calls()).length, beforeVerify);
+    const verifyTransaction = (await page.evaluate(() => window.approvalHarness.transactions)).at(-1) as {kind:string;request:Record<string,unknown>};
+    assert.equal(verifyTransaction.kind, 'verify');
+    assert.equal(verifyTransaction.request.hostId, 'ssh-test');
+    assert.equal(verifyTransaction.request.threadId, 'thread-a');
+    assert.equal(verifyTransaction.request.challenge, 'YQ');
+    await show('mcpServer/elicitation/request', verification, {verification:'delayed'});
+    const beforeVerifyCancel = (await calls()).length;
+    await dialog.getByRole('button', {name:'Verify'}).click();
+    await dialog.getByRole('button', {name:'Cancel'}).click();
+    await dialog.getByText('Response sent; waiting for the request to resolve.').waitFor();
+    assert.equal((await page.evaluate(() => window.approvalHarness.transactions)).at(-1) &&
+      ((await page.evaluate(() => window.approvalHarness.transactions)).at(-1) as {kind:string}).kind, 'verify-cancel');
+    assert.equal((await calls()).length, beforeVerifyCancel);
+    await show('mcpServer/elicitation/request', verification, {verification:'fail',validity:true});
+    await dialog.getByRole('button', {name:'Verify'}).click();
+    await dialog.getByText(/Response could not be confirmed/).waitFor();
+    assert.equal(await dialog.getByRole('button', {name:'Verify'}).isDisabled(), true);
+
+    const otp = {mode:'form',serverName:'node_repl',requestedSchema:{type:'object',required:['approved'],properties:{approved:{type:'boolean'}}},
+      _meta:{codex_approval_kind:'browser_email_otp',connector_id:'browser-use',origin:'https://example.test',frame_origin:'https://example.test',
+        browser_auth_challenge_id:'a'.repeat(32),otp_handle:'a'.repeat(21)+'A'}};
+    await show('mcpServer/elicitation/request', otp, {otpIdentity:'wrong'});
+    assert.equal(await dialog.getByRole('button', {name:'Allow'}).isDisabled(), true);
+    await show('mcpServer/elicitation/request', otp, {otpIdentity:'wrong-thread'});
+    assert.equal(await dialog.getByRole('button', {name:'Allow'}).isDisabled(), true);
+    await show('mcpServer/elicitation/request', otp, {otpIdentity:true});
+    await dialog.getByText(/A code from connected email will be sent privately to https:\/\/example.test/).waitFor();
+    await dialog.getByRole('button', {name:'Allow'}).click();
+    assert.deepEqual((await calls()).at(-1)?.result, {action:'accept',content:{approved:true},_meta:null});
+
+    const suggestion = {mode:'form',serverName:'fixture',requestedSchema:{type:'object',properties:{}},
+      _meta:{codex_approval_kind:'tool_suggestion',tool_type:'plugin',suggest_type:'enable',tool_id:'plugin',tool_name:'Example',suggest_reason:'Needed'}};
+    await show('mcpServer/elicitation/request', suggestion, {suggestion:true,validity:true});
+    await dialog.getByRole('button', {name:'Continue'}).click();
+    assert.deepEqual((await calls()).at(-1)?.result, {action:'accept',content:{},_meta:null});
+    const setup = (await page.evaluate(() => window.approvalHarness.transactions)).at(-1) as {kind:string;request:Record<string,unknown>};
+    assert.equal(setup.kind, 'suggestion');
+    assert.equal(setup.request.hostId, 'ssh-test');
+    await show('mcpServer/elicitation/request', suggestion, {suggestion:true,validity:false});
+    const beforeInvalid = (await calls()).length;
+    await dialog.getByRole('button', {name:'Continue'}).click();
+    await dialog.getByText(/original request could not be verified/).waitFor();
+    assert.equal((await calls()).length, beforeInvalid);
+    assert.equal(await dialog.getByRole('button', {name:'Continue'}).isDisabled(), true);
+    await show('mcpServer/elicitation/request', suggestion, {suggestion:'delayed',validity:true});
+    const beforeChanged = (await calls()).length;
+    await dialog.getByRole('button', {name:'Continue'}).click();
+    await page.evaluate(meta => window.approvalHarness.update({_meta:meta}), {...suggestion._meta,tool_name:'Changed'});
+    await dialog.getByRole('heading', {name:'Enable Changed'}).waitFor();
+    await page.evaluate(() => window.approvalHarness.releaseSuggestion());
+    await dialog.getByText(/original request could not be verified/).waitFor();
+    assert.equal((await calls()).length, beforeChanged);
+    await show('mcpServer/elicitation/request', suggestion, {suggestion:'delayed',validity:true});
+    const beforeThreadChange = (await calls()).length;
+    await dialog.getByRole('button', {name:'Continue'}).click();
+    await page.evaluate(() => window.approvalHarness.update({threadId:'thread-b'}));
+    await dialog.getByText(/Thread: thread-b/).waitFor();
+    await page.evaluate(() => window.approvalHarness.releaseSuggestion());
+    await dialog.getByText(/original request could not be verified/).waitFor();
+    assert.equal((await calls()).length, beforeThreadChange);
+
+    const browserAuth = {mode:'form',serverName:'node_repl',requestedSchema:{type:'object',properties:{}},_meta:{
+      codex_approval_kind:'browser_auth',browser_auth_challenge_id:'a'.repeat(32),origin:'https://example.test',reason:'Sign in',
+      fields:[{id:'user',label:'Username',type:'text',required:true},{id:'password',label:'Password',type:'password',required:true}],
+      options:[{id:'password',label:'Password sign-in',field_ids:['user','password']}],screenshot:{tabId:'2'}}};
+    await show('mcpServer/elicitation/request', browserAuth);
+    assert.equal(await dialog.getByRole('button', {name:'Send sign-in details'}).isDisabled(), true);
+    await show('mcpServer/elicitation/request', browserAuth, {browserAuth:true});
+    await dialog.getByLabel('Password sign-in').check();
+    await dialog.getByLabel('Username').fill('synthetic-user');
+    await dialog.getByLabel('Password', {exact:true}).fill('synthetic-secret');
+    await page.evaluate(() => window.approvalHarness.update({threadId:'thread-b'}));
+    await dialog.getByText(/Thread: thread-b/).waitFor();
+    assert.equal(await dialog.getByLabel('Password sign-in').isChecked(), false);
+    await show('mcpServer/elicitation/request', browserAuth, {browserAuth:true});
+    await dialog.getByLabel('Password sign-in').check();
+    await dialog.getByLabel('Username').fill('synthetic-user');
+    await dialog.getByLabel('Password', {exact:true}).fill('synthetic-secret');
+    const beforeAuthReply = (await calls()).length;
+    await dialog.getByRole('button', {name:'Send sign-in details'}).click();
+    await dialog.getByText('Response sent; waiting for the request to resolve.').waitFor();
+    assert.equal((await calls()).length, beforeAuthReply);
+    const auth = (await page.evaluate(() => window.approvalHarness.transactions)).at(-1) as {kind:string;request:Record<string,unknown>};
+    assert.equal(auth.kind, 'browser-auth');
+    assert.equal(auth.request.hostId, 'ssh-test');
+    assert.equal(auth.request.threadId, 'thread-a');
+    assert.equal(auth.request.targetTabId, '2');
+    assert.equal(auth.request.selectedOption, 'password');
+    assert.deepEqual(auth.request.fields, {user:{value:'synthetic-user'},password:{value:'synthetic-secret'}});
+    assert.equal(await dialog.getByLabel('Password', {exact:true}).inputValue(), '');
+    await hide(); await reopen();
+    assert.equal(await dialog.getByRole('button', {name:'Send sign-in details'}).isDisabled(), true);
+    await show('mcpServer/elicitation/request', browserAuth, {browserAuth:'fail',validity:true});
+    await dialog.getByLabel('Password sign-in').check();
+    await dialog.getByLabel('Username').fill('synthetic-user');
+    await dialog.getByLabel('Password', {exact:true}).fill('synthetic-secret');
+    await dialog.getByRole('button', {name:'Send sign-in details'}).click();
+    await dialog.getByText(/Response could not be confirmed/).waitFor();
+    assert.equal(await dialog.getByRole('button', {name:'Send sign-in details'}).isDisabled(), true);
     await page.close();
   } finally { await browser.close(); }
 });
