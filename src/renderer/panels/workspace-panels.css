@@ -1,0 +1,39 @@
+.yard-workspace-panels { --yard-panel-border: #d5d8da; --yard-panel-muted: #697076; display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 260px; color: #222629; background: #fff; font: 13px/1.4 system-ui, sans-serif; }
+.yard-workspace-panels * { box-sizing: border-box; }
+.yard-workspace-panels button { font: inherit; color: inherit; }
+.yard-panel-header, .yard-file-toolbar, .yard-files-tree-heading { display: flex; align-items: center; gap: 4px; min-height: 40px; border-bottom: 1px solid var(--yard-panel-border); }
+.yard-panel-header { padding: 0 6px; }
+.yard-panel-icon, .yard-panel-tab-close { display: inline-flex; justify-content: center; align-items: center; flex: 0 0 auto; width: 30px; height: 30px; padding: 6px; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
+.yard-panel-icon:hover, .yard-panel-tab-close:hover, .yard-files-tree-entry:hover { background: #edf0f1; }
+.yard-panel-icon:disabled, .yard-panel-tab-close:disabled { opacity: .4; cursor: default; }
+.yard-panel-icon svg, .yard-panel-tab-close svg, .yard-files-tree-entry svg { width: 16px; height: 16px; flex: 0 0 16px; }
+.yard-panel-tabs { display: flex; flex: 1; height: 40px; min-width: 0; overflow-x: auto; }
+.yard-panel-tab { display: flex; flex: 0 0 auto; align-items: center; min-width: 0; max-width: 200px; padding: 0 2px 0 8px; border-bottom: 2px solid transparent; }
+.yard-panel-tab.is-active { border-color: #2b7b72; }
+.yard-panel-tab > button[role=tab] { display: flex; align-items: center; gap: 6px; min-width: 0; height: 100%; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.yard-panel-tab > button[role=tab] span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.yard-panel-dirty { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #a36023; }
+.yard-panel-body { display: flex; flex: 1; min-height: 0; }
+.yard-files-tree { display: flex; flex-direction: column; flex: 0 0 clamp(150px, 30%, 240px); min-width: 0; border-right: 1px solid var(--yard-panel-border); }
+.yard-files-tree-heading { justify-content: space-between; padding: 0 6px 0 12px; font-weight: 600; }
+.yard-files-tree-list { overflow: auto; padding: 5px 0; }
+.yard-files-tree-entry { display: flex; align-items: center; gap: 5px; width: 100%; min-width: 0; height: 28px; padding-right: 8px; text-align: left; border: 0; background: transparent; cursor: pointer; }
+.yard-files-tree-entry span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.yard-files-tree-spacer { flex: 0 0 16px; }
+.yard-files-tree-status, .yard-files-tree-error { padding: 5px 8px; color: var(--yard-panel-muted); overflow-wrap: anywhere; }
+.yard-files-tree-error, .yard-file-error { color: #a42c24; }
+.yard-file-main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.yard-file-toolbar { padding: 0 5px 0 12px; }
+.yard-file-path { flex: 1; min-width: 0; overflow: hidden; color: var(--yard-panel-muted); text-overflow: ellipsis; white-space: nowrap; }
+.yard-file-error { padding: 8px 12px; border-bottom: 1px solid #e9c4c0; background: #fff3f2; overflow-wrap: anywhere; }
+.yard-file-status { display: grid; flex: 1; place-items: center; padding: 20px; color: var(--yard-panel-muted); }
+.yard-file-editor { display: flex; flex: 1; min-height: 0; overflow: hidden; font: 13px/20px ui-monospace, monospace; }
+.yard-file-gutter { position: relative; flex: 0 0 auto; min-width: 42px; margin: 0; overflow: hidden; color: #858c90; background: #f6f7f7; text-align: right; user-select: none; font: inherit; }
+.yard-file-gutter span { position: absolute; right: 8px; white-space: pre; }
+.yard-file-text { flex: 1; min-width: 0; min-height: 0; resize: none; margin: 0; padding: 8px 12px; border: 0; outline: 0; color: inherit; background: transparent; font: inherit; tab-size: 2; }
+.yard-file-text:focus-visible { box-shadow: inset 0 0 0 1px #7aa9a4; }
+.yard-file-media { display: grid; flex: 1; min-height: 0; place-items: center; padding: 16px; overflow: auto; background: #f6f7f7; }
+.yard-file-media img, .yard-file-media video { max-width: 100%; max-height: 100%; object-fit: contain; }
+.yard-file-hex { flex: 1; min-height: 0; margin: 0; padding: 12px; overflow: auto; font: 12px/1.6 ui-monospace, monospace; }
+@media (max-width: 560px) { .yard-files-tree { flex-basis: 36%; } .yard-file-toolbar { padding-left: 6px; } }
+@media (prefers-color-scheme: dark) { .yard-workspace-panels { --yard-panel-border: #414648; --yard-panel-muted: #a4abad; color: #e5e8e8; background: #202324; } .yard-panel-icon:hover, .yard-panel-tab-close:hover, .yard-files-tree-entry:hover { background: #353a3b; } .yard-file-gutter, .yard-file-media { background: #292d2e; } .yard-file-error { color: #ffb0a9; background: #472b29; border-color: #70433f; } }
