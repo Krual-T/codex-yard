@@ -85,3 +85,18 @@ test('a changed trust state or override cannot silently apply a pending edit', a
   client.hooks[0].trustStatus = 'trusted'; await settings.load(); settings.edit(trusted.key, false); client.override = true;
   assert.equal(await settings.save(), false); assert.equal(settings.dirty, true); assert.match(settings.getSnapshot().error || '', /overrides/);
 });
+
+test('omitted optional matcher and command async use protocol defaults', async () => {
+  const client = new FakeClient();
+  const withoutOptionals = { ...trusted } as Partial<typeof trusted>;
+  delete withoutOptionals.matcher; delete withoutOptionals.async;
+  client.hooks = [withoutOptionals as typeof trusted];
+  const settings = new HookSettings(client, 'ssh:one', '/project');
+  await settings.load();
+  assert.equal(settings.getSnapshot().error, null);
+  assert.equal(settings.getSnapshot().hooks[0].matcher, null);
+  assert.deepEqual(settings.getSnapshot().hooks[0].handler, { type: 'command', command: 'echo fixture', async: false });
+  client.hooks[0] = { ...trusted, async: 'false' as unknown as boolean };
+  await settings.load();
+  assert.match(settings.getSnapshot().error ?? '', /Invalid hook handler/);
+});

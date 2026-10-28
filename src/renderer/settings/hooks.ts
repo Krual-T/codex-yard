@@ -23,20 +23,20 @@ export const canEditHook = (hook: HookEntry) => !hook.isManaged && hook.trustSta
 
 function hookEntry(value: unknown): HookEntry {
   if (!record(value) || typeof value.key !== 'string' || !value.key || typeof value.eventName !== 'string'
-    || !(typeof value.matcher === 'string' || value.matcher === null) || typeof value.source !== 'string'
+    || !(typeof value.matcher === 'string' || value.matcher == null) || typeof value.source !== 'string'
     || typeof value.sourcePath !== 'string' || typeof value.trustStatus !== 'string'
     || typeof value.isManaged !== 'boolean' || typeof value.enabled !== 'boolean'
     || !(value.timeoutSec == null || typeof value.timeoutSec === 'number' && Number.isFinite(value.timeoutSec))) throw new Error('Invalid hook response');
   let handler: Handler;
-  if (value.handlerType === 'command' && typeof value.command === 'string' && typeof value.async === 'boolean') {
-    handler = { type: 'command', command: value.command, async: value.async };
+  if (value.handlerType === 'command' && typeof value.command === 'string' && (value.async === undefined || typeof value.async === 'boolean')) {
+    handler = { type: 'command', command: value.command, async: value.async ?? false };
   } else if (value.handlerType === 'mcpTool' && typeof value.server === 'string' && typeof value.tool === 'string') {
     handler = { type: 'mcpTool', server: value.server, tool: value.tool };
   } else if (value.handlerType === 'prompt' || value.handlerType === 'agent') handler = { type: value.handlerType };
   else if (typeof value.handlerType === 'string' && value.handlerType !== 'command' && value.handlerType !== 'mcpTool') handler = { type: 'unknown', label: value.handlerType };
   else throw new Error('Invalid hook handler');
-  return { key: value.key, eventName: value.eventName, matcher: value.matcher, source: value.source, sourcePath: value.sourcePath,
-    trustStatus: value.trustStatus, isManaged: value.isManaged, enabled: value.enabled, timeoutSec: value.timeoutSec as number | null, handler };
+  return { key: value.key, eventName: value.eventName, matcher: value.matcher ?? null, source: value.source, sourcePath: value.sourcePath,
+    trustStatus: value.trustStatus, isManaged: value.isManaged, enabled: value.enabled, timeoutSec: (value.timeoutSec as number | null | undefined) ?? null, handler };
 }
 function hookGroups(value: unknown): HookGroup[] {
   if (!Array.isArray(value)) throw new Error('Invalid hook response');

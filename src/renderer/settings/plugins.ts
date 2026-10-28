@@ -7,7 +7,7 @@ interface PluginSummary {
   version?: string | null; localVersion?: string | null; availability?: string | null; disabledReason?: string | null;
   interface?: { displayName?: string | null; shortDescription?: string | null; longDescription?: string | null; developerName?: string | null } | null;
 }
-interface Marketplace { name: string; path: string | null; interface?: { displayName?: string | null } | null; plugins: PluginSummary[] }
+interface Marketplace { name: string; path?: string | null; interface?: { displayName?: string | null } | null; plugins: PluginSummary[] }
 interface PluginResponse { marketplaces: Marketplace[]; marketplaceLoadErrors?: { marketplacePath: string; message: string }[] }
 export interface PluginSource { pluginName: string; marketplacePath: string | null; remoteMarketplaceName: string | null }
 export interface PluginEntry { summary: PluginSummary; marketplace: string; marketplaceLabel: string; source: PluginSource | null }
@@ -33,13 +33,13 @@ export async function readPlugins(client: WorkbenchClient, hostId: string, cwd: 
   const params = { cwds: cwd ? [cwd] : null };
   const result = await client.rpc<PluginResponse>(directory ? 'plugin/list' : 'plugin/installed', params, hostId);
   if (!Array.isArray(result?.marketplaces) || result.marketplaces.some(marketplace => !marketplace || typeof marketplace.name !== 'string' || !marketplace.name
-    || !(typeof marketplace.path === 'string' && !!marketplace.path || marketplace.path === null) || !Array.isArray(marketplace.plugins)
+    || !(typeof marketplace.path === 'string' && !!marketplace.path || marketplace.path == null) || !Array.isArray(marketplace.plugins)
     || marketplace.interface != null && (typeof marketplace.interface !== 'object' || !optionalString(marketplace.interface.displayName))
     || marketplace.plugins.some(plugin => !validSummary(plugin))) || result.marketplaceLoadErrors != null
     && (!Array.isArray(result.marketplaceLoadErrors) || result.marketplaceLoadErrors.some(error => !error || typeof error.marketplacePath !== 'string' || typeof error.message !== 'string')))
     throw new Error('Invalid plugin catalog response');
   const entries = result.marketplaces.flatMap(marketplace => marketplace.plugins.filter(plugin => directory || plugin.installed).map(summary => {
-    const source: PluginSource | null = marketplace.path !== null
+    const source: PluginSource | null = marketplace.path != null
       ? { marketplacePath: marketplace.path, remoteMarketplaceName: null, pluginName: summary.name }
       : summary.remotePluginId ? { marketplacePath: null, remoteMarketplaceName: marketplace.name, pluginName: summary.remotePluginId } : null;
     return { summary, marketplace: marketplace.name, marketplaceLabel: marketplace.interface?.displayName || marketplace.name, source };
@@ -55,14 +55,14 @@ export async function readPlugin(client: WorkbenchClient, hostId: string, source
   if (!plugin || typeof plugin.marketplaceName !== 'string' || !optionalString(plugin.description) || !validSummary(plugin.summary)
     || !Array.isArray(plugin.skills) || !Array.isArray(plugin.hooks) || !Array.isArray(plugin.apps)
     || !Array.isArray(plugin.appTemplates) || !Array.isArray(plugin.mcpServers)
-    || !(plugin.scheduledTasks === null || Array.isArray(plugin.scheduledTasks))
+    || !(plugin.scheduledTasks == null || Array.isArray(plugin.scheduledTasks))
     || plugin.skills.some(skill => !skill || typeof skill.name !== 'string' || typeof skill.description !== 'string' || typeof skill.enabled !== 'boolean')
     || plugin.hooks.some(hook => !hook || typeof hook.key !== 'string' || typeof hook.eventName !== 'string')
     || plugin.apps.some(app => !app || typeof app.id !== 'string' || typeof app.name !== 'string' || !optionalString(app.description))
     || plugin.appTemplates.some(app => !app || typeof app.templateId !== 'string' || typeof app.name !== 'string' || !optionalString(app.description))
     || plugin.mcpServers.some(server => typeof server !== 'string')
     || plugin.scheduledTasks?.some(task => !task || typeof task.key !== 'string' || typeof task.name !== 'string')) throw new Error('Invalid plugin details response');
-  return plugin;
+  return { ...plugin, scheduledTasks: plugin.scheduledTasks ?? null };
 }
 export function pluginSource(search: string): PluginSource | null {
   const params = new URLSearchParams(search);

@@ -83,3 +83,17 @@ test('detail reads the exact marketplace and validates its response', async () =
   client.results['plugin/read'] = { plugin: { ...detail, hooks: [{ key: 'broken' }] } };
   await assert.rejects(readPlugin(client, 'local', { pluginName: 'review', marketplacePath: '/market', remoteMarketplaceName: null }), /Invalid plugin details/);
 });
+
+test('omitted marketplace path and scheduled tasks use null without relaxing required fields', async () => {
+  const client = new FakeClient();
+  client.results['plugin/list'] = { marketplaces: [{ name: 'remote', plugins: [remote] }] };
+  const result = await readPlugins(client, 'ssh:one', '/project', true);
+  assert.deepEqual(result.entries[0].source, { marketplacePath: null, remoteMarketplaceName: 'remote', pluginName: 'plugin-remote' });
+  client.results['plugin/read'] = { plugin: { marketplaceName: 'remote', summary: remote, description: null, skills: [], hooks: [],
+    apps: [], appTemplates: [], mcpServers: [] } };
+  const source = { pluginName: 'plugin-remote', marketplacePath: null, remoteMarketplaceName: 'remote' };
+  assert.equal((await readPlugin(client, 'ssh:one', source)).scheduledTasks, null);
+  client.results['plugin/read'] = { plugin: { marketplaceName: 'remote', summary: remote, description: null, skills: [], hooks: [],
+    apps: [], appTemplates: [], mcpServers: [], scheduledTasks: false } };
+  await assert.rejects(readPlugin(client, 'ssh:one', source), /Invalid plugin details/);
+});
