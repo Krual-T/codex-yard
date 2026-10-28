@@ -56,8 +56,10 @@ let requests: { operation: string; args: unknown[] }[] = [];
 let events: { at: number; event: TerminalEvent }[] = [];
 let connections: { hostId: string; state: string }[] = [];
 let sockets: { page: WebSocketRoute; server: WebSocketRoute; connected: boolean }[] = [];
+type ShortcutObservation = { at: number; hostId: string | null; connection: string | null; state: string | null;
+  focus: { tag: string; label: string | null; className: string } | null };
 const results: { hostId: string; projectId: string; cwd: string; checks: string[]; gaps: string[]; errors: string[];
-  requests: typeof requests; events: typeof events; connections: typeof connections }[] = [];
+  requests: typeof requests; events: typeof events; connections: typeof connections; firstShortcut?: ShortcutObservation | null }[] = [];
 const report: Record<string, unknown> = { renderer: 'owned', localPeer: 'synthetic local RPC with a real disposable local PTY',
   requestedSsh, realDaemonUsed: false, realSshUsed: false, physicalRemoteMachine: false, realInference: false, results };
 
@@ -172,6 +174,19 @@ try {
     results.push({ hostId: target.hostId, projectId: target.projectId, cwd: target.cwd, checks, gaps, errors, requests, events, connections });
     const localSpawnCount = localFake.calls('process/spawn').filter(call => call.params.tty === true).length;
     page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    await page.addInitScript(() => {
+      window.addEventListener('keydown', event => {
+        if (!event.ctrlKey || event.code !== 'Backquote') return;
+        const host = document.querySelector<HTMLSelectElement>('select[aria-label="Execution host"]');
+        const connection = document.querySelector('.yard-connection');
+        const focus = document.activeElement;
+        (window as Window & { yardTerminalShortcut?: unknown }).yardTerminalShortcut = {
+          at: Date.now(), hostId: host?.value ?? null, connection: connection?.getAttribute('title') ?? null,
+          state: connection?.getAttribute('data-state') ?? null,
+          focus: focus ? { tag: focus.tagName, label: focus.getAttribute('aria-label'), className: String(focus.className) } : null,
+        };
+      }, true);
+    });
     await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
     page.on('pageerror', error => errors.push(error.message));
     await page.routeWebSocket('**/native-host', route => {
@@ -205,6 +220,12 @@ try {
       const create = requests.filter(request => request.operation === 'create').at(-1)!;
       const sessionId = (create.args[0] as { sessionId: string }).sessionId;
       await until(() => events.some(({ event }) => event.type === 'attached' && event.sessionId === sessionId), 'new terminal attached');
+    }
+    async function checkShortcutFocus(action: string) {
+      try {
+        await until(async () => await terminal.count() === 1 && await terminal.evaluate(element => document.activeElement === element),
+          'terminal focus after shortcut', 1000);
+      } catch { gaps.push(`Ctrl+Backquote did not focus the terminal after ${action}`); }
     }
     async function open() {
       const before = requests.filter(request => request.operation === 'create').length;
@@ -242,11 +263,16 @@ try {
     }
     assert.equal(requests.filter(request => request.operation === 'create').length, 0, 'No terminal may start before an explicit action');
     await page.keyboard.press('Control+Backquote');
+    results.at(-1)!.firstShortcut = await page.evaluate(() =>
+      (window as Window & { yardTerminalShortcut?: ShortcutObservation }).yardTerminalShortcut ?? null);
     await delay(1000);
     if (!requests.some(request => request.operation === 'create')) {
       gaps.push('Ctrl+Backquote did not explicitly open the first terminal');
       await open();
-    } else await waitForNewTerminal(0);
+    } else {
+      await waitForNewTerminal(0);
+      await checkShortcutFocus('opening it');
+    }
     const create = requests.find(request => request.operation === 'create')!;
     assert.equal((create.args[0] as { hostId: string }).hostId, target.hostId);
     assert.equal((create.args[0] as { cwd: string }).cwd, target.cwd);
@@ -307,6 +333,7 @@ try {
     try {
       await until(async () => await terminalTabs.first().getByRole('tab', { name: 'Terminal' }).getAttribute('aria-selected') === 'true',
         'shortcut selects an existing live terminal', 1000);
+      await checkShortcutFocus('selecting an existing shell');
       checks.push('Shortcut selects a live shell instead of restarting the stopped tab');
     } catch {
       gaps.push('Ctrl+Backquote did not select the existing live shell when another tab had exited');
@@ -359,11 +386,13 @@ try {
     assert.equal(requests.filter(request => request.operation === 'write').length, writeCount, 'Reconnect must not replay terminal input');
     await page.keyboard.press('Control+Backquote');
     await delay(1000);
-    if (requests.filter(request => request.operation === 'create').length === createCount) {
+    const reopenedByShortcut = requests.filter(request => request.operation === 'create').length > createCount;
+    if (!reopenedByShortcut) {
       gaps.push('Ctrl+Backquote did not explicitly open a replacement terminal after reconnect');
       await page.getByRole('button', { name: 'New terminal', exact: true }).click();
     }
     await waitForNewTerminal(createCount);
+    if (reopenedByShortcut) await checkShortcutFocus('reopening it after reconnect');
     if (target.hostId !== 'local') assert.ok(connections.filter(connection => connection.hostId === target.hostId && connection.state === 'connected').length > remoteConnectedCount,
       'The explicit replacement must reconnect the selected SSH host');
     const reconnectedPid = await pid('TW_AFTER_RECONNECT');
@@ -371,7 +400,10 @@ try {
     await checkTarget('TW_RECONNECT');
     await page.getByRole('button', { name: /^(隐藏面板|Hide panel)$/ }).click();
     await page.keyboard.press('Control+Backquote');
-    try { await page.locator('.yard-terminal-container:visible .xterm-screen').waitFor({ state: 'visible', timeout: 1000 }); }
+    try {
+      await page.locator('.yard-terminal-container:visible .xterm-screen').waitFor({ state: 'visible', timeout: 1000 });
+      await checkShortcutFocus('revealing an existing shell');
+    }
     catch {
       gaps.push('Ctrl+Backquote did not reveal the existing terminal');
       await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
