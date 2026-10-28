@@ -111,3 +111,14 @@ test('conflicting structured prefill retains both drafts instead of flattening e
   assert.equal(switched.pendingDrafts?.[0]?.text, 'Existing');
   assert.equal(activatePending(switched, false).text, 'Existing');
 });
+
+test('colliding reference identities with different context retain both versions', () => {
+  const current = { ...emptyDraft(), references: [{ id: 'same', text: 'first', context: { line: 1 } }] };
+  const incoming: ComposerDraft = { text: '', images: [], files: [], references: [{ id: 'same', text: 'second', context: { line: 2 } }] };
+  const merged = mergePrefill(current, incoming);
+  assert.deepEqual(merged.references, current.references);
+  assert.deepEqual(merged.pendingDrafts, [incoming]);
+  const switched = activatePending(merged, true);
+  assert.deepEqual(switched.references, incoming.references);
+  assert.deepEqual(switched.pendingDrafts?.[0]?.references, current.references);
+});

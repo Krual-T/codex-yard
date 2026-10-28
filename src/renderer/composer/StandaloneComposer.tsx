@@ -23,6 +23,7 @@ export type StandaloneComposerRuntimeProps = StandaloneComposerProps & {
   initialOptions?: SubmitOptions;
   hosts?: ComposerHost[];
   onTargetChange?: (target: ComposerTarget) => void | Promise<void>;
+  onPrefillConsumed?: (id: string) => void;
 };
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -36,7 +37,7 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
   }}><summary>{name}</summary>{preview == null ? '正在读取…' : <pre>{preview}</pre>}</details>;
 }
 
-function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, prefill, activeTurnId, initialOptions, hosts, onTargetChange }: StandaloneComposerRuntimeProps) {
+function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed }: StandaloneComposerRuntimeProps) {
   const key = draftKey(context);
   const [initial] = useState(() => loadDraft(context));
   const current = useRef(initial);
@@ -70,12 +71,15 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     current.current = next;
     const saved = writeDraft(key, next);
     if (mounted.current) { setDraft(next.draft); setStorageError(!saved); }
+    return saved;
   }, [key]);
   useEffect(() => {
-    if (!prefill || current.current.prefills.includes(prefill.id)) return;
-    changeDraft(value => mergePrefill(value, prefill.draft), prefill.id);
+    if (!prefill) return;
+    if (current.current.prefills.includes(prefill.id)) { onPrefillConsumed?.(prefill.id); return; }
+    const saved = changeDraft(value => mergePrefill(value, prefill.draft), prefill.id);
+    if (saved) onPrefillConsumed?.(prefill.id);
     editor.current?.focus();
-  }, [prefill, changeDraft]);
+  }, [prefill, changeDraft, onPrefillConsumed]);
 
   const addFiles = async (files: File[]) => {
     if (!files.length || uploadInFlight.current || editIssue || structuredInput) return;
@@ -100,7 +104,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       || current.current.draft.document && textEditIssue(current.current.draft) && !current.current.draft.input) {
       setError('当前内容无法无损发送，已保留原始草稿。'); return;
     }
-    if (busy && followUp === 'queue' && (current.current.draft.hints?.length || current.current.draft.references.some(reference => reference.context || reference.original))) {
+    if (busy && followUp === 'queue' && (current.current.draft.hints?.length || current.current.draft.references.some(reference => reference.context !== undefined || reference.original !== undefined))) {
       setError('此草稿包含队列协议无法保存的上下文，已保留草稿。'); return;
     }
     if (busy && !context.threadId) { setError('会话尚未创建，请稍后再排队。'); return; }

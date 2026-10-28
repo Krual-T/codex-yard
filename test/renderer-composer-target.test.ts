@@ -11,7 +11,7 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     import * as React from 'react';
     import { createRoot } from 'react-dom/client';
     import { StandaloneComposer } from './src/renderer/composer/StandaloneComposer.tsx';
-    const state={calls:[],changes:[],submissions:[],fail:false,setThread:null};
+    const state={calls:[],changes:[],submissions:[],consumed:[],fail:false,setThread:null,setPrefill:null};
     const hosts=[{hostId:'local',displayName:'Local'},{hostId:'ssh-fixture',displayName:'SSH fixture'}];
     const client={
       async host(endpoint,params={}){
@@ -30,8 +30,10 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     };
     function App(){
       const [context,setContext]=React.useState({hostId:'local',cwd:'/work/one',threadId:null,draftId:'new-draft'});
+      const [prefill,setPrefill]=React.useState(null);state.setPrefill=setPrefill;
       state.setThread=id=>setContext(value=>({...value,threadId:id}));
-      return React.createElement(StandaloneComposer,{client,context,hosts,busy:false,
+      return React.createElement(StandaloneComposer,{client,context,hosts,prefill,busy:false,
+        onPrefillConsumed(id){state.consumed.push(id);setPrefill(value=>value?.id===id?null:value);},
         async onTargetChange(target){if(state.fail)throw Error('fixture rejected');state.changes.push(target);setContext(value=>({...value,...target}));},
         async onSubmit(draft,options,action){state.submissions.push({context,draft,action});},async onInterrupt(){}});
     }
@@ -52,9 +54,13 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     await target.selectOption({ label: 'Local: /work/two' });
     await page.waitForFunction(() => (window as any).fixture.changes.length === 1);
     assert.equal(await editor.inputValue(), 'local draft');
+    await page.evaluate(() => (window as any).fixture.setPrefill({id:'one-time',draft:{text:'',images:[],files:[],references:[{id:'r',text:'local reference'}]}}));
+    await page.getByText('local reference').waitFor();
+    await page.waitForFunction(() => (window as any).fixture.consumed.includes('one-time'));
     await target.selectOption({ label: 'SSH fixture: /remote/project' });
     await page.waitForFunction(() => (window as any).fixture.changes.length === 2);
     await page.waitForFunction(() => (document.querySelector('textarea[aria-label="和 Codex 一起工作"]') as HTMLTextAreaElement)?.value === '');
+    assert.equal(await page.getByText('local reference').count(), 0);
     await editor.fill('remote draft');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await page.waitForFunction(() => (window as any).fixture.submissions.length === 1);
@@ -65,6 +71,7 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     assert.deepEqual(submission.action, { type: 'send' });
     await target.selectOption({ label: 'Local: /work/two' });
     await page.waitForFunction(() => (document.querySelector('textarea[aria-label="和 Codex 一起工作"]') as HTMLTextAreaElement)?.value === 'local draft');
+    await page.getByText('local reference').waitFor();
     await page.evaluate(() => { (window as any).fixture.fail = true; });
     await target.selectOption({ label: 'SSH fixture: /remote/project' });
     await page.getByRole('alert').filter({ hasText: 'fixture rejected' }).waitFor();

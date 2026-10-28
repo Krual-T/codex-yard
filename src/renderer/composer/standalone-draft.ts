@@ -211,7 +211,20 @@ export function updateDraftText(draft: Draft, text: string): Draft {
 export function mergePrefill(current: Draft, incoming: ComposerDraft): Draft {
   const next = normalizeDraft(incoming);
   if (!hasContent(current) && !current.pendingDrafts?.length && !current.blocked) return next;
-  if (next.input || next.document || next.hints?.length || current.input || current.document || current.hints?.length || current.blocked || current.pendingDrafts?.length) {
+  const conflict = <T,>(left: T[], right: T[], id: (value: T) => string): boolean => {
+    const seen = new Map<string, string>();
+    try {
+      for (const value of [...left, ...right]) {
+        const key = id(value), serialized = JSON.stringify(value);
+        if (seen.has(key) && seen.get(key) !== serialized) return true;
+        seen.set(key, serialized);
+      }
+      return false;
+    } catch { return true; }
+  };
+  if (next.input || next.document || next.hints?.length || current.input || current.document || current.hints?.length || current.blocked || current.pendingDrafts?.length
+    || conflict(current.images, next.images, value => value.id) || conflict(current.files, next.files, value => value.path)
+    || conflict(current.references, next.references, value => value.id) || conflict(current.skills, next.skills, value => value.path)) {
     return { ...current, pendingDrafts: [...current.pendingDrafts ?? [], incoming] };
   }
   const merge = <T,>(left: T[], right: T[], id: (value: T) => string): T[] => {

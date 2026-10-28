@@ -137,7 +137,15 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 3);
     await page.evaluate(() => (window as any).fixture.rejectSubmit());
 
-    await page.evaluate(() => (window as any).fixture.render({busy:true,prefill:null}));
+    await page.evaluate(() => (window as any).fixture.render({busy:true,prefill:{id:'opaque-ref',draft:{text:'',images:[],files:[],references:[{id:'opaque',text:'opaque context',original:false}]}}}));
+    await page.getByText('opaque context').waitFor();
+    await editor.fill('retain with context');
+    await page.getByRole('button', { name: '排队' }).click();
+    await page.getByRole('alert').filter({ hasText: '队列协议无法保存的上下文' }).waitFor();
+    assert.equal(await editor.inputValue(), 'retain with context');
+    assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'thread/queue/add').length), 0);
+    await page.getByRole('button', { name: '移除引用' }).click();
+    await page.evaluate(() => (window as any).fixture.render({ prefill: null }));
     await editor.fill('steer the active turn');
     await page.getByRole('button', { name: '发送到当前任务' }).click();
     await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 4);
