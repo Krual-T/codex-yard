@@ -1,4 +1,5 @@
 import type { ComposerContext, ComposerDocument, ComposerDraft, ComposerImage } from '../workbench-contract.ts';
+import { readRichDocument, richDocumentSkills, serializeRichDocument } from './rich-document.ts';
 
 export interface DraftImage extends ComposerImage { previewSrc: string }
 export interface DraftSkill { name: string; path: string }
@@ -90,7 +91,7 @@ export function writeDraft(key: string, value: StoredDraft): boolean {
 function emptyMetadata(value: unknown): boolean {
   return value == null || value === false || value === '' || Array.isArray(value) && value.length === 0;
 }
-function plainDocument(document: ComposerDocument, expected?: string): string | null {
+function plainParagraphs(document: ComposerDocument): string[] | null {
   const only = (node: ComposerDocument, keys: string[]) => Object.keys(node).every(key => keys.includes(key));
   if (document.type !== 'doc' || !only(document, ['type', 'content']) || !Array.isArray(document.content)) return null;
   const paragraphs: string[] = [];
@@ -104,11 +105,22 @@ function plainDocument(document: ComposerDocument, expected?: string): string | 
     }
     paragraphs.push(text);
   }
+  return paragraphs;
+}
+function plainDocument(document: ComposerDocument, expected?: string): string | null {
+  const paragraphs = plainParagraphs(document);
+  if (!paragraphs) return null;
   if (paragraphs.length <= 1) return paragraphs[0] ?? '';
   const choices = [paragraphs.join('\n\n'), paragraphs.join('\n')];
   return expected !== undefined && choices.includes(expected) ? expected : null;
 }
-function documentFromText(text: string): ComposerDocument {
+function editedPlainDocument(document: ComposerDocument, previous: ComposerDocument, text: string): string | null {
+  const before = plainParagraphs(previous), after = plainParagraphs(document);
+  if (!before || !after || plainDocument(previous, text) !== text) return null;
+  const separator = before.join('\n\n') === text && before.join('\n') !== text ? '\n\n' : '\n';
+  return after.join(separator);
+}
+export function documentFromText(text: string): ComposerDocument {
   return { type: 'doc', content: text.split('\n').map(line => ({ type: 'paragraph',
     ...(line ? { content: [{ type: 'text', text: line }] } : {}) })) };
 }
@@ -166,8 +178,15 @@ function readLegacy(context: ComposerContext): StoredDraft | null {
       if (isDocument(source.document)) {
         document = source.document;
         const plain = plainDocument(document, promptText);
-        if (plain === null || promptText !== undefined && plain !== promptText) blocked = '此草稿包含格式或上下文，当前编辑器不能无损编辑。';
-        else text = plain;
+        if (plain !== null && (promptText === undefined || plain === promptText)) text = plain;
+        else {
+          const rich = readRichDocument(document);
+          if (rich === null) blocked = '此草稿包含尚不支持的文档内容，已保留原始数据。';
+          else if (promptText === undefined) text = serializeRichDocument(rich);
+          else if (plain !== promptText && serializeRichDocument(rich) !== promptText) {
+            blocked = '此草稿的文档与保存的文本不一致，已保留两个版本。';
+          }
+        }
       } else blocked = '此草稿的文档格式无法读取，已保留原始数据。';
     } else if (value !== undefined && typeof value !== 'string') blocked = '此草稿包含未识别的内容，已保留原始数据。';
     if (record(value) && 'document' in value && source !== value && record(source)
@@ -191,7 +210,15 @@ export function loadDraft(context: ComposerContext): StoredDraft {
   const oldThreadId = context.threadId && (context.draftId === context.threadId || context.draftId === 'local:' + context.threadId
     || context.legacyDraftKey === context.threadId || context.legacyDraftKey === 'local:' + context.threadId);
   const old = oldThreadId || context.legacyDraftKey === oldKey ? readDraft(oldKey) : null;
-  return readDraft(key) ?? old ?? readLegacy(context) ?? { revision: createId(), draft: emptyDraft(), prefills: [] };
+  const saved = readDraft(key) ?? old;
+  if (saved?.draft.blocked === '此草稿包含格式或上下文，当前编辑器不能无损编辑。') {
+    const legacy = readLegacy(context);
+    const candidate = { ...saved.draft, blocked: undefined };
+    if (legacy && !legacy.draft.blocked && JSON.stringify(candidate.document) === JSON.stringify(legacy.draft.document)
+      && candidate.text === legacy.draft.text && JSON.stringify(candidate.preserved) === JSON.stringify(legacy.draft.preserved)
+      && !richEditIssue(candidate)) return { ...saved, draft: candidate };
+  }
+  return saved ?? readLegacy(context) ?? { revision: createId(), draft: emptyDraft(), prefills: [] };
 }
 export function textEditIssue(draft: Draft): string | null {
   if (draft.blocked) return draft.blocked;
@@ -204,6 +231,41 @@ export function textEditIssue(draft: Draft): string | null {
     }
   }
   return null;
+}
+export function richEditIssue(draft: Draft): string | null {
+  if (draft.blocked) return draft.blocked;
+  const document = draft.document && readRichDocument(draft.document);
+  if (!document) return '此草稿包含尚不支持的文档内容，已保留原始数据。';
+  if (serializeRichDocument(document) !== draft.text && plainDocument(draft.document!, draft.text) !== draft.text) {
+    return '此草稿的文档与保存的文本不一致，已保留两个版本。';
+  }
+  if (draft.hints?.length) return '此草稿包含提示信息，当前编辑器不能无损编辑。';
+  if (draft.input) {
+    const text = draft.input.filter(item => item.type === 'text');
+    if (text.length > 1 || text.some(item => typeof item.text !== 'string' || !Array.isArray(item.text_elements)
+      || item.text_elements.length || item.text !== draft.text) || !text.length && draft.text) {
+      return '此消息包含格式化或分段内容，当前编辑器不能无损编辑。';
+    }
+    const skills = richDocumentSkills(document);
+    if (draft.input.some(item => item.type === 'skill' && skills.some(skill => skill.name === item.name && skill.path === item.path)
+      && Object.keys(item).some(key => !['type', 'name', 'path'].includes(key)))) {
+      return '此技能引用包含额外信息，当前编辑器不能无损编辑。';
+    }
+  }
+  return null;
+}
+
+export function updateRichDraft(draft: Draft, document: ComposerDocument): Draft {
+  if (richEditIssue(draft)) return draft;
+  const next = readRichDocument(document), previous = draft.document && readRichDocument(draft.document);
+  if (!next || !previous) return draft;
+  const text = editedPlainDocument(document, draft.document!, draft.text) ?? serializeRichDocument(next);
+  const oldSkills = richDocumentSkills(previous), newSkills = richDocumentSkills(next);
+  const removed = oldSkills.filter(old => !newSkills.some(skill => skill.name === old.name && skill.path === old.path));
+  const input = draft.input?.filter(item => !removed.some(skill => item.type === 'skill'
+    && item.name === skill.name && item.path === skill.path)).map(item => item.type === 'text' ? { ...item, text } : item);
+  if (input && !input.some(item => item.type === 'text') && text) input.unshift({ type: 'text', text, text_elements: [] });
+  return { ...draft, text, document, ...(input ? { input } : {}) };
 }
 export function updateDraftText(draft: Draft, text: string): Draft {
   if (textEditIssue(draft)) return draft;
@@ -249,6 +311,10 @@ export function activatePending(draft: Draft, keepCurrent: boolean): Draft {
 }
 
 export function draftToInput(draft: ComposerDraft, hostId: string): Record<string, unknown>[] {
+  const rich = draft.document && readRichDocument(draft.document);
+  if (draft.document && (!rich || serializeRichDocument(rich) !== draft.text && plainDocument(draft.document, draft.text) !== draft.text)) {
+    throw new Error('草稿文档无法与待发送文本无损对应，已保留原始草稿。');
+  }
   const input: Record<string, unknown>[] = draft.input?.map(item => ({ ...item })) ?? [];
   if (draft.input) {
     const text = input.filter(item => item.type === 'text');
@@ -279,13 +345,17 @@ export function draftToInput(draft: ComposerDraft, hostId: string): Record<strin
       : item.url ? existing.url === item.url : existing.path === item.path));
     if (match < 0) input.push(item); else matched.add(match);
   }
-  for (const skill of draft.skills ?? []) {
+  const skills = [...draft.skills ?? [], ...(rich ? richDocumentSkills(rich) : [])];
+  for (const skill of skills) {
     const match = original.findIndex((item, index) => !matched.has(index) && item.type === 'skill' && item.name === skill.name && item.path === skill.path);
-    if (match < 0) input.push({ type: 'skill', name: skill.name, path: skill.path }); else matched.add(match);
+    if (match < 0) {
+      if (!input.some(item => item.type === 'skill' && item.name === skill.name && item.path === skill.path)) input.push({ type: 'skill', name: skill.name, path: skill.path });
+    } else matched.add(match);
   }
   return input;
 }
 export function hasContent(draft: Draft): boolean {
+  const document = draft.document && readRichDocument(draft.document);
   return !!(draft.text.trim() || draft.images.length || draft.files.length || draft.references.length || draft.skills.length
-    || draft.input?.length || draft.document || draft.blocked);
+    || draft.input?.length || draft.document && (!document || serializeRichDocument(document).trim()) || draft.blocked);
 }

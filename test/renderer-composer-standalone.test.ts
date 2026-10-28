@@ -89,6 +89,11 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.getByLabel('沙箱权限').selectOption('read-only');
     await page.getByLabel('快速').check();
     await page.getByLabel('计划').check();
+    await page.evaluate(() => (window as any).fixture.render({ initialOptions: {
+      approvalPolicy: { granular: { sandbox_approval: false, rules: true, skill_approval: false, request_permissions: true, mcp_elicitations: false } },
+      approvalsReviewer: 'user', permissionProfileId: 'updated-profile', sandboxMode: 'workspace-write',
+    } }));
+    await page.waitForFunction(() => (document.querySelector('select[aria-label="沙箱权限"]') as HTMLSelectElement)?.value === 'read-only');
     await editor.fill('first draft');
     await editor.evaluate(element => element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, isComposing: true })));
     assert.equal(await page.evaluate(() => (window as any).fixture.state.submissions.length), 0);
@@ -100,11 +105,21 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     const submitted = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
     assert.equal(submitted.draft.text, 'first draft');
     assert.deepEqual(submitted.action, { type: 'send' });
-    assert.deepEqual(submitted.options, { model: 'model-b', effort: 'low', approvalPolicy: { granular: { sandbox_approval: true, rules: false, skill_approval: true, request_permissions: false, mcp_elicitations: true } }, sandboxMode: 'read-only', serviceTier: 'fast', mode: 'plan', approvalsReviewer: 'guardian_subagent', permissionProfileId: 'fixture-profile' });
+    assert.deepEqual(submitted.options, { model: 'model-b', effort: 'low', approvalPolicy: { granular: { sandbox_approval: false, rules: true, skill_approval: false, request_permissions: true, mcp_elicitations: false } }, sandboxMode: 'read-only', serviceTier: 'fast', mode: 'plan', approvalsReviewer: 'user', permissionProfileId: undefined });
     await editor.fill('newer edit');
     await page.evaluate(() => (window as any).fixture.resolveSubmit());
     await page.getByRole('button', { name: '发送', exact: true }).waitFor();
     assert.equal(await editor.inputValue(), 'newer edit');
+    await page.evaluate(() => (window as any).fixture.render({ initialOptions: {
+      approvalPolicy: { granular: { sandbox_approval: false, rules: true, skill_approval: false, request_permissions: true, mcp_elicitations: false } },
+      approvalsReviewer: 'user', permissionProfileId: 'resolved-read-only', sandboxMode: 'read-only',
+    } }));
+    await page.waitForTimeout(50);
+    await page.evaluate(() => (window as any).fixture.render({ initialOptions: {
+      approvalPolicy: { granular: { sandbox_approval: false, rules: true, skill_approval: false, request_permissions: true, mcp_elicitations: false } },
+      approvalsReviewer: 'user', permissionProfileId: 'external-profile', sandboxMode: 'workspace-write',
+    } }));
+    await page.waitForFunction(() => (document.querySelector('select[aria-label="沙箱权限"]') as HTMLSelectElement)?.value === 'workspace-write');
     await page.evaluate(() => (window as any).fixture.render({ context: { threadId: 'thread-b', draftId: 'thread-b' } }));
     await editor.fill('other thread');
     await page.evaluate(() => (window as any).fixture.render({ context: { threadId: 'thread-a', draftId: 'thread-a' } }));

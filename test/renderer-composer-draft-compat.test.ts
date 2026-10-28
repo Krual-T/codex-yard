@@ -104,6 +104,20 @@ test('rich documents and opaque legacy metadata remain preserved and cannot be o
   assert.deepEqual((draft.preserved as { draft: unknown }).draft, record);
 });
 
+test('a previously retained rich draft is unlocked only when its legacy source still matches', () => {
+  const saved = storage();
+  const document = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Bold', marks: [{ type: 'strong' }] }] }] };
+  const retained = { document, plainTextMode: false, prompt: '**Bold**' };
+  saved.setItem('native-atoms', JSON.stringify({ 'composer-retained-documents-v1': { 'local:thread-1': retained } }));
+  const matching = loadDraft({ ...context, legacyDraftKey: 'local:thread-1' });
+  const blocked = { ...matching, draft: { ...matching.draft, blocked: '此草稿包含格式或上下文，当前编辑器不能无损编辑。' } };
+  writeDraft(draftKey(context), blocked);
+  assert.equal(loadDraft({ ...context, legacyDraftKey: 'local:thread-1' }).draft.blocked, undefined);
+  const changed = { ...retained, prompt: 'different version' };
+  saved.setItem('native-atoms', JSON.stringify({ 'composer-retained-documents-v1': { 'local:thread-1': changed } }));
+  assert.equal(loadDraft({ ...context, legacyDraftKey: 'local:thread-1' }).draft.blocked, blocked.draft.blocked);
+});
+
 test('conflicting retained and prompt documents remain distinct and block editing', () => {
   const saved = storage();
   const document = (text: string) => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });

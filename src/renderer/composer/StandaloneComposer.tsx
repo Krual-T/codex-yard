@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ClipboardEvent, KeyboardEvent } from 'react';
+import type { ClipboardEvent } from 'react';
 import type { ComposerDraft, StandaloneComposerProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
-import { activatePending, createId, draftKey, draftToInput, hasContent, loadDraft, mergePrefill, readDraft, textEditIssue, updateDraftText, writeDraft } from './standalone-draft.ts';
+import { activatePending, createId, documentFromText, draftKey, draftToInput, hasContent, loadDraft, mergePrefill, readDraft, richEditIssue, textEditIssue, updateDraftText, updateRichDraft, writeDraft } from './standalone-draft.ts';
 import type { Draft } from './standalone-draft.ts';
 import { importAttachments } from './standalone-files.ts';
 import { useCompletions } from './standalone-completions.tsx';
@@ -13,6 +13,9 @@ import { useFollowUpSetting } from './standalone-follow-up.ts';
 import type { FollowUpAction } from './standalone-follow-up.ts';
 import { StandaloneTarget } from './standalone-target.tsx';
 import type { ComposerHost, ComposerTarget } from './standalone-target.tsx';
+import { StandaloneRichEditor } from './StandaloneRichEditor.tsx';
+import type { RichEditorHandle } from './StandaloneRichEditor.tsx';
+import { FilePenLine } from 'lucide-react';
 import './standalone-composer.css';
 
 export { draftToInput } from './standalone-draft.ts';
@@ -42,7 +45,9 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const [initial] = useState(() => loadDraft(context));
   const current = useRef(initial);
   const [draft, setDraft] = useState<Draft>(initial.draft);
-  const [options, setOptions] = useState<SubmitOptions>(() => ({ ...initialOptions }));
+  const [overrides, setOverrides] = useState<Partial<SubmitOptions>>({});
+  const [appliedOptions, setAppliedOptions] = useState<{ changes: Partial<SubmitOptions>; baseline: SubmitOptions } | null>(null);
+  const options = { ...initialOptions, ...overrides };
   const [error, setError] = useState('');
   const [storageError, setStorageError] = useState(false);
   const [sending, setSending] = useState(false);
@@ -57,12 +62,39 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const interruptInFlight = useRef(false);
   const uploadInFlight = useRef(false);
   const editor = useRef<HTMLTextAreaElement>(null);
+  const richEditor = useRef<RichEditorHandle>(null);
   const picker = useRef<HTMLInputElement>(null);
   const modelPicker = useRef<HTMLSelectElement>(null);
-  const editIssue = textEditIssue(draft);
+  const editIssue = draft.document ? richEditIssue(draft) : textEditIssue(draft);
+  const richActive = !!draft.document && !editIssue;
   const structuredInput = draft.input !== undefined;
-  const completions = useCompletions(client, context.hostId, context.cwd, editIssue || structuredInput ? '' : draft.text, cursor, busy);
+  const completions = useCompletions(client, context.hostId, context.cwd, editIssue || structuredInput || richActive ? '' : draft.text, cursor, busy);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    if (!appliedOptions) return;
+    const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+    const baseline = appliedOptions.baseline, next = { ...appliedOptions.changes };
+    const sandboxChanged = !same(initialOptions?.sandboxMode, baseline.sandboxMode)
+      || !same(initialOptions?.permissionProfileId, baseline.permissionProfileId);
+    const cleared: (keyof SubmitOptions)[] = [];
+    let changed = false;
+    for (const field of Object.keys(next) as (keyof SubmitOptions)[]) {
+      const local = Object.hasOwn(overrides, field) && same(overrides[field], next[field]);
+      const authoritativeChanged = field === 'sandboxMode' || field === 'permissionProfileId'
+        ? sandboxChanged : !same(initialOptions?.[field], baseline[field]);
+      if (!local || authoritativeChanged) {
+        if (local) cleared.push(field);
+        delete next[field]; changed = true;
+      }
+    }
+    if (!changed) return;
+    if (cleared.length) setOverrides(previous => {
+      const result = { ...previous };
+      for (const field of cleared) if (same(result[field], appliedOptions.changes[field])) delete result[field];
+      return result;
+    });
+    setAppliedOptions(Object.keys(next).length ? { ...appliedOptions, changes: next } : null);
+  }, [appliedOptions, initialOptions, overrides]);
 
   const changeDraft = useCallback((update: (draft: Draft) => Draft, prefillId?: string) => {
     const previous = mounted.current ? current.current : readDraft(key) ?? current.current;
@@ -81,7 +113,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     }
     const saved = changeDraft(value => mergePrefill(value, prefill.draft), prefill.id);
     if (saved) onPrefillConsumed?.(prefill.id);
-    editor.current?.focus();
+    requestAnimationFrame(() => { if (richEditor.current) richEditor.current.focus(); else editor.current?.focus(); });
   }, [prefill, changeDraft, onPrefillConsumed, key, storageError]);
 
   const addFiles = async (files: File[]) => {
@@ -104,7 +136,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const submit = async (followUp: FollowUpAction = followUpSetting.value) => {
     if (submitInFlight.current || uploadInFlight.current || !hasContent(current.current.draft)) return;
     if (current.current.draft.blocked
-      || current.current.draft.document && textEditIssue(current.current.draft) && !current.current.draft.input) {
+      || current.current.draft.document && richEditIssue(current.current.draft)) {
       setError('当前内容无法无损发送，已保留原始草稿。'); return;
     }
     if (busy && followUp === 'queue' && (current.current.draft.hints?.length || current.current.draft.references.some(reference => reference.context !== undefined || reference.original !== undefined))) {
@@ -125,6 +157,9 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     try {
       const submitted: ComposerDraft = captured.draft;
       await onSubmit(submitted, options, action);
+      if (mounted.current && action.type === 'send' && Object.keys(overrides).length) {
+        setAppliedOptions({ changes: { ...overrides }, baseline: { ...initialOptions } });
+      }
       if (busy && followUp === 'queue' && mounted.current) setQueueVersion(value => value + 1);
       const persisted = readDraft(key);
       if (current.current.revision === captured.revision && (!persisted || persisted.revision === captured.revision)) {
@@ -132,7 +167,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       } else if (current.current.revision === captured.revision && mounted.current) {
         setError('发送已确认，但草稿已在其他页面修改，已保留。');
       }
-      if (mounted.current) editor.current?.focus();
+      if (mounted.current) requestAnimationFrame(() => { if (richEditor.current) richEditor.current.focus(); else editor.current?.focus(); });
     } catch (reason) {
       if (mounted.current) {
         if (busy && context.threadId) setQueueVersion(value => value + 1);
@@ -162,29 +197,30 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       else { editor.current?.focus(); editor.current?.setSelectionRange(caret, caret); }
     });
   };
-  const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
-    if (completions.query) {
-      if (event.key === 'Escape') { event.preventDefault(); completions.dismiss(); return; }
+  const keyDown = (event: globalThis.KeyboardEvent): boolean => {
+    if (event.isComposing || event.keyCode === 229) return false;
+    if (!richActive && completions.query) {
+      if (event.key === 'Escape') { event.preventDefault(); completions.dismiss(); return true; }
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        if (completions.items.length) { event.preventDefault(); completions.move(event.key === 'ArrowDown' ? 1 : -1); }
-        return;
+        if (completions.items.length) { event.preventDefault(); completions.move(event.key === 'ArrowDown' ? 1 : -1); return true; }
+        return false;
       }
       if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
         const selected = completions.items[completions.selected];
-        if (selected) { event.preventDefault(); chooseCompletion(selected); return; }
-        if (event.key === 'Enter' && completions.loading) { event.preventDefault(); return; }
+        if (selected) { event.preventDefault(); chooseCompletion(selected); return true; }
+        if (event.key === 'Enter' && completions.loading) { event.preventDefault(); return true; }
       }
     }
-    if (event.key !== 'Enter' || event.altKey || event.repeat || enterSetting.pending || enterSetting.error) return;
+    if (event.key !== 'Enter' || event.altKey || event.repeat || enterSetting.pending || enterSetting.error) return false;
     const modifier = event.ctrlKey || event.metaKey;
     if (busy && modifier && (enterSetting.value === 'enter' ? !event.shiftKey : event.shiftKey)) {
-      if (followUpSetting.pending || followUpSetting.error) return;
-      event.preventDefault(); void submit(followUpSetting.value === 'queue' ? 'steer' : 'queue'); return;
+      if (followUpSetting.pending || followUpSetting.error) return false;
+      event.preventDefault(); void submit(followUpSetting.value === 'queue' ? 'steer' : 'queue'); return true;
     }
-    if (event.shiftKey || busy && (followUpSetting.pending || followUpSetting.error)) return;
+    if (event.shiftKey || busy && (followUpSetting.pending || followUpSetting.error)) return false;
     const needsModifier = enterSetting.value === 'cmdAlways' || enterSetting.value === 'cmdIfMultiline' && draft.text.includes('\n');
-    if (needsModifier ? modifier : !modifier) { event.preventDefault(); void submit(); }
+    if (needsModifier ? modifier : !modifier) { event.preventDefault(); void submit(); return true; }
+    return false;
   };
   const interrupt = async () => {
     if (interruptInFlight.current) return;
@@ -214,11 +250,14 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         </div>)}
       </div> : null}
       {editIssue ? <div className="standalone-composer__retained" role="status">{editIssue}<details><summary>查看保留的内容</summary><pre>{JSON.stringify({ document: draft.document, input: draft.input, hints: draft.hints, preserved: draft.preserved, pending: draft.pendingDrafts }, null, 2)}</pre></details></div> : null}
+      {richActive && draft.document ? <StandaloneRichEditor ref={richEditor} document={draft.document}
+        onChange={document => changeDraft(value => updateRichDraft(value, document))} onKeyDown={keyDown} onImages={files => void addFiles(files)}
+        onInvalid={() => setError('编辑内容包含不支持的文档结构，已保留上一次草稿。')} /> :
       <textarea ref={editor} aria-label="和 Codex 一起工作" placeholder="输入消息" value={draft.text} readOnly={!!editIssue}
         aria-autocomplete="list" aria-controls={completions.query ? completions.listId : undefined}
         aria-activedescendant={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
         onChange={event => { const text = event.target.value; setCursor(event.target.selectionStart); changeDraft(value => updateDraftText(value, text)); }}
-        onSelect={event => setCursor(event.currentTarget.selectionStart)} onKeyDown={keyDown} onPaste={paste} />
+        onSelect={event => setCursor(event.currentTarget.selectionStart)} onKeyDown={event => { keyDown(event.nativeEvent); }} onPaste={paste} />}
       {completions.query ? <div className="standalone-composer__completions" id={completions.listId} role="listbox" aria-label={completions.query.kind === 'file' ? '工作区文件' : '技能'}>
         {completions.items.map((item, index) => <button type="button" role="option" id={completions.listId + '-' + index} key={item.kind + ':' + (item.kind === 'command' ? item.name : item.path)}
           aria-selected={index === completions.selected} onMouseDown={event => event.preventDefault()} onClick={() => chooseCompletion(item)}>
@@ -233,8 +272,12 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ''; void addFiles(files);
         }} />
         <button type="button" aria-label="添加附件" title="添加附件" disabled={uploading || !!editIssue || structuredInput} onClick={() => picker.current?.click()}>＋</button>
+        {!draft.document ? <button type="button" aria-label="富文本编辑" title="富文本编辑" disabled={!!editIssue}
+          onClick={() => { changeDraft(value => ({ ...value, document: documentFromText(value.text) }));
+            requestAnimationFrame(() => richEditor.current?.focus()); }}><FilePenLine size={16} /></button> : null}
         {onTargetChange ? <StandaloneTarget client={client} context={context} hosts={hosts} disabled={busy || sending || uploading} onTargetChange={onTargetChange} /> : null}
-        <StandaloneOptions client={client} hostId={context.hostId} cwd={context.cwd} threadId={context.threadId} busy={busy} modelRef={modelPicker} value={options} onChange={setOptions} />
+        <StandaloneOptions client={client} hostId={context.hostId} cwd={context.cwd} threadId={context.threadId} busy={busy} modelRef={modelPicker} value={options}
+          onChange={patch => setOverrides(previous => ({ ...previous, ...patch }))} />
         <label className="standalone-composer__enter">发送方式 <select aria-label="发送方式" value={enterSetting.value} disabled={enterSetting.pending} onChange={event => {
           const value = event.target.value;
           if (value === 'enter' || value === 'cmdIfMultiline' || value === 'cmdAlways') void enterSetting.update(value);

@@ -12,7 +12,7 @@ interface OptionsProps {
   busy: boolean;
   modelRef: Ref<HTMLSelectElement>;
   value: SubmitOptions;
-  onChange(value: SubmitOptions): void;
+  onChange(patch: Partial<SubmitOptions>): void;
 }
 function record(value: unknown): Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -85,7 +85,7 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRe
   }, [client, hostId, cwd]);
   const configured = threadId == null ? defaults : {};
   const selected = available.find(item => item.value === (value.model ?? configured.model));
-  const change = (part: Partial<SubmitOptions>) => onChange({ ...value, ...part });
+  const change = (part: Partial<SubmitOptions>) => onChange(part);
   return <fieldset className="standalone-composer__options" disabled={busy} title={busy ? '排队消息使用会话设置' : undefined} aria-label="会话选项">
     <label>模型 <select ref={modelRef} aria-label="模型" value={value.model ?? ''} disabled={loading || !available.length} onChange={event => {
       const model = available.find(item => item.value === (event.target.value || configured.model));
@@ -106,7 +106,7 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRe
       {typeof value.approvalPolicy === 'object' ? <option value="__granular__">自定义审批</option> : null}
       <option value="">{configured.approvalPolicy ? '配置默认 (' + approvalLabel(configured.approvalPolicy) + ')' : '会话默认'}</option><option value="untrusted">不受信任时</option><option value="on-request">按请求</option><option value="never">从不</option>
     </select></label>
-    <label>权限 <select aria-label="沙箱权限" value={value.sandboxMode ?? ''} onChange={event => change({ sandboxMode: sandbox(event.target.value) })}>
+    <label>权限 <select aria-label="沙箱权限" value={value.sandboxMode ?? ''} onChange={event => change({ sandboxMode: sandbox(event.target.value), permissionProfileId: undefined })}>
       <option value="">{configured.sandboxMode ? '配置默认 (' + configured.sandboxMode + ')' : '会话默认'}</option><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="danger-full-access">完全访问</option>
     </select></label>
     <label><input type="checkbox" checked={(value.serviceTier === undefined ? configured.serviceTier : value.serviceTier) === 'fast'} onChange={event => change({ serviceTier: event.target.checked ? 'fast' : null })} />快速</label>
