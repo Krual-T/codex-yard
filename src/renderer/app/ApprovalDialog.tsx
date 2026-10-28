@@ -9,10 +9,14 @@ import { classifyElicitation, displayApprovalParameters } from './approval-elici
 import type { ApprovalPersistence } from './approval-elicitation.ts';
 import type { ApprovalBrowserAuth, ApprovalToolSuggestion } from './approval-special.ts';
 import { ApprovalBrowserAuthQr, browserAuthScopeKey, sameBrowserAuthScope } from './approval-browser-auth.tsx';
+import { ApprovalBrowserAuthSavedLogins } from './approval-browser-auth-candidates.tsx';
 import type { ApprovalBrowserAuthAcknowledgeRequest, ApprovalBrowserAuthAcknowledgement, ApprovalBrowserAuthBinding,
   ApprovalBrowserAuthQrSubscribe, ApprovalBrowserAuthScope, ApprovalQrCodeRenderer } from './approval-browser-auth.tsx';
+import type { ApprovalBrowserAuthCandidates, ApprovalBrowserAuthRequestCandidates, ApprovalBrowserAuthUseCandidate } from './approval-browser-auth-candidates.tsx';
 export type { ApprovalBrowserAuthAcknowledgeRequest, ApprovalBrowserAuthAcknowledgement, ApprovalBrowserAuthBinding,
   ApprovalBrowserAuthQrSubscribe, ApprovalBrowserAuthQrUpdate, ApprovalBrowserAuthScope, ApprovalQrCodeRenderer } from './approval-browser-auth.tsx';
+export type { ApprovalBrowserAuthCandidate, ApprovalBrowserAuthCandidates, ApprovalBrowserAuthRequestCandidates,
+  ApprovalBrowserAuthUseCandidate } from './approval-browser-auth-candidates.tsx';
 
 export interface ServerRequest {
   hostId: string; id: string | number; method: string; params: Record<string, unknown>;
@@ -80,6 +84,11 @@ export interface ApprovalDialogProps {
   browserAuthAcknowledgement?: ApprovalBrowserAuthAcknowledgement;
   /** Retry only the chat acknowledgement for this exact confirmed operation. */
   onAcknowledgeBrowserAuth?(request: ApprovalBrowserAuthAcknowledgeRequest): Promise<void>;
+  /** Candidate labels and short-lived host-owned choice mappings, bound to the original request. */
+  browserAuthCandidates?: ApprovalBrowserAuthCandidates;
+  onRequestBrowserAuthCandidates?: ApprovalBrowserAuthRequestCandidates;
+  /** The host resolves the choice in its private credential transaction. */
+  onUseBrowserAuthCandidate?: ApprovalBrowserAuthUseCandidate;
   /** Resolved original-conversation agent identity, not an email address or a code. */
   emailOtpIdentity?: ApprovalOtpIdentity;
   completionContext?: ApprovalCompletionContext;
@@ -351,7 +360,8 @@ export function ApprovalDialog(props: ApprovalDialogProps) {
 function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscape, inputDismissMode = 'interrupt', stateRef, outcome, onOutcome,
   inputDraft, onInputDraftChange, formDraft, onFormDraftChange, onCheckRequestValidity, onPickApprovalFiles, onBeginUserVerification,
   onApplyToolSuggestion, onSubmitBrowserAuth, browserAuthBinding, onSubscribeBrowserAuthQr, browserAuthQrCode,
-  browserAuthAcknowledgement, onAcknowledgeBrowserAuth, emailOtpIdentity, completionContext, onCheckConnectorAuthorization }: ApprovalDialogProps) {
+  browserAuthAcknowledgement, onAcknowledgeBrowserAuth, browserAuthCandidates, onRequestBrowserAuthCandidates,
+  onUseBrowserAuthCandidate, emailOtpIdentity, completionContext, onCheckConnectorAuthorization }: ApprovalDialogProps) {
   const dialog = useRef<HTMLElement>(null);
   const inFlight = useRef(false);
   const acknowledgementInFlight = useRef(false);
@@ -519,6 +529,10 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
       origin: view.origin, challengeId: view.challengeId, ...(view.targetTabId ? { targetTabId: view.targetTabId } : {}),
       ...(authScope ? { accountId: authScope.accountId, userId: authScope.userId } : {}),
       fields, ...(selectedOption ? { selectedOption } : {}) }), false, true);
+  };
+  const submitBrowserAuthCandidate = (choiceId: string) => {
+    if (!authScope || !onUseBrowserAuthCandidate || authScopeKeyRef.current !== authScopeKey) return;
+    void send(() => onUseBrowserAuthCandidate({ scope: authScope, choiceId }), true, true);
   };
   const retryBrowserAuthAcknowledgement = async () => {
     if (!acknowledgement || !authScope || !onAcknowledgeBrowserAuth || !onCheckRequestValidity || !onOutcome
@@ -706,7 +720,12 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
         {acknowledgement && <button type="button" disabled={busy || acknowledgementInFlight.current || !managed || !sourceValid || outcome !== 'ready'
           || acknowledgement.status !== 'ready' || !onAcknowledgeBrowserAuth || !onCheckRequestValidity}
           onClick={() => { void retryBrowserAuthAcknowledgement(); }}>Retry chat response</button>}
-      </div> : <BrowserAuthFields key={JSON.stringify([threadId, serverName, view.origin, view.challengeId, view.fields, view.options, authScopeKey])}
+      </div> : <>
+      {browserAuthCandidates && (authScope ? <ApprovalBrowserAuthSavedLogins key={authScopeKey} scope={authScope}
+        snapshot={browserAuthCandidates} disabled={locked} onRequest={onRequestBrowserAuthCandidates}
+        onUse={onUseBrowserAuthCandidate ? submitBrowserAuthCandidate : undefined} />
+        : <p role="alert">Saved sign-in choices do not match this request.</p>)}
+      <BrowserAuthFields key={JSON.stringify([threadId, serverName, view.origin, view.challengeId, view.fields, view.options, authScopeKey])}
         view={view} disabled={locked} available={Boolean(onSubmitBrowserAuth && threadId && serverName)} onSubmit={submitBrowserAuth}>
         {view.hasQrCode && (authScope && onSubscribeBrowserAuthQr && browserAuthQrCode
           ? <ApprovalBrowserAuthQr key={authScopeKey} scope={authScope} enabled={!locked} initialPayload={view.initialQrPayload}
@@ -718,7 +737,7 @@ function ApprovalDialogContent({ request, onRespond, onUnsupported, onInputEscap
                 || !onSubmitBrowserAuth || authScopeKeyRef.current !== authScopeKey || lockedRef.current || inFlight.current) return;
               submitBrowserAuth({});
             }} /> : <p>The sign-in code requires the original account and browser host.</p>)}
-      </BrowserAuthFields>)}
+      </BrowserAuthFields></>)}
       {form && <form id={formId} noValidate onSubmit={(event) => { event.preventDefault(); submitForm(); }}>
         {view?.kind === 'form' && view.confirmation && <div>
           {view.confirmation.title && <h3>{view.confirmation.title}</h3>}
