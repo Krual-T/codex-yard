@@ -4,6 +4,7 @@ import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-
 import { ModelSettings } from '../src/renderer/settings/model-settings.ts';
 
 class FakeClient implements WorkbenchClient {
+  async reply(): Promise<void> { throw new Error('Unexpected approval'); }
   config: { model: string; model_reasoning_effort: string; profile: string | null } = { model: 'alpha', model_reasoning_effort: 'high', profile: 'work' };
   calls: { method: string; params?: Record<string, unknown>; hostId?: string }[] = [];
   reject = false;

@@ -173,10 +173,10 @@ export class Preferences {
     this.disposed = false;
     const lifecycle = ++this.lifecycle;
     this.unsubscribe = this.client.subscribe(event => {
-      const source = event.type === 'global-state-updated' ? 'global' : event.type === 'persisted-atoms-changed' ? 'atom' :
+      const source = event.type === 'global-state-updated' ? 'global' : event.type === 'persisted-atom-updated' ? 'atom' :
         event.type === 'settings-changed' ? 'setting' : null;
       if (source) {
-        const keys = Array.isArray(event.keys) ? event.keys : typeof event.key === 'string' ? [event.key] :
+        const keys = Array.isArray(event.keys) && event.keys.length ? event.keys : typeof event.key === 'string' ? [event.key] :
           preferenceKeys.filter(key => preferenceDefinitions[key].source === source);
         for (const key of keys) if (typeof key === 'string' && key in preferenceDefinitions &&
           preferenceDefinitions[key as PreferenceKey].source === source) {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useState } from 'react';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { entryState, Row } from './PreferenceControls.tsx';
 import type { PreferenceProps } from './PreferenceControls.tsx';
@@ -19,7 +19,7 @@ export function WorktreesSection({ client, hostId, preferences, snapshot, onDirt
   const root = snapshot['git-worktree-root'], cleanup = snapshot['worktree-auto-cleanup-enabled'];
   const keep = snapshot['worktree-keep-count'], upstream = snapshot['worktree-upstream-refresh-mode'];
   const keepDirty = keepText !== null && keepText !== String(keep.value);
-  useEffect(() => { onDirtyChange(keepDirty); }, [keepDirty, onDirtyChange]);
+  useLayoutEffect(() => { onDirtyChange(keepDirty); }, [keepDirty, onDirtyChange]);
   useEffect(() => {
     if (local) return;
     let active = true;

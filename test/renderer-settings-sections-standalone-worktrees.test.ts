@@ -10,6 +10,7 @@ test('remote worktrees use the selected host and reject filtered or invalid desk
     rpc: async <T>(method: string, params?: Record<string, unknown>, hostId?: string) => { calls.push([method, params, hostId]); return response as T; },
     host: async () => { throw new Error('Unexpected local storage access'); },
     subscribe: () => () => {},
+    reply: async () => { throw new Error('Unexpected approval'); },
   };
   assert.deepEqual(await readRemoteWorktreePreferences(client, 'ssh:fixture'), { root: '/remote/worktrees', autoCleanup: false, keepCount: 7 });
   assert.deepEqual(calls[0], ['config/read', { includeLayers: false }, 'ssh:fixture']);

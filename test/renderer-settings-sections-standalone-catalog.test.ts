@@ -4,6 +4,7 @@ import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-
 import { readCatalog } from '../src/renderer/settings/catalog.ts';
 
 class FakeClient implements WorkbenchClient {
+  async reply(): Promise<void> { throw new Error('Unexpected approval'); }
   calls: { method: string; params?: Record<string, unknown>; hostId?: string }[] = [];
   result: unknown;
   subscribe(_listener: (event: WorkbenchEvent) => void) { return () => {}; }

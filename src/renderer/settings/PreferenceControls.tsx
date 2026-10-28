@@ -6,7 +6,7 @@ export interface PreferenceProps { preferences: Preferences; snapshot: Preferenc
 export function Row({ label, description, children, error, retry }: {
   label: string; description?: ReactNode; children?: ReactNode; error?: string | null; retry?: () => void;
 }) {
-  return <div className="yard-setting-row">
+  return <div className="yard-setting-row" id={label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}>
     <div className="yard-setting-copy"><div className="yard-setting-label">{label}</div>
       {description && <div className="yard-setting-description">{description}</div>}
       {error && <div className="yard-setting-error" role="alert">{error} {retry && <button type="button" className="yard-link" onClick={retry}>Retry</button>}</div>}

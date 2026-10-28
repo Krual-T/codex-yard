@@ -4,6 +4,7 @@ import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-
 import { readConnections, setAutoConnect } from '../src/renderer/settings/connections.ts';
 
 class FakeClient implements WorkbenchClient {
+  async reply(): Promise<void> { throw new Error('Unexpected approval'); }
   calls: { endpoint: string; params?: Record<string, unknown> }[] = [];
   statusError = false;
   writeError = false;

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useSyncExternalStore } from 'react';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { Row } from './PreferenceControls.tsx';
 import { ModelSettings } from './model-settings.ts';
@@ -10,8 +10,8 @@ export function ModelSection({ client, hostId, onDirtyChange, onSavingChange }: 
   const state = useSyncExternalStore(modelSettings.subscribe, modelSettings.getSnapshot, modelSettings.getSnapshot);
   const dirty = modelSettings.dirty;
   useEffect(() => { void modelSettings.load(); return () => modelSettings.dispose(); }, [modelSettings]);
-  useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
-  useEffect(() => { onSavingChange(state.saving); }, [state.saving, onSavingChange]);
+  useLayoutEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
+  useLayoutEffect(() => { onSavingChange(state.saving); }, [state.saving, onSavingChange]);
   const selected = state.models.find(model => model.model === state.model);
   const efforts = Array.isArray(selected?.supportedReasoningEfforts) ? selected.supportedReasoningEfforts : [];
   return <>

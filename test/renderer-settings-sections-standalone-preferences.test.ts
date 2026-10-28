@@ -13,6 +13,7 @@ class FakeClient implements WorkbenchClient {
   pauseWrite: (() => Promise<void>) | null = null;
   pauseRead: ((key: string) => Promise<void>) | null = null;
   rpc<T>(): Promise<T> { throw new Error('RPC is not used for UI preferences'); }
+  async reply(): Promise<void> { throw new Error('Unexpected approval'); }
   subscribe(listener: (event: WorkbenchEvent) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
     this.calls.push({ endpoint, params });
@@ -64,7 +65,7 @@ test('host and cross-tab notifications refresh the correct store while keeping d
   client.atoms['show-context-window-usage'] = false;
   client.globals['reduced-motion-preference'] = 'on';
   for (const event of [{ type: 'settings-changed', keys: ['appearanceTheme'] },
-    { type: 'persisted-atoms-changed' }, { type: 'global-state-updated', keys: ['reduced-motion-preference'] }]) {
+    { type: 'persisted-atom-updated', keys: ['show-context-window-usage'] }, { type: 'global-state-updated', keys: ['reduced-motion-preference'] }]) {
     for (const listener of client.listeners) listener(event);
   }
   await new Promise(resolve => setImmediate(resolve));
@@ -72,6 +73,23 @@ test('host and cross-tab notifications refresh the correct store while keeping d
   assert.equal(prefs.getSnapshot().appearanceTheme.value, 'light');
   assert.equal(prefs.getSnapshot()['show-context-window-usage'].value, false);
   assert.equal(prefs.getSnapshot()['reduced-motion-preference'].value, 'on');
+  stop();
+});
+
+test('atom change notifications refresh specified keys and surface malformed storage', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  const stop = prefs.start();
+  await prefs.load();
+  client.calls.length = 0;
+  client.atoms['show-educational-tips'] = false;
+  for (const listener of client.listeners) listener({ type: 'persisted-atom-updated', keys: ['show-educational-tips'] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(prefs.getSnapshot()['show-educational-tips'].value, false);
+  assert.deepEqual(client.calls.map(call => call.params?.key), ['show-educational-tips']);
+  client.fail = 'get-persisted-atom';
+  for (const listener of client.listeners) listener({ type: 'persisted-atom-updated', keys: [] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(prefs.getSnapshot()['show-educational-tips'].error ?? '', /offline/);
   stop();
 });
 

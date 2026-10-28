@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useLayoutEffect, useState } from 'react';
 import { NumberPreference, Row, Select, Toggle, entryState } from './PreferenceControls.tsx';
 import type { PreferenceProps } from './PreferenceControls.tsx';
 import { codeThemes, defaultThemes, exportTheme, importTheme, preferenceDefinitions } from './preferences.ts';
@@ -13,7 +13,7 @@ function ThemeEditor({ variant, onDirtyChange, ...props }: PreferenceProps & { v
   const [dialog, setDialog] = useState<'import' | 'export' | null>(null);
   const [text, setText] = useState('');
   const [error, setError] = useState('');
-  useEffect(() => { onDirtyChange(dialog === 'import' && text.trim().length > 0); }, [dialog, text, onDirtyChange]);
+  useLayoutEffect(() => { onDirtyChange(dialog === 'import' && text.trim().length > 0); }, [dialog, text, onDirtyChange]);
   const disabled = entryState(entry).disabled;
   const update = (patch: Partial<ChromeTheme>) => props.preferences.edit(themeKey, { ...theme, ...patch });
   const font = (key: 'ui' | 'content' | 'code', value: string) => {

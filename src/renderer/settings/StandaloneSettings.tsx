@@ -12,7 +12,6 @@ import { ModelSection } from './ModelSection.tsx';
 import { Preferences, preferenceKeys } from './preferences.ts';
 import { WorktreesSection } from './WorktreesSection.tsx';
 import { hostPath, readSettingsRoute, sectionPath } from './routing.ts';
-import type { SettingsRoute } from './routing.ts';
 import './standalone-settings.css';
 
 export interface SettingsSection { id: string; title: string; group: string }
@@ -46,8 +45,7 @@ export const settingsSections: SettingsSection[] = [
 
 interface RemoteConnection { hostId: string; displayName?: string; sshAlias?: string }
 export interface SettingsNavigationGuard { requestLeave(): Promise<boolean> }
-export type SettingsIntegrationProps = Omit<StandaloneSettingsProps, 'onNavigate'> & {
-  onNavigate?: (path: string, options?: { replace?: boolean }) => void;
+export type SettingsIntegrationProps = StandaloneSettingsProps & {
   registerNavigationGuard?: (guard: SettingsNavigationGuard | null) => void;
 };
 const searchLabels: Record<string, string[]> = {
@@ -63,13 +61,10 @@ const searchLabels: Record<string, string[]> = {
   'keyboard-shortcuts': ['Number shortcuts', 'Open web link in default browser'],
 };
 
-export function StandaloneSettings({ client, hostId, initialSection, location, onNavigate, onClose, registerNavigationGuard }: SettingsIntegrationProps) {
+export function StandaloneSettings({ client, hostId, location, onNavigate, onClose, registerNavigationGuard }: SettingsIntegrationProps) {
   const preferences = useMemo(() => new Preferences(client), [client]);
   const snapshot = useSyncExternalStore(preferences.subscribe, preferences.getSnapshot, preferences.getSnapshot);
-  const incoming = readSettingsRoute(location, initialSection, hostId);
-  const [route, setRoute] = useState<SettingsRoute>(() => incoming);
-  const routeRef = useRef(route);
-  routeRef.current = route;
+  const route = readSettingsRoute(location, hostId);
   const { section, hostId: selectedHost } = route;
   const [hosts, setHosts] = useState<RemoteConnection[]>([]);
   const [hostError, setHostError] = useState<string | null>(null);
@@ -85,8 +80,6 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
   const [confirmLeave, setConfirmLeave] = useState(false);
   const pending = useRef<{ promise: Promise<boolean>; resolve: (allowed: boolean) => void } | null>(null);
   const transition = useRef(0);
-  const navigateRef = useRef(onNavigate);
-  navigateRef.current = onNavigate;
   const dirty = preferences.dirty || otherDirty;
   const anySaving = saving || otherSaving || preferenceKeys.some(key => snapshot[key].saving);
   const flags = useRef({ dirty, saving: anySaving });
@@ -120,20 +113,8 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
   }, [registerNavigationGuard, requestLeave]);
   useEffect(() => () => { pending.current?.resolve(false); pending.current = null; }, [preferences]);
   useEffect(() => {
-    if (incoming.path === routeRef.current.path && incoming.hostId === routeRef.current.hostId) return;
-    const id = ++transition.current;
-    void requestLeave().then(allowed => {
-      if (id !== transition.current) return;
-      if (allowed) setRoute(incoming);
-      else if (incoming.path !== routeRef.current.path) navigateRef.current?.(routeRef.current.path, { replace: true });
-    });
-  }, [incoming.path, incoming.hostId, requestLeave]);
-  useEffect(() => {
-    if (!route.redirect || !onNavigate) return;
-    const next = readSettingsRoute({ pathname: '/settings/general', search: route.search }, undefined, route.hostId);
-    setRoute(next);
-    onNavigate(route.redirect, { replace: true });
-  }, [route.redirect, route.search, route.hostId, onNavigate]);
+    if (route.redirect) onNavigate(route.redirect, { replace: true, state: location.state });
+  }, [route.redirect, location.state, onNavigate]);
   useEffect(() => {
     let active = true;
     void client.host<{ remoteConnections: RemoteConnection[] }>('refresh-remote-connections').then(result => {
@@ -159,6 +140,16 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
     }
     setSearchTarget(null);
   }, [searchTarget, section]);
+  useEffect(() => {
+    if (!location.hash) return;
+    let id = location.hash.slice(1);
+    try { id = decodeURIComponent(id); } catch { return; }
+    const target = document.getElementById(id);
+    if (target && content.current?.contains(target)) {
+      target.scrollIntoView({ block: 'center' });
+      target.querySelector<HTMLElement>('input, select, textarea, button')?.focus();
+    }
+  }, [location.hash, section]);
 
   const guard = (action: () => void) => {
     const id = ++transition.current;
@@ -168,8 +159,7 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
     const action = () => {
       if (next !== section) {
         const path = sectionPath(next, route);
-        setRoute(readSettingsRoute({ pathname: path.split('?')[0], search: path.includes('?') ? path.slice(path.indexOf('?')) : '' }, next, selectedHost));
-        onNavigate?.(path);
+        onNavigate(path, { state: location.state });
       }
       setSearch('');
       if (label) setSearchTarget({ section: next, label });
@@ -188,15 +178,13 @@ export function StandaloneSettings({ client, hostId, initialSection, location, o
   return <div className="yard-settings">
     <aside className="yard-settings-nav" aria-label="Settings navigation">
       <div className="yard-settings-nav-header"><strong>Settings</strong><button type="button" onClick={() => guard(onClose)} aria-label="Close settings">Close</button></div>
+      {route.pathname.slice('/settings/'.length).includes('/') && <button type="button" onClick={() => guard(() => onNavigate(route.path, { delta: -1, state: location.state }))}>Back</button>}
       <label className="yard-host-label">Host
         <select aria-label="Settings host" value={selectedHost} onChange={event => {
           const next = event.target.value;
           if (next === selectedHost) return;
           const path = hostPath(next, route);
-          guard(() => {
-            setRoute(readSettingsRoute({ pathname: path.split('?')[0], search: path.includes('?') ? path.slice(path.indexOf('?')) : '' }, section, next));
-            onNavigate?.(path);
-          });
+          guard(() => onNavigate(path, { state: location.state }));
         }}>
           <option value="local">Local</option>
           {selectedHost !== 'local' && !hosts.some(host => host.hostId === selectedHost) && <option value={selectedHost}>{selectedHost}</option>}
