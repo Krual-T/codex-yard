@@ -17,6 +17,7 @@ declare global {
       setLocale(locale: string): void;
       enableActions(): void;
       setHost(hostId: string): void;
+      setArchived(value: boolean): void;
     };
   }
 }
@@ -35,6 +36,7 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
       let changeLocale=()=>{};
       let enableActions=()=>{};
       let changeHost=()=>{};
+      let changeArchived=()=>{};
       const row=(id,name,cwd,status={type:'idle'})=>({id,name,cwd,preview:'',turns:[],status,updatedAt:1700000000});
       const active=[row('one','Running task','/repo',{type:'active',activeFlags:[]}),
         row('two','Assigned second','/repo',{type:'active',activeFlags:['waitingOnApproval']}),row('recent','Recent task','/other')];
@@ -55,6 +57,7 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
         const [search,setSearch]=useState(''),[showArchived,setArchived]=useState(false),[tabs,setTabs]=useState([]),[current,setCurrent]=useState(null),[withActions,setWithActions]=useState(false),[host,setHost]=useState('local');
         enableActions=()=>setWithActions(true);
         changeHost=setHost;
+        changeArchived=setArchived;
         const list=useThreadList(client,{hostId:host,archived:showArchived,search,refreshKey:0});
         const open=row=>{const tab={id:row.id,name:row.name,hostId:row.hostId,archived:row.archived};
           setTabs(old=>old.some(item=>item.id===tab.id&&item.hostId===tab.hostId)?old:[...old,tab]);setCurrent(tab);};
@@ -75,7 +78,7 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
               onClick:()=>setCurrent(tab)},'Tab '+tab.name))),React.createElement('output',{id:'selected'},JSON.stringify(current)))));
       }
       window.sidebarUIHarness={calls,pending:()=>waiting.length,resolveNext:rows=>waiting.shift().resolve({data:rows,nextCursor:null}),
-        rejectNext:message=>waiting.shift().reject(Error(message)),setLocale:locale=>changeLocale(locale),enableActions:()=>enableActions(),setHost:host=>changeHost(host)};
+        rejectNext:message=>waiting.shift().reject(Error(message)),setLocale:locale=>changeLocale(locale),enableActions:()=>enableActions(),setHost:host=>changeHost(host),setArchived:value=>changeArchived(value)};
       createRoot(document.getElementById('root')).render(React.createElement(App));
     ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' },
   });
@@ -162,10 +165,10 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
     await projectTwo.click();
     await projectOne.click();
     await sidebar.getByRole('button', { name: 'New chat in Project Two' }).click();
-    await sidebar.getByRole('button', { name: 'New chat', exact: true }).click();
+    await sidebar.getByRole('button', { name: 'New chat', exact: true }).first().click();
     await sidebar.getByRole('button', { name: 'Add project' }).click();
-    await sidebar.getByRole('button', { name: 'Account' }).click();
-    await page.getByRole('menuitem', { name: 'Settings' }).click();
+    await sidebar.getByRole('button', { name: 'Open profile menu' }).click();
+    await page.getByRole('menuitem', { name: /^Settings/ }).click();
     const calls = await page.evaluate(() => window.sidebarUIHarness.calls);
     assert.deepEqual(calls.projects[0], { id: 'two', name: 'Project Two', rootPaths: ['/repo'], hostId: 'local' });
     assert.equal(calls.projects[1], null);
@@ -178,15 +181,13 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
 
     await projectOneGroup.getByRole('button', { name: /Running task/ }).click();
     assert.deepEqual(JSON.parse(await page.locator('#selected').innerText()), { id: 'one', name: 'Running task', hostId: 'local', archived: false });
-    await sidebar.getByRole('button', { name: 'Account' }).click();
-    await page.getByRole('menuitem', { name: 'Archived chats' }).click();
+    await page.evaluate(() => window.sidebarUIHarness.setArchived(true));
     await sidebar.getByRole('button', { name: 'Archived task' }).waitFor();
     await page.getByRole('tab', { name: 'Tab Running task' }).click();
     assert.equal(JSON.parse(await page.locator('#selected').innerText()).archived, false);
     await sidebar.getByRole('button', { name: 'Archived task' }).click();
     assert.equal(JSON.parse(await page.locator('#selected').innerText()).archived, true);
-    await sidebar.getByRole('button', { name: 'Account' }).click();
-    await page.getByRole('menuitem', { name: 'Show recent chats' }).click();
+    await sidebar.getByRole('button', { name: 'Show recent chats' }).click();
     await sidebar.getByRole('button', { name: /Running task/ }).first().waitFor();
     await page.getByRole('tab', { name: 'Tab Archived task' }).click();
     assert.equal(JSON.parse(await page.locator('#selected').innerText()).archived, true);
@@ -229,7 +230,7 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
     await page.waitForFunction(() => window.sidebarUIHarness.pending() === 1);
     await page.evaluate(() => window.sidebarUIHarness.resolveNext([{ id: 'loaded', name: 'Loaded later', cwd: '/other',
       preview: '', turns: [], status: { type: 'idle' } }]));
-    await sidebar.getByRole('button', { name: 'Loaded later' }).waitFor();
+    await sidebar.getByRole('button', { name: 'Loaded later', exact: true }).waitFor();
 
     await page.evaluate(() => window.sidebarUIHarness.enableActions());
     await sidebar.getByRole('button', { name: 'Projects: Project One' }).click();
@@ -241,7 +242,7 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
     await projectOneGroup.getByRole('button', { name: 'Conversation menu: Running task' }).click();
     const menu = page.getByRole('menu');
     await page.keyboard.press('End');
-    assert.equal(await menu.getByRole('menuitem', { name: 'Move to project' }).evaluate(element => document.activeElement === element), true);
+    assert.equal(await menu.getByRole('menuitem', { name: 'Permanently delete' }).evaluate(element => document.activeElement === element), true);
     await page.keyboard.press('Escape');
     assert.equal(await page.getByRole('menu').count(), 0);
     await projectOneGroup.getByRole('button', { name: 'Conversation menu: Running task' }).click();
@@ -251,7 +252,7 @@ test('standalone sidebar keeps row identity, project controls, search and narrow
     assert.deepEqual((await page.evaluate(() => window.sidebarUIHarness.calls)).actions, [
       { hostId: 'local', id: 'one', action: 'pin' }, { hostId: 'local', id: 'one', action: 'rename' },
     ]);
-    await sidebar.getByRole('button', { name: 'Account' }).click();
+    await sidebar.getByRole('button', { name: 'Open profile menu' }).click();
     await page.setViewportSize({ width: 1000, height: 750 });
     await page.getByRole('menu').waitFor({ state: 'hidden' });
 
