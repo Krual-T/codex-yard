@@ -15,7 +15,7 @@ const recovery: MessageEditRecovery = {
 const request = { origin, expectedTurnIds: ['turn'], clientUserMessageId: 'previous-client',
   turnParams: { input: [{ type: 'text', text: 'previous' }] }, operation: 'submit' as const };
 
-function fixture(previous?: StoredMessageEdit['submission']) {
+function fixture(previous?: StoredMessageEdit['submission'], prepareHost?: () => Promise<void>) {
   let saved: unknown = { [JSON.stringify([origin.hostId, origin.threadId])]: { recovery, ...(previous ? { submission: previous } : {}) } };
   let gate: Promise<void> | undefined, release: (() => void) | undefined, entered: (() => void) | undefined;
   let failNext = false, calls = 0;
@@ -31,7 +31,12 @@ function fixture(previous?: StoredMessageEdit['submission']) {
   };
   const client: WorkbenchClient = {
     rpc: async () => { throw new Error('unexpected RPC'); }, subscribe: () => () => {}, reply: async () => {},
-    host: async () => { calls++; throw new Error('connection lost after dispatch'); },
+    host: async (_endpoint, _params, options) => {
+      await prepareHost?.();
+      try { options?.assertBeforeSend?.(); }
+      catch (reason) { throw Object.assign(reason instanceof Error ? reason : new Error(String(reason)), { uncertain: false, sendPhase: 'before-send' }); }
+      calls++; throw new Error('connection lost after dispatch');
+    },
   };
   const store = new MessageEditRecoveryStore(client, storage), access = store.createAccess();
   return {
@@ -49,6 +54,23 @@ function fixture(previous?: StoredMessageEdit['submission']) {
     },
   };
 }
+
+test('authority revoked inside transport preparation restores the exact unsent phase', async () => {
+  let prepared!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { prepared = resolve; });
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const previous = { request, stage: 'prepared' as const, operationId: 'previous-operation', editorVersion: version };
+  const h = fixture(previous, async () => { prepared(); await waiting; });
+  assert.equal(h.access.acquire(origin), true);
+  const pending = h.store.submit(origin, ['turn'], {}, h.access.capture(origin));
+  await entered;
+  h.access.release(origin);
+  assert.equal(h.access.acquire(origin), true);
+  release();
+  await assert.rejects(pending, /使用权已改变/);
+  assert.equal(h.calls(), 0);
+  assert.deepEqual((await h.store.read(origin.hostId, origin.threadId))?.submission, previous);
+});
 
 for (const stage of [undefined, 'prepared', 'reverted', 'revertUnknown', 'startUnknown', 'conflict'] as const) {
   test(`dispatch refusal restores the exact previous ${stage ?? 'absent'} phase`, async () => {

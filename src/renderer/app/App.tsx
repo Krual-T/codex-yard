@@ -152,20 +152,31 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const targetChange = useRef<{ controller: ComposerDraftController; owner: ComposerDraftSnapshot['owner']; lease: ComposerDraftLease;
     target: { hostId: string; cwd: string }; committed(): void } | null>(null);
   const navigationLocked = useRef(false);
+  const committedNavigation = useRef<{ id: number; target: Route } | null>(null);
   useLayoutEffect(() => {
+    const commit = committedNavigation.current;
+    if (!commit || commit.id !== navigationCommit || current.hostId !== commit.target.hostId
+      || current.threadId !== commit.target.threadId || current.section !== commit.target.section) return;
     const pending = targetChange.current;
     if (pending && (current.hostId !== pending.target.hostId || current.threadId !== null || current.section
       || cwd !== pending.target.cwd || composerController.current?.snapshot()?.owner.hostId !== pending.target.hostId)) return;
     // Keep the original editor frozen until the new route actually commits.
     const editLease = navigationLease.current;
-    if (editLease) {
-      if (!current.section && !current.readOnly && current.hostId === editLease.origin.hostId && current.threadId === editLease.origin.threadId) editLease.release();
-      else editLease.handoff();
+    try {
+      if (editLease) {
+        if (!current.section && current.hostId === editLease.origin.hostId && current.threadId === editLease.origin.threadId) editLease.release();
+        else editLease.handoff();
+      }
+    } catch (cause) {
+      editLease?.release();
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
       navigationLease.current = null;
+      composerNavigationLease.current?.release(); composerNavigationLease.current = null; navigationLocked.current = false;
+      committedNavigation.current = null;
+      setLeaving(false);
+      if (pending) { targetChange.current = null; pending.committed(); }
     }
-    composerNavigationLease.current?.release(); composerNavigationLease.current = null; navigationLocked.current = false;
-    setLeaving(false);
-    if (pending) { targetChange.current = null; pending.committed(); }
   }, [navigationCommit, current.hostId, current.threadId, current.section, current.readOnly, cwd]);
   const editStore = useMemo(() => new MessageEditRecoveryStore(client, undefined, { hostChecksRebasedSourceBeforeRevert: true }), [client]);
   const editAccess = useMemo(() => editStore.createAccess(), [editStore]);
@@ -296,7 +307,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const controller = createRouteNavigation(() => {
       const next = route();
       if (next.section && !routeRef.current.section) setSettingsSourceEpoch(value => value + 1);
-      navigationGeneration.current++; setLeaving(true); setCurrent(next); setNavigationCommit(value => value + 1); setError(''); setMenu(false);
+      const id = ++navigationGeneration.current;
+      committedNavigation.current = { id, target: next };
+      setLeaving(true); setCurrent(next); setNavigationCommit(id); setError(''); setMenu(false);
     }, async () => {
       navigationLocked.current = true;
       let accepted = false;
@@ -327,13 +340,14 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       } }
     }, (committed, cause) => {
       if (!committed) {
+        committedNavigation.current = null;
         navigationLease.current?.release(); navigationLease.current = null;
         composerNavigationLease.current?.release(); composerNavigationLease.current = null;
         navigationLocked.current = false; setLeaving(false);
         if (cause) setError(cause instanceof Error ? cause.message : String(cause));
       }
       setNavigationFactsEpoch(value => value + 1);
-    });
+    }, cause => setError(cause instanceof Error ? cause.message : String(cause)));
     navigation.current = controller;
     setNavigationFactsEpoch(value => value + 1);
     const unsubscribe = client.subscribe(event => {
@@ -882,7 +896,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
               return recovered;
             }}
             onEditNavigationController={receiveMessageEditController}
-            onEditDraftChange={(value, origin, version) => editStore.save(value, origin, version)}
+            onEditDraftChange={(value, origin, version, authority) => editStore.save(value, origin, version, authority)}
             onOpenFile={openFile} onOpenFileAt={location => {
               if (location.hostId !== current.hostId) { setError('文件所属主机已改变，请返回原会话打开。'); return; }
               openFile(location.path, location.line, location.column, location.cwd ?? panelCwd);

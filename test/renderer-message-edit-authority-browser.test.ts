@@ -10,6 +10,7 @@ declare global {
     editAuthorityHarness: {
       ready(): boolean;
       saved(): Promise<{ recovery: { editor: { sessionId: string; revision: number; edits: { text: string }[] } }; submission?: { stage: string; operationId: string } } | null>;
+      restore(): Promise<void>;
       owner(name: 'one' | 'two'): boolean;
       revoke(name: 'one' | 'two'): void;
       failNextSave(): void;
@@ -22,6 +23,7 @@ declare global {
       holdNextSubmit(): void;
       parentCalls(): number;
       completedClears(): number;
+      authorityFailures(): number;
       writtenText(): string;
       changeConnection(): void;
       holdNextRead(): void;

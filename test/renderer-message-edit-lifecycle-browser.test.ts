@@ -190,11 +190,57 @@ test('an old cancel waiting for its IDB transaction cannot use a later acquisiti
     const input = editor(page, 'two');
     await input.waitFor();
     await page.evaluate(() => window.editAuthorityHarness.releaseBeforeWrite());
-    await page.waitForFunction(() => window.editAuthorityHarness.lastWriteError().includes('另一页面已更改此编辑'));
+    await page.waitForFunction(() => window.editAuthorityHarness.lastWriteError().includes('消息编辑使用权已改变'));
     assert.equal((await page.evaluate(() => window.editAuthorityHarness.saved()))?.recovery.editor.sessionId, 'shared-session');
     await input.fill('new owner keeps recovery');
     await savedText(page, 'new owner keeps recovery');
     await page.waitForFunction(() => window.editAuthorityHarness.writtenText() === 'new owner keeps recovery');
+    assert.equal(await page.evaluate(() => window.editAuthorityHarness.owner('two')), true);
+  } finally { await h.browser.close(); }
+});
+
+test('an empty mounted message view blocks late recovery until its navigation lease is released', options, async () => {
+  const h = await fixture();
+  try {
+    const page = await h.open('http://127.0.0.1:18949/?unread=1');
+    await page.evaluate(() => window.editAuthorityHarness.show('two', false));
+    assert.equal(await page.evaluate(() => window.editAuthorityHarness.freeze('one')), null);
+    await page.evaluate(() => window.editAuthorityHarness.restore());
+    assert.equal(await editor(page, 'one').count(), 0);
+    assert.equal(await page.evaluate(() => window.editAuthorityHarness.owner('one')), false);
+    await page.evaluate(() => window.editAuthorityHarness.release('one'));
+    await editor(page, 'one').waitFor();
+    assert.equal(await editor(page, 'one').inputValue(), 'original');
+    await page.evaluate(async () => {
+      window.editAuthorityHarness.freeze('one');
+      await window.editAuthorityHarness.flush('one');
+      window.editAuthorityHarness.handoff('one');
+      window.editAuthorityHarness.show('one', false);
+      window.editAuthorityHarness.show('two', true);
+    });
+    await editor(page, 'two').waitFor();
+    assert.equal(await page.evaluate(() => window.editAuthorityHarness.owner('two')), true);
+  } finally { await h.browser.close(); }
+});
+
+test('a cancel queued behind an older write receipt cannot delete a newly accepted edit', options, async () => {
+  const h = await fixture();
+  try {
+    const page = await h.open('http://127.0.0.1:18949/?unread=1');
+    await view(page, 'one').getByRole('button', { name: 'Edit message' }).click();
+    await editor(page, 'one').waitFor();
+    await page.evaluate(() => window.editAuthorityHarness.holdNextWrite());
+    await editor(page, 'one').fill('queued replacement');
+    await page.waitForFunction(() => window.editAuthorityHarness.waiting());
+    await view(page, 'one').getByRole('button', { name: 'Cancel', exact: true }).click();
+    await page.evaluate(() => window.editAuthorityHarness.revoke('one'));
+    await view(page, 'two').getByRole('button', { name: 'Edit message' }).click();
+    await editor(page, 'two').waitFor();
+    assert.equal(await editor(page, 'two').inputValue(), 'queued replacement');
+    await page.evaluate(() => window.editAuthorityHarness.releaseGate());
+    await page.waitForFunction(() => window.editAuthorityHarness.authorityFailures() >= 2);
+    assert.equal(await page.evaluate(() => window.editAuthorityHarness.completedClears()), 0);
+    assert.equal((await page.evaluate(() => window.editAuthorityHarness.saved()))?.recovery.editor.edits[0]?.text, 'queued replacement');
     assert.equal(await page.evaluate(() => window.editAuthorityHarness.owner('two')), true);
   } finally { await h.browser.close(); }
 });

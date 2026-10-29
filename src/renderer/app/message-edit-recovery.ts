@@ -249,11 +249,14 @@ export class MessageEditRecoveryStore {
     if (!this.observed.has(key)) this.observed.set(key, { serialized: JSON.stringify(value) });
     return stored(value, identity);
   }
-  private async change(origin: MessageEditOrigin, update: (previous: StoredMessageEdit | null) => StoredMessageEdit | null): Promise<StoredMessageEdit | null> {
+  private async change(origin: MessageEditOrigin, update: (previous: StoredMessageEdit | null) => StoredMessageEdit | null,
+    assertAuthority?: () => void): Promise<StoredMessageEdit | null> {
+    assertAuthority?.();
     const key = keyFor(origin);
     const observation = this.observed.get(key);
     let result: StoredMessageEdit | null = null;
     await this.storage.update(value => {
+      assertAuthority?.();
       const previous = entries(value), serialized = JSON.stringify(previous[key]);
       if (this.observed.get(key) !== observation || (observation && observation.serialized !== serialized)) {
         throw new Error('另一页面已更改此编辑。当前输入已保留，请刷新后核对恢复记录。');
@@ -264,11 +267,13 @@ export class MessageEditRecoveryStore {
       return next;
     });
     // A later acquisition may have accepted a different baseline while this receipt was pending.
-    if (this.observed.get(key) === observation) this.observed.set(key, { serialized: result ? JSON.stringify(result) : undefined });
+    let currentAuthority = true;
+    try { assertAuthority?.(); } catch { currentAuthority = false; }
+    if (currentAuthority && this.observed.get(key) === observation) this.observed.set(key, { serialized: result ? JSON.stringify(result) : undefined });
     this.storage.changed();
     return result;
   }
-  save(value: MessageEditRecovery | null, origin: MessageEditOrigin, version: MessageEditRecoveryVersion) {
+  save(value: MessageEditRecovery | null, origin: MessageEditOrigin, version: MessageEditRecoveryVersion, assertAuthority?: () => void) {
     return this.change(origin, previous => {
       if (previous && !sameOrigin(previous.recovery.origin, origin)) throw new Error('此会话还有另一条未完成的编辑，已保留。');
       const old = previous?.recovery.editor;
@@ -284,7 +289,7 @@ export class MessageEditRecoveryStore {
       }
       if (!sameOrigin(value.origin, origin)) throw new Error('编辑草稿目标不一致。');
       return { ...previous, recovery: structuredClone(value) };
-    }).then(() => {});
+    }, assertAuthority).then(() => {});
   }
 
   async prepareRebase(origin: MessageEditOrigin, version: MessageEditRecoveryVersion): Promise<MessageEditRebaseCandidate> {
@@ -383,14 +388,15 @@ export class MessageEditRecoveryStore {
     const operation = pending.request.operation;
     if (pending.stage === 'started') return this.confirmStarted(state!);
     // The uncertain phase is durable before crossing the browser/host boundary.
-    try {
+    const assertBeforeSend = () => {
       const assertion: unknown = assertCanDispatch?.();
       if (assertion && (typeof assertion === 'object' || typeof assertion === 'function')
         && typeof (assertion as { then?: unknown }).then === 'function') {
         void Promise.resolve(assertion).catch(() => {});
         throw new Error('派发前检查必须同步完成，未发送。');
       }
-    } catch (reason) {
+    };
+    const restoreUnsent = async () => {
       try {
         await this.change(origin, previous => {
           if (previous?.submission?.operationId !== operationId) throw new Error('编辑恢复记录已改变，未覆盖。');
@@ -401,10 +407,19 @@ export class MessageEditRecoveryStore {
       } catch (restoreError) {
         throw new Error('派发前检查失败，恢复阶段未能写回；原记录已保留，请先核对。', { cause: restoreError });
       }
+    };
+    try { assertBeforeSend(); } catch (reason) {
+      await restoreUnsent(); throw reason;
+    }
+    let response: EditMessageResult;
+    try {
+      response = await this.client.host<EditMessageResult>('message-edit', { hostId: origin.hostId, threadId: origin.threadId,
+        ...pending.request }, { assertBeforeSend });
+    } catch (reason) {
+      if (reason && typeof reason === 'object' && 'uncertain' in reason && reason.uncertain === false
+        && 'sendPhase' in reason && reason.sendPhase === 'before-send') await restoreUnsent();
       throw reason;
     }
-    const response = await this.client.host<EditMessageResult>('message-edit', { hostId: origin.hostId, threadId: origin.threadId,
-      ...pending.request });
     if (!['prepared', 'reverted', 'revertUnknown', 'startUnknown', 'started', 'conflict'].includes(response.stage)) {
       throw new Error('编辑结果无法确认，恢复记录已保留；请检查结果，勿重复发送。');
     }

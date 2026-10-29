@@ -1,5 +1,6 @@
 import { createElement } from 'react';
 import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
 import type { ThreadSummary } from '../lib/codex-protocol.ts';
 import { MessageEditRecoveryStore, messageEditChanged, messageEditsAtom } from '../src/renderer/app/message-edit-recovery.ts';
 import type { EditRecoveryStorage } from '../src/renderer/app/message-edit-recovery.ts';
@@ -56,6 +57,14 @@ const storage: EditRecoveryStorage = {
 };
 const store = new MessageEditRecoveryStore(client, storage);
 const access = { one: store.createAccess(), two: store.createAccess() };
+let authorityFailures = 0;
+for (const value of Object.values(access)) {
+  const capture = value.capture;
+  value.capture = origin => {
+    const assertion = capture(origin);
+    return () => { try { assertion(); } catch (reason) { authorityFailures++; throw reason; } };
+  };
+}
 const controllers: Partial<Record<'one' | 'two', MessageEditNavigationController>> = {};
 const leases: Partial<Record<'one' | 'two', MessageEditNavigationLease>> = {};
 const root = createRoot(document.getElementById('root')!);
@@ -67,8 +76,8 @@ function render() {
     createElement(StandaloneMessages, { client, hostId: origin.hostId, thread, editRecovery: suppliedRecovery, editAccess: access[name],
       editHistory: { order: 'ascending', tailComplete: true },
       onEditNavigationController: value => { if (value) controllers[name] = value; else delete controllers[name]; },
-      onEditDraftChange: async (value, target, version) => {
-        try { await store.save(value, target, version); }
+      onEditDraftChange: async (value, target, version, authority) => {
+        try { await store.save(value, target, version, authority); }
         catch (reason) { lastWriteError = reason instanceof Error ? reason.message : String(reason); throw reason; }
         if (!value) completedClears++;
         else writtenText = value.editor?.edits[0]?.text ?? '';
@@ -105,6 +114,7 @@ async function initialize() {
 Object.assign(window, { editAuthorityHarness: {
   ready: () => Boolean(controllers.one && controllers.two),
   saved: () => store.read(origin.hostId, origin.threadId),
+  restore: async () => { suppliedRecovery = (await store.read(origin.hostId, origin.threadId))!.recovery; flushSync(render); },
   owner: (name: 'one' | 'two') => access[name].owns(origin),
   revoke: (name: 'one' | 'two') => { access[name].release(origin); },
   failNextSave: () => { failNextSave = true; },
@@ -117,6 +127,7 @@ Object.assign(window, { editAuthorityHarness: {
   holdNextSubmit: () => { holdNextSubmit = true; waiting = false; },
   parentCalls: () => parentCalls,
   completedClears: () => completedClears,
+  authorityFailures: () => authorityFailures,
   writtenText: () => writtenText,
   changeConnection: () => { connectionGeneration++; },
   holdNextRead: () => { holdNextRead = true; readWaiting = false; },

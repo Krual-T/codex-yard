@@ -1,14 +1,17 @@
 export interface NavigationOptions { replace?: boolean; delta?: number; state?: unknown }
 
 /** Keep the committed URL visible while an asynchronous leave guard is open. */
-export function createRouteNavigation(changed: () => void, requestLeave: () => Promise<boolean>, settled?: (committed: boolean, error?: unknown) => void) {
+export function createRouteNavigation(changed: () => void, requestLeave: () => Promise<boolean>, settled?: (committed: boolean, error?: unknown) => void,
+  reportHistoryError?: (error: unknown) => void) {
   let index = Number(history.state?.__yardIndex ?? 0), position = index;
   let committed = { url: location.href, state: history.state };
   let pending = false, approvedPop = false, disposed = false;
   let moving: Promise<void> | null = null, arrived: (() => void) | null = null;
   if (!Object.hasOwn(history.state ?? {}, '__yardIndex')) {
-    history.replaceState({ __yardIndex: index, __yardState: history.state }, '', location.href);
-    committed.state = history.state;
+    try {
+      history.replaceState({ __yardIndex: index, __yardState: history.state }, '', location.href);
+      committed.state = history.state;
+    } catch (error) { reportHistoryError?.(error); }
   }
   const commit = () => {
     index = position; committed = { url: location.href, state: history.state }; changed();
@@ -56,9 +59,11 @@ export function createRouteNavigation(changed: () => void, requestLeave: () => P
       if (pending || disposed || moving) return false;
       const target = new URL(path, committed.url), previous = new URL(committed.url);
       if (target.origin !== previous.origin || target.pathname !== previous.pathname) return false;
-      history.replaceState(committed.state, '', target.href);
-      committed = { url: location.href, state: history.state };
-      return true;
+      try {
+        history.replaceState(committed.state, '', target.href);
+        committed = { url: location.href, state: history.state };
+        return true;
+      } catch (error) { reportHistoryError?.(error); return false; }
     },
     async navigate(path: string, options: NavigationOptions = {}): Promise<boolean> {
       if (pending || disposed) return false;

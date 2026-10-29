@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v19，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v20，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -79,9 +79,13 @@ v17修订：文件与可视化预填必须在来源回调的首await前登记原
 
 主导航在首次等待前同步取得原消息编辑租约和原composer owner租约，并置输入区域inert；排空后核对设置离页、文件恢复、浏览器未提交编辑和未接收快照，在路由提交前再次flush两项租约。同一host/thread的消息视图保留编辑器，仅release解除冻结；真正离开等新路由layout commit后才handoff，旧组件卸载后租约仍能按原身份释放使用权。History API的pushState、replaceState或go抛错也走失败收尾，解除inert和租约，保留原页与原稿。设置深链无已知父级历史时Back替换为明确父URL。租约保护本页输入与已登记外部操作；不会锁住其他renderer的合法后续编辑，也不额外保存所有历史版本。
 
+导航收尾只消费 router 真正提交的本次代次和目标；等待期间的归档、cwd 或只读元数据变化不能触发handoff。同一消息视图的只读变化仍保留原编辑器。当前URL同步和初始History replace的异常就地显示，保留原URL与当前只读事实；它们不伪装为一次导航完成。
+
 主页面和Mini使用同一个MessageEditRecoveryStore，各自稳定创建独立的createAccess句柄，同一host/thread同时只有一个可写消息编辑器。取得使用权后重读现有IDB恢复记录；只有本次明确接纳read结果时才更新CAS基线，后台读取不替正在编辑的旧稿接受新基线。事务开始与完成都核对原observed对象及授予身份，撤权再授予不能放行旧写。pending acquisition也参与导航freeze：同步取消本次取得流程并等待已有写排空，迟到读取不能重开编辑器；导航取消时允许重新核对恢复。
 
-消息hook调用onEdit(draft,origin,prepare)时先同步进入父回调；prepare是本次不可变编辑快照的幂等保存函数，父在首次await前捕获原access、目标、导航和connectionRevision，再实际调用并等待prepare。保存完成与宿主调用前复核原host/thread/turn/item、连接及目标；消息编辑没有模型选择控件，overrides为空，由当前会话核对真实设置。失败不调用宿主，并按原operationId条件恢复之前的提交阶段，保留新稿与并发记录；已调用宿主后的断线仍保持unknown。取消、重取权和提交完成只能操作本次原身份，不能删除后来保存的新稿。该使用权仅协调同一renderer的双视图；跨页仍由现有IDB事务冲突检查负责。主页面已接v19合同，真实App行为及Mini父消费者验收仍待完成。
+已挂载但尚无编辑或获取流程的消息视图同样建立host/thread冻结token，阻止等待中到达的恢复记录获取权限；取消时重新核对，真正离开后移交。取消和恢复写在排队前捕获原授予，沿原atom条件更新复核，旧排队取消不能借后来owner的新基线删除其稿件。
+
+消息hook调用onEdit(draft,origin,prepare)时先同步进入父回调；prepare是本次不可变编辑快照的幂等保存函数，父在首次await前捕获原access、目标、导航和connectionRevision，再实际调用并等待prepare。保存完成与宿主调用前复核原host/thread/turn/item、连接及目标；消息编辑没有模型选择控件，overrides为空，由当前会话核对真实设置。WorkbenchClient的assertBeforeSend将同一断言带到连接准备的最后等待之后、原socket.send前；明确未派发才按原operationId条件恢复之前阶段，已派发或未知仍保留原恢复证据。取消、重取权和提交完成只能操作本次原身份，不能删除后来保存的新稿。该使用权仅协调同一renderer的双视图；跨页仍由现有IDB事务冲突检查负责。主页面已接v20合同，真实App故障复验及Mini父消费者验收仍待完成。
 
 浏览器选择、保存、附加和删除先取得原owner外部句柄，根atom事务共用既有composer版本更新。父级用实际home/thread binding核对browser owner；composer删除借用同一句柄，完整after在投影接收前保留，根事务已提交时返回handled，不再进行第二次删除。接收失败保留完整快照及复制、另存、核对与明确放弃出口，阻止静默离页；已持久版本不会被旧投影二次写回。跨页删除watcher也经同一外部操作队列和根事务，只处理精确删除标记。发送确认仍从不可变intent记录实际完整引用后按精确revision清理。
 

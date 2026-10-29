@@ -9,15 +9,19 @@ const chromePath = process.env.AGENTS_TEST_CHROMIUM || '/usr/bin/google-chrome';
 test('History API failures release leave guards without committing or consuming a history index', { skip: !existsSync(chromePath) }, async () => {
   const bundle = await build({ stdin: { resolveDir: process.cwd(), contents: `
     import {createRouteNavigation} from './src/renderer/app/route-navigation.ts';
-    let frozen=false, commits=0, outcomes=[], controller;
+    let frozen=false, commits=0, outcomes=[], historyErrors=[], controller;
     const install=()=>controller=createRouteNavigation(()=>commits++, async()=>{frozen=true;return true},
-      (committed,error)=>{frozen=false;outcomes.push({committed,error:error instanceof Error?error.message:null})});
+      (committed,error)=>{frozen=false;outcomes.push({committed,error:error instanceof Error?error.message:null})},
+      error=>historyErrors.push(error instanceof Error?error.message:String(error)));
     install();
     window.navigationHarness={
       navigate:(path,options)=>controller.navigate(path,options),
-      state:()=>({frozen,commits,outcomes,index:history.state.__yardIndex,path:location.pathname}),
+      replace:path=>controller.replaceCurrentURL(path),
+      historyErrors:()=>historyErrors,
+      state:()=>({frozen,commits,outcomes,index:history.state?.__yardIndex??null,path:location.pathname}),
       fail(method){const original=history[method].bind(history);history[method]=(...args)=>{history[method]=original;throw new DOMException('blocked '+method,'SecurityError')}},
-      restart(){controller.dispose();history.replaceState(null,'','/settings/browser-use/downloads');frozen=false;commits=0;outcomes=[];install()},
+      restart(blockInit=false){controller.dispose();history.replaceState(null,'','/settings/browser-use/downloads');frozen=false;commits=0;outcomes=[];
+        if(blockInit)window.navigationHarness.fail('replaceState');install()},
     };
   ` }, bundle: true, write: false, format: 'iife' });
   const browser = await chromium.launch({ executablePath: chromePath, headless: true,
@@ -45,6 +49,14 @@ test('History API failures release leave guards without committing or consuming 
     assert.equal(await run("navigationHarness.navigate('/settings/browser-use',{delta:-1})"), true);
     assert.deepEqual(await run('navigationHarness.state()'), { frozen: false, commits: 1,
       outcomes: [{ committed: true, error: null }], index: 0, path: '/settings/browser-use' });
+    await run("navigationHarness.fail('replaceState')");
+    assert.equal(await run("navigationHarness.replace('/settings/browser-use?retained=1')"), false);
+    assert.equal(await run('location.search'), '');
+    assert.deepEqual(await run('navigationHarness.historyErrors()'), ['blocked replaceState']);
+    await run('navigationHarness.restart(true)');
+    assert.deepEqual(await run('navigationHarness.historyErrors()'), ['blocked replaceState', 'blocked replaceState']);
+    assert.equal((await run('navigationHarness.state()') as { path: string }).path, '/settings/browser-use/downloads');
+    assert.equal(await run("navigationHarness.navigate('/local/recovered')"), true);
     assert.deepEqual(errors, []);
   } finally { await browser.close(); }
 });
