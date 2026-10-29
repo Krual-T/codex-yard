@@ -1416,9 +1416,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         </section>
         <div className="yard-composer-container" inert={leaving}>
           {current.threadId && !loading && goalMounted && <div hidden={!goalOpen}><StandaloneGoal client={client} hostId={current.hostId} threadId={current.threadId} readOnly={current.readOnly} /></div>}
-          <FullAccessNotice client={client} options={effectiveComposerOptions?.owner.hostId === composerOwner.hostId
+          {current.threadId && <FullAccessNotice client={client} options={effectiveComposerOptions?.owner.hostId === composerOwner.hostId
             && effectiveComposerOptions.owner.threadId === composerOwner.threadId && effectiveComposerOptions.owner.draftId === composerOwner.draftId
-            ? effectiveComposerOptions.options : initialOptions} sessionDismissed={fullAccessDismissed} onDismissSession={() => setFullAccessDismissed(true)} />
+            ? effectiveComposerOptions.options : initialOptions} sessionDismissed={fullAccessDismissed} onDismissSession={() => setFullAccessDismissed(true)} />}
           {current.readOnly && <p role="status">此会话已归档，原输入已保留。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p>}
           <div inert={current.readOnly}>
           {!sendState || current.threadId && (loading || !initialOptions) && !(composerIsCurrent || current.readOnly && thread) ? current.readOnly ? null : <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
