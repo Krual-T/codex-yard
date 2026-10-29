@@ -71,6 +71,8 @@ try {
   await page.getByRole('button', { name: '另一个标签', exact: true }).click();
   const secondTab = page.getByRole('tab', { name: '另一个标签', exact: true });
   await secondTab.and(page.locator('[aria-selected="true"]')).waitFor();
+  await page.getByText('第二个对话', { exact: true }).waitFor({ timeout: 60000 });
+  await page.locator('.yard-conversation:not([inert])').waitFor();
   await page.keyboard.press('Control+1');
   try {
     await chatTab.and(page.locator('[aria-selected="true"]')).waitFor({ timeout: 2000 });
@@ -84,7 +86,7 @@ try {
   } catch { gaps.push('Holding Ctrl did not show the original tab shortcut hints'); }
   finally { await page.keyboard.up('Control'); }
   await chatTab.click();
-  assert.equal(await chatTab.getAttribute('aria-selected'), 'true');
+  await chatTab.and(page.locator('[aria-selected="true"]')).waitFor();
   await page.waitForFunction(() => [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
     .some(input => ['和 Codex 一起工作', '与 Codex 协作'].includes(input.getAttribute('aria-label') ?? '') && input.value.includes('标签切换后保留的草稿')));
   assert.ok((await editor.inputValue()).includes('标签切换后保留的草稿'));

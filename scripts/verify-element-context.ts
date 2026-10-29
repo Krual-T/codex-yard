@@ -221,7 +221,7 @@ try {
   await page.getByRole('button', { name: '元素引用验收', exact: true }).click();
   await page.locator('.standalone-composer__reference').filter({ hasText: '需要修改的按钮' }).waitFor();
   assert.equal(await editor.inputValue(), '保留这段草稿，请调整元素');
-  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await page.getByRole('button', { name: /^(发送|Send)$/ }).click();
   await fake.waitForCall('turn/start');
   await page.locator('.standalone-composer__reference').filter({ hasText: '需要修改的按钮' }).waitFor({ state: 'detached' });
   report.requests = fake.messages.filter(message => message.method === 'turn/start');
@@ -246,7 +246,7 @@ try {
   await page.locator('.standalone-composer__reference').filter({ hasText: '需要修改的按钮' }).waitFor();
   assert.equal(await editor.inputValue(), '新对话也引用这个按钮');
   await capture('new-draft');
-  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await page.getByRole('button', { name: /^(发送|Send)$/ }).click();
   const newTurn = await fake.waitForCall('turn/start', 2);
   assert.ok(newTurn);
   for (const expected of ['新对话也引用这个按钮', '#selected', 'border-radius']) assert.ok(JSON.stringify(newTurn).includes(expected), 'Missing new-draft context: ' + expected);

@@ -73,7 +73,7 @@ try {
     const first = page.locator('.yard-owned-sidebar-project .yard-owned-sidebar-thread').first();
     await first.waitFor({ timeout: 60000 });
     const scroller = page.locator('.yard-owned-sidebar-scroll');
-    const newChat = page.getByRole('button', { name: 'New chat in Tablet Project', exact: true });
+    const newChat = page.getByRole('button', { name: /^(New chat in Tablet Project|在此项目新建对话： Tablet Project)$/ });
     assert.ok(await visibleThroughAncestors(newChat), 'project new-chat action must be visible without hover');
     await page.screenshot({ path: join(output, `${viewport.width}-project-action.png`) });
     const project = page.getByRole('button', { name: 'Tablet Project', exact: true });

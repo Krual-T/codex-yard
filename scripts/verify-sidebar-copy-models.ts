@@ -295,6 +295,8 @@ try {
   await firstTab.and(page.locator('[aria-selected="true"]')).waitFor({ timeout: 60000 });
   await page.getByRole('button', { name: 'Second conversation', exact: true }).click();
   await page.getByRole('tab', { name: 'Second conversation', exact: true }).and(page.locator('[aria-selected="true"]')).waitFor();
+  await page.getByText('No messages yet', { exact: true }).waitFor({ timeout: 60000 });
+  await page.locator('.yard-conversation:not([inert])').waitFor();
   await page.keyboard.press('Control+1');
   try {
     await firstTab.and(page.locator('[aria-selected="true"]')).waitFor({ timeout: 3000 });
