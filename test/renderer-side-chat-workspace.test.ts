@@ -14,6 +14,7 @@ import { SideChatParentReceipts } from '../src/native/side-chat-parent-receipts.
 import { createStateMutations } from '../src/native/state-mutations.ts';
 import { createFakeCodex, fixtureThread, NO_REPLY } from './fake-codex.ts';
 import type {} from './renderer-side-chat-workspace-fixture.tsx';
+import type {} from './renderer-side-chat-root-fixture.tsx';
 
 type Message = Record<string, any>;
 async function peer() {
@@ -35,7 +36,8 @@ async function peer() {
     { id: 'queue-b', clientUserMessageId: 'client-b', input: [{ type: 'text', text: 'synthetic queue B', text_elements: [] }] },
   ];
   const approvalReplies: Message[] = [];
-  const order: string[] = [], reads: { purpose: string; token: unknown }[] = [];
+  const order: string[] = [], reads: { purpose: string; token: unknown }[] = [], dispatches: Message[] = [], nativeWrites: Message[] = [];
+  let injectionStatus: Message | null = null;
   fake.handlers.set('thread/fork', (_params, context) => {
     order.push('fork');
     const child = ++forks === 1 ? 'child-a' : 'child-' + forks;
@@ -83,7 +85,8 @@ async function peer() {
     });
     const ready = connection.connect().then(() => {
       socketGenerations.set(connection.socket!, generation);
-      if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'codex-app-server-connection-changed', hostId: 'local', state: 'connected' }));
+      if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'codex-app-server-connection-changed', hostId: 'local', state: 'connected',
+        daemonConnectionGeneration: generation }));
     });
     page.on('close', () => { authority.invalidate(page); parent.forgetPage(page); receipts.forgetPage(page); connections.delete(page); connection.close(); });
     page.on('message', raw => { void (async () => {
@@ -97,6 +100,7 @@ async function peer() {
       }
       if (message.type === 'mcp-request') {
         await ready;
+        dispatches.push(structuredClone(message));
         const request = message.request, source = { page, hostId: 'local', connection, socket: connection.socket!, connectionGeneration: generation,
           isCurrent: () => page.readyState === WebSocket.OPEN && connection.connected && socketGenerations.get(connection.socket!) === generation };
         const attempt = request.method === 'thread/start' ? receipts.begin(source, 'thread/start', null) : null;
@@ -126,6 +130,17 @@ async function peer() {
           if (body.action === 'read') reads.push({ purpose: body.purpose, token: (result as Message).token });
           if (body.action === 'prepare' && lostPrepare-- > 0) throw Object.assign(new Error('Synthetic prepare reply lost.'), { uncertain: true });
           if (body.action === 'retryPersistence' && lostPersistence-- > 0) throw Object.assign(new Error('Synthetic persistence reply lost.'), { uncertain: true });
+        } else if (endpoint === 'send-injection') {
+          nativeWrites.push(structuredClone(body));
+          if (body.action === 'inject') {
+            injectionStatus = { reference: structuredClone(body.reference), injection: { phase: 'injected', persistentThread: false,
+              terminal: { kind: 'injected' } }, turn: { phase: 'waiting', attempts: [] }, pendingPersistence: null };
+          } else if (body.action === 'start' && injectionStatus) {
+            injectionStatus.turn = { phase: 'accepted', attemptId: body.turnAttemptId, attempts: [body.turnAttemptId],
+              connectionGeneration: body.daemonConnectionGeneration,
+              terminal: { kind: 'accepted', result: { turn: { id: 'native-turn', items: [], status: 'inProgress' } } } };
+          } else if (body.action !== 'status') throw Error('Unexpected synthetic injection action.');
+          result = structuredClone(injectionStatus);
         } else if (endpoint === 'queued-follow-up-send-lock-acquire') result = { acquired: true };
         else if (endpoint === 'queued-follow-up-send-lock-release') result = {};
         else if (endpoint === 'get-setting') result = { value: body.key === 'composerPlainTextMode' ? false : 'queue', exists: true };
@@ -145,7 +160,7 @@ async function peer() {
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); if (!address || typeof address === 'string') throw Error('No fixture address.');
-  return { url: `http://127.0.0.1:${address.port}/`, fake, order, reads, approvalReplies, section: () => section,
+  return { url: `http://127.0.0.1:${address.port}/`, fake, order, reads, dispatches, nativeWrites, approvalReplies, section: () => section,
     holdChild() { holdChild = true; }, releaseChild() { holdChild = false; deliverChild?.(); }, childWaiting: () => !!deliverChild,
     holdFork() { holdFork = true; }, releaseFork() { lateFork?.(); }, forkWaiting: () => !!lateFork,
     holdPrepare() { holdPrepare = true; }, releasePrepare() { holdPrepare = false; deliverPrepare?.(); }, prepareWaiting: () => !!deliverPrepare,
@@ -169,6 +184,15 @@ async function peer() {
     },
     queue: () => structuredClone(queue),
     changeGeneration() { generation = 'generation-b'; },
+    signalGeneration() {
+      generation = 'generation-b';
+      for (const [page, byHost] of connections) {
+        const connection = byHost.get('local');
+        if (connection?.socket) socketGenerations.set(connection.socket, generation);
+        if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'codex-app-server-connection-changed',
+          hostId: 'local', state: 'connected', daemonConnectionGeneration: generation }));
+      }
+    },
     async changeInjectAttempt() { await mutations.run(() => {
       const next = structuredClone(section), operation = Object.values(next.operations)[0] as Message;
       operation.inject.attemptId = 'other-attempt'; section = next;
@@ -195,6 +219,10 @@ async function eventually(check: () => boolean) {
   for (let i = 0; i < 300; i++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
   throw Error('Timed out waiting for the synthetic peer.');
 }
+async function eventuallyAsync(check: () => Promise<boolean>) {
+  for (let i = 0; i < 300; i++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
+  throw Error('Timed out waiting for the synthetic browser state.');
+}
 async function setup(browser: Browser, script: string, url: string): Promise<{ context: BrowserContext; page: Page }> {
   const context = await browser.newContext();
   await context.route('**/*', route => route.request().url().startsWith(url) ? route.continue() : route.abort());
@@ -204,6 +232,286 @@ async function setup(browser: Browser, script: string, url: string): Promise<{ c
   await page.getByRole('button', { name: '打开侧聊' }).waitFor();
   return { context, page };
 }
+
+async function setupRoot(browser: Browser, script: string, url: string): Promise<{ context: BrowserContext; page: Page }> {
+  const context = await browser.newContext();
+  await context.route('**/*', route => route.request().url().startsWith(url) ? route.continue() : route.abort());
+  const page = await context.newPage(); page.setDefaultTimeout(10_000);
+  await page.goto(url); await page.addScriptTag({ content: script });
+  await page.evaluate(async () => window.sideChatRootFixture.mount());
+  await page.waitForFunction(() => window.sideChatRootFixture.mounted());
+  return { context, page };
+}
+
+test('SideChatRoot composes the original workspace, shared sender and child draft', { timeout: 100_000 }, async t => {
+  const bundle = await build({ entryPoints: ['test/renderer-side-chat-root-fixture.tsx'], bundle: true, write: false,
+    format: 'iife', loader: { '.css': 'empty' } });
+  const browser = await chromium.launch({ executablePath: process.env.YARD_VALIDATION_CHROME_BIN || '/usr/bin/google-chrome',
+    headless: true, args: ['--no-sandbox', '--disable-background-networking'] });
+  const script = bundle.outputFiles[0]!.text;
+  try {
+    await t.test('opens once and exposes the real child and its browser draft transaction', async () => {
+      const p = await peer(), { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const identity = await page.evaluate(() => window.sideChatRootFixture.open());
+        assert.notEqual(identity.draftId, identity.prepareId);
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && !!window.sideChatRootFixture.child()?.hasNavigation);
+        const child = await page.evaluate(() => window.sideChatRootFixture.child());
+        assert.deepEqual(child?.owner, { hostId: 'local', threadId: 'child-a', draftId: identity.draftId });
+        assert.equal(child?.hasDraft, true); assert.equal(child?.hasEditNavigation, false);
+        assert.deepEqual(p.order.slice(0, 4), ['fork', 'child', 'respond', 'inject']);
+        const associations = await page.evaluate(() => window.sideChatRootFixture.listRecoverable());
+        assert.equal(associations[0]?.draftId, identity.draftId); assert.equal(associations[0]?.prepareId, identity.prepareId);
+        assert.equal(associations[0]?.childThreadId, 'child-a');
+        const reference = await page.evaluate(() => window.sideChatRootFixture.attachBrowserReference());
+        assert.equal(reference.context?.draftId, identity.draftId); assert.equal(reference.context?.threadId, 'child-a');
+        await page.getByRole('button', { name: '移除引用' }).click();
+        await page.waitForFunction(() => window.sideChatRootFixture.child()?.snapshot.draft.references?.length === 0);
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.browserComments())).comments.length, 0);
+        assert.deepEqual(await page.evaluate(() => window.sideChatRootFixture.removed()), [child!.owner]);
+        await page.evaluate(() => window.sideChatRootFixture.setVisible(false));
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.owner.draftId, identity.draftId);
+        await page.evaluate(() => window.sideChatRootFixture.setVisible(true));
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await input.fill('synthetic message for the child projection');
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.waitForFunction(() => !!window.sideChatRootFixture.child()?.hasEditNavigation);
+        const turn = p.dispatches.find(message => message.request?.method === 'turn/start');
+        assert.equal(turn?.daemonConnectionGeneration, 'generation-a'); assert.equal(turn?.request.params.threadId, 'child-a');
+        await page.getByRole('button', { name: '停止', exact: true }).click();
+        await eventually(() => p.fake.calls('turn/interrupt').length === 1);
+        const stop = p.dispatches.find(message => message.request?.method === 'turn/interrupt');
+        assert.equal(stop?.daemonConnectionGeneration, 'generation-a'); assert.equal(stop?.request.params.threadId, 'child-a');
+        assert.equal(stop?.request.params.turnId, 'fixture-turn-1');
+        assert.equal(p.fake.calls('thread/fork').length, 1);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('navigation freezes before waiting, drains the real draft operation, and hands off only after commit', async () => {
+      const p = await peer(), { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => !!window.sideChatRootFixture.child()?.hasNavigation);
+        await input.fill('synthetic retained draft');
+        await page.waitForFunction(() => window.sideChatRootFixture.child()?.snapshot.draft.text === 'synthetic retained draft');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.holdDraftOperation()), true);
+        await page.evaluate(() => window.sideChatRootFixture.holdOwnerWork());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), true);
+        const draftId = (await page.evaluate(() => window.sideChatRootFixture.child()))!.identity.draftId;
+        assert.equal(await page.evaluate(id => window.sideChatRootFixture.canAttachOwner(id), draftId), false);
+        await page.evaluate(() => window.sideChatRootFixture.beginFlush());
+        await page.waitForTimeout(100);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDone()), false);
+        assert.equal(await page.evaluate(() => { try { window.sideChatRootFixture.open(); return false; } catch { return true; } }), true);
+        await page.evaluate(() => window.sideChatRootFixture.releaseDraftOperation());
+        await page.waitForTimeout(100);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDone()), false);
+        await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushResult()), true);
+        await page.evaluate(() => window.sideChatRootFixture.revokeNavigation());
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.snapshot.draft.text, 'synthetic retained draft');
+        await page.evaluate(() => { window.sideChatRootFixture.changeParent(); window.sideChatRootFixture.handoffNavigation();
+          window.sideChatRootFixture.releaseNavigation(); });
+        await page.waitForFunction(() => !window.sideChatRootFixture.child());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.closed), 0);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('navigation freezes and hands off every retained child', async () => {
+      const p = await peer(), { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const first = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => !!window.sideChatRootFixture.child()?.hasNavigation);
+        await input.fill('first retained draft');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        const second = await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.waitForFunction(id => window.sideChatRootFixture.child()?.identity.draftId === id
+          && !!window.sideChatRootFixture.child()?.hasNavigation, second.draftId);
+        await input.waitFor(); await input.fill('second retained draft');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await page.waitForFunction(ids => ids.every(id => window.sideChatRootFixture.canAcquireChild(id)), [first.draftId, second.draftId]);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), true);
+        for (const id of [first.draftId, second.draftId]) {
+          assert.equal(await page.evaluate(value => window.sideChatRootFixture.canAcquireChild(value), id), false);
+        }
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushNavigation()), true);
+        await page.evaluate(() => window.sideChatRootFixture.revokeNavigation());
+        await page.evaluate(() => { window.sideChatRootFixture.changeParent(); window.sideChatRootFixture.handoffNavigation();
+          window.sideChatRootFixture.releaseNavigation(); });
+        await page.waitForFunction(() => !window.sideChatRootFixture.child());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.closed), 0);
+        assert.equal(p.fake.calls('thread/fork').length, 2);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('a close freezes the child before draining its original external draft operation', async () => {
+      const p = await peer(), { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.waitForFunction(() => !!window.sideChatRootFixture.child()?.hasNavigation);
+        await page.waitForFunction(() => window.sideChatRootFixture.canAcquireDraft());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.holdDraftOperation()), true);
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.canAcquireDraft()), false);
+        assert.equal(p.order.includes('close'), false);
+        await page.evaluate(() => window.sideChatRootFixture.releaseDraftOperation());
+        await page.waitForFunction(() => window.sideChatRootFixture.closed === 1);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 1);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('an unconfirmed revoke keeps the original root and draft frozen until retry succeeds', async () => {
+      const p = await peer(); p.failRevoke(true); p.enableQueue();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.getByText(/浏览器确认尚未撤销/).waitFor();
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.getByRole('button', { name: '删除待发送消息' }).first().waitFor();
+        await input.fill('draft survives revoke failure');
+        await page.waitForFunction(() => window.sideChatRootFixture.child()?.snapshot.draft.text === 'draft survives revoke failure');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), true);
+        const flushed = await page.evaluate(() => window.sideChatRootFixture.flushNavigation());
+        if (!flushed) console.error('root revoke flush diagnostic', await page.locator('body').innerText());
+        assert.equal(flushed, true);
+        await assert.rejects(page.evaluate(() => window.sideChatRootFixture.revokeNavigation()), /revoke reply lost/);
+        await assert.rejects(page.evaluate(() => window.sideChatRootFixture.releaseNavigation()), /撤权尚未确认/);
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.snapshot.draft.text, 'draft survives revoke failure');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.canAcquireDraft()), false);
+        p.failRevoke(false);
+        await page.evaluate(() => window.sideChatRootFixture.revokeNavigation());
+        await page.evaluate(() => window.sideChatRootFixture.releaseNavigation());
+        await page.waitForFunction(() => window.sideChatRootFixture.canAcquireDraft());
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('the original child and daemon generation reach native injection and its turn', async () => {
+      const p = await peer(), { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const identity = await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && !!window.sideChatRootFixture.child());
+        await page.evaluate(() => window.sideChatRootFixture.structuredDraft());
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await eventually(() => p.nativeWrites.length === 2);
+        assert.deepEqual(p.nativeWrites.map(item => item.action), ['inject', 'start']);
+        for (const call of p.nativeWrites) {
+          assert.equal(call.daemonConnectionGeneration, 'generation-a'); assert.equal(call.reference.threadId, 'child-a');
+          assert.equal(call.reference.owner.draftId, identity.draftId);
+        }
+        assert.equal(p.fake.calls('turn/start').length, 0);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('changing Main while native injection waits rejects the original grant without dispatch', async () => {
+      const p = await peer(), { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && !!window.sideChatRootFixture.child());
+        await page.evaluate(() => window.sideChatRootFixture.structuredDraft());
+        await page.evaluate(() => window.sideChatRootFixture.holdNative());
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.waitForFunction(() => window.sideChatRootFixture.nativeWaiting());
+        await page.evaluate(() => { window.sideChatRootFixture.changeParent(); window.sideChatRootFixture.releaseNative(); });
+        await eventuallyAsync(() => page.evaluate(async () => Object.values((await window.sideChatRootFixture.sends()).requests).some(item => item.stage === 'failed')));
+        assert.equal(p.nativeWrites.length, 0); assert.equal(p.fake.calls('turn/start').length, 0);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseNative()); await context.close(); await p.close(); }
+    });
+    await t.test('switching the active child invalidates an older pending input grant', async () => {
+      const p = await peer(), { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && !!window.sideChatRootFixture.child());
+        await page.evaluate(() => window.sideChatRootFixture.structuredDraft());
+        await page.evaluate(() => window.sideChatRootFixture.holdNative());
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.waitForFunction(() => window.sideChatRootFixture.nativeWaiting());
+        const next = await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.waitForFunction(id => window.sideChatRootFixture.child()?.identity.draftId === id, next.draftId);
+        await page.evaluate(() => window.sideChatRootFixture.releaseNative());
+        await eventuallyAsync(() => page.evaluate(async () => Object.values((await window.sideChatRootFixture.sends()).requests).some(item => item.stage === 'failed')));
+        assert.equal(p.nativeWrites.length, 0); assert.equal(p.fake.calls('turn/start').length, 0);
+        await page.evaluate(id => window.sideChatRootFixture.show(id), original.draftId);
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.owner.draftId, original.draftId);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseNative()); await context.close(); await p.close(); }
+    });
+    await t.test('queue deletion and start use the original child grant and daemon generation', async () => {
+      const p = await peer(); p.enableQueue();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit);
+        const remove = page.getByRole('button', { name: '删除待发送消息' }).first(); await remove.waitFor(); await remove.click();
+        await eventually(() => p.fake.calls('thread/queue/delete').length === 1);
+        const deletion = p.dispatches.find(message => message.request?.method === 'thread/queue/delete');
+        assert.equal(deletion?.daemonConnectionGeneration, 'generation-a'); assert.equal(deletion?.request.params.threadId, 'child-a');
+        const start = page.getByRole('button', { name: '立即发送待发送消息' }).first(); await start.waitFor(); await start.click();
+        await eventually(() => p.fake.calls('thread/queue/start').length === 1);
+        const starting = p.dispatches.find(message => message.request?.method === 'thread/queue/start');
+        assert.equal(starting?.daemonConnectionGeneration, 'generation-a'); assert.equal(starting?.request.params.threadId, 'child-a');
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('a new daemon generation cannot authorize a send for the old child', async () => {
+      const p = await peer(), { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit);
+        await input.fill('must remain on the original child');
+        p.signalGeneration();
+        await page.waitForFunction(() => window.sideChatRootFixture.generation() === 'generation-b');
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.getByText(/原页面的主机连接已失效/).waitFor();
+        assert.equal(p.fake.calls('turn/start').length, 0); assert.equal(p.nativeWrites.length, 0);
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.snapshot.draft.text, 'must remain on the original child');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), false);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('reopening a durable association observes without taking the original token or reforking', async () => {
+      const p = await peer(), { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const identity = await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        const other = await context.newPage(); await other.goto(p.url); await other.addScriptTag({ content: script });
+        await other.evaluate(() => window.sideChatRootFixture.mount());
+        await other.waitForFunction(() => window.sideChatRootFixture.mounted());
+        assert.equal((await other.evaluate(() => window.sideChatRootFixture.listRecoverable()))[0]?.draftId, identity.draftId);
+        const restored = await other.evaluate(value => window.sideChatRootFixture.restore(value), identity);
+        assert.equal(restored.mode, 'restore');
+        await other.waitForFunction(() => window.sideChatRootFixture.history().thread?.id === 'child-a');
+        assert.equal((await other.evaluate(() => window.sideChatRootFixture.history())).liveReady, false);
+        await other.getByRole('button', { name: '关闭侧聊' }).click();
+        await other.waitForFunction(() => window.sideChatRootFixture.exited === 1);
+        assert.equal(await other.evaluate(() => window.sideChatRootFixture.closed), 0);
+        assert.equal(p.fake.calls('thread/fork').length, 1); assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('unknown close preserves the old mounted draft when a separate side chat is opened', async () => {
+      const p = await peer(); p.holdUnsubscribe();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await input.fill('original unresolved draft');
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        await page.getByText(/原操作结果未知/).waitFor();
+        await page.getByRole('button', { name: '另开侧聊' }).click();
+        await page.waitForFunction(() => window.sideChatRootFixture.child()?.owner.threadId === 'child-2');
+        const next = await page.evaluate(() => window.sideChatRootFixture.child());
+        assert.notEqual(next?.owner.draftId, original.draftId);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), false);
+        await page.evaluate(id => window.sideChatRootFixture.show(id), original.draftId);
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.snapshot.draft.text, 'original unresolved draft');
+        assert.equal(await page.getByRole('textbox', { name: '草稿', exact: true }).inputValue(), 'original unresolved draft');
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 1); assert.equal(p.fake.calls('thread/fork').length, 2);
+      } finally { await context.close(); await p.close(); }
+    });
+  } finally { await browser.close(); }
+});
 
 test('real workspace, IDB, browser client and native parent/provider use one synthetic peer', { timeout: 100_000 }, async t => {
   const bundle = await build({ entryPoints: ['test/renderer-side-chat-workspace-fixture.tsx'], bundle: true, write: false,
@@ -640,7 +948,7 @@ test('real workspace, IDB, browser client and native parent/provider use one syn
         assert.equal(p.fake.calls('thread/queue/start')[0]!.params.threadId, 'child-a');
         assert.equal(p.fake.calls('thread/queue/start')[0]!.params.queuedSubmissionId, 'queue-a');
         assert.ok((await page.evaluate(() => window.sideChatWorkspaceFixture.authorityDispatches()))
-          .some(item => item.method === 'thread/queue/start' && !item.original));
+          .some(item => item.method === 'thread/queue/start' && item.original));
         assert.deepEqual(p.queue().map(item => item.id), ['queue-b']);
       } finally { await context.close(); await p.close(); }
     });

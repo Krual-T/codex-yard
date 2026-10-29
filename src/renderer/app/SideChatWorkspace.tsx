@@ -17,6 +17,7 @@ import type { MessageEditRecoveryStore, StoredMessageEdit } from './message-edit
 import { SendRecoveryNotice } from './SendRecoveryNotice.tsx';
 import { sendsAtom } from './send-recovery.ts';
 import type { SendIntent, SendRecoverySnapshot, SendRecoveryStore } from './send-recovery.ts';
+import type { SendInjectionAuthority } from './send-injection-client.ts';
 import { submitDraft } from './submission.ts';
 import { isThreadBusy } from './thread-state.ts';
 import { SideChatWorkspaceRuntime } from './side-chat-workspace-runtime.ts';
@@ -40,6 +41,8 @@ export interface SideChatWorkspaceProps {
   client: WorkbenchClient;
   identity: SideChatWorkspaceIdentity;
   open: boolean;
+  /** The parent has already received an explicit open action. */
+  startOnMount?: boolean;
   sessions: ConversationSessions;
   sends: SendRecoveryStore;
   edits: MessageEditRecoveryStore;
@@ -50,6 +53,8 @@ export interface SideChatWorkspaceProps {
   freezeSending(owner: ComposerDraftOwner): SideChatSendLease;
   /** Captures the original owner and connection synchronously at the input action. */
   captureSubmissionAuthority(owner: ComposerDraftOwner): () => void;
+  /** Resolve the same synchronously captured grant, without obtaining a newer connection. */
+  nativeInjectionAuthority?(originalAuthority: () => void, owner: ComposerDraftOwner): SendInjectionAuthority;
   /** A null originalAuthority is allowed only for a legacy queue start on this workspace's fixed original socket. */
   dispatchSubmission: SideChatWriteDispatch;
   /** Serialize with all writes for this host/thread and guard the original daemon socket at dispatch. */
@@ -73,6 +78,7 @@ export interface SideChatWorkspaceProps {
   onDraftController?: StandaloneComposerRuntimeProps['onDraftController'];
   onDraftChange?: StandaloneComposerRuntimeProps['onDraftChange'];
   onRemoveReference?: StandaloneComposerRuntimeProps['onRemoveReference'];
+  onEditNavigationController?(controller: MessageEditNavigationController | null): void;
   onOpenFile?(location: { hostId: string; threadId: string; path: string; cwd?: string; line?: number; column?: number }): void;
   onOpenBrowser?(value: { hostId: string; threadId: string; url?: string }): void;
   onOpenVisualization?(value: { hostId: string; threadId: string; path: string }): void;
@@ -146,6 +152,12 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
   const latest = useRef(props); latest.current = props;
   const { runtime, original, client, sessions, sends, edits, approvals, draft } = props;
   const controller = runtime.controller!;
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (props.startOnMount && original.mode === 'new' && !autoStarted.current) {
+      autoStarted.current = true; void controller.start();
+    }
+  }, [controller, original.mode, props.startOnMount]);
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const childId = state.view?.childId ?? null;
   const identity = childId ? { hostId: original.hostId, threadId: childId } : null;
@@ -258,6 +270,13 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
     authority: (() => void) | undefined, retry?: SendIntent) => {
     if (!authority) throw notSent('缺少原发送权限。');
     const owner = structuredClone(description.owner); guard(owner, action, authority);
+    const originalAuthority = authorities.current.get(authority)!;
+    const capturedNative = latest.current.nativeInjectionAuthority?.(originalAuthority, owner);
+    const nativeInjectionAuthority = capturedNative && { daemonConnectionGeneration: capturedNative.daemonConnectionGeneration,
+      assertBeforeSend(threadId: string) {
+        if (threadId !== owner.threadId) throw notSent('原侧聊注入目标已改变。');
+        guard(owner, action, authority); sync(capturedNative.assertBeforeSend(threadId));
+      } };
     return task(async () => {
       const cleanup = { controller(intent: SendIntent) {
         assertOriginal();
@@ -265,8 +284,8 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
         if (!draft.current) throw new Error('原侧聊输入区未挂载，恢复记录已保留。');
         return draft.current;
       } };
-      const originalAuthority = authorities.current.get(authority)!;
       await sendConversationDraft({ client, sessions, sends, cleanup,
+        nativeInjectionAuthority,
         dispatch: (method, params, hostId, beforeSend) => latest.current.dispatchSubmission(method, params, hostId, beforeSend, originalAuthority),
         guard(threadId) { if (threadId !== owner.threadId) throw notSent('原侧聊目标已改变。'); guard(owner, action, authority); },
         prepareCreated: async () => { throw notSent('临时侧聊没有可创建的新会话。'); },
@@ -376,6 +395,8 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
     const owner = currentOwner();
     if (!owner.threadId || origin.hostId !== owner.hostId || origin.threadId !== owner.threadId) throw notSent('消息编辑目标已改变。');
     const authority = capture(owner), access = editAccess.capture(origin);
+    const originalAuthority = authorities.current.get(authority)!;
+    const capturedNative = latest.current.nativeInjectionAuthority?.(originalAuthority, owner);
     await task(async () => {
       await prepare(); await sessions.ready({ hostId: owner.hostId, threadId: owner.threadId! });
       const current = sessions.view({ hostId: owner.hostId, threadId: owner.threadId! }).snapshot();
@@ -385,14 +406,19 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
         initialOptions: current.options ?? undefined }, value, {}, { type: 'send' }, async () => {}, origin,
       (actual, expected, params) => edits.submit(actual, expected, params, () => {
         access(); guard(owner, { type: 'send' }, authority);
+        if (capturedNative) sync(capturedNative.assertBeforeSend(owner.threadId!));
         if (!sessions.view({ hostId: owner.hostId, threadId: owner.threadId! }).snapshot().historyComplete) throw notSent('原消息历史已改变。');
-      }));
+      }, capturedNative?.daemonConnectionGeneration));
       if (result.turn) sessions.started({ hostId: owner.hostId, threadId: owner.threadId! }, result.turn);
     });
   };
+  const receiveEditController = useCallback((value: MessageEditNavigationController | null) => {
+    editor.current = value; latest.current.onEditNavigationController?.(value);
+  }, []);
   return <>
     {error && <div role="alert">{error}{closeCompletionPending ? <button type="button" onClick={() => void finishClosed()}>继续完成关闭</button> : null}</div>}
     {scopedIntents.map(intent => <SendRecoveryNotice key={intent.id} intent={intent} canRetry={!!history?.canSubmit && history.liveReady === true}
+      canCheckInjectionReceipt={sends.hasConfirmedInjectionReceipt(intent)}
       onOpen={async () => { assertOriginal(); }} onCheck={() => task(async () => {
         const current = await reloadIntent(intent); await sends.check(current.id); changed(); })}
       onRetry={async () => { const authority = capture(currentOwner()), current = await reloadIntent(intent);
@@ -403,6 +429,8 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
       onFinish={() => task(async () => { const current = await reloadIntent(intent); await finishConversationSend(sends, current, { controller() {
         assertOriginal(); if (!draft.current || !sameOwner(draft.current.snapshot()?.owner ?? currentOwner(), current.owner)) throw new Error('原草稿未挂载。'); return draft.current;
       } }); changed(); })}
+      onRetryInjectionPersistence={() => task(async () => { const current = await reloadIntent(intent);
+        await sends.retryNativePersistence(current.id); changed(); })}
       onCancel={() => task(async () => { const authority = capture(currentOwner()), current = await reloadIntent(intent); authority();
         await latest.current.cancelSend(current, authority); changed(); })} />)}
     <SideChatPanel client={scopedClient} controller={controller} open={props.open} history={history} onClose={() => void finishClosed()}
@@ -463,7 +491,7 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
       messages={{ editAccess, editRecovery: edit?.childId === childId ? edit.value?.recovery ?? null : null,
         editRebase: edit?.childId === childId ? messageEditRebaseMarker(edit.value) : null,
         editHistory: { order: 'ascending', tailComplete: conversation.historyComplete },
-        onEditNavigationController: value => { editor.current = value; }, onEditDraftChange: (value, origin, version, authority) => edits.save(value, origin, version, authority),
+        onEditNavigationController: receiveEditController, onEditDraftChange: (value, origin, version, authority) => edits.save(value, origin, version, authority),
         onPrepareEditRebase: (origin, version) => edits.prepareRebase(origin, version), onCommitEditRebase: candidate => edits.commitRebase(candidate),
         onEdit: edit?.childId === childId ? onEdit : undefined,
         onOpenFile: path => { if (childId) props.onOpenFile?.({ hostId: original.hostId, threadId: childId, path, cwd: original.cwd }); },
