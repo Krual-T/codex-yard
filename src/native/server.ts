@@ -45,6 +45,8 @@ import { createFiles, fileEndpoints, fileMethods } from './files.ts';
 import type { RemoteFileCommand } from './files.ts';
 import { createPetOverlay, petPosition } from './pet-overlay.ts';
 import { createPetAssets } from './pet-assets.ts';
+import { SideChatParentReceipts } from './side-chat-parent-receipts.ts';
+import type { SideChatReceiptAttempt } from './side-chat-parent-receipts.ts';
 import { webManifest, brandAssets } from './visual-feedback.ts';
 import { TerminalHost } from './terminal.ts';
 import type { TerminalOperation } from './terminal-protocol.ts';
@@ -57,7 +59,7 @@ import type { ChromeConnection } from '../browser-reuse/chrome-mcp.ts';
 import type { ChromeRequest } from '../browser-reuse/protocol.ts';
 import { visualizationSandboxPolicy } from './visualizations.ts';
 
-interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; httpFetch?: typeof fetch; hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection; nativeStateCheckpoint?: (step: NativeStateCheckpoint) => void | Promise<void> }
+interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; httpFetch?: typeof fetch; hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection; nativeStateCheckpoint?: (step: NativeStateCheckpoint) => void | Promise<void>; sideChatParentReceipts?: SideChatParentReceipts }
 const mime: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript',
   '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
@@ -165,6 +167,11 @@ export async function createNativeWorkbench(options: Options = {}) {
   const ownedPaths = new WeakMap<CodexConnection, { paths?: HostPaths; sshHost: typeof catalog.hosts[number] }>();
   const connectionSnapshots = new WeakMap<WebSocket, { connection: CodexConnection; hostId: string; paths: HostPaths; sshHost?: typeof catalog.hosts[number] }>();
   const connectionGenerations = new WeakMap<WebSocket, string>();
+  function connectionGeneration(socket: WebSocket): string {
+    let generation = connectionGenerations.get(socket);
+    if (!generation) { generation = crypto.randomUUID(); connectionGenerations.set(socket, generation); }
+    return generation;
+  }
   async function ownedConnectionFor(hostId: string) {
     validHost(hostId);
     let connection = hostId === 'local' ? control : fileConnections.get(hostId);
@@ -188,8 +195,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     const snapshot = socket && connectionSnapshots.get(socket);
     if (!socket || !connection.connected || connection.socket !== socket || socket.readyState !== WebSocket.OPEN
       || snapshot?.hostId !== hostId || snapshot.connection !== connection) throw new Error('The original settings connection changed. Reload the settings.');
-    let generation = connectionGenerations.get(socket);
-    if (!generation) { generation = crypto.randomUUID(); connectionGenerations.set(socket, generation); }
+    const generation = connectionGeneration(socket);
     return { hostId, generation, homeDirectory: snapshot.paths.homeDirectory, codexHome: snapshot.paths.codexHome };
   }
   const files = createFiles({ dataDir, workspace, hosts: sshHosts, remoteCommand: options.remoteFileCommand,
@@ -211,6 +217,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     await stateMutations.run(() => nativeState.persist({ ...state, globals, settings }));
   }
   const clients = new Map<WebSocket, Map<string, CodexConnection>>();
+  const sideChatParents = options.sideChatParentReceipts ?? new SideChatParentReceipts();
   const approvalRequests = new ApprovalRequestRegistry<WebSocket, WebSocket>();
   const observedApprovalSockets = new WeakSet<WebSocket>();
   function observeApprovalSocket(page: WebSocket, hostId: string, socket: WebSocket) {
@@ -477,6 +484,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     });
     client.on('close', () => {
       clients.delete(client);
+      sideChatParents.forgetPage(client);
       approvalRequests.closePage(client);
       void browser.close().finally(() => browsers.delete(client));
       // Hang up page-owned shells before closing their daemon connection, so
@@ -510,6 +518,12 @@ export async function createNativeWorkbench(options: Options = {}) {
     const current = connection;
     current.on('message', (message, sourceSocket) => {
       if (!sourceSocket || sourceSocket !== current.socket || sourceSocket.readyState !== WebSocket.OPEN) return;
+      if (clients.get(client) === connections && client.readyState === WebSocket.OPEN
+        && ['thread/settings/updated', 'thread/archived', 'thread/unarchived', 'thread/reverted'].includes(message.method)) {
+        const threadId = record(message.params).threadId;
+        if (typeof threadId === 'string' && threadId) sideChatParents.invalidate(hostId, threadId);
+        else sideChatParents.invalidateHost(hostId);
+      }
       observeApprovalSocket(client, hostId, sourceSocket);
       const source = { page: client, hostId, socket: sourceSocket };
       const params = record(message.params);
@@ -561,6 +575,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       // The daemon survives a client disconnect. Keep other hosts connected;
       // the renderer restores subscriptions when this host reconnects.
       if (current.socket) observeApprovalSocket(client, hostId, current.socket);
+      if (!current.connected && current.socket) sideChatParents.forgetSocket(client, current.socket);
       notifyConnection(client, hostId, current);
     });
     return current;
@@ -645,15 +660,46 @@ export async function createNativeWorkbench(options: Options = {}) {
         const loaded = await connection.request('thread/loaded/list', {});
         if (!loaded.data.some(id => id === params.threadId)) params.config = { ...record(params.config), ...hostTools.config };
       }
+      const parentMethod = method === 'thread/start' || method === 'thread/fork' || method === 'thread/resume' ? method : null;
+      let parentAttempt: SideChatReceiptAttempt | undefined;
+      if (parentMethod) {
+        if (!sourceSocket || connection.socket !== sourceSocket || !connection.connected || sourceSocket.readyState !== WebSocket.OPEN) {
+          throw new Error('原会话连接已改变，请重新核对。');
+        }
+        parentAttempt = sideChatParents.begin({ page: client, hostId, connection, socket: sourceSocket,
+          connectionGeneration: connectionGeneration(sourceSocket),
+          isCurrent: () => clients.get(client) === connections && client.readyState === WebSocket.OPEN
+            && connections.get(hostId) === connection && connection.connected && connection.socket === sourceSocket
+            && sourceSocket.readyState === WebSocket.OPEN }, parentMethod,
+        parentMethod === 'thread/resume' && typeof params.threadId === 'string' ? params.threadId : null);
+      }
+      if (typeof params.threadId === 'string' && params.threadId) {
+        if (method === 'thread/unsubscribe') sideChatParents.revokePageThread(client, hostId, params.threadId);
+        if (['thread/settings/update', 'thread/archive', 'thread/unarchive', 'thread/delete', 'thread/revert', 'thread/queue/start'].includes(method)
+          || method === 'turn/start' && ['model', 'effort', 'serviceTier', 'approvalPolicy', 'approvalsReviewer', 'permissions',
+            'sandboxPolicy', 'collaborationMode'].some(key => Object.hasOwn(params, key))) sideChatParents.invalidate(hostId, params.threadId);
+      }
       const observeSubscription = message.observeSubscriptionTerminal === true && ['thread/resume', 'thread/unsubscribe'].includes(method);
       const request = () => connection.requestWithCursor(method, params, { mutating: writeMethods.has(method),
-        onLateTerminal: observeSubscription ? terminal => {
-          if (connections.get(hostId) !== connection) return;
+        onLateTerminal: observeSubscription || parentAttempt ? terminal => {
+          if (parentAttempt) {
+            if (terminal.outcome === 'success') sideChatParents.receive(parentAttempt, terminal.result, connection.eventCursor);
+            else sideChatParents.cancel(parentAttempt);
+          }
+          if (!observeSubscription || connections.get(hostId) !== connection || connection.socket !== sourceSocket) return;
           send(client, { type: 'mcp-response', hostId, late: true, message: terminal.outcome === 'success'
             ? { id, result: terminal.result } : { id, error: { code: -32000, message: terminal.error.message, data: terminal.error.data } } });
-        } : undefined });
-      const response = ['turn/start', 'thread/revert', 'thread/queue/start'].includes(method) && typeof params.threadId === 'string'
-        ? await conversationWrite(hostId, params.threadId, request) : await request();
+        } : undefined,
+        ...(parentAttempt ? { retainLateUntilDisconnect: true as const } : {}) });
+      let response;
+      try {
+        response = ['turn/start', 'thread/revert', 'thread/queue/start'].includes(method) && typeof params.threadId === 'string'
+          ? await conversationWrite(hostId, params.threadId, request) : await request();
+      } catch (error) {
+        if (parentAttempt && record(error).code !== 'TIMEOUT') sideChatParents.cancel(parentAttempt);
+        throw error;
+      }
+      if (parentAttempt) sideChatParents.receive(parentAttempt, response.result, response.eventCursor);
       let result = response.result;
       if (method === 'thread/start' && record(record(result).thread).id) createdThreads.add(hostId + ':' + String(record(record(result).thread).id));
       if (method === 'thread/delete') createdThreads.delete(hostId + ':' + String(params.threadId));
@@ -783,6 +829,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       case 'message-edit': {
         if (typeof params.threadId !== 'string' || !params.threadId) throw new Error('编辑需要会话身份。');
         const connection = await connectedFor(client, connections, hostId);
+        if (params.operation !== 'check') sideChatParents.invalidate(hostId, params.threadId);
         return conversationWrite(hostId, params.threadId, () => editMessage(connection, hostId, params.threadId as string, params));
       }
       case 'message-send-status': {
