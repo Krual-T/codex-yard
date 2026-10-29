@@ -11,7 +11,7 @@ export interface MessageOutputPreviewAuthority {
   /** Changes with the original page, host, thread, cwd and connection scope. */
   sourceKey: string;
   assertCurrent(): void;
-  projectlessOutputDirectory?: MessageOutputDirectory;
+  outputDirectory?: MessageOutputDirectory;
 }
 
 function OutputCard({ entry, open, canOpen }: { entry: MessageOutputPreview; open(): void; canOpen: boolean }) {
@@ -40,7 +40,6 @@ function OutputCard({ entry, open, canOpen }: { entry: MessageOutputPreview; ope
       <button type="button" ref={trigger} className="yard-output-menu-trigger" aria-haspopup="menu" aria-expanded={menuOpen}
         onClick={() => setMenuOpen(value => !value)}>Open in <ChevronDown size={13} aria-hidden="true" /></button>
       {menuOpen && <div className="yard-output-menu-content" role="menu" aria-label="Open in">
-        {canOpen && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); open(); }}>Open preview</button>}
         <div className="yard-output-menu-note">External app discovery is unavailable in this web host.</div>
       </div>}
     </div>
@@ -52,7 +51,7 @@ export function MessageOutputPreviews({ client, hostId, threadId, cwd, turn, aut
   client: WorkbenchClient; hostId: string; threadId: string; cwd: string; turn: TurnSummary;
   authority?: MessageOutputPreviewAuthority;
 } & OpenFile) {
-  const directory = authority?.projectlessOutputDirectory;
+  const directory = authority?.outputDirectory;
   const directoryPath = directory?.status === 'known' ? directory.path : undefined;
   const projection = useMemo(() => {
     const all = projectMessageOutputPreviews(turn, cwd);

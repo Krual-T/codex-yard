@@ -166,7 +166,11 @@ export const remarkFileCitations: Plugin<[], Root> = function () {
         const raw = start == null || end == null ? '' : source.slice(start, end);
         const citation = !nestedLink && child.name === 'codex-file-citation' ? citationLink(child.attributes) : null;
         const replacement = citation
-          ? { type: 'link', url: citation.url, children: [{ type: 'text', value: citation.label }] }
+          ? { type: 'link', url: citation.url, children: [
+            ...(citation.filePath ? [{ type: 'text', value: '', data: { hName: 'span',
+              hProperties: { className: ['yard-citation-icon'], ariaHidden: 'true' }, hChildren: [] } }] : []),
+            { type: 'text', value: citation.label },
+          ] }
           : { type: 'text', value: raw };
         return child.type === 'textDirective' ? replacement : { type: 'paragraph', children: [replacement] };
       });

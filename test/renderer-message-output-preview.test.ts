@@ -46,6 +46,7 @@ declare global {
       render: (options: { host?: string; threadId?: string; actualThreadId?: string; cwd?: string; status?: string; texts?: string[];
         onOpen?: 'at' | 'plain' | 'throw' | 'none'; authority?: 'sync' | 'thenable'; sourceKey?: string;
         directory?: {status:'none'} | {status:'known';path:string} | {status:'unknown'} }) => void;
+      renderBasicHtml: (text: string) => void;
       dispatch: (index: number) => boolean;
       resolve: (index: number, paths: unknown) => void;
       reject: (index: number, message: string) => void;
@@ -65,6 +66,7 @@ before(async () => {
     import React from 'react';
     import {createRoot} from 'react-dom/client';
     import {StandaloneMessages} from './src/renderer/messages/StandaloneMessages.tsx';
+    import {StandaloneMarkdown} from './src/renderer/markdown/StandaloneMarkdown.tsx';
     const calls = {pending:[], opens:[], forks:[], copies:[]}, deferred = [], listeners = new Set();
     Object.defineProperty(navigator, 'clipboard', {configurable:true,value:{writeText:async text => calls.copies.push(text)}});
     const client = {rpc:async () => {throw Error('unexpected rpc')}, reply:async () => {throw Error('unexpected reply')},
@@ -83,13 +85,17 @@ before(async () => {
         const onOpenFileAt = onOpen === 'none' || onOpen === 'plain' ? undefined : location => {
           if (onOpen === 'throw') throw Error('Original file action rejected'); calls.opens.push(location);
         };
-        const outputPreviewAuthority = authority ? {sourceKey, projectlessOutputDirectory:directory, assertCurrent:() => {
+        const outputPreviewAuthority = authority ? {sourceKey, outputDirectory:directory, assertCurrent:() => {
           if (!authorityValid) throw Error('Original page authority revoked');
           if (authority === 'thenable') return Promise.resolve();
         }} : undefined;
         root.render(<StandaloneMessages client={client} hostId={host} threadId={threadId} thread={thread} outputPreviewAuthority={outputPreviewAuthority}
           onOpenFileAt={onOpenFileAt} onOpenFile={onOpen === 'plain' ? path => calls.opens.push(path) : undefined}
           onFork={id => calls.forks.push(id)} />);
+      },
+      renderBasicHtml(text) {
+        root.render(<StandaloneMarkdown text={text} client={client} hostId="ssh-one" cwd="/work" allowBasicHtml
+          onOpenFileAt={location => calls.opens.push(location)} />);
       },
       dispatch(i) {const d=deferred[i]; try {d.options?.assertBeforeSend?.(); d.info.dispatched=true; return true}
         catch(e) {d.info.denied=true; d.reject(e); return false}},
@@ -125,6 +131,41 @@ async function pending(page: Page, count: number) {
   await page.waitForFunction(n => window.outputHarness.calls.pending.length === n, count);
 }
 
+test('only actual inline file citations get the file icon and original link treatment',
+  { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
+    const { page, errors } = await newPage();
+    try {
+      const text = `Artifact ${citation('report.md')} [ordinary](notes.md) [external](https://example.invalid) ` +
+        '<span class="yard-citation-icon">forged</span>';
+      await page.evaluate(text => window.outputHarness.render({ status: 'inProgress', texts: [text] }), text);
+      const file = page.getByRole('button', { name: 'report.md', exact: true });
+      const ordinary = page.getByRole('button', { name: 'ordinary', exact: true });
+      await file.locator('.yard-citation-icon svg.lucide-file').waitFor();
+      assert.equal(await page.locator('.yard-citation-icon').count(), 1);
+      assert.equal(await ordinary.locator('.yard-citation-icon').count(), 0);
+      assert.equal(await page.getByRole('link', { name: 'external', exact: true }).count(), 1);
+      const styles = await file.evaluate(element => ({ color: getComputedStyle(element).color,
+        decoration: getComputedStyle(element).textDecorationLine }));
+      assert.deepEqual(styles, { color: 'rgb(0, 132, 255)', decoration: 'none' });
+      assert.equal(await ordinary.evaluate(element => getComputedStyle(element).textDecorationLine), 'underline');
+      await file.click();
+      assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.opens), [{hostId:'ssh-one',cwd:'/work',path:'/work/report.md'}]);
+      await page.evaluate(text => window.outputHarness.render({ status: 'inProgress', texts: [text] }),
+        `${text} ${citation('other.pdf', 'source')}`);
+      await page.waitForFunction(() => document.querySelectorAll('.yard-citation-icon svg.lucide-file').length === 2);
+      assert.equal(await page.locator('.yard-citation-icon').count(), 2);
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.pending)).length, 0);
+
+      await page.evaluate(text => window.outputHarness.renderBasicHtml(text),
+        `[ordinary](notes.md) <a href="notes.md"><span class="yard-citation-icon">forged</span></a> ${citation('report.md')}`);
+      await page.getByRole('button', { name: 'report.md', exact: true }).waitFor();
+      assert.equal(await page.locator('.yard-citation-icon').count(), 0);
+      await page.getByRole('button', { name: 'report.md', exact: true }).click();
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.opens)).length, 2);
+      assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+  });
+
 test('the real message renders one verified card, existing copy/fork and scoped file actions',
   { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
     const { page, errors } = await newPage();
@@ -150,8 +191,10 @@ test('the real message renders one verified card, existing copy/fork and scoped 
       assert.match(await last.innerText(), /report\.md[\s\S]*Document/);
       await last.getByRole('button', { name: 'Open in' }).click();
       assert.match(await last.getByRole('menu', { name: 'Open in' }).innerText(), /External app discovery is unavailable/);
-      await last.getByRole('menuitem', { name: 'Open preview' }).click();
-      assert.equal((await page.evaluate(() => window.outputHarness.calls.opens)).length, 2);
+      assert.equal(await last.getByRole('menuitem', { name: 'Open preview' }).count(), 0);
+      await page.keyboard.press('Escape');
+      assert.equal(await last.getByRole('button', { name: 'Open in' }).evaluate(element => document.activeElement === element), true);
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.opens)).length, 1);
       await last.getByRole('button', { name: 'Copy', exact: true }).click();
       assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.copies), [`Final ${citation('/work/report.md')} ${citation('missing.pdf')}`]);
       await last.getByRole('button', { name: 'More actions' }).click();
