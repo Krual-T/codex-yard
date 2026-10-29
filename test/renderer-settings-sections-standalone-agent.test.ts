@@ -6,8 +6,13 @@ import { fixtureConfigurationHost, fixtureDraft, fixtureOperations, fixtureSourc
 
 class FakeClient implements WorkbenchClient {
   operations = fixtureOperations(this);
-  config: { approval_policy: unknown; sandbox_mode: string; profile: string | null } = { approval_policy: 'on-request', sandbox_mode: 'read-only', profile: null };
-  requirements: { allowedApprovalPolicies: unknown[] | null; allowedSandboxModes: string[] | null } = { allowedApprovalPolicies: null, allowedSandboxModes: null };
+  config: { approval_policy: unknown; sandbox_mode: string; profile: string | null; web_search?: string; model_verbosity?: string | null;
+    model_reasoning_summary?: string; sandbox_workspace_write?: { network_access: boolean }; [key: string]: unknown } =
+    { approval_policy: 'on-request', sandbox_mode: 'read-only', profile: null };
+  effectiveOverrides: Record<string, unknown> = {};
+  lockedKeys: string[] = []; projectionAvailable = true; dropProjectionAfterWrite = false; supportsIndexedWebSearch = true; overridden = false;
+  requirements: { allowedApprovalPolicies: unknown[] | null; allowedSandboxModes: string[] | null; allowedWebSearchModes: string[] | null } =
+    { allowedApprovalPolicies: null, allowedSandboxModes: null, allowedWebSearchModes: null };
   version = 'v1';
   generation = 'generation-a'; sourceAvailable = true;
   calls: { method: string; params?: Record<string, unknown>; hostId?: string }[] = [];
@@ -24,19 +29,23 @@ class FakeClient implements WorkbenchClient {
   }
   async rpc<T>(method: string, params?: Record<string, unknown>, hostId?: string): Promise<T> {
     this.calls.push({ method, params, hostId });
-    if (method === 'config/read') return { config: { ...this.config }, layers: this.missingVersion ? [] :
+    if (method === 'config/read') return { config: { ...this.config, ...this.effectiveOverrides }, layers: this.missingVersion ? [] :
       [{ name: { type: 'user', file: '/fixture/codex/config.toml', profile: null }, version: this.version }],
+      ...(this.projectionAvailable ? { yardAgentConfiguration: { base: structuredClone(this.config), lockedKeys: this.lockedKeys,
+        supportsIndexedWebSearch: this.supportsIndexedWebSearch } } : {}),
       ...(this.sourceAvailable ? { yardConfigSource: fixtureSource(hostId, '/fixture/codex', this.generation) } : {}) } as T;
     if (method === 'configRequirements/read') return { requirements: this.requirements } as T;
     if (method === 'config/batchWrite') {
       if (this.reject) throw new Error('offline');
       if (this.conflict) this.version = 'external';
       if (params?.expectedVersion !== this.version) throw new Error('Configuration modified');
-      for (const edit of params?.edits as { keyPath: string; value: string }[]) {
-        if (edit.keyPath === 'approval_policy') this.config.approval_policy = edit.value;
-        if (edit.keyPath === 'sandbox_mode') this.config.sandbox_mode = edit.value;
+      for (const edit of params?.edits as { keyPath: string; value: string | boolean | null }[]) {
+        if (edit.keyPath === 'sandbox_workspace_write.network_access') this.config.sandbox_workspace_write = { network_access: edit.value as boolean };
+        else if (edit.value === null) delete this.config[edit.keyPath];
+        else this.config[edit.keyPath] = edit.value;
       }
-      this.version = 'v2'; return { status: 'ok' } as T;
+      if (this.dropProjectionAfterWrite) this.projectionAvailable = false;
+      this.version = 'v2'; return { status: this.overridden ? 'okOverridden' : 'ok' } as T;
     }
     throw new Error('Unknown RPC');
   }
@@ -103,7 +112,8 @@ test('agent restores a newer edit separately from an unknown original request', 
   assert.deepEqual(record?.params.edits, [{ keyPath: 'sandbox_mode', value: 'workspace-write', mergeStrategy: 'upsert' }]);
   const second = new AgentSettings(client, 'local', client.operations); await second.load();
   await second.restoreDraft(await fixtureDraft(client.operations, first.editorId));
-  assert.deepEqual(second.getSnapshot().values, { approval: 'never', sandbox: 'workspace-write' });
+  assert.equal(second.getSnapshot().values.approval, 'never');
+  assert.equal(second.getSnapshot().values.sandbox, 'workspace-write');
   client.reject = false; assert.equal(await second.save(), false);
   assert.equal(client.calls.filter(call => call.method === 'config/batchWrite').length, 1);
 });
@@ -134,7 +144,8 @@ test('agent reload retains only an edited approval and adopts a concurrent sandb
   client.config.sandbox_mode = 'read-only'; client.version = 'external-version';
   assert.equal(await agent.save(), false);
   await agent.load();
-  assert.deepEqual(agent.getSnapshot().values, { approval: 'on-request', sandbox: 'read-only' });
+  assert.equal(agent.getSnapshot().values.approval, 'on-request');
+  assert.equal(agent.getSnapshot().values.sandbox, 'read-only');
   assert.deepEqual(agent.getSnapshot().conflicts, []);
   assert.equal(await agent.save(), true);
   const write = client.calls.find(call => call.method === 'config/batchWrite');
@@ -215,4 +226,119 @@ test('agent reload removes the exact local draft when the authoritative policy c
   await first.load(); first.edit('approval', 'never'); await first.retryDraftPersistence();
   client.config.approval_policy = 'never'; client.version = 'v2'; await first.load(); await first.retryDraftPersistence();
   await client.operations.refresh(); assert.equal(client.operations.getSnapshot().drafts.some(item => item.editorId === first.editorId), false);
+});
+
+test('five configuration controls and workspace network save only changed user keys with original source and version', async () => {
+  const client = new FakeClient(), agent = new AgentSettings(client, 'ssh:fixture', client.operations);
+  client.config.model_verbosity = 'low'; client.config.model_reasoning_summary = 'concise'; client.config.web_search = 'cached';
+  client.config.future_setting = { preserved: true };
+  await agent.load();
+  agent.edit('approval', 'never'); agent.edit('sandbox', 'workspace-write'); agent.edit('networkAccess', 'true');
+  agent.edit('webSearch', 'live'); agent.edit('verbosity', ''); agent.edit('reasoning', 'detailed');
+  assert.equal(await agent.save(), true);
+  const write = client.calls.find(call => call.method === 'config/batchWrite');
+  assert.deepEqual(write?.params, { edits: [
+    { keyPath: 'approval_policy', value: 'never', mergeStrategy: 'upsert' },
+    { keyPath: 'sandbox_mode', value: 'workspace-write', mergeStrategy: 'upsert' },
+    { keyPath: 'sandbox_workspace_write.network_access', value: true, mergeStrategy: 'upsert' },
+    { keyPath: 'web_search', value: 'live', mergeStrategy: 'upsert' },
+    { keyPath: 'model_verbosity', value: null, mergeStrategy: 'upsert' },
+    { keyPath: 'model_reasoning_summary', value: 'detailed', mergeStrategy: 'upsert' },
+  ], filePath: null, expectedVersion: 'v1', reloadUserConfig: true });
+  const hostCall = client.calls.find(call => call.method === 'configuration-write');
+  assert.equal(hostCall?.params?.hostId, 'ssh:fixture');
+  assert.deepEqual(hostCall?.params?.source, fixtureSource('ssh:fixture', '/fixture/codex', 'generation-a'));
+  assert.equal(Object.hasOwn(client.config, 'model_verbosity'), false);
+  assert.deepEqual(client.config.future_setting, { preserved: true });
+  assert.equal(agent.dirty, false);
+});
+
+test('user layer stays editable under profile overrides and a confirmed overridden write verifies the base', async () => {
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
+  client.config.profile = 'work'; client.config.model_verbosity = 'low';
+  client.effectiveOverrides.model_verbosity = 'high'; client.overridden = true;
+  await agent.load();
+  assert.equal(agent.getSnapshot().values.verbosity, 'low');
+  agent.edit('verbosity', '');
+  assert.equal(await agent.save(), true);
+  assert.equal(agent.getSnapshot().values.verbosity, 'high');
+  assert.match(agent.getSnapshot().warning ?? '', /higher-priority/);
+  assert.equal(agent.dirty, false);
+  assert.equal(await client.operations.find('local', 'agent'), null);
+});
+
+test('managed keys and changed web restrictions prevent dispatch even after editing', async () => {
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
+  client.lockedKeys = ['model_reasoning_summary']; client.requirements.allowedWebSearchModes = ['cached'];
+  await agent.load(); agent.edit('reasoning', 'detailed'); agent.edit('webSearch', 'live');
+  assert.equal(agent.dirty, false);
+  assert.deepEqual(agent.getSnapshot().webSearches, ['disabled', 'cached']);
+  agent.edit('webSearch', 'disabled');
+  client.lockedKeys.push('web_search');
+  assert.equal(await agent.save(), false);
+  assert.equal(agent.getSnapshot().values.webSearch, 'disabled');
+  assert.equal(client.calls.some(call => call.method === 'configuration-write'), false);
+});
+
+test('missing host projection cannot turn absent fields into assumed defaults or dispatch writes', async () => {
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
+  client.projectionAvailable = false; await agent.load(); agent.edit('webSearch', 'live'); agent.edit('approval', 'never');
+  assert.equal(agent.getSnapshot().projectionAvailable, false);
+  assert.match(agent.getSnapshot().writeError ?? '', /details are unavailable/);
+  assert.equal(agent.dirty, false);
+  assert.equal(client.calls.some(call => call.method === 'configuration-write'), false);
+});
+
+test('indexed search is offered only for the original daemon capability and rechecked before dispatch', async () => {
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
+  client.supportsIndexedWebSearch = false; await agent.load();
+  assert.deepEqual(agent.getSnapshot().webSearches, ['disabled', 'cached', 'live']);
+  agent.edit('webSearch', 'indexed'); assert.equal(agent.dirty, false);
+  client.supportsIndexedWebSearch = true; await agent.load(); agent.edit('webSearch', 'indexed');
+  client.supportsIndexedWebSearch = false;
+  assert.equal(await agent.save(), false);
+  assert.equal(agent.getSnapshot().values.webSearch, 'indexed');
+  assert.equal(client.calls.some(call => call.method === 'configuration-write'), false);
+});
+
+test('an old two-field persisted draft recovers without manufacturing changes to newer fields', async () => {
+  const client = new FakeClient(), first = new AgentSettings(client, 'local', client.operations);
+  client.config.web_search = 'live'; client.config.model_verbosity = 'high'; client.config.model_reasoning_summary = 'detailed';
+  await first.load(); first.edit('approval', 'never'); await first.retryDraftPersistence();
+  const original = await fixtureDraft(client.operations, first.editorId) as Record<string, unknown>;
+  const old = { ...original, values: { approval: 'never', sandbox: 'read-only' }, saved: { approval: 'on-request', sandbox: 'read-only' } };
+  const second = new AgentSettings(client, 'local', client.operations); await second.load(); await second.restoreDraft(old);
+  assert.equal(second.getSnapshot().values.webSearch, 'live');
+  assert.equal(second.getSnapshot().values.verbosity, 'high');
+  assert.equal(second.getSnapshot().values.reasoning, 'detailed');
+  assert.equal(await second.save(), true);
+  assert.deepEqual(client.calls.find(call => call.method === 'config/batchWrite')?.params?.edits,
+    [{ keyPath: 'approval_policy', value: 'never', mergeStrategy: 'upsert' }]);
+});
+
+test('new field conflicts and unknown writes retain their own draft and original operation', async () => {
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
+  client.config.web_search = 'cached'; await agent.load(); agent.edit('webSearch', 'live');
+  client.config.web_search = 'disabled'; client.version = 'v2'; await agent.load();
+  assert.deepEqual(agent.getSnapshot().conflicts, ['webSearch']);
+  assert.equal(await agent.save(), false); agent.resolveConflict('webSearch', 'draft');
+  client.reject = true; assert.equal(await agent.save(), false);
+  const operation = await client.operations.find('local', 'agent');
+  assert.ok(operation); assert.equal(operation.phase, 'unknown');
+  assert.deepEqual(operation.params.edits, [{ keyPath: 'web_search', value: 'live', mergeStrategy: 'upsert' }]);
+  client.reject = false; assert.equal(await agent.save(), false);
+  assert.equal(client.calls.filter(call => call.method === 'config/batchWrite').length, 1);
+  assert.equal(agent.getSnapshot().values.webSearch, 'live');
+});
+
+test('a received write is not resent when the user-layer verification becomes unavailable', async () => {
+  const client = new FakeClient(), agent = new AgentSettings(client, 'local', client.operations);
+  await agent.load(); agent.edit('reasoning', 'detailed'); client.dropProjectionAfterWrite = true;
+  assert.equal(await agent.save(), false);
+  assert.match(agent.getSnapshot().error ?? '', /saved user configuration could not be verified/);
+  const operation = await client.operations.find('local', 'agent');
+  assert.equal(operation?.phase, 'finished');
+  assert.equal(agent.getSnapshot().values.reasoning, 'detailed');
+  assert.equal(await agent.save(), false);
+  assert.equal(client.calls.filter(call => call.method === 'config/batchWrite').length, 1);
 });

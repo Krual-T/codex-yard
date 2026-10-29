@@ -7,25 +7,60 @@ import type { ConfigReadSource } from '../../../lib/config-write-protocol.ts';
 
 type Approval = 'on-request' | 'never';
 type Sandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
-export type AgentField = 'approval' | 'sandbox';
-type AgentValues = { approval: string; sandbox: string };
-type RawConfig = { approval_policy?: unknown; sandbox_mode?: unknown; profile?: unknown };
-type ConfigRead = { config: RawConfig; layers?: unknown; yardConfigSource?: unknown };
-type RequirementsRead = { requirements: { allowedApprovalPolicies?: unknown; allowedSandboxModes?: unknown } | null };
+type WebSearch = 'disabled' | 'cached' | 'indexed' | 'live';
+export type AgentField = 'approval' | 'sandbox' | 'networkAccess' | 'webSearch' | 'verbosity' | 'reasoning';
+type AgentValues = Record<AgentField, string>;
+type RawConfig = { approval_policy?: unknown; sandbox_mode?: unknown; sandbox_workspace_write?: unknown;
+  web_search?: unknown; model_verbosity?: unknown; model_reasoning_summary?: unknown; profile?: unknown };
+type ConfigRead = { config: RawConfig; layers?: unknown; yardConfigSource?: unknown; yardAgentConfiguration?: unknown };
+type RequirementsRead = { requirements: { allowedApprovalPolicies?: unknown; allowedSandboxModes?: unknown; allowedWebSearchModes?: unknown } | null };
 export interface AgentSnapshot {
   loading: boolean; saving: boolean; error: string | null; writeError: string | null; warning: string | null;
   profile: string | null; values: AgentValues; saved: AgentValues;
   conflicts: AgentField[];
-  approvals: Approval[]; sandboxes: Sandbox[];
+  approvals: Approval[]; sandboxes: Sandbox[]; webSearches: WebSearch[]; locked: AgentField[]; projectionAvailable: boolean;
+  configFile: string | null;
   draftStorageError: string | null; draftSaving: boolean;
 }
 const approvals: Approval[] = ['on-request', 'never'];
 const sandboxes: Sandbox[] = ['read-only', 'workspace-write', 'danger-full-access'];
+const webSearches: WebSearch[] = ['disabled', 'cached', 'indexed', 'live'];
+const verbosity = ['', 'low', 'medium', 'high'];
+const reasoning = ['auto', 'concise', 'detailed', 'none'];
+const fields: AgentField[] = ['approval', 'sandbox', 'networkAccess', 'webSearch', 'verbosity', 'reasoning'];
+const keys: Record<AgentField, string> = { approval: 'approval_policy', sandbox: 'sandbox_mode',
+  networkAccess: 'sandbox_workspace_write.network_access', webSearch: 'web_search', verbosity: 'model_verbosity', reasoning: 'model_reasoning_summary' };
 const advanced = '__advanced__';
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const profileName = (value: unknown) => typeof value === 'string' && value ? value : null;
 const valueOf = (value: unknown, fallback: string) => value == null ? fallback : typeof value === 'string' ? value : advanced;
-const matches = (a: AgentValues, b: AgentValues) => a.approval === b.approval && a.sandbox === b.sandbox;
+const matches = (a: AgentValues, b: AgentValues) => fields.every(field => a[field] === b[field]);
+const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+function rawValue(config: RawConfig, field: AgentField): unknown {
+  if (field === 'networkAccess') return object(config.sandbox_workspace_write) ? config.sandbox_workspace_write.network_access : undefined;
+  return (config as Record<string, unknown>)[keys[field]];
+}
+function projection(read: ConfigRead): { base: RawConfig; locked: AgentField[]; supportsIndexedWebSearch: boolean } | null {
+  const data = read.yardAgentConfiguration;
+  if (!object(data) || !object(data.base) || !Array.isArray(data.lockedKeys) ||
+    typeof data.supportsIndexedWebSearch !== 'boolean' ||
+    data.lockedKeys.some(key => typeof key !== 'string' || !Object.values(keys).includes(key))) return null;
+  const lockedKeys = data.lockedKeys;
+  return { base: data.base, locked: fields.filter(field => lockedKeys.includes(keys[field])), supportsIndexedWebSearch: data.supportsIndexedWebSearch };
+}
+function valuesFor(read: ConfigRead): AgentValues {
+  const base = projection(read)?.base ?? {};
+  const selected = (field: AgentField) => rawValue(base, field) ?? rawValue(read.config, field);
+  const sandbox = valueOf(selected('sandbox'), 'read-only');
+  const network = selected('networkAccess');
+  return { approval: valueOf(selected('approval'), 'on-request'), sandbox,
+    networkAccess: network == null ? 'false' : typeof network === 'boolean' ? String(network) : advanced,
+    webSearch: valueOf(selected('webSearch'), sandbox === 'danger-full-access' ? 'live' : 'cached'),
+    verbosity: valueOf(selected('verbosity'), ''), reasoning: valueOf(selected('reasoning'), 'auto') };
+}
+function writeValue(field: AgentField, value: string): string | boolean | null {
+  return field === 'networkAccess' ? value === 'true' : field === 'verbosity' && value === '' ? null : value;
+}
 
 export class AgentSettings {
   private readonly client: WorkbenchClient;
@@ -45,13 +80,18 @@ export class AgentSettings {
   private draftSource: ConfigReadSource | null = null;
   private rawApproval: unknown = null;
   private snapshot: AgentSnapshot = { loading: true, saving: false, error: null, writeError: null, warning: null,
-    profile: null, values: { approval: 'on-request', sandbox: 'read-only' }, saved: { approval: 'on-request', sandbox: 'read-only' },
-    approvals: [], sandboxes: [], conflicts: [], draftStorageError: null, draftSaving: false };
+    profile: null, values: { approval: 'on-request', sandbox: 'read-only', networkAccess: 'false', webSearch: 'cached', verbosity: '', reasoning: 'auto' },
+    saved: { approval: 'on-request', sandbox: 'read-only', networkAccess: 'false', webSearch: 'cached', verbosity: '', reasoning: 'auto' },
+    approvals: [], sandboxes: [], webSearches: [], locked: [], projectionAvailable: false, configFile: null,
+    conflicts: [], draftStorageError: null, draftSaving: false };
   constructor(client: WorkbenchClient, hostId: string, operations = settingsConfigOperations(client)) {
     this.client = client; this.hostId = hostId; this.operations = operations;
   }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
+  getOpenConfigTarget() {
+    return this.target && this.source ? { hostId: this.hostId, file: this.target.file, source: { ...this.source } } : null;
+  }
   private update(patch: Partial<AgentSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; for (const listener of this.listeners) listener(); }
   retryDraftPersistence() {
     if (this.snapshot.saving) return this.draftWrites;
@@ -71,13 +111,17 @@ export class AgentSettings {
   async restoreDraft(draft: unknown): Promise<void> {
     if (this.dirty || this.snapshot.loading || this.snapshot.saving) throw new Error('Finish the current edit before restoring another copy.');
     if (!draft || typeof draft !== 'object' || Array.isArray(draft)) throw new Error('The saved agent edit cannot be read.');
-    const value = draft as Record<string, unknown>, values = value.values, saved = value.saved;
-    const valid = (v: unknown): v is AgentValues => !!v && typeof v === 'object' && !Array.isArray(v)
-      && typeof (v as AgentValues).approval === 'string' && typeof (v as AgentValues).sandbox === 'string';
-    if (!valid(values) || !valid(saved) || !(value.profile === null || typeof value.profile === 'string') || !(value.target === null || isConfigTarget(value.target))) {
+    const value = draft as Record<string, unknown>, originalValues = value.values, originalSaved = value.saved;
+    const valid = (v: unknown): v is Partial<AgentValues> & Pick<AgentValues, 'approval' | 'sandbox'> => object(v)
+      && typeof v.approval === 'string' && typeof v.sandbox === 'string'
+      && fields.every(field => v[field] === undefined || typeof v[field] === 'string');
+    if (!valid(originalValues) || !valid(originalSaved) || !(value.profile === null || typeof value.profile === 'string') || !(value.target === null || isConfigTarget(value.target))) {
       throw new Error('The saved agent edit has no verifiable baseline.');
     }
-    const fields: AgentField[] = ['approval', 'sandbox'];
+    // Older drafts contain only approval and sandbox. New fields come from the
+    // currently read baseline, not from an invented historical configuration.
+    const values = { ...this.snapshot.saved, ...originalValues };
+    const saved = { ...this.snapshot.saved, ...originalSaved };
     if (value.conflicts !== undefined && (!Array.isArray(value.conflicts) || value.conflicts.some(field => !fields.includes(field)))) throw new Error('The saved agent conflicts cannot be read.');
     const conflicts = value.conflicts === undefined ? fields.filter(field => values[field] !== saved[field]) : value.conflicts as AgentField[];
     const baselines = value.conflictBaselines;
@@ -104,18 +148,21 @@ export class AgentSettings {
     return source ? userConfigTarget(read.layers, source.codexHome)
       : { target: null, error: 'Cannot save without the original configuration connection. Reload and review your edit.' };
   }
-  private async requirements(): Promise<{ approvals: Approval[]; sandboxes: Sandbox[] }> {
+  private async requirements(): Promise<{ approvals: Approval[]; sandboxes: Sandbox[]; webSearches: WebSearch[] }> {
     const result = await this.client.rpc<RequirementsRead>('configRequirements/read', {}, this.hostId);
     if (!result || !('requirements' in result) || result.requirements != null && (typeof result.requirements !== 'object' || Array.isArray(result.requirements))) {
       throw new Error('Invalid configuration requirements response');
     }
     const allowedApproval = result.requirements?.allowedApprovalPolicies;
     const allowedSandbox = result.requirements?.allowedSandboxModes;
-    if (allowedApproval != null && !Array.isArray(allowedApproval) || allowedSandbox != null && !Array.isArray(allowedSandbox)) {
+    const allowedWeb = result.requirements?.allowedWebSearchModes;
+    if (allowedApproval != null && !Array.isArray(allowedApproval) || allowedSandbox != null && !Array.isArray(allowedSandbox)
+      || allowedWeb != null && !Array.isArray(allowedWeb)) {
       throw new Error('Invalid configuration requirements response');
     }
     return { approvals: approvals.filter(value => allowedApproval == null || allowedApproval.includes(value)),
-      sandboxes: sandboxes.filter(value => allowedSandbox == null || allowedSandbox.includes(value)) };
+      sandboxes: sandboxes.filter(value => allowedSandbox == null || allowedSandbox.includes(value)),
+      webSearches: webSearches.filter(value => value === 'disabled' || allowedWeb == null || allowedWeb.includes(value)) };
   }
   async load(reviewSource = false): Promise<void> {
     if (this.snapshot.saving) return;
@@ -140,10 +187,10 @@ export class AgentSettings {
         (this.draftTarget.file !== target.target.file || this.draftTarget.profile !== target.target.profile)) {
         this.update({ loading: false, error: 'The target configuration changed. Discard your edits before changing targets.' }); return;
       }
-      const saved = { approval: valueOf(read.config.approval_policy, 'on-request'), sandbox: valueOf(read.config.sandbox_mode, 'read-only') };
+      const projected = projection(read);
+      const saved = valuesFor(read);
       const previous = this.snapshot;
       const wasDirty = this.dirty;
-      const fields: AgentField[] = ['approval', 'sandbox'];
       const values = { ...saved };
       const conflicts: AgentField[] = [];
       for (const field of fields) {
@@ -151,7 +198,7 @@ export class AgentSettings {
         if (previous.values[field] === saved[field]) continue;
         values[field] = previous.values[field];
         const changed = field === 'approval'
-          ? JSON.stringify(read.config.approval_policy) !== JSON.stringify(this.rawApproval)
+          ? JSON.stringify(rawValue(projected?.base ?? read.config, 'approval') ?? read.config.approval_policy) !== JSON.stringify(this.rawApproval)
           : saved[field] !== previous.saved[field];
         if (changed || previous.conflicts.includes(field)) {
           conflicts.push(field);
@@ -159,19 +206,23 @@ export class AgentSettings {
         }
       }
       for (const field of fields) if (!conflicts.includes(field)) delete this.conflictBaselines[field];
-      this.rawApproval = read.config.approval_policy;
+      this.rawApproval = rawValue(projected?.base ?? read.config, 'approval') ?? read.config.approval_policy;
       this.target = target.target;
       this.source = source;
       if (this.dirty && reviewSource) { this.draftSource = source; this.draftTarget = target.target; this.targetNeedsReview = false; }
       if (matches(values, saved)) { this.draftTarget = null; this.targetNeedsReview = false; }
-      this.update({ loading: false, profile, saved, values, conflicts,
+      this.update({ loading: false, profile, saved, values, conflicts, configFile: target.target?.file ?? null,
+        projectionAvailable: !!projected, locked: projected?.locked ?? fields,
         error: conflicts.length ? 'Some settings changed elsewhere. Review each conflict before saving.' : null,
-        writeError: target.error, ...allowed });
+        writeError: target.error || (!projected ? 'The configuration details are unavailable. Reload after the host has been updated.' : null),
+        ...allowed, webSearches: allowed.webSearches.filter(value => value !== 'indexed' || projected?.supportsIndexedWebSearch) });
       if (wasDirty || this.dirty) void this.retryDraftPersistence();
-    } catch (error) { if (generation === this.generation) this.update({ loading: false, error: message(error), approvals: [], sandboxes: [] }); }
+    } catch (error) { if (generation === this.generation) this.update({ loading: false, error: message(error), approvals: [], sandboxes: [], webSearches: [] }); }
   }
   edit(field: AgentField, value: string) {
-    if (this.snapshot.saving || this.snapshot.loading || !(field === 'approval' ? this.snapshot.approvals : this.snapshot.sandboxes).includes(value as never)) return;
+    const choices: Record<AgentField, readonly string[]> = { approval: this.snapshot.approvals, sandbox: this.snapshot.sandboxes,
+      networkAccess: ['true', 'false'], webSearch: this.snapshot.webSearches, verbosity, reasoning };
+    if (this.snapshot.saving || this.snapshot.loading || !this.snapshot.projectionAvailable || this.snapshot.locked.includes(field) || !choices[field].includes(value)) return;
     if (!this.dirty && value !== this.snapshot.saved[field]) { this.draftTarget = this.target; this.draftSource = this.source; this.targetNeedsReview = !this.target; }
     const values = { ...this.snapshot.values, [field]: value };
     const conflicts = value === this.snapshot.saved[field] ? this.snapshot.conflicts.filter(item => item !== field) : this.snapshot.conflicts;
@@ -204,6 +255,7 @@ export class AgentSettings {
     if (this.snapshot.conflicts.length) { this.update({ error: 'Review each conflicting setting before saving.' }); return false; }
     const { values, saved, profile } = this.snapshot, target = this.target, rawApproval = this.rawApproval;
     const source = this.draftSource;
+    if (!this.snapshot.projectionAvailable) { this.update({ error: 'The configuration details are unavailable. Reload the settings before saving.' }); return false; }
     if (!source) { this.update({ error: 'The original configuration connection is unavailable. Reload and review your edit.' }); return false; }
     if (!target || !this.draftTarget || this.targetNeedsReview) { this.update({ error: this.snapshot.writeError || 'Cannot save without a verified configuration version.' }); return false; }
     const generation = ++this.generation;
@@ -219,19 +271,23 @@ export class AgentSettings {
       }
       const current = await this.targetFor(before);
       if (generation !== this.generation) return false;
-      const beforeValues = { approval: valueOf(before.config.approval_policy, 'on-request'), sandbox: valueOf(before.config.sandbox_mode, 'read-only') };
+      const beforeProjection = projection(before);
+      if (!beforeProjection) { this.update({ saving: false, writeError: 'The configuration details are unavailable. Reload the settings before saving.' }); return false; }
+      const beforeValues = valuesFor(before);
       if (profileName(before.config.profile) !== profile || !matches(beforeValues, saved) ||
-        JSON.stringify(before.config.approval_policy) !== JSON.stringify(rawApproval) ||
+        JSON.stringify(rawValue(beforeProjection.base, 'approval') ?? before.config.approval_policy) !== JSON.stringify(rawApproval) ||
         !current.target || current.target.file !== target.file || current.target.profile !== target.profile || current.target.version !== target.version) {
         this.update({ saving: false, error: 'Configuration changed elsewhere. Reload and review your edits before saving.' }); return false;
       }
       if (values.approval !== saved.approval && !allowed.approvals.includes(values.approval as Approval) ||
-        values.sandbox !== saved.sandbox && !allowed.sandboxes.includes(values.sandbox as Sandbox)) {
+        values.sandbox !== saved.sandbox && !allowed.sandboxes.includes(values.sandbox as Sandbox) ||
+        values.webSearch !== saved.webSearch && (!allowed.webSearches.includes(values.webSearch as WebSearch) ||
+          values.webSearch === 'indexed' && !beforeProjection.supportsIndexedWebSearch) ||
+        fields.some(field => values[field] !== saved[field] && beforeProjection.locked.includes(field))) {
         this.update({ saving: false, ...allowed, error: 'Configuration requirements changed. Reload and review your edits before saving.' }); return false;
       }
-      const edits: { keyPath: string; value: string; mergeStrategy: 'upsert' }[] = [];
-      if (values.approval !== saved.approval) edits.push({ keyPath: 'approval_policy', value: values.approval, mergeStrategy: 'upsert' });
-      if (values.sandbox !== saved.sandbox) edits.push({ keyPath: 'sandbox_mode', value: values.sandbox, mergeStrategy: 'upsert' });
+      const changed = fields.filter(field => values[field] !== saved[field]);
+      const edits = changed.map(field => ({ keyPath: keys[field], value: writeValue(field, values[field]), mergeStrategy: 'upsert' as const }));
       const submitted = await this.operations.submit(this.hostId, 'config/batchWrite',
         { edits, filePath: target.filePath, expectedVersion: target.version, reloadUserConfig: true },
         { section: 'agent', editorId: this.editorId, revision: this.draftRevision, source, draft: { values, saved, profile, rawApproval, target, source } }, () => generation === this.generation);
@@ -241,24 +297,22 @@ export class AgentSettings {
       const after = await this.read(), afterTarget = await this.targetFor(after);
       if (!sameConfigSource(source, configReadSource(after.yardConfigSource, this.hostId))) throw new Error('The configuration connection changed after the save. Check the original operation.');
       if (generation !== this.generation) return false;
-      const actual = { approval: valueOf(after.config.approval_policy, 'on-request'), sandbox: valueOf(after.config.sandbox_mode, 'read-only') };
-      const confirmed = (values.approval === saved.approval || actual.approval === values.approval) &&
-        (values.sandbox === saved.sandbox || actual.sandbox === values.sandbox) &&
+      const afterProjection = projection(after);
+      if (!afterProjection) throw new Error('The saved user configuration could not be verified');
+      const actual = valuesFor(after);
+      const confirmed = changed.every(field => (rawValue(afterProjection.base, field) ?? null) === writeValue(field, values[field])) &&
         profileName(after.config.profile) === profile && afterTarget.target?.file === target.file;
-      this.rawApproval = after.config.approval_policy;
+      this.rawApproval = rawValue(afterProjection.base, 'approval') ?? after.config.approval_policy;
       this.target = afterTarget.target;
-      const nextValues = confirmed ? actual : {
-        approval: values.approval !== saved.approval ? values.approval : actual.approval,
-        sandbox: values.sandbox !== saved.sandbox ? values.sandbox : actual.sandbox,
-      };
-      const conflicts: AgentField[] = confirmed ? [] : (['approval', 'sandbox'] as AgentField[]).filter(field =>
-        values[field] !== saved[field] && values[field] !== actual[field]);
-      if (conflicts.includes('approval')) this.conflictBaselines.approval = { value: saved.approval, raw: rawApproval };
-      if (conflicts.includes('sandbox')) this.conflictBaselines.sandbox = { value: saved.sandbox };
+      const nextValues = { ...actual };
+      if (!confirmed) for (const field of changed) nextValues[field] = values[field];
+      const conflicts: AgentField[] = confirmed ? [] : changed.filter(field =>
+        (rawValue(afterProjection.base, field) ?? null) !== writeValue(field, values[field]));
+      for (const field of conflicts) this.conflictBaselines[field] = { value: saved[field], ...(field === 'approval' ? { raw: rawApproval } : {}) };
       if (confirmed) await this.operations.finish(submitted.operationId, { consumeSubmittedDraft: true });
       if (generation !== this.generation) return false;
       if (confirmed) { this.draftTarget = null; this.draftRevision = null; this.conflictBaselines = {}; }
-      this.update({ saving: false, saved: actual, writeError: afterTarget.error,
+      this.update({ saving: false, saved: actual, writeError: afterTarget.error, locked: afterProjection.locked, configFile: afterTarget.target?.file ?? null,
         values: nextValues, conflicts,
         warning: result.status === 'okOverridden' ? result.overriddenMetadata?.message || 'A higher-priority configuration overrides this change.' : null,
         error: confirmed ? null : 'The saved configuration differs from your edit. Review the effective values.' });

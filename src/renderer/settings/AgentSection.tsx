@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } f
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { Row } from './PreferenceControls.tsx';
 import { AgentSettings } from './agent-settings.ts';
+import type { AgentField } from './agent-settings.ts';
+import type { ConfigReadSource } from '../../../lib/config-write-protocol.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
 import { SettingsDraftRecovery } from './SettingsDraftRecovery.tsx';
 
@@ -33,6 +35,7 @@ function ExperimentalFeatures({ client, hostId }: { client: WorkbenchClient; hos
     };
     void read(); return () => { active = false; };
   }, [client, hostId, revision]);
+  if (!state.loading && !state.error && !state.features.length) return null;
   return <><h3 data-setting-id="experimental" tabIndex={-1}>{t('Experimental features')}</h3>
     {state.loading ? <p>{t('Loading experimental features...')}</p> : state.error ? <p className="yard-setting-error" role="alert">{t('Could not load experimental features:')} {state.error} <button className="yard-link" type="button" onClick={() => setRevision(value => value + 1)}>{t('Retry')}</button></p> :
       state.features.length ? <><p className="yard-muted">{t('Changing experimental features is not available for this connection.')}</p><div className="yard-setting-group">
@@ -41,56 +44,74 @@ function ExperimentalFeatures({ client, hostId }: { client: WorkbenchClient; hos
   </>;
 }
 
-export function AgentSection({ client, hostId, onDirtyChange, onSavingChange, registerDiscard }: {
+export function AgentSection({ client, hostId, onDirtyChange, onSavingChange, registerDiscard, onOpenConfig }: {
   client: WorkbenchClient; hostId: string; onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
   registerDiscard?: (discard: (() => Promise<boolean>) | null) => void;
+  onOpenConfig?: (hostId: string, file: string, source: ConfigReadSource) => void;
 }) {
   const { t } = useI18n();
   const agent = useMemo(() => new AgentSettings(client, hostId), [client, hostId]);
   const state = useSyncExternalStore(agent.subscribe, agent.getSnapshot, agent.getSnapshot), dirty = agent.dirty;
+  const text = (value: string) => translateKnown(t, value);
   useEffect(() => { void agent.load(); return () => agent.dispose(); }, [agent]);
   useLayoutEffect(() => { onDirtyChange(dirty || Boolean(state.draftStorageError)); }, [dirty, state.draftStorageError, onDirtyChange]);
   useLayoutEffect(() => { onSavingChange(state.saving || state.draftSaving); }, [state.saving, state.draftSaving, onSavingChange]);
   useLayoutEffect(() => { registerDiscard?.(() => agent.discard()); return () => registerDiscard?.(null); }, [agent, registerDiscard]);
-  const approvalLabels: Record<string, string> = { 'on-request': t('Ask when requested'), never: t('Never ask'), untrusted: t('Untrusted commands'), 'on-failure': t('On failure'), __advanced__: t('Advanced policy') };
+  const approvalLabels: Record<string, string> = { 'on-request': text('On request'), never: text('Never ask for approval'), untrusted: text('Untrusted'), 'on-failure': text('On failure'), __advanced__: text('Advanced policy') };
   const sandboxLabels: Record<string, string> = { 'read-only': t('Read only'), 'workspace-write': t('Workspace write'), 'danger-full-access': t('Full access') };
+  const fieldLabels: Record<AgentField, string> = { approval: 'Approval policy', sandbox: 'Sandbox settings', networkAccess: 'Allow network access',
+    webSearch: 'Web search', verbosity: 'Output detail', reasoning: 'Reasoning summary' };
+  const valueLabels: Record<AgentField, Record<string, string>> = { approval: approvalLabels, sandbox: sandboxLabels,
+    networkAccess: { true: text('On'), false: text('Off') }, webSearch: { disabled: text('Disabled'), cached: text('Cached'), indexed: text('Indexed'), live: text('Live') },
+    verbosity: { '': text('Model default'), low: text('Low'), medium: text('Medium'), high: text('High') },
+    reasoning: { auto: text('Auto'), concise: text('Concise'), detailed: text('Detailed'), none: text('None') } };
+  const disabled = (field: AgentField) => state.loading || state.saving || !state.projectionAvailable || state.locked.includes(field);
+  const change = (field: AgentField, value: string) => { agent.edit(field, value); void agent.save(); };
+  const select = (field: AgentField, choices: readonly string[]) => <select aria-label={text(fieldLabels[field])} value={state.values[field]}
+    disabled={disabled(field) || !choices.length} onChange={event => change(field, event.target.value)}>
+    {!choices.includes(state.values[field]) && <option value={state.values[field]}>{valueLabels[field][state.values[field]] ?? state.values[field]}</option>}
+    {choices.map(value => <option key={value} value={value}>{valueLabels[field][value]}</option>)}
+  </select>;
+  const description = (field: AgentField, detail: string) => state.locked.includes(field) && state.projectionAvailable
+    ? <>{text(detail)} {' '}{text('Managed by admin policy.')}</> : detail;
   return <>
-    <div className="yard-section-heading"><h2>{t('Agent')}</h2><button type="button" disabled={dirty || state.loading || state.saving} onClick={() => { void agent.load(); }}>{t('Refresh')}</button></div>
+    <div className="yard-section-heading"><h3 style={{ fontWeight: 500 }}>{text('Agent defaults')}</h3></div>
+    <div className="yard-section-heading"><span>{text('User config')}</span><button type="button" className="yard-link" disabled={!onOpenConfig || !state.configFile || state.loading || state.saving}
+      onClick={() => { const target = agent.getOpenConfigTarget(); if (onOpenConfig && target) onOpenConfig(target.hostId, target.file, target.source); }}>{text('Open config.toml')}</button></div>
     <SettingsDraftRecovery client={client} hostId={hostId} section="agent" editorId={agent.editorId}
       disabled={dirty || state.loading || state.saving || state.draftSaving} onRestore={draft => agent.restoreDraft(draft)} />
-    <p className="yard-muted">{t('Defaults for')} {hostId === 'local' ? t('the local host') : hostId}{state.profile ? `, ${t('profile')} ${state.profile}` : ''}. {t('Project and managed configuration may override these values.')}</p>
     {state.error && <p className="yard-setting-error" role="alert">{translateKnown(t, state.error)} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void agent.load(); }}>{t('Reload')}</button></p>}
     {state.writeError && <p className="yard-setting-error" role="alert">{state.writeError} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void agent.load(true); }}>Reload and review</button></p>}
     {state.draftStorageError && <p className="yard-setting-error" role="alert">Could not save the newer edit in this browser: {state.draftStorageError}{' '}
       <button type="button" onClick={() => { void agent.retryDraftPersistence(); }}>Retry saving edit</button></p>}
     {state.warning && <p role="status">{state.warning}</p>}
     {state.conflicts.map(field => {
-      const labels = field === 'approval' ? approvalLabels : sandboxLabels;
+      const labels = valueLabels[field];
       return <div key={field} className="yard-setting-error" role="alert">
-        <p>{t(field === 'approval' ? 'Approval policy' : 'Sandbox mode')} {t('changed elsewhere.')} {t('Current:')} {labels[state.saved[field]] || state.saved[field]}; {t('Your edit:')} {labels[state.values[field]] || state.values[field]}.</p>
+        <p>{text(fieldLabels[field])} {t('changed elsewhere.')} {t('Current:')} {labels[state.saved[field]] ?? state.saved[field]}; {t('Your edit:')} {labels[state.values[field]] ?? state.values[field]}.</p>
         <div className="yard-actions"><button type="button" disabled={state.saving} onClick={() => agent.resolveConflict(field, 'current')}>{t('Use current value')}</button>
           <button type="button" disabled={state.saving} onClick={() => agent.resolveConflict(field, 'draft')}>{t('Keep my change')}</button></div>
       </div>;
     })}
-    {state.loading ? <p>{t('Loading agent settings...')}</p> : <div className="yard-setting-group">
-      <Row label="Approval policy" description="Choose when Codex asks for approval.">
-        <select aria-label={t('Approval policy')} value={state.values.approval} disabled={state.saving || !state.approvals.length} onChange={event => agent.edit('approval', event.target.value)}>
-          {!state.approvals.includes(state.values.approval as 'on-request' | 'never') && <option value={state.values.approval}>{approvalLabels[state.values.approval] || state.values.approval}</option>}
-          {state.approvals.map(value => <option key={value} value={value}>{approvalLabels[value]}</option>)}
-        </select>
+    {state.loading ? <p>{t('Loading agent settings...')}</p> : <div className="yard-setting-group" style={{ border: '1px solid var(--yard-border, #d8dde1)', borderRadius: 8, padding: '0 16px' }}>
+      <Row label="Approval policy" description={description('approval', 'Choose when ChatGPT asks for approval')}>
+        {select('approval', state.approvals)}
       </Row>
-      <Row label="Sandbox mode" description="Choose how much Codex can do when running commands.">
-        <select aria-label={t('Sandbox mode')} value={state.values.sandbox} disabled={state.saving || !state.sandboxes.length} onChange={event => agent.edit('sandbox', event.target.value)}>
-          {!state.sandboxes.includes(state.values.sandbox as 'read-only' | 'workspace-write' | 'danger-full-access') && <option value={state.values.sandbox}>{sandboxLabels[state.values.sandbox] || state.values.sandbox}</option>}
-          {state.sandboxes.map(value => <option key={value} value={value}>{sandboxLabels[value]}</option>)}
-        </select>
+      <Row label="Sandbox settings" description={description('sandbox', 'Choose how much ChatGPT can do when running commands')}>
+        {select('sandbox', state.sandboxes)}
       </Row>
+      {state.values.sandbox === 'workspace-write' && <Row label="Allow network access" description={description('networkAccess', 'Allow network access while commands run in the workspace')}>
+        <input type="checkbox" role="switch" aria-label={text('Allow network access')} checked={state.values.networkAccess === 'true'}
+          disabled={disabled('networkAccess') || state.values.networkAccess === '__advanced__'} onChange={event => change('networkAccess', String(event.target.checked))} />
+      </Row>}
+      <Row label="Web search" description={description('webSearch', 'Choose how ChatGPT accesses the web')}>{select('webSearch', state.webSearches)}</Row>
+      <Row label="Output detail" description={description('verbosity', 'Choose how much detail ChatGPT includes in responses')}>{select('verbosity', ['', 'low', 'medium', 'high'])}</Row>
+      <Row label="Reasoning summary" description={description('reasoning', 'Choose how ChatGPT summarizes its reasoning')}>{select('reasoning', ['auto', 'concise', 'detailed', 'none'])}</Row>
     </div>}
     {dirty && <div className="yard-inline-save"><span>{t('Unsaved agent settings')}</span><div className="yard-actions">
       <button type="button" disabled={state.saving} onClick={() => { void agent.discard(); }}>{t('Discard')}</button>
       <button type="button" disabled={state.saving || Boolean(state.writeError) || state.conflicts.length > 0} onClick={() => { void agent.save(); }}>{t(state.saving ? 'Saving...' : 'Save')}</button>
     </div></div>}
-    <p className="yard-muted">{t('Project-specific settings, network access, web search and response detail cannot be changed from this connection.')}</p>
     <ExperimentalFeatures client={client} hostId={hostId} />
   </>;
 }
