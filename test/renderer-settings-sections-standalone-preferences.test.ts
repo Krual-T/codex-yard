@@ -103,7 +103,7 @@ test('Browser saves recheck the captured authority after dispatch waits and pres
   current = true;
   client.pauseWrite = null;
   assert.equal(await prefs.saveOne('browser-show-full-url', assertBeforeSend), true);
-  assert.equal(checks, 3);
+  assert.equal(checks, 4);
   assert.equal(client.settings['browser-show-full-url'], true);
   assert.equal(prefs.dirty, false);
 });
@@ -179,6 +179,88 @@ test('a failed acknowledged read retains refresh notifications and the newer edi
       for (const listener of client.listeners) listener({ type: 'connection-state', state: 'connected' });
       await new Promise<void>(resolve => setImmediate(resolve));
       assert.equal(client.calls.filter(call => call.endpoint === 'get-setting').length, reads);
+    } finally { stop(); }
+  });
+});
+
+test('acknowledged confirmation reads recheck the original page after dispatch waits and retain the saved receipt', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  await prefs.load();
+  let release: () => void = () => {}, entered: () => void = () => {};
+  const reading = new Promise<void>(resolve => { entered = resolve; });
+  client.pauseRead = async key => {
+    if (key !== 'browser-show-full-url') return;
+    entered();
+    await new Promise<void>(resolve => { release = resolve; });
+  };
+  let current = true;
+  const assertBeforeSend = () => { if (!current) throw new Error('The original settings page changed.'); };
+  prefs.edit('browser-show-full-url', true);
+  const saving = prefs.saveOne('browser-show-full-url', assertBeforeSend);
+  await reading;
+  current = false;
+  release();
+  assert.equal(await saving, false);
+  const retained = prefs.getSnapshot()['browser-show-full-url'];
+  assert.equal(client.settings['browser-show-full-url'], true);
+  assert.equal(retained.saved, true);
+  assert.equal(retained.value, true);
+  assert.deepEqual(retained.editBase, { exists: true, value: true });
+  assert.match(retained.error ?? '', /original settings page changed/);
+  client.pauseRead = null;
+  await prefs.reload('browser-show-full-url');
+  assert.equal(prefs.dirty, false);
+  assert.equal(client.calls.filter(call => call.endpoint === 'set-setting').length, 1);
+});
+
+test('queued notifications survive failed or malformed follow-up reads until a successful reconnect read', async t => {
+  for (const failure of ['offline', 'malformed'] as const) await t.test(failure, async () => {
+    const client = new FakeClient(), prefs = new Preferences(client);
+    const stop = prefs.start();
+    try {
+      await prefs.load();
+      const host = client.host.bind(client);
+      let reads = 0;
+      client.host = async <T>(endpoint: string, params?: Record<string, unknown>, options?: { assertBeforeSend?: () => void }): Promise<T> => {
+        if (endpoint === 'get-setting' && params?.key === 'appearanceTheme' && ++reads === 2) {
+          client.calls.push({ endpoint, params });
+          options?.assertBeforeSend?.();
+          if (failure === 'offline') throw new Error('notification read disconnected');
+          return { value: 'dark' } as T;
+        }
+        return host<T>(endpoint, params, options);
+      };
+      let release: () => void = () => {}, entered: () => void = () => {};
+      const reading = new Promise<void>(resolve => { entered = resolve; });
+      client.pauseRead = async key => {
+        if (key !== 'appearanceTheme') return;
+        client.pauseRead = null;
+        entered();
+        await new Promise<void>(resolve => { release = resolve; });
+      };
+      prefs.edit('appearanceTheme', 'light');
+      const saving = prefs.saveOne('appearanceTheme');
+      await reading;
+      prefs.edit('appearanceTheme', 'system');
+      client.settings.appearanceTheme = 'dark';
+      for (const listener of client.listeners) listener({ type: 'settings-changed', keys: ['appearanceTheme'] });
+      release();
+      assert.equal(await saving, true);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(reads, 2);
+      assert.match(prefs.getSnapshot().appearanceTheme.error ?? '', failure === 'offline' ? /notification read disconnected/ : /whether the value exists/);
+      for (const listener of client.listeners) listener({ type: 'connection-state', state: 'connected' });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const restored = prefs.getSnapshot().appearanceTheme;
+      assert.equal(reads, 3);
+      assert.equal(restored.saved, 'dark');
+      assert.equal(restored.value, 'system');
+      assert.deepEqual(restored.editBase, { exists: true, value: 'light' });
+      assert.equal(restored.conflict, true);
+      assert.equal(client.calls.filter(call => call.endpoint === 'set-setting').length, 1);
+      for (const listener of client.listeners) listener({ type: 'connection-state', state: 'connected' });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(reads, 3);
     } finally { stop(); }
   });
 });
