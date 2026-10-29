@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -84,6 +86,46 @@ async function fixture(t: TestContext) {
   t.after(async () => { for (const connection of connections) connection.close(); await peer.close(); await rm(root, { recursive: true, force: true }); });
   return { root, file, initial, state, native, mutations, peer, first, second, connect, grant, original, service, deps, write,
     reference, input, inject, start, otherTurn, disk, checkpoint(value?: typeof checkpoint) { checkpoint = value; } };
+}
+
+async function stopOwnerDuringPreparation(f: Awaited<ReturnType<typeof fixture>>, step: 'injection' | 'turn') {
+  const script = `
+import { CodexConnection } from './lib/codex.ts';
+import { createConversationWrites } from './src/native/conversation-writes.ts';
+import { createNativeState } from './src/native/native-state.ts';
+import { createStateMutations } from './src/native/state-mutations.ts';
+import { createSendInjection } from './src/native/send-injection.ts';
+const [root, socketPath, payload, step] = process.argv.slice(1);
+const { input, source } = JSON.parse(payload);
+const state = {};
+const replace = next => { for (const key of Object.keys(state)) delete state[key]; Object.assign(state, next); };
+let fileSyncs = 0;
+const native = createNativeState({ dataDir: root, publish: replace, checkpoint(name) {
+  if (name === 'file-sync' && ++fileSyncs === (step === 'injection' ? 2 : 5)) process.exit(73);
+} });
+replace(await native.load());
+const mutations = createStateMutations(native.beforeAction);
+const service = createSendInjection({ mutations, assertStateAvailable: native.assertAvailable, readSection: () => state.sendInjections,
+  persistSection: section => native.persist({ ...state, sendInjections: section }) });
+const connection = new CodexConnection(socketPath, { timeout: 1000 });
+await connection.connect();
+const original = { connection, socket: connection.socket, generation: input.reference.connectionGeneration, source, assertOriginal() {} };
+const write = createConversationWrites(), ref = input.reference;
+await write(ref.hostId, ref.threadId, () => service.inject(input, original));
+if (step === 'turn') await write(ref.hostId, ref.threadId, () => service.startTurn({ reference: ref, turnAttemptId: 'turn-attempt-1' }, original));
+process.exit(1);
+`;
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', script, f.root, f.peer.socketPath,
+    JSON.stringify({ input: f.input(), source: f.original.source }), step], { cwd: process.cwd(), stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', data => { stderr += String(data); });
+  const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
+  try {
+    const [code, signal] = await once(child, 'exit');
+    assert.equal(signal, null, stderr);
+    assert.equal(code, 73, stderr);
+  } finally { clearTimeout(timer); }
+  return child;
 }
 
 test('two real consumers cannot interpose a turn between injection and its original turn', async t => {
@@ -172,7 +214,9 @@ test('a new peer can resume a confirmed durable injection after reloading the na
   replace(reloaded, await native.load());
   const mutations = createStateMutations(native.beforeAction);
   const rebuilt = createSendInjection({ mutations, assertStateAvailable: native.assertAvailable, readSection: () => reloaded.sendInjections,
-    persistSection: section => native.persist({ ...reloaded, sendInjections: section }) });
+    persistSection: section => native.persist({ ...reloaded, sendInjections: section }),
+    assertPreviousOwnerStopped() { assert.equal(f.first.closed, true); assert.equal(f.first.pending.size, 0); } });
+  assert.deepEqual(await rebuilt.recoverInterruptedPreparations(), []);
   const origin: SendInjectionOriginal = { connection: replacement, socket, generation: 'generation-new-daemon', source: f.original.source,
     assertOriginal(reference) { assert.deepEqual(reference, value.reference); assert.equal(replacement.socket, socket); },
     assertResumedSource(reference, source) {
@@ -199,6 +243,78 @@ test('a changed codex home cannot resume the original injection even with a call
   await assert.rejects(f.start(value.reference, 'turn-attempt-1', origin), /状态目录已改变/);
   await assert.rejects(f.otherTurn(), /尚未结算/);
   assert.equal(f.peer.calls('turn/start').length, 0);
+});
+
+for (const step of ['injection', 'turn'] as const) {
+  test(`a stopped original process recovers only its persisted ${step} preparation`, async t => {
+    const f = await fixture(t), value = f.input(), child = await stopOwnerDuringPreparation(f, step);
+    const reloaded: Value = {}, native = createNativeState({ dataDir: f.root, publish: next => replace(reloaded, next) });
+    replace(reloaded, await native.load());
+    const old = (reloaded.sendInjections as { operations: { injection: { phase: string }; turn: { phase: string } }[] }).operations[0];
+    assert.equal(step === 'injection' ? old.injection.phase : old.turn.phase, 'preparing');
+    assert.equal(f.peer.calls('thread/inject_items').length, step === 'injection' ? 0 : 1);
+    assert.equal(f.peer.calls('turn/start').length, 0);
+    const mutations = createStateMutations(native.beforeAction);
+    const service = createSendInjection({ mutations, assertStateAvailable: native.assertAvailable, readSection: () => reloaded.sendInjections,
+      persistSection: section => native.persist({ ...reloaded, sendInjections: section }),
+      assertPreviousOwnerStopped() { assert.equal(child.exitCode, 73); assert.equal(child.signalCode, null); } });
+    const recovered = await service.recoverInterruptedPreparations();
+    assert.equal(recovered.length, 1);
+    const state = step === 'injection' ? recovered[0].injection : recovered[0].turn;
+    assert.deepEqual(state.terminal, { kind: 'not-sent', reason: 'previous-owner-stopped' });
+    await assert.rejects(service.recoverInterruptedPreparations(), /只能在/);
+    if (step === 'injection') {
+      await f.write('host-a', 'thread-a', async () => {
+        await service.assertCanWrite('host-a', 'thread-a');
+        return f.second.request('turn/start', { threadId: 'thread-a', input: [], clientUserMessageId: 'other-cid' }, { mutating: true });
+      });
+      assert.equal(f.peer.calls('thread/inject_items').length, 0);
+    } else {
+      await assert.rejects(service.assertCanWrite('host-a', 'thread-a'), /尚未结算/);
+      const socket = f.second.socket;
+      assert.ok(socket);
+      const resume = await f.second.request('thread/resume', { threadId: value.reference.threadId });
+      const origin: SendInjectionOriginal = { connection: f.second, socket, generation: 'generation-b', source: f.original.source,
+        assertOriginal(reference) { assert.deepEqual(reference, value.reference); },
+        assertResumedSource(reference, source) { assert.deepEqual(source, f.original.source); assert.equal(resume.thread.id, reference.threadId); } };
+      assert.equal((await f.start(value.reference, 'turn-attempt-2', origin, service)).turn.phase, 'accepted');
+      assert.equal(f.peer.calls('thread/inject_items').length, 1);
+      assert.equal(f.peer.calls('turn/start').length, 1);
+    }
+  });
+}
+
+test('startup recovery requires prior-owner proof and is unavailable after normal use', async t => {
+  const f = await fixture(t), service = createSendInjection(f.deps);
+  await assert.rejects(service.recoverInterruptedPreparations(), /尚不能确认/);
+  assert.equal(await service.status(f.reference()), null);
+  await assert.rejects(service.recoverInterruptedPreparations(), /只能在/);
+});
+
+test('startup recovery rechecks a preparation after directory sync fails following rename', async t => {
+  const f = await fixture(t), value = f.input(), child = await stopOwnerDuringPreparation(f, 'injection');
+  const reloaded: Value = {};
+  let fail = true;
+  const native = createNativeState({ dataDir: f.root, publish: next => replace(reloaded, next), checkpoint(step) {
+    if (step === 'directory-sync' && fail) { fail = false; throw new Error('fixture directory sync failure'); }
+  } });
+  replace(reloaded, await native.load());
+  const mutations = createStateMutations(native.beforeAction);
+  let proofs = 0;
+  const service = createSendInjection({ mutations, assertStateAvailable: native.assertAvailable, readSection: () => reloaded.sendInjections,
+    persistSection: section => native.persist({ ...reloaded, sendInjections: section }),
+    assertPreviousOwnerStopped() { proofs++; assert.equal(child.exitCode, 73); assert.equal(child.signalCode, null); } });
+  await assert.rejects(service.recoverInterruptedPreparations(), /native-state/);
+  assert.deepEqual(await service.recoverInterruptedPreparations(), []);
+  assert.equal(proofs, 2);
+  assert.deepEqual((await service.status(value.reference))?.injection.terminal,
+    { kind: 'not-sent', reason: 'previous-owner-stopped' });
+  await f.write('host-a', 'thread-a', async () => {
+    await service.assertCanWrite('host-a', 'thread-a');
+    return f.second.request('turn/start', { threadId: 'thread-a', input: [], clientUserMessageId: 'other-cid' }, { mutating: true });
+  });
+  assert.equal(f.peer.calls('thread/inject_items').length, 0);
+  assert.equal(f.peer.calls('turn/start').length, 1);
 });
 
 test('a confirmed injection in an ephemeral thread cannot resume on a new connection', async t => {
@@ -325,6 +441,40 @@ test('an original late injection success is retained without replay and remains 
   assert.equal((await f.start(value.reference)).turn.phase, 'accepted');
 });
 
+test('a late committed success clears the earlier failed unknown observation for the same attempt', async t => {
+  const f = await fixture(t), value = f.input();
+  let pending: { id: string | number; send(value: unknown): void } | undefined, failures = 0;
+  f.checkpoint(step => { if (step === 'file-sync' && failures > 0) { failures--; throw new Error('fixture unknown sync failure'); } });
+  f.peer.handlers.set('thread/inject_items', (_params, context) => {
+    pending = { id: context.message.id!, send: context.send }; failures = 1; return NO_REPLY;
+  });
+  const timedOut = await f.inject(value);
+  assert.equal(timedOut.pendingPersistence?.terminal, null);
+  assert.ok(pending); pending.send({ id: pending.id, result: {} });
+  const settled = await eventually(() => f.service.status(value.reference), result => result?.injection.phase === 'injected');
+  assert.equal(settled?.pendingPersistence, null);
+  assert.equal((await f.start(value.reference)).turn.phase, 'accepted');
+  assert.equal(f.peer.calls('thread/inject_items').length, 1);
+  assert.equal(f.peer.calls('turn/start').length, 1);
+});
+
+test('a captured terminal remains fenced and visible if the original durable record is missing', async t => {
+  const f = await fixture(t), value = f.input();
+  let pending: { id: string | number; send(value: unknown): void } | undefined;
+  f.peer.handlers.set('thread/inject_items', (_params, context) => { pending = { id: context.message.id!, send: context.send }; return NO_REPLY; });
+  const sending = f.inject(value);
+  await f.peer.waitForCall('thread/inject_items');
+  await f.mutations.run(() => f.native.persist({ ...f.state, sendInjections: { version: 1, operations: [] } }));
+  assert.ok(pending); pending.send({ id: pending.id, result: {} });
+  assert.equal((await sending).pendingPersistence?.terminal?.kind, 'injected');
+  assert.equal((await f.service.status(value.reference))?.pendingPersistence?.terminal?.kind, 'injected');
+  await assert.rejects(f.service.retryPersistence(value.reference, { step: 'injection', attemptId: value.reference.injectionAttemptId }), /记录不存在/);
+  await assert.rejects(f.otherTurn(), /尚未结算/);
+  assert.equal((await f.inject(value)).pendingPersistence?.terminal?.kind, 'injected');
+  assert.equal(f.peer.calls('thread/inject_items').length, 1);
+  assert.equal(f.peer.calls('turn/start').length, 0);
+});
+
 test('a late original protocol rejection releases the fence without guessing from history', async t => {
   const f = await fixture(t), value = f.input();
   let pending: { id: string | number; send(value: unknown): void } | undefined;
@@ -366,7 +516,9 @@ test('a restarted module keeps a lost original result unknown and does not dispa
   replace(reloaded, await native.load());
   const mutations = createStateMutations(native.beforeAction);
   const rebuilt = createSendInjection({ mutations, assertStateAvailable: native.assertAvailable, readSection: () => reloaded.sendInjections,
-    persistSection: section => native.persist({ ...reloaded, sendInjections: section }) });
+    persistSection: section => native.persist({ ...reloaded, sendInjections: section }),
+    assertPreviousOwnerStopped() { assert.equal(f.first.closed, true); assert.equal(f.first.pending.size, 0); } });
+  assert.deepEqual(await rebuilt.recoverInterruptedPreparations(), []);
   assert.equal((await rebuilt.status(value.reference))?.injection.phase, 'unknown');
   assert.equal((await rebuilt.retryPersistence(value.reference, { step: 'injection', attemptId: value.reference.injectionAttemptId }))?.injection.phase, 'unknown');
   await assert.rejects(rebuilt.assertCanWrite('host-a', 'thread-a'), /尚未结算/);
@@ -619,7 +771,7 @@ test('complete references and frozen dispatch content are required for lookup or
   const f = await fixture(t), value = f.input();
   assert.equal((await f.inject(value)).injection.phase, 'injected');
   await assert.rejects(f.service.status({ ...value.reference, callId: 'different-call' }), /身份不匹配/);
-  await assert.rejects(f.service.assertCanWrite('host-a', 'thread-a', { ...value.reference, revision: 'other-revision' }), /尚未结算/);
+  await assert.rejects(f.service.assertCanWrite('host-a', 'thread-a'), /尚未结算/);
   const changed = f.input(value.reference); changed.turnParams.input = [{ type: 'text', text: 'different' }];
   await assert.rejects(f.inject(changed), /内容已改变/);
   assert.equal(f.peer.calls('thread/inject_items').length, 1);

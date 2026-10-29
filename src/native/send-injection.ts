@@ -48,7 +48,7 @@ export type SendInjectionTerminal =
   | { kind: 'injected' }
   | { kind: 'accepted'; result: ObjectValue }
   | { kind: 'rejected'; code: string | number }
-  | { kind: 'not-sent'; reason: 'original-changed' | 'idle-unconfirmed' | 'storage-failed' | 'transport-unavailable' };
+  | { kind: 'not-sent'; reason: 'original-changed' | 'idle-unconfirmed' | 'storage-failed' | 'transport-unavailable' | 'previous-owner-stopped' };
 type InjectionPhase = 'preparing' | 'sending' | 'unknown' | 'injected' | 'rejected' | 'not-sent';
 type TurnPhase = 'waiting' | 'preparing' | 'sending' | 'unknown' | 'accepted' | 'rejected' | 'not-sent';
 interface InjectionState { phase: InjectionPhase; persistentThread?: boolean; terminal?: SendInjectionTerminal }
@@ -73,6 +73,8 @@ interface Observation {
   terminal: SendInjectionTerminal | null;
   /** Only used when the original reservation itself could not be confirmed. */
   reservation?: StoredOperation;
+  /** Used for status only if the original durable record is temporarily unavailable. */
+  fallback?: StoredOperation;
 }
 export interface SendInjectionStatus {
   reference: SendInjectionReference;
@@ -89,6 +91,8 @@ export interface SendInjectionOptions {
   persistSection(section: unknown): Promise<void>;
   /** Hint matching pages to query the original status; this is not itself a receipt. */
   onChange?(reference: SendInjectionReference, receipt: SendInjectionReceiptIdentity): void;
+  /** Only at startup: synchronously prove the old owner and its request observers have stopped. */
+  assertPreviousOwnerStopped?(): void;
 }
 
 const object = (value: unknown): value is ObjectValue => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -161,7 +165,8 @@ function validTerminal(value: unknown, step: Step, phase: string): boolean {
     && object(value.result.turn) && id(value.result.turn.id);
   if (value.kind === 'rejected') return typeof value.code === 'string' && id(value.code)
     || typeof value.code === 'number' && Number.isSafeInteger(value.code);
-  return value.kind === 'not-sent' && ['original-changed', 'idle-unconfirmed', 'storage-failed', 'transport-unavailable'].includes(String(value.reason));
+  return value.kind === 'not-sent' && ['original-changed', 'idle-unconfirmed', 'storage-failed', 'transport-unavailable',
+    'previous-owner-stopped'].includes(String(value.reason));
 }
 
 function active(operation: StoredOperation): boolean {
@@ -258,6 +263,12 @@ function failure(error: unknown): SendInjectionTerminal | null {
 /** Existing native-state holds the fence; every Yard write must use the parent's conversationWrite interval. */
 export function createSendInjection(options: SendInjectionOptions) {
   const observed = new Map<string, Observation>();
+  let lifecycle: 'startup' | 'recovering' | 'running' = 'startup';
+
+  function beginUse(): void {
+    if (lifecycle === 'recovering') throw new Error('正在恢复原发送记录。');
+    lifecycle = 'running';
+  }
 
   function read(): Section { options.assertStateAvailable(); return section(options.readSection()); }
   async function save(value: Section): Promise<void> { await options.persistSection(clone(value)); }
@@ -289,7 +300,7 @@ export function createSendInjection(options: SendInjectionOptions) {
           operation = clone(event.reservation);
           current.operations.push(operation);
         }
-        if (!operation) return null;
+        if (!operation) throw new Error('原发送记录不存在，无法补存。');
         if (event.reservation && (!isDeepStrictEqual(operation.items, event.reservation.items)
           || !isDeepStrictEqual(operation.turnParams, event.reservation.turnParams)
           || !isDeepStrictEqual(operation.source, event.reservation.source))) {
@@ -304,6 +315,7 @@ export function createSendInjection(options: SendInjectionOptions) {
           && event.connectionGeneration === operation.reference.connectionGeneration
           : operation.turn.attemptId === event.attemptId
             && event.connectionGeneration === (operation.turn.connectionGeneration ?? operation.reference.connectionGeneration);
+        let committedTerminal = false;
         if (sameAttempt && ['preparing', 'sending', 'unknown'].includes(state.phase)) {
           state.phase = (event.terminal?.kind ?? 'unknown') as never;
           if (event.terminal) state.terminal = clone(event.terminal); else delete state.terminal;
@@ -311,48 +323,93 @@ export function createSendInjection(options: SendInjectionOptions) {
             operation.injection.persistentThread = event.persistentThread;
           }
           await save(current);
+          committedTerminal = event.terminal !== null;
+        } else if (sameAttempt && event.terminal !== null && isDeepStrictEqual(state.terminal, event.terminal)) {
+          committedTerminal = true;
         } else if (event.reservation && operation.injection.phase === 'preparing') {
           throw new Error('原注入恢复身份已改变。');
         }
-        return operation;
+        return { operation, committedTerminal };
       });
-      if (observed.get(observationKey(event)) === event) observed.delete(observationKey(event));
-      else {
-        const remembered = observed.get(observationKey(event));
-        if (remembered && isDeepStrictEqual(remembered, event)) observed.delete(observationKey(event));
+      const remembered = observed.get(observationKey(event));
+      if (remembered && (isDeepStrictEqual(remembered, event) || result?.committedTerminal && event.terminal !== null
+        && remembered.terminal === null && isDeepStrictEqual(remembered.reference, event.reference)
+        && remembered.connectionGeneration === event.connectionGeneration)) {
+        observed.delete(observationKey(event));
       }
       notify(event);
-      return result ? statusOf(result) : null;
+      return statusOf(result.operation);
     } catch (error) { remember(event); throw error; }
   }
 
   async function retain(event: Observation, fallback: StoredOperation): Promise<SendInjectionStatus> {
-    try { return await settle(event) ?? statusOf(fallback); }
-    catch { remember(event); return statusOf(fallback); }
+    const original = { ...event, fallback };
+    try { return await settle(original) ?? statusOf(fallback); }
+    catch { remember(original); return statusOf(fallback); }
   }
 
-  async function assertCanWrite(hostId: string, threadId: string, reference?: SendInjectionReference): Promise<void> {
-    if (!id(hostId) || !id(threadId) || reference && (!validReference(reference)
-      || reference.hostId !== hostId || reference.threadId !== threadId)) throw new Error('会话写入身份无效。');
+  async function recoverInterruptedPreparations(): Promise<SendInjectionStatus[]> {
+    if (lifecycle !== 'startup') throw new Error('只能在宿主开始处理请求前恢复原准备记录。');
+    lifecycle = 'recovering';
+    try {
+      const result = await options.mutations.run(async () => {
+        if (!options.assertPreviousOwnerStopped) throw new Error('尚不能确认原宿主和请求观察者已停止。');
+        const stopped = options.assertPreviousOwnerStopped();
+        if (stopped !== undefined) {
+          void Promise.resolve(stopped).catch(() => {});
+          throw new Error('原宿主停止状态必须同步核对。');
+        }
+        const current = read(), recovered: { operation: StoredOperation; event: Observation }[] = [];
+        for (const operation of current.operations) {
+          const terminal = { kind: 'not-sent', reason: 'previous-owner-stopped' } as const;
+          if (operation.injection.phase === 'preparing') {
+            operation.injection = { phase: 'not-sent', terminal };
+            recovered.push({ operation, event: { reference: operation.reference, step: 'injection',
+              attemptId: operation.reference.injectionAttemptId, connectionGeneration: operation.reference.connectionGeneration, terminal } });
+          } else if (operation.turn.phase === 'preparing' && operation.turn.attemptId) {
+            operation.turn.phase = 'not-sent'; operation.turn.terminal = terminal;
+            recovered.push({ operation, event: { reference: operation.reference, step: 'turn', attemptId: operation.turn.attemptId,
+              connectionGeneration: operation.turn.connectionGeneration ?? operation.reference.connectionGeneration, terminal } });
+          }
+        }
+        if (recovered.length) await save(current);
+        return recovered;
+      });
+      lifecycle = 'running';
+      for (const item of result) notify(item.event);
+      return result.map(item => statusOf(item.operation));
+    } catch (error) { lifecycle = 'startup'; throw error; }
+  }
+
+  async function assertCanWrite(hostId: string, threadId: string): Promise<void> {
+    beginUse();
+    if (!id(hostId) || !id(threadId)) throw new Error('会话写入身份无效。');
     await options.mutations.run(() => {
       const current = read();
       const blocking = current.operations.find(value => value.reference.hostId === hostId && value.reference.threadId === threadId && active(value));
-      if (blocking && (!reference || !isDeepStrictEqual(blocking.reference, reference))) {
+      const pending = [...observed.values()].find(value => value.fallback && active(value.fallback)
+        && value.reference.hostId === hostId && value.reference.threadId === threadId);
+      if (blocking || pending) {
         throw new Error('此会话有尚未结算的原上下文注入，请先核对原发送。');
       }
     });
   }
 
   async function status(reference: SendInjectionReference): Promise<SendInjectionStatus | null> {
+    beginUse();
     if (!validReference(reference)) throw new Error('原注入身份无效。');
     return options.mutations.run(() => {
       const operation = matching(read().operations, reference)
-        ?? [...observed.values()].find(value => value.reservation && isDeepStrictEqual(value.reference, reference))?.reservation;
+        ?? (() => {
+          const event = [...observed.values()].find(value => (value.reservation || value.fallback) && isDeepStrictEqual(value.reference, reference));
+          return event?.reservation ?? event?.fallback;
+        })();
       return operation ? statusOf(operation) : null;
     });
   }
 
   async function retryPersistence(reference: SendInjectionReference, receipt: SendInjectionReceiptIdentity): Promise<SendInjectionStatus | null> {
+    beginUse();
     if (!validReference(reference) || !receipt || !['injection', 'turn'].includes(receipt.step) || !id(receipt.attemptId)
       || receipt.step === 'injection' && receipt.attemptId !== reference.injectionAttemptId) throw new Error('原回执身份无效。');
     const event = observed.get(observationKey({ reference, ...receipt, connectionGeneration: reference.connectionGeneration, terminal: null }));
@@ -425,7 +482,7 @@ export function createSendInjection(options: SendInjectionOptions) {
         return { reply: original.connection.request(method, params, { mutating: true, retainLateUntilDisconnect: true,
           onLateTerminal: terminal => {
             const event: Observation = { reference: clone(reference), step, attemptId, connectionGeneration: original.generation,
-              persistentThread, terminal: terminalFor(step, terminal) };
+              persistentThread, fallback, terminal: terminalFor(step, terminal) };
             void settle(event).catch(() => {});
           } }) };
       });
@@ -441,6 +498,7 @@ export function createSendInjection(options: SendInjectionOptions) {
   }
 
   async function inject(input: SendInjectionInput, origin: SendInjectionOriginal): Promise<SendInjectionStatus> {
+    beginUse();
     if (!input || !validReference(input.reference) || !validPayload(input.reference, input.items, input.turnParams)) {
       throw new Error('原注入请求身份或内容无效，未发送。');
     }
@@ -459,17 +517,18 @@ export function createSendInjection(options: SendInjectionOptions) {
           }
           return previous;
         }
-        const unpersisted = [...observed.values()].find(value => value.step === 'injection' && value.reservation
+        const unpersisted = [...observed.values()].find(value => value.step === 'injection' && (value.reservation || value.fallback)
           && key(value.reference) === key(reference));
-        if (unpersisted?.reservation) {
-          if (!isDeepStrictEqual(unpersisted.reference, reference) || !isDeepStrictEqual(unpersisted.reservation.items, operation.items)
-            || !isDeepStrictEqual(unpersisted.reservation.turnParams, operation.turnParams)
-            || !isDeepStrictEqual(unpersisted.reservation.source, operation.source)) {
+        const pendingOperation = unpersisted?.reservation ?? unpersisted?.fallback;
+        if (unpersisted && pendingOperation) {
+          if (!isDeepStrictEqual(unpersisted.reference, reference) || !isDeepStrictEqual(pendingOperation.items, operation.items)
+            || !isDeepStrictEqual(pendingOperation.turnParams, operation.turnParams)
+            || !isDeepStrictEqual(pendingOperation.source, operation.source)) {
             throw new Error('原注入身份或内容已改变，未重复发送。');
           }
-          return unpersisted.reservation;
+          return pendingOperation;
         }
-        if ([...observed.values()].some(value => value.step === 'injection' && value.reservation
+        if ([...observed.values()].some(value => (value.reservation || value.fallback)
           && value.reference.hostId === reference.hostId && value.reference.threadId === reference.threadId)) {
           throw new Error('原注入的未发送回执尚未保存，请先补存。');
         }
@@ -496,6 +555,7 @@ export function createSendInjection(options: SendInjectionOptions) {
 
   async function startTurn(input: { reference: SendInjectionReference; turnAttemptId: string },
     origin: SendInjectionOriginal): Promise<SendInjectionStatus> {
+    beginUse();
     if (!input || !validReference(input.reference) || !id(input.turnAttemptId)) throw new Error('原发送身份无效，未发送。');
     const reference = clone(input.reference), original = captureOriginal(origin, reference), attemptId = input.turnAttemptId;
     let reservation: StoredOperation | undefined;
@@ -534,5 +594,5 @@ export function createSendInjection(options: SendInjectionOptions) {
     return dispatch(reference, original, 'turn', attemptId, prepared.operation);
   }
 
-  return { assertCanWrite, inject, startTurn, status, retryPersistence };
+  return { recoverInterruptedPreparations, assertCanWrite, inject, startTurn, status, retryPersistence };
 }
