@@ -16,6 +16,7 @@ test('standalone composer preserves drafts, routes settings and controls the aut
       import { StandaloneComposer, draftToInput } from './src/renderer/composer/StandaloneComposer.tsx';
       const state = { calls: [], submissions: [], queues: {}, subscribers: new Set(), settings:{composerEnterBehavior:'enter'}, history:[], lock: true, failAdd: false, failStart: false, interruptFail: false };
       let seq = 0, resolveSubmit, rejectSubmit;
+      const authorities = new WeakMap();
       const key = (host, thread) => host + ':' + thread;
       const notify = (host, thread) => { for (const listener of state.subscribers) listener({type:'mcp-notification', hostId:host, method:'thread/queue/changed', params:{threadId:thread}}); };
       const client = {
@@ -58,8 +59,22 @@ test('standalone composer preserves drafts, routes settings and controls the aut
       let props = {client,context:{hostId:'local',threadId:'thread-a',draftId:'thread-a',cwd:'/fixture/a'},busy:false,activeTurnId:'turn-active',
         initialOptions:{approvalPolicy:{granular:{sandbox_approval:true,rules:false,skill_approval:true,request_permissions:false,mcp_elicitations:true}},approvalsReviewer:'guardian_subagent',permissionProfileId:'fixture-profile'},
         onDraftChange(snapshot) { state.snapshot = snapshot; },
-        onSubmit(draft,options,action) { if(action.type==='queue') return client.rpc('thread/queue/add',{threadId:props.context.threadId,input:draftToInput(draft,props.context.hostId),clientUserMessageId:crypto.randomUUID()},props.context.hostId); state.submissions.push({draft:structuredClone(draft),options:structuredClone(options),action}); return new Promise((resolve,reject)=>{resolveSubmit=resolve;rejectSubmit=reject;}); },
-        async onStartQueued(id) { await client.rpc('thread/resume',{threadId:props.context.threadId},props.context.hostId); await client.rpc('thread/queue/start',{threadId:props.context.threadId,queuedSubmissionId:id},props.context.hostId); },
+        captureSubmissionAuthority(owner) { const captured=structuredClone(owner);const check=()=>{const c=props.context;
+          if(c.hostId!==captured.hostId || c.threadId!==captured.threadId || c.draftId!==captured.draftId)throw Error('fixture original owner changed');};
+          check();authorities.set(check,captured);return check; },
+        async dispatchQueueMutation(method,params,host,authority,check) {const owner=authorities.get(authority);authority();check();
+          if(!owner || owner.hostId!==host || owner.threadId!==params.threadId)throw Error('fixture original queue changed');
+          return client.rpc(method,params,host);},
+        async removeQueuedOriginal(entry,authority,check) {const owner=authorities.get(authority);authority();check();
+          if(!owner)throw Error('fixture queue authority missing');const queue=state.queues[key(owner.hostId,owner.threadId)] || [];
+          const current=queue.find(item=>item.id===entry.id);
+          if(!current || current.clientUserMessageId!==entry.clientUserMessageId || JSON.stringify(current.input)!==JSON.stringify(entry.input))return 'changed';
+          authority();check();const result=await client.rpc('thread/queue/delete',{threadId:owner.threadId,queuedSubmissionId:entry.id},owner.hostId);
+          return result.deleted?'deleted':'changed';},
+        onSubmit(draft,options,action,_description,assertAuthority) { assertAuthority?.();if(action.type==='queue') return client.rpc('thread/queue/add',{threadId:props.context.threadId,input:draftToInput(draft,props.context.hostId),clientUserMessageId:crypto.randomUUID()},props.context.hostId); state.submissions.push({draft:structuredClone(draft),options:structuredClone(options),action}); return new Promise((resolve,reject)=>{resolveSubmit=resolve;rejectSubmit=reject;}); },
+        async onStartQueued(id,check,authority) {const owner=authorities.get(authority);authority();check();
+          await client.rpc('thread/resume',{threadId:owner.threadId},owner.hostId);authority();check();
+          await client.rpc('thread/queue/start',{threadId:owner.threadId,queuedSubmissionId:id},owner.hostId); },
         async onInterrupt() { if(state.interruptFail) throw Error('fixture stop failure'); }};
       const root = createRoot(document.getElementById('root'));
       window.fixture = {state, render(changes={}) {props={...props,...changes,context:{...props.context,...changes.context}};root.render(React.createElement(StandaloneComposer,props));},
@@ -67,7 +82,14 @@ test('standalone composer preserves drafts, routes settings and controls the aut
         input(){return draftToInput(state.snapshot.draft,props.context.hostId);}};
       window.fixture.render();
     ` },
-    bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' },
+    bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' }, plugins: [{
+      name: 'unreachable-node-util', setup(builder) {
+        builder.onResolve({ filter: /^node:util$/ }, () => ({ path: 'node:util', namespace: 'unreachable-node-util' }));
+        builder.onLoad({ filter: /.*/, namespace: 'unreachable-node-util' }, () => ({
+          contents: "export function isDeepStrictEqual(){throw new Error('Unexpected native-only utility call')}", loader: 'js',
+        }));
+      },
+    }],
   });
   const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ['--no-sandbox'] });
   const context = await browser.newContext();
@@ -215,9 +237,13 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.getByRole('button', { name: '上移待发送消息' }).nth(1).click();
     await page.waitForFunction(() => (window as any).fixture.state.queues['local:thread-a'][0].input[0].text === 'queued two');
     await page.getByRole('button', { name: '编辑待发送消息' }).first().click();
-    await page.getByRole('textbox', { name: '编辑待发送消息' }).fill('changed queue');
-    await page.getByRole('button', { name: '保存', exact: true }).click();
-    await page.getByText('changed queue', { exact: true }).waitFor();
+    await page.waitForFunction(() => (document.querySelector('textarea[aria-label="和 Codex 一起工作"]') as HTMLTextAreaElement)?.value === 'queued two');
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.queues['local:thread-a'].map((entry: any) => entry.input[0].text)), ['queued one']);
+    await editor.fill('changed queue');
+    await page.getByRole('button', { name: '排队', exact: true }).click();
+    await page.getByLabel('待发送消息', { exact: true }).getByText('changed queue', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '上移待发送消息' }).nth(1).click();
+    await page.waitForFunction(() => (window as any).fixture.state.queues['local:thread-a'][0].input[0].text === 'changed queue');
     await page.getByRole('button', { name: '删除待发送消息' }).last().click();
     await page.getByLabel('待发送消息', { exact: true }).getByText('queued one', { exact: true }).waitFor({ state: 'detached' });
     await page.evaluate(() => { (window as any).fixture.state.failAdd = true; });
@@ -225,7 +251,7 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.getByRole('button', { name: '排队' }).click();
     await page.getByRole('alert').filter({ hasText: 'fixture uncertain response' }).waitFor();
     assert.equal(await editor.inputValue(), 'retain on failure');
-    assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'thread/queue/add').length), 3);
+    assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'thread/queue/add').length), 4);
     assert.equal(await page.evaluate(() => (window as any).fixture.state.queues['local:thread-a'].some((item: any) => item.input[0].text === 'retain on failure')), true);
     await page.evaluate(() => { (window as any).fixture.state.interruptFail = true; });
     await page.getByRole('button', { name: '停止' }).click();
@@ -236,7 +262,7 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'thread/queue/start').length), 0);
     await page.evaluate(() => { (window as any).fixture.state.lock = true; });
     await page.getByRole('button', { name: '立即发送待发送消息' }).first().click();
-    await page.getByText('changed queue', { exact: true }).waitFor({ state: 'detached' });
+    await page.getByLabel('待发送消息', { exact: true }).getByText('changed queue', { exact: true }).waitFor({ state: 'detached' });
     await page.waitForFunction(() => (window as any).fixture.state.calls.some((call: any) => call.endpoint === 'queued-follow-up-send-lock-release' && call.params.sent === true));
     const release = await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.endpoint === 'queued-follow-up-send-lock-release').at(-1));
     assert.equal(release.params.sent, true);
@@ -257,7 +283,7 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.getByRole('img', { name: 'fixture.png' }).waitFor();
     await page.evaluate(() => { (window as any).fixture.state.failAdd = false; (window as any).fixture.render({busy:true}); });
     await page.getByRole('button', { name: '排队' }).click();
-    await page.waitForFunction(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'thread/queue/add').length === 4);
+    await page.waitForFunction(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'thread/queue/add').length === 5);
     const localInput = await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'thread/queue/add').at(-1).params.input);
     assert.ok(localInput.some((item: any) => item.type === 'localImage' && item.path === '/fixture/fixture.png'));
     assert.ok(localInput.some((item: any) => item.type === 'text' && item.text.includes('/fixture/fixture.txt')));
