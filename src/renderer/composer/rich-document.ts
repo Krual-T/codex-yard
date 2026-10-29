@@ -34,6 +34,22 @@ export function httpAutolinkHref(value: string): string | null {
   } catch { return null; }
 }
 
+/** Page references are identifiers, not destinations for browser navigation. */
+function validPageReference(path: unknown): boolean {
+  if (typeof path !== 'string') return false;
+  const id = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,199}$/u;
+  const identifier = /^(page|space):\/\/([^#]+)(?:#(.+))?$/u.exec(path);
+  if (identifier) return id.test(identifier[2]!) && (identifier[3] === undefined
+    || identifier[1] === 'page' && id.test(identifier[3]));
+  try {
+    const url = new URL(path);
+    const prefix = url.pathname.startsWith('/codex/app/space/') ? '/codex/app/space/' : '/space/';
+    return url.origin === 'https://chatgpt.com' && !url.username && !url.password
+      && url.pathname.startsWith(prefix) && id.test(url.pathname.slice(prefix.length))
+      && (!url.hash || id.test(url.hash.slice(1))) && !url.searchParams.has('thread') && !url.searchParams.has('message');
+  } catch { return false; }
+}
+
 /** Allocate identities only for explicitly created or copied link occurrences. */
 export function linkOccurrenceAllocator(document: ProseMirrorNode): () => number {
   const used = new Set<number>();
@@ -82,6 +98,18 @@ export const composerSchema = new Schema({
       selectable: true, parseDOM: [{ tag: 'span[data-mention="skill"]', getAttrs: dom => copiedAttrs(dom as HTMLElement, ['name', 'path', 'description']) }],
       toDOM: node => ['span', { class: 'standalone-composer__mention', 'data-mention': 'skill', 'data-composer-attrs': JSON.stringify(node.attrs) },
         node.attrs.displayName || node.attrs.name] },
+    pageReferenceMention: { attrs: { path: string, projectId: { default: '', validate: 'string' },
+      spaceId: { default: '', validate: 'string' }, title: string }, inline: true, group: 'inline', atom: true, selectable: false,
+      parseDOM: [{ tag: 'span[data-mention="page-reference"]', getAttrs: dom => copiedAttrs(dom as HTMLElement, ['path', 'title']) },
+        { tag: 'span[page-reference-mention-path][page-reference-mention-title]', getAttrs: dom => {
+          const element = dom as HTMLElement, path = element.getAttribute('page-reference-mention-path');
+          return validPageReference(path) ? { path, title: element.getAttribute('page-reference-mention-title'),
+            projectId: element.getAttribute('page-reference-mention-project-id') ?? '',
+            spaceId: element.getAttribute('page-reference-mention-space-id') ?? '' } : false;
+        } }],
+      toDOM: node => ['span', { class: 'standalone-composer__mention standalone-composer__page-reference',
+        'data-mention': 'page-reference', 'data-composer-attrs': JSON.stringify(node.attrs),
+        title: node.attrs.path, role: 'group', 'aria-label': node.attrs.title }, node.attrs.title] },
     richLink: { attrs: { displayText: string, href: string, sourceAppId: string,
       isLoading: { default: false, validate: 'boolean' }, loadingDisplayText: optionalString,
       literalMarkdownSource: optionalString, literalMarkdownOccurrenceId: { default: null, validate: 'number|null' },
@@ -89,8 +117,8 @@ export const composerSchema = new Schema({
       inline: true, group: 'inline', atom: true, selectable: false,
       parseDOM: [{ tag: 'span[data-mention="rich-link"]', getAttrs: dom => copiedAttrs(dom as HTMLElement, ['displayText', 'href', 'sourceAppId']) }],
       toDOM: node => ['span', { class: 'standalone-composer__mention', 'data-mention': 'rich-link', 'data-composer-attrs': JSON.stringify(node.attrs),
-        title: node.attrs.href, ...(node.attrs.isLoading ? { 'aria-busy': 'true' }
-          : { role: 'button', tabindex: '0', 'aria-haspopup': 'dialog', 'aria-expanded': 'false' }) },
+        title: node.attrs.href, role: 'button', tabindex: '0', 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+        ...(node.attrs.isLoading ? { 'data-saved-loading': 'true' } : {}) },
         node.attrs.isLoading ? node.attrs.loadingDisplayText ?? node.attrs.displayText : node.attrs.displayText] },
     // Used only in a temporary serialization projection, never in a stored document.
     literalMarkdownLink: { attrs: { source: string }, inline: true, group: 'inline', atom: true },
@@ -228,6 +256,7 @@ const serializer = new MarkdownSerializer({
   atMention: (state, node) => state.write('[' + state.esc(node.attrs.label) + '](' + markdownDestination(node.attrs.path) + ')'),
   skillMention: (state, node) => state.write('[' + state.esc(node.attrs.promptLinkLabel || '$' + node.attrs.name) + ']('
     + markdownDestination(node.attrs.path) + ')'),
+  pageReferenceMention: (state, node) => state.write('[' + state.esc(node.attrs.title) + '](' + markdownDestination(node.attrs.path) + ')'),
   richLink: (state, node) => state.write(verifiedLiteralLink(node.attrs.literalMarkdownSource, node.attrs.displayText, node.attrs.href)
     ?? '[' + state.esc(node.attrs.displayText) + '](' + markdownDestination(node.attrs.href) + ')'),
   literalMarkdownLink: (state, node) => state.write(node.attrs.source),
@@ -262,6 +291,7 @@ function validJSON(node: ComposerDocument): boolean {
   if (node.type === 'ordered_list' && node.attrs?.startingNumber !== undefined
     && (!Number.isInteger(node.attrs.startingNumber) || (node.attrs.startingNumber as number) < 1)) return false;
   if (node.type === 'skillMention' && (!node.attrs?.path || !node.attrs?.name)) return false;
+  if (node.type === 'pageReferenceMention' && !validPageReference(node.attrs?.path)) return false;
   if (node.type === 'richLink') {
     const attrs = node.attrs;
     if (attrs?.literalMarkdownSource != null && !verifiedLiteralLink(attrs.literalMarkdownSource, attrs.displayText, attrs.href)) return false;
@@ -276,6 +306,8 @@ function validJSON(node: ComposerDocument): boolean {
     if (!knownKeys(mark, ['type', 'attrs'])) return true;
     const markType = composerSchema.marks[mark.type];
     if (!markType || mark.attrs && !knownKeys(mark.attrs, Object.keys(markType.spec.attrs ?? {}))) return true;
+    if (mark.type === 'link' && typeof mark.attrs?.literalMarkdownSource === 'string'
+      && /[\r\n]/.test(mark.attrs.literalMarkdownSource)) return true;
     return mark.type === 'link' && mark.attrs?.literalMarkdownOccurrenceId != null
       && (!Number.isSafeInteger(mark.attrs.literalMarkdownOccurrenceId) || (mark.attrs.literalMarkdownOccurrenceId as number) < 0);
   })) return false;
@@ -355,6 +387,7 @@ export function serializePlainDocument(document: ProseMirrorNode, preserveTextLi
       if (child.type.name === 'hard_break') output += '\n';
       else if (child.type.name === 'atMention') output += plainLink(child.attrs.label, child.attrs.path);
       else if (child.type.name === 'skillMention') output += plainLink(child.attrs.promptLinkLabel || '$' + child.attrs.name, child.attrs.path);
+      else if (child.type.name === 'pageReferenceMention') output += plainLink(child.attrs.title, child.attrs.path);
       else if (child.type.name === 'richLink') output += plainLink(child.attrs.displayText, child.attrs.href);
       else if (child.type.name === 'chatGptSystemHint') output += plainLink(child.attrs.label, 'chatgpt-system-hint://' + child.attrs.systemHint);
     });

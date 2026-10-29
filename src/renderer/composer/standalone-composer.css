@@ -12,6 +12,7 @@
 .standalone-composer__rich-toolbar form { display: flex; align-items: center; min-width: 0; }
 .standalone-composer__rich-toolbar input { min-width: 0; max-width: 220px; background: var(--yard-surface, var(--yard-bg, #fff)); border: 1px solid var(--yard-border, #c9c9c9); border-radius: 4px; padding: 3px; }
 .standalone-composer__mention { border-radius: 3px; background: color-mix(in srgb, var(--yard-accent, #3159b5) 18%, transparent); padding: 1px 3px; }
+.standalone-composer__mention > svg { display: inline; vertical-align: -2px; margin-right: 3px; }
 .standalone-composer__editor:focus-within { border-color: var(--yard-accent, #3159b5); }
 .standalone-composer__completions { max-height: 220px; overflow-y: auto; border-top: 1px solid var(--yard-border, #c9c9c9); padding: 4px; }
 .standalone-composer .standalone-composer__completions button { width: 100%; display: flex; gap: 8px; align-items: center; text-align: left; }

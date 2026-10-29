@@ -529,7 +529,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       </div> : null}
       {editIssue ? <div className="standalone-composer__retained" role="status">{localizeDraftIssue(editIssue, t)}
         {recoverableLegacy ? <button type="button" disabled={frozen || !loaded} onClick={() => void changeDraft(value => recoverLegacyDraft(value) ?? value)}>{t('Restore')}</button> : null}
-        <details><summary>{t('View retained content')}</summary><pre>{JSON.stringify({ document: draft.document, input: draft.input, hints: draft.hints, preserved: draft.preserved, pending: draft.pendingDrafts }, null, 2)}</pre></details></div> : null}
+        <details open={!draft.text && !!draft.document || undefined}><summary>{t('View retained content')}</summary><pre>{JSON.stringify({ document: draft.document, input: draft.input, hints: draft.hints, preserved: draft.preserved, pending: draft.pendingDrafts }, null, 2)}</pre></details></div> : null}
       {plainTextSetting.value && richActive && textEditIssue(draft) ? <div role="status">{t('Existing formatting is retained while plain text mode is on.')}
         {!draft.input ? ' ' + (locale.toLowerCase().startsWith('zh') ? '发送时使用纯文本，不包含粗体等格式。' : 'Sending uses plain text without bold and similar formatting.') : null}</div> : null}
       {richActive && draft.document ? <StandaloneRichEditor ref={richEditor} document={draft.document} currentDocument={() => current.current.draft.document}

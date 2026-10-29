@@ -72,8 +72,8 @@ test('literal matching keeps outer marks, escaped labels and rejects mismatched 
   assert.ok(combinedParsed);
   assert.ok(!serializeRichDocument(combinedParsed).includes('[a](https://example.test)[b]'));
   combined.content![0]!.content![1]!.marks![1]!.attrs!.literalMarkdownSource = '[a\nb](https://example.test)';
-  const multilineParsed = readRichDocument(combined)!;
-  assert.ok(!serializeRichDocument(multilineParsed).includes('[a\nb](https://example.test)'));
+  assert.equal(readRichDocument(combined), null);
+  assert.equal(combined.content![0]!.content![1]!.marks![1]!.attrs!.literalMarkdownSource, '[a\nb](https://example.test)');
   assert.equal(readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [
     { type: 'literalMarkdownLink', attrs: { source: '[x](https://example.test)' } },
   ] }] }), null);

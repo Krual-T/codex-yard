@@ -1,8 +1,8 @@
 import { Fragment as ReactFragment, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
-import { Bold, Code2, Italic, Link as LinkIcon, X } from 'lucide-react';
+import { Bold, Code2, FileText, Italic, Link as LinkIcon, X } from 'lucide-react';
 import { toggleMark } from 'prosemirror-commands';
 import { closeHistory, history, redo, undo } from 'prosemirror-history';
-import { Fragment, Schema, Slice } from 'prosemirror-model';
+import { DOMSerializer, Fragment, Schema, Slice } from 'prosemirror-model';
 import type { Mark, Node as ProseMirrorNode } from 'prosemirror-model';
 import { EditorState, Plugin, TextSelection } from 'prosemirror-state';
 import type { Transaction } from 'prosemirror-state';
@@ -253,7 +253,7 @@ function linkOccurrence(editor: EditorView, element: HTMLElement): LinkOccurrenc
   try {
     const fromDOM = editor.posAtDOM(element, 0), node = editor.state.doc.nodeAt(fromDOM);
     if (element.dataset.mention === 'rich-link') {
-      if (!node || node.type.name !== 'richLink' || node.attrs.isLoading
+      if (!node || node.type.name !== 'richLink'
         || element.getAttribute('data-composer-attrs') !== JSON.stringify(node.attrs)) return null;
       return { element, from: fromDOM, to: fromDOM + node.nodeSize, label: node.attrs.displayText,
         href: node.attrs.href, sourceAppId: node.attrs.sourceAppId, signature: JSON.stringify(node.toJSON()), node };
@@ -411,13 +411,31 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
     'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a']);
   const attributes = new Set(['class', 'dir', 'href', 'title', 'start', 'contenteditable', 'spellcheck', 'role', 'tabindex',
     'aria-busy', 'aria-expanded', 'aria-haspopup',
-    'data-pm-slice', 'data-mention', 'data-composer-attrs', 'data-composer-autolink', 'data-system-hint-type', 'data-system-hint-label']);
+    'data-pm-slice', 'data-mention', 'data-composer-attrs', 'data-composer-autolink', 'data-system-hint-type', 'data-system-hint-label', 'data-saved-loading',
+    'page-reference-mention-path', 'page-reference-mention-project-id', 'page-reference-mention-space-id', 'page-reference-mention-title', 'aria-label']);
   if (document.querySelector('style, link, script')) return false;
   return Array.from(document.body.querySelectorAll('*')).every(element => {
+    const icon = element.localName === 'svg' ? element : element.closest('svg');
+    if (icon) {
+      const mention = icon.closest('span[data-mention="page-reference"], span[data-mention="rich-link"], span[page-reference-mention-path][page-reference-mention-title]');
+      const allowed = element.localName === 'svg'
+        ? new Set(['xmlns', 'width', 'height', 'viewbox', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'class', 'aria-hidden', 'focusable'])
+        : new Set(['d', 'class', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'fill-rule', 'clip-rule', 'transform']);
+      return !!mention && (element === icon || element.localName === 'path' || element.localName === 'g')
+        && !element.textContent && Array.from(element.attributes).every(attribute => allowed.has(attribute.name.toLowerCase()));
+    }
     if (!tags.has(element.localName) || !Array.from(element.attributes).every(attribute => attributes.has(attribute.name))) return false;
     const mention = element.getAttribute('data-mention');
     if (mention !== null && !allowMentions) return false;
-    if (mention !== null && (element.localName !== 'span' || mention !== 'file' && mention !== 'skill' && mention !== 'rich-link')) return false;
+    if (mention !== null && (element.localName !== 'span' || mention !== 'file' && mention !== 'skill'
+      && mention !== 'rich-link' && mention !== 'page-reference')) return false;
+    if (element.hasAttribute('page-reference-mention-path')) {
+      if (!allowMentions || element.localName !== 'span' || mention !== null) return false;
+      return !!readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'pageReferenceMention', attrs: {
+        path: element.getAttribute('page-reference-mention-path'), title: element.getAttribute('page-reference-mention-title'),
+        projectId: element.getAttribute('page-reference-mention-project-id') ?? '', spaceId: element.getAttribute('page-reference-mention-space-id') ?? '',
+      } }] }] });
+    }
     const systemHint = element.getAttribute('data-system-hint-type');
     const hintLabel = element.getAttribute('data-system-hint-label');
     if (systemHint === null && hintLabel !== null) return false;
@@ -428,7 +446,7 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
     ] }] })) return false;
     if (!element.hasAttribute('data-composer-attrs')) return mention === null;
     const spec = mention === 'file' ? composerSchema.nodes.atMention?.spec : mention === 'skill' ? composerSchema.nodes.skillMention?.spec
-      : mention === 'rich-link' ? composerSchema.nodes.richLink?.spec
+      : mention === 'rich-link' ? composerSchema.nodes.richLink?.spec : mention === 'page-reference' ? composerSchema.nodes.pageReferenceMention?.spec
       : element.localName === 'pre' ? composerSchema.nodes.code_block?.spec
       : element.localName === 'a' || element.hasAttribute('data-composer-autolink') ? composerSchema.marks.link?.spec : null;
     if (!spec) return false;
@@ -436,8 +454,8 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
       const value: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
       return !!value && typeof value === 'object' && !Array.isArray(value)
         && Object.keys(value).every(key => Object.hasOwn(spec.attrs ?? {}, key))
-        && (mention !== 'rich-link' || !!readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [
-          { type: 'richLink', attrs: value as Record<string, unknown> },
+        && (mention !== 'rich-link' && mention !== 'page-reference' || !!readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [
+          { type: mention === 'rich-link' ? 'richLink' : 'pageReferenceMention', attrs: value as Record<string, unknown> },
         ] }] }));
     } catch { return false; }
   });
@@ -446,6 +464,8 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
 export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function StandaloneRichEditor(props, ref) {
   const { t } = useI18n('zh-CN');
   const host = useRef<HTMLDivElement>(null);
+  const pageIcon = useRef<SVGSVGElement>(null);
+  const linkIcon = useRef<SVGSVGElement>(null);
   const view = useRef<EditorView | null>(null);
   const composing = useRef(false);
   const latest = useRef(props);
@@ -506,6 +526,19 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     }
     closeRichLink(false); editor.focus();
   };
+  const recoverLoadingLink = () => {
+    if (!openedLink?.node?.attrs.isLoading || !editable() || composing.current) return;
+    const editor = view.current, source = latest.current.currentDocument();
+    const document = source && readRichDocument(source);
+    const current = editor && linkOccurrence(editor, openedLink.element);
+    if (!editor || !document || !editor.state.doc.eq(document) || !current || current.signature !== openedLink.signature) {
+      setLinkError(t('This link changed. Open it again before saving.')); return;
+    }
+    editor.dispatch(closeHistory(editor.state.tr.setNodeMarkup(current.from, undefined,
+      { ...current.node!.attrs, isLoading: false, loadingDisplayText: null })));
+    editor.dispatch(closeHistory(editor.state.tr));
+    closeRichLink(false); editor.focus();
+  };
   useImperativeHandle(ref, () => ({
     focus: () => view.current?.focus(),
     insertCompletion: (context, query, item, cwd) => {
@@ -537,8 +570,14 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
       handleTextInput(editor, from, to, text) { return text === ' ' && insertAutolink(editor, from, to); },
     } });
     plugins.rich.unshift(autolink); plugins.plain.unshift(autolink);
+    const inlineNode = (icon: SVGSVGElement | null) => (node: ProseMirrorNode) => {
+      const dom = DOMSerializer.fromSchema(composerSchema).serializeNode(node) as HTMLElement;
+      if (icon) dom.prepend(icon.cloneNode(true));
+      return { dom };
+    };
     const editor = new EditorView(host.current, {
       state: EditorState.create({ doc, plugins: latest.current.plainTextMode ? plugins.plain : plugins.rich }),
+      nodeViews: { pageReferenceMention: inlineNode(pageIcon.current), richLink: inlineNode(linkIcon.current) },
       editable: () => !latest.current.readOnly,
       attributes: { role: 'textbox', 'aria-label': latest.current.ariaLabel ?? latestTranslation.current('Work with Codex'), 'aria-multiline': 'true',
         ...(latest.current.enableCompletions === false ? {} : { 'aria-autocomplete': 'list' }) },
@@ -665,6 +704,8 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     if (editor && type && editable()) { syncRichSelection(editor); toggleMark(type)(editor.state, editor.dispatch, editor); editor.focus(); }
   };
   return <>
+    <span hidden aria-hidden="true"><FileText ref={pageIcon} size={14} aria-hidden="true" focusable="false" />
+      <LinkIcon ref={linkIcon} size={14} aria-hidden="true" focusable="false" /></span>
     {(!props.plainTextMode || linkOpen) && <div className="standalone-composer__rich-toolbar" role="toolbar" aria-label={t('Text formatting')}>
       {!props.plainTextMode && <>
         <button type="button" title={t('Bold')} aria-label={t('Bold')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('strong')}><Bold size={16} /></button>
@@ -706,8 +747,14 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         <span>{openedLink.label}</span>{' '}{safeRichLinkHref(openedLink.href)
           ? <a href={safeRichLinkHref(openedLink.href)!} target="_blank" rel="noopener noreferrer">{openedLink.href}</a> : <span>{openedLink.href}</span>}
         {openedLink.sourceAppId ? <span> {t('Source')}: {openedLink.sourceAppId}</span> : null}
-        <button type="button" disabled={props.readOnly} onClick={() => beginLinkEdit('text')}>{t('Edit link text')}</button>
-        <button type="button" disabled={props.readOnly} onClick={() => beginLinkEdit('url')}>{t('Edit link URL')}</button>
+        {openedLink.node?.attrs.isLoading ? <>
+          <p>{t('The saved Page lookup is no longer running. The original link is retained.')}</p>
+          <button type="button" disabled={props.readOnly} onClick={recoverLoadingLink}>{t('Use saved link')}</button>
+          {linkError ? <span role="alert">{linkError}</span> : null}
+        </> : <>
+          <button type="button" disabled={props.readOnly} onClick={() => beginLinkEdit('text')}>{t('Edit link text')}</button>
+          <button type="button" disabled={props.readOnly} onClick={() => beginLinkEdit('url')}>{t('Edit link URL')}</button>
+        </>}
       </>}
       <button type="button" title={t('Close')} aria-label={t('Close')} onClick={() => closeRichLink()}><X size={16} /></button>
     </div> : null}

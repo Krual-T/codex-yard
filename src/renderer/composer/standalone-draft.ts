@@ -566,6 +566,20 @@ function formatOrderedDocument(input: Record<string, unknown>[], document: Prose
   if (formatted.join('\n') !== full) throw new Error('文档格式与消息分段无法无损对应，已保留原始草稿。');
 }
 
+function hasReviewedTextContext(value: unknown, text: string): boolean {
+  if (!Array.isArray(value)) return false;
+  if (!value.length) return true;
+  if (!text.includes('\n# MCP app context:\n')) return false;
+  return value.every(attachment => record(attachment)
+    && Object.keys(attachment).every(key => ['kind', 'untrusted', 'id', 'sourceName', 'text', 'imageAttachments'].includes(key))
+    && attachment.kind === 'message' && attachment.untrusted === false
+    && typeof attachment.id === 'string' && attachment.id.length > 0
+    && typeof attachment.sourceName === 'string' && attachment.sourceName.length > 0
+    && typeof attachment.text === 'string' && attachment.text.length > 0
+    && Array.isArray(attachment.imageAttachments) && attachment.imageAttachments.length === 0
+    && text.includes('\n## ' + attachment.sourceName + '\n' + attachment.text + '\n'));
+}
+
 export function draftToInput(draft: ComposerDraft, hostId: string, options?: DraftInputOptions): Record<string, unknown>[] {
   const rich = draft.document && readRichDocument(draft.document);
   const legacyPlain = legacyPlainTextMode(draft) === true;
@@ -610,7 +624,7 @@ export function draftToInput(draft: ComposerDraft, hostId: string, options?: Dra
           || context.version !== 1 || Object.keys(context).some(key => !fields.includes(key))
           || !validSender || context.message !== undefined || typeof context.promptContextWithoutReviewedMessages !== 'string'
           || context.modelContextAttachments !== undefined && (!Array.isArray(context.modelContextAttachments) || context.modelContextAttachments.length > 0)
-          || context.reviewedMessageAttachments !== undefined && (!Array.isArray(context.reviewedMessageAttachments) || context.reviewedMessageAttachments.length > 0)) {
+          || context.reviewedMessageAttachments !== undefined && !hasReviewedTextContext(context.reviewedMessageAttachments, original)) {
           throw new Error('此 app 输入的完整上下文尚未确认，已保留原始消息，未发送。');
         }
       }
