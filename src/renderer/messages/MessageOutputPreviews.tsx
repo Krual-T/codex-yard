@@ -1,12 +1,13 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, File, FileImage, Presentation, Table2 } from 'lucide-react';
-import type { TurnSummary } from '../../../lib/codex-protocol.ts';
+import { ChevronDown, File, FileImage, FileText, Globe, Presentation, Table2 } from 'lucide-react';
+import { parse } from 'node-html-parser';
+import type { ThreadSummary, TurnSummary } from '../../../lib/codex-protocol.ts';
 import type { StandaloneMessagesProps, WorkbenchClient } from '../workbench-contract.ts';
-import { projectMessageOutputPreviews, restrictMessageOutputDirectory } from './message-output-previews.ts';
-import type { MessageOutputDirectory, MessageOutputPreview } from './message-output-previews.ts';
+import { projectMessageTurnPreviews } from './message-output-previews.ts';
+import type { MessageGooglePreview, MessageOutputDirectory, MessageOutputPreview, MessageWebsitePreview } from './message-output-previews.ts';
 import './message-output-previews.css';
 
-type OpenFile = Pick<StandaloneMessagesProps, 'onOpenFile' | 'onOpenFileAt'>;
+type OpenResource = Pick<StandaloneMessagesProps, 'onOpenFile' | 'onOpenFileAt' | 'onOpenBrowser'>;
 export interface MessageOutputPreviewAuthority {
   /** Changes with the original page, host, thread, cwd and connection scope. */
   sourceKey: string;
@@ -14,7 +15,8 @@ export interface MessageOutputPreviewAuthority {
   outputDirectory?: MessageOutputDirectory;
 }
 
-function OutputCard({ entry, open, canOpen }: { entry: MessageOutputPreview; open(): void; canOpen: boolean }) {
+function OutputCard({ entry, open, canOpen, websiteTitle }: { entry: MessageOutputPreview | MessageWebsitePreview | MessageGooglePreview;
+  open(): void; canOpen: boolean; websiteTitle?: string }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menu = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -28,13 +30,20 @@ function OutputCard({ entry, open, canOpen }: { entry: MessageOutputPreview; ope
     document.addEventListener('keydown', escape);
     return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape); };
   }, [menuOpen]);
-  const Icon = entry.kind === 'spreadsheet' ? Table2 : entry.kind === 'presentation' ? Presentation : entry.kind === 'image' ? FileImage : File;
-  const label = entry.kind === 'spreadsheet' ? 'Spreadsheet' : entry.kind === 'presentation' ? 'Presentation' : entry.kind === 'image' ? 'Image' : 'Document';
+  const Icon = entry.kind === 'website' ? Globe : entry.kind === 'spreadsheet' || entry.kind === 'google-drive' && entry.resourceKind === 'spreadsheet' ? Table2
+    : entry.kind === 'presentation' || entry.kind === 'google-drive' && entry.resourceKind === 'presentation' ? Presentation
+      : entry.kind === 'google-drive' && entry.resourceKind === 'document' ? FileText : entry.kind === 'image' ? FileImage : File;
+  const label = entry.kind === 'website' ? 'Website' : entry.kind === 'google-drive'
+    ? ({document:'Google Docs', spreadsheet:'Google Sheets', presentation:'Google Slides', drive:'Google Drive'} as const)[entry.resourceKind]
+    : entry.kind === 'spreadsheet' ? 'Spreadsheet' : entry.kind === 'presentation' ? 'Presentation' : entry.kind === 'image' ? 'Image' : 'Document';
+  const name = entry.kind === 'website' ? websiteTitle || 'Web preview' : entry.kind === 'google-drive' ? entry.title : entry.name;
   return <div className="yard-output-card">
-    <button type="button" className="yard-output-open" aria-label={`Open ${entry.name}`} disabled={!canOpen} onClick={open} />
+    <button type="button" className="yard-output-open" aria-label={`Open ${name}`} disabled={!canOpen} onClick={open} />
     <div className="yard-output-description" aria-hidden="true">
-      <span className="yard-output-icon"><Icon size={20} strokeWidth={1.5} /></span>
-      <span className="yard-output-title"><span title={entry.name}>{entry.name}</span><small>{label}</small></span>
+      <span className={`yard-output-icon${entry.kind === 'website' ? ' yard-output-icon--website' : entry.kind === 'google-drive' ? ` yard-output-icon--google-${entry.resourceKind}` : ''}`}>
+        <Icon size={20} strokeWidth={1.5} {...entry.kind === 'google-drive' && entry.resourceKind === 'document' ? {fill:'currentColor', stroke:'white'} : {}} />
+      </span>
+      <span className="yard-output-title"><span title={name}>{name}</span><small>{label}</small></span>
     </div>
     <div className="yard-output-menu" ref={menu}>
       <button type="button" ref={trigger} className="yard-output-menu-trigger" aria-haspopup="menu" aria-expanded={menuOpen}
@@ -47,25 +56,25 @@ function OutputCard({ entry, open, canOpen }: { entry: MessageOutputPreview; ope
 }
 
 /** The card is scoped to the same host and conversation as the rendered turn. */
-export function MessageOutputPreviews({ client, hostId, threadId, cwd, turn, authority, onOpenFile, onOpenFileAt }: {
-  client: WorkbenchClient; hostId: string; threadId: string; cwd: string; turn: TurnSummary;
+export function MessageOutputPreviews({ client, hostId, thread, turn, authority, onOpenFile, onOpenFileAt, onOpenBrowser }: {
+  client: WorkbenchClient; hostId: string; thread: ThreadSummary; turn: TurnSummary;
   authority?: MessageOutputPreviewAuthority;
-} & OpenFile) {
+} & OpenResource) {
+  const threadId = thread.id, cwd = thread.cwd;
   const directory = authority?.outputDirectory;
   const directoryPath = directory?.status === 'known' ? directory.path : undefined;
-  const projection = useMemo(() => {
-    const all = projectMessageOutputPreviews(turn, cwd);
-    return { ...restrictMessageOutputDirectory(all, cwd, directory), hasCandidates: all.length > 0 };
-  }, [turn, cwd, directory?.status, directoryPath]);
+  const projection = useMemo(() => projectMessageTurnPreviews(hostId, thread, turn, directory),
+    [hostId, threadId, cwd, turn, directory?.status, directoryPath]);
   const candidates = projection.entries;
-  const candidateKey = JSON.stringify(candidates);
+  const candidateKey = JSON.stringify(projection);
   const [connectionRevision, setConnectionRevision] = useState(0);
   const [attempt, setAttempt] = useState(0);
-  const scope = useMemo(() => ({ client, hostId, threadId, cwd, turnId: turn.id, candidates, connectionRevision, attempt, authority }),
+  const scope = useMemo(() => ({ client, hostId, threadId, cwd, turnId: turn.id, candidates, website: projection.website, google: projection.google, connectionRevision, attempt, authority }),
     [client, hostId, threadId, cwd, turn.id, candidateKey, connectionRevision, attempt, Boolean(authority), authority?.sourceKey]);
   const current = useRef<typeof scope | null>(scope);
   const [result, setResult] = useState<{ scope: typeof scope; entries: MessageOutputPreview[]; error: string | null } | null>(null);
   const [actionError, setActionError] = useState<{ scope: typeof scope; message: string } | null>(null);
+  const [websiteTitle, setWebsiteTitle] = useState<{ scope: typeof scope; title: string } | null>(null);
   const check = (expected: typeof scope) => {
     if (current.current !== expected) throw new Error('The original output source changed.');
     const checked: unknown = expected.authority?.assertCurrent();
@@ -88,13 +97,13 @@ export function MessageOutputPreviews({ client, hostId, threadId, cwd, turn, aut
     }
   }), [client, hostId]);
   useEffect(() => {
-    if (!scope.candidates.length || !scope.hostId || !scope.threadId) return;
+    const paths = scope.candidates.map(entry => entry.path);
+    if (!paths.length || !scope.hostId || !scope.threadId) return;
     let active = true;
     const checkRead = () => {
       if (!active) throw new Error('The original output source changed.');
       check(scope);
     };
-    const paths = scope.candidates.map(entry => entry.path);
     void (async () => {
       try {
         checkRead();
@@ -112,24 +121,69 @@ export function MessageOutputPreviews({ client, hostId, threadId, cwd, turn, aut
     })();
     return () => { active = false; };
   }, [scope]);
+  useEffect(() => {
+    if (scope.website?.target.type !== 'file' || !scope.hostId || !scope.threadId) return;
+    const path = scope.website.target.path;
+    let active = true;
+    const checkRead = () => {
+      if (!active) throw new Error('The original output source changed.');
+      check(scope);
+    };
+    void (async () => {
+      try {
+        checkRead();
+        const response = await scope.client.host<{ contents: unknown }>('read-file',
+          {hostId: scope.hostId, path},
+          {assertBeforeSend: checkRead});
+        checkRead();
+        if (typeof response?.contents !== 'string') throw new Error('Invalid read-file response.');
+        const title = parse(response.contents).querySelector('title')?.text.trim();
+        checkRead();
+        if (title) setWebsiteTitle({scope, title});
+      } catch { /* The original website label remains usable if its title cannot be read. */ }
+    })();
+    return () => { active = false; };
+  }, [scope]);
 
   const visible = result?.scope === scope ? result : null;
-  if (projection.unavailable && projection.hasCandidates) return <div className="yard-output-error" role="status">Could not verify the output directory.</div>;
-  if (!visible) return null;
-  const open = (entry: MessageOutputPreview) => {
+  const website = scope.website;
+  if (!visible && !website && !scope.google.length && !projection.unavailable && !projection.resourceUncertain && !projection.incomplete) return null;
+  const open = (entry: MessageOutputPreview | MessageWebsitePreview | MessageGooglePreview) => {
     try {
       check(scope);
-      if (!visible.entries.includes(entry)) throw new Error('The original output source changed.');
-      if (onOpenFileAt) onOpenFileAt({ hostId: scope.hostId, cwd: scope.cwd, path: entry.path });
-      else if (onOpenFile) onOpenFile(entry.path);
-      else throw new Error('File preview is unavailable.');
+      if (entry.kind === 'google-drive') {
+        if (!scope.google.includes(entry)) throw new Error('The original output source changed.');
+        if (!onOpenBrowser) throw new Error('Browser preview is unavailable.');
+        onOpenBrowser({hostId:scope.hostId, threadId:scope.threadId, url:entry.url, source:'link'});
+      } else if (entry.kind === 'website' && entry.target.type === 'url') {
+        if (entry !== website) throw new Error('The original output source changed.');
+        if (!onOpenBrowser) throw new Error('Browser preview is unavailable.');
+        onOpenBrowser({hostId:scope.hostId, threadId:scope.threadId, url:entry.target.url});
+      } else {
+        if (entry.kind === 'website' ? entry !== website : !visible?.entries.includes(entry)) throw new Error('The original output source changed.');
+        const path = entry.kind === 'website' && entry.target.type === 'file' ? entry.target.path
+          : entry.kind !== 'website' ? entry.path : null;
+        if (!path) throw new Error('The original output source changed.');
+        const target = { hostId: scope.hostId, cwd: scope.cwd, path, assertCurrent: () => check(scope) };
+        if (onOpenFileAt) onOpenFileAt(target);
+        else if (onOpenFile) onOpenFile(path);
+        else throw new Error('File preview is unavailable.');
+      }
       setActionError(null);
     } catch (error) { setActionError({ scope, message: error instanceof Error ? error.message : String(error) }); }
   };
   return <div className="yard-output-previews" data-markdown-copy="exclude">
-    {visible.entries.map(entry => <OutputCard key={`${connectionRevision}:${attempt}:${entry.path}`} entry={entry}
+    {visible?.entries.map(entry => <OutputCard key={`${connectionRevision}:${attempt}:${entry.path}`} entry={entry}
       canOpen={Boolean(onOpenFileAt || onOpenFile)} open={() => open(entry)} />)}
-    {visible.error && <div className="yard-output-error" role="alert">Could not check output files: {visible.error}{' '}
+    {scope.google.map(entry => <OutputCard key={`${connectionRevision}:${attempt}:${entry.url}`} entry={entry}
+      canOpen open={() => open(entry)} />)}
+    {website && <OutputCard key={`${connectionRevision}:${attempt}:website`} entry={website}
+      websiteTitle={websiteTitle?.scope === scope ? websiteTitle.title : undefined}
+      canOpen={website.target.type === 'url' || Boolean(onOpenFileAt || onOpenFile)} open={() => open(website)} />}
+    {projection.unavailable && <div className="yard-output-error" role="status">Could not verify the output directory.</div>}
+    {projection.resourceUncertain && <div className="yard-output-error" role="status">Could not verify app-generated output precedence for this website.</div>}
+    {projection.incomplete && <div className="yard-output-error" role="status">The output cannot be verified until the turn history is complete.</div>}
+    {visible?.error && <div className="yard-output-error" role="alert">Could not check output files: {visible.error}{' '}
       <button type="button" onClick={() => { current.current = null; setAttempt(value => value + 1); }}>Retry</button></div>}
     {actionError?.scope === scope && <div className="yard-output-error" role="alert">{actionError.message}</div>}
   </div>;

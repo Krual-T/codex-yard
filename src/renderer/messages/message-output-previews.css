@@ -7,6 +7,10 @@
 .yard-output-description { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; pointer-events: none; }
 .yard-output-icon { display: grid; place-items: center; width: 40px; height: 40px; flex: none; border-radius: 8px;
   color: var(--yard-muted, #626c69); background: var(--yard-surface, #f3f3f3); }
+.yard-output-icon--website { color: #00aeef; }
+.yard-output-icon--google-document, .yard-output-icon--google-drive { color: #4285f4; }
+.yard-output-icon--google-spreadsheet { color: #188038; }
+.yard-output-icon--google-presentation { color: #e6a000; }
 .yard-output-title { display: grid; gap: 1px; min-width: 0; font: 400 var(--yard-font-size, 14px)/1.35 var(--yard-ui-font, sans-serif); }
 .yard-output-title > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .yard-output-title small { color: var(--yard-muted, #626c69); font-size: 12px; }

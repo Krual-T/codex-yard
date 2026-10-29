@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ArrowDown, ChevronDown, ChevronLeft, ChevronRight, GitFork, MoreHorizontal, Pencil, Search, Undo2, X } from 'lucide-react';
-import type { ThreadItemSummary, TurnSummary } from '../../../lib/codex-protocol.ts';
+import type { ThreadItemSummary, ThreadSummary, TurnSummary } from '../../../lib/codex-protocol.ts';
 import type { StandaloneMessagesProps, WorkbenchClient } from '../workbench-contract.ts';
 import { StandaloneMarkdown } from '../markdown/StandaloneMarkdown.tsx';
 import { ToolItem } from '../tools/ToolItem.tsx';
@@ -25,6 +25,7 @@ type RenderItemProps = {
   item: ThreadItemSummary;
   turnId: string;
   outputTurn?: TurnSummary;
+  outputThread?: ThreadSummary;
   outputPreviewAuthority?: MessageOutputPreviewAuthority;
   threadId: string;
   client: WorkbenchClient;
@@ -275,7 +276,7 @@ function MessageMoreActions({ turnId, onFork, onError }: {
 }
 
 function MessageItem(props: RenderItemProps) {
-  const { item, turnId, outputTurn, outputPreviewAuthority, threadId, client, hostId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImages, onFork } = props;
+  const { item, turnId, outputTurn, outputThread, outputPreviewAuthority, threadId, client, hostId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImages, onFork } = props;
   const [actionError, setActionError] = useState('');
   const openSingleImage = useCallback((image: ImageSource) => onOpenImages([image], 0), [onOpenImages]);
   const markdownProps = { client, hostId, threadId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage: openSingleImage };
@@ -285,8 +286,8 @@ function MessageItem(props: RenderItemProps) {
     return <div className="yard-assistant-message">{item.type === 'plan'
       ? <div className="yard-message-label">Plan</div> : <h4 className="yard-screen-reader">ChatGPT said:</h4>}
       <StandaloneMarkdown text={text} {...markdownProps} />
-      {outputTurn && <MessageOutputPreviews client={client} hostId={hostId} threadId={threadId} cwd={cwd} turn={outputTurn} authority={outputPreviewAuthority}
-        onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} />}
+      {outputTurn && outputThread && <MessageOutputPreviews client={client} hostId={hostId} thread={outputThread} turn={outputTurn} authority={outputPreviewAuthority}
+        onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenBrowser={onOpenBrowser} />}
       {asArray(item.questions).map((value, index) => {
         const question = asRecord(value);
         return <section className="yard-question" key={index}><strong>{asString(question.title) || 'Question'}</strong>
@@ -520,13 +521,12 @@ export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, o
               : editTarget.restriction ?? (editingHere && !itemEditing ? 'Finish the current message edit first.' : null);
             const recoveryNote = itemEditing && sourceMissing && recoveryAvailable
               ? 'The original message is no longer available. The recovered edit will be checked before sending.' : null;
+            const outputTurn = requestedThreadId === thread.id && (turn.status === 'completed' || turn.status === 'failed')
+              && item.type === 'agentMessage' && !turn.items.slice(itemIndex + 1).some(entry => entry.type === 'agentMessage') ? turn : undefined;
             return <article className="yard-message-item" key={duplicateId ? `${item.id}:edit-draft` : item.id} data-message-id={item.id} data-search-current={selected?.key === key || undefined}
               ref={(node) => { if (node) nodes.current.set(key, node); else nodes.current.delete(key); }}>
               <MemoMessageItem item={item} turnId={turn.id} threadId={thread.id} client={client} hostId={hostId} cwd={thread.cwd} onEdit={onEdit}
-                outputTurn={requestedThreadId === thread.id && (turn.status === 'completed' || turn.status === 'failed')
-                  && item.type === 'agentMessage' && turn.items.some(entry => entry.type === 'agentMessage'
-                    && typeof entry.text === 'string' && entry.text.includes('codex-file-citation'))
-                  && !turn.items.slice(itemIndex + 1).some(entry => entry.type === 'agentMessage') ? turn : undefined}
+                outputThread={outputTurn ? thread : undefined} outputTurn={outputTurn}
                 outputPreviewAuthority={outputPreviewAuthority}
                 onFork={item.type === 'userMessage' && turn.items.some((entry) => entry.type === 'agentMessage' || entry.type === 'plan') ? undefined : onFork}
                 onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenVisualization={onOpenVisualization} onOpenBrowser={onOpenBrowser}
