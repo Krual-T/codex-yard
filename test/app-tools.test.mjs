@@ -5,6 +5,7 @@ import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { setImmediate } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { createAppTools, defaultAppToolsAdapter } from '../lib/app-tools.ts';
 
@@ -346,8 +347,10 @@ test('disconnect and close abort only their active handlers and remove the priva
   assert.equal(second.messages.some(message => message.id === 1), false);
   assert.equal(tasks.get('current').signal.aborted, false);
   const closed = once(tasks.get('current').signal, 'abort');
-  await app.close();
+  const closing = app.close();
   await closed;
+  tasks.get('current').resolve(output('stopped'));
+  await closing;
   await second.closed;
   await assert.rejects(stat(app.socketPath), { code: 'ENOENT' });
   await assert.rejects(stat(dirname(app.socketPath)), { code: 'ENOENT' });
@@ -411,7 +414,7 @@ test('the owned adapter reconnects to a stable pipe after host replacement witho
     if (params.arguments.text !== 'wait') return output('before restart');
     activeSignal = signal;
     started.emit('call');
-    return new Promise(() => {});
+    return new Promise(resolve => signal.addEventListener('abort', () => resolve(output('stopped')), { once: true }));
   }, socketPath, adapterPath: ownedAdapterPath });
   t.after(() => first.close());
   const mcp = await adapter(t, first);
@@ -438,6 +441,131 @@ test('the owned adapter reconnects to a stable pipe after host replacement witho
   assert.ok((await stat(callerFile)).isFile());
   assert.ok((await stat(directory)).isDirectory());
   await assert.rejects(stat(socketPath), { code: 'ENOENT' });
+});
+
+test('stable pipe remains exclusive until handlers and beforeRelease both settle', async t => {
+  const directory = await mkdtemp('/tmp/aw-drain-');
+  const socketPath = join(directory, 'tools.sock');
+  const started = new EventEmitter(), releaseStarted = new EventEmitter();
+  let activeSignal, resolveHandler, releaseOwner;
+  const ownerGate = new Promise(resolve => { releaseOwner = resolve; });
+  const first = await createAppTools({ tools, socketPath, adapterPath: fixtureAdapterPath,
+    callTool: (_params, { signal }) => new Promise(resolve => {
+      activeSignal = signal; resolveHandler = resolve; started.emit('call');
+    }),
+    beforeRelease: async () => { releaseStarted.emit('release'); await ownerGate; },
+  });
+  t.after(async () => {
+    resolveHandler?.(output('cleanup')); releaseOwner();
+    await first.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const client = await pipe(t, first);
+  const entered = once(started, 'call');
+  client.send(call(1, 'blocked'));
+  await entered;
+  const aborted = once(activeSignal, 'abort');
+  let reentrant;
+  activeSignal.addEventListener('abort', () => { reentrant = first.close(); }, { once: true });
+  const closing = first.close();
+  assert.equal(activeSignal.aborted, true);
+  assert.equal(reentrant, closing);
+  assert.equal(first.close(), closing);
+  let done = false;
+  void closing.then(() => { done = true; });
+  await aborted; await client.closed; await setImmediate();
+  assert.equal(done, false);
+  await assert.rejects(createAppTools({ tools, callTool: () => output('too early'), socketPath, adapterPath: fixtureAdapterPath }), /运行中的实例/);
+  const releasing = once(releaseStarted, 'release');
+  resolveHandler(output('late result'));
+  await releasing; await setImmediate();
+  assert.equal(done, false);
+  assert.equal(first.close(), closing);
+  await assert.rejects(createAppTools({ tools, callTool: () => output('still too early'), socketPath, adapterPath: fixtureAdapterPath }), /运行中的实例/);
+  releaseOwner(); await closing;
+  assert.equal(first.close(), closing);
+  const second = await createAppTools({ tools, callTool: () => output('new owner'), socketPath, adapterPath: fixtureAdapterPath });
+  t.after(() => second.close());
+  const replacement = await pipe(t, second);
+  replacement.send(call(2, 'new-owner'));
+  assert.deepEqual((await replacement.reply(2)).result, output('new owner'));
+  await second.close();
+});
+
+test('close prevents a queued frame from entering a new handler', async t => {
+  const calls = [];
+  const started = new EventEmitter();
+  let closing;
+  const app = await fixture(t, params => {
+    calls.push(params.callId);
+    if (params.callId === 'first') { closing = app.close(); started.emit('close'); }
+    return output(params.callId);
+  });
+  const client = await pipe(t, app);
+  const entered = once(started, 'close');
+  client.socket.write(Buffer.concat([frame(call(1, 'first')), frame(call(2, 'second'))]));
+  await entered;
+  await closing;
+  await client.closed;
+  assert.deepEqual(calls, ['first']);
+});
+
+test('close also drains handlers already cancelled or disconnected', async t => {
+  const directory = await mkdtemp('/tmp/aw-drain-old-');
+  const socketPath = join(directory, 'tools.sock');
+  const started = new EventEmitter(), tasks = new Map();
+  const first = await createAppTools({ tools, socketPath, adapterPath: fixtureAdapterPath,
+    callTool: (params, { signal }) => new Promise(resolve => { tasks.set(params.callId, { signal, resolve }); started.emit('call'); }),
+  });
+  t.after(async () => {
+    for (const task of tasks.values()) task.resolve(output('cleanup'));
+    await first.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const cancelled = await pipe(t, first);
+  let entered = once(started, 'call');
+  cancelled.send(call(1, 'cancelled')); await entered;
+  const aborted = once(tasks.get('cancelled').signal, 'abort');
+  cancelled.send({ jsonrpc: '2.0', id: 1, method: 'tools/cancel' }); await aborted;
+  const disconnected = await pipe(t, first);
+  entered = once(started, 'call');
+  disconnected.send(call(2, 'disconnected')); await entered;
+  const disconnectedAbort = once(tasks.get('disconnected').signal, 'abort');
+  disconnected.socket.destroy(); await disconnectedAbort;
+  const closing = first.close();
+  let done = false;
+  void closing.then(() => { done = true; });
+  await setImmediate();
+  await assert.rejects(createAppTools({ tools, callTool: () => output('too early'), socketPath, adapterPath: fixtureAdapterPath }), /运行中的实例/);
+  tasks.get('cancelled').resolve(output('cancelled result'));
+  await setImmediate();
+  assert.equal(done, false);
+  await assert.rejects(createAppTools({ tools, callTool: () => output('one still running'), socketPath, adapterPath: fixtureAdapterPath }), /运行中的实例/);
+  tasks.get('disconnected').resolve(output('disconnected result'));
+  await closing;
+  const second = await createAppTools({ tools, callTool: () => output('new owner'), socketPath, adapterPath: fixtureAdapterPath });
+  t.after(() => second.close());
+  await second.close();
+});
+
+test('failed owner cleanup keeps the pipe occupied until an explicit close retry succeeds', async t => {
+  const directory = await mkdtemp('/tmp/aw-drain-fail-');
+  const socketPath = join(directory, 'tools.sock');
+  let attempts = 0;
+  const first = await createAppTools({ tools, callTool: () => output('unused'), socketPath, adapterPath: fixtureAdapterPath,
+    beforeRelease: async () => { if (++attempts === 1) throw new Error('owner cleanup failed'); },
+  });
+  t.after(async () => { await first.close(); await rm(directory, { recursive: true, force: true }); });
+  const closing = first.close();
+  assert.equal(first.close(), closing);
+  await assert.rejects(closing, /owner cleanup failed/);
+  assert.equal(attempts, 1);
+  await assert.rejects(createAppTools({ tools, callTool: () => output('too early'), socketPath, adapterPath: fixtureAdapterPath }), /运行中的实例/);
+  await first.close();
+  assert.equal(attempts, 2);
+  const second = await createAppTools({ tools, callTool: () => output('new owner'), socketPath, adapterPath: fixtureAdapterPath });
+  t.after(() => second.close());
+  await second.close();
 });
 
 test('fixed pipe startup rejects long paths and occupied files without replacing them', async t => {

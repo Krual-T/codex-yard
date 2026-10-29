@@ -40,6 +40,8 @@ export type AppToolHandler = (params: AppToolCall, context: { signal: AbortSigna
 export interface AppToolsOptions {
   tools: readonly AppToolDescriptor[];
   callTool: AppToolHandler; adapterPath?: string; socketPath?: string;
+  /** Finish owner state work before release; failures keep the socket bound and can be retried. */
+  beforeRelease?(): Promise<void>;
 }
 type ToolReply = { result: unknown } | { error: { code: number; message: string } };
 
@@ -57,7 +59,7 @@ function missingFile(cause: unknown): null {
 }
 
 /** Hosts the private pipe consumed by the Codex App Tools MCP adapter. */
-export async function createAppTools({ tools, callTool, adapterPath = process.env.AGENTS_APP_TOOLS_ADAPTER || defaultAppToolsAdapter, socketPath: requestedSocketPath }: AppToolsOptions) {
+export async function createAppTools({ tools, callTool, beforeRelease, adapterPath = process.env.AGENTS_APP_TOOLS_ADAPTER || defaultAppToolsAdapter, socketPath: requestedSocketPath }: AppToolsOptions) {
   adapterPath = resolve(adapterPath);
   try {
     await access(adapterPath, constants.R_OK);
@@ -71,6 +73,7 @@ export async function createAppTools({ tools, callTool, adapterPath = process.en
     throw new Error(`无法读取 Codex App Tools 适配器：${adapterPath}。`, { cause });
   }
   if (!Array.isArray(tools) || typeof callTool !== 'function') throw new TypeError('需要工具目录和 callTool 处理函数。');
+  if (beforeRelease !== undefined && typeof beforeRelease !== 'function') throw new TypeError('beforeRelease 必须是函数。');
 
   const temporary = requestedSocketPath == null;
   const directory = requestedSocketPath == null ? await mkdtemp('/tmp/aw-') : dirname(resolve(requestedSocketPath));
@@ -105,9 +108,13 @@ export async function createAppTools({ tools, callTool, adapterPath = process.en
     }
   }
   const clients = new Set<Socket>();
+  const handlers = new Set<Promise<void>>();
+  const controllers = new Set<AbortController>();
+  let isClosing = false;
+  let released = false;
   let closing: Promise<void> | undefined;
   const server = createServer(socket => {
-    if (closing) { socket.destroy(); return; }
+    if (isClosing) { socket.destroy(); return; }
     const pending = new Map<RpcId, AbortController>();
     const header = Buffer.alloc(4);
     let headerBytes = 0;
@@ -141,6 +148,7 @@ export async function createAppTools({ tools, callTool, adapterPath = process.en
     }
 
     function receive(body: Buffer) {
+      if (isClosing) { socket.destroy(); return; }
       let message: unknown;
       try { message = JSON.parse(body.toString('utf8')); }
       catch { respond(null, { error: { code: -32700, message: 'JSON 格式无效。' } }); return; }
@@ -171,7 +179,9 @@ export async function createAppTools({ tools, callTool, adapterPath = process.en
       }
       const controller = new AbortController();
       pending.set(id, controller);
-      Promise.resolve().then(() => {
+      controllers.add(controller);
+      const handler = Promise.resolve().then(() => {
+        if (isClosing) throw new Error('工具宿主正在关闭。');
         controller.signal.throwIfAborted();
         if (!tools.some(tool => tool.namespace === params.namespace && tool.name === params.tool)) {
           throw Object.assign(new Error('工具或调用上下文无效。'), { code: -32602 });
@@ -184,8 +194,13 @@ export async function createAppTools({ tools, callTool, adapterPath = process.en
           code: isRecord(cause) && typeof cause.code === 'number' ? cause.code : -32000,
           message: errorMessage(cause) || '工具调用失败。',
         } });
-      }).finally(() => { if (pending.get(id) === controller) pending.delete(id); })
+      }).finally(() => {
+        controllers.delete(controller);
+        if (pending.get(id) === controller) pending.delete(id);
+      })
         .catch(() => { stop(); socket.destroy(); });
+      handlers.add(handler);
+      void handler.then(() => handlers.delete(handler), () => handlers.delete(handler));
     }
 
     // Keep one bounded frame, even when a client fragments headers or combines many frames.
@@ -236,12 +251,23 @@ export async function createAppTools({ tools, callTool, adapterPath = process.en
     socketPath, adapterPath,
     config: appToolsConfig(adapterPath, socketPath),
     close() {
-      closing ??= (async () => {
+      if (closing) return closing;
+      isClosing = true;
+      let resolveAttempt!: () => void, rejectAttempt!: (cause: unknown) => void;
+      const attempt = new Promise<void>((resolve, reject) => { resolveAttempt = resolve; rejectAttempt = reject; });
+      closing = attempt;
+      // A failed owner cleanup must not allow a replacement to claim this socket.
+      void attempt.catch(() => { if (!released && closing === attempt) closing = undefined; });
+      void (async () => {
+        for (const controller of controllers) controller.abort();
         for (const socket of clients) socket.destroy();
-        await new Promise(resolve => server.close(resolve));
+        await Promise.allSettled([...handlers]);
+        await beforeRelease?.();
+        await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+        released = true;
         if (temporary) await rm(directory, { recursive: true, force: true });
-      })();
-      return closing;
+      })().then(resolveAttempt, rejectAttempt);
+      return attempt;
     },
   };
 }
