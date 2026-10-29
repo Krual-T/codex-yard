@@ -31,7 +31,7 @@ function isCodeFile(name: string): boolean {
   return codeNames.has(lower) || (dot > 0 && codeExtensions.has(lower.slice(dot + 1)));
 }
 
-function citationLink(attributes: MarkdownNode['attributes']): { url: string; label: string } | null {
+function citationLink(attributes: MarkdownNode['attributes']): { url: string; label: string; filePath?: string } | null {
   const attrs = attributes ?? {};
   const path = typeof attrs.path === 'string' ? attrs.path.trim() : '';
   if (!path || /[\u0000-\u001f\u007f]/u.test(path)
@@ -65,8 +65,35 @@ function citationLink(attributes: MarkdownNode['attributes']): { url: string; la
     : start === 1 && !isCodeFile(name) ? '' : ` (line ${start})`;
   try {
     const encoded = encodeURIComponent(filePath).replace(/%2F/giu, '/');
-    return { url: `${encoded}${start == null ? '' : `#L${start}`}`, label: `${name}${lineLabel}` };
+    return { url: `${encoded}${start == null ? '' : `#L${start}`}`, label: `${name}${lineLabel}`, filePath };
   } catch { return null; }
+}
+
+/** Read local output citations with the same parser and validation as the inline links. */
+export function outputFileCitationReferences(text: string): { outputs: string[]; visualizations: string[] } {
+  const source = normalizeFileCitationEscapes(text);
+  const root = fromMarkdown(source, { extensions: [directive()], mdastExtensions: [directiveFromMarkdown()] }) as unknown as MarkdownNode;
+  const outputs: string[] = [], visualizations: string[] = [];
+  function visit(node: MarkdownNode): void {
+    if (['code', 'inlineCode', 'html', 'link', 'linkReference', 'image', 'imageReference', 'definition'].includes(node.type)) return;
+    const isDirective = node.type === 'textDirective' || node.type === 'leafDirective' || node.type === 'containerDirective';
+    if (isDirective && node.name === 'codex-file-citation') {
+      const citation = citationLink(node.attributes);
+      const purpose = node.attributes?.purpose;
+      if (citation?.filePath && (purpose == null || purpose === 'output')) outputs.push(citation.filePath);
+      return;
+    }
+    if (isDirective && (node.name === 'codex-inline-vis' || node.name === 'codex-live-vis')) {
+      const path = node.attributes?.path ?? node.attributes?.file;
+      const start = node.position?.start.offset;
+      const lineStart = start == null ? -1 : source.lastIndexOf('\n', start - 1) + 1;
+      if (path && start != null && /^\s*$/u.test(source.slice(lineStart, start))) visualizations.push(path);
+      return;
+    }
+    for (const child of node.children ?? []) visit(child);
+  }
+  visit(root);
+  return { outputs, visualizations };
 }
 
 /** The original tokenizer accepts escaped quotes in directive attributes. */

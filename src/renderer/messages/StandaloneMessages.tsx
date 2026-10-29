@@ -6,6 +6,8 @@ import type { StandaloneMessagesProps, WorkbenchClient } from '../workbench-cont
 import { StandaloneMarkdown } from '../markdown/StandaloneMarkdown.tsx';
 import { ToolItem } from '../tools/ToolItem.tsx';
 import { CopyButton } from './CopyButton.tsx';
+import { MessageOutputPreviews } from './MessageOutputPreviews.tsx';
+import type { MessageOutputPreviewAuthority } from './MessageOutputPreviews.tsx';
 import { messageCopyContent } from './message-copy.ts';
 import { ImageViewer, MessageImage } from './MessageImage.tsx';
 import { asArray, asRecord, asString, displayJson, editableDraft, parseUserContent, resolveToolFileLocation, serializedMessageContext } from './message-data.ts';
@@ -22,6 +24,8 @@ export type { MessageEditHistory } from './message-edit.ts';
 type RenderItemProps = {
   item: ThreadItemSummary;
   turnId: string;
+  outputTurn?: TurnSummary;
+  outputPreviewAuthority?: MessageOutputPreviewAuthority;
   threadId: string;
   client: WorkbenchClient;
   hostId: string;
@@ -271,7 +275,7 @@ function MessageMoreActions({ turnId, onFork, onError }: {
 }
 
 function MessageItem(props: RenderItemProps) {
-  const { item, turnId, threadId, client, hostId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImages, onFork } = props;
+  const { item, turnId, outputTurn, outputPreviewAuthority, threadId, client, hostId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImages, onFork } = props;
   const [actionError, setActionError] = useState('');
   const openSingleImage = useCallback((image: ImageSource) => onOpenImages([image], 0), [onOpenImages]);
   const markdownProps = { client, hostId, threadId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage: openSingleImage };
@@ -281,6 +285,8 @@ function MessageItem(props: RenderItemProps) {
     return <div className="yard-assistant-message">{item.type === 'plan'
       ? <div className="yard-message-label">Plan</div> : <h4 className="yard-screen-reader">ChatGPT said:</h4>}
       <StandaloneMarkdown text={text} {...markdownProps} />
+      {outputTurn && <MessageOutputPreviews client={client} hostId={hostId} threadId={threadId} cwd={cwd} turn={outputTurn} authority={outputPreviewAuthority}
+        onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} />}
       {asArray(item.questions).map((value, index) => {
         const question = asRecord(value);
         return <section className="yard-question" key={index}><strong>{asString(question.title) || 'Question'}</strong>
@@ -341,9 +347,11 @@ function searchText(value: unknown): string {
   return typeof value === 'number' || typeof value === 'boolean' ? String(value) : '';
 }
 
-export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser,
+export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, outputPreviewAuthority,
   editEnabled, editRecovery, editAccess, onEditDraftChange, onEditNavigationController, editRebase, onPrepareEditRebase, onCommitEditRebase,
-  editHistory, searchOpen, onSearchOpenChange }: StandaloneMessagesProps & StandaloneMessagesRecoveryProps & StandaloneMessagesSearchProps & { editHistory?: MessageEditHistory }) {
+  editHistory, searchOpen, onSearchOpenChange }: StandaloneMessagesProps & StandaloneMessagesRecoveryProps & StandaloneMessagesSearchProps & {
+    editHistory?: MessageEditHistory; outputPreviewAuthority?: MessageOutputPreviewAuthority;
+  }) {
   const [localSearchOpen, setLocalSearchOpen] = useState(false);
   const searchVisible = searchOpen ?? localSearchOpen;
   const [query, setQuery] = useState('');
@@ -515,6 +523,11 @@ export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, o
             return <article className="yard-message-item" key={duplicateId ? `${item.id}:edit-draft` : item.id} data-message-id={item.id} data-search-current={selected?.key === key || undefined}
               ref={(node) => { if (node) nodes.current.set(key, node); else nodes.current.delete(key); }}>
               <MemoMessageItem item={item} turnId={turn.id} threadId={thread.id} client={client} hostId={hostId} cwd={thread.cwd} onEdit={onEdit}
+                outputTurn={requestedThreadId === thread.id && (turn.status === 'completed' || turn.status === 'failed')
+                  && item.type === 'agentMessage' && turn.items.some(entry => entry.type === 'agentMessage'
+                    && typeof entry.text === 'string' && entry.text.includes('codex-file-citation'))
+                  && !turn.items.slice(itemIndex + 1).some(entry => entry.type === 'agentMessage') ? turn : undefined}
+                outputPreviewAuthority={outputPreviewAuthority}
                 onFork={item.type === 'userMessage' && turn.items.some((entry) => entry.type === 'agentMessage' || entry.type === 'plan') ? undefined : onFork}
                 onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenVisualization={onOpenVisualization} onOpenBrowser={onOpenBrowser}
                 onOpenImages={openImages} editRestriction={editRestriction} editing={itemEditing} identity={threadIdentity}
