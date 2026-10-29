@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
+import type { Page } from 'playwright-core';
 
 declare global {
   interface Window {
@@ -46,6 +48,13 @@ declare global {
 }
 
 const chromePath = '/usr/bin/google-chrome', require = createRequire(import.meta.url);
+async function waitForSaved(page: Page, accepts: (value: Awaited<ReturnType<Window['editAuthorityHarness']['saved']>>) => boolean) {
+  const deadline = Date.now() + 8_000;
+  while (!accepts(await page.evaluate(() => window.editAuthorityHarness.saved()))) {
+    assert.ok(Date.now() < deadline, 'The expected edit recovery was not committed');
+    await delay(20);
+  }
+}
 test('two real message views share one saved edit and transfer authority only after a durable flush', {
   skip: !existsSync(chromePath) && 'An isolated headless browser is unavailable', timeout: 90_000,
 }, async () => {
@@ -70,7 +79,7 @@ test('two real message views share one saved edit and transfer authority only af
     assert.equal(await two.getByRole('textbox', { name: 'Edit message text' }).count(), 0);
     assert.equal(await two.getByRole('button', { name: 'Edit message' }).isDisabled(), true);
     await first.fill('first draft');
-    await page.waitForFunction(async () => (await window.editAuthorityHarness.saved())?.recovery.editor.edits[0]?.text === 'first draft');
+    await waitForSaved(page, value => value?.recovery.editor.edits[0]?.text === 'first draft');
     await page.evaluate(() => { window.editAuthorityHarness.capture('one'); window.editAuthorityHarness.freeze('one'); });
     await assert.rejects(page.evaluate(() => window.editAuthorityHarness.handoff('one')), /must be saved/);
     await page.evaluate(() => window.editAuthorityHarness.failNextSave());
@@ -90,7 +99,7 @@ test('two real message views share one saved edit and transfer authority only af
     assert.equal(await first.count(), 0);
     assert.equal(await page.evaluate(() => window.editAuthorityHarness.capturedValid()), false);
     await second.fill('second view edit');
-    await page.waitForFunction(async () => (await window.editAuthorityHarness.saved())?.recovery.editor.edits[0]?.text === 'second view edit');
+    await waitForSaved(page, value => value?.recovery.editor.edits[0]?.text === 'second view edit');
     const saved = await page.evaluate(() => window.editAuthorityHarness.saved());
     assert.equal(saved?.recovery.editor.sessionId, 'shared-session');
     assert.ok(saved!.recovery.editor.revision > version.revision);
@@ -126,7 +135,7 @@ test('real message editor checks its captured target after IDB preparation and p
     const input = one.getByRole('textbox', { name: 'Edit message text' });
     await input.waitFor();
     await input.fill('retain this draft');
-    await page.waitForFunction(async () => (await window.editAuthorityHarness.saved())?.recovery.editor.edits[0]?.text === 'retain this draft');
+    await waitForSaved(page, value => value?.recovery.editor.edits[0]?.text === 'retain this draft');
     await page.evaluate(() => window.editAuthorityHarness.holdNextSubmit());
     await one.getByRole('button', { name: 'Send', exact: true }).click();
     await page.waitForFunction(() => window.editAuthorityHarness.waiting());
@@ -169,7 +178,7 @@ test('starting before a recovery prop arrives reads the existing IDB draft befor
     await input.waitFor();
     assert.equal(await input.inputValue(), 'original');
     await input.fill('saved session retained');
-    await page.waitForFunction(async () => (await window.editAuthorityHarness.saved())?.recovery.editor.edits[0]?.text === 'saved session retained');
+    await waitForSaved(page, value => value?.recovery.editor.edits[0]?.text === 'saved session retained');
     assert.equal((await page.evaluate(() => window.editAuthorityHarness.saved()))?.recovery.editor.sessionId, 'shared-session');
     assert.equal(await two.getByRole('textbox', { name: 'Edit message text' }).count(), 0);
     assert.equal(await two.getByRole('button', { name: 'Edit message' }).isDisabled(), true);
@@ -194,7 +203,7 @@ test('revoking captured authority during IDB preparation prevents the old editor
     const input = one.getByRole('textbox', { name: 'Edit message text' });
     await input.waitFor();
     await input.fill('draft before revoked authority');
-    await page.waitForFunction(async () => (await window.editAuthorityHarness.saved())?.recovery.editor.edits[0]?.text === 'draft before revoked authority');
+    await waitForSaved(page, value => value?.recovery.editor.edits[0]?.text === 'draft before revoked authority');
     await page.evaluate(() => window.editAuthorityHarness.holdNextSubmit());
     await one.getByRole('button', { name: 'Send', exact: true }).click();
     await page.waitForFunction(() => window.editAuthorityHarness.waiting());
@@ -202,7 +211,7 @@ test('revoking captured authority during IDB preparation prevents the old editor
     const other = two.getByRole('textbox', { name: 'Edit message text' });
     await other.waitFor();
     await page.evaluate(() => window.editAuthorityHarness.releaseGate());
-    await page.waitForFunction(async () => (await window.editAuthorityHarness.saved())?.submission === undefined);
+    await waitForSaved(page, value => !!value && value.submission === undefined);
     assert.equal(await page.evaluate(() => window.editAuthorityHarness.hostCalls()), 0);
     assert.equal(await other.inputValue(), 'draft before revoked authority');
     assert.equal(await input.count(), 0);
@@ -227,7 +236,7 @@ test('a failed IDB recovery write keeps the original pending record and the visi
     const one = page.locator('[data-view="one"]'), input = one.getByRole('textbox', { name: 'Edit message text' });
     await input.waitFor();
     await input.fill('preserve this edit');
-    await page.waitForFunction(async () => (await window.editAuthorityHarness.saved())?.recovery.editor.edits[0]?.text === 'preserve this edit');
+    await waitForSaved(page, value => value?.recovery.editor.edits[0]?.text === 'preserve this edit');
     await page.evaluate(() => window.editAuthorityHarness.holdNextSubmit());
     await one.getByRole('button', { name: 'Send', exact: true }).click();
     await page.waitForFunction(() => window.editAuthorityHarness.waiting());
