@@ -359,6 +359,10 @@ export function MiniConversation(props: MiniConversationProps) {
     };
     try {
       await sendConversationDraft({ client: latest.current.client, sessions: latest.current.sessions, sends: latest.current.sends, guard,
+        nativeInjectionAuthority: authority.daemonConnectionGeneration ? {
+          daemonConnectionGeneration: authority.daemonConnectionGeneration,
+          assertBeforeSend: threadId => guard(threadId, action.type === 'send'),
+        } : undefined,
         dispatch: (method, params, hostId, assert) => dispatch(method, params, hostId,
           withDaemonGeneration(assert, authority.daemonConnectionGeneration)),
         cleanup: { controller: intent => cleanupFor(creation.committed && creation.target ? creation.target : original).controller(intent) },
