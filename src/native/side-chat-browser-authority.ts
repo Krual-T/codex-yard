@@ -18,8 +18,12 @@ export interface SideChatBrowserOrigin {
   page: WebSocket;
   identity: SideChatBrowserIdentity;
   action: SideChatHostAction;
-  phase: 'challenge' | 'confirm' | 'claim' | 'fork' | 'inject' | 'unsubscribe' | 'child' | 'close' | 'cleanup' | 'respond';
+  phase: 'challenge' | 'confirm' | 'claim' | 'fork' | 'inject' | 'unsubscribe' | 'child' | 'close' | 'cleanup' | 'respond' | 'write';
   attemptId?: string;
+}
+export interface SideChatChildWrite {
+  identity: SideChatBrowserIdentity;
+  assertCurrent(): void;
 }
 export interface SideChatNativeBrowserAuthorityOptions {
   /** Check the original page, socket/generation, prepare index, operation, draft and applicable claim. */
@@ -90,6 +94,22 @@ export function createSideChatNativeBrowserAuthority(options: SideChatNativeBrow
       || grant.challenge.forkDispatchId !== scope.attemptId)) throw unavailable();
     if (scope.phase === 'inject' && !scope.childThreadId) throw unavailable();
     if (scope.phase === 'unsubscribe' && (!scope.childThreadId || !grant.closeReady)) throw unavailable();
+  }
+  /** Capture the original grant object before a request enters any asynchronous queue. */
+  function captureChildWrite(page: WebSocket, value: unknown): SideChatChildWrite | undefined {
+    if (value === undefined) return undefined;
+    if (!object(value) || !validIdentity(value.identity) || !value.identity.childThreadId || !id(value.challengeId)) throw unavailable();
+    const identity = structuredClone(value.identity), challengeId = value.challengeId, grant = grants.get(identity.operationId);
+    const check = () => {
+      if (!grant || !grant.confirmed || grant.suspended || grant.page !== page
+        || grant.challenge.challengeId !== challengeId || !sameIdentity(grant.challenge.identity, identity)
+        || !['start', 'retry', 'retryPersistence'].includes(grant.challenge.action)) throw unavailable();
+      current(grant, 'write', identity);
+    };
+    if (!grant || !grant.confirmed || grant.suspended || grant.page !== page
+      || grant.challenge.challengeId !== challengeId || !sameIdentity(grant.challenge.identity, identity)
+      || !['start', 'retry', 'retryPersistence'].includes(grant.challenge.action)) throw unavailable();
+    return { identity, assertCurrent: check };
   }
   function ask(grant: Grant, kind: SideChatAuthorityRequest['kind'], identity: SideChatBrowserIdentity,
     view?: SideChatHostView): Promise<void> {
@@ -199,5 +219,5 @@ export function createSideChatNativeBrowserAuthority(options: SideChatNativeBrow
   function invalidate(page: WebSocket, hostId?: string): void {
     for (const grant of grants.values()) if (grant.page === page && (hostId === undefined || grant.challenge.identity.hostId === hostId)) discard(grant);
   }
-  return { handle, invalidate, assertCurrent, prepareChild, prepareClose, cleanup, ownerStopped };
+  return { handle, invalidate, assertCurrent, captureChildWrite, prepareChild, prepareClose, cleanup, ownerStopped };
 }

@@ -8,6 +8,7 @@ interface SentMessage {
   requestId?: string;
   body?: string;
   daemonConnectionGeneration?: string;
+  sideChat?: unknown;
   request?: { id: string; method: string; params: Record<string, unknown> };
 }
 
@@ -90,6 +91,30 @@ test('host events update the original binding before subscribers, with host isol
   socket.host('local', 'connected', '');
   remote.assertOriginal();
   assert.equal(observed, 9);
+});
+
+test('SideChat proof is captured in the RPC envelope and host body before connection waits', async t => {
+  const { client, sockets } = fixture(t);
+  const opening = client.connect(); const socket = sockets[0]!; socket.open(); await opening;
+  const identity = { hostId: 'local', parentThreadId: 'parent', draftId: 'draft', prepareId: 'prepare',
+    operationId: 'operation', parentCwd: '/fixture', connectionGeneration: 'generation', childThreadId: 'child' };
+  const proof = { identity, challengeId: 'challenge' }, original = structuredClone(proof);
+  const rpc = client.rpc('turn/start', { threadId: 'child' }, 'local', { sideChat: proof });
+  proof.identity.draftId = 'later';
+  await Promise.resolve();
+  const sent = socket.sent.at(-1)!;
+  assert.deepEqual(sent.sideChat, original);
+  socket.message({ type: 'mcp-response', message: { id: sent.request!.id, result: {} } });
+  await rpc;
+
+  const hostProof = structuredClone(original);
+  const host = client.host('queue-edit', { threadId: 'child', sideChat: hostProof });
+  hostProof.identity.parentCwd = '/later';
+  await Promise.resolve();
+  const request = socket.sent.at(-1)!;
+  assert.deepEqual(JSON.parse(request.body!).sideChat, original);
+  socket.message({ type: 'fetch-response', requestId: request.requestId, responseType: 'success', body: 'changed' });
+  assert.equal(await host, 'changed');
 });
 
 test('closing, replacement, errors, suspend and stop revoke the original browser socket', async t => {

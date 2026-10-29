@@ -16,7 +16,7 @@ import type { SideChatParentReceipts } from './side-chat-parent-receipts.ts';
 import type { StateMutations } from './state-mutations.ts';
 import type { SideChatHostAction } from '../renderer/side-chat/types.ts';
 import type { SideChatHostView } from '../renderer/side-chat/types.ts';
-import type { SideChatBrowserOrigin } from './side-chat-browser-authority.ts';
+import type { SideChatBrowserOrigin, SideChatChildWrite } from './side-chat-browser-authority.ts';
 
 type Value = Record<string, unknown>;
 export interface SideChatBrowserScope extends SideChatEndpointScope {
@@ -508,6 +508,27 @@ export function createNativeSideChatParent(options: Options) {
       || op.operationId !== identity.operationId || parent.hostId !== identity.hostId
       || parent.threadId !== identity.parentThreadId || parent.connectionGeneration !== identity.connectionGeneration
       || (op.childId ?? null) !== identity.childThreadId) throw new BeforeSend('原侧聊浏览器身份已改变。');
+    if (origin.phase === 'write') {
+      assertConnection(binding);
+      const fork = record(op.fork), receipt = record(fork.receipt), child = record(receipt.thread);
+      const receiptOrigin = record(fork.receiptOrigin), inject = record(op.inject), close = record(op.close);
+      const fence = record(op.endpointFence), fenceOrigin = record(fence.origin), active = fence.active;
+      if (!identity.childThreadId || fence.version !== 1 || fence.ownerId !== ownerId || fence.recovering !== false
+        || !id(fence.token) || fenceOrigin.operationId !== identity.operationId || fenceOrigin.hostId !== identity.hostId
+        || fenceOrigin.parentThreadId !== identity.parentThreadId || fenceOrigin.connectionGeneration !== identity.connectionGeneration
+        || active !== null && (!id(record(active).callId) || record(active).ownerId !== ownerId
+          || !['start', 'retry', 'retryPersistence'].includes(String(record(active).action)))
+        || fork.status !== 'received' || !id(fork.attemptId) || receiptOrigin.attemptId !== fork.attemptId
+        || receiptOrigin.connectionGeneration !== identity.connectionGeneration || !Number.isSafeInteger(receiptOrigin.eventCursor)
+        || (receiptOrigin.eventCursor as number) < 0 || child.id !== identity.childThreadId || child.ephemeral !== true
+        || child.forkedFromId !== identity.parentThreadId || receipt.cwd !== identity.parentCwd
+        || inject.status !== 'received' || !id(inject.attemptId) || !inject.receipt
+        || typeof inject.receipt !== 'object' || Array.isArray(inject.receipt)
+        || close.requested !== false || close.status !== 'idle') {
+        throw new BeforeSend('原侧聊子会话尚未确认或已关闭。');
+      }
+      return;
+    }
     const closing = origin.action === 'close' || origin.action === 'retry' && record(op.close).requested === true;
     (closing ? assertConnection : assertBinding)(binding);
     if (origin.phase === 'challenge' || origin.phase === 'confirm' || origin.phase === 'claim') return;
@@ -540,5 +561,33 @@ export function createNativeSideChatParent(options: Options) {
       });
     });
   }
-  return { handle, forgetPage, ownsChild, projectsChanged, flushNotifications, assertBrowserOrigin };
+
+  /** Invoke inside the existing StateMutations interval, immediately before a daemon write. */
+  function assertChildWrite(hostId: string, threadId: string, proof?: SideChatChildWrite): void {
+    options.assertStateAvailable();
+    const section = options.readSection();
+    if (section === undefined) {
+      if (proof) throw new BeforeSend('原侧聊记录不可用。');
+      return;
+    }
+    const value = record(section);
+    if (value.version !== 1 || !value.operations || typeof value.operations !== 'object' || Array.isArray(value.operations)
+      || !value.prepared || typeof value.prepared !== 'object' || Array.isArray(value.prepared)) {
+      throw new BeforeSend('侧聊记录尚未核实，无法派发会话写入。');
+    }
+    let matches = 0;
+    for (const [operationId, raw] of Object.entries(value.operations)) {
+      const op = record(raw), parent = record(op.parent);
+      if (op.operationId !== operationId || !id(parent.hostId) || op.childId !== undefined && !id(op.childId)) {
+        throw new BeforeSend('侧聊记录尚未核实，无法派发会话写入。');
+      }
+      if (parent.hostId === hostId && op.childId === threadId) matches++;
+    }
+    if (!matches && !proof) return;
+    if (matches !== 1 || !proof || proof.identity.hostId !== hostId || proof.identity.childThreadId !== threadId) {
+      throw new BeforeSend('原侧聊子会话写入权限不可确认。');
+    }
+    proof.assertCurrent();
+  }
+  return { handle, forgetPage, ownsChild, assertChildWrite, projectsChanged, flushNotifications, assertBrowserOrigin };
 }

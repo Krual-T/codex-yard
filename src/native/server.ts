@@ -9,7 +9,8 @@ import { homedir, hostname } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { CodexConnection } from '../../lib/codex.ts';
+import { CodexConnection, RpcError } from '../../lib/codex.ts';
+import type { RequestOptions } from '../../lib/codex-protocol.ts';
 import { removeQueuedOriginal } from './queue-edit.ts';
 import { createSendInjection } from './send-injection.ts';
 import type { SendInjectionOriginal, SendInjectionReference, SendInjectionSource } from './send-injection.ts';
@@ -56,6 +57,7 @@ import { SideChatParentReceipts } from './side-chat-parent-receipts.ts';
 import type { SideChatReceiptAttempt } from './side-chat-parent-receipts.ts';
 import { createNativeSideChatParent } from './side-chat-native-parent.ts';
 import { createSideChatNativeBrowserAuthority } from './side-chat-browser-authority.ts';
+import type { SideChatChildWrite } from './side-chat-browser-authority.ts';
 import type { SideChatBrowserAuthority } from './side-chat-native-parent.ts';
 import { webManifest, brandAssets } from './visual-feedback.ts';
 import { TerminalHost } from './terminal.ts';
@@ -810,6 +812,34 @@ export async function createNativeWorkbench(options: Options = {}) {
       } };
   }
 
+  function captureChildWrite(client: WebSocket, value: unknown): SideChatChildWrite | undefined {
+    try { return sideChatBrowserAuthority.captureChildWrite(client, value); }
+    catch (cause) { throw Object.assign(new Error('原侧聊浏览器确认已改变，未派发。', { cause }), { uncertain: false, sendPhase: 'before-send' }); }
+  }
+  function assertChildWrite(hostId: string, threadId: string, proof: SideChatChildWrite | undefined): void {
+    try { sideChats.assertChildWrite(hostId, threadId, proof); }
+    catch (cause) { throw Object.assign(new Error('原侧聊子会话写入权限已改变，未派发。', { cause }), { uncertain: false, sendPhase: 'before-send' }); }
+  }
+  function guardedChildConnection(connection: CodexConnection, guard: () => void): CodexConnection {
+    return new Proxy(connection, { get(target, key) {
+      if (key !== 'request') return Reflect.get(target, key, target);
+      return (method: string, params?: unknown, options?: RequestOptions) => {
+        if (!options?.mutating) return target.request(method, params, options);
+        let dispatched = false;
+        return stateMutations.run(() => {
+          guard();
+          dispatched = true;
+          return { reply: target.request(method, params, options) };
+        }).then(value => value.reply, cause => {
+          if (dispatched) throw cause;
+          // This internal code lets message-edit preserve its known pre-write stage.
+          throw Object.assign(new RpcError(cause instanceof Error ? cause.message : '原侧聊写入未派发。',
+            { code: 'YARD_BEFORE_SEND', uncertain: false }), { sendPhase: 'before-send', cause });
+        });
+      };
+    } });
+  }
+
   async function handle(message: HostMessage, client: WebSocket, connections: Map<string, CodexConnection>) {
     if (await petOverlay.handle(message, value => send(client, value))) return;
     const hostId = message.hostId ?? 'local';
@@ -854,6 +884,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     if ((message.type === 'mcp-request' || message.type === 'thread-prewarm-start') && message.request) {
       const { method, id } = message.request;
       const params = { ...message.request.params };
+      const childWrite = writeMethods.has(method) ? captureChildWrite(client, message.sideChat) : undefined;
       const original = Object.hasOwn(message, 'daemonConnectionGeneration')
         ? capturePageConnection(client, connections, hostId, message.daemonConnectionGeneration) : undefined;
       if (method === 'config/batchWrite' || method === 'skills/config/write') {
@@ -928,8 +959,12 @@ export async function createNativeWorkbench(options: Options = {}) {
         response = writeMethods.has(method) && typeof params.threadId === 'string'
           ? await conversationWrite(hostId, params.threadId, async () => {
             if (method !== 'thread/resume' && method !== 'thread/unsubscribe') await sendInjections.assertCanWrite(hostId, params.threadId as string);
-            return request();
-          }) : await request();
+            const dispatched = await stateMutations.run(() => {
+              assertChildWrite(hostId, params.threadId as string, childWrite);
+              return { reply: request() };
+            });
+            return dispatched.reply;
+          }) : childWrite ? (() => { throw Object.assign(new Error('原侧聊写入目标无效。'), { uncertain: false, sendPhase: 'before-send' }); })() : await request();
       } catch (error) {
         if (parentAttempt && record(error).code !== 'TIMEOUT') sideChatParents.cancel(parentAttempt);
         throw error;
@@ -1089,30 +1124,44 @@ export async function createNativeWorkbench(options: Options = {}) {
         if (params.action === 'retryPersistence') return sendInjections.retryPersistence(reference,
           params.receipt as { step: 'injection' | 'turn'; attemptId: string });
         if (params.action !== 'inject' && params.action !== 'start') throw Object.assign(new Error('原注入操作无效。'), { uncertain: false, sendPhase: 'before-send' });
-        const original = captureInjectionConnection(client, connections, hostId, params.daemonConnectionGeneration, reference);
+        const childWrite = captureChildWrite(client, params.sideChat);
+        const connection = captureInjectionConnection(client, connections, hostId, params.daemonConnectionGeneration, reference);
+        const original: SendInjectionOriginal = { ...connection, assertOriginal(value) {
+          connection.assertOriginal(value);
+          if (childWrite && (value.owner.threadId !== childWrite.identity.childThreadId || value.owner.draftId !== childWrite.identity.draftId)) {
+            throw Object.assign(new Error('原侧聊发送草稿身份已改变。'), { uncertain: false, sendPhase: 'before-send' });
+          }
+          assertChildWrite(hostId, value.threadId, childWrite);
+        } };
         return conversationWrite(hostId, reference.threadId, () => params.action === 'inject'
           ? sendInjections.inject({ reference, items: params.items as ObjectValue[], turnParams: params.turnParams as ObjectValue }, original)
           : sendInjections.startTurn({ reference, turnAttemptId: params.turnAttemptId as string }, original));
       }
       case 'queue-edit': {
         if (typeof params.threadId !== 'string' || !params.threadId) throw Object.assign(new Error('原队列会话无效，未删除。'), { uncertain: false, sendPhase: 'before-send' });
+        const childWrite = captureChildWrite(client, params.sideChat);
         const original = capturePageConnection(client, connections, hostId, params.daemonConnectionGeneration);
+        const guard = () => { original.assertOriginal(); assertChildWrite(hostId, params.threadId as string, childWrite); };
         return conversationWrite(hostId, params.threadId, async () => {
           await sendInjections.assertCanWrite(hostId, params.threadId as string);
-          return removeQueuedOriginal(original.connection, params.threadId as string, params.entry, original.assertOriginal);
+          await stateMutations.run(guard);
+          return removeQueuedOriginal(guardedChildConnection(original.connection, guard), params.threadId as string, params.entry, guard);
         });
       }
       case 'message-edit': {
         if (typeof params.threadId !== 'string' || !params.threadId) throw new Error('编辑需要会话身份。');
         let entered = false;
         try {
+          const childWrite = params.operation === 'check' ? undefined : captureChildWrite(client, params.sideChat);
           const original = capturePageConnection(client, connections, hostId, params.daemonConnectionGeneration);
+          const guard = () => { original.assertOriginal(); if (params.operation !== 'check') assertChildWrite(hostId, params.threadId as string, childWrite); };
           return await conversationWrite(hostId, params.threadId, async () => {
             original.assertOriginal();
             if (params.operation !== 'check') await sendInjections.assertCanWrite(hostId, params.threadId as string);
+            if (params.operation !== 'check') await stateMutations.run(guard);
             if (params.operation !== 'check') sideChatParents.invalidate(hostId, params.threadId as string);
             entered = true;
-            return editMessage(original.connection, hostId, params.threadId as string, params, original);
+            return editMessage(guardedChildConnection(original.connection, guard), hostId, params.threadId as string, params, { assertOriginal: guard });
           });
         } catch (cause) {
           if (entered) throw cause;

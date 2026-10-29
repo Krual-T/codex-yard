@@ -206,6 +206,7 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
     const id = crypto.randomUUID();
     return this.request<T>({ type: 'mcp-request', hostId, observeSubscriptionTerminal: Boolean(options?.onLateTerminal),
       ...(options?.daemonConnectionGeneration !== undefined ? { daemonConnectionGeneration: options.daemonConnectionGeneration } : {}),
+      ...(options?.sideChat !== undefined ? { sideChat: options.sideChat } : {}),
       request: { id, method, params } }, id, !readMethods.has(method), false,
       { onLateTerminal: options?.onLateTerminal, onResult: method === 'thread/start' ? result => {
         // Emit while the original bridge's reply is being settled, before any

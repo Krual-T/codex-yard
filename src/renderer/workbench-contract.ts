@@ -17,6 +17,8 @@ export type WorkbenchDispatchOptions = Pick<RequestOptions, 'onLateTerminal'> & 
   assertBeforeSend?: () => void;
   /** Original page/host daemon socket token, captured before the operation's first await. */
   daemonConnectionGeneration?: string;
+  /** The original confirmed SideChat grant captured with the user's write. */
+  sideChat?: Readonly<{ identity: Readonly<import('./side-chat/browser-authority.ts').SideChatBrowserIdentity>; challengeId: string }>;
 };
 export interface WorkbenchClient {
   rpc<T = unknown>(method: string, params?: Record<string, unknown>, hostId?: string, options?: WorkbenchDispatchOptions): Promise<T>;
