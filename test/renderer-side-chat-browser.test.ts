@@ -103,7 +103,7 @@ test('side panel keeps the real composer across hidden, host changes, failure an
     assert.deepEqual(sent.description.owner, { hostId: 'a', threadId: 'child-a', draftId: 'draft-side-a' });
     assert.deepEqual(sent.owner, sent.description.owner); assert.equal(sent.options.mode, 'plan'); assert.ok(sent.description.revision);
     await editor.fill('newer side draft'); await page.evaluate(() => (window as any).peer.rejectSend());
-    await page.locator('.yard-side-chat:visible').getByText(/发送未确认/).waitFor();
+    await page.locator('.yard-side-chat:visible').getByText(/发送结果.*unknown send/).waitFor();
     await page.evaluate(() => (window as any).peer.markNode('a'));
     await page.evaluate(() => (window as any).peer.hide());
     assert.equal(await page.locator('.yard-side-chat').first().isHidden(), true);
@@ -126,7 +126,7 @@ test('side panel keeps the real composer across hidden, host changes, failure an
     await page.getByText('History b').waitFor();
     await page.evaluate(() => { const p=(window as any).peer; p.histories.b.historyComplete=false; p.histories.b.streamGap=true; p.render(); });
     await page.getByText(/部分进行中的内容尚未收到/).waitFor(); await editor.press('Enter');
-    await page.locator('.yard-side-chat:visible').getByText(/发送未确认/).waitFor();
+    await page.locator('.yard-side-chat:visible').getByText(/发送结果/).waitFor();
     assert.equal(await page.evaluate(() => (window as any).peer.state.submissions.length), 1);
     assert.equal(await editor.inputValue(), 'draft b');
     await page.evaluate(() => { const p=(window as any).peer; p.histories.b.historyComplete=true; p.histories.b.streamGap=false; p.render(); });
@@ -182,7 +182,7 @@ test('side panel keeps the real composer across hidden, host changes, failure an
     await page.getByText('History c').waitFor(); await editor.fill('unconfirmed c send'); await editor.press('Enter');
     await page.waitForFunction(() => (window as any).peer.state.submissions.length === 2);
     await editor.fill('retained c draft'); await page.evaluate(() => (window as any).peer.rejectSend());
-    await page.locator('.yard-side-chat:visible').getByText(/发送未确认/).waitFor();
+    await page.locator('.yard-side-chat:visible').getByText(/发送结果.*unknown send/).waitFor();
     await page.evaluate(() => (window as any).peer.markNode('c'));
     await page.evaluate(() => { const p=(window as any).peer; p.histories.c.error='connection lost'; p.histories.c.canSubmit=false; p.render(); });
     await page.getByRole('button', { name: '另开侧聊' }).click();
@@ -200,7 +200,7 @@ test('side panel keeps the real composer across hidden, host changes, failure an
     await page.evaluate(() => (window as any).peer.select('c'));
     assert.equal(await page.getByRole('button', { name: '另开侧聊' }).isDisabled(), true);
     assert.equal(await page.locator('.yard-side-chat:visible textarea').inputValue(), 'retained c draft');
-    await page.locator('.yard-side-chat:visible').getByText(/发送未确认/).waitFor();
+    await page.locator('.yard-side-chat:visible').getByText(/发送结果.*unknown send/).waitFor();
     await page.evaluate(() => (window as any).peer.restoreA());
     await page.getByText(/宿主已关闭此侧聊/).waitFor();
     assert.equal(await page.evaluate(() => (window as any).peer.state.closes.filter((host:any)=>host==='a').length), 1);
