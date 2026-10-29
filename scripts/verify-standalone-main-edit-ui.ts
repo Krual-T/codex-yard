@@ -19,7 +19,7 @@ const knownScenarios = new Set(['same-thread-dom', 'navigation-drain-and-restore
   'pending-acquisition-navigation', 'pending-submit-navigation', 'pending-submit-reconnect', 'cross-page-adopt-latest',
   'late-receipt-preserves-newer-page', 'settings-update-does-not-carry-overrides', 'archive-during-navigation', 'history-current-replace-failure',
   'history-initial-replace-failure', 'idb-wait-requires-persisted-text', 'cold-load-navigation', 'cold-load-navigation-failure',
-  'cold-history-failure-retry-navigation']);
+  'cold-history-failure-retry-navigation', 'cold-history-and-recovery-navigation']);
 if (selected && (!selected.length || selected.some(name => !knownScenarios.has(name)))) {
   throw new Error('YARD_MAIN_EDIT_SCENARIOS must contain known scenario names.');
 }
@@ -34,7 +34,7 @@ const workspace = join(runtime, 'workspace');
 const fake = await createFakeCodex(runtime);
 const names = ['same', 'navigation', 'history', 'acquire', 'connection', 'pending-navigation', 'cross-page', 'late', 'settings',
   'archive-during-navigation', 'history-current-replace-failure', 'history-initial-replace-failure', 'idb-wait-requires-persisted-text',
-  'cold-load-navigation', 'cold-load-navigation-failure', 'cold-history-failure-retry-navigation'];
+  'cold-load-navigation', 'cold-load-navigation-failure', 'cold-history-failure-retry-navigation', 'cold-history-and-recovery-navigation'];
 for (const name of names) {
   fake.threads.set(name, fixtureThread(name, workspace, { name: `Edit ${name}`, turns: [fixtureTurn('turn-' + name, [
     { id: 'user-' + name, type: 'userMessage', content: [{ type: 'text', text: 'Original ' + name, text_elements: [] }] },
@@ -188,7 +188,7 @@ async function scenario(name: string, run: () => Promise<void>) {
   console.log(JSON.stringify(results.at(-1)));
 }
 
-async function coldLoadNavigation(thread: string, failNavigation: boolean, initialHistoryFailure = false) {
+async function coldLoadNavigation(thread: string, failNavigation: boolean, initialHistoryFailure = false, holdRecovery = false) {
   const fixturePath = join(workspace, 'barrier.txt');
   await writeFile(fixturePath, 'file recovery barrier fixture\n');
   const seed = await newPage(thread);
@@ -223,7 +223,36 @@ async function coldLoadNavigation(thread: string, failNavigation: boolean, initi
   });
   let page: Page | undefined;
   try {
-    page = await newPage(thread, { cold: true });
+    page = await newPage(thread, { cold: true, beforeGoto: holdRecovery ? page => page.addInitScript(() => {
+      const descriptor = Object.getOwnPropertyDescriptor(IDBTransaction.prototype, 'oncomplete');
+      if (!descriptor?.set || !descriptor.get) throw new Error('Cannot intercept edit recovery transaction completion');
+      const gate: { held: number; released: boolean; stacks: string[]; callbacks: (() => void)[]; release?: () => void } =
+        { held: 0, released: false, stacks: [], callbacks: [] };
+      (window as unknown as { initialEditRecoveryGate: typeof gate }).initialEditRecoveryGate = gate;
+      gate.release = () => {
+        gate.released = true;
+        for (const callback of gate.callbacks.splice(0)) callback();
+      };
+      Object.defineProperty(IDBTransaction.prototype, 'oncomplete', {
+        configurable: true,
+        get(this: IDBTransaction) { return descriptor.get!.call(this); },
+        set(this: IDBTransaction, handler: ((this: IDBTransaction, event: Event) => void) | null) {
+          const stack = new Error('initial edit recovery transaction').stack ?? '';
+          if (!handler || gate.released || !/MessageEditRecoveryStore\.read/.test(stack)) {
+            descriptor.set!.call(this, handler); return;
+          }
+          gate.stacks.push(stack);
+          const transaction = this;
+          descriptor.set!.call(transaction, (event: Event) => {
+            gate.held++;
+            if (gate.released) handler.call(transaction, event);
+            else gate.callbacks.push(() => handler.call(transaction, event));
+          });
+        },
+      });
+    }) : undefined });
+    if (holdRecovery) await page.waitForFunction(() =>
+      (window as unknown as { initialEditRecoveryGate: { held: number } }).initialEditRecoveryGate.held > 0);
     if (initialHistoryFailure) {
       await Promise.race([firstResumeEntered.promise, new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error('First history request did not reach the peer')), 10_000).unref();
@@ -297,6 +326,17 @@ async function coldLoadNavigation(thread: string, failNavigation: boolean, initi
     if (initialHistoryFailure) assert.equal(await page.locator('.yard-messages-root .yard-message-empty').count(), 1);
     assert.deepEqual(await readEdit(page, thread), saved);
 
+    const editRecoveryGate = holdRecovery ? await page.evaluate(() => {
+      const gate = (window as unknown as { initialEditRecoveryGate: { held: number; released: boolean; stacks: string[]; release(): void } }).initialEditRecoveryGate;
+      const result = { held: gate.held, released: gate.released, stacks: gate.stacks };
+      gate.release();
+      return result;
+    }) : null;
+    if (editRecoveryGate) {
+      assert(editRecoveryGate.held > 0);
+      assert.equal(editRecoveryGate.released, false);
+      assert(editRecoveryGate.stacks.some(stack => /MessageEditRecoveryStore\.read/.test(stack)));
+    }
     if (initialHistoryFailure) { releaseRetryResume.resolve(); await waitForHistory(); }
     releaseHistory.resolve();
     await page.getByText('Fixture ' + thread, { exact: true }).waitFor();
@@ -312,7 +352,7 @@ async function coldLoadNavigation(thread: string, failNavigation: boolean, initi
     assert.equal(gate.loading, false); assert.equal(gate.inert, true); assert.equal(gate.fileLoading, true);
     assert.equal(new URL(page.url()).pathname, '/local/' + thread);
     const editorCount = await editor(page).count();
-    observations[thread] = { saved, beforeLeave, gate, editorCount, urlWhileBlocked: page.url() };
+    observations[thread] = { saved, beforeLeave, gate, editRecoveryGate, editorCount, urlWhileBlocked: page.url() };
     if (editorCount) await page.screenshot({ path: join(artifacts, `${thread}-blocked-failure.png`) });
     assert.equal(editorCount, 0, 'cold recovery must not acquire an editable session during the leave barrier');
     await page.evaluate(() => (window as unknown as { fileRecoveryGate: { release(): void } }).fileRecoveryGate.release());
@@ -335,10 +375,11 @@ async function coldLoadNavigation(thread: string, failNavigation: boolean, initi
     const next = await readEdit(page, thread);
     assert.equal(next?.recovery.editor.sessionId, saved.recovery.editor.sessionId);
     assert((next?.recovery.editor.revision ?? -1) > saved.recovery.editor.revision);
-    observations[thread] = { saved, beforeLeave, gate, editorCount, next, failNavigation, initialHistoryFailure, url: page.url() };
+    observations[thread] = { saved, beforeLeave, gate, editRecoveryGate, editorCount, next, failNavigation, initialHistoryFailure, url: page.url() };
   } finally {
     releaseHistory.resolve(); releaseFirstResume.resolve(); releaseRetryResume.resolve();
     if (page && !page.isClosed()) await page.evaluate(() => {
+      (window as unknown as { initialEditRecoveryGate?: { release?(): void } }).initialEditRecoveryGate?.release?.();
       (window as unknown as { fileRecoveryGate?: { release?(): void } }).fileRecoveryGate?.release?.();
     }).catch(() => {});
     fake.handlers.delete('thread/turns/list'); fake.handlers.delete('thread/resume');
@@ -362,6 +403,7 @@ try {
   await scenario('cold-load-navigation', () => coldLoadNavigation('cold-load-navigation', false));
   await scenario('cold-load-navigation-failure', () => coldLoadNavigation('cold-load-navigation-failure', true));
   await scenario('cold-history-failure-retry-navigation', () => coldLoadNavigation('cold-history-failure-retry-navigation', false, true));
+  await scenario('cold-history-and-recovery-navigation', () => coldLoadNavigation('cold-history-and-recovery-navigation', false, false, true));
 
   await scenario('same-thread-dom', async () => {
     const page = await newPage('same');
