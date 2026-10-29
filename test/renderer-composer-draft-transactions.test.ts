@@ -18,6 +18,8 @@ test('composer drafts commit and recover across isolated renderer pages', {
     const client={async rpc(method){
       if(method==='model/list'||method==='thread/queue/list')return {data:[],nextCursor:null};
       if(method==='config/read')return {config:{}};
+      if(method==='configRequirements/read')return {requirements:null};
+      if(method==='permissionProfile/list')return {data:[],nextCursor:null};
       throw Error('Unexpected RPC '+method);
     },async host(method,params){if(method==='get-setting')return {value:params.key==='composerEnterBehavior'?'cmdAlways':'queue'};
       throw Error('Unexpected host '+method);},subscribe(){return ()=>{}},async reply(){throw Error('unexpected approval')}};
@@ -242,6 +244,8 @@ test('composer drafts commit and recover across isolated renderer pages', {
         const page = await setup(context); await mount(page);
         const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' });
         await editor.fill('first message'); await saved(page);
+        await page.locator('.standalone-composer__access > summary').click();
+        await page.getByText('其他权限设置', { exact: true }).click();
         await page.getByRole('combobox', { name: '沙箱权限' }).selectOption('workspace-write');
         await page.getByRole('button', { name: '发送', exact: true }).click();
         await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);
@@ -251,7 +255,7 @@ test('composer drafts commit and recover across isolated renderer pages', {
         assert.deepEqual(submission.options.approvalPolicy, { granular: { sandbox_approval: true, rules: false,
           skill_approval: true, request_permissions: false, mcp_elicitations: true } });
         assert.deepEqual(submission.action, { type: 'send' });
-        assert.deepEqual(submission.description.overrides, { sandboxMode: 'workspace-write', permissionProfileId: undefined });
+        assert.deepEqual(submission.description.overrides, { sandboxMode: 'workspace-write', sandboxPolicy: undefined, permissionProfileId: undefined });
         assert.equal((await page.evaluate(async s => (window as any).fixture.readComposerDraft(s.owner, s.revision), submission.description)).draft.text, 'first message');
         await editor.fill('next message'); await saved(page);
         await page.evaluate(() => (window as any).fixture.resolveSubmit());

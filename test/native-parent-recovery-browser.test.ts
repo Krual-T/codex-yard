@@ -49,6 +49,7 @@ test('actual composer rechecks Enter behavior after a host isolation and recover
     await page.route('**/workbench-entry.js', route => route.abort());
     await page.goto(app.url + '/?id=' + id);
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+    await page.locator('.standalone-composer__add > summary').click();
     await page.getByLabel('Send method').waitFor();
     await page.waitForFunction(() => {
       const control = document.querySelector('select[aria-label="Send method"]') as HTMLSelectElement | null;
