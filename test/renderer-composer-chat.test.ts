@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
+import type { Locator } from 'playwright-core';
 
 test('chat lookup uses the real composer, original editor and host-scoped list', {
   skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
@@ -12,7 +13,8 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
     import {createRoot} from 'react-dom/client';
     import {I18nProvider} from './src/renderer/i18n/index.tsx';
     import {StandaloneComposer,draftToInput,readComposerDraft} from './src/renderer/composer/StandaloneComposer.tsx';
-    const state={calls:[],submissions:[],snapshots:[],controller:null,grant:1,epochs:{local:1,'ssh:other':1},hold:null,pending:[],failList:false};
+    const state={calls:[],hostCalls:[],submissions:[],snapshots:[],controller:null,grant:1,epochs:{local:1,'ssh:other':1},hold:null,pending:[],failList:false,
+      plainOverride:null,listeners:new Set()};
     const pages=(host,cursor)=>host==='local' ? cursor ? {data:[{id:'same-id',name:'Review local',cwd:'/workspace'}],nextCursor:null}
       : {data:[{id:'first',name:'Other local',cwd:'/workspace'},{id:'bad/id',name:'Unsupported identifier',cwd:'/workspace'}],nextCursor:'page-2'}
       : {data:[{id:'same-id',name:'Review remote',cwd:'/remote'}],nextCursor:null};
@@ -36,12 +38,14 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
         throw Error('unexpected RPC '+method);
       },
       async host(method,params={}){
-        if(method==='get-setting')return {exists:true,value:params.key==='composerPlainTextMode'?location.hostname.includes('plain-mode'):params.key==='composerEnterBehavior'?'enter':'queue'};
-        if(method==='workspace-directory-entries')return {entries:[]};
+        state.hostCalls.push(method);
+        if(method==='get-setting')return {exists:true,value:params.key==='composerPlainTextMode'?(state.plainOverride??location.hostname.includes('plain-mode')):params.key==='composerEnterBehavior'?(location.hostname.includes('rich-blocks')?'cmdAlways':'enter'):'queue'};
+        if(method==='workspace-directory-entries')return {entries:location.hostname.includes('rich-completion')
+          ? [{name:'example.ts',path:'example.ts',type:'file'}] : []};
         if(method==='codex-home')return {codexHome:'/fixture'};
         if(method==='workspace-root-options')return {roots:['/workspace']};
         throw Error('unexpected host '+method);
-      },subscribe(){return ()=>{}},async reply(){throw Error('unexpected approval')},
+      },subscribe(listener){state.listeners.add(listener);return ()=>state.listeners.delete(listener)},async reply(){throw Error('unexpected approval')},
     };
     props={client,context:{hostId:'local',threadId:null,draftId:'chat-fixture',cwd:'/workspace'},busy:false,
       hosts:[{hostId:'local',displayName:'Local'},{hostId:'ssh:other',displayName:'Remote'}],
@@ -67,6 +71,7 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
     await page.route('**/*', route => new URL(route.request().url()).origin === 'http://' + name + '.test'
       ? route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }) : route.abort());
     await page.goto('http://' + name + '.test/');
+    await page.addStyleTag({ content: readFileSync('src/renderer/composer/standalone-composer.css', 'utf8') });
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     await page.getByRole('textbox', { name: 'Work with Codex' }).waitFor();
     return { page, errors };
@@ -77,6 +82,7 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
     const editor = page.locator('[contenteditable="true"][role="textbox"]');
     await editor.waitFor(); await editor.focus(); return editor;
   };
+  const editorText = (editor: Locator) => editor.evaluate(element => element instanceof HTMLTextAreaElement ? element.value : element.textContent);
   try {
     await t.test('typed mention searches paged threads, persists and survives a failed send and reload', async () => {
       const { page, errors } = await open('chat-typed');
@@ -242,15 +248,22 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       await page.getByRole('option', { name: /Review local/ }).waitFor();
       await editor.press('Enter');
       await page.waitForFunction(() => JSON.stringify((window as any).fixture.state.controller.snapshot().draft.document).includes('thread://same-id?hostId=local'));
-      assert.equal(await editor.inputValue(), 'Plain Review local ');
+      const mention = editor.locator('[data-mention="agent"]');
+      await mention.waitFor();
+      assert.equal(await editor.getAttribute('contenteditable'), 'true');
+      assert.equal(await mention.getAttribute('agent-mention-path'), 'thread://same-id?hostId=local');
+      assert.equal(await mention.locator('svg').count(), 1);
+      assert.equal(await editorText(editor), 'Plain Review local ');
       await editor.press('Control+z');
-      assert.equal(await editor.inputValue(), 'Plain @Rev');
+      assert.equal(await editorText(editor), 'Plain @Rev');
+      assert.equal(await mention.count(), 0);
       await editor.press('Control+z');
-      assert.notEqual(await editor.inputValue(), 'Plain @Rev');
+      assert.notEqual(await editorText(editor), 'Plain @Rev');
       await editor.press('Control+Shift+z');
-      assert.equal(await editor.inputValue(), 'Plain @Rev');
+      assert.equal(await editorText(editor), 'Plain @Rev');
       await editor.press('Control+Shift+z');
-      assert.equal(await editor.inputValue(), 'Plain Review local ');
+      assert.equal(await editorText(editor), 'Plain Review local ');
+      assert.equal(await mention.count(), 1);
       await page.getByRole('button', { name: 'Send', exact: true }).click();
       await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
       const submitted = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
@@ -263,6 +276,323 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
+    await t.test('opening rich mode before a chat keeps earlier textarea typing in the same history', async () => {
+      const { page, errors } = await open('chat-rich-before-mention');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Prior ');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      await page.getByRole('toolbar', { name: 'Text formatting' }).waitFor();
+      await editor.pressSequentially('@Rev'); await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      await editor.press('Control+z'); assert.equal(await editorText(editor), 'Prior @Rev');
+      await editor.press('Control+z'); assert.equal(await editorText(editor), 'Prior ');
+      await editor.press('Control+z'); assert.equal(await editorText(editor), '');
+      await editor.press('Control+Shift+z'); assert.equal(await editorText(editor), 'Prior ');
+      await editor.press('Control+Shift+z'); assert.equal(await editorText(editor), 'Prior @Rev');
+      await editor.press('Control+Shift+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.hostCalls.includes('set-setting')), false);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('rich action after a chat keeps the original history, formatting and submitted reference', async () => {
+      const { page, errors } = await open('chat-inline-format');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Typed @Rev');
+      await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      await page.locator('.standalone-composer__add > summary').click();
+      await page.getByRole('button', { name: 'Rich text editor' }).click();
+      await page.getByRole('toolbar', { name: 'Text formatting' }).waitFor();
+      await editor.evaluate(element => {
+        const text = element.querySelector('p')!.firstChild!, range = document.createRange();
+        range.setStart(text, 0); range.setEnd(text, 5);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+      await page.getByRole('button', { name: 'Bold', exact: true }).click();
+      assert.equal(await editor.locator('strong').innerText(), 'Typed');
+      assert.match(JSON.stringify(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document)), /"type":"strong"/);
+      await editor.press('Control+z'); assert.equal(await editor.locator('strong').count(), 0);
+      await editor.press('Control+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 0);
+      assert.equal(await editorText(editor), 'Typed @Rev');
+      await editor.press('Control+z'); assert.notEqual(await editorText(editor), 'Typed @Rev');
+      await editor.press('Control+Shift+z'); assert.equal(await editorText(editor), 'Typed @Rev');
+      await editor.press('Control+Shift+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      await editor.press('Control+Shift+z'); assert.equal(await editor.locator('strong').innerText(), 'Typed');
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      const submitted = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
+      assert.equal(submitted.input[0].text, '**Typed** [@Review local](thread://same-id?hostId=local) ');
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.hostCalls.includes('set-setting')), false);
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      await page.reload(); await page.addStyleTag({ content: readFileSync('src/renderer/composer/standalone-composer.css', 'utf8') });
+      await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+      const reloaded = page.getByRole('textbox', { name: 'Work with Codex' });
+      await reloaded.locator('[data-mention="agent"]').waitFor();
+      assert.equal(await reloaded.locator('strong').innerText(), 'Typed');
+      assert.equal(await reloaded.locator('[data-mention="agent"]').getAttribute('agent-mention-path'), 'thread://same-id?hostId=local');
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('a retained legacy plain serialization keeps the same history when rich actions are enabled', async () => {
+      const { page, errors } = await open('chat-inline-legacy');
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      assert.equal(await page.evaluate(() => {
+        const controller = (window as any).fixture.state.controller;
+        return controller.update(controller.snapshot().owner, (draft: any) => ({ ...draft,
+          preserved: { promptKey: 'fixture', draft: { plainTextMode: true } } }));
+      }), true);
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Old @Rev'); await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      await editor.evaluate(element => {
+        const text = element.querySelector('p')!.firstChild!, range = document.createRange(); range.setStart(text, 0); range.setEnd(text, 3);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+      await page.getByRole('button', { name: 'Bold', exact: true }).click();
+      assert.equal(await editor.locator('strong').innerText(), 'Old');
+      const saved = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+      assert.equal(saved.text, 'Old [@Review local](thread://same-id?hostId=local) ');
+      assert.equal(saved.preserved.draft.plainTextMode, true);
+      await editor.press('Control+z'); assert.equal(await editor.locator('strong').count(), 0);
+      await editor.press('Control+z'); assert.equal(await editorText(editor), 'Old @Rev');
+      await editor.press('Control+Shift+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      await editor.press('Control+Shift+z'); assert.equal(await editor.locator('strong').innerText(), 'Old');
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.hostCalls.includes('set-setting')), false);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('multi-line text retains its original document structure through rich actions', async () => {
+      const { page, errors } = await open('chat-inline-multiline');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Lead @Rev'); await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await editor.press('Shift+Enter'); await editor.pressSequentially('Next');
+      assert.equal(await editorText(editor), 'Lead Review local \nNext');
+      const before = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document);
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      await editor.evaluate(element => {
+        const paragraph = element.querySelector('p')!, text = paragraph.lastChild!, range = document.createRange();
+        range.setStart(text, text.textContent!.length - 4); range.setEnd(text, text.textContent!.length);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+      await page.getByRole('button', { name: 'Bold', exact: true }).click();
+      assert.equal(await editor.locator('strong').innerText(), 'Next');
+      const after = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document);
+      const withoutMarks = (value: unknown): any => {
+        if (Array.isArray(value)) return value.map(withoutMarks).reduce((items: any[], item: any) => {
+          const last = items.at(-1);
+          if (last?.type === 'text' && item?.type === 'text') last.text += item.text; else items.push(item);
+          return items;
+        }, []);
+        return value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'marks')
+          .map(([key, item]) => [key, withoutMarks(item)])) : value;
+      };
+      assert.deepEqual(withoutMarks(after), withoutMarks(before));
+      await editor.press('Control+z'); assert.equal(await editor.locator('strong').count(), 0);
+      await editor.press('Control+Shift+z'); assert.equal(await editor.locator('strong').innerText(), 'Next');
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      const text = await page.evaluate(() => (window as any).fixture.state.submissions[0].input[0].text);
+      assert.match(text, /^Lead \[@Review local\]\(thread:\/\/same-id\?hostId=local\) \n\*\*Next\*\*$/);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('paragraphs typed before a chat insertion retain their undo history in rich mode', async () => {
+      const { page, errors } = await open('chat-inline-prior-paragraphs');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('First'); await editor.press('Shift+Enter'); await editor.pressSequentially('Second @Rev');
+      await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      const inserted = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document);
+      assert.equal(inserted.content.length, 2);
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      assert.deepEqual(await editor.locator('p').allTextContents(), ['First', 'Second Review local ']);
+      await editor.press('Control+z');
+      assert.deepEqual(await editor.locator('p').allTextContents(), ['First', 'Second @Rev']);
+      await editor.press('Control+z');
+      assert.notDeepEqual(await editor.locator('p').allTextContents(), ['First', 'Second @Rev']);
+      await editor.press('Control+Shift+z');
+      assert.deepEqual(await editor.locator('p').allTextContents(), ['First', 'Second @Rev']);
+      await editor.press('Control+Shift+z');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document), inserted);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('a skill selected before a chat survives rich activation and follows the same history', async () => {
+      const { page, errors } = await open('chat-inline-prior-skill');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('$rev'); await page.getByRole('option', { name: /review-skill/ }).click();
+      await editor.pressSequentially(' @Rev'); await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), [{ name: 'review-skill', path: '/skills/review' }]);
+      await editor.press('Control+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 0);
+      await editor.press('Control+z');
+      await editor.press('Control+z');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), []);
+      await editor.press('Control+Shift+z');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), [{ name: 'review-skill', path: '/skills/review' }]);
+      await editor.press('Control+Shift+z'); await editor.press('Control+Shift+z');
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      assert.doesNotMatch(JSON.stringify(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document)), /"type":"skill"/);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('rich block input and the earlier chat insertion share one undo and redo history', async () => {
+      const { page, errors } = await open('chat-inline-rich-blocks');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Before @Rev');
+      await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      await editor.press('End'); await editor.press('Enter'); await editor.pressSequentially('- Item');
+      await editor.locator('ul li').waitFor();
+      assert.equal(await editor.locator('ul li').innerText(), 'Item');
+      const completed = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document);
+      assert.equal(completed.content[1].type, 'list');
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      let undos = 0;
+      while (await editor.locator('[data-mention="agent"]').count() && undos++ < 8) await editor.press('Control+z');
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 0);
+      assert.equal(await editorText(editor), 'Before @Rev');
+      for (let index = 0; index < undos; index++) await editor.press('Control+Shift+z');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document), completed);
+      assert.equal(await editor.locator('ul li').innerText(), 'Item');
+      await editor.press('End'); await editor.pressSequentially(' @Rev');
+      await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      assert.equal(await editor.locator('ul li [data-mention="agent"]').count(), 1);
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      const sent = await page.evaluate(() => (window as any).fixture.state.submissions[0].input[0].text);
+      assert.match(sent, /\[@Review local\]\(thread:\/\/same-id\?hostId=local\)/);
+      assert.match(sent, /- Item/);
+      await page.reload(); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+      await page.locator('[contenteditable="true"] ul li').waitFor();
+      assert.equal(await page.locator('[contenteditable="true"] [data-mention="agent"]').count(), 2);
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.hostCalls.includes('set-setting')), false);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('rich structured clipboard remains editable beside the original chat atom', async () => {
+      const { page, errors } = await open('chat-inline-paste-blocks');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      const reference = await open('chat-existing-rich-paste-blocks');
+      await reference.page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      assert.equal(await reference.page.evaluate(() => {
+        const controller = (window as any).fixture.state.controller;
+        return controller.update(controller.snapshot().owner, (draft: any) => ({ ...draft,
+          document: { type: 'doc', content: [{ type: 'paragraph' }] } }));
+      }), true);
+      const referenceEditor = reference.page.locator('[contenteditable="true"][role="textbox"]');
+      await referenceEditor.waitFor(); await referenceEditor.focus();
+      assert.equal(await referenceEditor.getAttribute('data-composer-input-index'), null);
+      await editor.pressSequentially('Before @Rev');
+      await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await referenceEditor.pressSequentially('Before @Rev');
+      await reference.page.getByRole('option', { name: /Review local/ }).waitFor(); await referenceEditor.press('Enter');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      const pasteBlocks = (target: Locator, lead: boolean) => target.evaluate((element, includeLead) => {
+        const range = document.createRange(); range.selectNodeContents(element.querySelector('p')!); range.collapse(false);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const clipboard = new DataTransfer(); clipboard.setData('text/html', (includeLead ? '<p>Lead</p>' : '') + '<blockquote><p>Quoted</p></blockquote><ul><li><p>Item</p></li></ul>');
+        clipboard.setData('text/plain', (includeLead ? 'Lead\n' : '') + 'Quoted\nItem');
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+      }, lead);
+      await pasteBlocks(editor, false); await pasteBlocks(referenceEditor, false);
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document),
+        await reference.page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document));
+      assert.equal(await editor.locator('ul li').innerText(), 'Item');
+      await editor.press('Control+z'); assert.equal(await editor.locator('ul').count(), 0);
+      await pasteBlocks(editor, true);
+      assert.equal(await editor.locator('blockquote').innerText(), 'Quoted');
+      assert.equal(await editor.locator('ul li').innerText(), 'Item');
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      const pasted = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document);
+      await editor.press('Control+z'); assert.equal(await editor.locator('blockquote').count(), 0);
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      await editor.press('Control+Shift+z');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document), pasted);
+      assert.deepEqual(errors, []); assert.deepEqual(reference.errors, []); await reference.page.close(); await page.close();
+    });
+
+    await t.test('rich file, skill and autolink actions keep their real nodes after a chat insertion', async () => {
+      const { page, errors } = await open('chat-inline-rich-completion');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Before @Rev');
+      await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      await editor.press('End'); await editor.pressSequentially('@exam');
+      await page.getByRole('option', { name: /example\.ts/ }).click();
+      const file = editor.locator('[data-mention="file"]');
+      assert.equal(await file.count(), 1);
+      assert.match(await file.getAttribute('data-composer-attrs') ?? '', /\/workspace\/example\.ts/);
+      await editor.pressSequentially('$rev');
+      await page.getByRole('option', { name: /review-skill/ }).click();
+      assert.equal(await editor.locator('[data-mention="skill"]').count(), 1);
+      await editor.pressSequentially('https://example.test ');
+      assert.equal(await editor.locator('[data-composer-autolink]').innerText(), 'https://example.test');
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      const sent = await page.evaluate(() => (window as any).fixture.state.submissions[0].input);
+      assert.match(JSON.stringify(sent), /thread:\/\/same-id\?hostId=local/);
+      assert.match(JSON.stringify(sent), /\/workspace\/example\.ts/);
+      assert.ok(sent.some((item: any) => item.type === 'skill' && item.path === '/skills/review'));
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.hostCalls.includes('set-setting')), false);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('an external plain preference change follows composition without replacing the history', async () => {
+      const { page, errors } = await open('chat-inline-rich-blocks-preference-change');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Before @Rev');
+      await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      await page.getByRole('toolbar', { name: 'Text formatting' }).waitFor();
+      await editor.evaluate(element => element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })));
+      await page.evaluate(() => {
+        const state = (window as any).fixture.state; state.plainOverride = true;
+        for (const listener of state.listeners) listener({ type: 'settings-changed', keys: ['composerPlainTextMode'] });
+      });
+      await page.getByRole('toolbar', { name: 'Text formatting' }).waitFor({ state: 'hidden' });
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      await editor.evaluate(element => element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await editor.press('Control+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 0);
+      await editor.press('Control+Shift+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      await editor.press('End'); await editor.press('Enter'); await editor.pressSequentially('- plain');
+      assert.equal(await editor.locator('ul').count(), 0);
+      assert.equal(await editor.locator('p').last().innerText(), '- plain');
+      await page.evaluate(() => {
+        const state = (window as any).fixture.state; state.plainOverride = false;
+        for (const listener of state.listeners) listener({ type: 'settings-changed', keys: ['composerPlainTextMode'] });
+      });
+      await page.getByRole('toolbar', { name: 'Text formatting' }).waitFor();
+      await editor.press('End'); await editor.press('Enter'); await editor.pressSequentially('- rich');
+      assert.equal(await editor.locator('ul li').innerText(), 'rich');
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.hostCalls.includes('set-setting')), false);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('changing owners after rich activation does not carry the previous editor state', async () => {
+      const { page, errors } = await open('chat-inline-rich-owner');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Old @Rev');
+      await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      await page.waitForFunction(async () => JSON.stringify(await (window as any).fixture.read()).includes('thread://same-id?hostId=local'));
+      await page.evaluate(() => (window as any).fixture.render({ context: { threadId: 'other', draftId: 'other' } }));
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.owner?.draftId === 'other');
+      assert.equal(await editorText(editor), '');
+      await editor.pressSequentially('New owner');
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 0);
+      await page.evaluate(() => (window as any).fixture.render({ context: { threadId: null, draftId: 'chat-fixture' } }));
+      await page.locator('[contenteditable="true"] [data-mention="agent"]').waitFor();
+      assert.match(await editorText(editor), /Old Review local/);
+      assert.doesNotMatch(await editorText(editor), /New owner/);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
     await t.test('plain-text mode menu replaces the selected range and retains host identity', async () => {
       const { page, errors } = await open('chat-plain-mode');
       const editor = page.getByRole('textbox', { name: 'Work with Codex' });
@@ -272,11 +602,16 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       await page.getByRole('button', { name: 'Add chat' }).click();
       await page.getByLabel('Chat host').selectOption('ssh:other');
       await page.getByRole('button', { name: /Review remote/ }).click();
-      assert.equal(await editor.inputValue(), 'Before Review remote after');
+      assert.equal(await editorText(editor), 'Before Review remote after');
+      assert.equal(await editor.locator('[data-mention="agent"]').getAttribute('agent-mention-path'), 'thread://same-id?hostId=ssh%3Aother');
+      await page.locator('.standalone-composer__add > summary').click();
+      assert.equal(await page.getByRole('button', { name: 'Rich text editor' }).count(), 0);
+      await page.locator('.standalone-composer__add > summary').click();
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.hostCalls.includes('set-setting')), false);
       const draft = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
       assert.match(JSON.stringify(draft.document), /thread:\/\/same-id\?hostId=ssh%3Aother/);
-      await editor.press('Control+z'); assert.equal(await editor.inputValue(), 'Before TARGET after');
-      await editor.press('Control+Shift+z'); assert.equal(await editor.inputValue(), 'Before Review remote after');
+      await editor.press('Control+z'); assert.equal(await editorText(editor), 'Before TARGET after');
+      await editor.press('Control+Shift+z'); assert.equal(await editorText(editor), 'Before Review remote after');
       await editor.press('End');
       await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Add chat' }).click();
       await page.getByRole('button', { name: 'More chats' }).click();
@@ -285,6 +620,12 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       const paths = both.content[0].content.filter((node: any) => node.type === 'agentMention').map((node: any) => node.attrs.path);
       assert.deepEqual(paths, ['thread://same-id?hostId=ssh%3Aother', 'thread://same-id?hostId=local']);
       await editor.pressSequentially('@Rev');
+      assert.equal(await editorText(editor), 'Before Review remote afterReview local @Rev');
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.text), 'Before Review remote afterReview local @Rev');
+      assert.ok(await editor.getAttribute('aria-controls'), JSON.stringify(await editor.evaluate(element => ({
+        text: element.textContent, focused: document.activeElement === element, selection: document.getSelection()?.focusOffset,
+        selectionText: document.getSelection()?.focusNode?.textContent,
+      }))));
       await page.getByRole('option', { name: /Review local/ }).waitFor();
       await editor.press('Enter');
       const withCompletion = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document);
@@ -295,20 +636,122 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
-    await t.test('editing inside a text-mode agent label removes that node and undo restores it', async () => {
+    await t.test('the inline agent is atomic and deleting it can be undone', async () => {
       const { page, errors } = await open('chat-atom-edit');
       const editor = page.getByRole('textbox', { name: 'Work with Codex' });
       await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Add chat' }).click();
       await page.getByRole('button', { name: /Other local/ }).click();
-      assert.equal(await editor.inputValue(), 'Other local ');
-      await editor.evaluate((element: HTMLTextAreaElement) => { element.focus(); element.setSelectionRange(2, 2); element.dispatchEvent(new Event('select', { bubbles: true })); });
-      await editor.pressSequentially('X');
-      assert.equal(await editor.inputValue(), 'OtXher local ');
+      const mention = editor.locator('[data-mention="agent"]');
+      assert.equal(await editorText(editor), 'Other local ');
+      assert.equal(await mention.getAttribute('contenteditable'), 'false');
+      await editor.evaluate(element => {
+        (element as HTMLElement).focus();
+        const node = element.querySelector('[data-mention="agent"]')!;
+        const selection = document.getSelection()!, range = document.createRange();
+        range.setStartAfter(node); range.collapse(true); selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+      await editor.press('Backspace');
+      assert.equal(await editorText(editor), ' ');
       assert.doesNotMatch(JSON.stringify(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document)), /agentMention/);
       await editor.press('Control+z');
-      assert.equal(await editor.inputValue(), 'Other local ');
+      assert.equal(await editorText(editor), 'Other local ');
       assert.match(JSON.stringify(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document)), /agentMention/);
-      await editor.press('Control+Shift+z'); assert.equal(await editor.inputValue(), 'OtXher local ');
+      await editor.press('Control+Shift+z'); assert.equal(await editorText(editor), ' ');
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('copying and pasting the inline chat preserves its node and original host', async () => {
+      const { page, errors } = await open('chat-inline-clipboard-plain-mode');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Add chat' }).click();
+      await page.getByLabel('Chat host').selectOption('ssh:other'); await page.getByRole('button', { name: /Review remote/ }).click();
+      const copied = await editor.evaluate(element => {
+        const range = document.createRange(); range.selectNode(element.querySelector('[data-mention="agent"]')!);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const clipboard = new DataTransfer(); element.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+        return { html: clipboard.getData('text/html'), text: clipboard.getData('text/plain') };
+      });
+      assert.match(copied.html, /data-mention="agent"/); assert.match(copied.text, /@Review remote/);
+      await editor.evaluate((element, data) => {
+        const range = document.createRange(); range.selectNodeContents(element.querySelector('p')!); range.collapse(false);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const clipboard = new DataTransfer(); clipboard.setData('text/html', data.html); clipboard.setData('text/plain', data.text);
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+      }, copied);
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 2);
+      assert.deepEqual(await editor.locator('[data-mention="agent"]').evaluateAll(nodes => nodes.map(node => node.getAttribute('agent-mention-path'))),
+        ['thread://same-id?hostId=ssh%3Aother', 'thread://same-id?hostId=ssh%3Aother']);
+      await editor.press('Control+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      await editor.press('Control+Shift+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 2);
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      assert.equal((JSON.stringify(await page.evaluate(() => (window as any).fixture.state.submissions[0].input)).match(/thread:\/\/same-id\?hostId=ssh%3Aother/g) ?? []).length, 2);
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.hostCalls.includes('set-setting')), false);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('rich action keeps link creation, editing and marked paste on the same node history', async () => {
+      const { page, errors } = await open('chat-inline-link');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Link @Rev'); await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      await editor.evaluate(element => {
+        const text = element.querySelector('p')!.firstChild!, range = document.createRange(); range.setStart(text, 0); range.setEnd(text, 4);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+      await page.getByRole('button', { name: 'Link', exact: true }).click();
+      await page.getByLabel('Link address').fill('https://example.test/one'); await page.getByRole('button', { name: 'Apply' }).click();
+      const link = editor.locator('a'); assert.equal(await link.getAttribute('href'), 'https://example.test/one');
+      await link.click(); const dialog = page.getByRole('dialog', { name: 'Link' }); await dialog.getByRole('button', { name: 'Edit link URL' }).click();
+      await dialog.getByLabel('Link address').fill('https://example.test/two'); await dialog.getByRole('button', { name: 'Save link URL' }).click();
+      assert.equal(await link.getAttribute('href'), 'https://example.test/two');
+      await editor.press('Control+z'); assert.equal(await link.getAttribute('href'), 'https://example.test/one');
+      await editor.evaluate(element => {
+        const range = document.createRange(); range.selectNodeContents(element.querySelector('p')!); range.collapse(false);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const clipboard = new DataTransfer(); clipboard.setData('text/html', '<strong>pasted</strong>'); clipboard.setData('text/plain', 'pasted');
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+      });
+      assert.equal(await editor.locator('strong').innerText(), 'pasted');
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      const text = await page.evaluate(() => (window as any).fixture.state.submissions[0].input[0].text);
+      assert.match(text, /\[Link\]\(https:\/\/example\.test\/one\)/);
+      assert.match(text, /\[@Review local\]\(thread:\/\/same-id\?hostId=local\)/);
+      assert.match(text, /\*\*pasted\*\*/);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('a same-text external link revision cannot be overwritten by the retained view', async () => {
+      const { page, errors } = await open('chat-inline-new-source');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Link @Rev'); await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      await editor.evaluate(element => {
+        const text = element.querySelector('p')!.firstChild!, range = document.createRange(); range.setStart(text, 0); range.setEnd(text, 4);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+      await page.getByRole('button', { name: 'Link', exact: true }).click();
+      await page.getByLabel('Link address').fill('https://example.test/source'); await page.getByRole('button', { name: 'Apply' }).click();
+      const before = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.text);
+      assert.equal(await page.evaluate(() => {
+        const controller = (window as any).fixture.state.controller;
+        return controller.update(controller.snapshot().owner, (draft: any) => {
+          const next = structuredClone(draft), link = next.document.content[0].content[0].marks.find((mark: any) => mark.type === 'link');
+          link.attrs.literalMarkdownOccurrenceId = 99; return next;
+        });
+      }), true);
+      await editor.press('End'); await editor.pressSequentially('X');
+      await page.getByRole('alert').filter({ hasText: 'Unsupported document changes were not saved' }).waitFor();
+      const after = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+      assert.equal(after.text, before); assert.equal(after.document.content[0].content[0].marks[0].attrs.literalMarkdownOccurrenceId, 99);
       assert.deepEqual(errors, []); await page.close();
     });
 
@@ -318,13 +761,37 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Add chat' }).click();
       await page.getByRole('button', { name: /Other local/ }).click();
       await editor.pressSequentially('$rev');
+      assert.equal(await editorText(editor), 'Other local $rev');
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.text), 'Other local $rev');
+      assert.ok(await editor.getAttribute('aria-controls'), JSON.stringify(await editor.evaluate(element => ({
+        text: element.textContent, focused: document.activeElement === element, selection: document.getSelection()?.focusOffset,
+        selectionText: document.getSelection()?.focusNode?.textContent,
+      }))));
       await page.getByRole('option', { name: /review-skill/ }).click();
       await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.skills.some((skill: any) => skill.name === 'review-skill'));
       assert.match(JSON.stringify(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document)), /thread:\/\/first\?hostId=local/);
       await editor.press('Control+z');
-      assert.equal(await editor.inputValue(), 'Other local $rev');
+      assert.equal(await editorText(editor), 'Other local $rev');
       assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), []);
       await editor.press('Control+Shift+z');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), [{ name: 'review-skill', path: '/skills/review' }]);
+      const copied = await editor.evaluate(element => {
+        const range = document.createRange(); range.selectNodeContents(element.querySelector('p')!);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const clipboard = new DataTransfer(); element.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+        return { html: clipboard.getData('text/html'), text: clipboard.getData('text/plain') };
+      });
+      assert.doesNotMatch(copied.html, /data-text-skill/); assert.match(copied.html, /data-mention="agent"/);
+      await editor.evaluate((element, data) => {
+        const range = document.createRange(); range.selectNodeContents(element.querySelector('p')!); range.collapse(false);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const clipboard = new DataTransfer(); clipboard.setData('text/html', data.html); clipboard.setData('text/plain', data.text);
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+      }, copied);
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 2);
+      await editor.press('Control+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
       assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), [{ name: 'review-skill', path: '/skills/review' }]);
       assert.deepEqual(errors, []); await page.close();
     });
@@ -338,7 +805,7 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
         { type: 'text', text: 'Look @Rev', text_elements: [] },
       ], document: { type: 'doc', content: [
         { type: 'paragraph', content: [{ type: 'text', text: 'file @ref', marks: [{ type: 'strong' }] }] },
-        { type: 'paragraph', content: [{ type: 'text', text: 'Look @Rev' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'Look @Rev', marks: [{ type: 'em' }] }] },
       ] } };
       assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
       const first = page.getByRole('textbox', { name: 'Work with Codex 1' });
@@ -346,9 +813,12 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       await second.focus(); await second.press('End');
       await page.getByRole('option', { name: /Review local/ }).waitFor();
       await second.press('Enter');
-      assert.equal(await second.inputValue(), 'Look Review local ');
-      await second.press('Control+z'); assert.equal(await second.inputValue(), 'Look @Rev');
-      await second.press('Control+Shift+z'); assert.equal(await second.inputValue(), 'Look Review local ');
+      assert.equal(await editorText(second), 'Look Review local ');
+      assert.equal(await second.locator('[data-mention="agent"]').count(), 1);
+      assert.equal(await second.locator('em [data-mention="agent"]').count(), 1);
+      await second.press('Control+z'); assert.equal(await editorText(second), 'Look @Rev');
+      await second.press('Control+Shift+z'); assert.equal(await editorText(second), 'Look Review local ');
+      assert.equal(await second.locator('em [data-mention="agent"]').count(), 1);
       assert.equal(await first.inputValue(), 'file @ref');
       const draft = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
       assert.deepEqual(draft.input[0], original.input[0]); assert.deepEqual(draft.input[1], original.input[1]);
@@ -361,7 +831,9 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.equal(new TextDecoder().decode(new TextEncoder().encode(input[0].text).slice(input[0].text_elements[0].byteRange.start, input[0].text_elements[0].byteRange.end)), '@ref');
       assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
       await page.reload(); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
-      await second.waitFor(); assert.equal(await second.inputValue(), 'Look Review local ');
+      await second.waitFor(); assert.equal(await editorText(second), 'Look Review local ');
+      assert.equal(await second.locator('[data-mention="agent"]').count(), 1);
+      assert.equal(await second.locator('em [data-mention="agent"]').count(), 1);
       assert.deepEqual(errors, []); await page.close();
     });
 
@@ -450,10 +922,10 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       await page.getByRole('option', { name: /Review local/ }).waitFor();
       await editor.press('Enter');
       await editor.press('Control+z');
-      assert.equal(await editor.inputValue(), ' @Rev');
+      assert.equal(await editorText(editor), ' @Rev');
       assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), [{ name: 'review-skill', path: '/skills/review' }]);
       await editor.press('Control+Shift+z');
-      assert.match(await editor.inputValue(), /Review local/);
+      assert.match(await editorText(editor) ?? '', /Review local/);
       await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Add chat' }).click();
       await page.getByRole('button', { name: /Other local/ }).waitFor();
       await editor.focus();
@@ -469,7 +941,6 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
 
     await t.test('the conversation placeholder differs from the home placeholder', async () => {
       const { page, errors } = await open('chat-placeholder');
-      await page.addStyleTag({ content: readFileSync('src/renderer/composer/standalone-composer.css', 'utf8') });
       const homeRich = await enterRich(page);
       assert.equal(await homeRich.getAttribute('aria-placeholder'), 'Do anything');
       assert.equal(await homeRich.evaluate(element => getComputedStyle(element, '::before').content), '"Do anything"');
@@ -491,7 +962,9 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       await add.focus(); await add.press('Enter');
       const result = page.getByRole('button', { name: /Other local/ });
       await result.focus(); await result.press('Enter');
-      assert.equal(await page.getByRole('textbox', { name: 'Work with Codex' }).inputValue(), 'Other local ');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      assert.equal(await editorText(editor), 'Other local ');
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
       assert.match(JSON.stringify(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document)), /thread:\/\/first\?hostId=local/);
       assert.deepEqual(errors, []); await page.close();
     });

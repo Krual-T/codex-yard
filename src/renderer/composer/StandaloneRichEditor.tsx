@@ -2,12 +2,11 @@ import { Fragment as ReactFragment, forwardRef, useEffect, useImperativeHandle, 
 import { Bold, Code2, FileText, Italic, Link as LinkIcon, MessageSquare, X } from 'lucide-react';
 import { toggleMark } from 'prosemirror-commands';
 import { closeHistory, history, redo, undo } from 'prosemirror-history';
-import { DOMSerializer, Fragment, Schema, Slice } from 'prosemirror-model';
-import type { Mark, Node as ProseMirrorNode } from 'prosemirror-model';
+import { DOMSerializer, Fragment, Mark, Schema, Slice } from 'prosemirror-model';
+import type { Node as ProseMirrorNode } from 'prosemirror-model';
 import { EditorState, Plugin, TextSelection } from 'prosemirror-state';
 import type { Transaction } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
-import type { ClipboardEvent } from 'react';
 import type { ComposerDocument } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
 import { documentChanges } from '../messages/message-edit.ts';
@@ -17,6 +16,7 @@ import type { AgentMentionChoice, AgentMentionCurrent, AgentMentionTarget, RichC
 import type { Completion } from './standalone-completions.tsx';
 import { isStructuredAppInput } from './standalone-draft.ts';
 import type { Draft } from './standalone-draft.ts';
+import { projectTextAgentDocument, updateTextAgentDocument } from './text-agent-document.ts';
 import type { TextAgentSpan } from './text-agent-document.ts';
 
 export interface RichEditorHandle {
@@ -28,6 +28,10 @@ export interface RichEditorHandle {
 export type { AgentMentionChoice, AgentMentionCurrent, AgentMentionTarget } from './rich-editor-actions.ts';
 export interface StructuredInputEditorHandle {
   focus(index?: number, position?: number): void;
+  matchesDocument(document: ComposerDocument): boolean;
+  activateFormatting(document: ComposerDocument, commit?: () => boolean): boolean;
+  visibleText(): string;
+  insertRichCompletion(query: RichCompletionQuery, item: Completion, cwd: string): boolean;
   replace(index: number, start: number, end: number, text: string, skill?: TextCompletionSkill): boolean;
   removeSkill(name: string, path: string): void;
   skills(): TextCompletionSkill[];
@@ -37,15 +41,18 @@ export interface StructuredInputEditorHandle {
 export interface TextCompletionSkill { name: string; path: string; managed: boolean }
 export interface TextSkillChange { before: TextCompletionSkill[]; after: TextCompletionSkill[] }
 export interface TextAgentSegment { index: number; text: string; agents: TextAgentSpan[] }
-export interface TextAgentChange { before: TextAgentSegment[]; after: TextAgentSegment[] }
+export interface TextAgentChange { before: TextAgentSegment[]; after: TextAgentSegment[]; document?: ComposerDocument }
+export interface TextMarkSpan { start: number; end: number; marks: { type: string; attrs?: Record<string, unknown> }[] }
 export interface StructuredInputEditorProps {
   draft: Draft;
   onEdit(index: number, expectedText: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
   agentMentions?(index: number): readonly TextAgentSpan[];
-  onSelection?(index: number, cursor: number): void;
+  sourceMarks?(index: number): readonly TextMarkSpan[];
+  onSelection?(index: number, cursor: number, text?: string): void;
   onKeyDown(event: KeyboardEvent): boolean;
   onCompositionChange?(composing: boolean): void;
-  onPaste?(event: ClipboardEvent<HTMLTextAreaElement>): void;
+  onInvalid?(message?: string): void;
+  onPaste?(event: TextPasteEvent): void;
   readOnly?: boolean;
   ariaLabel?: string;
   placeholder?: string;
@@ -55,11 +62,13 @@ export interface StructuredInputEditorProps {
 }
 
 // The draft remains authoritative; this editor history joins each skill marker to its text replacement.
-const textHistorySchema = new Schema({ nodes: {
-  doc: { content: 'paragraph' }, paragraph: { content: 'inline*' },
-  text: { group: 'inline' }, skill: { inline: true, group: 'inline', atom: true, attrs: { name: {}, path: {}, managed: {} } },
-  agentMention: { inline: true, group: 'inline', atom: true, attrs: { name: {}, displayName: {}, conversationId: {}, path: {} } },
-} });
+const textHistorySchema = new Schema({ nodes: composerSchema.spec.nodes.update('paragraph', {
+  ...composerSchema.nodes.paragraph!.spec, whitespace: 'pre', parseDOM: [{ tag: 'p', preserveWhitespace: 'full' }],
+}).addToEnd('skill', { inline: true, group: 'inline', atom: true, selectable: false, attrs: { name: {}, path: {}, managed: {} },
+    toDOM: node => ['span', { 'data-text-skill': JSON.stringify(node.attrs), contenteditable: 'false', hidden: 'true' }],
+    parseDOM: [{ tag: 'span[data-text-skill]', getAttrs: dom => {
+      try { return JSON.parse((dom as HTMLElement).getAttribute('data-text-skill') ?? 'null'); } catch { return false; }
+    } }] }), marks: composerSchema.spec.marks });
 function textHistoryState(text: string, agents: readonly TextAgentSpan[] = []): EditorState {
   const children: ProseMirrorNode[] = [];
   let offset = 0;
@@ -76,10 +85,50 @@ function textHistoryState(text: string, agents: readonly TextAgentSpan[] = []): 
   return EditorState.create({ doc: textHistorySchema.nodes.doc!.create(null, paragraph), plugins: [history()] });
 }
 const agentLabel = (node: ProseMirrorNode): string => node.attrs.displayName || node.attrs.name;
+interface HistoryToken { start: number; end: number; from: number; to: number; node?: ProseMirrorNode }
+function historyProjection(state: EditorState): { text: string; tokens: HistoryToken[]; agents: TextAgentSpan[]; firstPosition: number } {
+  let text = '', previousEnd: number | undefined, firstPosition: number | undefined;
+  const tokens: HistoryToken[] = [], agents: TextAgentSpan[] = [];
+  state.doc.descendants((block, position) => {
+    if (!block.isTextblock) return;
+    firstPosition ??= position + 1;
+    if (previousEnd !== undefined) {
+      tokens.push({ start: text.length, end: text.length + 1, from: previousEnd, to: position + 1 });
+      text += '\n';
+    }
+    block.forEach((node, offset) => {
+      const from = position + 1 + offset;
+      let value = '';
+      if (node.isText) value = node.text ?? '';
+      else if (node.type.name === 'agentMention') value = agentLabel(node);
+      else if (node.type.name === 'hard_break') value = '\n';
+      else if (node.type.name !== 'skill') value = '\ufffc';
+      if (!value) return;
+      const start = text.length;
+      text += value;
+      tokens.push({ start, end: text.length, from, to: from + node.nodeSize, node });
+      if (node.type.name === 'agentMention') agents.push({ start, end: text.length,
+        attrs: { name: node.attrs.name, displayName: node.attrs.displayName, conversationId: node.attrs.conversationId, path: node.attrs.path } });
+    });
+    previousEnd = position + block.nodeSize - 1;
+    return false;
+  });
+  return { text, tokens, agents, firstPosition: firstPosition ?? 1 };
+}
+function simpleHistory(state: EditorState): boolean {
+  const block = state.doc.firstChild;
+  if (state.doc.childCount !== 1 || block?.type.name !== 'paragraph') return false;
+  let simple = true;
+  block.forEach(node => { if (!node.isText && node.type.name !== 'agentMention' && node.type.name !== 'skill') simple = false; });
+  return simple;
+}
 function historyText(state: EditorState): string {
-  return state.doc.textBetween(0, state.doc.content.size, '', node => node.type.name === 'agentMention' ? agentLabel(node) : '');
+  return simpleHistory(state)
+    ? state.doc.textBetween(0, state.doc.content.size, '', node => node.type.name === 'agentMention' ? agentLabel(node) : '')
+    : historyProjection(state).text;
 }
 function historyAgents(state: EditorState): TextAgentSpan[] {
+  if (!simpleHistory(state)) return historyProjection(state).agents;
   const agents: TextAgentSpan[] = [];
   let offset = 0;
   state.doc.descendants(node => {
@@ -93,6 +142,101 @@ function historyAgents(state: EditorState): TextAgentSpan[] {
   });
   return agents;
 }
+function historyDocument(state: EditorState, source: ComposerDocument): ComposerDocument | null {
+  const original = readRichDocument(source), before = original && projectTextAgentDocument(original);
+  if (!before) return null;
+  const updated = updateTextAgentDocument(source, before.text, historyText(state), historyAgents(state));
+  const document = updated && readRichDocument(updated), projection = document && projectTextAgentDocument(document);
+  if (!document || !projection) return null;
+  const ranges: { start: number; end: number; marks: readonly Mark[] }[] = [];
+  let offset = 0;
+  state.doc.firstChild?.forEach(node => {
+    const length = node.isText ? node.text?.length ?? 0 : node.type.name === 'agentMention' ? agentLabel(node).length : 0;
+    if (length) ranges.push({ start: offset, end: offset + length, marks: node.marks });
+    offset += length;
+  });
+  let transaction = EditorState.create({ doc: document }).tr;
+  let firstRange = 0;
+  for (const token of projection.tokens) {
+    if (!token.node || token.node.type.name === 'hard_break') continue;
+    while (firstRange < ranges.length && ranges[firstRange]!.end <= token.start) firstRange++;
+    for (let index = firstRange; index < ranges.length && ranges[index]!.start < token.end; index++) {
+      const range = ranges[index]!;
+      const start = Math.max(token.start, range.start), end = Math.min(token.end, range.end);
+      if (start >= end) continue;
+      const from = token.node.isText ? token.from + start - token.start : token.from;
+      const to = token.node.isText ? token.from + end - token.start : token.to;
+      transaction = transaction.removeMark(from, to);
+      for (const mark of range.marks) {
+        const type = composerSchema.marks[mark.type.name];
+        if (!type) return null;
+        transaction = transaction.addMark(from, to, type.create(mark.attrs));
+      }
+    }
+  }
+  const result = transaction.doc.toJSON() as ComposerDocument;
+  return readRichDocument(result) ? result : null;
+}
+function copiedWithoutSkillMarkers(slice: Slice): Slice {
+  const filter = (fragment: Fragment): Fragment => {
+    const nodes: ProseMirrorNode[] = [];
+    fragment.forEach(node => {
+      if (node.type.name !== 'skill') nodes.push(node.isLeaf ? node : node.copy(filter(node.content)));
+    });
+    return Fragment.fromArray(nodes);
+  };
+  return new Slice(filter(slice.content), slice.openStart, slice.openEnd);
+}
+function fullHistoryDocument(state: EditorState): ComposerDocument | null {
+  const content = copiedWithoutSkillMarkers(new Slice(state.doc.content, 0, 0)).content;
+  const result = state.doc.copy(content).toJSON() as ComposerDocument;
+  return readRichDocument(result) ? result : null;
+}
+function activateRichHistory(state: EditorState, source: ComposerDocument, editable: () => boolean): EditorState | null {
+  const original = readRichDocument(source), projection = original && projectTextAgentDocument(original);
+  const current = historyDocument(state, source), reconstructed = current && readRichDocument(current);
+  if (!original || !projection || !reconstructed || !original.eq(reconstructed)) return null;
+  let transaction = state.tr;
+  try {
+    for (const token of [...projection.tokens].reverse()) {
+      if (token.node && token.node.type.name !== 'hard_break') continue;
+      const from = historyPosition(state, token.start), to = historyPosition(state, token.end);
+      let onlyText = true;
+      state.doc.nodesBetween(from, to, node => { if (node.isInline && !node.isText) onlyText = false; });
+      if (!onlyText || state.doc.textBetween(from, to) !== '\n') return null;
+      transaction = transaction.delete(from, to);
+      if (token.node) transaction = transaction.insert(from, textHistorySchema.nodeFromJSON(token.node.toJSON()));
+      else transaction = transaction.split(from);
+    }
+    const next = state.apply(closeHistory(transaction.setMeta('addToHistory', false)));
+    const actual = fullHistoryDocument(next), document = actual && readRichDocument(actual);
+    if (!document || !document.eq(original)) return null;
+    const plugins = richEditorPlugins(textHistorySchema, state.plugins[0]).rich;
+    plugins.unshift(richAutolinkPlugin(editable));
+    return next.reconfigure({ plugins });
+  } catch { return null; }
+}
+function applySourceMarks(state: EditorState, spans: readonly TextMarkSpan[]): EditorState {
+  let transaction = state.tr, offset = 0, firstSpan = 0;
+  state.doc.firstChild?.forEach((node, position) => {
+    const length = node.isText ? node.text?.length ?? 0 : node.type.name === 'agentMention' ? agentLabel(node).length : 0;
+    if (!length) return;
+    const from = position + 1, end = offset + length;
+    transaction = transaction.removeMark(from, from + node.nodeSize);
+    while (firstSpan < spans.length && spans[firstSpan]!.end <= offset) firstSpan++;
+    for (let index = firstSpan; index < spans.length && spans[index]!.start < end; index++) {
+      const span = spans[index]!, start = Math.max(offset, span.start), stop = Math.min(end, span.end);
+      if (start >= stop || !node.isText && (start !== offset || stop !== end)) continue;
+      const left = node.isText ? from + start - offset : from, right = node.isText ? from + stop - offset : from + node.nodeSize;
+      for (const mark of span.marks) {
+        const type = textHistorySchema.marks[mark.type];
+        if (type) transaction = transaction.addMark(left, right, type.create(mark.attrs));
+      }
+    }
+    offset = end;
+  });
+  return transaction.doc.eq(state.doc) ? state : state.apply(transaction.setMeta('addToHistory', false));
+}
 function historySkills(state: EditorState): TextCompletionSkill[] {
   const result: TextCompletionSkill[] = [];
   state.doc.descendants(node => {
@@ -101,6 +245,15 @@ function historySkills(state: EditorState): TextCompletionSkill[] {
   return result;
 }
 function textOffset(state: EditorState, position: number): number {
+  if (!simpleHistory(state)) {
+    let offset = 0;
+    for (const token of historyProjection(state).tokens) {
+      if (position <= token.from) break;
+      offset = token.node?.isText ? token.start + Math.min(token.end - token.start, position - token.from)
+        : position >= token.to ? token.end : token.start;
+    }
+    return offset;
+  }
   let offset = 0;
   state.doc.descendants((node, pos) => {
     if (node.isText && pos < position) offset += Math.min(node.nodeSize, position - pos);
@@ -109,6 +262,18 @@ function textOffset(state: EditorState, position: number): number {
   return offset;
 }
 function historyPosition(state: EditorState, offset: number): number {
+  if (!simpleHistory(state)) {
+    const projection = historyProjection(state);
+    let previous = projection.firstPosition;
+    for (const token of projection.tokens) {
+      if (offset < token.start) return previous;
+      if (offset === token.start) return token.from;
+      if (offset < token.end) return token.node?.isText ? token.from + offset - token.start
+        : offset - token.start < (token.end - token.start) / 2 ? token.from : token.to;
+      previous = token.to;
+    }
+    return previous;
+  }
   let seen = 0, position = 1;
   state.doc.firstChild!.forEach(node => {
     if (node.isText) {
@@ -123,6 +288,11 @@ function historyPosition(state: EditorState, offset: number): number {
   return position;
 }
 function replaceHistoryText(state: EditorState, start: number, end: number, inserted: string): Transaction {
+  if (!simpleHistory(state)) {
+    const from = historyPosition(state, start), to = historyPosition(state, end);
+    if (!state.doc.resolve(from).sameParent(state.doc.resolve(to))) throw new Error('The selection crosses text blocks.');
+    return state.tr.insertText(inserted, from, to);
+  }
   // Expand only touched agent atoms so edits inside a visible label become ordinary text.
   let transaction = state.tr, offset = 0;
   const expanded: { position: number; label: string }[] = [];
@@ -166,44 +336,86 @@ function textChange(state: EditorState, before: string, after: string): Transact
 
 interface TextControlModel {
   state: EditorState; element: HTMLTextAreaElement | null; index: number;
-  composing: boolean; canEdit(): boolean;
+  view: EditorView | null; activateView(): void;
+  historyPlugin: Plugin; composing: boolean; rich: boolean; plainMode: boolean; applyMode(): void; canEdit(): boolean;
   apply(transaction: Transaction, inputType?: string): boolean;
 }
 export interface TextAgentTarget {
   control: TextControlModel; doc: ProseMirrorNode; selectionStart: number; selectionEnd: number;
+  view: EditorView | null; selection: EditorState['selection']; marks: readonly Mark[] | null;
   current: AgentMentionCurrent; readCurrent(): AgentMentionCurrent | null; from: number; to: number; used: boolean;
 }
+export type TextPasteEvent = { clipboardData: DataTransfer; preventDefault(): void };
 interface TextControlProps {
   index: number; text: string; readOnly: boolean; label: string; placeholder: string;
   controls: Map<number, TextControlModel>;
   onEdit(index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
   agentMentions?: readonly TextAgentSpan[];
-  onSelection?(index: number, cursor: number): void;
+  sourceMarks?: readonly TextMarkSpan[];
+  onSelection?(index: number, cursor: number, text?: string): void;
   onKeyDown(event: KeyboardEvent): boolean;
-  onPaste?(event: ClipboardEvent<HTMLTextAreaElement>): void;
+  onPaste?(event: TextPasteEvent): void;
   onCompositionChange?(composing: boolean): void;
+  formatting?: boolean;
+  plainTextMode?: boolean;
+  currentDocument?(): ComposerDocument | undefined;
+  onPendingLinkChange?(pending: boolean): void;
+  onInvalid?(message?: string): void;
   canEdit?(): boolean;
   completionListId?: string; completionSelectedId?: string;
 }
 function TextControl(props: TextControlProps) {
+  const { t } = useI18n('zh-CN');
   const model = useRef<TextControlModel | null>(null);
-  if (!model.current) model.current = { state: textHistoryState(props.text, props.agentMentions), element: null, index: props.index,
-    composing: false, canEdit: () => false, apply: () => false };
+  if (!model.current) {
+    const state = textHistoryState(props.text, props.agentMentions);
+    model.current = { state, element: null, index: props.index, historyPlugin: state.plugins[0]!,
+      view: null, activateView: () => {}, composing: false, rich: false, plainMode: false,
+      applyMode: () => {}, canEdit: () => false, apply: () => false };
+  }
   const control = model.current;
+  const [showView, setShowView] = useState(() => !!props.agentMentions?.length);
+  const [linkOpen, setLinkOpen] = useState(false), [href, setHref] = useState(''), [linkError, setLinkError] = useState('');
+  const [openedLink, setOpenedLink] = useState<LinkOccurrence | null>(null);
+  const [linkEdit, setLinkEdit] = useState<'text' | 'url' | null>(null), [linkValue, setLinkValue] = useState('');
+  const host = useRef<HTMLDivElement>(null), icon = useRef<SVGSVGElement>(null), pageIcon = useRef<SVGSVGElement>(null);
+  const linkIcon = useRef<SVGSVGElement>(null), focusView = useRef(false);
   const latest = useRef(props); latest.current = props;
   const composing = useRef(false);
   const compositionGeneration = useRef(0);
+  control.activateView = () => { focusView.current = true; setShowView(true); };
   control.canEdit = () => !latest.current.readOnly && latest.current.canEdit?.() !== false && !composing.current;
+  control.applyMode = () => {
+    const plain = !!latest.current.plainTextMode;
+    if (!control.rich || composing.current || control.view?.composing || control.plainMode === plain) return;
+    const modes = richEditorPlugins(textHistorySchema, control.historyPlugin);
+    const plugins = plain ? modes.plain : modes.rich;
+    plugins.unshift(richAutolinkPlugin(() => control.canEdit()));
+    control.state = control.state.reconfigure({ plugins });
+    control.plainMode = plain;
+    control.view?.updateState(control.state);
+  };
   const publish = (transaction: Transaction, inputType?: string): boolean => {
     const previous = control.state, next = previous.apply(transaction);
+    if (latest.current.formatting && transaction.docChanged) {
+      const saved = latest.current.currentDocument?.(), projected = saved && (control.rich ? fullHistoryDocument(previous) : historyDocument(previous, saved));
+      const source = saved && readRichDocument(saved), current = projected && readRichDocument(projected);
+      if (!source || !current || !source.eq(current)) { latest.current.onInvalid?.(); return false; }
+    }
     const beforeText = historyText(previous), afterText = historyText(next);
     const all = Array.from(latest.current.controls.values());
     const before = all.flatMap(item => historySkills(item.state));
     const after = all.flatMap(item => historySkills(item === control ? next : item.state));
     const segment = (item: TextControlModel, state: EditorState): TextAgentSegment => ({ index: item.index, text: historyText(state), agents: historyAgents(state) });
-    const agents = { before: all.map(item => segment(item, item.state)), after: all.map(item => segment(item, item === control ? next : item.state)) };
+    const source = latest.current.currentDocument?.();
+    const document = latest.current.formatting && transaction.docChanged && source
+      ? control.rich ? fullHistoryDocument(next) : historyDocument(next, source) : undefined;
+    if (document === null) { latest.current.onInvalid?.(); return false; }
+    const agents: TextAgentChange = { before: all.map(item => segment(item, item.state)),
+      after: all.map(item => segment(item, item === control ? next : item.state)), ...(document ? { document } : {}) };
     if (transaction.docChanged && latest.current.onEdit(control.index, beforeText, afterText, inputType, { before, after }, agents) === false) return false;
     control.state = next;
+    if (control.view && !control.view.isDestroyed) control.view.updateState(next);
     return true;
   };
   control.apply = publish;
@@ -217,6 +429,7 @@ function TextControl(props: TextControlProps) {
       control.element.setSelectionRange(start, end);
       latest.current.onSelection?.(control.index, end);
     }
+    if (applied && control.view) latest.current.onSelection?.(control.index, textOffset(control.state, control.state.selection.head), historyText(control.state));
     return applied;
   };
   const syncSelection = (element: HTMLTextAreaElement) => {
@@ -226,7 +439,7 @@ function TextControl(props: TextControlProps) {
       const head = element.selectionDirection === 'backward' ? start : end;
       control.state = control.state.apply(control.state.tr.setSelection(TextSelection.create(control.state.doc, anchor, head)));
     }
-    latest.current.onSelection?.(control.index, element.selectionStart);
+    latest.current.onSelection?.(control.index, element.selectionStart, historyText(control.state));
   };
   useLayoutEffect(() => {
     control.index = props.index;
@@ -234,10 +447,26 @@ function TextControl(props: TextControlProps) {
     return () => { if (props.controls.get(props.index) === control) props.controls.delete(props.index); };
   }, [control, props.controls, props.index]);
   useLayoutEffect(() => {
-    if (historyText(control.state) !== props.text || JSON.stringify(historyAgents(control.state)) !== JSON.stringify(props.agentMentions ?? [])) {
+    if (control.rich && !props.formatting) {
+      control.rich = false;
       control.state = textHistoryState(props.text, props.agentMentions);
+      control.historyPlugin = control.state.plugins[0]!;
+      control.plainMode = false;
+      control.view?.updateState(control.state);
+      return;
     }
-  }, [control, props.text, props.agentMentions]);
+    if (!control.rich && (historyText(control.state) !== props.text || JSON.stringify(historyAgents(control.state)) !== JSON.stringify(props.agentMentions ?? []))) {
+      control.state = textHistoryState(props.text, props.agentMentions);
+      control.historyPlugin = control.state.plugins[0]!;
+      control.view?.updateState(control.state);
+    }
+  }, [control, props.text, props.agentMentions, props.formatting]);
+  useLayoutEffect(() => { control.applyMode(); }, [control, props.formatting, props.plainTextMode]);
+  useLayoutEffect(() => {
+    if (!showView || props.formatting || !props.sourceMarks) return;
+    const next = applySourceMarks(control.state, props.sourceMarks);
+    if (next !== control.state) { control.state = next; control.view?.updateState(next); }
+  }, [control, props.sourceMarks, props.formatting, showView]);
   useLayoutEffect(() => {
     const element = control.element;
     const beforeInput = (event: InputEvent) => {
@@ -255,11 +484,191 @@ function TextControl(props: TextControlProps) {
     element?.addEventListener('beforeinput', beforeInput);
     element?.addEventListener('input', nativeInput);
     return () => { element?.removeEventListener('beforeinput', beforeInput); element?.removeEventListener('input', nativeInput); };
-  }, [control]);
+  }, [control, showView]);
+  useLayoutEffect(() => {
+    if (!showView || !host.current) return;
+    const editor = new EditorView(host.current, {
+      state: control.state,
+      nodeViews: { agentMention: node => {
+        const dom = DOMSerializer.fromSchema(textHistorySchema).serializeNode(node) as HTMLElement;
+        if (parseAgentThreadPath(node.attrs.path) && icon.current) dom.prepend(icon.current.cloneNode(true));
+        return { dom };
+      }, pageReferenceMention: node => {
+        const dom = DOMSerializer.fromSchema(textHistorySchema).serializeNode(node) as HTMLElement;
+        if (pageIcon.current) dom.prepend(pageIcon.current.cloneNode(true));
+        return { dom };
+      }, richLink: node => {
+        const dom = DOMSerializer.fromSchema(textHistorySchema).serializeNode(node) as HTMLElement;
+        if (linkIcon.current) dom.prepend(linkIcon.current.cloneNode(true));
+        return { dom };
+      } },
+      editable: () => !latest.current.readOnly && latest.current.canEdit?.() !== false,
+      attributes: { role: 'textbox', 'aria-label': latest.current.label, 'aria-multiline': 'true',
+        'data-composer-input-index': String(control.index), 'data-placeholder': latest.current.placeholder,
+        'aria-placeholder': latest.current.placeholder, 'aria-autocomplete': 'list' },
+      handleDOMEvents: {
+        focus: view => { latest.current.onSelection?.(control.index, textOffset(view.state, view.state.selection.head), historyText(view.state)); return false; },
+        compositionstart: () => {
+          compositionGeneration.current++;
+          if (!composing.current) { control.composing = true; composing.current = true; latest.current.onCompositionChange?.(true); }
+          return false;
+        },
+        compositionend: view => {
+          const generation = compositionGeneration.current;
+          requestAnimationFrame(() => {
+            if (control.view !== view || view.isDestroyed || generation !== compositionGeneration.current) return;
+            control.composing = false; composing.current = false; latest.current.onCompositionChange?.(false);
+            control.applyMode();
+            if (view.hasFocus()) latest.current.onSelection?.(control.index, textOffset(view.state, view.state.selection.head), historyText(view.state));
+          });
+          return false;
+        },
+      },
+      dispatchTransaction(transaction) {
+        if (!publish(transaction)) { editor.updateState(control.state); return; }
+        if (editor.hasFocus() && !composing.current) latest.current.onSelection?.(control.index, textOffset(control.state, control.state.selection.head), historyText(control.state));
+      },
+      handleKeyDown: (view, event) => {
+        if (view.composing || composing.current || event.isComposing || event.keyCode === 229) return false;
+        if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key.toLowerCase() === 'z' || event.key.toLowerCase() === 'y')) {
+          event.preventDefault(); return runHistory(event.key.toLowerCase() === 'y' || event.shiftKey ? 'redo' : 'undo');
+        }
+        if (latest.current.onKeyDown(event)) return true;
+        if (control.rich) return false;
+        if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          event.preventDefault(); view.dispatch(view.state.tr.insertText('\n').scrollIntoView()); return true;
+        }
+        return false;
+      },
+      handlePaste: (view, event) => {
+        const data = event.clipboardData;
+        if (!data) return false;
+        latest.current.onPaste?.({ clipboardData: data, preventDefault: () => event.preventDefault() });
+        if (event.defaultPrevented) return true;
+        if (control.rich && latest.current.plainTextMode) {
+          const text = data.getData('text/plain').replace(/\r\n?/g, '\n');
+          if (text) {
+            if (view.state.selection.$from.parent.type.spec.code) view.dispatch(view.state.tr.insertText(text).scrollIntoView());
+            else {
+              const paragraph = view.state.schema.nodes.paragraph!;
+              const nodes = text.split('\n').map(line => paragraph.create(null, line ? view.state.schema.text(line) : undefined));
+              view.dispatch(view.state.tr.replaceSelection(new Slice(Fragment.fromArray(nodes), 1, 1)).scrollIntoView());
+            }
+          }
+          return true;
+        }
+        const html = data.getData('text/html');
+        const containsAgent = /data-mention\s*=\s*["']agent["']|agent-mention-name\s*=/i.test(html);
+        if (html && (latest.current.formatting || containsAgent)) {
+          const supported = control.rich ? supportedClipboardHTML(html, true) : supportedTextHistoryClipboard(html, !!latest.current.formatting);
+          if (!supported) { latest.current.onInvalid?.(); return true; }
+          return false;
+        }
+        const text = data.getData('text/plain').replace(/\r\n?/g, '\n');
+        if (text) view.dispatch(view.state.tr.insertText(text).scrollIntoView());
+        return true;
+      },
+      transformCopied: copiedWithoutSkillMarkers,
+      transformPastedHTML: html => remapClipboardLinkOccurrences(html, control.state.doc),
+    });
+    control.view = editor;
+    if (focusView.current) { focusView.current = false; editor.focus(); }
+    return () => { if (control.view === editor) control.view = null; editor.destroy(); };
+  }, [control, showView]);
+  useLayoutEffect(() => {
+    control.view?.setProps({ editable: () => !latest.current.readOnly && latest.current.canEdit?.() !== false,
+      attributes: { role: 'textbox', 'aria-label': props.label, 'aria-multiline': 'true',
+        'data-composer-input-index': String(props.index), 'data-placeholder': props.placeholder, 'aria-placeholder': props.placeholder,
+        'aria-autocomplete': 'list', ...(props.completionListId ? { 'aria-controls': props.completionListId } : {}),
+        ...(props.completionSelectedId ? { 'aria-activedescendant': props.completionSelectedId } : {}) } });
+  }, [control, props.label, props.index, props.placeholder, props.readOnly, props.completionListId, props.completionSelectedId, showView]);
   useEffect(() => () => {
     compositionGeneration.current++;
     if (composing.current) { control.composing = false; composing.current = false; latest.current.onCompositionChange?.(false); }
+    latest.current.onPendingLinkChange?.(false);
   }, []);
+  useEffect(() => {
+    if (openedLink && !openedLink.element.isConnected && !linkEdit) setOpenedLink(null);
+    else openedLink?.element.setAttribute('aria-expanded', 'true');
+    return () => { openedLink?.element.setAttribute('aria-expanded', 'false'); };
+  }, [props.text, openedLink, linkEdit]);
+  const mark = (name: 'strong' | 'em' | 'code') => {
+    const view = control.view, type = textHistorySchema.marks[name];
+    if (!view || !type || !control.canEdit() || view.composing) return;
+    syncRichSelection(view);
+    toggleMark(type)(view.state, transaction => { control.apply(closeHistory(transaction)); }, view);
+    view.focus();
+  };
+  const openLink = (target: EventTarget | null): boolean => {
+    if (!props.formatting || !(target instanceof Element)) return false;
+    const element = target.closest<HTMLElement>('[data-mention="rich-link"][role="button"], a[data-composer-attrs]');
+    if (!element || !host.current?.contains(element)) return false;
+    if (openedLink?.element === element) { closeLink(); return true; }
+    const link = element && control.view && linkOccurrence(control.view, element);
+    if (!link || linkEdit || linkOpen) return true;
+    setOpenedLink(link); setLinkEdit(null); setLinkError('');
+    return true;
+  };
+  const closeLink = () => { if (linkEdit) props.onPendingLinkChange?.(false); setOpenedLink(null); setLinkEdit(null); setLinkError(''); };
+  if (showView) return <><span hidden aria-hidden="true"><MessageSquare ref={icon} size={14} aria-hidden="true" focusable="false" />
+    <FileText ref={pageIcon} size={14} aria-hidden="true" focusable="false" /><LinkIcon ref={linkIcon} size={14} aria-hidden="true" focusable="false" /></span>
+    {props.formatting && (!props.plainTextMode || linkOpen) ? <div className="standalone-composer__rich-toolbar" role="toolbar" aria-label={t('Text formatting')}>
+      {!props.plainTextMode ? <>
+      <button type="button" title={t('Bold')} aria-label={t('Bold')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('strong')}><Bold size={16} /></button>
+      <button type="button" title={t('Italic')} aria-label={t('Italic')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('em')}><Italic size={16} /></button>
+      <button type="button" title={t('Inline code')} aria-label={t('Inline code')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('code')}><Code2 size={16} /></button>
+      </> : null}
+      <button type="button" title={t('Link')} aria-label={t('Link')} disabled={props.readOnly} onMouseDown={event => {
+        event.preventDefault(); if (control.view) syncRichSelection(control.view);
+      }} onClick={() => {
+        if (!control.canEdit()) return;
+        setOpenedLink(null); setLinkEdit(null); props.onPendingLinkChange?.(!linkOpen); setLinkOpen(!linkOpen); setLinkError('');
+      }}><LinkIcon size={16} /></button>
+      {linkOpen ? <form onSubmit={event => {
+        event.preventDefault();
+        const view = control.view, safe = safeRichLinkHref(href), type = textHistorySchema.marks.link;
+        if (!safe) { setLinkError(t('Enter an HTTP, HTTPS, or mailto link.')); return; }
+        if (!view || !type || !control.canEdit() || view.state.selection.empty) return;
+        const { from, to } = view.state.selection;
+        const transaction = view.state.tr.addMark(from, to, type.create({ href: safe, literalMarkdownOccurrenceId: linkOccurrenceAllocator(view.state.doc)() }));
+        if (!control.apply(closeHistory(transaction))) return;
+        control.state = control.state.apply(closeHistory(control.state.tr)); view.updateState(control.state);
+        props.onPendingLinkChange?.(false); setLinkOpen(false); setHref(''); setLinkError(''); view.focus();
+      }}><input aria-label={t('Link address')} aria-invalid={!!linkError} value={href} disabled={props.readOnly}
+        onChange={event => { setHref(event.target.value); setLinkError(''); }} /><button type="submit" disabled={props.readOnly}>{t('Apply')}</button>
+        {linkError ? <span role="alert">{linkError}</span> : null}</form> : null}
+    </div> : null}
+    <div ref={host} className="standalone-composer__rich" onClickCapture={event => {
+      if (openLink(event.target)) { event.preventDefault(); event.stopPropagation(); }
+    }} onKeyDownCapture={event => {
+      if ((event.key === 'Enter' || event.key === ' ') && openLink(event.target)) { event.preventDefault(); event.stopPropagation(); }
+    }} />
+    {openedLink ? <div role="dialog" aria-label={t('Link')}>
+      {linkEdit ? <form onSubmit={event => {
+        event.preventDefault();
+        if (!control.canEdit() || !control.view) return;
+        const label = linkEdit === 'text' ? linkValue : openedLink.label;
+        const address = linkEdit === 'url' ? linkValue : openedLink.href, safe = address.trim() ? safeRichLinkHref(address) : null;
+        if (!label) { setLinkError(t('Link text cannot be empty.')); return; }
+        if (address.trim() && !safe) { setLinkError(t('Enter an HTTP, HTTPS, or mailto link.')); return; }
+        if (label !== openedLink.label || safe !== openedLink.href) {
+          const before = control.view.state.doc, result = replaceLink(control.view, openedLink, label, safe);
+          if (result !== 'saved' || control.view.state.doc.eq(before)) {
+            setLinkError(t(result === 'unmappable' ? 'This link edit cannot safely preserve formatting.' : 'This link changed. Open it again before saving.')); return;
+          }
+        }
+        closeLink(); control.view.focus();
+      }}><input autoFocus aria-label={linkEdit === 'text' ? t('Link text') : t('Link address')} aria-invalid={!!linkError}
+        value={linkValue} onChange={event => { setLinkValue(event.target.value); setLinkError(''); }} />
+        <button type="submit">{linkEdit === 'text' ? t('Save link text') : linkValue.trim() ? t('Save link URL') : t('Remove link')}</button>
+        {linkError ? <span role="alert">{linkError}</span> : null}</form> : <>
+        <span>{openedLink.label}</span>{' '}{safeRichLinkHref(openedLink.href)
+          ? <a href={safeRichLinkHref(openedLink.href)!} target="_blank" rel="noopener noreferrer">{openedLink.href}</a> : <span>{openedLink.href}</span>}
+        <button type="button" disabled={props.readOnly} onClick={() => { props.onPendingLinkChange?.(true); setLinkEdit('text'); setLinkValue(openedLink.label); }}>{t('Edit link text')}</button>
+        <button type="button" disabled={props.readOnly} onClick={() => { props.onPendingLinkChange?.(true); setLinkEdit('url'); setLinkValue(openedLink.href); }}>{t('Edit link URL')}</button>
+      </>}
+      <button type="button" title={t('Close')} aria-label={t('Close')} onClick={closeLink}><X size={16} /></button>
+    </div> : null}</>;
   return <textarea ref={element => { control.element = element; }} data-composer-input-index={props.index}
     aria-label={props.label} aria-autocomplete="list" aria-controls={props.completionListId}
     aria-activedescendant={props.completionSelectedId} placeholder={props.placeholder} value={props.text} readOnly={props.readOnly}
@@ -276,7 +685,7 @@ function TextControl(props: TextControlProps) {
       if (!publish(transaction, inputType)) {
         element.value = before; element.setSelectionRange(Math.min(before.length, element.selectionStart), Math.min(before.length, element.selectionStart));
       }
-      latest.current.onSelection?.(control.index, element.selectionStart);
+      latest.current.onSelection?.(control.index, element.selectionStart, historyText(control.state));
     }}
     onFocus={event => syncSelection(event.currentTarget)}
     onSelect={event => syncSelection(event.currentTarget)}
@@ -298,7 +707,7 @@ function TextControl(props: TextControlProps) {
         control.composing = false; composing.current = false; latest.current.onCompositionChange?.(false);
         const index = Number(element.dataset.composerInputIndex);
         if (element.isConnected && element.ownerDocument.activeElement === element && Number.isSafeInteger(index)
-          && latest.current.controls.get(index) === control) latest.current.onSelection?.(index, element.selectionStart);
+          && latest.current.controls.get(index) === control) latest.current.onSelection?.(index, element.selectionStart, historyText(control.state));
       });
     }} />;
 }
@@ -348,8 +757,8 @@ function replaceLink(editor: EditorView, before: LinkOccurrence, label: string, 
   if (!current || current.from !== before.from || current.to !== before.to || current.signature !== before.signature
     || current.href !== before.href) return 'stale';
   if (current.node) {
-    const replacement = href === null ? composerSchema.text(label, current.node.marks)
-      : composerSchema.nodes.richLink!.create({ ...current.node.attrs, displayText: label, href,
+    const replacement = href === null ? editor.state.schema.text(label, current.node.marks)
+      : editor.state.schema.nodes.richLink!.create({ ...current.node.attrs, displayText: label, href,
         sourceAppId: href === current.href ? current.node.attrs.sourceAppId : '',
         literalMarkdownSource: null, literalMarkdownOccurrenceId: current.node.attrs.literalMarkdownOccurrenceId ?? linkOccurrenceAllocator(editor.state.doc)(),
         markdownSourceStart: null, markdownSourceEnd: null }, null, current.node.marks);
@@ -367,8 +776,8 @@ function replaceLink(editor: EditorView, before: LinkOccurrence, label: string, 
     let transaction = editor.state.tr;
     for (const change of changes.reverse()) transaction = transaction.insertText(change.replacement, current.from + change.start, current.from + change.oldEnd);
     const to = current.from + label.length;
-    transaction = transaction.removeMark(current.from, to, composerSchema.marks.link!);
-    if (href !== null) transaction = transaction.addMark(current.from, to, composerSchema.marks.link!.create({ ...current.mark.attrs,
+    transaction = transaction.removeMark(current.from, to, editor.state.schema.marks.link!);
+    if (href !== null) transaction = transaction.addMark(current.from, to, editor.state.schema.marks.link!.create({ ...current.mark.attrs,
       href, sourceAppId: href === current.href ? current.mark.attrs.sourceAppId : null, isAutolink: false, isGeneratedAutolink: false,
       literalMarkdownSource: null, literalMarkdownOccurrenceId: current.mark.attrs.literalMarkdownOccurrenceId ?? linkOccurrenceAllocator(editor.state.doc)() }));
     editor.dispatch(closeHistory(transaction));
@@ -381,15 +790,53 @@ function textEditorHandle(controls: Map<number, TextControlModel>): StructuredIn
   return {
     focus(index, position) {
       const values = Array.from(controls.values());
-      const element = (index === undefined ? undefined : controls.get(index)?.element)
-        ?? values.find(item => !item.element?.readOnly)?.element ?? values[0]?.element;
+      const control = (index === undefined ? undefined : controls.get(index))
+        ?? values.find(item => item.canEdit()) ?? values[0];
+      const view = control?.view, element = control?.element;
+      if (view && !view.isDestroyed) {
+        if (position !== undefined) view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, historyPosition(view.state, position))));
+        view.focus(); return;
+      }
       element?.focus();
       if (element && position !== undefined) element.setSelectionRange(position, position);
     },
+    matchesDocument(document) {
+      const control = controls.get(-1), actual = control && historyDocument(control.state, document);
+      const source = readRichDocument(document), current = actual && readRichDocument(actual);
+      return !!source && !!current && source.eq(current);
+    },
+    activateFormatting(document, commit) {
+      const control = controls.get(-1);
+      if (!control || !control.canEdit() || control.composing || control.rich) return false;
+      const next = activateRichHistory(control.state, document, () => control.canEdit());
+      if (!next || commit?.() === false) return false;
+      control.state = next;
+      control.rich = true;
+      control.view?.updateState(next);
+      if (!control.view) control.activateView();
+      return true;
+    },
+    visibleText() { const control = controls.get(-1); return control ? historyText(control.state) : ''; },
+    insertRichCompletion(query, item, cwd) {
+      const control = controls.get(-1), view = control?.view;
+      if (!control?.rich || !control.canEdit() || !view || view.isDestroyed || view.composing) return false;
+      syncRichSelection(view);
+      const context = richCompletionContext(view);
+      if (!context) return false;
+      const from = historyPosition(view.state, query.start), to = historyPosition(view.state, query.end);
+      if (to !== context.blockStart + context.cursor || from < context.blockStart || from > to) return false;
+      const before = view.state.doc;
+      return insertRichCompletion(view, context, { start: from - context.blockStart, end: to - context.blockStart, token: query.token }, item, cwd)
+        && !view.state.doc.eq(before);
+    },
     replace(index, start, end, text, skill) {
-      const control = controls.get(index), element = control?.element;
-      if (!control || !element || element.readOnly || !element.isConnected || start < 0 || end < start
+      const control = controls.get(index), element = control?.element, view = control?.view;
+      if (!control || !control.canEdit() || !(view && !view.isDestroyed && view.dom.isConnected || element && !element.readOnly && element.isConnected)
+        || start < 0 || end < start
         || end > historyText(control.state).length) return false;
+      const left = control.state.doc.resolve(historyPosition(control.state, start));
+      const right = control.state.doc.resolve(historyPosition(control.state, end));
+      if (!left.sameParent(right) || !left.parent.isTextblock || left.parent.type.spec.code) return false;
       const selection = TextSelection.create(control.state.doc, historyPosition(control.state, start), historyPosition(control.state, end));
       control.state = control.state.apply(control.state.tr.setSelection(selection));
       let transaction = replaceHistoryText(control.state, start, end, text);
@@ -401,8 +848,8 @@ function textEditorHandle(controls: Map<number, TextControlModel>): StructuredIn
       transaction.setSelection(TextSelection.create(transaction.doc, caret));
       if (!control.apply(closeHistory(transaction), 'insertReplacementText')) return false;
       control.state = control.state.apply(closeHistory(control.state.tr));
-      element.value = historyText(control.state);
-      element.focus(); element.setSelectionRange(start + text.length, start + text.length);
+      if (view) view.focus();
+      else if (element) { element.value = historyText(control.state); element.focus(); element.setSelectionRange(start + text.length, start + text.length); }
       return true;
     },
     removeSkill(name, path) {
@@ -419,43 +866,56 @@ function textEditorHandle(controls: Map<number, TextControlModel>): StructuredIn
     },
     skills() { return Array.from(controls.values()).flatMap(control => historySkills(control.state)); },
     captureAgentMentionTarget(index, readCurrent, query) {
-      const control = controls.get(index), element = control?.element, current = readCurrent();
-      if (!control || !element || !element.isConnected || element.ownerDocument.activeElement !== element
-        || !control.canEdit() || control.composing || !current?.revision || !current.owner.draftId
+      const control = controls.get(index), element = control?.element, view = control?.view, current = readCurrent();
+      if (!control || !control.canEdit() || control.composing || !current?.revision || !current.owner.draftId) return null;
+      if (view) {
+        if (view.isDestroyed || !view.dom.isConnected || !view.hasFocus() || view.composing) return null;
+        syncRichSelection(view);
+      } else if (!element || !element.isConnected || element.ownerDocument.activeElement !== element
         || element.value !== historyText(control.state)) return null;
-      const selectionStart = element.selectionStart, selectionEnd = element.selectionEnd;
+      const selectionStart = view ? textOffset(control.state, control.state.selection.from) : element!.selectionStart;
+      const selectionEnd = view ? textOffset(control.state, control.state.selection.to) : element!.selectionEnd;
+      const text = historyText(control.state);
       let from = selectionStart, to = selectionEnd;
       if (query) {
         if (selectionStart !== selectionEnd || query.end !== selectionStart || !query.token.startsWith('@')
           || !Number.isSafeInteger(query.start) || !Number.isSafeInteger(query.end)
-          || query.start < 0 || query.start > query.end || element.value.slice(query.start, query.end) !== query.token) return null;
+          || query.start < 0 || query.start > query.end || text.slice(query.start, query.end) !== query.token) return null;
         from = query.start;
-        to = query.end + (element.value.slice(query.end).match(/^[^\s@$\ufffc]*/)?.[0].length ?? 0);
+        to = query.end + (text.slice(query.end).match(/^[^\s@$\ufffc]*/)?.[0].length ?? 0);
       }
-      return { control, doc: control.state.doc, selectionStart, selectionEnd,
+      return { control, doc: control.state.doc, selectionStart, selectionEnd, view: view ?? null, selection: control.state.selection, marks: control.state.storedMarks,
         current: { owner: { ...current.owner }, revision: current.revision }, readCurrent, from, to, used: false };
     },
     insertAgentMention(target, choice) {
-      const control = target?.control, element = control?.element, current = target?.readCurrent(), attrs = agentMentionAttributes(choice);
-      if (!control || !element || !attrs || target.used || controls.get(control.index) !== control || !element.isConnected
+      const control = target?.control, element = control?.element, view = control?.view, current = target?.readCurrent(), attrs = agentMentionAttributes(choice);
+      if (!control || !attrs || target.used || controls.get(control.index) !== control || (view ?? null) !== target.view
+        || !(view && !view.isDestroyed && view.dom.isConnected || element && element.isConnected)
         || !control.canEdit() || control.composing || control.state.doc !== target.doc
-        || element.value !== historyText(control.state) || element.selectionStart !== target.selectionStart
-        || element.selectionEnd !== target.selectionEnd || !current || current.revision !== target.current.revision
+        || view && (!control.state.selection.eq(target.selection) || view.composing)
+        || (control.state.storedMarks === null) !== (target.marks === null)
+        || !Mark.sameSet(control.state.storedMarks ?? [], target.marks ?? [])
+        || element && (element.value !== historyText(control.state) || element.selectionStart !== target.selectionStart
+          || element.selectionEnd !== target.selectionEnd) || !current || current.revision !== target.current.revision
         || current.owner.hostId !== target.current.owner.hostId || current.owner.threadId !== target.current.owner.threadId
         || current.owner.draftId !== target.current.owner.draftId) return false;
-      const before = historyText(control.state), label = attrs.displayName || attrs.name;
+      const before = historyText(control.state), { selection, storedMarks } = control.state;
+      const left = control.state.doc.resolve(historyPosition(control.state, target.from));
+      const right = control.state.doc.resolve(historyPosition(control.state, target.to));
+      if (!left.sameParent(right) || !left.parent.isTextblock || left.parent.type.spec.code) return false;
+      const marks = storedMarks ?? (selection.empty ? selection.$from.marks() : selection.$from.marksAcross(selection.$to) ?? []);
+      if (marks.some(mark => mark.type.name === 'code' || mark.type.name === 'link')) return false;
       let transaction = replaceHistoryText(control.state, target.from, target.to, '');
       const interim = control.state.apply(transaction), position = historyPosition(interim, target.from);
-      transaction = transaction.insert(position, textHistorySchema.nodes.agentMention!.create(attrs));
+      transaction = transaction.insert(position, textHistorySchema.nodes.agentMention!.create(attrs, null, marks));
       const space = !/^\s/u.test(before.slice(target.to));
       if (space) transaction = transaction.insertText(' ', position + 1);
       transaction = transaction.setSelection(TextSelection.create(transaction.doc, position + 1 + (space ? 1 : 0)));
       if (!control.apply(closeHistory(transaction), 'insertReplacementText')) return false;
       target.used = true;
       control.state = control.state.apply(closeHistory(control.state.tr));
-      element.value = historyText(control.state); element.focus();
-      const caret = target.from + label.length + (space ? 1 : 0);
-      element.setSelectionRange(caret, caret);
+      if (view) { view.updateState(control.state); view.focus(); }
+      else if (element) { element.value = historyText(control.state); control.activateView(); }
       return true;
     },
   };
@@ -472,10 +932,10 @@ export const StandaloneStructuredInputEditor = forwardRef<StructuredInputEditorH
       ? [{ entry, index, text: entry.text }] : []);
     return <>{entries.map(({ entry, index, text }, position) => <ReactFragment key={position}>
       {isStructuredAppInput(entry) ? <div role="status">{t('This app input contains retained context and cannot be edited here.')}</div> : null}
-      <TextControl index={index} text={text} agentMentions={props.agentMentions?.(index)} controls={controls.current} onEdit={props.onEdit} onSelection={props.onSelection}
+      <TextControl index={index} text={text} agentMentions={props.agentMentions?.(index)} sourceMarks={props.sourceMarks?.(index)} controls={controls.current} onEdit={props.onEdit} onSelection={props.onSelection}
         label={(props.ariaLabel ?? t('Work with Codex')) + (entries.length > 1 ? ' ' + new Intl.NumberFormat(locale).format(position + 1) : '')}
         placeholder={props.placeholder ?? t('Message')} readOnly={!!props.readOnly || isStructuredAppInput(entry)} onKeyDown={props.onKeyDown}
-        onPaste={props.onPaste} onCompositionChange={value => {
+        onPaste={props.onPaste} onInvalid={props.onInvalid} onCompositionChange={value => {
           if (value) compositions.current.add(position); else compositions.current.delete(position);
           props.onCompositionChange?.(compositions.current.size > 0);
         }}
@@ -594,6 +1054,57 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
   });
 }
 
+function supportedTextHistoryClipboard(html: string, formatting: boolean): boolean {
+  if (!supportedClipboardHTML(html, true)) return false;
+  const body = new DOMParser().parseFromString(html, 'text/html').body;
+  if (body.querySelectorAll('p, div').length > 1 || body.querySelector('br, pre, blockquote, ul, ol, li, h1, h2, h3, h4, h5, h6')) return false;
+  if (body.querySelector('[data-mention]:not([data-mention="agent"]), [page-reference-mention-path], [data-system-hint-type]')) return false;
+  return formatting || !body.querySelector('strong, b, em, i, code, a, [data-composer-autolink]');
+}
+
+function remapClipboardLinkOccurrences(html: string, document: ProseMirrorNode): string {
+  const parsed = new DOMParser().parseFromString(html, 'text/html');
+  const allocate = linkOccurrenceAllocator(document), occurrences = new Map<string, number>();
+  for (const element of parsed.querySelectorAll('[data-mention="rich-link"][data-composer-attrs], a[href], a[data-composer-attrs], span[data-composer-autolink][data-composer-attrs]')) {
+    try {
+      const attrs: unknown = element.hasAttribute('data-composer-attrs')
+        ? JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null')
+        : { href: element.getAttribute('href'), title: element.getAttribute('title') };
+      if (!attrs || typeof attrs !== 'object' || Array.isArray(attrs)) continue;
+      const copied = { ...attrs } as Record<string, unknown>;
+      const previous = copied.literalMarkdownOccurrenceId;
+      const key = element.matches('[data-mention="rich-link"]') || !Number.isSafeInteger(previous) || Number(previous) < 0
+        ? null : JSON.stringify(copied);
+      const occurrence = key === null ? allocate() : occurrences.get(key) ?? allocate();
+      if (key !== null) occurrences.set(key, occurrence);
+      for (const key of ['literalMarkdownSource', 'literalMarkdownOccurrenceId', 'markdownSourceStart', 'markdownSourceEnd', 'isLoading', 'loadingDisplayText']) delete copied[key];
+      copied.literalMarkdownOccurrenceId = occurrence;
+      element.setAttribute('data-composer-attrs', JSON.stringify(copied));
+    } catch { /* Invalid clipboard data is rejected by handlePaste. */ }
+  }
+  return parsed.body.innerHTML;
+}
+
+function richAutolinkPlugin(editable: () => boolean): Plugin {
+  const insertAutolink = (editor: EditorView, from: number, to: number) => {
+    if (from !== to || editor.composing || !editable()) return false;
+    const position = editor.state.doc.resolve(from), before = position.nodeBefore;
+    if (position.parent.type.spec.code || !before?.isText || before.marks.some(mark => mark.type.name === 'link')) return false;
+    const contents = before.text ?? '', candidate = contents.slice(contents.lastIndexOf(' ') + 1);
+    if (!httpAutolinkHref(candidate)) return false;
+    const mark = editor.state.schema.marks.link!.create({ href: null, sourceAppId: '', literalMarkdownOccurrenceId: linkOccurrenceAllocator(editor.state.doc)() });
+    editor.dispatch(editor.state.tr.addMark(from - candidate.length, from, mark).insertText(' ', from));
+    return true;
+  };
+  return new Plugin({ props: {
+    handleKeyDown(editor, event) {
+      return event.key === ' ' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing && event.keyCode !== 229
+        && insertAutolink(editor, editor.state.selection.from, editor.state.selection.to);
+    },
+    handleTextInput(editor, from, to, text) { return text === ' ' && insertAutolink(editor, from, to); },
+  } });
+}
+
 export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function StandaloneRichEditor(props, ref) {
   const { t } = useI18n('zh-CN');
   const host = useRef<HTMLDivElement>(null);
@@ -696,23 +1207,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     const doc = readRichDocument(latest.current.document);
     if (!host.current || !doc) return;
     const plugins = richEditorPlugins();
-    const insertAutolink = (editor: EditorView, from: number, to: number) => {
-      if (from !== to || composing.current || editor.composing || !editable()) return false;
-      const position = editor.state.doc.resolve(from), before = position.nodeBefore;
-      if (position.parent.type.spec.code || !before?.isText || before.marks.some(mark => mark.type.name === 'link')) return false;
-      const contents = before.text ?? '', candidate = contents.slice(contents.lastIndexOf(' ') + 1);
-      if (!httpAutolinkHref(candidate)) return false;
-      const mark = composerSchema.marks.link!.create({ href: null, sourceAppId: '', literalMarkdownOccurrenceId: linkOccurrenceAllocator(editor.state.doc)() });
-      editor.dispatch(editor.state.tr.addMark(from - candidate.length, from, mark).insertText(' ', from));
-      return true;
-    };
-    const autolink = new Plugin({ props: {
-      handleKeyDown(editor, event) {
-        return event.key === ' ' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing && event.keyCode !== 229
-          && insertAutolink(editor, editor.state.selection.from, editor.state.selection.to);
-      },
-      handleTextInput(editor, from, to, text) { return text === ' ' && insertAutolink(editor, from, to); },
-    } });
+    const autolink = richAutolinkPlugin(() => !composing.current && editable());
     plugins.rich.unshift(autolink); plugins.plain.unshift(autolink);
     const inlineNode = (icon: SVGSVGElement | null) => (node: ProseMirrorNode) => {
       const dom = DOMSerializer.fromSchema(composerSchema).serializeNode(node) as HTMLElement;
@@ -784,28 +1279,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         if (html && !supportedClipboardHTML(html, latest.current.allowMentions !== false)) { latest.current.onInvalid(); return true; }
         return false;
       },
-      transformPastedHTML: html => {
-        const parsed = new DOMParser().parseFromString(html, 'text/html');
-        const allocate = linkOccurrenceAllocator(editor.state.doc), occurrences = new Map<string, number>();
-        for (const element of parsed.querySelectorAll('[data-mention="rich-link"][data-composer-attrs], a[href], a[data-composer-attrs], span[data-composer-autolink][data-composer-attrs]')) {
-          try {
-            const attrs: unknown = element.hasAttribute('data-composer-attrs')
-              ? JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null')
-              : { href: element.getAttribute('href'), title: element.getAttribute('title') };
-            if (!attrs || typeof attrs !== 'object' || Array.isArray(attrs)) continue;
-            const copied = { ...attrs } as Record<string, unknown>;
-            const previous = copied.literalMarkdownOccurrenceId;
-            const key = element.matches('[data-mention="rich-link"]') || !Number.isSafeInteger(previous) || Number(previous) < 0
-              ? null : JSON.stringify(copied);
-            const occurrence = key === null ? allocate() : occurrences.get(key) ?? allocate();
-            if (key !== null) occurrences.set(key, occurrence);
-            for (const key of ['literalMarkdownSource', 'literalMarkdownOccurrenceId', 'markdownSourceStart', 'markdownSourceEnd', 'isLoading', 'loadingDisplayText']) delete copied[key];
-            copied.literalMarkdownOccurrenceId = occurrence;
-            element.setAttribute('data-composer-attrs', JSON.stringify(copied));
-          } catch { /* Invalid clipboard data is rejected by handlePaste. */ }
-        }
-        return parsed.body.innerHTML;
-      },
+      transformPastedHTML: (html): string => remapClipboardLinkOccurrences(html, editor.state.doc),
     });
     view.current = editor;
     let plain = !!latest.current.plainTextMode;

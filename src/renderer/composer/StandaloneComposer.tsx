@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { ClipboardEvent } from 'react';
 import type { ComposerDraft, StandaloneComposerProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
 import { activatePending, canEditStructuredDraft, createId, documentFromText, draftToInput, editStructuredDraftText, hasContent, isStructuredAppInput, mergePrefill, prepareDraftInput, recoverLegacyDraft, removeStructuredImage, removeStructuredSkill, richEditIssue, structuredEditIssue, textEditIssue, updateDraftText, updateRichDraft } from './standalone-draft.ts';
@@ -24,9 +23,9 @@ import type { FollowUpAction } from './standalone-follow-up.ts';
 import { StandaloneTarget } from './standalone-target.tsx';
 import type { ComposerHost, ComposerProjectChoice, ComposerProjectDisplay, ComposerTarget } from './standalone-target.tsx';
 import { StandalonePlainInputEditor, StandaloneRichEditor, StandaloneStructuredInputEditor } from './StandaloneRichEditor.tsx';
-import type { RichEditorHandle, StructuredInputEditorHandle, TextAgentChange, TextSkillChange } from './StandaloneRichEditor.tsx';
+import type { RichEditorHandle, StructuredInputEditorHandle, TextAgentChange, TextMarkSpan, TextPasteEvent, TextSkillChange } from './StandaloneRichEditor.tsx';
 import type { RichCompletionContext } from './rich-editor-actions.ts';
-import { readRichDocument } from './rich-document.ts';
+import { readRichDocument, serializePlainDocument, serializeRichDocument } from './rich-document.ts';
 import { isPlainTextAgentDocument, projectTextAgentDocument, textAgentSegments, updateTextAgentDocument } from './text-agent-document.ts';
 import type { TextAgentSpan } from './text-agent-document.ts';
 import { ArrowUp, FilePenLine, Lightbulb, MessageSquare, Mic, Paperclip, Plus } from 'lucide-react';
@@ -192,8 +191,15 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const editor = useRef<StructuredInputEditorHandle>(null);
   const richEditor = useRef<RichEditorHandle>(null);
   const structuredEditor = useRef<StructuredInputEditorHandle>(null);
-  // Keep the existing textarea and its history mounted after its first agent insertion.
-  const textAgentView = useRef(false);
+  // Keep the original text control and its history after its first agent insertion.
+  const composerOwnerKey = JSON.stringify([owner.hostId, owner.threadId, owner.draftId]);
+  const textAgentView = useRef<string | null>(null);
+  const [textFormattingOwner, setTextFormattingOwner] = useState<string | null>(null);
+  const textFormatting = textFormattingOwner === composerOwnerKey && !!draft.document;
+  const [textFormatValue, setTextFormatValue] = useState('');
+  useLayoutEffect(() => {
+    if (textFormattingOwner && (textFormattingOwner !== composerOwnerKey || !draft.document)) setTextFormattingOwner(null);
+  }, [draft.document, textFormattingOwner, composerOwnerKey]);
   const picker = useRef<HTMLInputElement>(null);
   const modelPicker = useRef<HTMLButtonElement>(null);
   const focusModelPicker = () => {
@@ -248,16 +254,20 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const recoverableLegacy = editIssue && recoverLegacyDraft(draft);
   const plainModeUnavailable = !!draft.document
     && (plainTextSetting.loading || !plainTextSetting.available || !!plainTextSetting.error);
-  const textViewDocument = textAgentView.current && draft.document ? readRichDocument(draft.document) : null;
+  const textViewDocument = textAgentView.current === composerOwnerKey && draft.document ? readRichDocument(draft.document) : null;
   const textViewProjection = textViewDocument && projectTextAgentDocument(textViewDocument);
-  const retainTextHistory = textAgentView.current && textViewProjection?.text === draft.text;
+  const matchesSavedText = (document: NonNullable<typeof textViewDocument>, text: string) =>
+    serializeRichDocument(document) === text || serializePlainDocument(document, true) === text;
+  const retainTextHistory = !!textViewDocument && (textViewProjection?.text === draft.text
+    || textFormatting && matchesSavedText(textViewDocument, draft.text));
+  const textViewValue = retainTextHistory ? textViewProjection?.text ?? draft.text : draft.text;
   const richActive = !!draft.document && !editIssue && !segmented && !retainTextHistory;
   const structuredInput = draft.input !== undefined;
   const selectedSegment = segmentSelection && draft.input?.[segmentSelection.index];
   const segmentText = selectedSegment?.type === 'text' && typeof selectedSegment.text === 'string' && !isStructuredAppInput(selectedSegment)
     ? selectedSegment.text : '';
   const completions = useCompletions(client, context.hostId, context.cwd,
-    richActive ? richContext?.text ?? '' : segmented ? segmentText : editIssue ? '' : draft.text,
+    richActive ? richContext?.text ?? '' : segmented ? segmentText : editIssue ? '' : textFormatting ? textFormatValue : textViewValue,
     richActive ? richContext?.cursor ?? 0 : segmented ? segmentSelection?.cursor ?? 0 : cursor,
     busy, richActive ? 'rich:' + richContext?.blockStart : segmented ? 'segment:' + segmentSelection?.index : 'plain');
   const lookupText = fileLookup ? '@' + fileLookup.text : '';
@@ -469,7 +479,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     uploadQueue.current = uploadQueue.current.then(run, run);
     return true;
   };
-  const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+  const paste = (event: TextPasteEvent) => {
     const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/'));
     if (!files.length) return;
     event.preventDefault();
@@ -571,14 +581,34 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const agentsForDraft = (value: typeof draft): Map<number, TextAgentSpan[]> => {
     const document = value.document && readRichDocument(value.document), projection = document && projectTextAgentDocument(document);
     const result = new Map<number, TextAgentSpan[]>();
-    if (!document || !projection?.agents.length || projection.text !== value.text) return result;
+    if (!document || !projection?.agents.length || projection.text !== value.text
+      && !(textFormatting && matchesSavedText(document, value.text))) return result;
     const entries = segmented && value.input ? value.input.flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
-      ? [{ index, text: entry.text }] : []) : [{ index: -1, text: value.text }];
+      ? [{ index, text: entry.text }] : []) : [{ index: -1, text: projection.text }];
     const spans = textAgentSegments(document, entries.map(entry => entry.text));
     if (spans) entries.forEach((entry, index) => result.set(entry.index, spans[index]!));
     return result;
   };
   const agentSegments = richActive ? new Map<number, TextAgentSpan[]>() : agentsForDraft(draft);
+  const marksForDraft = (value: typeof draft): Map<number, TextMarkSpan[]> => {
+    const document = value.document && readRichDocument(value.document), projection = document && projectTextAgentDocument(document);
+    const result = new Map<number, TextMarkSpan[]>();
+    if (!document || !projection || projection.text !== value.text
+      && !(textFormatting && matchesSavedText(document, value.text))) return result;
+    const entries = segmented && value.input ? value.input.flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
+      ? [{ index, text: entry.text }] : []) : [{ index: -1, text: projection.text }];
+    let offset = 0;
+    for (const entry of entries) {
+      const start = offset, end = start + entry.text.length;
+      result.set(entry.index, projection.tokens.flatMap(token => {
+        const left = Math.max(start, token.start), right = Math.min(end, token.end);
+        return left < right ? [{ start: left - start, end: right - start, marks: token.node?.marks.map(mark => mark.toJSON()) ?? [] }] : [];
+      }));
+      offset = end + 1;
+    }
+    return result;
+  };
+  const markSegments = richActive ? new Map<number, TextMarkSpan[]>() : marksForDraft(draft);
   const projectAgentEdit = (before: typeof draft, next: typeof draft, agents?: TextAgentChange): typeof draft | null => {
     if (!agents || ![...agents.before, ...agents.after].some(segment => segment.agents.length)) return next;
     const entries = segmented && next.input ? next.input.flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
@@ -651,6 +681,12 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       }
       if (item.kind === 'directory') completions.show(); else completions.dismiss();
       requestAnimationFrame(() => { if (item.kind === 'command') focusModelPicker(); else richEditor.current?.focus(); });
+      return;
+    }
+    if (textFormatting) {
+      if (!editor.current?.insertRichCompletion(query, item, context.cwd)) { completions.dismiss(); return; }
+      if (item.kind === 'directory') completions.show(); else completions.dismiss();
+      requestAnimationFrame(() => { if (item.kind === 'command') focusModelPicker(); else editor.current?.focus(); });
       return;
     }
     let replacement = '';
@@ -730,6 +766,17 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       const menu = inputRoot.current?.querySelector<HTMLDetailsElement>('.standalone-composer__add');
       if (menu) menu.open = false;
       requestAnimationFrame(() => richEditor.current?.focus()); return;
+    }
+    if (textFormatting) {
+      const control = editor.current, position = lookup.cursor;
+      if (!control || /^[^\s@$\/\ufffc]/.test(control.visibleText().slice(position))
+        || !control.insertRichCompletion({ start: position, end: position, token: '' }, item, lookup.cwd)) {
+        setError(locale.toLowerCase().startsWith('zh') ? '请在可安全插入的位置重新查找文件。' : 'Search again from a safe insertion point.'); return;
+      }
+      setFileLookup(null);
+      const menu = inputRoot.current?.querySelector<HTMLDetailsElement>('.standalone-composer__add');
+      if (menu) menu.open = false;
+      requestAnimationFrame(() => control.focus()); return;
     }
     const path = lookup.cwd.replace(/\/$/, '') + '/' + item.path;
     const fence = '`'.repeat(Math.max(0, ...Array.from(path.matchAll(/`+/g), match => match[0].length)) + 1);
@@ -902,7 +949,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         onImages={files => { void addFiles(files); }}
         onInvalid={message => setError(message ?? t('Unsupported document changes were not saved.'))} /> :
       segmented ? <>
-        <StandaloneStructuredInputEditor ref={structuredEditor} draft={draft} onEdit={editSegment} agentMentions={index => agentSegments.get(index) ?? []}
+        <StandaloneStructuredInputEditor key={composerOwnerKey} ref={structuredEditor} draft={draft} onEdit={editSegment} agentMentions={index => agentSegments.get(index) ?? []}
+          sourceMarks={index => markSegments.get(index) ?? []}
           placeholder={context.threadId ? t('Work with Codex') : locale.toLowerCase().startsWith('en') ? 'Do anything' : t('Message')}
           activeIndex={segmentSelection?.index} completionListId={completions.query ? completions.listId : undefined}
           completionSelectedId={completionSelectedId}
@@ -910,21 +958,33 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
             setSegmentSelection({ index, cursor: position });
             lastChatSelection.current = null;
           }}
-          onKeyDown={keyDown} onPaste={paste} onCompositionChange={value => {
+          onKeyDown={keyDown} onPaste={paste} onInvalid={message => setError(message ?? t('Unsupported document changes were not saved.'))} onCompositionChange={value => {
             setComposition('editor', value); if (value) setSegmentSelection(null);
           }} />
         <details className="standalone-composer__retained"><summary>{t('View retained content')}</summary>
           <pre>{JSON.stringify({ input: draft.input, document: draft.document, hints: draft.hints, preserved: draft.preserved }, null, 2)}</pre></details>
       </> :
-      <StandalonePlainInputEditor ref={editor} label={t('Work with Codex')}
+      <StandalonePlainInputEditor key={composerOwnerKey} ref={editor} label={t('Work with Codex')}
         placeholder={context.threadId ? t('Work with Codex') : locale.toLowerCase().startsWith('en') ? 'Do anything' : t('Message')}
-        text={draft.text} agentMentions={agentSegments.get(-1) ?? []} readOnly={!!editIssue}
+        text={textViewValue} agentMentions={agentSegments.get(-1) ?? []} sourceMarks={markSegments.get(-1)} readOnly={!!editIssue}
+        formatting={textFormatting} plainTextMode={plainTextSetting.value} currentDocument={() => current.current.draft.document}
+        onInvalid={message => setError(message ?? t('Unsupported document changes were not saved.'))}
+        onPendingLinkChange={value => { const wasPending = pendingLink.current; pendingLink.current = value; if (wasPending && !value) recheckProjection(); }}
         canEdit={() => !frozenRef.current} completionListId={completions.query ? completions.listId : undefined}
         completionSelectedId={completionSelectedId}
         onEdit={(_index, expected, text, inputType, skills, agents) => {
           if (frozenRef.current) return false;
           if (expected !== text || inputType === 'historyUndo' || inputType === 'historyRedo') completions.show();
           const before = current.current.draft;
+          if (textFormatting) {
+            const source = before.document && readRichDocument(before.document), result = agents?.document && readRichDocument(agents.document);
+            if (!source || !result || !agents?.document) return false;
+            const updated = updateRichDraft(before, agents.document);
+            if (updated.document !== agents.document) return false;
+            const next = projectCompletionSkills(updated, skills);
+            void changeDraft(value => value === before ? next : value);
+            return current.current.draft === next;
+          }
           if (before.text !== expected) return false;
           const hasAgents = agents && [...agents.before, ...agents.after].some(segment => segment.agents.length);
           const { document: _document, ...withoutDocument } = before;
@@ -933,13 +993,14 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           const projected = projectAgentEdit(before, projectCompletionSkills(next, skills), agents);
           if (!projected) { setError('The chat reference cannot be inserted without changing retained formatting or input.'); return false; }
           const previousView = textAgentView.current;
-          if (hasAgents) textAgentView.current = true;
+          if (hasAgents) textAgentView.current = composerOwnerKey;
           void changeDraft(value => value === before ? projected : value);
           const applied = current.current.draft === projected;
           if (!applied) textAgentView.current = previousView;
           return applied;
-        }} onSelection={(_index, position) => {
+        }} onSelection={(_index, position, visibleText) => {
           setCursor(position);
+          if (visibleText !== undefined) setTextFormatValue(visibleText);
           lastChatSelection.current = null;
         }} onKeyDown={keyDown} onPaste={paste}
         onCompositionChange={value => setComposition('editor', value)} />}
@@ -1021,10 +1082,27 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
               setOverrides(previous => ({ ...previous, mode: options.mode === 'plan' ? 'default' : 'plan' }));
               event.currentTarget.closest('details')?.removeAttribute('open');
             }}><Lightbulb size={16} aria-hidden="true" />{locale.toLowerCase().startsWith('en') ? 'Plan mode' : t('Plan')}</button>
-            {!draft.document && !plainTextSetting.value ? <button type="button" className="standalone-composer__rich-action" disabled={!!editIssue || structuredInput}
+            {(!draft.document || retainTextHistory && !textFormatting) && !plainTextSetting.value ? <button type="button" className="standalone-composer__rich-action" disabled={!!editIssue || structuredInput}
               onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open');
-                changeDraft(value => ({ ...value, document: documentFromText(value.text) }));
-                requestAnimationFrame(() => richEditor.current?.focus()); }}><FilePenLine size={16} aria-hidden="true" />{t('Rich text editor')}</button> : null}
+                if (retainTextHistory && draft.document) {
+                  if (!editor.current?.matchesDocument(draft.document) || !editor.current.activateFormatting(draft.document)) {
+                    setError(t('Unsupported document changes were not saved.')); return;
+                  }
+                  setTextFormattingOwner(composerOwnerKey); requestAnimationFrame(() => editor.current?.focus());
+                }
+                else {
+                  const before = current.current.draft, document = documentFromText(before.text);
+                  const control = editor.current;
+                  if (!control?.matchesDocument(document) || !control.activateFormatting(document, () => {
+                    const previousView = textAgentView.current, next = { ...before, document };
+                    textAgentView.current = composerOwnerKey;
+                    void changeDraft(value => value === before ? next : value);
+                    if (current.current.draft === next) return true;
+                    textAgentView.current = previousView;
+                    return false;
+                  })) { setError(t('Unsupported document changes were not saved.')); return; }
+                  setTextFormattingOwner(composerOwnerKey); requestAnimationFrame(() => control.focus());
+                } }}><FilePenLine size={16} aria-hidden="true" />{t('Rich text editor')}</button> : null}
             <label className="standalone-composer__enter">{t('Send method')} <select aria-label={t('Send method')} value={enterSetting.value} disabled={enterSetting.pending} onChange={event => {
               const value = event.target.value;
               if (value === 'enter' || value === 'cmdIfMultiline' || value === 'cmdAlways') void enterSetting.update(value);

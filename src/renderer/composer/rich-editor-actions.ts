@@ -3,10 +3,10 @@ import { closeHistory, history, redo, undo } from 'prosemirror-history';
 import { inputRules, textblockTypeInputRule, undoInputRule, wrappingInputRule } from 'prosemirror-inputrules';
 import { keymap } from 'prosemirror-keymap';
 import { Fragment, Mark } from 'prosemirror-model';
-import type { Node as ProseMirrorNode } from 'prosemirror-model';
+import type { Node as ProseMirrorNode, Schema } from 'prosemirror-model';
 import { liftListItem, sinkListItem, splitListItem } from 'prosemirror-schema-list';
 import { TextSelection } from 'prosemirror-state';
-import type { Command, Selection } from 'prosemirror-state';
+import type { Command, Plugin, Selection } from 'prosemirror-state';
 import type { EditorView } from 'prosemirror-view';
 import type { ComposerDocument } from '../workbench-contract.ts';
 import type { ComposerDraftOwner } from './composer-draft-store.ts';
@@ -136,12 +136,13 @@ export function insertRichCompletion(editor: EditorView, expected: RichCompletio
   } else if (item.kind === 'command') {
     transaction = transaction.delete(from, to);
   } else {
+    const schema = editor.state.schema;
     const node = item.kind === 'skill'
-      ? composerSchema.nodes.skillMention!.create({ name: item.name, path: item.path, description: item.description,
+      ? schema.nodes.skillMention!.create({ name: item.name, path: item.path, description: item.description,
         displayName: item.name, promptLinkLabel: '$' + item.name })
-      : composerSchema.nodes.atMention!.create({ label: '@' + item.path, path: cwd.replace(/\/$/, '') + '/' + item.path,
+      : schema.nodes.atMention!.create({ label: '@' + item.path, path: cwd.replace(/\/$/, '') + '/' + item.path,
         fsPath: cwd.replace(/\/$/, '') + '/' + item.path });
-    transaction = transaction.replaceWith(from, to, Fragment.fromArray([node, composerSchema.text(' ')]));
+    transaction = transaction.replaceWith(from, to, Fragment.fromArray([node, schema.text(' ')]));
     caret += 2;
   }
   transaction = transaction.setSelection(TextSelection.create(transaction.doc, caret)).scrollIntoView();
@@ -157,10 +158,10 @@ function separateHistory(command: Command): Command {
   } : undefined, view);
 }
 
-export function richEditorPlugins() {
-  const nodes = composerSchema.nodes;
+export function richEditorPlugins(schema: Schema = composerSchema, previousHistory?: Plugin) {
+  const nodes = schema.nodes;
   const listItem = nodes.regular_list_item!;
-  const historyPlugin = history();
+  const historyPlugin = previousHistory ?? history();
   const markdownRules = inputRules({ rules: [
     wrappingInputRule(/^\s*([-+*])\s$/, nodes.list!),
     wrappingInputRule(/^([1-9]\d{0,8})\.\s$/, nodes.ordered_list!, match => ({ startingNumber: Number(match[1]) }),
