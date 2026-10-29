@@ -87,7 +87,7 @@ test('the owned client isolates host requests and never replays them after disco
   assert.equal(second.sent.filter(message => message.request?.method === 'turn/start').length, 0);
 });
 
-test('only failures before the original socket send carry not-sent evidence', async t => {
+test('not-sent evidence distinguishes the page socket from the trusted host dispatch', async t => {
   const sockets: FakeSocket[] = [];
   class FakeSocket {
     static OPEN = 1;
@@ -114,19 +114,41 @@ test('only failures before the original socket send carry not-sent evidence', as
   assert.ok(before instanceof WorkbenchError && !before.uncertain && before.sendPhase === 'before-send');
   assert.equal(sockets[0]!.sent.length, 0);
   const connected = client.connect(), socket = sockets[1]!; socket.open(); await connected;
+  const sentBeforeHost = socket.sent.length;
   const rejected = client.host('configuration-write', { action: 'submit' }).catch(error => error);
   await Promise.resolve();
+  assert.equal(socket.sent.length, sentBeforeHost + 1, 'the page sent the request to the host');
   const id = socket.sent.at(-1)!.requestId;
   socket.message({ type: 'fetch-response', requestId: id, responseType: 'error', error: 'host rejected', uncertain: false, sendPhase: 'before-send' });
   const after = await rejected;
-  assert.ok(after instanceof WorkbenchError && !after.uncertain && after.sendPhase === undefined);
+  assert.ok(after instanceof WorkbenchError && !after.uncertain && after.sendPhase === 'before-send',
+    'the trusted host explicitly reported that its own dispatch did not occur');
+  const ordinary = client.host('configuration-write', { action: 'submit' }).catch(error => error);
+  await Promise.resolve();
+  socket.message({ type: 'fetch-response', requestId: socket.sent.at(-1)!.requestId, responseType: 'error', error: 'host rejected', uncertain: false });
+  const ordinaryError = await ordinary;
+  assert.ok(ordinaryError instanceof WorkbenchError && !ordinaryError.uncertain && ordinaryError.sendPhase === undefined);
+  const contradictory = client.host('configuration-write', { action: 'submit' }).catch(error => error);
+  await Promise.resolve();
+  socket.message({ type: 'fetch-response', requestId: socket.sent.at(-1)!.requestId, responseType: 'error', error: 'host outcome unknown', uncertain: true, sendPhase: 'before-send' });
+  const contradictoryError = await contradictory;
+  assert.ok(contradictoryError instanceof WorkbenchError && contradictoryError.uncertain && contradictoryError.sendPhase === undefined);
+  const rpcRejected = client.rpc('turn/start', { threadId: 'original' }).catch(error => error);
+  await Promise.resolve();
+  const rpcRequest = socket.sent.at(-1)!.request;
+  assert.equal(rpcRequest.method, 'turn/start');
+  socket.message({ type: 'mcp-response', message: { id: rpcRequest.id, error: { message: 'host rejected', data: { uncertain: false, sendPhase: 'before-send' } } } });
+  const rpcError = await rpcRejected;
+  assert.ok(rpcError instanceof WorkbenchError && !rpcError.uncertain && rpcError.sendPhase === 'before-send');
   const circular: Record<string, unknown> = {}; circular.self = circular;
   const count = socket.sent.length;
   const serialization = await client.rpc('turn/start', circular).catch(error => error);
   assert.ok(serialization instanceof WorkbenchError && serialization.sendPhase === 'before-send');
   assert.equal(socket.sent.length, count);
   socket.failSend = true;
+  const attemptedCount = socket.sent.length;
   const attempted = await client.host('configuration-write', { action: 'submit' }).catch(error => error);
+  assert.equal(socket.sent.length, attemptedCount + 1, 'the original socket send was attempted');
   assert.ok(attempted instanceof WorkbenchError && attempted.uncertain && attempted.sendPhase === undefined);
   socket.failSend = false;
   const lost = client.host('configuration-write', { action: 'submit' }).catch(error => error);

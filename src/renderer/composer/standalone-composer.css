@@ -5,6 +5,7 @@
 .standalone-composer textarea::placeholder { color: var(--yard-muted, #666); opacity: 1; }
 .standalone-composer__editor > textarea { display: block; min-height: 59px; max-height: 320px; border: 0; padding: 13px 12px 2px; outline: none; }
 .standalone-composer__rich .ProseMirror { box-sizing: border-box; min-height: 59px; max-height: 320px; overflow: auto; padding: 13px 12px 2px; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
+.standalone-composer__rich .ProseMirror:has(> p:only-child > br.ProseMirror-trailingBreak:only-child)::before { content: attr(data-placeholder); position: absolute; color: var(--yard-muted, #666); pointer-events: none; }
 .standalone-composer__rich .ProseMirror p { margin: 0; }
 .standalone-composer__rich .ProseMirror pre { overflow-x: auto; }
 .standalone-composer pre, .standalone-composer code { font-family: var(--yard-code-font, monospace); font-size: var(--yard-code-size, var(--yard-font-size, 13px)); }
@@ -50,6 +51,9 @@
 .standalone-composer .standalone-composer__add-panel button { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; }
 .standalone-composer__lookup { display: flex; flex-direction: column; gap: 4px; }
 .standalone-composer__lookup input { min-width: 0; width: 100%; box-sizing: border-box; border: 1px solid var(--yard-border, #c9c9c9); background: var(--yard-surface, #fff); color: var(--yard-fg, #222); padding: 5px; }
+.standalone-composer__chat-lookup { max-height: 250px; overflow-y: auto; }
+.standalone-composer__chat-lookup button span, .standalone-composer__completions button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.standalone-composer__chat-lookup small { color: var(--yard-muted, #666); margin-left: auto; }
 .standalone-composer__menu-panel label { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .standalone-composer__menu-panel label:has(input[type="checkbox"]) { justify-content: flex-start; }
 .standalone-composer__menu-panel select { min-width: 0; max-width: 170px; border: 1px solid var(--yard-border, #c9c9c9); border-radius: 4px; background: var(--yard-surface, var(--yard-bg, #fff)); padding: 3px; text-overflow: ellipsis; }

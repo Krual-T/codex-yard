@@ -26,6 +26,7 @@ import { record, publicConfig, readMethods, writeMethods } from './protocol.ts';
 import type { HostMessage, ObjectValue } from './protocol.ts';
 import { projectAgentConfiguration } from './agent-config-projection.ts';
 import { createThreadProjects, readThreadProjectState } from './thread-projects.ts';
+import { observeThreadProjectMembershipSources } from './thread-project-condition.ts';
 import { mergeThreadProjectCatalog } from './thread-project-catalog.ts';
 import { createThreadProjectInventory } from './thread-project-inventory.ts';
 import type { ThreadProjectOperation } from './thread-projects.ts';
@@ -376,6 +377,7 @@ export async function createNativeWorkbench(options: Options = {}) {
   const addProject = createProjectCatalogWrites(globals, stateMutations, persist, broadcast);
   let projectCompatibility: import('./thread-projects.ts').ThreadProjectCompatibility = {};
   let projectInventoryGeneration = 0;
+  let verifyProjectInventory: (() => { complete: boolean }) | undefined;
   const compatibility = { resolveLegacyThreadHosts: (id: string) => projectCompatibility.resolveLegacyThreadHosts?.(id) };
   const threadProjects = createThreadProjects(globals, persist, broadcast, validHost, compatibility, stateMutations);
   const petOverlay = createPetOverlay(globals, settings, persist, broadcast, stateMutations);
@@ -1049,18 +1051,31 @@ export async function createNativeWorkbench(options: Options = {}) {
         return {};
       }
       case 'approval-request-interrupt': {
+        const childWrite = captureChildWrite(client, params.sideChat);
+        const pageConnection = Object.hasOwn(params, 'daemonConnectionGeneration')
+          ? capturePageConnection(client, connections, hostId, params.daemonConnectionGeneration) : undefined;
         const ref = record(params.ref), connection = connections.get(hostId), socket = connection?.socket;
         if (!connection?.connected || !socket || socket.readyState !== WebSocket.OPEN || ref.hostId !== hostId
           || typeof ref.generation !== 'string' || !(typeof ref.id === 'string' || typeof ref.id === 'number' && Number.isFinite(ref.id))
           || typeof params.threadId !== 'string' || !params.threadId || typeof params.turnId !== 'string' || !params.turnId)
           throw Object.assign(new Error('原输入请求不可用，未停止其他会话。'), { uncertain: false });
-        const claim = approvalRequests.claim({ page: client, hostId, socket },
-          { hostId, id: ref.id, generation: ref.generation }, { threadId: params.threadId, turnId: params.turnId });
-        if (claim.status !== 'claimed') throw Object.assign(new Error('原输入请求已失效或正在处理。'), { uncertain: false });
-        const dispatched = await approvalRequests.dispatch(claim.claim, original => {
-          if (connection.socket !== original || original.readyState !== WebSocket.OPEN) throw new Error('Original input connection closed');
-          return connection.request('turn/interrupt', { threadId: params.threadId, turnId: params.turnId }, { mutating: true }).then(() => undefined);
+        const pending = await stateMutations.run(() => {
+          pageConnection?.assertOriginal();
+          if (!connection.connected || connection.socket !== socket || socket.readyState !== WebSocket.OPEN)
+            throw Object.assign(new Error('原输入请求连接已改变，未停止其他会话。'), { uncertain: false, sendPhase: 'before-send' });
+          assertChildWrite(hostId, params.threadId as string, childWrite);
+          const claim = approvalRequests.claim({ page: client, hostId, socket },
+            { hostId, id: ref.id as string | number, generation: ref.generation as string },
+            { threadId: params.threadId as string, turnId: params.turnId as string });
+          if (claim.status !== 'claimed') throw Object.assign(new Error('原输入请求已失效或正在处理。'), { uncertain: false });
+          // Claim and socket dispatch share revoke/close's existing interval;
+          // the daemon response must not hold the native-state queue.
+          return { reply: approvalRequests.dispatch(claim.claim, original => {
+            if (connection.socket !== original || original.readyState !== WebSocket.OPEN) throw new Error('Original input connection closed');
+            return connection.request('turn/interrupt', { threadId: params.threadId, turnId: params.turnId }, { mutating: true }).then(() => undefined);
+          }) };
         });
+        const dispatched = await pending.reply;
         if (dispatched.status !== 'sent') throw Object.assign(new Error('停止原任务的结果待确认，请检查原会话。'), { uncertain: dispatched.status === 'unknown' });
         return null;
       }
@@ -1090,31 +1105,69 @@ export async function createNativeWorkbench(options: Options = {}) {
         return { state: connection?.connected ? 'connected' : connection?.connecting ? 'connecting' : 'disconnected', error: connection?.lastError ?? null };
       }
       case 'thread-project-state': {
+        const resolveIds = params.resolveThreadIds === undefined ? undefined : (() => {
+          if (!Array.isArray(params.resolveThreadIds) || params.resolveThreadIds.some(id => typeof id !== 'string' || !id.trim()))
+            throw new Error('需要有效的会话身份列表。');
+          return [...new Set(params.resolveThreadIds as string[])];
+        })();
+        const original = resolveIds === undefined ? undefined : capturePageConnection(client, connections, hostId, params.daemonConnectionGeneration);
         const initial = await stateMutations.run(() => {
+          original?.assertOriginal();
           const unresolved = readThreadProjectState(globals, {}).unresolved;
           const needsInventory = unresolved.projectless.length > 0 || ['assignments', 'outputDirectories', 'workspaceRoots']
             .some(key => Object.keys(unresolved[key as 'assignments' | 'outputDirectories' | 'workspaceRoots']).length > 0);
           return { needsInventory, snapshot: structuredClone({ ...readThreadProjectState(globals, compatibility),
             inventory: { complete: true, errors: {} }, catalog: { local: globals['local-projects'], remote: globals['remote-projects'] } }) };
         });
-        if (!initial.needsInventory) return initial.snapshot;
+        if (!initial.needsInventory && resolveIds === undefined) return initial.snapshot;
         const generation = ++projectInventoryGeneration;
-        const inventory = createThreadProjectInventory(['local', ...sshHosts.keys()], async id => {
+        const hostIds = ['local', ...sshHosts.keys()];
+        const inventory = createThreadProjectInventory(hostIds, async id => {
+          original?.assertOriginal();
           const connection = id === 'local' ? control : connections.get(id) ?? fileConnections.get(id);
           if (!connection?.connected) throw new Error('主机未连接，旧项目归属尚未核实。');
-          return connection;
+          const socket = connection.socket;
+          const assertCurrent = () => {
+            original?.assertOriginal();
+            const current = id === 'local' ? control : connections.get(id) ?? fileConnections.get(id);
+            if (current !== connection || !connection.connected || !socket || connection.socket !== socket || socket.readyState !== WebSocket.OPEN)
+              throw new Error('会话目录的原宿主连接已改变。');
+          };
+          assertCurrent();
+          return { request: (method: string, requestParams: Record<string, unknown>) => connection.request(method, requestParams), assertCurrent };
         });
-        const status = await inventory.refresh();
+        await inventory.refresh();
         return stateMutations.run(() => {
+          original?.assertOriginal();
+          const status = inventory.verify();
           if (generation === projectInventoryGeneration) {
             projectCompatibility = inventory.compatibility;
+            verifyProjectInventory = inventory.verify;
             sideChats.projectsChanged();
           }
           return structuredClone({ ...readThreadProjectState(globals, inventory.compatibility), inventory: status,
-            catalog: { local: globals['local-projects'], remote: globals['remote-projects'] } });
+            catalog: { local: globals['local-projects'], remote: globals['remote-projects'] },
+            ...(resolveIds === undefined ? {} : {
+              resolvedThreadHosts: status.complete ? Object.fromEntries(resolveIds.map(id => [id, inventory.compatibility.resolveLegacyThreadHosts(id) ?? []])) : null,
+              membershipSources: observeThreadProjectMembershipSources(globals, resolveIds.flatMap(threadId => hostIds.map(hostId => ({ hostId, threadId })))),
+            }) });
         });
       }
-      case 'thread-projects': return threadProjects(params.operation as ThreadProjectOperation, params.value);
+      case 'thread-projects': {
+        const value = record(params.value);
+        if (params.operation === 'setMembership' && Object.hasOwn(value, 'expected')) {
+          if (value.hostId !== hostId || typeof value.threadId !== 'string' || !value.threadId) throw new Error('原会话宿主身份无效。');
+          const original = capturePageConnection(client, connections, hostId, params.daemonConnectionGeneration);
+          const childWrite = captureChildWrite(client, params.sideChat);
+          const threadId = value.threadId;
+          return threadProjects('setMembership', params.value, () => {
+            original.assertOriginal();
+            assertChildWrite(hostId, threadId, childWrite);
+            if (!verifyProjectInventory?.().complete) throw new Error('会话目录已失效，请重新核对项目归属。');
+          });
+        }
+        return threadProjects(params.operation as ThreadProjectOperation, params.value);
+      }
       case 'project-add': return addProject(hostId, params.path, params.name);
       case 'send-injection': {
         const reference = params.reference as SendInjectionReference;

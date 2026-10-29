@@ -402,3 +402,57 @@ test('a child injection already issued before revoke accepts its original succes
   assert.equal(status.responseType, 'success'); assert.equal(status.body.injection.phase, 'injected');
   assert.equal(f.fake.calls('thread/inject_items').length, 2); assert.equal(f.fake.calls('turn/start').length, 0);
 });
+
+test('approval input dismissal requires the original child proof without consuming a refused claim', async t => {
+  const f = await fixture(t);
+  f.fake.handlers.set('turn/interrupt', () => ({}));
+  f.fake.broadcast({ id: 'input-child', method: 'item/tool/requestUserInput',
+    params: { threadId: f.child.id, turnId: 'child-turn', questions: [] } });
+  const input = await f.a.until(message => message.request?.id === 'input-child');
+  const params = { hostId: 'local', ref: input.requestRef, threadId: f.child.id, turnId: 'child-turn',
+    daemonConnectionGeneration: f.daemonConnectionGeneration };
+  const refused = await f.a.host('approval-request-interrupt', params);
+  assert.equal(refused.responseType, 'error'); assert.equal(refused.uncertain, false);
+  assert.equal(f.fake.calls('turn/interrupt').length, 0);
+  const accepted = await f.a.host('approval-request-interrupt', { ...params, sideChat: f.proof });
+  assert.equal(accepted.responseType, 'success', JSON.stringify(accepted));
+  assert.equal(f.fake.calls('turn/interrupt').length, 1);
+  assert.equal(f.fake.calls('turn/interrupt')[0]!.params.threadId, f.child.id);
+
+  f.fake.broadcast({ id: 'input-main', method: 'item/tool/requestUserInput',
+    params: { threadId: f.parent.id, turnId: 'main-turn', questions: [] } });
+  const main = await f.a.until(message => message.request?.id === 'input-main');
+  assert.equal((await f.a.host('approval-request-interrupt', { hostId: 'local', ref: main.requestRef,
+    threadId: f.parent.id, turnId: 'main-turn' })).responseType, 'success');
+  assert.equal(f.fake.calls('turn/interrupt').length, 2);
+});
+
+test('approval input dismissal queued behind revoke stays not sent and permits an explicit fresh confirmation', async t => {
+  const f = await fixture(t);
+  f.fake.handlers.set('turn/interrupt', () => ({}));
+  f.fake.broadcast({ id: 'input-child', method: 'item/tool/requestUserInput',
+    params: { threadId: f.child.id, turnId: 'child-turn', questions: [] } });
+  const input = await f.a.until(message => message.request?.id === 'input-child');
+  let entered!: () => void, release!: () => void;
+  const blocked = new Promise<void>(resolve => { entered = resolve; });
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  f.gateNextCommit({ entered, wait });
+  const setting = f.a.host('set-setting', { key: 'fixture-interrupt-checkpoint', value: true });
+  try {
+    await blocked;
+    const revoking = f.revoke();
+    const params = { hostId: 'local', ref: input.requestRef, threadId: f.child.id, turnId: 'child-turn',
+      daemonConnectionGeneration: f.daemonConnectionGeneration };
+    const interrupted = f.a.host('approval-request-interrupt', { ...params, sideChat: f.proof });
+    await f.a.host('locale-info', {});
+    assert.equal(f.fake.calls('turn/interrupt').length, 0);
+    release(); await setting; await revoking;
+    const result = await interrupted;
+    assert.equal(result.responseType, 'error'); assert.equal(result.uncertain, false);
+    assert.equal(f.fake.calls('turn/interrupt').length, 0);
+    const grant = await f.challenge(f.a, 'registration-fresh-input', 'retry', f.identity);
+    assert.equal((await f.a.host('approval-request-interrupt', { ...params,
+      sideChat: { identity: structuredClone(f.identity), challengeId: grant.challengeId } })).responseType, 'success');
+    assert.equal(f.fake.calls('turn/interrupt').length, 1);
+  } finally { release(); }
+});

@@ -118,6 +118,7 @@ export async function sendConversationDraft(services: ConversationSendServices, 
   const nativeAuthority = services.nativeInjectionAuthority && {
     daemonConnectionGeneration: services.nativeInjectionAuthority.daemonConnectionGeneration,
     assertBeforeSend: services.nativeInjectionAuthority.assertBeforeSend,
+    ...(services.nativeInjectionAuthority.sideChat ? { sideChat: structuredClone(services.nativeInjectionAuthority.sideChat) } : {}),
   };
   const captured = structuredClone({ scope, draft, options, action, description, retry });
   const original = captured.scope;

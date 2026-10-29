@@ -10,6 +10,8 @@ import type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescr
 import { importAttachments } from './standalone-files.ts';
 import { useCompletions } from './standalone-completions.tsx';
 import type { Completion } from './standalone-completions.tsx';
+import { ChatThreadResults } from './standalone-chat-lookup.tsx';
+import type { ChatChoice, ChatLookupSnapshot } from './standalone-chat-lookup.tsx';
 import { StandaloneOptions } from './standalone-options.tsx';
 import { positionComposerMenu } from './composer-menu-position.ts';
 import { StandaloneQueue } from './standalone-queue.tsx';
@@ -22,9 +24,12 @@ import type { FollowUpAction } from './standalone-follow-up.ts';
 import { StandaloneTarget } from './standalone-target.tsx';
 import type { ComposerHost, ComposerProjectChoice, ComposerProjectDisplay, ComposerTarget } from './standalone-target.tsx';
 import { StandalonePlainInputEditor, StandaloneRichEditor, StandaloneStructuredInputEditor } from './StandaloneRichEditor.tsx';
-import type { RichEditorHandle, StructuredInputEditorHandle, TextSkillChange } from './StandaloneRichEditor.tsx';
+import type { RichEditorHandle, StructuredInputEditorHandle, TextAgentChange, TextSkillChange } from './StandaloneRichEditor.tsx';
 import type { RichCompletionContext } from './rich-editor-actions.ts';
-import { ArrowUp, FilePenLine, Lightbulb, Mic, Paperclip, Plus } from 'lucide-react';
+import { readRichDocument } from './rich-document.ts';
+import { isPlainTextAgentDocument, projectTextAgentDocument, textAgentSegments, updateTextAgentDocument } from './text-agent-document.ts';
+import type { TextAgentSpan } from './text-agent-document.ts';
+import { ArrowUp, FilePenLine, Lightbulb, MessageSquare, Mic, Paperclip, Plus } from 'lucide-react';
 import './standalone-composer.css';
 
 export { draftToInput } from './standalone-draft.ts';
@@ -36,6 +41,13 @@ export type { QueueEditEntry } from './standalone-queue-storage.ts';
 export type { DispatchQueueMutation, QueueMutationMethod } from './standalone-queue.tsx';
 export type { ComposerProjectChoice } from './standalone-target.tsx';
 export type ComposerReference = NonNullable<ComposerDraft['references']>[number];
+interface ChatSelection {
+  controller: ComposerDraftController; isCurrentEditor(): boolean; insert(choice: ChatChoice): boolean;
+  owner: ComposerDraftOwner; revision: string; cwd: string;
+}
+interface ChatLookup {
+  id: number; selection: ChatSelection; client: WorkbenchClient; hostId: string; search: string; assertOwner(): void; assertOriginal(): void;
+}
 export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSubmit'> & {
   onSubmit(draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, description?: ComposerSubmissionDescription,
     assertAuthority?: () => void): Promise<void>;
@@ -148,6 +160,13 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const lastRichContext = useRef<RichCompletionContext | null>(null);
   const [fileLookup, setFileLookup] = useState<{ text: string; draft: ComposerDraft; revision: string;
     hostId: string; cwd: string; cursor: number; segment: { index: number; cursor: number } | null; rich: RichCompletionContext | null } | null>(null);
+  const [chatLookup, setChatLookup] = useState<ChatLookup | null>(null);
+  const [chatCompletion, setChatCompletion] = useState<ChatLookup | null>(null);
+  const [chatSnapshot, setChatSnapshot] = useState<ChatLookupSnapshot | null>(null);
+  const [chatIndex, setChatIndex] = useState(-1);
+  const [chatError, setChatError] = useState('');
+  const chatSequence = useRef(0);
+  const lastChatSelection = useRef<ChatSelection | null>(null);
   const enterSetting = useEnterSetting(client);
   const followUpSetting = useFollowUpSetting(client);
   const plainTextSetting = usePlainTextSetting(client);
@@ -173,6 +192,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const editor = useRef<StructuredInputEditorHandle>(null);
   const richEditor = useRef<RichEditorHandle>(null);
   const structuredEditor = useRef<StructuredInputEditorHandle>(null);
+  // Keep the existing textarea and its history mounted after its first agent insertion.
+  const textAgentView = useRef(false);
   const picker = useRef<HTMLInputElement>(null);
   const modelPicker = useRef<HTMLButtonElement>(null);
   const focusModelPicker = () => {
@@ -227,7 +248,10 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const recoverableLegacy = editIssue && recoverLegacyDraft(draft);
   const plainModeUnavailable = !!draft.document
     && (plainTextSetting.loading || !plainTextSetting.available || !!plainTextSetting.error);
-  const richActive = !!draft.document && !editIssue && !segmented;
+  const textViewDocument = textAgentView.current && draft.document ? readRichDocument(draft.document) : null;
+  const textViewProjection = textViewDocument && projectTextAgentDocument(textViewDocument);
+  const retainTextHistory = textAgentView.current && textViewProjection?.text === draft.text;
+  const richActive = !!draft.document && !editIssue && !segmented && !retainTextHistory;
   const structuredInput = draft.input !== undefined;
   const selectedSegment = segmentSelection && draft.input?.[segmentSelection.index];
   const segmentText = selectedSegment?.type === 'text' && typeof selectedSegment.text === 'string' && !isStructuredAppInput(selectedSegment)
@@ -238,14 +262,91 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     busy, richActive ? 'rich:' + richContext?.blockStart : segmented ? 'segment:' + segmentSelection?.index : 'plain');
   const lookupText = fileLookup ? '@' + fileLookup.text : '';
   const fileResults = useCompletions(client, context.hostId, context.cwd, lookupText, lookupText.length, busy, 'menu-file-lookup');
+  const chatHosts = [{ hostId: context.hostId, displayName: hosts?.find(host => host.hostId === context.hostId)?.displayName ?? context.hostId },
+    ...(hosts ?? []).filter(host => host.hostId !== context.hostId)]
+    .filter((host, index, all) => all.findIndex(item => item.hostId === host.hostId) === index);
+  const captureChatSelection = (query?: { start: number; end: number; token: string }, selectedIndex?: number): ChatSelection | null => {
+    const originalController = controller, snapshot = originalController.snapshot();
+    if (!snapshot || frozenRef.current || pendingLink.current || compositions.current.size) return null;
+    const common = { controller: originalController, owner: snapshot.owner, revision: snapshot.revision, cwd: context.cwd };
+    if (richActive) {
+      const source = richEditor.current;
+      const target = source?.captureAgentMentionTarget(() => originalController.snapshot(), query);
+      return source && target ? { ...common, isCurrentEditor: () => richEditor.current === source,
+        insert: choice => source.insertAgentMention(target, choice) } : null;
+    }
+    const source = segmented ? structuredEditor.current : editor.current;
+    const index = segmented ? selectedIndex ?? segmentSelection?.index : -1;
+    if (!source || index === undefined) return null;
+    const target = source.captureAgentMentionTarget(index, () => originalController.snapshot(), query);
+    return target ? { ...common, isCurrentEditor: () => (segmented ? structuredEditor.current : editor.current) === source,
+      insert: choice => source.insertAgentMention(target, choice) } : null;
+  };
+  const captureDefaultChatSelection = (): ChatSelection | null => {
+    if (frozenRef.current || pendingLink.current || compositions.current.size) return null;
+    if (richActive) richEditor.current?.focus();
+    else {
+      const index = segmented ? segmentSelection?.index ?? draft.input?.findIndex(entry => entry.type === 'text' && !isStructuredAppInput(entry)) : -1;
+      (segmented ? structuredEditor.current : editor.current)?.focus(index);
+      return captureChatSelection(undefined, index);
+    }
+    return captureChatSelection();
+  };
+  const makeChatLookup = (selection: ChatSelection, hostId: string, search: string, originalAuthority?: () => void): ChatLookup => {
+    if (!originalAuthority && !captureSubmissionAuthority) throw new Error('Chat lookup requires the original conversation authority.');
+    const authority = originalAuthority ?? captureSubmissionAuthority!(structuredClone(selection.owner));
+    const transport = client as WorkbenchClient & { captureDaemonConnection?: (hostId: string) => { generation: string; assertOriginal(): void } };
+    if (typeof transport.captureDaemonConnection !== 'function') throw new Error('Chat lookup requires a confirmed host connection.');
+    const connection = transport.captureDaemonConnection(hostId);
+    const assertOriginal = () => {
+      authority(); connection.assertOriginal();
+      const snapshot = selection.controller.snapshot(), source = projectSource.current.context;
+      if (activeController.current !== selection.controller || !selection.isCurrentEditor() || !snapshot
+        || snapshot.revision !== selection.revision || snapshot.owner.hostId !== selection.owner.hostId
+        || snapshot.owner.threadId !== selection.owner.threadId || snapshot.owner.draftId !== selection.owner.draftId
+        || source.hostId !== selection.owner.hostId || source.cwd !== selection.cwd
+        || frozenRef.current || pendingLink.current || compositions.current.size) {
+        throw new Error('The original draft or selection changed; search for the chat again.');
+      }
+    };
+    assertOriginal();
+    const lookupClient: WorkbenchClient = {
+      rpc<T = unknown>(method: string, params?: Record<string, unknown>, requestedHost?: string, options?: Parameters<WorkbenchClient['rpc']>[3]) {
+        if (requestedHost !== hostId) return Promise.reject(new Error('The chat host changed.'));
+        try { assertOriginal(); } catch (cause) { return Promise.reject(cause); }
+        return client.rpc<T>(method, params, requestedHost, { ...options, daemonConnectionGeneration: connection.generation,
+          assertBeforeSend: () => { assertOriginal(); options?.assertBeforeSend?.(); } });
+      },
+      host: client.host.bind(client), subscribe: client.subscribe.bind(client), reply: client.reply.bind(client),
+    };
+    return { id: ++chatSequence.current, selection, client: lookupClient, hostId, search, assertOwner: authority, assertOriginal };
+  };
+  const reportChatSnapshot = useCallback((snapshot: ChatLookupSnapshot) => setChatSnapshot(snapshot), []);
+  const chatQuery = completions.query?.kind === 'file' && !completions.query.directory ? completions.query : null;
+  useLayoutEffect(() => {
+    setChatIndex(-1); setChatError('');
+    if (!chatQuery) { setChatCompletion(null); return; }
+    const selection = captureChatSelection(chatQuery);
+    if (!selection) { setChatCompletion(null); return; }
+    try { setChatCompletion(makeChatLookup(selection, context.hostId, chatQuery.term)); }
+    catch (cause) { setChatCompletion(null); setChatError(message(cause)); }
+  }, [client, controller, captureSubmissionAuthority, context.hostId, context.cwd,
+    chatQuery?.start, chatQuery?.end, chatQuery?.token, richContext?.text, richContext?.blockStart, richActive, segmented, segmentSelection?.index]);
   useLayoutEffect(() => {
     const menu = inputRoot.current?.querySelector<HTMLDetailsElement>('.standalone-composer__add[open]');
     if (menu) positionComposerMenu(menu);
-  }, [fileLookup, fileResults.items, fileResults.loading, fileResults.error]);
+  }, [fileLookup, fileResults.items, fileResults.loading, fileResults.error, chatLookup]);
   const onRichContext = useCallback((next: RichCompletionContext | null) => {
     if (next) lastRichContext.current = next;
+    const editor = richEditor.current, snapshot = controller.snapshot();
+    if (editor && snapshot && !frozenRef.current && !pendingLink.current && !compositions.current.size) {
+      const originalController = controller, target = editor.captureAgentMentionTarget(() => originalController.snapshot());
+      if (target) lastChatSelection.current = { controller: originalController, isCurrentEditor: () => richEditor.current === editor,
+        insert: choice => editor.insertAgentMention(target, choice), owner: snapshot.owner,
+        revision: snapshot.revision, cwd: projectSource.current.context.cwd };
+    }
     setRichContext(previous => previous?.text === next?.text && previous?.cursor === next?.cursor && previous?.blockStart === next?.blockStart ? previous : next);
-  }, []);
+  }, [controller]);
   useEffect(() => {
     if (!appliedOptions) return;
     const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
@@ -401,7 +502,9 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       if (!activeTurnId) { setError(t('Current task has no confirmed turn ID')); return; }
       action = { type: 'steer', turnId: activeTurnId };
     }
-    const documentPlainTextMode = readyPlainTextMode ?? plainTextSetting.value;
+    const sourceDocument = current.current.draft.document && readRichDocument(current.current.draft.document);
+    const plainAgentSource = !!sourceDocument && isPlainTextAgentDocument(sourceDocument, current.current.draft.text);
+    const documentPlainTextMode = plainAgentSource || (readyPlainTextMode ?? plainTextSetting.value);
     try {
       // This ID only validates the payload; the parent owns the durable call ID.
       const prepared = prepareDraftInput(current.current.draft, context.hostId,
@@ -465,12 +568,58 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     }
     return { ...next, skills };
   };
-  const editSegment = (index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange) => {
+  const agentsForDraft = (value: typeof draft): Map<number, TextAgentSpan[]> => {
+    const document = value.document && readRichDocument(value.document), projection = document && projectTextAgentDocument(document);
+    const result = new Map<number, TextAgentSpan[]>();
+    if (!document || !projection?.agents.length || projection.text !== value.text) return result;
+    const entries = segmented && value.input ? value.input.flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
+      ? [{ index, text: entry.text }] : []) : [{ index: -1, text: value.text }];
+    const spans = textAgentSegments(document, entries.map(entry => entry.text));
+    if (spans) entries.forEach((entry, index) => result.set(entry.index, spans[index]!));
+    return result;
+  };
+  const agentSegments = richActive ? new Map<number, TextAgentSpan[]>() : agentsForDraft(draft);
+  const projectAgentEdit = (before: typeof draft, next: typeof draft, agents?: TextAgentChange): typeof draft | null => {
+    if (!agents || ![...agents.before, ...agents.after].some(segment => segment.agents.length)) return next;
+    const entries = segmented && next.input ? next.input.flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
+      ? [{ index, text: entry.text }] : []) : [{ index: -1, text: next.text }];
+    let offset = 0;
+    const spans: TextAgentSpan[] = [];
+    for (const entry of entries) {
+      const segment = agents.after.find(value => value.index === entry.index);
+      if (!segment || segment.text !== entry.text) return null;
+      const original = segmented ? next.input?.[entry.index] : undefined;
+      if (original && segment.agents.length && original.text_elements !== undefined) {
+        if (!Array.isArray(original.text_elements)) return null;
+        const encoder = new TextEncoder();
+        const ranges = segment.agents.map(agent => ({ start: encoder.encode(entry.text.slice(0, agent.start)).length,
+          end: encoder.encode(entry.text.slice(0, agent.end)).length }));
+        if (original.text_elements.some(element => {
+          if (!element || typeof element !== 'object' || Array.isArray(element)) return true;
+          const range = (element as { byteRange?: unknown }).byteRange;
+          if (!range || typeof range !== 'object' || Array.isArray(range)) return true;
+          const { start, end } = range as { start?: unknown; end?: unknown };
+          return typeof start !== 'number' || typeof end !== 'number' || !Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+            || start < 0 || end < start || end > encoder.encode(entry.text).length
+            || ranges.some(agent => start < agent.end && end > agent.start || start === end && start > agent.start && start < agent.end);
+        })) return null;
+      }
+      spans.push(...segment.agents.map(agent => ({ ...agent, start: agent.start + offset, end: agent.end + offset })));
+      offset += entry.text.length + 1;
+    }
+    const document = updateTextAgentDocument(before.document, before.text, next.text, spans);
+    return document ? { ...next, document } : null;
+  };
+  const editSegment = (index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange) => {
     if (frozenRef.current) return false;
     if (expected !== text || inputType === 'historyUndo' || inputType === 'historyRedo') completions.show();
-    const before = current.current.draft, result = editStructuredDraftText(before, index, expected, text);
+    const before = current.current.draft;
+    const hasAgents = agents && [...agents.before, ...agents.after].some(segment => segment.agents.length);
+    const { document: _document, ...withoutDocument } = before;
+    const result = editStructuredDraftText(hasAgents ? withoutDocument : before, index, expected, text);
     if (!result.draft) { setError(translateKnown(t, result.error)); return false; }
-    const next = projectCompletionSkills(result.draft, skills);
+    const next = projectAgentEdit(before, projectCompletionSkills(result.draft, skills), agents);
+    if (!next) { setError('The chat reference cannot be inserted without changing retained formatting or input.'); return false; }
     setError('');
     void changeDraft(value => value === before ? next : value);
     return current.current.draft === next;
@@ -519,7 +668,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       if (index === undefined || entry?.type !== 'text' || typeof entry.text !== 'string'
         || entry.text.slice(query.start, query.end) !== query.token) { completions.dismiss(); return; }
       const end = completionEnd(entry.text, query.end, query.token);
-      const result = editStructuredDraftText(before, index, entry.text,
+      const { document: _document, ...withoutDocument } = before;
+      const result = editStructuredDraftText(agentSegments.size ? withoutDocument : before, index, entry.text,
         entry.text.slice(0, query.start) + replacement + entry.text.slice(end));
       if (!result.draft) { setError(translateKnown(t, result.error)); completions.dismiss(); return; }
       const after = entry.text.slice(0, query.start) + replacement + entry.text.slice(end);
@@ -542,7 +692,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     const end = completionEnd(before.text, query.end, query.token);
     const after = before.text.slice(0, query.start) + replacement + before.text.slice(end);
     const control = editor.current;
-    if (!control || updateDraftText(before, after).text !== after) { completions.dismiss(); return; }
+    const { document: _document, ...withoutDocument } = before;
+    if (!control || updateDraftText(agentSegments.size ? withoutDocument : before, after).text !== after) { completions.dismiss(); return; }
     const existing = control.skills();
     const skill = item.kind === 'skill' ? { name: item.name, path: item.path,
       managed: existing.some(value => value.managed && value.name === item.name && value.path === item.path)
@@ -594,19 +745,49 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     if (menu) menu.open = false;
     requestAnimationFrame(() => control.focus(index, position + replacement.length));
   };
+  const chooseChat = (lookup: ChatLookup, choice: ChatChoice, fromMenu: boolean) => {
+    try {
+      setError('');
+      lookup.assertOriginal();
+      if (choice.hostId !== lookup.hostId || !lookup.selection.insert(choice)) {
+        throw new Error('The original draft or selection changed; search for the chat again.');
+      }
+      setError(''); setChatError(''); lastChatSelection.current = null;
+      if (fromMenu) {
+        setChatLookup(null);
+        const menu = inputRoot.current?.querySelector<HTMLDetailsElement>('.standalone-composer__add');
+        if (menu) menu.open = false;
+      } else { completions.dismiss(); setChatCompletion(null); }
+    } catch (cause) { setError(previous => previous || message(cause)); }
+  };
+  const completionChats = chatCompletion && chatSnapshot?.key === String(chatCompletion.id) ? chatSnapshot.items : [];
+  const effectiveChatIndex = chatIndex >= 0 && chatIndex < completionChats.length ? chatIndex
+    : !completions.items.length && completionChats.length ? 0 : -1;
+  const selectedCompletion = effectiveChatIndex >= 0 ? completions.items.length + effectiveChatIndex : completions.selected;
   const keyDown = (event: globalThis.KeyboardEvent): boolean => {
     if (frozenRef.current) { event.preventDefault(); return true; }
     if (compositions.current.has('editor') || event.isComposing || event.keyCode === 229) return false;
     if (completions.query) {
       if (event.key === 'Escape') { event.preventDefault(); completions.dismiss(); return true; }
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        if (completions.items.length) { event.preventDefault(); completions.move(event.key === 'ArrowDown' ? 1 : -1); return true; }
+        const total = completions.items.length + completionChats.length;
+        if (total) {
+          event.preventDefault();
+          const next = (Math.max(0, selectedCompletion) + (event.key === 'ArrowDown' ? 1 : -1) + total) % total;
+          if (next < completions.items.length) { setChatIndex(-1); completions.select(next); }
+          else setChatIndex(next - completions.items.length);
+          return true;
+        }
         return false;
       }
       if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        if (effectiveChatIndex >= 0 && completionChats[effectiveChatIndex] && chatCompletion) {
+          event.preventDefault(); chooseChat(chatCompletion, completionChats[effectiveChatIndex]!, false); return true;
+        }
         const selected = completions.items[completions.selected];
         if (selected) { event.preventDefault(); chooseCompletion(selected); return true; }
-        if (event.key === 'Enter' && completions.loading) { event.preventDefault(); return true; }
+        if (event.key === 'Enter' && (completions.loading || !!chatCompletion && chatSnapshot?.key !== String(chatCompletion.id)
+          || chatSnapshot?.key === String(chatCompletion?.id) && chatSnapshot.loading)) { event.preventDefault(); return true; }
       }
     }
     if (event.key !== 'Enter' || event.altKey || event.repeat || enterSetting.pending || enterSetting.error) return false;
@@ -627,6 +808,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     catch (reason) { if (activeController.current === controller) setError(t('Could not stop:') + message(reason)); }
     finally { interruptInFlight.current = false; if (mounted.current) setInterrupting(false); }
   };
+  const completionSelectedId = effectiveChatIndex >= 0 ? completions.listId + '-chat-' + effectiveChatIndex
+    : completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined;
   return <div className="standalone-composer">
     <div ref={inputRoot} inert={frozen} aria-busy={frozen || undefined} onKeyDown={event => {
       if (event.key !== 'Escape' || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
@@ -709,48 +892,72 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       {plainTextSetting.value && richActive && textEditIssue(draft) ? <div role="status">{t('Existing formatting is retained while plain text mode is on.')}
         {!draft.input ? ' ' + (locale.toLowerCase().startsWith('zh') ? '发送时使用纯文本，不包含粗体等格式。' : 'Sending uses plain text without bold and similar formatting.') : null}</div> : null}
       {richActive && draft.document ? <StandaloneRichEditor ref={richEditor} document={draft.document} currentDocument={() => current.current.draft.document}
+        placeholder={context.threadId ? t('Work with Codex') : locale.toLowerCase().startsWith('en') ? 'Do anything' : t('Message')}
         plainTextMode={plainTextSetting.value} canEdit={() => !frozenRef.current}
         onChange={document => changeDraftFromOperation(value => updateRichDraft(value, document))} onKeyDown={keyDown}
         onCompositionChange={value => setComposition('editor', value)}
         onPendingLinkChange={value => { const wasPending = pendingLink.current; pendingLink.current = value; if (wasPending && !value) recheckProjection(); }}
         onCompletionContext={onRichContext} completionListId={completions.query ? completions.listId : undefined}
-        completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
+        completionSelectedId={completionSelectedId}
         onImages={files => { void addFiles(files); }}
         onInvalid={message => setError(message ?? t('Unsupported document changes were not saved.'))} /> :
       segmented ? <>
-        <StandaloneStructuredInputEditor ref={structuredEditor} draft={draft} onEdit={editSegment}
+        <StandaloneStructuredInputEditor ref={structuredEditor} draft={draft} onEdit={editSegment} agentMentions={index => agentSegments.get(index) ?? []}
+          placeholder={context.threadId ? t('Work with Codex') : locale.toLowerCase().startsWith('en') ? 'Do anything' : t('Message')}
           activeIndex={segmentSelection?.index} completionListId={completions.query ? completions.listId : undefined}
-          completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
-          onSelection={(index, position) => setSegmentSelection({ index, cursor: position })}
+          completionSelectedId={completionSelectedId}
+          onSelection={(index, position) => {
+            setSegmentSelection({ index, cursor: position });
+            lastChatSelection.current = null;
+          }}
           onKeyDown={keyDown} onPaste={paste} onCompositionChange={value => {
             setComposition('editor', value); if (value) setSegmentSelection(null);
           }} />
         <details className="standalone-composer__retained"><summary>{t('View retained content')}</summary>
           <pre>{JSON.stringify({ input: draft.input, document: draft.document, hints: draft.hints, preserved: draft.preserved }, null, 2)}</pre></details>
       </> :
-      <StandalonePlainInputEditor ref={editor} label={t('Work with Codex')} placeholder={locale.toLowerCase().startsWith('en') ? 'Do anything' : t('Message')} text={draft.text} readOnly={!!editIssue}
+      <StandalonePlainInputEditor ref={editor} label={t('Work with Codex')}
+        placeholder={context.threadId ? t('Work with Codex') : locale.toLowerCase().startsWith('en') ? 'Do anything' : t('Message')}
+        text={draft.text} agentMentions={agentSegments.get(-1) ?? []} readOnly={!!editIssue}
         canEdit={() => !frozenRef.current} completionListId={completions.query ? completions.listId : undefined}
-        completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
-        onEdit={(_index, expected, text, inputType, skills) => {
+        completionSelectedId={completionSelectedId}
+        onEdit={(_index, expected, text, inputType, skills, agents) => {
           if (frozenRef.current) return false;
           if (expected !== text || inputType === 'historyUndo' || inputType === 'historyRedo') completions.show();
           const before = current.current.draft;
           if (before.text !== expected) return false;
-          const next = updateDraftText(before, text);
+          const hasAgents = agents && [...agents.before, ...agents.after].some(segment => segment.agents.length);
+          const { document: _document, ...withoutDocument } = before;
+          const next = updateDraftText(hasAgents ? withoutDocument : before, text);
           if (next.text !== text) return false;
-          const projected = projectCompletionSkills(next, skills);
+          const projected = projectAgentEdit(before, projectCompletionSkills(next, skills), agents);
+          if (!projected) { setError('The chat reference cannot be inserted without changing retained formatting or input.'); return false; }
+          const previousView = textAgentView.current;
+          if (hasAgents) textAgentView.current = true;
           void changeDraft(value => value === before ? projected : value);
-          return current.current.draft === projected;
-        }} onSelection={(_index, position) => setCursor(position)} onKeyDown={keyDown} onPaste={paste}
+          const applied = current.current.draft === projected;
+          if (!applied) textAgentView.current = previousView;
+          return applied;
+        }} onSelection={(_index, position) => {
+          setCursor(position);
+          lastChatSelection.current = null;
+        }} onKeyDown={keyDown} onPaste={paste}
         onCompositionChange={value => setComposition('editor', value)} />}
       {completions.query ? <div className="standalone-composer__completions" id={completions.listId} role="listbox" aria-label={t(completions.query.kind === 'file' ? 'Workspace files' : 'Skill')}>
         {completions.items.map((item, index) => <button type="button" role="option" id={completions.listId + '-' + index} key={item.kind + ':' + (item.kind === 'command' ? item.name : item.path)}
-          aria-selected={index === completions.selected} onMouseDown={event => event.preventDefault()} onClick={() => chooseCompletion(item)}>
+          aria-selected={effectiveChatIndex < 0 && index === completions.selected} onMouseDown={event => event.preventDefault()} onClick={() => chooseCompletion(item)}>
           <span>{item.kind === 'command' ? '/' : ''}{item.name}{item.kind === 'directory' ? '/' : ''}</span><small>{item.kind === 'command' ? t('Select model') : item.kind === 'skill' ? item.description : item.path}</small>
         </button>)}
+        {chatCompletion ? <ChatThreadResults key={chatCompletion.id} client={chatCompletion.client} hostId={chatCompletion.hostId}
+          hostName={chatHosts.find(host => host.hostId === chatCompletion.hostId)?.displayName ?? chatCompletion.hostId}
+          search={chatCompletion.search} resultKey={String(chatCompletion.id)} listId={completions.listId} offset={completions.items.length}
+          selected={selectedCompletion} preserveFocus chinese={locale.toLowerCase().startsWith('zh')}
+          onSnapshot={reportChatSnapshot} onChoose={choice => chooseChat(chatCompletion, choice, false)} /> : null}
+        {chatError ? <div role="alert">{chatError}</div> : null}
         {completions.loading ? <div role="status">{t('Loading suggestions...')}</div> : null}
         {completions.error ? <div role="alert">{t('Could not load suggestions:')}{completions.error}</div> : null}
-        {!completions.loading && !completions.error && !completions.items.length ? <div>{t('No matches')}</div> : null}
+        {!completions.loading && !completions.error && !completions.items.length && !completionChats.length
+          && (!chatCompletion || chatSnapshot?.key === String(chatCompletion.id) && !chatSnapshot.loading) ? <div>{t('No matches')}</div> : null}
       </div> : null}
       <div className="standalone-composer__footer">
         <input ref={picker} type="file" multiple hidden onChange={event => {
@@ -758,10 +965,15 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         }} />
         <details className="standalone-composer__menu standalone-composer__add" onToggle={event => {
           positionComposerMenu(event.currentTarget);
-          if (!event.currentTarget.open) setFileLookup(null);
+          if (!event.currentTarget.open) { setFileLookup(null); setChatLookup(null); }
         }}>
           <summary aria-label={locale.toLowerCase().startsWith('en') ? 'Add files and more' : t('Add attachment')}
-            title={locale.toLowerCase().startsWith('en') ? 'Add files and more' : t('Add attachment')}><Plus size={18} aria-hidden="true" /></summary>
+            title={locale.toLowerCase().startsWith('en') ? 'Add files and more' : t('Add attachment')}
+            onMouseDown={() => {
+              let selection = captureChatSelection();
+              if (!selection && !lastChatSelection.current) selection = captureDefaultChatSelection();
+              if (selection) lastChatSelection.current = selection;
+            }}><Plus size={18} aria-hidden="true" /></summary>
           <div className="standalone-composer__menu-panel standalone-composer__add-panel">
             <button type="button" disabled={uploading || !!editIssue} onClick={event => {
               if (!picker.current || frozenRef.current) return;
@@ -772,8 +984,29 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
             {onOpenGoal ? <button type="button" onClick={event => {
               event.currentTarget.closest('details')?.removeAttribute('open'); onOpenGoal();
             }}><Lightbulb size={16} aria-hidden="true" />{t('Goal')}</button> : null}
+            {!chatLookup ? <button type="button" disabled={!!editIssue} onClick={() => {
+              const selection = lastChatSelection.current ?? captureDefaultChatSelection();
+              if (!selection) { setError('Select an insertion point in the editor and try again.'); return; }
+              try { setFileLookup(null); setError(''); setChatLookup(makeChatLookup(selection, context.hostId, '')); }
+              catch (cause) { setError(message(cause)); }
+            }}><MessageSquare size={16} aria-hidden="true" />{locale.toLowerCase().startsWith('zh') ? '添加会话' : 'Add chat'}</button> :
+              <div className="standalone-composer__lookup standalone-composer__chat-lookup">
+                <input autoFocus aria-label={locale.toLowerCase().startsWith('zh') ? '查找会话' : 'Find chats'} value={chatLookup.search}
+                  onChange={event => setChatLookup({ ...chatLookup, search: event.currentTarget.value })} />
+                {chatHosts.length > 1 ? <label>{locale.toLowerCase().startsWith('zh') ? '主机' : 'Host'}
+                  <select aria-label={locale.toLowerCase().startsWith('zh') ? '会话主机' : 'Chat host'} value={chatLookup.hostId}
+                    onChange={event => {
+                      try { setError(''); setChatLookup(makeChatLookup(chatLookup.selection, event.currentTarget.value, chatLookup.search, chatLookup.assertOwner)); }
+                      catch (cause) { setError(message(cause)); }
+                    }}>{chatHosts.map(host => <option value={host.hostId} key={host.hostId}>{host.displayName}</option>)}</select></label> : null}
+                <ChatThreadResults key={chatLookup.id} client={chatLookup.client} hostId={chatLookup.hostId}
+                  hostName={chatHosts.find(host => host.hostId === chatLookup.hostId)?.displayName ?? chatLookup.hostId}
+                  search={chatLookup.search} resultKey={String(chatLookup.id)} chinese={locale.toLowerCase().startsWith('zh')}
+                  onChoose={choice => chooseChat(chatLookup, choice, true)} />
+              </div>}
             {!fileLookup ? <button type="button" disabled={!!editIssue} onClick={() => {
               const source = current.current;
+              setChatLookup(null);
               setFileLookup({ text: '', draft: structuredClone(source.draft), revision: source.revision,
                 hostId: context.hostId, cwd: context.cwd, cursor, segment: segmentSelection, rich: lastRichContext.current });
             }}>{locale.toLowerCase().startsWith('zh') ? '查找文件' : 'Find files'}</button> : <div className="standalone-composer__lookup">

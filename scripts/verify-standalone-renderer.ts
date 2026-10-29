@@ -128,6 +128,25 @@ await context.addInitScript(() => {
 });
 const page = await context.newPage();
 const errors: string[] = [], requests: string[] = [], checks: string[] = [];
+async function openSidePanelItem(name: 'Open turn changes' | 'Open visualization' | 'Open Chrome panel') {
+  const toggle = page.locator('summary[aria-label="Open side panel"]');
+  const menu = toggle.locator('..');
+  if (await menu.getAttribute('open') === null) await toggle.click();
+  await menu.getByRole('menuitem', { name, exact: true }).click();
+  if (await menu.getAttribute('open') !== null) await toggle.click();
+}
+async function waitForHostConnected(target: Page, hostId: string) {
+  await target.waitForFunction(hostId => {
+    const client = (window as any).acceptanceClient;
+    try { return client.connected && !!client.captureDaemonConnection(hostId).generation; }
+    catch { return false; }
+  }, hostId);
+}
+async function openGoal() {
+  if (await page.getByRole('region', { name: 'Conversation goal', exact: true }).isVisible()) return;
+  await page.getByRole('button', { name: 'Conversation menu', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Goal', exact: true }).click();
+}
 async function holdUiWrites(target: Page) {
   await target.evaluate(async () => {
     await new Promise<void>((resolve, reject) => {
@@ -200,7 +219,7 @@ try {
   const turnsBeforeReconnect = fake.calls('turn/start').length;
   fake.disconnectAll();
   await page.getByRole('button', { name: 'Reconnect host', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('.yard-connection')?.getAttribute('data-state') === 'connected');
+  await waitForHostConnected(page, 'local');
   await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).waitFor();
   assert.equal(fake.calls('turn/start').length, turnsBeforeReconnect);
   checks.push('daemon connection loss exposes an explicit read-only reconnect action and restores the actual host without replaying input');
@@ -210,19 +229,24 @@ try {
   const remoteDraft = remotePage.getByRole('textbox', { name: 'Work with Codex', exact: true });
   await remoteDraft.fill('KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
   await installClientProbe(remotePage);
-  await remotePage.waitForFunction(() => document.querySelector('.yard-connection')?.getAttribute('title') === 'Browser: connected; Host: connected');
+  await waitForHostConnected(remotePage, remoteHostId);
   remoteAvailable = false; remoteFake.disconnectAll();
   await remotePage.getByRole('button', { name: 'Reconnect host', exact: true }).waitFor();
   await remotePage.evaluate(async () => {
     const client = (window as any).acceptanceClient; client.suspend(); await client.resume();
   });
   await remotePage.getByRole('button', { name: 'Reconnect host', exact: true }).waitFor();
-  await remotePage.waitForFunction(() => document.querySelector('.yard-connection')?.getAttribute('title') === 'Browser: connected; Host: disconnected');
+  await remotePage.getByRole('status').filter({ hasText: 'Host disconnected' }).waitFor();
+  assert.equal(await remotePage.evaluate(() => (window as any).acceptanceClient.connected), true);
+  assert.equal(await remotePage.evaluate(hostId => {
+    try { (window as any).acceptanceClient.captureDaemonConnection(hostId); return true; }
+    catch { return false; }
+  }, remoteHostId), false);
   assert.equal(await remoteDraft.inputValue(), 'KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
   assert.equal(remoteFake.calls('turn/start').length, 0);
   remoteAvailable = true;
   await remotePage.getByRole('button', { name: 'Reconnect host', exact: true }).click();
-  await remotePage.waitForFunction(() => document.querySelector('.yard-connection')?.getAttribute('data-state') === 'connected');
+  await waitForHostConnected(remotePage, remoteHostId);
   assert.equal(await remoteDraft.inputValue(), 'KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
   assert.equal(remoteFake.calls('turn/start').length, 0);
   await remotePage.close();
@@ -247,6 +271,8 @@ try {
   await coldArchived.reload();
   await coldArchived.getByRole('button', { name: 'Restore conversation', exact: true }).waitFor();
   const coldDraft = coldArchived.getByRole('textbox', { name: 'Work with Codex', exact: true });
+  await coldArchived.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value
+    === 'UNPERSISTED_COMPOSER_BEFORE_EXTERNAL_ARCHIVE');
   assert.equal(await coldDraft.evaluate(element => element.closest('[inert]') !== null), true);
   assert.equal(await coldDraft.inputValue(), 'UNPERSISTED_COMPOSER_BEFORE_EXTERNAL_ARCHIVE');
   await coldArchived.close();
@@ -270,11 +296,9 @@ try {
   const fileEditor = page.getByRole('textbox', { name: `File: ${notesPath}`, exact: true });
   await fileEditor.waitFor(); assert.equal(await fileEditor.innerText(), 'one\ntwo\nthree');
   await fileEditor.press('ControlOrMeta+End'); await page.keyboard.type(' edited');
-  const sidebarButton = page.getByRole('button', { name: 'Toggle sidebar', exact: true });
-  if (!await page.getByRole('button', { name: 'Settings', exact: true }).isVisible()) await sidebarButton.click();
   page.once('dialog', dialog => dialog.accept());
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  await page.keyboard.press('Control+,');
+  await page.getByRole('heading', { name: 'General', exact: true, level: 1 }).waitFor();
   let restoredBeforeGuard = false;
   const guardAnswered = page.waitForEvent('dialog').then(async dialog => {
     restoredBeforeGuard = new URL(page.url()).pathname === '/settings/general'; await dialog.dismiss();
@@ -282,7 +306,7 @@ try {
   await page.evaluate(() => history.back());
   await guardAnswered;
   await page.waitForFunction(() => location.pathname === '/settings/general');
-  await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  await page.getByRole('heading', { name: 'General', exact: true, level: 1 }).waitFor();
   assert(restoredBeforeGuard, 'Back navigation must restore the committed URL before asking to leave.');
   page.once('dialog', dialog => dialog.accept());
   await page.evaluate(() => history.back());
@@ -293,11 +317,13 @@ try {
     && document.querySelector<HTMLButtonElement>('button[aria-label="Save file"]')?.disabled
     && document.querySelector<HTMLButtonElement>('button[aria-label="Reload file"]')?.disabled === false);
   assert.equal(await readFile(notesPath, 'utf8'), '\ufeffone\r\ntwo\nthree edited');
-  await page.getByRole('button', { name: 'Open turn changes', exact: true }).click();
+  await openSidePanelItem('Open turn changes');
   const addedLine = page.getByLabel('Diff', { exact: true }).locator('.yard-diff-line.is-add');
   await addedLine.getByText('two', { exact: true }).waitFor();
   assert.equal(await addedLine.getByRole('img', { name: 'Added line', exact: true }).count(), 1);
-  await page.getByRole('button', { name: 'Open terminal', exact: true }).click();
+  const bottomPanelToggle = page.getByRole('button', { name: 'Toggle bottom panel', exact: true });
+  if (await page.locator('.yard-workspace-panels:visible').isVisible()) await bottomPanelToggle.click();
+  await bottomPanelToggle.click();
   await page.locator('.xterm-rows').getByText('APP_TERMINAL_READY').waitFor();
   await page.locator('.xterm-helper-textarea').focus(); await page.keyboard.type('app-input');
   await page.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent?.includes('app-input'));
@@ -373,6 +399,7 @@ try {
   await page.setViewportSize({ width: 1360, height: 900 });
   const goalRegion = page.getByRole('region', { name: 'Conversation goal', exact: true });
   const goalWritesBefore = fake.calls('thread/goal/set').length;
+  await openGoal();
   await goalRegion.getByRole('button', { name: 'New goal', exact: true }).click();
   await goalRegion.getByLabel('Goal content', { exact: true }).fill('OWNED_GOAL **bold**\n\n- preserve list');
   await goalRegion.getByRole('button', { name: 'Rich text editing', exact: true }).click();
@@ -383,24 +410,27 @@ try {
   assert.equal(fake.calls('thread/goal/set').at(-1)!.params.status, 'paused');
   assert.equal(fake.calls('thread/goal/set').at(-1)!.params.origin, 'user');
   await page.reload();
+  await openGoal();
   await goalRegion.getByText('OWNED_GOAL **bold**\n\n- preserve list', { exact: true }).waitFor();
   await goalRegion.getByRole('button', { name: 'Clear goal', exact: true }).click();
   await goalRegion.getByRole('button', { name: 'Confirm clear', exact: true }).click();
   await goalRegion.getByRole('button', { name: 'New goal', exact: true }).waitFor();
   checks.push('actual App mounts owned goal controls and rich objective; explicit paused create, reload and clear use the original thread protocol without starting a turn');
 
-  if (!await page.getByRole('button', { name: 'Settings', exact: true }).isVisible()) await sidebarButton.click();
   await page.getByRole('button', { name: 'Edit message', exact: true }).click();
   await holdUiWrites(page);
-  const heldEditor = page.getByRole('textbox', { name: 'Edit message text', exact: true });
+  // Keep observing the original editor while navigation makes its subtree inert.
+  const heldEditor = page.locator('textarea[aria-label="Edit message text"]');
+  await heldEditor.evaluate(element => element.setAttribute('data-retained-navigation-editor', 'original'));
   await heldEditor.fill('UNSENT_EDIT_BEFORE_NAVIGATION');
   const editLocation = page.url();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.keyboard.press('Control+,');
   assert.equal(page.url(), editLocation, 'Navigation must wait for the actual pending UI transaction.');
   assert.equal(await heldEditor.isDisabled(), true);
+  assert.equal(await heldEditor.getAttribute('data-retained-navigation-editor'), 'original');
   await page.evaluate(() => (window as any).releaseUiWriteBarrier());
   await page.waitForURL(url => url.pathname === '/settings/general');
-  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Back to app', exact: true }).click();
   await page.waitForURL('**/local/owned-conversation');
   await heldEditor.waitFor(); assert.equal(await heldEditor.inputValue(), 'UNSENT_EDIT_BEFORE_NAVIGATION');
   const originalHistory = fake.handlers.get('thread/turns/list')!;
@@ -560,7 +590,7 @@ try {
   await page.goto(app.url + '/');
   await input.fill('FRESH_HOME_UNSENT_AFTER_CREATION');
   await page.getByText('Saving draft...', { exact: true }).waitFor({ state: 'hidden' });
-  await page.getByRole('button', { name: 'Created ' + id, exact: true }).click();
+  await page.getByRole('button', { name: 'Created ' + id, exact: true }).first().click();
   await page.waitForURL('**/local/' + id);
   await input.waitFor(); assert.equal(await input.inputValue(), '', 'A fresh home must not alias the thread that consumed its old identity.');
   await page.goto(app.url + '/');
@@ -568,7 +598,7 @@ try {
   await page.reload();
   await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value === 'FRESH_HOME_UNSENT_AFTER_CREATION');
   assert.equal(fake.calls('turn/start').length, beforeHomeReturn);
-  await page.getByRole('button', { name: 'Created ' + id, exact: true }).click();
+  await page.getByRole('button', { name: 'Created ' + id, exact: true }).first().click();
   await page.waitForURL('**/local/' + id); await input.waitFor(); assert.equal(await input.inputValue(), '');
   checks.push('direct home navigation after first send gets a distinct stable draft; sidebar return and complete reload preserve it without an extra turn');
   await installClientProbe(page);
@@ -675,7 +705,7 @@ try {
   assert.equal(await page.evaluate(() => (window as any).acceptanceClient.connected), false);
   await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
   await page.waitForFunction(() => (window as any).acceptanceClient.connected);
-  await page.waitForFunction(() => document.querySelector('.yard-conversation-header strong')?.textContent === 'RESTORED_PAGE_THREAD');
+  await page.waitForFunction(() => document.querySelector('.yard-thread-title strong')?.textContent === 'RESTORED_PAGE_THREAD');
   assert.equal(fake.calls('thread/name/set').length, 1, 'Resuming must not replay a write with a lost receipt.');
   checks.push('persisted page lifecycle events reconnect the real client, rehydrate history and retain an unknown write without replay (simulated cache events)');
   const visualizationPath = join(temporary, 'owned-chart.html');
@@ -706,13 +736,13 @@ try {
   assert(widgetContext.some(entry => entry.field === 'interaction' && entry.modelContent?.changes?.some((change: any) => change.edits?.some((edit: any) => edit.label === 'Chart width' && edit.value === 70))));
   assert(!JSON.stringify(widgetContext).includes('PRIVATE_WIDGET_VALUE'));
   await recovery.waitFor({ state: 'visible' }); await recovery.waitFor({ state: 'hidden' });
-  await page.getByRole('button', { name: 'Open visualization', exact: true }).click();
+  await openSidePanelItem('Open visualization');
   await visualizationFrame.getByText('Owned visualization', { exact: true }).waitFor();
   assert.equal(await visualizationFrame.locator('html').getAttribute('lang'), await page.locator('html').getAttribute('lang'));
   await page.getByRole('region', { name: 'Visualization', exact: true }).getByRole('button', { name: 'Close', exact: true }).click();
   checks.push('actual App visualization directive, carousel, Tweak, widget persistence, structured prefill and model-visible context; private content excluded');
 
-  await page.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
+  await openSidePanelItem('Open Chrome panel');
   const browserSelection = page.getByLabel('浏览器所在电脑');
   await page.waitForFunction(() => { const option = document.querySelector<HTMLOptionElement>('select[aria-label="浏览器所在电脑"] option[value="server"]'); return option !== null && !option.disabled; });
   await browserSelection.selectOption('server');
@@ -764,8 +794,8 @@ try {
   assert.equal(Object.values(comments.value.entries).flat().length, 0, 'Removing an actual composer reference must await its authoritative comment deletion.');
   checks.push('actual App Chrome panel selects a disposable real Chrome target through official MCP; real DevTools element reaches composer and transactional removal');
   const sourceBeforeSettings = new URL(page.url());
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  await page.keyboard.press('Control+,');
+  await page.getByRole('heading', { name: 'General', exact: true, level: 1 }).waitFor();
   const expectedSettingsSource = { hostId: sourceBeforeSettings.searchParams.get('hostId') ?? 'local',
     returnTo: sourceBeforeSettings.pathname + sourceBeforeSettings.search + sourceBeforeSettings.hash,
     source: { kind: 'thread', threadId: decodeURIComponent(sourceBeforeSettings.pathname.split('/')[2]!) } };
@@ -779,12 +809,12 @@ try {
   assert.deepEqual(JSON.parse(new URL(legacySettings.url()).searchParams.get('yardSettingsOrigin')!), expectedSettingsSource);
   await legacySettings.close();
   const sourceReads = fake.calls('thread/read').length;
-  await page.reload(); await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  await page.reload(); await page.getByRole('heading', { name: 'General', exact: true, level: 1 }).waitFor();
   assert.deepEqual(JSON.parse(new URL(page.url()).searchParams.get('yardSettingsOrigin')!), expectedSettingsSource);
   const copiedSettings = await context.newPage();
-  await copiedSettings.goto(page.url()); await copiedSettings.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  await copiedSettings.goto(page.url()); await copiedSettings.getByRole('heading', { name: 'General', exact: true, level: 1 }).waitFor();
   assert.deepEqual(JSON.parse(new URL(copiedSettings.url()).searchParams.get('yardSettingsOrigin')!), expectedSettingsSource);
-  await copiedSettings.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await copiedSettings.getByRole('button', { name: 'Back to app', exact: true }).click();
   await copiedSettings.waitForURL(sourceBeforeSettings.href); await copiedSettings.close();
   await page.getByRole('button', { name: 'Hooks', exact: true }).click();
   await page.getByRole('textbox', { name: 'Working directory', exact: true }).waitFor();
@@ -805,14 +835,16 @@ try {
   await page.waitForFunction(path => [...document.querySelectorAll('.yard-muted')].some(node => node.textContent === 'Scope: ' + path), changedScope);
   await otherSettingsWriter.close();
   await page.getByRole('button', { name: 'General', exact: true }).click();
-  await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Back to app', exact: true }).click();
   await page.waitForURL(sourceBeforeSettings.href);
   assert(fake.calls('thread/read').slice(sourceReads).some(call => record(call.params).threadId === expectedSettingsSource.source.threadId));
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).click();
+  await page.keyboard.press('Control+,');
+  await page.getByRole('heading', { name: 'General', exact: true, level: 1 }).waitFor();
   checks.push('settings keep exact source and return route in copied URLs/reload and resolve changed project membership from a second actual page');
   const configWritesBefore = fake.calls('config/batchWrite').length;
-  await page.getByRole('button', { name: 'Models', exact: true }).click();
+  await page.getByRole('searchbox', { name: 'Search settings', exact: true }).fill('Models');
+  await page.getByLabel('Settings search results', { exact: true }).getByRole('button', { name: 'Models', exact: true }).click();
   await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('low');
   await page.locator('.yard-inline-save').getByRole('button', { name: 'Save', exact: true }).click();
   await page.locator('.yard-inline-save').waitFor({ state: 'hidden' });
@@ -828,26 +860,36 @@ try {
     && entry.hostId === 'local' && entry.state === 'succeeded' && record(entry.terminal).kind === 'ok').length, 2);
   checks.push('actual App model editor writes through original durable configuration operations and retains the verified base-layer value across reload');
   await page.getByRole('button', { name: 'General', exact: true }).click();
-  await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  await page.getByRole('heading', { name: 'General', exact: true, level: 1 }).waitFor();
   await page.getByRole('combobox', { name: 'Language', exact: true }).selectOption('zh-CN');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.waitForFunction(() => document.documentElement.lang === 'zh-CN');
-  await page.getByRole('heading', { name: '通用', exact: true }).waitFor();
-  await page.getByRole('button', { name: '新建对话', exact: true }).waitFor();
+  await page.getByRole('heading', { name: '通用', exact: true, level: 1 }).waitFor();
+  await page.locator('button.yard-settings-back').click();
+  if (!await page.getByRole('button', { name: '新建对话', exact: true }).first().isVisible()) {
+    await page.getByRole('button', { name: '切换侧边栏', exact: true }).click();
+  }
+  await page.getByRole('button', { name: '新建对话', exact: true }).first().waitFor();
+  await page.getByRole('textbox', { name: '与 Codex 协作', exact: true }).click();
+  await page.keyboard.press('Control+,');
+  await page.getByRole('heading', { name: '通用', exact: true, level: 1 }).waitFor();
   await page.reload();
-  await page.getByRole('heading', { name: '通用', exact: true }).waitFor();
+  await page.getByRole('heading', { name: '通用', exact: true, level: 1 }).waitFor();
   assert.equal(await page.evaluate(() => document.documentElement.lang), 'zh-CN');
   await page.getByRole('combobox', { name: '语言', exact: true }).selectOption('en-US');
   await page.getByRole('button', { name: '保存', exact: true }).click();
   await page.waitForFunction(() => document.documentElement.lang === 'en-US');
-  await page.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  await page.getByRole('heading', { name: 'General', exact: true, level: 1 }).waitFor();
   checks.push('saved locale changes actual settings, sidebar and document together and survives full reload; CSS font lists retain their fallback semantics');
+  await page.getByRole('button', { name: 'Back to app', exact: true }).click();
   const workspaceTabs = page.locator('.yard-tab-strip [role="tab"]');
   assert(await workspaceTabs.count() >= 2);
   await workspaceTabs.nth(1).click();
   await page.waitForFunction(() => document.querySelectorAll('.yard-tab-strip [role="tab"]')[1]?.getAttribute('aria-selected') === 'true');
+  await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).click();
   await page.keyboard.press('Control+1');
   await page.waitForFunction(() => document.querySelector('.yard-tab-strip [role="tab"]')?.getAttribute('aria-selected') === 'true');
+  await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).click();
   await page.keyboard.down('Control');
   await workspaceTabs.first().getByText('Ctrl+1', { exact: true }).waitFor();
   await page.keyboard.up('Control');

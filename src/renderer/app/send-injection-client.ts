@@ -1,11 +1,13 @@
 import type { TurnSummary } from '../../../lib/codex-protocol.ts';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import type { NativeInjectionRecord, SendIntent, SendRecoveryStore } from './send-recovery.ts';
+import type { SideChatChildDispatchProof } from '../side-chat/browser-authority.ts';
 
 /** The parent captures both fields synchronously before its first await. */
 export interface SendInjectionAuthority {
   daemonConnectionGeneration: string;
   assertBeforeSend(threadId: string): void;
+  readonly sideChat?: SideChatChildDispatchProof;
 }
 export interface NativeSubmissionInjection {
   store: SendRecoveryStore;
@@ -25,6 +27,7 @@ function assertAuthority(authority: SendInjectionAuthority, threadId: string) {
 async function dispatch(client: WorkbenchClient, store: SendRecoveryStore, intent: SendIntent,
   native: NativeInjectionRecord, step: 'injection' | 'turn', authority: SendInjectionAuthority) {
   const { reference } = native;
+  const sideChat = authority.sideChat && structuredClone(authority.sideChat);
   let invoked = false;
   let response: unknown;
   try {
@@ -32,9 +35,9 @@ async function dispatch(client: WorkbenchClient, store: SendRecoveryStore, inten
     invoked = true;
     response = await client.host('send-injection', step === 'injection'
       ? { action: 'inject', hostId: reference.hostId, reference, items: intent.injection!.responseItems,
-        turnParams: native.turnParams, daemonConnectionGeneration: authority.daemonConnectionGeneration }
+        turnParams: native.turnParams, daemonConnectionGeneration: authority.daemonConnectionGeneration, ...(sideChat ? { sideChat } : {}) }
       : { action: 'start', hostId: reference.hostId, reference, turnAttemptId: native.turnAttemptId,
-        daemonConnectionGeneration: authority.daemonConnectionGeneration },
+        daemonConnectionGeneration: authority.daemonConnectionGeneration, ...(sideChat ? { sideChat } : {}) },
     { assertBeforeSend: () => assertAuthority(authority, reference.threadId) });
   } catch (cause) {
     const error = !invoked ? Object.assign(new Error(cause instanceof Error ? cause.message : String(cause), { cause }),
@@ -48,7 +51,10 @@ async function dispatch(client: WorkbenchClient, store: SendRecoveryStore, inten
 /** Inject once, then start only its original immutable turn through the same host fence. */
 export async function sendNativeInjection(client: WorkbenchClient, context: NativeSubmissionInjection,
   threadId: string, turnParams: Record<string, unknown>): Promise<{ turn: TurnSummary }> {
-  const { store, intent, authority } = context;
+  const { store, intent } = context;
+  const authority = { daemonConnectionGeneration: context.authority.daemonConnectionGeneration,
+    assertBeforeSend: context.authority.assertBeforeSend.bind(context.authority),
+    ...(context.authority.sideChat ? { sideChat: structuredClone(context.authority.sideChat) } : {}) };
   if (!intent.injection) throw new Error('缺少原上下文发送记录。');
   assertAuthority(authority, threadId);
   let current = intent;

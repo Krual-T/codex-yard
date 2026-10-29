@@ -432,7 +432,7 @@ const fixture = {
   failNextAcceptance() { failAcceptance = true; acceptanceFailureStack = ''; },
   revokeDuringClear() { revokeAtClear = true; revocationStack = ''; },
   revocationStack: () => revocationStack,
-  restoreAuthority() { authorityGranted = true; authorityEpoch++; },
+  restoreAuthority() { authorityGranted = true; authorityEpoch++; root.render(<Fixture />); },
   showPeer() { fixture.renderPeer(true); },
   freezePeer() { peerLease = peerController?.freeze() ?? null; return !!peerLease; },
   async flushPeer() { await peerLease?.flush(); },

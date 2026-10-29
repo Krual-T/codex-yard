@@ -1,5 +1,5 @@
 import { SideChatBrowserAuthorityBridge, readSideChatDraftAssociation } from '../side-chat/browser-authority.ts';
-import type { SideChatBrowserIdentity, SideChatDraftIdentity, SideChatSendLease } from '../side-chat/browser-authority.ts';
+import type { SideChatBrowserIdentity, SideChatChildDispatchAuthority, SideChatDraftIdentity, SideChatSendLease } from '../side-chat/browser-authority.ts';
 import { SideChatController } from '../side-chat/controller.ts';
 import type { SideChatHostAction, SideChatHostPort, SideChatHostView, SideChatReadPurpose, SideChatScope } from '../side-chat/types.ts';
 import type { ComposerDraftController, ComposerDraftOwner } from '../composer/StandaloneComposer.tsx';
@@ -201,6 +201,11 @@ export class SideChatWorkspaceRuntime {
       call.settled = true;
       this.storeToken(reply, version);
       if (this.bridge.hasPendingChildCapture && (reply.view.childId || ['unknown', 'inflight'].includes(reply.view.fork.status))) return reply.view;
+      if (action !== 'close' && reply.view.childId && reply.view.fork.status === 'received'
+        && reply.view.inject.status === 'received' && !reply.view.close.requested && reply.view.close.status === 'idle') {
+        this.bridge.captureChildDispatch(reply.view.childId).assertCurrent();
+        return reply.view;
+      }
       if (reply.view.close.status === 'closed' && !reply.view.childId) {
         await this.bridge.completeEmptyClose(() => {
           if (this.lastCall !== call || !call.settled || reply.view.close.status !== 'closed' || reply.view.childId
@@ -277,6 +282,55 @@ export class SideChatWorkspaceRuntime {
       && this.bridge.hasLinkedOperation(view.operationId);
   }
   assertScope(): void { this.options.assertCurrent(); }
+  /** A write stays tied to this page, child, original connection and confirmed challenge. */
+  captureChildDispatch(childThreadId: string): SideChatChildDispatchAuthority {
+    const snapshot = this.controller?.getSnapshot(), view = snapshot?.view;
+    const verify = () => {
+      this.options.assertCurrent();
+      const current = this.controller?.getSnapshot();
+      if (!this.original || this.invalidated || this.hostFreeze || this.dispatching || !view || !current?.view
+        || current.view.operationId !== view.operationId || current.view.childId !== childThreadId
+        || current.phase !== 'ready' || current.pendingClose || current.view.close.requested
+        || !this.lastCall?.settled || this.lastCall.operationId !== view.operationId) {
+        throw notSent('原侧聊子会话写入权限尚未确认。');
+      }
+    };
+    verify();
+    const authority = this.bridge.captureChildDispatch(childThreadId);
+    return { proof: authority.proof, assertCurrent: () => { verify(); authority.assertCurrent(); } };
+  }
+  get needsChildAuthorization(): boolean {
+    const current = this.controller?.getSnapshot();
+    return this.original && !this.invalidated && !this.hostFreeze && !this.dispatching && !!this.token
+      && current?.phase === 'ready' && !current.pendingClose && !!current.view?.childId && !current.view.close.requested
+      && !!this.lastCall?.settled && !this.bridge.hasRegistration && this.bridge.hasLiveChild(current.view.childId);
+  }
+  /** Reconfirm the same live original child after an acknowledged revocation, without a host operation. */
+  async authorizeChild(): Promise<void> {
+    if (!this.needsChildAuthorization) return;
+    const view = this.controller!.getSnapshot().view!, token = this.token, version = this.tokenVersion, call = this.lastCall;
+    const check = () => {
+      this.options.assertCurrent();
+      const current = this.controller?.getSnapshot();
+      if (!this.original || this.invalidated || this.hostFreeze || this.token !== token || this.tokenVersion !== version
+        || this.lastCall !== call || !call?.settled || current?.phase !== 'ready' || current.pendingClose
+        || current.view?.operationId !== view.operationId || current.view.childId !== view.childId || current.view.close.requested) {
+        throw notSent('原侧聊在重新确认期间已改变。');
+      }
+    };
+    check(); this.dispatching++;
+    try {
+      await this.bridge.authorize('retry'); check(); this.bridge.captureChildDispatch(view.childId!).assertCurrent();
+    } catch (error) {
+      if (this.bridge.hasRegistration) {
+        try { await this.bridge.revoke(); } catch { throw new Error('侧聊重新确认的撤销结果未知，原稿已保留。'); }
+      }
+      throw error;
+    } finally {
+      this.dispatching--;
+      this.projectionRevision++; for (const listener of this.projectionListeners) listener();
+    }
+  }
   /** Freeze host actions synchronously before a close or route change can wait. */
   freezeHostOperations(kind: 'close' | 'navigation'): () => void {
     this.options.assertCurrent();

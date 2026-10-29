@@ -17,6 +17,14 @@ export interface RichCompletionContext { text: string; cursor: number; blockStar
 export interface RichCompletionQuery { start: number; end: number; token: string }
 export interface AgentMentionChoice { threadId: string; hostId: string; title: string }
 export interface AgentMentionCurrent { owner: ComposerDraftOwner; revision: string }
+export function agentMentionAttributes(choice: AgentMentionChoice): { name: string; displayName: string; conversationId: null; path: string } | null {
+  const threadId = choice.threadId.trim(), hostId = choice.hostId;
+  if (typeof hostId !== 'string' || !/^[A-Za-z0-9._:-]+$/.test(hostId)) return null;
+  const path = 'thread://' + threadId + '?hostId=' + encodeURIComponent(hostId);
+  if (!parseAgentThreadPath(path)) return null;
+  const name = choice.title.trim() || threadId;
+  return { name, displayName: name, conversationId: null, path };
+}
 const agentMentionTarget = Symbol('agentMentionTarget');
 export interface AgentMentionTarget {
   readonly [agentMentionTarget]: {
@@ -73,15 +81,12 @@ export function insertAgentMention(editor: EditorView, target: AgentMentionTarge
     || !editor.state.selection.eq(captured.selection)
     || (editor.state.storedMarks === null) !== (captured.marks === null)
     || !Mark.sameSet(editor.state.storedMarks ?? [], captured.marks ?? [])) return false;
-  const threadId = choice.threadId.trim(), hostId = choice.hostId;
-  if (typeof hostId !== 'string' || !/^[A-Za-z0-9._:-]+$/.test(hostId)) return false;
-  const path = 'thread://' + threadId + '?hostId=' + encodeURIComponent(hostId);
-  if (!parseAgentThreadPath(path)) return false;
-  const name = choice.title.trim() || threadId;
+  const attrs = agentMentionAttributes(choice);
+  if (!attrs) return false;
   const { selection, storedMarks } = editor.state;
   const marks = storedMarks ?? (selection.empty ? selection.$from.marks() : selection.$from.marksAcross(selection.$to) ?? []);
   if (marks.some(mark => mark.type.name === 'code' || mark.type.name === 'link')) return false;
-  const node = composerSchema.nodes.agentMention!.create({ name, displayName: name, conversationId: null, path }, null, marks);
+  const node = composerSchema.nodes.agentMention!.create(attrs, null, marks);
   let transaction = editor.state.tr.replaceWith(captured.from, captured.to, node);
   const after = captured.from + node.nodeSize;
   const next = transaction.doc.resolve(after).nodeAfter;

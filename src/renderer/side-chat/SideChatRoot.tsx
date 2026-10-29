@@ -12,7 +12,9 @@ import { composerDraftAtomKey } from '../composer/composer-draft-store.ts';
 import type { MessageEditNavigationController } from '../messages/StandaloneMessages.tsx';
 import { readBrowserAtoms } from '../storage/ui-atoms.ts';
 import { readSideChatDraftAssociation } from './browser-authority.ts';
-import type { SideChatBrowserIdentity, SideChatDraftAssociation, SideChatDraftIdentity, SideChatSendLease } from './browser-authority.ts';
+import type { SideChatBrowserIdentity, SideChatChildDispatchAuthority, SideChatDraftAssociation, SideChatDraftIdentity, SideChatSendLease } from './browser-authority.ts';
+import type { WorkbenchDispatchOptions } from '../workbench-contract.ts';
+import type { VisualizationFollowUp } from '../visualizations/index.tsx';
 
 export interface SideChatRootParent {
   hostId: string;
@@ -35,12 +37,13 @@ export interface SideChatRootChild {
 }
 export interface SideChatRootController {
   /** Explicit user action; captures Main and the current daemon before scheduling React work. */
-  open(): SideChatWorkspaceIdentity;
+  open(): Promise<SideChatWorkspaceIdentity>;
   /** Observe an existing durable association; never grants its old operation dispatch rights. */
   restore(identity: SideChatDraftIdentity): Promise<SideChatWorkspaceIdentity>;
   listRecoverable(): Promise<SideChatDraftAssociation[]>;
-  show(draftId: string): void;
+  show(draftId: string): Promise<void>;
   activeChild(): SideChatRootChild | null;
+  submitVisualization(request: VisualizationFollowUp, signal: AbortSignal): Promise<void>;
   freeze(): SideChatWorkspaceNavigationLease | null;
 }
 export interface SideChatRootProps {
@@ -83,8 +86,10 @@ interface Entry {
   editNavigation: MessageEditNavigationController | null;
   frozen: { purpose?: 'cancel' } | null;
   pending: Set<Promise<unknown>>;
+  activation: number;
 }
-interface Grant { entry: Entry; owner: ComposerDraftOwner; daemon: Daemon; check(): void; checkWithFreeze(lease: object): void }
+interface Grant { entry: Entry; owner: ComposerDraftOwner; daemon: Daemon; childAuthority?: SideChatChildDispatchAuthority;
+  check(): void; checkWithFreeze(lease: object): void }
 const beforeSend = (message: string) => Object.assign(new Error(message), { uncertain: false as const, sendPhase: 'before-send' as const });
 const nonempty = (value: unknown): value is string => typeof value === 'string' && !!value.trim();
 const sameOwner = (a: ComposerDraftOwner, b: ComposerDraftOwner) => a.hostId === b.hostId && a.threadId === b.threadId && a.draftId === b.draftId;
@@ -100,6 +105,8 @@ function synchronous(value: unknown): void {
 export function SideChatRoot(props: SideChatRootProps) {
   const latest = useRef(props); latest.current = props;
   const entries = useRef<Entry[]>([]), active = useRef<string | null>(null), alive = useRef(true), navigating = useRef(false);
+  const switching = useRef<{ lease: SideChatWorkspaceNavigationLease; commit(): unknown; flushed: boolean; running: boolean } | null>(null);
+  const [switchError, setSwitchError] = useState('');
   const grants = useRef(new WeakMap<() => void, Grant>());
   const [, render] = useState(0);
   const refresh = () => render(value => value + 1);
@@ -145,16 +152,71 @@ export function SideChatRoot(props: SideChatRootProps) {
     const now = latest.current;
     const entry: Entry = { identity: structuredClone(identity), parent, daemon, client: now.client, sessions: now.sessions,
       sends: now.sends, edits: now.edits, approvals: now.approvals, navigation: null, draft: null, editNavigation: null,
-      frozen: null, pending: new Set() };
-    entries.current.push(entry); active.current = identity.draftId; refresh(); publish();
+      frozen: null, pending: new Set(), activation: 0 };
+    entries.current.push(entry); select(identity.draftId);
     return structuredClone(identity);
+  };
+  const select = (draftId: string | null) => {
+    if (active.current !== draftId) {
+      const old = entries.current.find(entry => entry.identity.draftId === active.current);
+      if (old) old.activation++;
+      const next = entries.current.find(entry => entry.identity.draftId === draftId);
+      if (next) next.activation++;
+      active.current = draftId;
+    }
+    refresh(); publish();
+  };
+  const resumeSwitch = async (): Promise<unknown> => {
+    const transition = switching.current;
+    if (!transition || transition.running) throw beforeSend('原侧聊切换正在处理。');
+    transition.running = true;
+    try {
+      if (!transition.flushed) {
+        if (!await transition.lease.flush()) {
+          transition.lease.release(); switching.current = null; navigating.current = false;
+          throw beforeSend('原侧聊尚未排空，未切换。');
+        }
+        transition.flushed = true;
+      }
+      await transition.lease.revoke();
+      navigating.current = false;
+      let result: unknown;
+      try { result = transition.commit(); }
+      catch (cause) {
+        transition.lease.release(); switching.current = null;
+        const original = entries.current.find(entry => entry.identity.draftId === active.current);
+        if (original?.navigation) void original.navigation.activate().catch(() => {});
+        throw cause;
+      }
+      transition.lease.release(); switching.current = null;
+      setSwitchError('');
+      const selected = entries.current.find(entry => entry.identity.draftId === active.current);
+      if (selected?.navigation) void selected.navigation.activate().catch(() => {});
+      return result;
+    } catch (cause) {
+      if (switching.current === transition) setSwitchError('原侧聊撤权尚未确认，原稿保持冻结。');
+      throw cause;
+    } finally { transition.running = false; refresh(); }
+  };
+  const switchTo = <T,>(draftId: string, commit: () => T, allowFrozen = false): Promise<T> => {
+    if (!alive.current || navigating.current || switching.current) throw beforeSend('侧聊正在移交。');
+    assertSwitch(draftId);
+    const selected = entries.current.find(entry => entry.identity.draftId === active.current);
+    if (!selected || active.current === draftId || allowFrozen && selected.frozen) return Promise.resolve(commit());
+    const lease = selected.navigation?.freeze();
+    if (!lease) throw beforeSend('原侧聊尚不能冻结，未切换。');
+    navigating.current = true;
+    switching.current = { lease, commit, flushed: false, running: false };
+    refresh();
+    return resumeSwitch() as Promise<T>;
   };
   const open = () => {
     if (navigating.current || !alive.current) throw beforeSend('侧聊正在移交。');
     const { parent, daemon } = captureParent();
     if (parent.parent.archived) throw beforeSend('归档会话不能打开侧聊。');
-    return add({ hostId: parent.parent.hostId, parentThreadId: parent.parent.threadId, cwd: parent.parent.cwd,
-      draftId: crypto.randomUUID(), prepareId: crypto.randomUUID(), mode: 'new' }, parent, daemon);
+    const identity: SideChatWorkspaceIdentity = { hostId: parent.parent.hostId, parentThreadId: parent.parent.threadId, cwd: parent.parent.cwd,
+      draftId: crypto.randomUUID(), prepareId: crypto.randomUUID(), mode: 'new' };
+    return switchTo(identity.draftId, () => { synchronous(parent.assertCurrent()); daemon.assertOriginal(); return add(identity, parent, daemon); });
   };
   const track = <T,>(entry: Entry, action: () => Promise<T>): Promise<T> => {
     let result: Promise<T>;
@@ -190,26 +252,31 @@ export function SideChatRoot(props: SideChatRootProps) {
       release() { if (entry.frozen === lease) { parentLease.release(); entry.frozen = null; if (purpose === 'cancel' && alive.current) refresh(); } },
     };
   };
-  const capture = (entry: Entry, owner: ComposerDraftOwner): (() => void) => {
+  const capture = (entry: Entry, owner: ComposerDraftOwner, childAuthority?: SideChatChildDispatchAuthority): (() => void) => {
     assertEntry(entry);
     const snapshot = entry.draft?.snapshot();
     if (navigating.current || entry.frozen || entry.identity.mode !== 'new' || active.current !== entry.identity.draftId
       || !snapshot || !owner.threadId || !sameOwner(snapshot.owner, owner)) throw beforeSend('原侧聊输入权限不可用。');
     const daemon = latest.current.client.captureDaemonConnection(owner.hostId);
     if (daemon.generation !== entry.daemon.generation) throw beforeSend('原侧聊连接代次已改变。');
-    const fixed = structuredClone(owner);
+    const fixed = structuredClone(owner), activation = entry.activation;
+    if (childAuthority && (childAuthority.proof.identity.hostId !== fixed.hostId || childAuthority.proof.identity.childThreadId !== fixed.threadId
+      || childAuthority.proof.identity.draftId !== fixed.draftId || childAuthority.proof.identity.connectionGeneration !== daemon.generation)) {
+      throw beforeSend('原侧聊子会话授权身份已改变。');
+    }
     const checkFor = (lease: object | null) => {
       assertEntry(entry); daemon.assertOriginal();
       const current = entry.draft?.snapshot();
-      if (navigating.current || entry.frozen !== lease || active.current !== entry.identity.draftId
+      if (navigating.current || entry.activation !== activation || entry.frozen !== lease || active.current !== entry.identity.draftId
         || !current || !sameOwner(current.owner, fixed)) throw beforeSend('原侧聊输入权限已改变。');
+      childAuthority?.assertCurrent();
     };
     const check = () => checkFor(null);
-    check(); grants.current.set(check, { entry, owner: fixed, daemon, check, checkWithFreeze: lease => checkFor(lease) }); return check;
+    check(); grants.current.set(check, { entry, owner: fixed, daemon, childAuthority, check, checkWithFreeze: lease => checkFor(lease) }); return check;
   };
   const grantFor = (entry: Entry, original: (() => void) | null, hostId: string, threadId: unknown) => {
     const grant = original && grants.current.get(original);
-    if (!grant || grant.entry !== entry || grant.owner.hostId !== hostId || grant.owner.threadId !== threadId) {
+    if (!grant || !grant.childAuthority || grant.entry !== entry || grant.owner.hostId !== hostId || grant.owner.threadId !== threadId) {
       throw beforeSend('原侧聊操作授权或目标已改变。');
     }
     grant.check(); return grant;
@@ -225,12 +292,13 @@ export function SideChatRoot(props: SideChatRootProps) {
       if (existing) {
         if (existing.identity.hostId !== fixed.hostId || existing.identity.parentThreadId !== fixed.parentThreadId
           || existing.identity.cwd !== parent.parent.cwd) throw beforeSend('已挂载侧聊的原父会话已改变。');
-        active.current = fixed.draftId; refresh(); publish(); return structuredClone(existing.identity);
+        return switchTo(fixed.draftId, () => { select(fixed.draftId); return structuredClone(existing.identity); });
       }
       const saved = await readSideChatDraftAssociation(fixed);
       synchronous(parent.assertCurrent()); daemon.assertOriginal();
       if (!saved || saved.parentCwd && saved.parentCwd !== parent.parent.cwd) throw beforeSend('原侧聊草稿或父工作目录无法确认。');
-      return add({ ...fixed, cwd: parent.parent.cwd, mode: 'restore' }, parent, daemon);
+      return switchTo(fixed.draftId, () => { synchronous(parent.assertCurrent()); daemon.assertOriginal();
+        return add({ ...fixed, cwd: parent.parent.cwd, mode: 'restore' }, parent, daemon); });
     },
     async listRecoverable() {
       const { parent, daemon } = captureParent(), atoms = await readBrowserAtoms();
@@ -254,9 +322,15 @@ export function SideChatRoot(props: SideChatRootProps) {
     show(draftId) {
       if (navigating.current || !entries.current.some(entry => entry.identity.draftId === draftId)) throw beforeSend('原侧聊未挂载。');
       assertSwitch(draftId);
-      active.current = draftId; refresh(); publish();
+      return switchTo(draftId, () => { select(draftId); });
     },
     activeChild() { const entry = entries.current.find(item => item.identity.draftId === active.current); return entry ? child(entry) : null; },
+    submitVisualization(request, signal) {
+      const entry = entries.current.find(item => item.identity.draftId === active.current);
+      if (!entry || navigating.current || entry.frozen || !entry.navigation) throw beforeSend('原侧聊不可接收可视化输入。');
+      assertEntry(entry);
+      return entry.navigation.submitVisualization(request, signal);
+    },
     freeze() {
       if (!alive.current || navigating.current) return null;
       navigating.current = true;
@@ -295,6 +369,10 @@ export function SideChatRoot(props: SideChatRootProps) {
           for (const lease of leases) lease.release();
           valid = false; navigating.current = false;
           if (handedOff) { entries.current = []; active.current = null; refresh(); publish(); }
+          else {
+            const selected = entries.current.find(entry => entry.identity.draftId === active.current);
+            if (selected?.navigation) void selected.navigation.activate().catch(() => {});
+          }
         },
       };
     },
@@ -306,42 +384,50 @@ export function SideChatRoot(props: SideChatRootProps) {
   }, [api]);
 
   return <section aria-label="侧聊工作区" hidden={!props.visible}>
+    {switchError && <div role="alert">{switchError}{switching.current && <button type="button" onClick={() => void resumeSwitch().catch(() => {})}>重试撤销权限</button>}</div>}
     {entries.current.length > 1 && <nav aria-label="侧聊实例">{entries.current.map((entry, index) =>
       <button key={entry.identity.draftId} type="button" aria-current={active.current === entry.identity.draftId ? 'page' : undefined}
         disabled={entry.identity.draftId !== active.current && entries.current.find(item => item.identity.draftId === active.current)?.frozen?.purpose === 'cancel'}
-        onClick={() => api.show(entry.identity.draftId)}>侧聊 {index + 1}</button>)}</nav>}
+        onClick={() => { try { void api.show(entry.identity.draftId).catch(() => {}); } catch (cause) { setSwitchError(cause instanceof Error ? cause.message : String(cause)); } }}>侧聊 {index + 1}</button>)}</nav>}
     {entries.current.map(entry => <div key={entry.identity.draftId} hidden={active.current !== entry.identity.draftId}>
       <SideChatWorkspace client={entry.client} identity={entry.identity}
       open={props.visible && active.current === entry.identity.draftId} startOnMount={entry.identity.mode === 'new'}
       sessions={entry.sessions} sends={entry.sends} edits={entry.edits} approvals={entry.approvals}
       assertCurrent={() => assertEntry(entry)} freezeSending={(owner, purpose) => freezeSending(entry, owner, purpose)}
-      captureSubmissionAuthority={owner => capture(entry, owner)}
+      captureSubmissionAuthority={(owner, authority) => capture(entry, owner, authority)}
       nativeInjectionAuthority={(original, owner) => {
         const grant = grantFor(entry, original, owner.hostId, owner.threadId);
-        return { daemonConnectionGeneration: grant.daemon.generation, assertBeforeSend(threadId) {
+        return { daemonConnectionGeneration: grant.daemon.generation, sideChat: structuredClone(grant.childAuthority!.proof), assertBeforeSend(threadId) {
           if (threadId !== grant.owner.threadId) throw beforeSend('原侧聊注入目标已改变。'); grant.check();
         } };
       }}
       dispatchSubmission={(method, params, hostId, check, original) => {
         const grant = grantFor(entry, original, hostId, params.threadId);
-        return track(entry, () => entry.client.rpc(method, params, hostId, { daemonConnectionGeneration: grant.daemon.generation,
-          assertBeforeSend: () => { grant.check(); check(); } }));
+        const options: WorkbenchDispatchOptions & { sideChat: SideChatChildDispatchAuthority['proof'] } = {
+          daemonConnectionGeneration: grant.daemon.generation, sideChat: structuredClone(grant.childAuthority!.proof),
+          assertBeforeSend: () => { grant.check(); check(); } };
+        return track(entry, () => entry.client.rpc(method, params, hostId, options));
       }}
       dispatchQueueMutation={(method, params, hostId, original, check, onLateTerminal) => {
         const grant = grantFor(entry, original, hostId, params.threadId);
-        return track(entry, () => entry.client.rpc(method, params, hostId, { daemonConnectionGeneration: grant.daemon.generation,
-          assertBeforeSend: () => { grant.check(); check(); }, onLateTerminal }));
+        const options: WorkbenchDispatchOptions & { sideChat: SideChatChildDispatchAuthority['proof'] } = {
+          daemonConnectionGeneration: grant.daemon.generation, sideChat: structuredClone(grant.childAuthority!.proof),
+          assertBeforeSend: () => { grant.check(); check(); }, onLateTerminal };
+        return track(entry, () => entry.client.rpc(method, params, hostId, options));
       }}
       removeQueuedOriginal={(scope, queued, original, check) => {
         const grant = grantFor(entry, original, scope.hostId, scope.childThreadId);
         return track(entry, () => entry.client.host<'deleted' | 'changed'>('queue-edit', { hostId: scope.hostId,
-          threadId: scope.childThreadId, entry: queued, daemonConnectionGeneration: grant.daemon.generation },
+          threadId: scope.childThreadId, entry: queued, daemonConnectionGeneration: grant.daemon.generation,
+          sideChat: structuredClone(grant.childAuthority!.proof) },
         { assertBeforeSend: () => { grant.check(); check(); } }));
       }}
       interruptTurn={(scope, check, original) => {
         const grant = grantFor(entry, original, scope.hostId, scope.childThreadId);
-        return track(entry, () => entry.client.rpc('turn/interrupt', { threadId: scope.childThreadId, turnId: scope.turnId }, scope.hostId,
-          { daemonConnectionGeneration: grant.daemon.generation, assertBeforeSend: () => { grant.check(); check(); } }));
+        const options: WorkbenchDispatchOptions & { sideChat: SideChatChildDispatchAuthority['proof'] } = {
+          daemonConnectionGeneration: grant.daemon.generation, sideChat: structuredClone(grant.childAuthority!.proof),
+          assertBeforeSend: () => { grant.check(); check(); } };
+        return track(entry, () => entry.client.rpc('turn/interrupt', { threadId: scope.childThreadId, turnId: scope.turnId }, scope.hostId, options));
       }}
       cancelSend={(intent, check, original) => {
         const grant = grants.current.get(original), lease = entry.frozen;
@@ -353,7 +439,7 @@ export function SideChatRoot(props: SideChatRootProps) {
       cleanupChild={identity => latest.current.cleanupChild(identity)}
       onNavigationController={value => { entry.navigation = value; if (active.current === entry.identity.draftId) publish(); }}
       onClosed={() => latest.current.onClosed(structuredClone(entry.identity))}
-      onExitObservation={() => { if (active.current === entry.identity.draftId) { assertSwitch(null); active.current = null; refresh(); publish(); }
+      onExitObservation={() => { if (active.current === entry.identity.draftId) { assertSwitch(null); select(null); }
         latest.current.onExitObservation(structuredClone(entry.identity)); }}
       onOpenNew={scope => {
         if (!alive.current || !entries.current.includes(entry) || scope.hostId !== entry.identity.hostId
@@ -361,8 +447,9 @@ export function SideChatRoot(props: SideChatRootProps) {
         const { parent, daemon } = captureParent();
         if (parent.parent.archived || parent.parent.hostId !== entry.identity.hostId || parent.parent.threadId !== entry.identity.parentThreadId
           || parent.parent.cwd !== entry.identity.cwd) throw beforeSend('当前父会话无法打开新的侧聊。');
-        add({ hostId: parent.parent.hostId, parentThreadId: parent.parent.threadId, cwd: parent.parent.cwd,
-          draftId: crypto.randomUUID(), prepareId: crypto.randomUUID(), mode: 'new' }, parent, daemon);
+        const identity: SideChatWorkspaceIdentity = { hostId: parent.parent.hostId, parentThreadId: parent.parent.threadId, cwd: parent.parent.cwd,
+          draftId: crypto.randomUUID(), prepareId: crypto.randomUUID(), mode: 'new' };
+        return switchTo(identity.draftId, () => { synchronous(parent.assertCurrent()); daemon.assertOriginal(); add(identity, parent, daemon); }, true);
       }}
       onDraftController={value => { entry.draft = value; if (active.current === entry.identity.draftId) publish(); }}
       onDraftChange={() => { if (active.current === entry.identity.draftId) publish(); }}
