@@ -74,6 +74,8 @@ export interface SendInjectionOptions {
   readSection(): unknown;
   /** Persist the section in the existing full native-state root, within the supplied transaction. */
   persistSection(section: unknown): Promise<void>;
+  /** Hint matching pages to query the original status; this is not itself a receipt. */
+  onChange?(reference: SendInjectionReference, receipt: SendInjectionReceiptIdentity): void;
 }
 
 const object = (value: unknown): value is ObjectValue => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -216,9 +218,18 @@ export function createSendInjection(options: SendInjectionOptions) {
     return clone({ reference: operation.reference, injection: operation.injection, turn: operation.turn,
       pendingPersistence: event ? { step: event.step, attemptId: event.attemptId, terminal: event.terminal } : null });
   }
+  function notify(event: Observation): void {
+    try { void Promise.resolve(options.onChange?.(clone(event.reference), { step: event.step, attemptId: event.attemptId })).catch(() => {}); }
+    catch { /* A notification failure must not change the original receipt. */ }
+  }
   function remember(event: Observation): void {
     const existing = observed.get(observationKey(event));
-    if (!existing || event.terminal !== null || existing.terminal === null) observed.set(observationKey(event), clone(event));
+    if (!existing || event.terminal !== null || existing.terminal === null) {
+      if (!isDeepStrictEqual(existing, event)) {
+        observed.set(observationKey(event), clone(event));
+        notify(event);
+      }
+    }
   }
   async function settle(event: Observation): Promise<SendInjectionStatus | null> {
     try {
@@ -256,6 +267,7 @@ export function createSendInjection(options: SendInjectionOptions) {
         const remembered = observed.get(observationKey(event));
         if (remembered && isDeepStrictEqual(remembered, event)) observed.delete(observationKey(event));
       }
+      notify(event);
       return result ? statusOf(result) : null;
     } catch (error) { remember(event); throw error; }
   }

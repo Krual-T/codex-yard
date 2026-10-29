@@ -393,6 +393,26 @@ test('a stale retry cannot persist a newer turn attempt receipt', async t => {
   assert.equal(f.peer.calls('turn/start').length, 2);
 });
 
+test('late receipt and failed persistence notify the original identity without exposing payload', async t => {
+  const f = await fixture(t), value = f.input();
+  const notifications: { reference: SendInjectionReference; step: string; attemptId: string }[] = [];
+  const service = createSendInjection({ ...f.deps, onChange(reference, receipt) {
+    notifications.push({ reference, ...receipt });
+    throw new Error('fixture notification failure');
+  } });
+  let pending: { id: string | number; send(value: unknown): void } | undefined, failures = 0;
+  f.checkpoint(step => { if (step === 'file-sync' && failures > 0) { failures--; throw new Error('fixture sync failure'); } });
+  f.peer.handlers.set('thread/inject_items', (_params, context) => { pending = { id: context.message.id!, send: context.send }; return NO_REPLY; });
+  assert.equal((await f.inject(value, f.original, service)).injection.phase, 'unknown');
+  failures = 1;
+  assert.ok(pending); pending.send({ id: pending.id, result: {} });
+  const received = await eventually(() => service.status(value.reference), result => result?.pendingPersistence?.terminal?.kind === 'injected');
+  assert.equal(received?.injection.phase, 'unknown');
+  assert.deepEqual(notifications.at(-1), { reference: value.reference, step: 'injection', attemptId: value.reference.injectionAttemptId });
+  assert.equal((await service.retryPersistence(value.reference, { step: 'injection', attemptId: value.reference.injectionAttemptId }))?.injection.phase, 'injected');
+  assert.equal(f.peer.calls('thread/inject_items').length, 1);
+});
+
 test('the original late turn acceptance releases its fence without another turn', async t => {
   const f = await fixture(t), value = f.input();
   assert.equal((await f.inject(value)).injection.phase, 'injected');
