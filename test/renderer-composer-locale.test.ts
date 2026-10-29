@@ -17,8 +17,11 @@ test('locale changes update composer controls without replacing the draft or ric
     const state={submissions:[]};
     const client={async rpc(method) {
       if(method==='model/list') return {data:[{id:'fixture-model',model:'fixture-model',displayName:'Fixture Model',isDefault:true,supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};
-      if(method==='config/read') return {config:{model:'fixture-model',sandbox_mode:'workspace-write'},
+      if(method==='config/read') return {config:{model:'fixture-model',sandbox_mode:'workspace-write',
+        sandbox_workspace_write:{writable_roots:[],network_access:false,exclude_tmpdir_env_var:false,exclude_slash_tmp:false}},
         layers:[{name:{type:'user',file:'/fixture/codex/config.toml',profile:null},version:'1'}]};
+      if(method==='configRequirements/read') return {requirements:null};
+      if(method==='permissionProfile/list') return {data:[],nextCursor:null};
       throw Error('unexpected RPC '+method);
     },async host(endpoint){if(endpoint==='get-setting') return {exists:false};
       if(endpoint==='codex-home') return {codexHome:'/fixture/codex'}; throw Error('unexpected host '+endpoint);},
@@ -46,12 +49,15 @@ test('locale changes update composer controls without replacing the draft or ric
     await english.waitFor();
     assert.equal(await english.inputValue(), 'draft stays');
     assert.equal(await page.evaluate(() => document.activeElement === (window as any).originalEditor), true);
+    await page.locator('.standalone-composer__model > summary').filter({ hasText: 'Fixture Model' }).waitFor();
     await page.waitForFunction(() => {
-      const model = document.querySelector('[aria-label="Model"]') as HTMLSelectElement | null;
-      return model?.value === 'fixture-model' && model.title === 'Fixture Model';
+      const model = document.querySelector<HTMLButtonElement>('[data-model="fixture-model"]');
+      return model && !model.disabled;
     });
     await page.locator('.standalone-composer__access summary').click();
+    await page.getByText('Other permission settings', { exact: true }).click();
     await page.getByLabel('Sandbox permissions').selectOption('read-only');
+    await page.locator('.standalone-composer__access > summary').click();
     await page.locator('.standalone-composer__add summary').click();
     await page.getByRole('button', { name: 'Rich text editor' }).click();
     const rich = page.getByRole('textbox', { name: 'Work with Codex' });

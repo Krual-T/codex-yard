@@ -261,7 +261,7 @@ test('the main composer edits ordered input, retains attachments and survives re
     assert.equal(await page.evaluate(value => (window as any).fixture.setDraft(value), linkDraft), true);
     const rich = page.locator('.ProseMirror'), links = rich.locator('[data-mention="rich-link"]');
     await links.first().waitFor();
-    assert.equal(await links.nth(1).getAttribute('aria-busy'), 'true');
+    assert.equal(await links.nth(1).getAttribute('data-saved-loading'), 'true');
     assert.equal(await links.nth(1).innerText(), 'Loading link');
     await links.first().click();
     assert.equal(await links.first().getAttribute('aria-expanded'), 'true');
@@ -293,7 +293,7 @@ test('the main composer edits ordered input, retains attachments and survives re
     await page.reload(); await mount();
     await page.evaluate(() => (window as any).fixture.render({ context: { draftId: 'rich-link' } }));
     await links.first().waitFor();
-    assert.equal(await links.nth(1).getAttribute('aria-busy'), 'true');
+    assert.equal(await links.nth(1).getAttribute('data-saved-loading'), 'true');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);
     const linkSent = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
