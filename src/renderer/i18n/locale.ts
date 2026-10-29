@@ -45,6 +45,7 @@ export function hasTranslations(locale: string): boolean {
 }
 
 function languageLabel(locale: string): string {
+  if (locale === 'en-US') return 'English';
   try { return new Intl.DisplayNames([locale], { type: 'language' }).of(locale) ?? locale; }
   catch { return locale; }
 }

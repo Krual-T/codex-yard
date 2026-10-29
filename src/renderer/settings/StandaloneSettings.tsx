@@ -303,7 +303,10 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
           <p role="status">{t('Selected project or session')}: {t('Loading...')}</p> :
         section === 'general-settings' ? <GeneralSection preferences={preferences} snapshot={snapshot} platform={platform} navigate={navigate} /> :
           section === 'appearance' ? <AppearanceSection key={editorRevision} preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} onDirtyChange={setOtherDirty} onInvalidChange={setAppearanceInvalid} revealTarget={searchTarget?.section === section ? searchTarget.id : null} /> :
-            section === 'configuration' ? <><h1>{translateKnown(t, 'Configuration')}</h1><AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /></> :
+            section === 'configuration' ? <><div className="yard-configuration-heading"><h1>{translateKnown(t, 'Configuration')}</h1>
+              <p>{t('Configure permissions, web access, and agent responses for new chats')}{' '}
+                <a href="https://developers.openai.com/codex/config-basic" target="_blank" rel="noreferrer">{t('Learn more')}</a></p></div>
+              <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /></> :
             section === 'models' ? <ModelSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
               section === 'agent' ? <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
                 section === 'personalization' ? <PersonalizationSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} InstructionEditor={InstructionEditor} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
