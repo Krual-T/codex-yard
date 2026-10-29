@@ -18,7 +18,8 @@ const selected = process.env.YARD_MAIN_EDIT_SCENARIOS?.split(',').filter(Boolean
 const knownScenarios = new Set(['same-thread-dom', 'navigation-drain-and-restore', 'history-failure-unfreezes',
   'pending-acquisition-navigation', 'pending-submit-navigation', 'pending-submit-reconnect', 'cross-page-adopt-latest',
   'late-receipt-preserves-newer-page', 'settings-update-does-not-carry-overrides', 'archive-during-navigation', 'history-current-replace-failure',
-  'history-initial-replace-failure']);
+  'history-initial-replace-failure', 'idb-wait-requires-persisted-text', 'cold-load-navigation', 'cold-load-navigation-failure',
+  'cold-history-failure-retry-navigation']);
 if (selected && (!selected.length || selected.some(name => !knownScenarios.has(name)))) {
   throw new Error('YARD_MAIN_EDIT_SCENARIOS must contain known scenario names.');
 }
@@ -32,7 +33,8 @@ const { createFakeCodex, fixtureThread, fixtureTurn, agentItem } = await import(
 const workspace = join(runtime, 'workspace');
 const fake = await createFakeCodex(runtime);
 const names = ['same', 'navigation', 'history', 'acquire', 'connection', 'pending-navigation', 'cross-page', 'late', 'settings',
-  'archive-during-navigation', 'history-current-replace-failure', 'history-initial-replace-failure'];
+  'archive-during-navigation', 'history-current-replace-failure', 'history-initial-replace-failure', 'idb-wait-requires-persisted-text',
+  'cold-load-navigation', 'cold-load-navigation-failure', 'cold-history-failure-retry-navigation'];
 for (const name of names) {
   fake.threads.set(name, fixtureThread(name, workspace, { name: `Edit ${name}`, turns: [fixtureTurn('turn-' + name, [
     { id: 'user-' + name, type: 'userMessage', content: [{ type: 'text', text: 'Original ' + name, text_elements: [] }] },
@@ -58,7 +60,7 @@ const results: { name: string; status: 'pass' | 'fail'; details?: string }[] = [
 const observations: Record<string, unknown> = {};
 const openPages: Page[] = [];
 
-async function newPage(thread: string, options?: { path?: string; beforeGoto?: (page: Page) => Promise<void> }) {
+async function newPage(thread: string, options?: { path?: string; beforeGoto?: (page: Page) => Promise<void>; cold?: boolean }) {
   const page = await browser.newPage(); openPages.push(page);
   page.setDefaultTimeout(10_000);
   page.on('pageerror', error => errors.push(error.message));
@@ -74,9 +76,12 @@ async function newPage(thread: string, options?: { path?: string; beforeGoto?: (
   const response = await page.goto(app.url + (options?.path ?? '/local/' + thread));
   assert.equal(response?.status(), 200);
   assert.match(await response!.text(), /<script type="module" src="\/workbench-entry\.js"><\/script>/);
-  await page.getByText('Fixture ' + thread, { exact: true }).waitFor();
   assert.deepEqual(entryResponses, [200]);
-  await page.locator('.yard-message-edit, button[aria-label="Edit message"]').first().waitFor({ state: 'visible' });
+  if (options?.cold) await page.locator('.yard-conversation .yard-loading').waitFor();
+  else {
+    await page.getByText('Fixture ' + thread, { exact: true }).waitFor();
+    await page.locator('.yard-message-edit, button[aria-label="Edit message"]').first().waitFor({ state: 'visible' });
+  }
   await page.waitForFunction(() => document.querySelector('.yard-connection')?.getAttribute('title') === 'Browser: connected; Host: connected');
   return page;
 }
@@ -85,21 +90,22 @@ async function startEdit(page: Page, text: string) {
   await page.getByRole('button', { name: 'Edit message', exact: true }).click();
   await editor(page).fill(text);
 }
-async function waitForEdit(page: Page, thread: string, text: string) {
-  await page.waitForFunction(async expected => {
-    const root = await new Promise<{ atoms?: Record<string, unknown> } | undefined>((done, reject) => {
-      const open = indexedDB.open('codex-yard.ui-atoms.v1', 1);
-      open.onerror = () => reject(open.error);
-      open.onsuccess = () => {
-        const db = open.result, tx = db.transaction('atoms', 'readonly');
-        const get = tx.objectStore('atoms').get('native-atoms');
-        get.onsuccess = () => done(get.result); get.onerror = () => reject(get.error);
-        tx.oncomplete = () => db.close();
-      };
-    });
-    const entries = root?.atoms?.['codex-yard.message-edits.v1'] as Record<string, { recovery?: { draft?: { text?: string } } }> | undefined;
-    return entries?.[JSON.stringify(['local', expected.thread])]?.recovery?.draft?.text === expected.text;
-  }, { thread, text });
+async function waitForEdit(page: Page, thread: string, text: string, timeoutMs = 10_000) {
+  let observed: EditRecord | undefined;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const wait = async () => {
+    while (!stopped) {
+      observed = await readEdit(page, thread);
+      if (stopped || observed?.recovery.draft.text === text) return;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  };
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out waiting for persisted edit ${JSON.stringify(text)}; last text: ${JSON.stringify(observed?.recovery.draft.text)}`)), timeoutMs);
+  });
+  try { await Promise.race([wait(), timeout]); }
+  finally { stopped = true; clearTimeout(timer); }
 }
 type EditRecord = { recovery: { draft: { text: string }; editor: { sessionId: string; revision: number } };
   submission?: { operationId: string; stage: string } };
@@ -182,7 +188,181 @@ async function scenario(name: string, run: () => Promise<void>) {
   console.log(JSON.stringify(results.at(-1)));
 }
 
+async function coldLoadNavigation(thread: string, failNavigation: boolean, initialHistoryFailure = false) {
+  const fixturePath = join(workspace, 'barrier.txt');
+  await writeFile(fixturePath, 'file recovery barrier fixture\n');
+  const seed = await newPage(thread);
+  await startEdit(seed, 'cold persisted draft'); await waitForEdit(seed, thread, 'cold persisted draft');
+  const saved = await readEdit(seed, thread);
+  assert(saved);
+  await seed.close();
+
+  const historyEntered = deferred(), releaseHistory = deferred(), firstResumeEntered = deferred(), releaseFirstResume = deferred(),
+    releaseRetryResume = deferred();
+  let rejectFirstResume = initialHistoryFailure;
+  if (initialHistoryFailure) fake.handlers.set('thread/resume', async params => {
+    if (params.threadId === thread && rejectFirstResume) {
+      rejectFirstResume = false; firstResumeEntered.resolve(); await releaseFirstResume.promise;
+      throw new Error('fixture first history failure');
+    }
+    if (params.threadId === thread) await releaseRetryResume.promise;
+    return fake.defaultResult('thread/resume', params);
+  });
+  fake.handlers.set('thread/turns/list', async params => {
+    if (params.threadId === thread) { historyEntered.resolve(); await releaseHistory.promise; }
+    return fake.defaultResult('thread/turns/list', params);
+  });
+  fake.handlers.set('fs/getMetadata', params => {
+    const file = params.path === fixturePath;
+    if (!file && params.path !== workspace) throw new Error('Unexpected fixture path: ' + String(params.path));
+    return { isFile: file, isDirectory: !file, isSymlink: false, createdAtMs: 1, modifiedAtMs: 1 };
+  });
+  fake.handlers.set('fs/readDirectory', params => {
+    assert.equal(params.path, workspace);
+    return { entries: [{ fileName: 'barrier.txt', isFile: true, isDirectory: false }] };
+  });
+  let page: Page | undefined;
+  try {
+    page = await newPage(thread, { cold: true });
+    if (initialHistoryFailure) {
+      await Promise.race([firstResumeEntered.promise, new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('First history request did not reach the peer')), 10_000).unref();
+      })]);
+      releaseFirstResume.resolve();
+      const initialAlert = page.getByRole('alert').filter({ hasText: 'fixture first history failure' });
+      await initialAlert.waitFor();
+      await page.locator('.yard-messages-root .yard-message-empty').filter({ hasText: 'Select a conversation' }).waitFor();
+      assert.equal(await page.locator('.yard-conversation .yard-loading, .yard-message-edit, button[aria-label="Edit message"]').count(), 0);
+      await page.screenshot({ path: join(artifacts, `${thread}-empty-before-retry.png`) });
+      await initialAlert.getByRole('button', { name: 'Retry', exact: true }).click();
+    }
+    const waitForHistory = () => Promise.race([historyEntered.promise, new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Cold history request did not reach the peer')), 10_000).unref();
+    })]);
+    if (!initialHistoryFailure) await waitForHistory();
+    assert.equal(new URL(page.url()).pathname, '/local/' + thread);
+    assert.equal(await page.locator('.yard-message-edit, button[aria-label="Edit message"]').count(), 0);
+    await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
+    await page.getByRole('button', { name: 'barrier.txt', exact: true }).waitFor();
+
+    await page.evaluate(() => {
+      const descriptor = Object.getOwnPropertyDescriptor(IDBTransaction.prototype, 'oncomplete');
+      if (!descriptor?.set || !descriptor.get) throw new Error('Cannot intercept the IDB transaction completion callback');
+      const gate: { armed: boolean; held: boolean; released: boolean; stack: string; release?: () => void } =
+        { armed: true, held: false, released: false, stack: '' };
+      (window as unknown as { fileRecoveryGate: typeof gate }).fileRecoveryGate = gate;
+      Object.defineProperty(IDBTransaction.prototype, 'oncomplete', {
+        configurable: true,
+        get(this: IDBTransaction) { return descriptor.get!.call(this); },
+        set(this: IDBTransaction, handler: ((this: IDBTransaction, event: Event) => void) | null) {
+          if (!gate.armed || !handler) { descriptor.set!.call(this, handler); return; }
+          gate.armed = false; gate.stack = new Error('file recovery transaction').stack ?? '';
+          const transaction = this;
+          descriptor.set!.call(transaction, (event: Event) => {
+            gate.held = true;
+            gate.release = () => {
+              if (gate.released) return;
+              gate.released = true;
+              Object.defineProperty(IDBTransaction.prototype, 'oncomplete', descriptor);
+              handler.call(transaction, event);
+            };
+          });
+        },
+      });
+    });
+    await page.getByRole('button', { name: 'barrier.txt', exact: true }).click();
+    await page.waitForFunction(() => (window as unknown as { fileRecoveryGate: { held: boolean } }).fileRecoveryGate.held);
+    await page.locator('.yard-file-status').getByText('Loading...', { exact: true }).waitFor();
+    const beforeLeave = {
+      url: page.url(),
+      loading: await page.locator('.yard-conversation .yard-loading').count(),
+      messageRoots: await page.locator('.yard-conversation .yard-messages-root').count(),
+      editors: await editor(page).count(),
+    };
+    assert.equal(beforeLeave.loading, initialHistoryFailure ? 0 : 1);
+    assert.equal(beforeLeave.messageRoots, initialHistoryFailure ? 1 : 0);
+    assert.equal(beforeLeave.editors, 0);
+    if (failNavigation) await page.evaluate(() => {
+      const original = history.pushState;
+      history.pushState = function () {
+        history.pushState = original;
+        throw new DOMException('fixture cold navigation failure', 'SecurityError');
+      };
+    });
+    page.on('dialog', dialog => { void dialog.accept(); });
+    await settings(page);
+    await page.waitForFunction(() => !!document.querySelector('.yard-conversation[inert]'));
+    assert.equal(new URL(page.url()).pathname, '/local/' + thread);
+    assert.equal(await page.locator('.yard-conversation .yard-loading').count(), initialHistoryFailure ? 0 : 1);
+    if (initialHistoryFailure) assert.equal(await page.locator('.yard-messages-root .yard-message-empty').count(), 1);
+    assert.deepEqual(await readEdit(page, thread), saved);
+
+    if (initialHistoryFailure) { releaseRetryResume.resolve(); await waitForHistory(); }
+    releaseHistory.resolve();
+    await page.getByText('Fixture ' + thread, { exact: true }).waitFor();
+    await page.locator('.yard-conversation .yard-message-edit, .yard-conversation button[aria-label="Edit message"]').first().waitFor();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    const gate = await page.evaluate(() => {
+      const state = (window as unknown as { fileRecoveryGate: { held: boolean; released: boolean; stack: string } }).fileRecoveryGate;
+      return { ...state, loading: !!document.querySelector('.yard-conversation .yard-loading'),
+        inert: !!document.querySelector('.yard-conversation[inert]'), fileLoading: !!document.querySelector('.yard-file-status[role="status"]') };
+    });
+    assert.equal(gate.held, true); assert.equal(gate.released, false);
+    assert.match(gate.stack, /readFileRecovery/, 'the held transaction must belong to the real file recovery barrier');
+    assert.equal(gate.loading, false); assert.equal(gate.inert, true); assert.equal(gate.fileLoading, true);
+    assert.equal(new URL(page.url()).pathname, '/local/' + thread);
+    const editorCount = await editor(page).count();
+    observations[thread] = { saved, beforeLeave, gate, editorCount, urlWhileBlocked: page.url() };
+    if (editorCount) await page.screenshot({ path: join(artifacts, `${thread}-blocked-failure.png`) });
+    assert.equal(editorCount, 0, 'cold recovery must not acquire an editable session during the leave barrier');
+    await page.evaluate(() => (window as unknown as { fileRecoveryGate: { release(): void } }).fileRecoveryGate.release());
+
+    if (failNavigation) {
+      await page.getByRole('alert').filter({ hasText: 'fixture cold navigation failure' }).waitFor();
+      assert.equal(new URL(page.url()).pathname, '/local/' + thread);
+      await page.waitForFunction(() => !document.querySelector('.yard-conversation[inert]'));
+    } else {
+      await page.waitForURL('**/settings/general**');
+      assert.deepEqual(await readEdit(page, thread), saved);
+      await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+      await page.waitForURL('**/local/' + thread);
+    }
+    await editor(page).waitFor();
+    assert.equal(await editor(page).inputValue(), 'cold persisted draft');
+    const nextText = initialHistoryFailure ? 'cold edit after history retry and return'
+      : failNavigation ? 'cold edit after failed navigation' : 'cold edit after return';
+    await editor(page).fill(nextText); await waitForEdit(page, thread, nextText);
+    const next = await readEdit(page, thread);
+    assert.equal(next?.recovery.editor.sessionId, saved.recovery.editor.sessionId);
+    assert((next?.recovery.editor.revision ?? -1) > saved.recovery.editor.revision);
+    observations[thread] = { saved, beforeLeave, gate, editorCount, next, failNavigation, initialHistoryFailure, url: page.url() };
+  } finally {
+    releaseHistory.resolve(); releaseFirstResume.resolve(); releaseRetryResume.resolve();
+    if (page && !page.isClosed()) await page.evaluate(() => {
+      (window as unknown as { fileRecoveryGate?: { release?(): void } }).fileRecoveryGate?.release?.();
+    }).catch(() => {});
+    fake.handlers.delete('thread/turns/list'); fake.handlers.delete('thread/resume');
+    fake.handlers.delete('fs/getMetadata'); fake.handlers.delete('fs/readDirectory');
+  }
+}
+
 try {
+  await scenario('idb-wait-requires-persisted-text', async () => {
+    const thread = 'idb-wait-requires-persisted-text', page = await newPage(thread);
+    await startEdit(page, 'persisted first'); await waitForEdit(page, thread, 'persisted first');
+    const before = await readEdit(page, thread);
+    await assert.rejects(waitForEdit(page, thread, 'not yet persisted', 200), /Timed out waiting for persisted edit/);
+    await editor(page).fill('persisted second'); await waitForEdit(page, thread, 'persisted second');
+    const after = await readEdit(page, thread);
+    assert.equal(after?.recovery.editor.sessionId, before?.recovery.editor.sessionId);
+    assert((after?.recovery.editor.revision ?? -1) > (before?.recovery.editor.revision ?? -1));
+    observations['idb-wait-requires-persisted-text'] = { before, after };
+  });
+
+  await scenario('cold-load-navigation', () => coldLoadNavigation('cold-load-navigation', false));
+  await scenario('cold-load-navigation-failure', () => coldLoadNavigation('cold-load-navigation-failure', true));
+  await scenario('cold-history-failure-retry-navigation', () => coldLoadNavigation('cold-history-failure-retry-navigation', false, true));
+
   await scenario('same-thread-dom', async () => {
     const page = await newPage('same');
     await startEdit(page, 'same-thread unsent'); await waitForEdit(page, 'same', 'same-thread unsent');
@@ -258,28 +438,70 @@ try {
   });
 
   await scenario('history-current-replace-failure', async () => {
-    const thread = 'history-current-replace-failure', page = await newPage(thread);
+    const thread = 'history-current-replace-failure';
+    const path = `/local/${thread}?fixture=original#fragment`;
+    const page = await newPage(thread, { path });
     await startEdit(page, 'replace failure retained'); await waitForEdit(page, thread, 'replace failure retained');
+    const savedBefore = await readEdit(page, thread);
+    const originalIndex = await page.evaluate(() => history.state?.__yardIndex);
     await page.evaluate(() => {
-      const state = window as unknown as { historyReplaceAttempted: boolean };
-      state.historyReplaceAttempted = false;
+      const state = window as unknown as { historyReplaceAttempts: number; historyReplaceAllowed: boolean; historyRetryClicked: boolean;
+        historyReplaceBeforeRetry: string[]; historyReplaceAfterRetry: string[]; releaseHistoryReplace?: () => void };
+      state.historyReplaceAttempts = 0; state.historyReplaceAllowed = false; state.historyRetryClicked = false;
+      state.historyReplaceBeforeRetry = []; state.historyReplaceAfterRetry = [];
       const original = history.replaceState;
+      state.releaseHistoryReplace = () => { state.historyReplaceAllowed = true; };
+      document.addEventListener('click', event => {
+        const button = event.target instanceof Element ? event.target.closest('button') : null;
+        if (button?.textContent?.trim() === 'Retry' && button.closest('[role="alert"]')?.textContent?.includes('fixture current URL replace failure')) {
+          state.historyRetryClicked = true;
+        }
+      }, true);
       history.replaceState = function (data, unused, url) {
         if (url && new URL(url, location.href).searchParams.has('archived')) {
-          state.historyReplaceAttempted = true; history.replaceState = original;
-          throw new DOMException('fixture current URL replace failure', 'SecurityError');
+          if (!state.historyReplaceAllowed) {
+            state.historyReplaceAttempts++;
+            throw new DOMException('fixture current URL replace failure', 'SecurityError');
+          }
+          (state.historyRetryClicked ? state.historyReplaceAfterRetry : state.historyReplaceBeforeRetry).push(new URL(url, location.href).href);
         }
         return original.call(this, data, unused, url);
       };
     });
     fake.archived.add(thread);
     fake.broadcast({ method: 'thread/archived', params: { threadId: thread } });
-    await page.waitForFunction(() => (window as unknown as { historyReplaceAttempted: boolean }).historyReplaceAttempted);
+    await page.waitForFunction(() => (window as unknown as { historyReplaceAttempts: number }).historyReplaceAttempts > 0);
     assert.equal(await page.getByRole('heading', { name: 'Unable to display Codex Yard' }).count(), 0,
       'a current-page History replace failure must not replace the editor');
     assert.equal(new URL(page.url()).pathname, '/local/' + thread);
     assert.equal(await editor(page).inputValue(), 'replace failure retained');
     assert.equal(await page.locator('.yard-message-edit').getByRole('button', { name: 'Send', exact: true }).isDisabled(), true);
+    assert.equal(page.url(), app.url + path);
+    const alert = page.getByRole('alert').filter({ hasText: 'fixture current URL replace failure' });
+    await alert.waitFor();
+    const failedAttempts = await page.evaluate(() => {
+      const state = window as unknown as { historyReplaceAttempts: number; releaseHistoryReplace(): void };
+      state.releaseHistoryReplace();
+      return state.historyReplaceAttempts;
+    });
+    await alert.getByRole('button', { name: 'Retry', exact: true }).click();
+    await page.waitForFunction(() => new URL(location.href).searchParams.get('archived') === '1');
+    const retryCalls = await page.evaluate(() => {
+      const state = window as unknown as { historyRetryClicked: boolean; historyReplaceBeforeRetry: string[]; historyReplaceAfterRetry: string[] };
+      return { clicked: state.historyRetryClicked, before: state.historyReplaceBeforeRetry, after: state.historyReplaceAfterRetry };
+    });
+    assert.equal(retryCalls.clicked, true);
+    assert.deepEqual(retryCalls.before, []);
+    assert(retryCalls.after.some(url => new URL(url).searchParams.get('archived') === '1'));
+    const after = new URL(page.url());
+    assert.equal(after.searchParams.get('fixture'), 'original');
+    assert.equal(after.hash, '#fragment');
+    assert.equal(await page.evaluate(() => history.state?.__yardIndex), originalIndex);
+    assert.equal(await editor(page).inputValue(), 'replace failure retained');
+    assert.equal(await page.locator('.yard-message-edit').getByRole('button', { name: 'Send', exact: true }).isDisabled(), true);
+    assert.deepEqual(await readEdit(page, thread), savedBefore);
+    assert.equal(await alert.count(), 0);
+    observations['history-current-replace-failure'] = { savedBefore, failedAttempts, retryCalls, urlAfterRetry: after.href, historyIndex: originalIndex };
   });
 
   await scenario('history-initial-replace-failure', async () => {
@@ -320,9 +542,26 @@ try {
     assert.equal(await editor(page).inputValue(), 'saved before router initialization');
     const savedAfter = await readEdit(page, thread);
     assert.deepEqual(savedAfter, savedBefore);
+    const alert = page.getByRole('alert').filter({ hasText: 'fixture initial history replace failure' });
+    assert.equal(await page.evaluate(() => Object.hasOwn(history.state ?? {}, '__yardIndex')), false);
+    await alert.getByRole('button', { name: 'Retry', exact: true }).click();
+    await page.waitForFunction(() => Object.hasOwn(history.state ?? {}, '__yardIndex'));
+    assert.equal(await page.evaluate(() => history.state.__yardIndex), 0);
+    assert.equal(page.url(), app.url + path);
+    assert.equal(await alert.count(), 0);
+    assert.equal(await editor(page).inputValue(), 'saved before router initialization');
     await editor(page).fill('still editable after router initialization');
     await waitForEdit(page, thread, 'still editable after router initialization');
-    observations['history-initial-replace-failure'] = { fault, savedBefore, savedAfter, savedEdited: await readEdit(page, thread) };
+    const savedEdited = await readEdit(page, thread);
+    await settings(page);
+    await page.waitForURL('**/settings/general**');
+    await page.getByRole('button', { name: 'Close settings', exact: true }).click();
+    await page.waitForURL(app.url + path);
+    await editor(page).waitFor();
+    assert.equal(await editor(page).inputValue(), 'still editable after router initialization');
+    assert.deepEqual(await readEdit(page, thread), savedEdited);
+    observations['history-initial-replace-failure'] = { fault, savedBefore, savedAfter, savedEdited, urlAfterReturn: page.url(),
+      historyIndexAfterReturn: await page.evaluate(() => history.state?.__yardIndex) };
   });
 
   await scenario('pending-acquisition-navigation', async () => {
@@ -383,6 +622,8 @@ try {
   await scenario('pending-submit-reconnect', async () => {
     const page = await newPage('connection');
     await startEdit(page, 'connection unsent'); await waitForEdit(page, 'connection', 'connection unsent');
+    const before = await readEdit(page, 'connection');
+    assert(before);
     await holdUiWrites(page);
     await page.locator('.yard-message-edit').getByRole('button', { name: 'Send', exact: true }).click();
     await page.locator('.yard-message-edit').getByRole('button', { name: 'Sending...', exact: true }).waitFor();
@@ -391,11 +632,12 @@ try {
     await page.getByRole('button', { name: 'Reconnect host', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('.yard-connection')?.getAttribute('title') === 'Browser: connected; Host: connected');
     await releaseUiWrites(page);
-    await page.getByRole('alert').filter({ hasText: '原连接已改变' }).first().waitFor();
+    await page.getByRole('alert').filter({ hasText: /^(?:原连接或输入使用权已改变，原稿已保留，未发送。|消息编辑的原连接已改变，编辑稿已保留，未发送。)$/ }).first().waitFor();
     assert.equal(await editor(page).inputValue(), 'connection unsent');
     await waitForEdit(page, 'connection', 'connection unsent');
     const saved = await readEdit(page, 'connection');
     assert.equal(saved?.submission, undefined);
+    assert.deepEqual(saved, before);
     observations['pending-submit-reconnect'] = saved;
     assert.equal(calls('thread/revert', 'connection').length, 0);
     assert.equal(calls('turn/start', 'connection').length, 0);
