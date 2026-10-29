@@ -1,18 +1,26 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, File, FileImage, FileText, Globe, Presentation, Table2 } from 'lucide-react';
+import { ChevronDown, File, FileImage, FileText, Globe, PanelTop, Presentation, Table2 } from 'lucide-react';
 import { parse } from 'node-html-parser';
 import type { ThreadSummary, TurnSummary } from '../../../lib/codex-protocol.ts';
 import type { StandaloneMessagesProps, WorkbenchClient } from '../workbench-contract.ts';
 import { projectMessageTurnPreviews } from './message-output-previews.ts';
-import type { MessageGooglePreview, MessageOutputDirectory, MessageOutputPreview, MessageWebsitePreview } from './message-output-previews.ts';
+import type { MessageArtifactPreview, MessageGooglePreview, MessageOutputDirectory, MessageOutputPreview, MessageWebsitePreview } from './message-output-previews.ts';
 import './message-output-previews.css';
 
-type OpenResource = Pick<StandaloneMessagesProps, 'onOpenFile' | 'onOpenFileAt' | 'onOpenBrowser'>;
+export type MessageArtifactSessionOpen = (value: { hostId: string; threadId: string; artifactRef: string;
+  kind: 'spreadsheet' | 'presentation'; title: string; pageId?: string; assertCurrent?: () => void }) => void;
+type OpenResource = Pick<StandaloneMessagesProps, 'onOpenFile' | 'onOpenFileAt' | 'onOpenBrowser'> & {
+  onOpenArtifactSession?: MessageArtifactSessionOpen;
+};
 export interface MessageOutputPreviewAuthority {
   /** Changes with the original page, host, thread, cwd and connection scope. */
   sourceKey: string;
   assertCurrent(): void;
   outputDirectory?: MessageOutputDirectory;
+  /** True only when the original page capability and account are both verified. */
+  canOpenArtifactPage?: boolean;
+  /** The current local/SSH transcript is non-shared; shared callers must supply this fact. */
+  isSharedConversation?: boolean;
 }
 
 function OutputCard({ entry, open, canOpen, websiteTitle }: { entry: MessageOutputPreview | MessageWebsitePreview | MessageGooglePreview;
@@ -55,8 +63,20 @@ function OutputCard({ entry, open, canOpen, websiteTitle }: { entry: MessageOutp
   </div>;
 }
 
+function ArtifactCard({ entry, open, canOpen }: { entry: MessageArtifactPreview; open(): void; canOpen: boolean }) {
+  const Icon = entry.resourceKind === 'spreadsheet' ? Table2 : PanelTop;
+  return <div className="yard-output-card yard-output-card--artifact">
+    {canOpen && <button type="button" className="yard-output-open" aria-label={`Open ${entry.title}`} onClick={open} />}
+    <div className="yard-output-description">
+      <span className={`yard-output-icon yard-output-icon--artifact-${entry.resourceKind}`} aria-hidden="true"><Icon size={16} strokeWidth={1.5} /></span>
+      <span className="yard-output-title"><span title={entry.title}>{entry.title}</span>
+        <small>{entry.resourceKind === 'spreadsheet' ? 'Sheet' : 'Slide'}</small></span>
+    </div>
+  </div>;
+}
+
 /** The card is scoped to the same host and conversation as the rendered turn. */
-export function MessageOutputPreviews({ client, hostId, thread, turn, authority, onOpenFile, onOpenFileAt, onOpenBrowser }: {
+export function MessageOutputPreviews({ client, hostId, thread, turn, authority, onOpenFile, onOpenFileAt, onOpenBrowser, onOpenArtifactSession }: {
   client: WorkbenchClient; hostId: string; thread: ThreadSummary; turn: TurnSummary;
   authority?: MessageOutputPreviewAuthority;
 } & OpenResource) {
@@ -69,12 +89,15 @@ export function MessageOutputPreviews({ client, hostId, thread, turn, authority,
   const candidateKey = JSON.stringify(projection);
   const [connectionRevision, setConnectionRevision] = useState(0);
   const [attempt, setAttempt] = useState(0);
-  const scope = useMemo(() => ({ client, hostId, threadId, cwd, turnId: turn.id, candidates, website: projection.website, google: projection.google, connectionRevision, attempt, authority }),
-    [client, hostId, threadId, cwd, turn.id, candidateKey, connectionRevision, attempt, Boolean(authority), authority?.sourceKey]);
+  const scope = useMemo(() => ({ client, hostId, threadId, cwd, turnId: turn.id, candidates, website: projection.website,
+    google: projection.google, artifacts: projection.artifacts, connectionRevision, attempt, authority }),
+    [client, hostId, threadId, cwd, turn.id, candidateKey, connectionRevision, attempt, Boolean(authority), authority?.sourceKey,
+      authority?.canOpenArtifactPage, authority?.isSharedConversation]);
   const current = useRef<typeof scope | null>(scope);
   const [result, setResult] = useState<{ scope: typeof scope; entries: MessageOutputPreview[]; error: string | null } | null>(null);
   const [actionError, setActionError] = useState<{ scope: typeof scope; message: string } | null>(null);
   const [websiteTitle, setWebsiteTitle] = useState<{ scope: typeof scope; title: string } | null>(null);
+  const [expandedScope, setExpandedScope] = useState<typeof scope | null>(null);
   const check = (expected: typeof scope) => {
     if (current.current !== expected) throw new Error('The original output source changed.');
     const checked: unknown = expected.authority?.assertCurrent();
@@ -147,11 +170,17 @@ export function MessageOutputPreviews({ client, hostId, thread, turn, authority,
 
   const visible = result?.scope === scope ? result : null;
   const website = scope.website;
-  if (!visible && !website && !scope.google.length && !projection.unavailable && !projection.resourceUncertain && !projection.incomplete) return null;
-  const open = (entry: MessageOutputPreview | MessageWebsitePreview | MessageGooglePreview) => {
+  if (!visible && !website && !scope.google.length && !scope.artifacts.length && !projection.unavailable && !projection.resourceUncertain && !projection.incomplete) return null;
+  const open = (entry: MessageOutputPreview | MessageWebsitePreview | MessageGooglePreview | MessageArtifactPreview) => {
     try {
       check(scope);
-      if (entry.kind === 'google-drive') {
+      if (entry.kind === 'artifact-session') {
+        if (!scope.artifacts.includes(entry)) throw new Error('The original output source changed.');
+        if (!onOpenArtifactSession) throw new Error('Artifact session navigation is unavailable for this page.');
+        onOpenArtifactSession({ hostId: scope.hostId, threadId: scope.threadId, artifactRef: entry.artifactRef,
+          kind: entry.resourceKind, title: entry.title, ...(entry.pageId ? { pageId: entry.pageId } : {}),
+          assertCurrent: () => check(scope) });
+      } else if (entry.kind === 'google-drive') {
         if (!scope.google.includes(entry)) throw new Error('The original output source changed.');
         if (!onOpenBrowser) throw new Error('Browser preview is unavailable.');
         onOpenBrowser({hostId:scope.hostId, threadId:scope.threadId, url:entry.url, source:'link'});
@@ -172,14 +201,22 @@ export function MessageOutputPreviews({ client, hostId, thread, turn, authority,
       setActionError(null);
     } catch (error) { setActionError({ scope, message: error instanceof Error ? error.message : String(error) }); }
   };
-  return <div className="yard-output-previews" data-markdown-copy="exclude">
-    {visible?.entries.map(entry => <OutputCard key={`${connectionRevision}:${attempt}:${entry.path}`} entry={entry}
-      canOpen={Boolean(onOpenFileAt || onOpenFile)} open={() => open(entry)} />)}
-    {scope.google.map(entry => <OutputCard key={`${connectionRevision}:${attempt}:${entry.url}`} entry={entry}
-      canOpen open={() => open(entry)} />)}
-    {website && <OutputCard key={`${connectionRevision}:${attempt}:website`} entry={website}
+  const cards = [
+    ...(visible?.entries ?? []).map(entry => <OutputCard key={`${connectionRevision}:${attempt}:${entry.path}`} entry={entry}
+      canOpen={Boolean(onOpenFileAt || onOpenFile)} open={() => open(entry)} />),
+    ...scope.google.map(entry => <OutputCard key={`${connectionRevision}:${attempt}:${entry.url}`} entry={entry}
+      canOpen open={() => open(entry)} />),
+    ...scope.artifacts.map(entry => <ArtifactCard key={`${connectionRevision}:${attempt}:${entry.pageId ? `page:${entry.pageId}` : `artifact:${entry.artifactRef}`}`}
+      entry={entry} canOpen={entry.pageId ? authority?.canOpenArtifactPage === true
+        : scope.hostId === 'local' && Boolean(scope.threadId) && !authority?.isSharedConversation} open={() => open(entry)} />),
+    ...(website ? [<OutputCard key={`${connectionRevision}:${attempt}:website`} entry={website}
       websiteTitle={websiteTitle?.scope === scope ? websiteTitle.title : undefined}
-      canOpen={website.target.type === 'url' || Boolean(onOpenFileAt || onOpenFile)} open={() => open(website)} />}
+      canOpen={website.target.type === 'url' || Boolean(onOpenFileAt || onOpenFile)} open={() => open(website)} />] : []),
+  ];
+  const collapsed = scope.artifacts.length > 0 && cards.length > 4 && expandedScope !== scope;
+  return <div className="yard-output-previews" data-markdown-copy="exclude">
+    {collapsed ? cards.slice(0, 3) : cards}
+    {collapsed && <button type="button" className="yard-output-more" onClick={() => setExpandedScope(scope)}>Show {cards.length - 3} more</button>}
     {projection.unavailable && <div className="yard-output-error" role="status">Could not verify the output directory.</div>}
     {projection.resourceUncertain && <div className="yard-output-error" role="status">Could not verify app-generated output precedence for this website.</div>}
     {projection.incomplete && <div className="yard-output-error" role="status">The output cannot be verified until the turn history is complete.</div>}

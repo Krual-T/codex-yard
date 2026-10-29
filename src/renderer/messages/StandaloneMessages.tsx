@@ -7,7 +7,7 @@ import { StandaloneMarkdown } from '../markdown/StandaloneMarkdown.tsx';
 import { ToolItem } from '../tools/ToolItem.tsx';
 import { CopyButton } from './CopyButton.tsx';
 import { MessageOutputPreviews } from './MessageOutputPreviews.tsx';
-import type { MessageOutputPreviewAuthority } from './MessageOutputPreviews.tsx';
+import type { MessageArtifactSessionOpen, MessageOutputPreviewAuthority } from './MessageOutputPreviews.tsx';
 import { messageCopyContent } from './message-copy.ts';
 import { ImageViewer, MessageImage } from './MessageImage.tsx';
 import { asArray, asRecord, asString, displayJson, editableDraft, parseUserContent, resolveToolFileLocation, serializedMessageContext } from './message-data.ts';
@@ -37,6 +37,7 @@ type RenderItemProps = {
   onOpenFileAt: StandaloneMessagesProps['onOpenFileAt'];
   onOpenVisualization: StandaloneMessagesProps['onOpenVisualization'];
   onOpenBrowser: StandaloneMessagesProps['onOpenBrowser'];
+  onOpenArtifactSession: MessageArtifactSessionOpen | undefined;
   onOpenImages: (images: ImageSource[], index: number) => void;
   editRestriction: string | null;
   editing: EditingSession | null;
@@ -276,7 +277,7 @@ function MessageMoreActions({ turnId, onFork, onError }: {
 }
 
 function MessageItem(props: RenderItemProps) {
-  const { item, turnId, outputTurn, outputThread, outputPreviewAuthority, threadId, client, hostId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImages, onFork } = props;
+  const { item, turnId, outputTurn, outputThread, outputPreviewAuthority, threadId, client, hostId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenArtifactSession, onOpenImages, onFork } = props;
   const [actionError, setActionError] = useState('');
   const openSingleImage = useCallback((image: ImageSource) => onOpenImages([image], 0), [onOpenImages]);
   const markdownProps = { client, hostId, threadId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage: openSingleImage };
@@ -287,7 +288,7 @@ function MessageItem(props: RenderItemProps) {
       ? <div className="yard-message-label">Plan</div> : <h4 className="yard-screen-reader">ChatGPT said:</h4>}
       <StandaloneMarkdown text={text} {...markdownProps} />
       {outputTurn && outputThread && <MessageOutputPreviews client={client} hostId={hostId} thread={outputThread} turn={outputTurn} authority={outputPreviewAuthority}
-        onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenBrowser={onOpenBrowser} />}
+        onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenBrowser={onOpenBrowser} onOpenArtifactSession={onOpenArtifactSession} />}
       {asArray(item.questions).map((value, index) => {
         const question = asRecord(value);
         return <section className="yard-question" key={index}><strong>{asString(question.title) || 'Question'}</strong>
@@ -348,10 +349,10 @@ function searchText(value: unknown): string {
   return typeof value === 'number' || typeof value === 'boolean' ? String(value) : '';
 }
 
-export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, outputPreviewAuthority,
+export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenArtifactSession, outputPreviewAuthority,
   editEnabled, editRecovery, editAccess, onEditDraftChange, onEditNavigationController, editRebase, onPrepareEditRebase, onCommitEditRebase,
   editHistory, searchOpen, onSearchOpenChange }: StandaloneMessagesProps & StandaloneMessagesRecoveryProps & StandaloneMessagesSearchProps & {
-    editHistory?: MessageEditHistory; outputPreviewAuthority?: MessageOutputPreviewAuthority;
+    editHistory?: MessageEditHistory; outputPreviewAuthority?: MessageOutputPreviewAuthority; onOpenArtifactSession?: MessageArtifactSessionOpen;
   }) {
   const [localSearchOpen, setLocalSearchOpen] = useState(false);
   const searchVisible = searchOpen ?? localSearchOpen;
@@ -529,7 +530,7 @@ export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, o
                 outputThread={outputTurn ? thread : undefined} outputTurn={outputTurn}
                 outputPreviewAuthority={outputPreviewAuthority}
                 onFork={item.type === 'userMessage' && turn.items.some((entry) => entry.type === 'agentMessage' || entry.type === 'plan') ? undefined : onFork}
-                onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenVisualization={onOpenVisualization} onOpenBrowser={onOpenBrowser}
+                onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenVisualization={onOpenVisualization} onOpenBrowser={onOpenBrowser} onOpenArtifactSession={onOpenArtifactSession}
                 onOpenImages={openImages} editRestriction={editRestriction} editing={itemEditing} identity={threadIdentity}
                 turnIndex={turnIndex} itemIndex={itemIndex} onStartEdit={startEdit} onUpdateEdit={updateEdit} onEndEdit={endEdit}
                 onSubmitEdit={submitEdit} recoveryNote={recoveryNote} rebaseRequired={Boolean(itemEditing && rebaseRequired)}
