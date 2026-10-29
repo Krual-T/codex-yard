@@ -18,6 +18,7 @@ import type { SendRecoverySnapshot, SendRecoveryStore } from './send-recovery.ts
 import { SendRecoveryNotice } from './SendRecoveryNotice.tsx';
 
 export type MiniWorkspaceDefaultTarget = Omit<MiniConversationTarget, 'draftId'>;
+export type MiniConnectionAuthority = (() => void) & { daemonConnectionGeneration: string };
 export interface MiniWorkspaceLease { flush(): Promise<boolean>; handoff(): void; release(): void }
 export interface MiniWorkspaceController { freeze(): MiniWorkspaceLease | null }
 export interface MiniWorkspaceProps {
@@ -31,7 +32,7 @@ export interface MiniWorkspaceProps {
   hostConnections: Readonly<Record<string, MiniHostConnection | undefined>>;
   defaultTarget: MiniWorkspaceDefaultTarget;
   resolveTarget(identity: { hostId: string; threadId: string | null }): Promise<MiniWorkspaceDefaultTarget>;
-  captureConnection(hostId: string): () => void;
+  captureConnection(hostId: string): MiniConnectionAuthority;
   freezeMain(): MiniWorkspaceLease;
   onController?(controller: MiniWorkspaceController | null): void;
   onOpenThread(identity: MiniIdentity): void;
@@ -53,9 +54,10 @@ export interface MiniWorkspaceProps {
 }
 
 type Owner = Pick<MiniConversationTarget, 'hostId' | 'threadId' | 'draftId'>;
-type Grant = { epoch: number; assertConnection: () => void; original: Owner; alias?: Owner };
+type Grant = { epoch: number; assertConnection: MiniConnectionAuthority; connections: ReadonlyMap<string, MiniConnectionAuthority>; original: Owner; alias?: Owner };
 type Opening = { epoch: number; original: MiniConversationTarget; requested: { hostId: string; threadId: string | null };
-  assertOriginal: () => void; assertRequested: () => void; previous: Grant | null; acquiredMain: boolean;
+  assertOriginal: MiniConnectionAuthority; assertRequested: MiniConnectionAuthority; connections: ReadonlyMap<string, MiniConnectionAuthority>;
+  previous: Grant | null; acquiredMain: boolean;
   candidate?: MiniConversationTarget; ready: boolean };
 type Phase = 'idle' | 'opening' | 'active' | 'closing' | 'blocked' | 'navigation';
 const owner = (target: MiniConversationTarget): Owner => ({ hostId: target.hostId, threadId: target.threadId, draftId: target.draftId });
@@ -69,6 +71,11 @@ const validMetadata = (target: MiniWorkspaceDefaultTarget) => typeof target.host
   && (target.readOnly === undefined || typeof target.readOnly === 'boolean');
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 const missingAuthority = () => Object.assign(new Error('Mini 原连接或输入权限已改变，原内容已保留。'), { uncertain: false });
+const daemonGeneration = (authority: () => void) => {
+  const value = (authority as Partial<MiniConnectionAuthority>).daemonConnectionGeneration;
+  if (typeof value !== 'string' || !value) throw missingAuthority();
+  return value;
+};
 
 export function MiniWorkspace(props: MiniWorkspaceProps) {
   const latest = useRef(props); latest.current = props;
@@ -134,6 +141,17 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
       && !!host && host.state === 'connected' && host.fresh && observed !== 'disconnected' && observed !== 'connecting'
       && (!barriers.current.has(hostId) || barriers.current.get(hostId) !== host.revision);
   }, []);
+  const captureAvailableConnections = useCallback((initial: ReadonlyMap<string, MiniConnectionAuthority>) => {
+    const captured = new Map(initial);
+    for (const hostId of Object.keys(latest.current.hostConnections)) {
+      if (captured.has(hostId) || !connected(hostId)) continue;
+      try {
+        const authority = latest.current.captureConnection(hostId);
+        daemonGeneration(authority); authority(); captured.set(hostId, authority);
+      } catch { /* A different unavailable host must not prevent the current grant. */ }
+    }
+    return captured;
+  }, [connected]);
   const refreshSends = useCallback(async () => {
     const sequence = ++readSequence.current, source = latest.current.sends;
     try {
@@ -198,14 +216,15 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
       || !sameOwner(requested, owner(current)) || !connected(current.hostId)) throw missingAuthority();
     held.assertConnection();
     const captured = held.epoch, original = structuredClone(requested), source = latest.current;
-    return () => {
+    return Object.assign(() => {
       const now = targetRef.current, active = grant.current;
       if (!alive.current || phase.current !== 'active' || !now || !active || !petConfirmed.current || active.epoch !== captured
+        || active.assertConnection !== held.assertConnection
         || latest.current.client !== source.client || latest.current.sessions !== source.sessions || latest.current.sends !== source.sends
         || latest.current.edits !== source.edits || !connected(now.hostId)
         || !(sameOwner(original, owner(now)) || active.alias && sameOwner(original, active.original) && sameOwner(owner(now), active.alias))) throw missingAuthority();
-      active.assertConnection();
-    };
+      held.assertConnection();
+    }, { daemonConnectionGeneration: daemonGeneration(held.assertConnection) });
   }, [connected]);
 
   const releaseMini = useCallback(() => {
@@ -245,14 +264,15 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
     try {
       if (!connected(current.hostId) || !connected(request.target.hostId)) throw missingAuthority();
       const assertOriginal = latest.current.captureConnection(current.hostId);
-      const assertRequested = sameIdentity(current, request.target) ? assertOriginal : latest.current.captureConnection(request.target.hostId);
-      assertOriginal(); assertRequested();
+      const assertRequested = current.hostId === request.target.hostId ? assertOriginal : latest.current.captureConnection(request.target.hostId);
+      daemonGeneration(assertOriginal); daemonGeneration(assertRequested); assertOriginal(); assertRequested();
+      const connections = captureAvailableConnections(new Map([[current.hostId, assertOriginal], [request.target.hostId, assertRequested]]));
       ++epoch.current; grant.current = null; phase.current = 'opening'; setInteractive(false);
       if (acquiredMain) { main.current = latest.current.freezeMain(); mainHandedOff.current = false; }
       if (shell.current.mounted && !mini.current) throw new Error('Mini 输入控制器尚未就绪，原内容已保留。');
       if (mini.current && !miniLease.current) miniLease.current = mini.current.freeze();
       if (mini.current && !miniLease.current) throw new Error('Mini 输入正在处理，请稍后重试。');
-      op = { epoch: epoch.current, original: structuredClone(current), requested: { ...request.target }, assertOriginal, assertRequested,
+      op = { epoch: epoch.current, original: structuredClone(current), requested: { ...request.target }, assertOriginal, assertRequested, connections,
         previous, acquiredMain, ready: false };
       opening.current = op;
     } catch (cause) {
@@ -281,16 +301,19 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
         op.ready = true; return true;
       } catch (cause) { abortOpening(op, cause); return false; }
     })();
-  }, [abortOpening, connected, releaseMain, releaseMini, report, restoreGrant]);
+  }, [abortOpening, captureAvailableConnections, connected, releaseMain, releaseMini, report, restoreGrant]);
 
   const changeTarget = useCallback((next: MiniConversationTarget) => {
     const current = targetRef.current, op = opening.current;
     if (!current || !canUseOwner(owner(next))) throw missingAuthority();
     const alias = validAlias(current, owner(next));
     const same = sameOwner(owner(current), owner(next));
-    let nextConnection: (() => void) | null = null;
+    let nextConnection: MiniConnectionAuthority | null = null;
     if (!same && !alias && phase.current === 'active') {
-      nextConnection = latest.current.captureConnection(next.hostId); nextConnection();
+      nextConnection = grant.current?.connections.get(next.hostId) ?? null;
+      if (!nextConnection) throw Object.assign(new Error('目标宿主的原连接尚未确认，请关闭并重新打开 Mini；原输入已保留。'), { uncertain: false });
+      try { nextConnection(); }
+      catch (cause) { throw Object.assign(new Error('目标宿主的原连接已改变，请关闭并重新打开 Mini；原输入已保留。', { cause }), { uncertain: false }); }
     }
     rememberMiniTarget(next);
     priorOwner.current = owner(current);
@@ -299,7 +322,8 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
       if (alias) grant.current = { ...grant.current, alias: owner(next) };
       else if (!same || JSON.stringify(current) !== JSON.stringify(next)) {
         ++epoch.current;
-        grant.current = { epoch: epoch.current, original: owner(next), assertConnection: nextConnection ?? grant.current.assertConnection };
+        grant.current = { ...grant.current, epoch: epoch.current, original: owner(next), alias: undefined,
+          assertConnection: nextConnection ?? grant.current.assertConnection };
       }
     }
     if (op && sameIdentity(next, op.requested)) op.candidate = structuredClone(next);
@@ -361,7 +385,7 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
           if (!main.current) throw new Error('主输入的移交租约不存在。');
           if (!mainHandedOff.current) { main.current.handoff(); mainHandedOff.current = true; }
           releaseMini(); opening.current = null; phase.current = 'active';
-          grant.current = { epoch: epoch.current, assertConnection: op.assertRequested, original: owner(current) };
+          grant.current = { epoch: epoch.current, assertConnection: op.assertRequested, connections: op.connections, original: owner(current) };
           setAccessError(''); setInteractive(true);
         } catch (cause) { opening.current = null; phase.current = 'blocked'; report(cause); }
       } else if (phase.current === 'closing' && !value.transitioning) {
@@ -449,9 +473,10 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
       }
       return;
     }
-    let assertConnection: () => void;
+    let assertConnection: MiniConnectionAuthority, connections: ReadonlyMap<string, MiniConnectionAuthority>;
     try {
-      assertConnection = latest.current.captureConnection(current.hostId); assertConnection();
+      assertConnection = latest.current.captureConnection(current.hostId); daemonGeneration(assertConnection); assertConnection();
+      connections = captureAvailableConnections(new Map([[current.hostId, assertConnection]]));
       if (mini.current && !miniLease.current) miniLease.current = mini.current.freeze();
       if (mini.current && !miniLease.current) throw new Error('Mini 仍在处理输入，请稍后重试。');
     } catch (cause) { report(cause); return; }
@@ -469,13 +494,13 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
           || !mini.current || !sameOwner(owner(mini.current.target()), owner(current))) throw missingAuthority();
         const saved = leaseFlushed.current;
         releaseMini(); phase.current = 'active';
-        grant.current = { epoch: captured, assertConnection, original: owner(current) };
+        grant.current = { epoch: captured, assertConnection, connections, original: owner(current) };
         setInteractive(true);
         if (saved) setAccessError('');
         else report('Mini 原输入尚未保存，请在原编辑器重试。');
       } catch (cause) { report(cause); }
     })();
-  }, [connected, finishHidden, releaseMini, report, sendPet]);
+  }, [captureAvailableConnections, connected, finishHidden, releaseMini, report, sendPet]);
 
   const navigation = useMemo<MiniWorkspaceController>(() => ({ freeze() {
     if (['opening', 'closing', 'navigation'].includes(phase.current)) return null;
@@ -505,6 +530,8 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
     requests: miniApprovalRequests(props.approvals, activity.hostId, activity.threadId) })), [props.activities, props.approvals, approvals]);
   const pending = useMemo(() => miniPendingApprovalRefs(props.approvals), [props.approvals, approvals]);
   const dispatch = useCallback<ConversationWriteDispatch>(async (method, params, hostId, assertAuthority) => {
+    const daemonConnectionGeneration = daemonGeneration(assertAuthority);
+    assertAuthority();
     const active = grant.current;
     if (method === 'turn/start' && active?.alias && active.alias.hostId === hostId && active.alias.threadId === params.threadId) {
       let recovery: SendRecoverySnapshot;
@@ -519,7 +546,7 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
         || intent.owner.threadId !== null && intent.owner.threadId !== threadId) throw missingAuthority();
       assertAuthority();
     }
-    return latest.current.client.rpc(method, params, hostId, { assertBeforeSend: assertAuthority });
+    return latest.current.client.rpc(method, params, hostId, { assertBeforeSend: assertAuthority, daemonConnectionGeneration });
   }, []);
   const receiveController = useCallback((controller: MiniConversationController | null) => { mini.current = controller; }, []);
   const requests = Object.values(snapshot?.requests ?? {}).filter(intent => target && intent.owner.hostId === target.hostId
@@ -537,6 +564,7 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
       onQuickChatStateChange={stateChanged} onBeforeQuickChatClose={beforeClose} onQuickChatTarget={switchTarget} shortcut={props.shortcut}>
       {target && <div ref={miniContent}>
         {requests.map(intent => <SendRecoveryNotice key={intent.id} intent={intent} canRetry={interactive}
+          canCheckInjectionReceipt={props.sends.hasConfirmedInjectionReceipt(intent)}
           onOpen={async () => {
             if (intent.threadId) { latest.current.onOpenThread({ hostId: intent.owner.hostId, threadId: intent.threadId }); return; }
             const input = miniContent.current?.querySelector<HTMLElement>('.standalone-composer textarea:not(:disabled), .standalone-composer [contenteditable="true"]');
@@ -549,7 +577,8 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
           onCancel={async () => { const assert = captureAuthority(owner(target)); assert(); await latest.current.sends.cancel(intent.id); await refreshSends(); }} />)}
         <MiniConversation client={props.client} sessions={props.sessions} sends={props.sends} edits={props.edits} initialTarget={target}
           initialOptions={props.initialOptions} hosts={props.hosts} editEnabled={interactive && shellInteractive} isConnected={connected} canUseOwner={canUseOwner}
-          captureEditAuthority={captureAuthority} dispatchSubmission={dispatch} onController={receiveController} onTargetChanged={changeTarget}
+          captureEditAuthority={captureAuthority} getDaemonConnectionGeneration={daemonGeneration} dispatchSubmission={dispatch}
+          onController={receiveController} onTargetChanged={changeTarget}
           onRecoveryChanged={notifyRecovery} onError={report} onOpenThread={props.onOpenThread} onOpenFile={props.onOpenFile}
           onOpenVisualization={props.onOpenVisualization} onOpenBrowser={props.onOpenBrowser} onAssignCreatedProject={props.onAssignCreatedProject}
           onDraftController={props.onDraftController} onDraftChange={props.onDraftChange} onRemoveReference={props.onRemoveReference} />

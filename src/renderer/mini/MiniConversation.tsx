@@ -56,6 +56,8 @@ export interface MiniConversationProps {
   canUseOwner(owner: ComposerDraftOwner): boolean;
   /** Capture this view's current connection and owner grant, including their generations. */
   captureEditAuthority(owner: ComposerDraftOwner): () => void;
+  /** Read the daemon generation belonging to that exact captured authority. */
+  getDaemonConnectionGeneration?(authority: () => void): string;
   /** Preserve the original connection and assert immediately before the actual write. */
   dispatchSubmission: ConversationWriteDispatch;
   onController(controller: MiniConversationController | null): void;
@@ -92,8 +94,11 @@ function validTarget(target: MiniConversationTarget) {
   return !!target.hostId && target.threadId !== '' && target.draftId.startsWith('mini:') && !!target.cwd;
 }
 interface SubmissionAuthority {
+  daemonConnectionGeneration?: string;
   acceptCreated(target: MiniConversationTarget): void;
 }
+const withDaemonGeneration = (assert: () => void, generation: string | undefined) =>
+  generation === undefined ? assert : Object.assign(assert, { daemonConnectionGeneration: generation });
 
 export function MiniConversation(props: MiniConversationProps) {
   const latest = useRef(props); latest.current = props;
@@ -114,6 +119,7 @@ export function MiniConversation(props: MiniConversationProps) {
   const editAccess = useMemo(() => props.edits.createAccess(), [props.edits]);
   const locked = useRef(false), inFlight = useRef(false), mounted = useRef(false);
   const submissionAuthorities = useRef(new WeakMap<() => void, SubmissionAuthority>());
+  const submissionProbe = useRef<((authority: () => void) => void) | null>(null);
   const provisionalRelease = useRef<(() => void) | null>(null);
   const key = ownerKey(target), usable = validTarget(target) && props.canUseOwner(ownerOf(target));
   const initialized = readyKey === key && (usable || mountedComposerKey.current === key);
@@ -294,6 +300,7 @@ export function MiniConversation(props: MiniConversationProps) {
       requireSynchronous(parent, 'Mini 发送权限必须同步捕获。');
       throw notSent('Mini 发送权限尚未同步确认，原输入已保留。');
     }
+    const daemonConnectionGeneration = source.getDaemonConnectionGeneration?.(parent as () => void);
     let expected = targetKey(original), generation = targetGeneration.current;
     const checkParent = () => {
       try { requireSynchronous(parent(), 'Mini 发送权限检查必须同步完成。'); }
@@ -307,9 +314,10 @@ export function MiniConversation(props: MiniConversationProps) {
       checkParent();
       if (targetGeneration.current !== generation || targetKey(targetRef.current) !== expected
         || !latest.current.canUseOwner(ownerOf(targetRef.current))) throw notSent('Mini 原输入目标或权限已改变，未发送。');
+      submissionProbe.current?.(assert);
     };
     assert();
-    submissionAuthorities.current.set(assert, { acceptCreated(next) {
+    submissionAuthorities.current.set(assert, { daemonConnectionGeneration, acceptCreated(next) {
       checkParent();
       if (original.threadId !== null || !next.threadId || next.hostId !== original.hostId || next.draftId !== original.draftId
         || targetGeneration.current !== generation + 1 || targetKey(targetRef.current) !== targetKey(next)) {
@@ -328,6 +336,7 @@ export function MiniConversation(props: MiniConversationProps) {
     requireSynchronous(earlyAuthority(), 'Mini 发送权限检查必须同步完成。');
     if (inFlight.current || locked.current) throw notSent('Mini 正在处理其他操作，原输入已保留。');
     const original = structuredClone(targetRef.current), originalKey = targetKey(original);
+    const dispatch = latest.current.dispatchSubmission;
     inFlight.current = true; setWorking(true); setError('');
     const creation: { target: MiniConversationTarget | null; lease: ComposerDraftLease | null; release: (() => void) | null; committed: boolean } =
       { target: null, lease: null, release: null, committed: false };
@@ -350,7 +359,8 @@ export function MiniConversation(props: MiniConversationProps) {
     };
     try {
       await sendConversationDraft({ client: latest.current.client, sessions: latest.current.sessions, sends: latest.current.sends, guard,
-        dispatch: latest.current.dispatchSubmission,
+        dispatch: (method, params, hostId, assert) => dispatch(method, params, hostId,
+          withDaemonGeneration(assert, authority.daemonConnectionGeneration)),
         cleanup: { controller: intent => cleanupFor(creation.committed && creation.target ? creation.target : original).controller(intent) },
         recoveryChanged: changed,
         assignCreatedProject: async (value, assertAuthority) => {
@@ -422,6 +432,7 @@ export function MiniConversation(props: MiniConversationProps) {
       requireSynchronous(assertParent, '消息编辑权限必须同步捕获，未修改会话。');
       throw notSent('消息编辑权限尚未同步确认，原输入已保留。');
     }
+    const daemonConnectionGeneration = latest.current.getDaemonConnectionGeneration?.(assertParent as () => void);
     inFlight.current = true; setWorking(true);
     try {
       assertAccess();
@@ -451,7 +462,7 @@ export function MiniConversation(props: MiniConversationProps) {
           || !latest.current.isConnected(identity.hostId) || !latest.current.canUseOwner(ownerOf(current)) || !view.canSubmit || locked.current) {
           throw notSent('消息编辑来源或权限已改变，未修改会话。');
         }
-      }));
+      }, daemonConnectionGeneration));
       if (result.turn) props.sessions.started(identity, result.turn);
     } catch (cause) { report(cause); throw cause; }
     finally { inFlight.current = false; if (mounted.current) setWorking(false); }
@@ -459,7 +470,17 @@ export function MiniConversation(props: MiniConversationProps) {
 
   const startQueued = async (id: string, earlyAuthority?: () => void) => {
     if (!earlyAuthority) throw notSent('Mini 队列原权限尚未捕获，未启动。');
-    requireSynchronous(earlyAuthority(), 'Mini 队列权限检查必须同步完成。');
+    // The queue wraps the early guard; identify the original guard it invokes synchronously.
+    let original: (() => void) | undefined;
+    const priorProbe = submissionProbe.current;
+    submissionProbe.current = value => {
+      if (original && original !== value) throw notSent('Mini 队列原权限无法唯一确认，未启动。');
+      original = value;
+    };
+    try { requireSynchronous(earlyAuthority(), 'Mini 队列权限检查必须同步完成。'); }
+    finally { submissionProbe.current = priorProbe; }
+    const captured = original && submissionAuthorities.current.get(original);
+    if (!captured) throw notSent('Mini 队列原权限尚未捕获，未启动。');
     const current = structuredClone(targetRef.current), identity = current.threadId && { hostId: current.hostId, threadId: current.threadId };
     if (!identity || current.readOnly || inFlight.current || locked.current) throw notSent('Mini 会话暂时无法启动队列。');
     inFlight.current = true; setWorking(true);
@@ -475,7 +496,8 @@ export function MiniConversation(props: MiniConversationProps) {
       };
       assertAuthority();
       dispatched = true;
-      await props.dispatchSubmission('thread/queue/start', { threadId: identity.threadId, queuedSubmissionId: id }, identity.hostId, assertAuthority);
+      await props.dispatchSubmission('thread/queue/start', { threadId: identity.threadId, queuedSubmissionId: id }, identity.hostId,
+        withDaemonGeneration(assertAuthority, captured.daemonConnectionGeneration));
     } catch (cause) {
       if (!dispatched) throw Object.assign(new Error(errorText(cause), { cause }), { uncertain: false });
       throw cause;
@@ -492,6 +514,7 @@ export function MiniConversation(props: MiniConversationProps) {
       requireSynchronous(parent, 'Mini 停止任务权限必须同步捕获。');
       throw notSent('Mini 停止任务权限尚未确认。');
     }
+    const daemonConnectionGeneration = latest.current.getDaemonConnectionGeneration?.(parent as () => void);
     const view = sourceSessions.view(identity).snapshot();
     const turn = view.thread?.turns.find(item => item.status === 'inProgress');
     if (!turn || !view.canSubmit) throw notSent('当前任务已改变，未停止其他任务。');
@@ -508,7 +531,7 @@ export function MiniConversation(props: MiniConversationProps) {
     };
     assertAuthority();
     await sourceClient.rpc('turn/interrupt', { threadId: identity.threadId, turnId: turn.id }, identity.hostId,
-      { assertBeforeSend: assertAuthority });
+      { assertBeforeSend: assertAuthority, ...(daemonConnectionGeneration === undefined ? {} : { daemonConnectionGeneration }) });
   };
   const edit = usable && props.editEnabled !== false && editState?.key === key && editState.status === 'ready' ? editState.value : null;
   const thread = conversation.thread?.id === target.threadId ? conversation.thread : null;

@@ -4,11 +4,13 @@ import { flushSync } from 'react-dom';
 import type { ThreadSummary } from '../lib/codex-protocol.ts';
 import { MiniWorkspace } from '../src/renderer/app/MiniWorkspace.tsx';
 import type { MiniWorkspaceController, MiniWorkspaceLease } from '../src/renderer/app/MiniWorkspace.tsx';
+import { BrowserWorkbenchClient } from '../src/renderer/app/client.ts';
 import { ApprovalRequestsController } from '../src/renderer/app/approval-requests.ts';
 import { ConversationSessions, useConversationSession } from '../src/renderer/app/conversation-sessions.ts';
 import { MessageEditRecoveryStore, messageEditChanged } from '../src/renderer/app/message-edit-recovery.ts';
 import { SendRecoveryStore, sendThreadKey } from '../src/renderer/app/send-recovery.ts';
 import { StandaloneComposer } from '../src/renderer/composer/StandaloneComposer.tsx';
+import { readUnknownQueueRecovery } from '../src/renderer/composer/standalone-queue-storage.ts';
 import type { ComposerDraftController } from '../src/renderer/composer/StandaloneComposer.tsx';
 import { readComposerDraft } from '../src/renderer/composer/composer-draft-store.ts';
 import { StandaloneMessages } from '../src/renderer/messages/StandaloneMessages.tsx';
@@ -16,9 +18,13 @@ import type { MessageEditNavigationController } from '../src/renderer/messages/S
 import type { WorkbenchClient, WorkbenchDispatchOptions, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 
 const listeners = new Set<(event: WorkbenchEvent) => void>();
-const emit = (event: WorkbenchEvent) => { for (const listener of listeners) listener(event); };
-const calls: { method: string; hostId: string; params: Record<string, unknown> }[] = [];
+const emit = (event: WorkbenchEvent) => {
+  if (controlledSocket) controlledSocket.message(event);
+  else for (const listener of listeners) listener(event);
+};
+const calls: { method: string; hostId: string; params: Record<string, unknown>; daemonConnectionGeneration?: string }[] = [];
 const hostCalls: { endpoint: string; params: Record<string, unknown> }[] = [];
+const wire: Record<string, any>[] = [];
 const errors: string[] = [], opened: unknown[] = [], leases: string[] = [];
 const projects: { hostId: string; projectId?: string; threadId: string; turnsBefore: number }[] = [];
 const threads: Record<string, ThreadSummary> = {};
@@ -28,7 +34,8 @@ const thread = (hostId: string, id: string): ThreadSummary => threads[hostId + '
       content: [{ type: 'text', text: 'original message', text_elements: [] }] }] }],
 };
 let generation = 0, connected = true, petOpen = true, failHide = false, failMain = false, failWrites = false;
-let mainController: ComposerDraftController | null = null, mainEditor: MessageEditNavigationController | null = null;
+let mainController: ComposerDraftController | null = null, miniController: ComposerDraftController | null = null;
+let mainEditor: MessageEditNavigationController | null = null;
 let workspace: MiniWorkspaceController | null = null, mainVisible = true, holdMain = false, resolveMain: (() => void) | undefined;
 let mainWaiting = false, defaultThread: string | null = location.search.includes('home=1') ? null : 'thread-a';
 const defaultProject = location.search.includes('project=1') ? 'project-original' : undefined;
@@ -38,14 +45,57 @@ let failPreSendRead = false;
 let holdPetRead = false, petReadWaiting = false, resolvePetRead: (() => void) | undefined;
 let holdPetAck = false, petAckWaiting = false, resolvePetAck: (() => void) | undefined;
 let holdTargetResolution = false, targetResolutionWaiting = false, resolveTargetResolution: (() => void) | undefined;
-const client: WorkbenchClient = {
+let holdSendRead = false, sendReadWaiting = false, resolveSendRead: (() => void) | undefined;
+let holdEditSubmit = false, editSubmitWaiting = false, resolveEditSubmit: (() => void) | undefined;
+let holdQueueLock = false, queueLockWaiting = false, resolveQueueLock: (() => void) | undefined;
+let holdCreatedReply = false, createdReplyWaiting = false, resolveCreatedReply: (() => void) | undefined;
+let holdInterruptConnect = false, interruptConnectWaiting = false, resolveInterruptConnect: (() => void) | undefined;
+const socketMode = location.search.includes('socket=1');
+let controlledSocket: FixtureSocket | null = null;
+const originalWebSocket = Object.getOwnPropertyDescriptor(window, 'WebSocket');
+class FixtureSocket {
+  static OPEN = 1;
+  readyState = 0;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor(_url: string) { controlledSocket = this; queueMicrotask(() => this.open()); }
+  open() {
+    this.readyState = 1; this.onopen?.();
+    this.host('local', 'daemon-A'); this.host('remote', 'daemon-remote');
+  }
+  message(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
+  host(hostId: string, value: string) {
+    this.message({ type: 'codex-app-server-connection-changed', hostId, state: 'connected', daemonConnectionGeneration: value });
+  }
+  close() { if (this.readyState !== 3) { this.readyState = 3; this.onclose?.(); } }
+  send(value: string) {
+    const message = JSON.parse(value); wire.push(structuredClone(message));
+    if (message.type === 'mcp-request') {
+      void backend.rpc(message.request.method, message.request.params, message.hostId,
+        { daemonConnectionGeneration: message.daemonConnectionGeneration }).then(result => {
+        this.message({ type: 'mcp-response', hostId: message.hostId, message: { id: message.request.id, result } });
+      }, error => this.message({ type: 'mcp-response', hostId: message.hostId,
+        message: { id: message.request.id, error: { message: String(error), data: { uncertain: false } } } }));
+    } else if (message.type === 'fetch') {
+      const endpoint = String(message.url).split('/').at(-1)!;
+      void backend.host(endpoint, JSON.parse(message.body)).then(body => {
+        this.message({ type: 'fetch-response', requestId: message.requestId, responseType: 'success', body });
+      }, error => this.message({ type: 'fetch-response', requestId: message.requestId, responseType: 'error', error: String(error) }));
+    }
+  }
+}
+const queues: Record<string, { id: string; clientUserMessageId: string; input: Record<string, unknown>[] }[]> = {};
+const backend: WorkbenchClient = {
   async rpc<T>(method: string, params: Record<string, unknown> = {}, hostId = 'local', options?: WorkbenchDispatchOptions): Promise<T> {
     if (method === 'turn/start' && holdWrite) {
       holdWrite = false; writeWaiting = true;
       await new Promise<void>(resolve => { resolveWrite = resolve; }); writeWaiting = false;
     }
     options?.assertBeforeSend?.();
-    calls.push({ method, hostId, params: structuredClone(params) });
+    calls.push({ method, hostId, params: structuredClone(params),
+      ...(options?.daemonConnectionGeneration === undefined ? {} : { daemonConnectionGeneration: options.daemonConnectionGeneration }) });
     if (method === 'model/list') return { data: [{ id: 'fixture', model: 'fixture-model', displayName: 'Fixture', isDefault: true,
       supportedReasoningEfforts: [] }], nextCursor: null } as T;
     if (method === 'config/read') return { config: { model: 'fixture-model' }, layers: [] } as T;
@@ -53,23 +103,50 @@ const client: WorkbenchClient = {
     if (method === 'thread/resume') return { thread: structuredClone(thread(hostId, String(params.threadId))), model: 'fixture-model' } as T;
     if (method === 'thread/read') return { thread: { ...structuredClone(thread(hostId, String(params.threadId))), turns: [] } } as T;
     if (method === 'thread/turns/list') return { data: thread(hostId, String(params.threadId)).turns, nextCursor: null } as T;
-    if (method === 'thread/items/list' || method === 'thread/queue/list') return { data: [], nextCursor: null } as T;
+    if (method === 'thread/items/list') return { data: [], nextCursor: null } as T;
+    if (method === 'thread/queue/list') return { data: queues[hostId + ':' + String(params.threadId)] ?? [], nextCursor: null } as T;
     if (method === 'thread/unsubscribe') return {} as T;
     if (method === 'thread/start') {
       const created = thread(hostId, 'created-' + calls.filter(call => call.method === 'thread/start').length);
       created.turns = [];
       const result = { thread: structuredClone(created), model: 'fixture-model' };
-      emit({ type: 'thread-created', hostId, result }); return result as T;
+      emit({ type: 'thread-created', hostId, result });
+      if (holdCreatedReply) {
+        holdCreatedReply = false; createdReplyWaiting = true;
+        await new Promise<void>(resolve => { resolveCreatedReply = resolve; }); createdReplyWaiting = false;
+      }
+      return result as T;
     }
     if (method === 'turn/start') {
       const turn = { id: 'sent-' + calls.filter(call => call.method === 'turn/start').length, status: 'inProgress' as const, items: [] };
       const value = thread(hostId, String(params.threadId)); value.turns = [turn]; value.status = { type: 'active', activeFlags: [] };
       return { turn } as T;
     }
+    if (method === 'turn/steer') return { turnId: params.expectedTurnId } as T;
+    if (method === 'thread/inject_items') return {} as T;
+    if (method === 'thread/queue/add') {
+      const entry = { id: 'queue-' + calls.filter(call => call.method === 'thread/queue/add').length,
+        clientUserMessageId: String(params.clientUserMessageId), input: params.input as Record<string, unknown>[] };
+      (queues[hostId + ':' + String(params.threadId)] ??= []).push(entry);
+      return { queuedSubmission: entry } as T;
+    }
+    if (method === 'thread/queue/start') {
+      queues[hostId + ':' + String(params.threadId)] = (queues[hostId + ':' + String(params.threadId)] ?? [])
+        .filter(entry => entry.id !== params.queuedSubmissionId);
+      return {} as T;
+    }
+    if (method === 'turn/interrupt') {
+      const value = thread(hostId, String(params.threadId)), turn = value.turns.find(item => item.status === 'inProgress');
+      if (turn) { turn.status = 'completed'; value.status = { type: 'idle' };
+        emit({ type: 'mcp-notification', hostId, method: 'turn/completed', params: { threadId: value.id, turn: structuredClone(turn) } }); }
+      return {} as T;
+    }
     throw new Error('Unexpected synthetic RPC ' + method);
   },
-  async host<T>(endpoint: string, params: Record<string, unknown> = {}): Promise<T> {
+  async host<T>(endpoint: string, params: Record<string, unknown> = {}, options?: Pick<WorkbenchDispatchOptions, 'assertBeforeSend'>): Promise<T> {
+    options?.assertBeforeSend?.();
     hostCalls.push({ endpoint, params: structuredClone(params) });
+    if (endpoint === 'message-edit') return { stage: 'started', turn: { id: 'edited-turn', status: 'inProgress', items: [] } } as T;
     if (endpoint === 'pet-overlay') {
       const message = params.message as { type: string; isOpen?: boolean };
       if (message.type === 'avatar-overlay-open-state-request' && holdPetAck) {
@@ -101,17 +178,47 @@ const client: WorkbenchClient = {
     if (endpoint === 'codex-home') return { codexHome: '/fixture/.codex' } as T;
     if (endpoint === 'get-persisted-atom') return {} as T;
     if (endpoint === 'message-send-status') return { turnId: null, queuedSubmissionId: null } as T;
-    if (endpoint === 'queued-follow-up-send-lock-acquire') return { acquired: true } as T;
+    if (endpoint === 'queued-follow-up-send-lock-acquire') {
+      if (holdQueueLock) {
+        holdQueueLock = false; queueLockWaiting = true;
+        await new Promise<void>(resolve => { resolveQueueLock = resolve; }); queueLockWaiting = false;
+      }
+      return { acquired: true } as T;
+    }
     if (endpoint === 'queued-follow-up-send-lock-release') return {} as T;
     throw new Error('Unexpected synthetic host ' + endpoint);
   },
   subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
   async reply(ref, response) { hostCalls.push({ endpoint: 'reply', params: { ref, response } }); },
 };
+if (socketMode) Object.defineProperty(window, 'WebSocket', { configurable: true, value: FixtureSocket });
+const socketClient = socketMode ? new BrowserWorkbenchClient('ws://fixture.invalid/native-host') : null;
+if (socketClient) {
+  const rpc = socketClient.rpc.bind(socketClient);
+  socketClient.rpc = <T,>(method: string, params: Record<string, unknown> = {}, hostId = 'local', options?: WorkbenchDispatchOptions) => {
+    if (method !== 'turn/interrupt' || !holdInterruptConnect) return rpc<T>(method, params, hostId, options);
+    holdInterruptConnect = false;
+    const original = socketClient.connect, connect = original.bind(socketClient);
+    socketClient.connect = () => {
+      interruptConnectWaiting = true;
+      return new Promise<void>(resolve => { resolveInterruptConnect = resolve; }).then(() => {
+        interruptConnectWaiting = false; return connect();
+      });
+    };
+    try { return rpc<T>(method, params, hostId, options); }
+    finally { socketClient.connect = original; }
+  };
+}
+const client: WorkbenchClient = socketClient ?? backend;
+if (socketClient) void socketClient.connect();
 const sends = new SendRecoveryStore(client);
 const readSends = sends.read.bind(sends);
 sends.read = async () => {
   const value = await readSends();
+  if (holdSendRead) {
+    holdSendRead = false; sendReadWaiting = true;
+    await new Promise<void>(resolve => { resolveSendRead = resolve; }); sendReadWaiting = false;
+  }
   if (failPreSendRead && Object.values(value.requests).some(intent => intent.stage === 'sending')) {
     failPreSendRead = false; throw new Error('Synthetic original receipt read failure');
   }
@@ -119,6 +226,14 @@ sends.read = async () => {
 };
 const sessions = new ConversationSessions(client, async identity => (await sends.read()).creations[sendThreadKey(identity.hostId, identity.threadId)]);
 const edits = new MessageEditRecoveryStore(client);
+const submitEdit = edits.submit.bind(edits);
+edits.submit = async (...args) => {
+  if (holdEditSubmit) {
+    holdEditSubmit = false; editSubmitWaiting = true;
+    await new Promise<void>(resolve => { resolveEditSubmit = resolve; }); editSubmitWaiting = false;
+  }
+  return submitEdit(...args);
+};
 const approvals = new ApprovalRequestsController(client);
 const mainAccess = edits.createAccess();
 const nativePut = IDBObjectStore.prototype.put;
@@ -203,19 +318,28 @@ function Fixture() {
         }
         return value;
       }}
-      captureConnection={() => { const captured = generation; if (!connected) throw new Error('Synthetic offline');
-        return () => { if (!connected || captured !== generation) throw new Error('Synthetic original connection revoked'); }; }}
+      captureConnection={hostId => {
+        if (socketClient) {
+          const captured = socketClient.captureDaemonConnection(hostId);
+          return Object.assign(() => captured.assertOriginal(), { daemonConnectionGeneration: captured.generation });
+        }
+        const captured = generation; if (!connected) throw new Error('Synthetic offline');
+        return Object.assign(() => { if (!connected || captured !== generation) throw new Error('Synthetic original connection revoked'); },
+          { daemonConnectionGeneration: 'synthetic-' + captured });
+      }}
       freezeMain={freezeMain} onController={value => { workspace = value; }}
+      onDraftController={value => { miniController = value; }}
       onOpenThread={value => { opened.push(value); }} onOpenRequest={(identity, ref) => { opened.push({ identity, ref }); }}
       onExpand={() => {}} onOpenSettings={() => {}} onError={message => { errors.push(message); }}
       onAssignCreatedProject={async (target, created, assert) => { assert(); projects.push({ hostId: target.hostId, projectId: target.projectId,
         threadId: created.id, turnsBefore: calls.filter(call => call.method === 'turn/start').length }); }}
+      hosts={[{ hostId: 'local', displayName: 'Local' }, { hostId: 'remote', displayName: 'Remote' }]}
       initialOptions={{ model: 'fixture-model' }} />}
   </>;
 }
 const root = createRoot(document.getElementById('root')!);
 const fixture = {
-  calls, hostCalls, errors, opened, leases, projects, sends, approvals,
+  calls, hostCalls, wire, errors, opened, leases, projects, sends, approvals,
   updateOnline: (_value: boolean) => {}, render: () => {},
   leaveMini: async () => {}, mountMini: () => {},
   ready: () => !!mainController && !!mainEditor,
@@ -240,6 +364,49 @@ const fixture = {
   releasePetRead() { resolvePetRead?.(); resolvePetRead = undefined; },
   holdWrite() { holdWrite = true; }, writeWaiting: () => writeWaiting,
   releaseWrite() { resolveWrite?.(); resolveWrite = undefined; },
+  holdSendRead() { holdSendRead = true; }, sendReadWaiting: () => sendReadWaiting,
+  releaseSendRead() { resolveSendRead?.(); resolveSendRead = undefined; },
+  holdEditSubmit() { holdEditSubmit = true; }, editSubmitWaiting: () => editSubmitWaiting,
+  releaseEditSubmit() { resolveEditSubmit?.(); resolveEditSubmit = undefined; },
+  holdQueueLock() { holdQueueLock = true; }, queueLockWaiting: () => queueLockWaiting,
+  releaseQueueLock() { resolveQueueLock?.(); resolveQueueLock = undefined; },
+  holdCreatedReply() { holdCreatedReply = true; }, createdReplyWaiting: () => createdReplyWaiting,
+  releaseCreatedReply() { resolveCreatedReply?.(); resolveCreatedReply = undefined; },
+  holdInterruptConnect() { holdInterruptConnect = true; }, interruptConnectWaiting: () => interruptConnectWaiting,
+  releaseInterruptConnect() { resolveInterruptConnect?.(); resolveInterruptConnect = undefined; },
+  setDaemon(hostId: string, value: string) { controlledSocket?.host(hostId, value); },
+  async attachAppInput() {
+    const snapshot = miniController?.snapshot();
+    if (!miniController || !snapshot) throw new Error('Mini controller unavailable');
+    const text = 'An MCP app initiated this message. Read the untrusted_input tool output.';
+    const envelope = { version: 1, message: { source: 'mcp_app', sourceId: 'fixture-app', text: 'fixture context', imageUrls: [] } };
+    return miniController.update(snapshot.owner, draft => ({ ...draft, text, input: [{ type: 'text', text,
+      text_elements: [{ byteRange: { start: 0, end: new TextEncoder().encode(text).length },
+        placeholder: 'codex-untrusted-app-input:' + JSON.stringify(envelope) }] }] }));
+  },
+  async seedInjectionReceipt(confirmed: boolean) {
+    const target = JSON.parse(sessionStorage.getItem('codex-yard.mini-target.v1')!);
+    const owner = { hostId: target.hostId, threadId: target.threadId, draftId: target.draftId };
+    const injection = { callId: 'fixture-call', input: [{ type: 'text', text: 'fixture', text_elements: [] }],
+      responseItems: [{ type: 'function_call', call_id: 'fixture-call', name: 'fixture', arguments: '{}' }] };
+    const intent = await sends.prepare({ owner, revision: 'fixture-revision' }, target.cwd,
+      { text: 'fixture', images: [], files: [] }, {}, {}, undefined, undefined, { type: 'send' }, injection);
+    await sends.injecting(intent.id, intent.attemptId);
+    if (confirmed) {
+      if (!socketClient) throw new Error('Controlled socket required');
+      const captured = socketClient.captureDaemonConnection(target.hostId);
+      await socketClient.rpc('thread/inject_items', { threadId: target.threadId, items: injection.responseItems }, target.hostId,
+        { daemonConnectionGeneration: captured.generation, assertBeforeSend: captured.assertOriginal });
+      failWrites = true;
+      try { await sends.injected(intent.id, intent.attemptId); throw new Error('Expected fixture persistence failure'); }
+      catch (cause) { if (!(cause instanceof DOMException)) throw cause; }
+      finally { failWrites = false; }
+    } else {
+      await sends.injectionFailed(intent.id, new Error('Synthetic lost injection response'), intent.attemptId);
+    }
+    await sends.failed(intent.id, new Error('Synthetic receipt persistence outcome'), intent.attemptId);
+    return intent.id;
+  },
   disconnect() { connected = false; generation++; emit({ type: 'connection-state', state: 'disconnected' }); fixture.updateOnline(false); },
   reconnect() { connected = true; generation++; emit({ type: 'connection-state', state: 'connected' }); fixture.updateOnline(true); },
   hide() { petOpen = false; emit({ type: 'workbench-pet-state', state: { isOpen: false, visibility: 'always-visible', position: null } }); },
@@ -254,13 +421,15 @@ const fixture = {
       method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-b', command: 'pwd', cwd: '/fixture/remote',
         availableDecisions: ['accept', 'decline'] } } }); },
   records: () => sends.read(),
+  queueRecovery: () => readUnknownQueueRecovery('local', 'thread-a'),
   edit: () => edits.read('local', 'thread-a'),
   mainDraft: () => mainController?.snapshot(),
   miniDraft: async (owner: Parameters<typeof readComposerDraft>[0]) => readComposerDraft(owner),
   pointer: () => sessionStorage.getItem('codex-yard.mini-target.v1'),
   nav: () => workspace,
   resetHome() { defaultThread = null; fixture.render(); },
-  dispose() { root.unmount(); sessions.dispose(); approvals.dispose(); },
+  dispose() { root.unmount(); sessions.dispose(); approvals.dispose(); socketClient?.close();
+    if (originalWebSocket) Object.defineProperty(window, 'WebSocket', originalWebSocket); },
 };
 Object.assign(window, { miniWorkspaceFixture: fixture });
 root.render(<Fixture />);
