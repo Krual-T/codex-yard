@@ -847,7 +847,9 @@ function appendPromptState(state: EditorState, addition: ComposerDocument): Edit
   if (!incoming || incoming.childCount !== 1 || incoming.firstChild?.type.name !== 'paragraph') return null;
   let hasPlugin = false;
   incoming.descendants(node => { if (node.type.name === 'pluginMention') hasPlugin = true; });
-  if (!hasPlugin) return null;
+  let plainText = incoming.firstChild.childCount > 0;
+  incoming.firstChild.forEach(node => { if (!node.isText || node.marks.length) plainText = false; });
+  if (!hasPlugin && !plainText) return null;
   try {
     const paragraph = state.schema.nodeFromJSON(incoming.firstChild.toJSON());
     const end = Selection.atEnd(state.doc), last = historyText(state);

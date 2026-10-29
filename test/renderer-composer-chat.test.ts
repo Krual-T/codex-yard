@@ -20,7 +20,7 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
     import {createSummaryOutputPrefill} from './src/renderer/app/summary-output-prefill.ts';
     import {readRichDocument,serializeRichDocument} from './src/renderer/composer/rich-document.ts';
     const state={calls:[],hostCalls:[],submissions:[],snapshots:[],controller:null,grant:1,epochs:{local:1,'ssh:other':1},hold:null,pending:[],failList:false,
-      plainOverride:null,listeners:new Set(),appendPort:null,appendOperation:null,appendChecks:0,revokeAt:0};
+      plainOverride:null,listeners:new Set(),appendPort:null,appendOperation:null,appendChecks:0,revokeAt:0,cancelAt:0};
     const pages=(host,cursor)=>host==='local' ? cursor ? {data:[{id:'same-id',name:'Review local',cwd:'/workspace'}],nextCursor:null}
       : {data:[{id:'first',name:'Other local',cwd:'/workspace'},{id:'bad/id',name:'Unsupported identifier',cwd:'/workspace'}],nextCursor:'page-2'}
       : {data:[{id:'same-id',name:'Review remote',cwd:'/remote'}],nextCursor:null};
@@ -70,13 +70,15 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       seedRich(document){const c=state.controller,parsed=readRichDocument(document);
         if(!parsed)throw Error('invalid fixture document');
         return c.update(c.snapshot().owner,draft=>({...draft,text:serializeRichDocument(parsed),document}));},
-      beginAppend(revokeAt=0){const c=state.controller,owner=c.snapshot().owner,grant=state.grant;
-        state.appendChecks=0;state.revokeAt=revokeAt;
+      beginAppend(revokeAt=0,cancelAt=0){const c=state.controller,owner=c.snapshot().owner,grant=state.grant;
+        state.appendChecks=0;state.revokeAt=revokeAt;state.cancelAt=cancelAt;
         state.appendOperation=state.appendPort.begin(owner,()=>{state.appendChecks++;
+          if(state.cancelAt && state.appendChecks===state.cancelAt)state.appendOperation?.cancel();
           if(state.grant!==grant || state.revokeAt && state.appendChecks>=state.revokeAt)throw Error('fixture original authority revoked');});
         return !!state.appendOperation;},
-      append(kind='document'){const c=props.context;
-        return state.appendOperation.append(createSummaryOutputPrefill({kind,context:{hostId:c.hostId,cwd:c.cwd}}).document);},
+      append(kind='document',prefillId){const c=props.context;
+        return state.appendOperation.append(createSummaryOutputPrefill({kind,context:{hostId:c.hostId,cwd:c.cwd}}).document,prefillId);},
+      appendText(text,prefillId){return state.appendOperation.append({type:'doc',content:[{type:'paragraph',content:[{type:'text',text}]}]},prefillId);},
       cancelAppend(){state.appendOperation.cancel();},
       async holdAtoms(){const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('codex-yard.ui-atoms.v1',1);
           req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error)});
@@ -1187,15 +1189,24 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       const editor = page.getByRole('textbox', { name: 'Work with Codex' });
       await editor.pressSequentially('Before');
       assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), true);
-      assert.deepEqual(await page.evaluate(() => (window as any).fixture.append()), { status: 'accepted' });
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.append('document', 'output-document-prefill')), { status: 'accepted' });
       const node = editor.locator('[data-mention="plugin"]');
       await node.waitFor();
-      assert.equal(await node.textContent(), '@Documents');
+      assert.equal(await node.textContent(), 'Documents');
       assert.equal(await node.getAttribute('contenteditable'), 'false');
       assert.equal(await node.getAttribute('data-prompt-link-href'), 'plugin://documents@openai-primary-runtime');
       assert.equal(await node.getAttribute('data-prompt-link-label'), '@Documents');
+      assert.deepEqual(await node.locator('svg').evaluate(element => ({ namespace: element.namespaceURI,
+        width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height,
+        margin: getComputedStyle(element).marginRight, hidden: element.getAttribute('aria-hidden') })),
+      { namespace: 'http://www.w3.org/2000/svg', width: 16, height: 16, margin: '3px', hidden: 'true' });
       const saved = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
       assert.match(JSON.stringify(saved.document), /"type":"pluginMention"/);
+      const snapshot = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+      assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), true);
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.append('document', 'output-document-prefill')), { status: 'accepted' });
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot()), snapshot);
+      assert.equal(await node.count(), 1);
       await editor.press('Control+z'); assert.equal(await editorText(editor), 'Before');
       await editor.press('Control+z'); assert.equal(await editorText(editor), '');
       await editor.press('Control+Shift+z'); assert.equal(await editorText(editor), 'Before');
@@ -1266,7 +1277,7 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), true);
       assert.deepEqual(await page.evaluate(() => (window as any).fixture.append('site')), { status: 'accepted' });
       const node = editor.locator('[data-mention="plugin"]'); await node.waitFor();
-      assert.equal(await node.textContent(), '@Sites');
+      assert.equal(await node.textContent(), 'Sites');
       const copied = await editor.evaluate(element => {
         const range = document.createRange(); range.selectNode(element.querySelector('[data-mention="plugin"]')!);
         const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
@@ -1348,10 +1359,11 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.equal(await source.page.evaluate(() => (window as any).fixture.beginAppend()), true);
       const newer = target.page.getByRole('textbox', { name: 'Work with Codex' }); await newer.fill('Newer version');
       assert.equal(await target.page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
-      assert.match(await source.page.evaluate(async () => { try { await (window as any).fixture.append(); return 'accepted'; } catch (error) { return String(error); } }), /版本|changed|草稿/i);
+      assert.match(await source.page.evaluate(async () => { try { await (window as any).fixture.append('document', 'concurrent-prefill'); return 'accepted'; } catch (error) { return String(error); } }), /版本|changed|草稿/i);
       assert.equal(await original.inputValue(), 'Original');
       assert.equal((await target.page.evaluate(() => (window as any).fixture.read())).draft.text, 'Newer version');
       assert.doesNotMatch(JSON.stringify(await target.page.evaluate(() => (window as any).fixture.read())), /pluginMention/);
+      assert.doesNotMatch(JSON.stringify(await target.page.evaluate(() => (window as any).fixture.versions())), /concurrent-prefill/);
       assert.deepEqual(source.errors, []); assert.deepEqual(target.errors, []); await target.page.close(); await source.page.close();
     });
 
@@ -1361,7 +1373,7 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
       await page.evaluate(() => (window as any).fixture.holdAtoms());
       assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), true);
-      await page.evaluate(() => { const f = (window as any).fixture; f.appendResult = f.append().then((value: any) => ({ value }), (error: unknown) => ({ error: String(error) })); });
+      await page.evaluate(() => { const f = (window as any).fixture; f.appendResult = f.append('document', 'cancelled-prefill').then((value: any) => ({ value }), (error: unknown) => ({ error: String(error) })); });
       await page.waitForFunction(() => !!document.querySelector('[aria-busy="true"][inert]'));
       await page.keyboard.type('unwanted');
       assert.equal(await editor.inputValue(), 'Original');
@@ -1371,6 +1383,7 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       await page.waitForFunction(() => !document.querySelector('[aria-busy="true"][inert]'));
       assert.equal(await editor.inputValue(), 'Original');
       assert.doesNotMatch(JSON.stringify(await page.evaluate(() => (window as any).fixture.read())), /pluginMention/);
+      assert.doesNotMatch(JSON.stringify(await page.evaluate(() => (window as any).fixture.versions())), /cancelled-prefill/);
       assert.deepEqual(errors, []); await page.close();
     });
 
@@ -1378,12 +1391,131 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       const { page, errors } = await open('plugin-append-committed');
       const editor = page.getByRole('textbox', { name: 'Work with Codex' }); await editor.fill('Keep original');
       assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend(4)), true);
-      assert.deepEqual(await page.evaluate(() => (window as any).fixture.append()), { status: 'committed-unaccepted' });
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.append('document', 'committed-prefill')), { status: 'committed-unaccepted' });
       assert.equal(await editor.inputValue(), 'Keep original');
       const versions = await page.evaluate(() => (window as any).fixture.versions());
       assert.match(JSON.stringify(versions), /pluginMention/);
+      assert.match(JSON.stringify(versions), /committed-prefill/);
       assert.equal(await page.evaluate(() => (window as any).fixture.state.submissions.length), 0);
       assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('prompt consumer cancellation after the root commit retains the original projection and committed version', async () => {
+      const { page, errors } = await open('prompt-consumer-cancel-committed');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' }); await editor.fill('Original');
+      assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend(0, 4)), true);
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.appendText('Spawn a subagent to explore this repo.', 'cancel-after-commit')),
+        { status: 'committed-unaccepted' });
+      assert.equal(await editor.inputValue(), 'Original');
+      const versions = await page.evaluate(() => (window as any).fixture.versions());
+      assert.ok(versions.versions.some((version: { prefills: string[]; draft: { text: string } }) =>
+        version.prefills.includes('cancel-after-commit') && version.draft.text === 'Original Spawn a subagent to explore this repo.'));
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.submissions.length), 0);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('prompt consumer retries the stable ID after a seen failure and after undo without another write', async () => {
+      const { page, errors } = await open('prompt-consumer-seen');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      const prompt = 'Spawn a subagent to explore this repo.', id = 'home-subagent-prompt';
+      await editor.pressSequentially('Before');
+      assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), true);
+      const failure = await page.evaluate(async ({ prompt, id }) => {
+        try {
+          const result = await (window as any).fixture.appendText(prompt, id);
+          if (result.status !== 'accepted') return 'append was not accepted';
+          throw new Error('synthetic seen save failure');
+        } catch (error) { return String(error); }
+      }, { prompt, id });
+      assert.match(failure, /synthetic seen save failure/);
+      assert.equal(await editorText(editor), `Before ${prompt}`);
+      const saved = await page.evaluate(() => (window as any).fixture.versions());
+      assert.equal(saved.versions.length, 1);
+      assert.deepEqual(saved.versions[0].prefills, [id]);
+
+      const retry = async () => page.evaluate(async ({ prompt, id }) => {
+        const f = (window as any).fixture, before = f.state.controller.snapshot();
+        const versions = await f.versions(), originalPut = IDBObjectStore.prototype.put;
+        let writes = 0;
+        IDBObjectStore.prototype.put = function(...args: Parameters<IDBObjectStore['put']>) {
+          if (this.name === 'atoms') writes++;
+          return originalPut.apply(this, args);
+        };
+        try {
+          if (!f.beginAppend()) throw new Error('append operation unavailable');
+          const receipt = await f.appendText(prompt, id);
+          return { receipt, before, after: f.state.controller.snapshot(), versions, afterVersions: await f.versions(), writes };
+        } finally { IDBObjectStore.prototype.put = originalPut; }
+      }, { prompt, id });
+      const repeated = await retry();
+      assert.deepEqual(repeated.receipt, { status: 'accepted' });
+      assert.deepEqual(repeated.after, repeated.before);
+      assert.deepEqual(repeated.afterVersions, repeated.versions);
+      assert.equal(repeated.writes, 0);
+      assert.equal(await editorText(editor), `Before ${prompt}`);
+
+      await editor.press('Control+z');
+      assert.equal(await editorText(editor), 'Before');
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const afterUndo = await retry();
+      assert.deepEqual(afterUndo.receipt, { status: 'accepted' });
+      assert.deepEqual(afterUndo.after, afterUndo.before);
+      assert.deepEqual(afterUndo.afterVersions, afterUndo.versions);
+      assert.equal(afterUndo.writes, 0);
+      assert.equal(await editorText(editor), 'Before');
+      await editor.press('Control+Shift+z');
+      assert.equal(await editorText(editor), `Before ${prompt}`);
+      await editor.press('Control+z'); await editor.press('Control+z');
+      assert.equal(await editorText(editor), '');
+      await editor.press('Control+Shift+z'); await editor.press('Control+Shift+z');
+      assert.equal(await editorText(editor), `Before ${prompt}`);
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      await page.reload(); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+      await page.waitForFunction(expected => (window as any).fixture.state.controller?.snapshot()?.draft.text === expected, `Before ${prompt}`);
+      const afterReload = await retry();
+      assert.deepEqual(afterReload.receipt, { status: 'accepted' });
+      assert.deepEqual(afterReload.after, afterReload.before);
+      assert.equal(afterReload.writes, 0);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('prompt consumer appends plain text to rich and ordered segmented drafts with their histories', async () => {
+      const prompt = 'Spawn a subagent to explore this repo.';
+      const rich = await open('prompt-consumer-rich');
+      const document = { type: 'doc', content: [
+        { type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: 'Heading' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'Body', marks: [{ type: 'strong' }] }] },
+      ] };
+      assert.equal(await rich.page.evaluate(value => (window as any).fixture.seedRich(value), document), true);
+      const richEditor = rich.page.locator('[contenteditable="true"][role="textbox"]'); await richEditor.waitFor();
+      assert.equal(await rich.page.evaluate(() => (window as any).fixture.beginAppend()), true);
+      assert.deepEqual(await rich.page.evaluate(value => (window as any).fixture.appendText(value, 'rich-home'), prompt), { status: 'accepted' });
+      assert.equal(await richEditor.locator('h2').textContent(), 'Heading');
+      assert.equal(await richEditor.locator('strong').textContent(), 'Body');
+      assert.match(await richEditor.textContent() ?? '', /Spawn a subagent to explore this repo\./);
+      await richEditor.press('Control+z'); assert.equal(await richEditor.locator('p').textContent(), 'Body');
+      await richEditor.press('Control+Shift+z'); assert.match(await richEditor.textContent() ?? '', /Spawn a subagent/);
+
+      const segmented = await open('prompt-consumer-segmented');
+      const original = { text: '文件 @ref\nTail', images: [], files: [], references: [], skills: [], input: [
+        { type: 'text', text: '文件 @ref', text_elements: [{ byteRange: { start: 7, end: 11 }, placeholder: 'ref' }] },
+        { type: 'image', fileId: 'file-1', detail: 'high' }, { type: 'text', text: 'Tail', text_elements: [] },
+      ], document: { type: 'doc', content: [
+        { type: 'paragraph', content: [{ type: 'text', text: '文件 @ref', marks: [{ type: 'strong' }] }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'Tail', marks: [{ type: 'em' }] }] },
+      ] } };
+      assert.equal(await segmented.page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const segmentEditor = segmented.page.getByRole('textbox', { name: 'Work with Codex 2' }); await segmentEditor.waitFor();
+      assert.equal(await segmented.page.evaluate(() => (window as any).fixture.beginAppend()), true);
+      assert.deepEqual(await segmented.page.evaluate(value => (window as any).fixture.appendText(value, 'segmented-home'), prompt), { status: 'accepted' });
+      const draft = await segmented.page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+      assert.deepEqual(draft.input[0], original.input[0]); assert.deepEqual(draft.input[1], original.input[1]);
+      assert.deepEqual(draft.document.content[0], original.document.content[0]);
+      assert.equal(draft.input[2].text, `Tail ${prompt}`);
+      await segmentEditor.press('Control+z'); assert.equal(await editorText(segmentEditor), 'Tail');
+      await segmentEditor.press('Control+Shift+z'); assert.equal(await editorText(segmentEditor), `Tail ${prompt}`);
+      assert.deepEqual(rich.errors, []); assert.deepEqual(segmented.errors, []);
+      await rich.page.close(); await segmented.page.close();
     });
 
     await t.test('the conversation placeholder differs from the home placeholder', async () => {

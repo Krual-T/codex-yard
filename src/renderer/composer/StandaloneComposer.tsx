@@ -44,7 +44,7 @@ export type { ComposerProjectChoice } from './standalone-target.tsx';
 export type ComposerReference = NonNullable<ComposerDraft['references']>[number];
 export interface ComposerPromptAppendPort {
   begin(owner: ComposerDraftOwner, assertOriginal: () => void): {
-    append(document: ComposerDocument): Promise<{ status: 'accepted' | 'committed-unaccepted' }>;
+    append(document: ComposerDocument, prefillId?: string): Promise<{ status: 'accepted' | 'committed-unaccepted' }>;
     cancel(): void;
   } | null;
 }
@@ -732,7 +732,8 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
             : displayed.marks.some(mark => mark.marks.length)) return null;
         }
         const { document: _document, ...withoutDocument } = before;
-        const edited = editStructuredDraftText(withoutDocument, last.index, last.text, stage.text);
+        const hasAgents = [...stage.agents.before, ...stage.agents.after].some(segment => segment.agents.length);
+        const edited = editStructuredDraftText(hasAgents ? withoutDocument : before, last.index, last.text, stage.text);
         const projected = edited.draft && projectAgentEdit(before, edited.draft, stage.agents);
         return projected ? { draft: projected, stage, textControl: false, index: last.index } : null;
       }
@@ -767,29 +768,33 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
         }
       };
       return {
-        async append(addition) {
+        async append(addition, prefillId) {
           if (ended || used) throw new Error('This prompt append has already ended.');
           used = true; running = true;
           let accepted = false;
           try {
             const captured = structuredClone(addition);
-            let prepared: ReturnType<PromptAppendRuntime['prepare']> = null;
+            let prepared: ReturnType<PromptAppendRuntime['prepare']> = null, duplicate = false;
             const receipt = await operation.transaction(async (before, isCurrent) => {
               verify();
               if (!isCurrent()) throw new Error('The original draft changed before the append.');
-              prepared = runtime.prepare(before.draft, captured, source);
-              if (!prepared) throw new Error('This prompt cannot be appended without changing the original draft.');
-              const nextDraft = prepared.draft;
-              const after = await updateBrowserAtoms(atoms => {
+              const outcome = await updateBrowserAtoms(atoms => {
                 verify();
                 if (!isCurrent()) throw new Error('The original draft changed before it was saved.');
-                const result = updateComposerDraftVersionInRoot(atoms[composerDraftAtomKey], before, () => nextDraft, createId());
+                const result = updateComposerDraftVersionInRoot(atoms[composerDraftAtomKey], before, draft => {
+                  prepared = runtime.prepare(draft, captured, source);
+                  if (!prepared) throw new Error('This prompt cannot be appended without changing the original draft.');
+                  return prepared.draft;
+                }, createId(), prefillId);
+                if (result.duplicate) return { value: { after: result.after, duplicate: true } };
                 if (!result.changed) throw new Error('The prompt append did not change the draft.');
-                return { value: result.after, updates: { [composerDraftAtomKey]: result.root } };
+                return { value: { after: result.after, duplicate: false }, updates: { [composerDraftAtomKey]: result.root } };
               });
-              return { after, value: null };
+              duplicate = outcome.duplicate;
+              return { after: outcome.after, value: duplicate };
             }, () => {
               verify();
+              if (duplicate) return true;
               if (!prepared || !prepared.stage.apply()) return false;
               if (prepared.textControl) {
                 textAgentView.current = composerOwnerKey;
@@ -799,7 +804,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
               return true;
             });
             accepted = receipt.accepted;
-            if (accepted) requestAnimationFrame(() => {
+            if (accepted && !receipt.value) requestAnimationFrame(() => {
               if (activeController.current !== runtime.controller || promptAppendRuntime.current?.editor() !== source) return;
               if ('visibleText' in source) source.focus(prepared?.index); else source.focus();
             });
