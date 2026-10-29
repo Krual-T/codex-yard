@@ -4,6 +4,15 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 
+async function waitForBrowser(check: () => Promise<unknown>) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Timed out waiting for the asynchronous browser condition.');
+}
+
 declare global {
   interface Window { receiptEditorHarness: {
     calls: Record<string, unknown>[];
@@ -101,7 +110,7 @@ test('real settings editors restore rejected submissions and newer drafts after 
       }
       assert.equal(await page.evaluate(() => window.receiptEditorHarness.requestLeave()), false, section);
       await page.evaluate(() => window.receiptEditorHarness.rejectWrite());
-      await page.waitForFunction(async () => (await window.receiptEditorHarness.record())?.phase === 'finished');
+      await waitForBrowser(() => page.evaluate(async () => (await window.receiptEditorHarness.record())?.phase === 'finished'));
       await page.getByRole('region', { name: 'Configuration save recovery' })
         .getByText('The configuration changed. Reload and review your edits before saving again.', { exact: true }).waitFor();
       const original = await page.evaluate(() => window.receiptEditorHarness.record());
@@ -128,9 +137,9 @@ test('real settings editors restore rejected submissions and newer drafts after 
         if (section === 'hooks-settings') await main.getByRole('checkbox', { name: 'SessionStart hook 2' }).uncheck();
         else await main.getByRole('checkbox', { name: 'second (repo, /fixture/second/SKILL.md)' }).uncheck();
       }
-      await page.waitForFunction(async section => (await window.receiptEditorHarness.drafts()).some(({draft}) =>
+      await waitForBrowser(() => page.evaluate(async section => (await window.receiptEditorHarness.drafts()).some(({draft}) =>
         section === 'models' ? draft.effort === 'low' : section === 'agent' ? (draft.values as {sandbox?: string})?.sandbox === 'workspace-write' :
-        section === 'worktrees' ? (draft.draft as {keepCount?: string})?.keepCount === '4' : Array.isArray(draft.drafts) && draft.drafts.length === 2), section);
+        section === 'worktrees' ? (draft.draft as {keepCount?: string})?.keepCount === '4' : Array.isArray(draft.drafts) && draft.drafts.length === 2), section));
       await page.evaluate(() => window.receiptEditorHarness.reset());
       await main.getByRole('region', { name: 'Saved configuration edits' }).getByRole('button', { name: 'Restore this edit' }).last().click();
       if (section === 'models') {

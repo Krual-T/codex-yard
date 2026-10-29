@@ -12,6 +12,15 @@ import { createFakeCodex } from './fake-codex.ts';
 import { fileDaemonFixture } from './file-daemon-fixture.ts';
 import { nativeFixture } from './native-fixture.ts';
 
+async function waitForBrowser(check: () => Promise<unknown>) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Timed out waiting for the asynchronous browser condition.');
+}
+
 test('file recovery retains the original pending operation and later edits across scopes and refresh', {
   skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 90_000,
 }, async t => {
@@ -180,7 +189,7 @@ test('file recovery retains the original pending operation and later edits acros
     await page.evaluate(() => (window as any).fixture.client.resume());
     await page.evaluate(() => (window as any).fixture.edit(1, 'B'));
     await page.evaluate(() => (window as any).fixture.flush());
-    await page.waitForFunction(async () => (await (window as any).fixture.recovery('thread-a'))?.draft === '\ufeffABhello\r\nworld\nend\r');
+    await waitForBrowser(() => page.evaluate(async () => (await (window as any).fixture.recovery('thread-a'))?.draft === '\ufeffABhello\r\nworld\nend\r'));
     await page.getByRole('button', { name: 'Check save result' }).click();
     await page.getByRole('alert').filter({ hasText: 'still unknown' }).waitFor();
     assert.equal(await page.getByRole('button', { name: 'Save file' }).isDisabled(), true);
@@ -213,7 +222,7 @@ test('file recovery retains the original pending operation and later edits acros
     assert.equal(writes, 1);
 
     release();
-    await page.waitForFunction(async id => (await (window as any).fixture.status(id)).outcome === 'saved', operationId);
+    await waitForBrowser(() => page.evaluate(async id => (await (window as any).fixture.status(id)).outcome === 'saved', operationId));
     assert.equal(await readFile(path, 'utf8'), '\ufeffAhello\r\nworld\nend\r');
     const newerPage = await context.newPage();
     newerPage.setDefaultTimeout(10_000);
@@ -256,7 +265,7 @@ test('file recovery retains the original pending operation and later edits acros
     await page.getByRole('button', { name: 'Save file' }).click();
     await page.waitForFunction(() => (window as any).fixture.held());
     await page.evaluate(() => (window as any).fixture.edit(1, 'Y'));
-    await page.waitForFunction(async path => (await (window as any).fixture.fileRecovery('receipt-a', path))?.draft === 'XYbase\n', receiptPath);
+    await waitForBrowser(() => page.evaluate(async path => (await (window as any).fixture.fileRecovery('receipt-a', path))?.draft === 'XYbase\n', receiptPath));
     const oldReceiptId = await page.evaluate(async path => (await (window as any).fixture.fileRecovery('receipt-a', path)).id, receiptPath);
     await newerPage.evaluate(({ cwd, path }) => (window as any).fixture.render({scopeId:'receipt-a',
       request:{id:'receipt-other',scopeId:'receipt-a',hostId:'local',cwd,kind:'file',path}}), { cwd: project, path: receiptPath });
@@ -440,7 +449,7 @@ test('file recovery retains the original pending operation and later edits acros
       { path: recreatePath, confirmed }), /File recovery changed in another page/);
     assert.equal(await page.evaluate(async path => (window as any).fixture.fileRecovery('recreate', path), recreatePath), undefined);
     await page.evaluate(() => (window as any).fixture.edit(1, 'Y'));
-    await page.waitForFunction(async path => (await (window as any).fixture.fileRecovery('recreate', path))?.draft === 'XYbase\n', recreatePath);
+    await waitForBrowser(() => page.evaluate(async path => (await (window as any).fixture.fileRecovery('recreate', path))?.draft === 'XYbase\n', recreatePath));
     const recreated = await page.evaluate(async path => (window as any).fixture.fileRecovery('recreate', path), recreatePath);
     assert.equal(recreated.id, confirmed.id);
     assert.equal(recreated.draft, 'XYbase\n');
@@ -489,9 +498,9 @@ test('file recovery retains the original pending operation and later edits acros
     assert.equal(statusCall.queryPath, aliasPath);
     await unlink(link); await symlink(aliasB, link);
     releaseAlias();
-    await page.waitForFunction(async ({ cwd, path, id, queryCwd, queryPath }) =>
+    await waitForBrowser(() => page.evaluate(async ({ cwd, path, id, queryCwd, queryPath }) =>
       (await (window as any).fixture.client.host('workspace-file-save-status', {hostId:'local',cwd,path,operationId:id,queryCwd,queryPath})).outcome === 'conflict',
-    { cwd: aliasA, path: directPath, id: aliasId, queryCwd: project, queryPath: aliasPath });
+    { cwd: aliasA, path: directPath, id: aliasId, queryCwd: project, queryPath: aliasPath }));
     assert.equal(await readFile(directPath, 'utf8'), 'Abase\n');
     assert.equal(await readFile(otherPath, 'utf8'), 'base\n');
     await page.getByRole('button', { name: 'Check save result' }).click();
@@ -548,7 +557,7 @@ test('file recovery retains the original pending operation and later edits acros
     await page.getByRole('button', { name: 'Save file' }).click();
     await page.waitForFunction(() => (window as any).fixture.held());
     await page.evaluate(() => (window as any).fixture.edit(1, 'Y'));
-    await page.waitForFunction(async path => (await (window as any).fixture.fileRecovery('held-conflict', path))?.draft === 'XYbase\n', heldPath);
+    await waitForBrowser(() => page.evaluate(async path => (await (window as any).fixture.fileRecovery('held-conflict', path))?.draft === 'XYbase\n', heldPath));
     await newerPage.evaluate(({ cwd, path }) => (window as any).fixture.render({scopeId:'held-conflict',cwd,
       request:{id:'held-conflict-other',scopeId:'held-conflict',hostId:'local',cwd,kind:'file',path}}), { cwd: project, path: heldPath });
     await newerPage.getByRole('textbox', { name: `File: ${heldPath}` }).waitFor();

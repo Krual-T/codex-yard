@@ -4,6 +4,15 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 
+async function waitForBrowser(check: () => Promise<unknown>) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Timed out waiting for the asynchronous browser condition.');
+}
+
 declare global {
   interface Window {
     settingsReviewHarness: {
@@ -87,7 +96,7 @@ test('actual settings navigation waits for exact IDB cleanup, preserves another 
     for (const page of [first, second]) { await page.goto('http://settings-review-fixture.invalid/'); await page.addScriptTag({ content: bundle.outputFiles[0]!.text }); }
     await first.getByRole('combobox', { name: 'Model', exact: true }).selectOption('beta');
     await second.getByRole('combobox', { name: 'Reasoning effort' }).selectOption('low');
-    await second.waitForFunction(async () => (await window.settingsReviewHarness.snapshot()).drafts.length === 2);
+    await waitForBrowser(() => second.evaluate(async () => (await window.settingsReviewHarness.snapshot()).drafts.length === 2));
     const prior = await second.evaluate(() => window.settingsReviewHarness.snapshot());
     const other = prior.drafts.find(item => item.draft.effort === 'low'); assert.ok(other);
     await first.getByRole('button', { name: 'General', exact: true }).click();
@@ -103,7 +112,7 @@ test('actual settings navigation waits for exact IDB cleanup, preserves another 
     assert.equal(await dialog.getByRole('button', { name: 'Keep editing' }).isDisabled(), true);
     await second.evaluate(() => window.settingsReviewHarness.releaseTransaction());
     await first.getByRole('combobox', { name: 'Language' }).waitFor();
-    await second.waitForFunction(async () => (await window.settingsReviewHarness.snapshot()).drafts.length === 1);
+    await waitForBrowser(() => second.evaluate(async () => (await window.settingsReviewHarness.snapshot()).drafts.length === 1));
     const remaining = await second.evaluate(() => window.settingsReviewHarness.snapshot());
     assert.equal(remaining.drafts[0]?.editorId, other.editorId);
     assert.equal(remaining.drafts[0]?.draft.effort, 'low');
@@ -153,7 +162,7 @@ test('scope discard and restored conflict remain visible through real component 
     await context.route('**/*', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="root"></div>' }));
     const hooks = await context.newPage(); await hooks.goto('http://settings-review-fixture.invalid/?section=hooks'); await hooks.addScriptTag({ content: bundle.outputFiles[0]!.text });
     await hooks.getByRole('checkbox', { name: 'SessionStart hook 1' }).uncheck();
-    await hooks.waitForFunction(async () => (await window.settingsReviewHarness.snapshot()).drafts.some(item => item.section === 'hooks-settings'));
+    await waitForBrowser(() => hooks.evaluate(async () => (await window.settingsReviewHarness.snapshot()).drafts.some(item => item.section === 'hooks-settings')));
     await hooks.evaluate(() => window.settingsReviewHarness.setScope('/fixture/two'));
     const scopeWarning = hooks.getByRole('alert').filter({ hasText: 'The selected project changed' }); await scopeWarning.waitFor();
     await hooks.evaluate(() => window.settingsReviewHarness.failNextWrite());
@@ -174,12 +183,12 @@ test('scope discard and restored conflict remain visible through real component 
 
     const model = await context.newPage(); await model.goto('http://settings-review-fixture.invalid/'); await model.addScriptTag({ content: bundle.outputFiles[0]!.text });
     await model.getByRole('combobox', { name: 'Model', exact: true }).selectOption('beta');
-    await model.waitForFunction(async () => (await window.settingsReviewHarness.snapshot()).drafts.some(item => item.section === 'models'));
+    await waitForBrowser(() => model.evaluate(async () => (await window.settingsReviewHarness.snapshot()).drafts.some(item => item.section === 'models')));
     await model.evaluate(() => window.settingsReviewHarness.setConfig({ model: 'gamma', effort: 'high', version: 'v2' }));
     await model.locator('.yard-inline-save').getByRole('button', { name: 'Save' }).click();
     await model.getByRole('button', { name: 'Reload', exact: true }).click();
     await model.getByRole('button', { name: 'Keep my change' }).waitFor();
-    await model.waitForFunction(async () => (await window.settingsReviewHarness.snapshot()).drafts.some(item => Array.isArray(item.draft.conflicts) && item.draft.conflicts.includes('model')));
+    await waitForBrowser(() => model.evaluate(async () => (await window.settingsReviewHarness.snapshot()).drafts.some(item => Array.isArray(item.draft.conflicts) && item.draft.conflicts.includes('model'))));
     const original = (await model.evaluate(() => window.settingsReviewHarness.snapshot())).drafts.find(item => item.section === 'models'); assert.ok(original);
     await model.reload(); await model.addScriptTag({ content: bundle.outputFiles[0]!.text });
     const saved = model.getByRole('region', { name: 'Saved configuration edits' });
@@ -187,7 +196,7 @@ test('scope discard and restored conflict remain visible through real component 
     await model.getByRole('button', { name: 'Keep my change' }).waitFor();
     assert.equal(await model.getByRole('combobox', { name: 'Model', exact: true }).inputValue(), 'beta');
     assert.equal(await model.locator('.yard-inline-save').getByRole('button', { name: 'Save' }).isDisabled(), true);
-    await model.waitForFunction(async id => (await window.settingsReviewHarness.snapshot()).drafts.some(item => item.editorId !== id && item.section === 'models'), original.editorId);
+    await waitForBrowser(() => model.evaluate(async id => (await window.settingsReviewHarness.snapshot()).drafts.some(item => item.editorId !== id && item.section === 'models'), original.editorId));
     await model.evaluate(() => { window.settingsReviewHarness.setConfig({ model: 'beta', effort: 'high', version: 'v3' }); window.settingsReviewHarness.failNextWrite(); });
     await model.getByRole('button', { name: 'Reload', exact: true }).click();
     await model.getByText(/Could not save the newer edit in this browser/).waitFor();

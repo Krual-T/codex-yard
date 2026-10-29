@@ -13,6 +13,15 @@ import { browserOwnerKey } from '../src/renderer/browser/comments.ts';
 import type { BrowserOwner } from '../src/renderer/browser/comments.ts';
 import type { Fixture } from './browser-consumption-fixture.tsx';
 
+async function waitForBrowser(check: () => Promise<unknown>) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Timed out waiting for the asynchronous browser condition.');
+}
+
 declare global { interface Window { browserConsumption: Fixture } }
 
 test('confirmed browser references consume only the submitted version across pages and recovery', {
@@ -53,12 +62,12 @@ test('confirmed browser references consume only the submitted version across pag
     return reference;
   };
   const durable = async (page: Page) => {
-    await page.waitForFunction(async () => {
+    await waitForBrowser(() => page.evaluate(async () => {
       const snapshot = window.browserConsumption.snapshot();
       if (!snapshot) return false;
       const versions = await window.browserConsumption.versions(snapshot.owner);
       return versions.versions.some(value => value.revision === snapshot.revision);
-    });
+    }));
   };
   const initial = { hostId: 'local', threadId: 'thread-a', draftId: 'draft-a' };
   try {
@@ -161,7 +170,7 @@ test('confirmed browser references consume only the submitted version across pag
     const newerC = (await second.evaluate(() => window.browserConsumption.snapshot()))!.revision;
     await mount(second, { hostId: 'ssh-other', threadId: 'elsewhere', draftId: 'elsewhere' });
     await first.getByRole('button', { name: '删除引用' }).click();
-    await first.waitForFunction(async value => (await window.browserConsumption.comments(value)).comments.length === 0, changedOwner);
+    await waitForBrowser(() => first.evaluate(async value => (await window.browserConsumption.comments(value)).comments.length === 0, changedOwner));
     await second.evaluate(id => window.browserConsumption.confirm(id), beforeDelete.id);
     await second.evaluate(id => window.browserConsumption.finish(id), beforeDelete.id);
     assert.equal((await second.evaluate(value => window.browserConsumption.comments(value), changedOwner)).comments.length, 0);
@@ -185,8 +194,8 @@ test('confirmed browser references consume only the submitted version across pag
       }, requirePruned);
     };
     if ((await second.evaluate(() => window.browserConsumption.snapshot()))?.draft.text !== 'Newer C after submit') await chooseNewer();
-    await second.waitForFunction(async owner => (await window.browserConsumption.versions(owner)).versions.some(value =>
-      value.draft.text === 'Newer C after submit' && value.draft.references?.length === 0), changedOwner);
+    await waitForBrowser(() => second.evaluate(async owner => (await window.browserConsumption.versions(owner)).versions.some(value =>
+      value.draft.text === 'Newer C after submit' && value.draft.references?.length === 0), changedOwner));
     if ((await second.evaluate(() => window.browserConsumption.snapshot()))?.draft.references?.length !== 0) {
       await chooseNewer(true);
     }

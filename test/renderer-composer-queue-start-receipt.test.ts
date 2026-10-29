@@ -4,6 +4,15 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 
+async function waitForBrowser(check: () => Promise<unknown>) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Timed out waiting for the asynchronous browser condition.');
+}
+
 test('queue starts use the committed marker receipt and recover a known undispatched release', {
   skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 60_000,
 }, async t => {
@@ -83,7 +92,7 @@ test('queue starts use the committed marker receipt and recover a known undispat
         assert.equal(await page.evaluate(() => (window as any).fixture.state.starts), 0);
         await page.evaluate(() => (window as any).fixture.render());
         await page.waitForFunction(() => (window as any).fixture.state.releases.length === 2);
-        await page.waitForFunction(async () => (await (window as any).fixture.recovery()).markers.length === 0);
+        await waitForBrowser(() => page.evaluate(async () => (await (window as any).fixture.recovery()).markers.length === 0));
         const state = await page.evaluate(() => (window as any).fixture.state);
         assert.equal(state.starts, 0);
         assert.ok(state.releases.every((release: any) => release.sent === false && release.hostId === 'ssh-fixture'));

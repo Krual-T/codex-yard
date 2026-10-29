@@ -13,6 +13,15 @@ import { browserOwnerKey, browserReferences } from '../src/renderer/browser/comm
 import type { BrowserOwner } from '../src/renderer/browser/comments.ts';
 import type { Fixture } from './browser-consumption-fixture.tsx';
 
+async function waitForBrowser(check: () => Promise<unknown>) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Timed out waiting for the asynchronous browser condition.');
+}
+
 declare global { interface Window { browserConsumption: Fixture } }
 
 const owner: BrowserOwner = { hostId: 'local', threadId: 'review-thread', draftId: 'review-draft' };
@@ -48,10 +57,10 @@ async function mount(page: Page, value: BrowserOwner) {
     const snapshot = window.browserConsumption.snapshot();
     return snapshot?.owner.hostId === target.hostId && snapshot.owner.threadId === target.threadId && snapshot.owner.draftId === target.draftId;
   }, value);
-  await page.waitForFunction(async target => {
+  await waitForBrowser(() => page.evaluate(async target => {
     const snapshot = window.browserConsumption.snapshot(), versions = await window.browserConsumption.versions(target);
     return !!snapshot && versions.versions.some(version => version.revision === snapshot.revision);
-  }, value);
+  }, value));
 }
 
 async function addAndAttach(page: Page, value: BrowserOwner) {
@@ -103,7 +112,7 @@ test('unsaved panel edits survive list changes, cross-page deletion and owner sw
   await internals.close();
   await first.getByLabel('浏览器引用批注').fill('unsaved text survives deletion');
   await second.getByRole('button', { name: '删除引用' }).click();
-  await second.waitForFunction(async target => (await window.browserConsumption.comments(target)).comments.length === 0, owner);
+  await waitForBrowser(() => second.evaluate(async target => (await window.browserConsumption.comments(target)).comments.length === 0, owner));
   await first.waitForFunction(() => [...document.querySelectorAll('textarea')].some(element => element.value === 'unsaved text survives deletion'));
   await first.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
     writeText: async (value: string) => { (window as unknown as { copied: string }).copied = value; },
@@ -136,13 +145,13 @@ test('a deleted legacy reference remains tombstoned and a manual claim gets an i
   await page.getByRole('button', { name: '添加到草稿' }).click();
   await page.waitForFunction(id => window.browserConsumption.snapshot()?.draft.references?.some(reference => reference.id === id), oldRef.id);
   await page.getByRole('button', { name: '删除引用' }).click();
-  await page.waitForFunction(async target => (await window.browserConsumption.comments(target)).deleted.length === 1, owner);
+  await waitForBrowser(() => page.evaluate(async target => (await window.browserConsumption.comments(target)).deleted.length === 1, owner));
   await page.evaluate(target => window.browserConsumption.claimProven(target, 'legacy'), owner);
   let stored = await page.evaluate(() => window.browserConsumption.atom('codex-yard.browser-comments.v1')) as Record<string, unknown>;
   assert.deepEqual((stored.entries as Record<string, unknown>).legacy, [original]);
   await page.getByText('待认领的旧浏览器批注').click();
   await page.getByRole('button', { name: '认领可添加的批注' }).click();
-  await page.waitForFunction(async target => (await window.browserConsumption.comments(target)).comments.length === 1, owner);
+  await waitForBrowser(() => page.evaluate(async target => (await window.browserConsumption.comments(target)).comments.length === 1, owner));
   const state = await page.evaluate(target => window.browserConsumption.comments(target), owner);
   const newRef = browserReferences(owner, state.comments)[0]!;
   assert.notEqual(newRef.id, oldRef.id);
@@ -187,7 +196,7 @@ test('R1 confirmation and removal preserve shared R2 and an explicitly selected 
   await first.waitForFunction(() => window.browserConsumption.snapshot()?.draft.text === 'Page A');
   await second.waitForFunction(() => window.browserConsumption.snapshot()?.draft.text === 'Page B');
   await locker.evaluate(() => (window as unknown as { unlock(): void }).unlock());
-  await first.waitForFunction(async target => (await window.browserConsumption.versions(target)).versions.length === 2, owner);
+  await waitForBrowser(() => first.evaluate(async target => (await window.browserConsumption.versions(target)).versions.length === 2, owner));
   await locker.close();
   const intent = await second.evaluate(() => window.browserConsumption.prepare());
   assert.deepEqual(intent.draft.references, [original]);

@@ -29,7 +29,12 @@ const options = { skip: !existsSync(chromePath) && 'An isolated headless browser
 const view = (page: Page, name: 'one' | 'two') => page.locator(`[data-view="${name}"]`);
 const editor = (page: Page, name: 'one' | 'two') => view(page, name).getByRole('textbox', { name: 'Edit message text' });
 async function savedText(page: Page, text: string) {
-  await page.waitForFunction(async expected => (await window.editAuthorityHarness.saved())?.recovery.editor.edits[0]?.text === expected, text);
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if ((await page.evaluate(() => window.editAuthorityHarness.saved()))?.recovery.editor.edits[0]?.text === text) return;
+    await page.waitForTimeout(30);
+  }
+  throw new Error(`Timed out waiting for the saved message edit: ${text}`);
 }
 
 test('the parent captures connection and authority before the first recovery save waits', options, async () => {

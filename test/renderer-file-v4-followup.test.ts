@@ -6,6 +6,15 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium, type BrowserContext, type Page } from 'playwright-core';
 
+async function waitForBrowser(check: () => Promise<unknown>) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Timed out waiting for the asynchronous browser condition.');
+}
+
 test('file recovery protects distinct page drafts and follows durable host receipts', {
   skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
 }, async t => {
@@ -106,7 +115,7 @@ test('file recovery protects distinct page drafts and follows durable host recei
     await page.getByRole('button', {name:'Save file'}).click();
     await page.waitForFunction(() => !!(window as any).fixture.state.release);
     await page.evaluate(() => (window as any).fixture.edit(1,'Y'));
-    await page.waitForFunction(async () => (await (window as any).fixture.recovery('shared','/w/shared.txt'))?.draft === 'XYbase\n');
+    await waitForBrowser(() => page!.evaluate(async () => (await (window as any).fixture.recovery('shared','/w/shared.txt'))?.draft === 'XYbase\n'));
     await open(other, 'shared', '/w/shared.txt');
     await other.evaluate(() => { const f = (window as any).fixture; f.state.status = 'different'; f.edit(0,'B'); });
     await other.evaluate(() => (window as any).fixture.flush());
@@ -182,7 +191,7 @@ test('file recovery protects distinct page drafts and follows durable host recei
     await open(page, 'blocked', '/w/lost.txt');
     await page.getByRole('alert').filter({hasText:'Save result is unknown'}).waitFor();
     await page.getByRole('button', {name:'Check save result'}).click();
-    await page.waitForFunction(async () => (await (window as any).fixture.recovery('blocked','/w/lost.txt'))?.phase === 'failed');
+    await waitForBrowser(() => page!.evaluate(async () => (await (window as any).fixture.recovery('blocked','/w/lost.txt'))?.phase === 'failed'));
     const recovered = await page.evaluate(() => (window as any).fixture.recovery('blocked','/w/lost.txt'));
     assert.equal(recovered.id, submitted.id); assert.equal(recovered.checkId, 'original-operation');
     assert.deepEqual(recovered.query, {cwd:'/original',path:'/original/link.txt'}); assert.equal(recovered.submitted, false);
@@ -219,7 +228,7 @@ test('file recovery protects distinct page drafts and follows durable host recei
     await open(racingOther, 'status-race', '/w/status-race.txt');
     await racingOther.evaluate(() => { (window as any).fixture.state.status = 'failed'; });
     await racingOther.getByRole('button', {name:'Check save result'}).click();
-    await racingOther.waitForFunction(async () => (await (window as any).fixture.recovery('status-race','/w/status-race.txt'))?.phase === 'failed');
+    await waitForBrowser(() => racingOther.evaluate(async () => (await (window as any).fixture.recovery('status-race','/w/status-race.txt'))?.phase === 'failed'));
     const terminalRecord = await racingOther.evaluate(() => (window as any).fixture.recovery('status-race','/w/status-race.txt'));
     await page.evaluate(() => (window as any).fixture.state.releaseStatus());
     await page.getByRole('alert').filter({hasText:'File recovery changed in another page'}).waitFor();
@@ -240,7 +249,7 @@ test('file recovery protects distinct page drafts and follows durable host recei
     await page.getByRole('alert').filter({hasText:'Save result is unknown'}).waitFor();
     await page.evaluate(() => (window as any).fixture.flush());
     await page.getByRole('button', {name:'Check save result'}).click();
-    await page.waitForFunction(async () => (await (window as any).fixture.recovery('storage','/w/storage.txt'))?.phase === 'saved');
+    await waitForBrowser(() => page!.evaluate(async () => (await (window as any).fixture.recovery('storage','/w/storage.txt'))?.phase === 'saved'));
     await page.evaluate(() => (window as any).fixture.flush());
     assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((c: any) => c.endpoint === 'workspace-file-save').length), 1);
     assert.equal(await page.getByRole('button', {name:'Save file'}).isDisabled(), true);

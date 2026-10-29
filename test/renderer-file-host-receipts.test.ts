@@ -12,6 +12,15 @@ import { createFakeCodex } from './fake-codex.ts';
 import { fileDaemonFixture } from './file-daemon-fixture.ts';
 import { nativeFixture } from './native-fixture.ts';
 
+async function waitForBrowser(check: () => Promise<unknown>) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Timed out waiting for the asynchronous browser condition.');
+}
+
 test('file panels recover actual host failed, blocked and lost receipts without replay', {
   skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
 }, async t => {
@@ -148,8 +157,8 @@ test('file panels recover actual host failed, blocked and lost receipts without 
     assert.deepEqual(checks.map((call: any) => call.params.operationId), [blockedRecovery.id, originalRecovery.id]);
     assert.equal(writes, 2); assert.equal(await readFile(pendingFile, 'utf8'), 'base\n');
     release();
-    await original.waitForFunction(async ({scope,cwd,path}: any) => (await (window as any).fixture.recovery(scope,cwd,path))?.phase === 'saved',
-      {scope:'original',cwd:project,path:pendingTarget});
+    await waitForBrowser(() => original.evaluate(async ({scope,cwd,path}: any) => (await (window as any).fixture.recovery(scope,cwd,path))?.phase === 'saved',
+      {scope:'original',cwd:project,path:pendingTarget}));
     await other.getByRole('button', {name:'Check save result'}).click();
     await other.getByRole('alert').filter({hasText:'File changed on disk'}).waitFor();
     assert.equal(await other.evaluate(() => (window as any).fixture.text()), 'Bbase\n');

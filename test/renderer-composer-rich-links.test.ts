@@ -9,6 +9,15 @@ import type { ComposerDocument } from '../src/renderer/workbench-contract.ts';
 import { draftToInput } from '../src/renderer/composer/standalone-draft.ts';
 import { readRichDocument, safeRichLinkHref, serializePlainDocument, serializeRichDocument } from '../src/renderer/composer/rich-document.ts';
 
+async function waitForBrowser(check: () => Promise<unknown>) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Timed out waiting for the asynchronous browser condition.');
+}
+
 test('literal link marks preserve titles, formatting and per-occurrence spelling in complex documents', () => {
   const href = 'https://example.test/a(b)', title = 'Link title';
   const first = '[**bold** and *ital*](https://example.test/a\\(b\\) "Link title")';
@@ -724,10 +733,10 @@ test('pending link form blocks capture and dispatch, and survives delayed confir
     await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);
     await editLinkAddress(page);
     await page.evaluate(() => (window as any).fixture.resolveSubmit());
-    await page.waitForFunction(async () => {
+    await waitForBrowser(() => page.evaluate(async () => {
       const f = (window as any).fixture, owner = f.state.controller.snapshot().owner;
       return (await f.readComposerDraftVersions(owner)).versions.every((value: any) => !value.draft.document);
-    });
+    }));
     assert.equal(await dialog.getByRole('textbox', { name: '链接地址' }).inputValue(), 'https://example.test/pending');
     assert.equal(await editor.count(), 1);
     assert.equal((await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft)).document.content[0].content[0].text, 'Original');

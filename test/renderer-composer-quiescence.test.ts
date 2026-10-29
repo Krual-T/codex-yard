@@ -4,6 +4,15 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 
+async function waitForBrowser(check: () => Promise<unknown>) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Timed out waiting for the asynchronous browser condition.');
+}
+
 test('composer leases drain real attachment, reference and queue edits before the parent switches owners', {
   skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
 }, async t => {
@@ -279,11 +288,11 @@ test('composer leases drain real attachment, reference and queue edits before th
       await page.evaluate(() => { const f = (window as any).fixture; IDBObjectStore.prototype.put = f.originalPut; f.release(); });
       await page.getByRole('alert').filter({ hasText: 'synthetic quota failure' }).waitFor();
       await page.getByRole('button', { name: '重试保存' }).click();
-      await page.waitForFunction(async () => {
+      await waitForBrowser(() => page.evaluate(async () => {
         const f = (window as any).fixture, snapshot = f.state.controller.snapshot();
         const saved = await f.readComposerDraft(snapshot.owner, snapshot.revision);
         return saved?.draft.images.length === 3;
-      });
+      }));
     });
 
     await t.test('a concurrent page cannot replace the frozen projection until release', async () => {
@@ -437,7 +446,7 @@ test('composer leases drain real attachment, reference and queue edits before th
       assert.equal((await page.evaluate(() => (window as any).fixture.readUnknown())).length, 1);
       await page.waitForFunction(() => (window as any).fixture.state.lockReleaseWaiting);
       await page.evaluate(() => (window as any).fixture.resolveLockRelease());
-      await page.waitForFunction(async () => (await (window as any).fixture.readUnknown()).length === 0);
+      await waitForBrowser(() => page.evaluate(async () => (await (window as any).fixture.readUnknown()).length === 0));
     });
 
     await t.test('a known rejected queue start resumes only its lock release', async () => {

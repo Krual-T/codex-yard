@@ -289,27 +289,17 @@ async function activeVersions(page: Page, threadId: string) {
   });
 }
 async function waitForVersion(page: Page, threadId: string, text: string, reference: string | null) {
-  await page.waitForFunction(async expected => {
-    const raw = await new Promise<unknown>((resolve, reject) => {
-      const open = indexedDB.open('codex-yard.ui-atoms.v1', 1);
-      open.onerror = () => reject(open.error);
-      open.onsuccess = () => {
-        const db = open.result, tx = db.transaction('atoms', 'readonly'), request = tx.objectStore('atoms').get('native-atoms');
-        request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
-        tx.oncomplete = () => db.close();
-      };
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const versions = await activeVersions(page, threadId);
+    const matching = versions.filter(version => {
+      const draft = record(version.draft);
+      return draft.text === text && (reference === null || JSON.stringify(draft.references).includes(reference));
     });
-    const obj = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value)
-      ? value as Record<string, unknown> : {};
-    const entries = obj(obj(obj(raw).atoms)['codex-yard.composer-drafts.v3']).entries;
-    const versions = Object.values(obj(entries)).flatMap(entry => Array.isArray(obj(entry).versions) ? obj(entry).versions as unknown[] : []);
-    const matching = versions.map(obj).filter(version => {
-      const owner = obj(version.owner), draft = obj(version.draft);
-      return owner.hostId === 'local' && owner.threadId === expected.threadId && owner.draftId === expected.threadId
-        && draft.text === expected.text && (expected.reference === null || JSON.stringify(draft.references).includes(expected.reference));
-    });
-    return matching.length === 1;
-  }, { threadId, text, reference });
+    if (matching.length === 1) return;
+    await page.waitForTimeout(30);
+  }
+  throw new Error(`Timed out waiting for the saved draft version for ${threadId}.`);
 }
 async function holdDeletionReads(page: Page, threadId: string) {
   await page.evaluate(threadId => {

@@ -12,6 +12,15 @@ import type { BrowserContext, Page } from 'playwright-core';
 import type { BrowserOwner } from '../src/renderer/browser/comments.ts';
 import type { Fixture } from './browser-consumption-fixture.tsx';
 
+async function waitForBrowser(check: () => Promise<unknown>) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Timed out waiting for the asynchronous browser condition.');
+}
+
 declare global { interface Window { browserConsumption: Fixture } }
 
 const owner: BrowserOwner = { hostId: 'local', threadId: 'recovery-thread', draftId: 'recovery-draft' };
@@ -44,11 +53,11 @@ async function withBrowser(run: (context: BrowserContext, origin: string) => Pro
 
 async function mount(page: Page, value: BrowserOwner) {
   await page.evaluate(target => window.browserConsumption.mount(target), value);
-  await page.waitForFunction(async target => {
+  await waitForBrowser(() => page.evaluate(async target => {
     const snapshot = window.browserConsumption.snapshot();
     if (!snapshot || JSON.stringify(snapshot.owner) !== JSON.stringify(target)) return false;
     return (await window.browserConsumption.versions(target)).versions.some(version => version.revision === snapshot.revision);
-  }, value);
+  }, value));
 }
 
 async function addAndAttach(page: Page, value: BrowserOwner, otherOwnerPending = false) {
@@ -173,11 +182,11 @@ test('retry cannot replace a newer local draft after the first acceptance read f
   const { before, after, recovery } = await failFirstAcceptanceRead(page);
   await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('newer local draft');
   await page.getByRole('button', { name: '保存为独立草稿' }).click();
-  await page.waitForFunction(async target => {
+  await waitForBrowser(() => page.evaluate(async target => {
     const snapshot = window.browserConsumption.snapshot();
     return snapshot?.draft.text === 'newer local draft' && (await window.browserConsumption.versions(target)).versions
       .some(version => version.revision === snapshot.revision && version.draft.text === snapshot.draft.text);
-  }, owner);
+  }, owner));
   const current = await page.evaluate(() => window.browserConsumption.snapshot());
   assert.ok(current); assert.notEqual(current.revision, before.revision); assert.notEqual(current.revision, after.revision);
   const savedRoots = await roots(page);
@@ -207,8 +216,8 @@ test('retry and discard preserve unsaved newer input after the first acceptance 
   assert.deepEqual(await page.evaluate(() => window.browserConsumption.snapshot()), unsaved);
   assert.deepEqual(await roots(page), savedRoots);
   await page.getByRole('button', { name: '保存为独立草稿' }).click();
-  await page.waitForFunction(async target => (await window.browserConsumption.versions(target)).versions
-    .some(version => version.draft.text === 'unsaved newer input'), owner);
+  await waitForBrowser(() => page.evaluate(async target => (await window.browserConsumption.versions(target)).versions
+    .some(version => version.draft.text === 'unsaved newer input'), owner));
 }));
 
 test('an owner switch while retry waits cannot apply the previous owner receipt', {
@@ -219,11 +228,11 @@ test('an owner switch while retry waits cannot apply the previous owner receipt'
   const locker = await context.newPage(); await locker.goto(origin + '/writer'); await mount(locker, other);
   await assertDifferentRenderers(context);
   await locker.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('different owner draft');
-  await locker.waitForFunction(async target => {
+  await waitForBrowser(() => locker.evaluate(async target => {
     const snapshot = window.browserConsumption.snapshot();
     return snapshot?.draft.text === 'different owner draft' && (await window.browserConsumption.versions(target)).versions
       .some(version => version.revision === snapshot.revision && version.draft.text === snapshot.draft.text);
-  }, other);
+  }, other));
   const expectedOther = await locker.evaluate(() => window.browserConsumption.snapshot());
   assert.ok(expectedOther);
   await locker.evaluate(async () => {
@@ -246,11 +255,11 @@ test('an owner switch while retry waits cannot apply the previous owner receipt'
   await page.evaluate(target => window.browserConsumption.mount(target), other);
   await page.waitForFunction(target => JSON.stringify(window.browserConsumption.snapshot()?.owner) === JSON.stringify(target), other);
   await locker.evaluate(() => (window as unknown as { unlock(): void }).unlock());
-  await page.waitForFunction(async target => {
+  await waitForBrowser(() => page.evaluate(async target => {
     const snapshot = window.browserConsumption.snapshot();
     return JSON.stringify(snapshot?.owner) === JSON.stringify(target) && (await window.browserConsumption.versions(target)).versions
       .some(version => version.revision === snapshot?.revision);
-  }, other);
+  }, other));
   const elsewhere = page.locator('section[role="status"]').filter({ hasText: '其他草稿有已保存但尚未接收的版本' });
   await elsewhere.waitFor();
   await elsewhere.getByRole('button', { name: '放弃此待接收快照' }).waitFor({ state: 'visible' });
@@ -275,8 +284,8 @@ test('retry cannot restore a committed version replaced by another renderer', {
   const writer = await context.newPage(); await writer.goto(origin + '/writer');
   await assertDifferentRenderers(context);
   await writer.evaluate(snapshot => window.browserConsumption.replaceVersion(snapshot, 'replacement-after-read-failure', 'other renderer edit'), after);
-  await page.waitForFunction(async ({ target, revision }) => !(await window.browserConsumption.versions(target)).versions
-    .some(version => version.revision === revision), { target: owner, revision: after.revision });
+  await waitForBrowser(() => page.evaluate(async ({ target, revision }) => !(await window.browserConsumption.versions(target)).versions
+    .some(version => version.revision === revision), { target: owner, revision: after.revision }));
   const savedRoots = await roots(page);
   await recovery.getByRole('button', { name: '核对已保存的草稿版本' }).click();
   await page.getByText('当前草稿未能确认此活动版本', { exact: false }).waitFor();
@@ -298,7 +307,7 @@ test('recovery checks durable activity even when the controller still displays t
   await assertDifferentRenderers(context);
   await writer.evaluate(target => window.browserConsumption.forkVersion(target, 'independent-one', 'independent one'), owner);
   await writer.evaluate(target => window.browserConsumption.forkVersion(target, 'independent-two', 'independent two'), owner);
-  await first.waitForFunction(async target => (await window.browserConsumption.versions(target)).versions.length === 3, owner);
+  await waitForBrowser(() => first.evaluate(async target => (await window.browserConsumption.versions(target)).versions.length === 3, owner));
 
   await first.evaluate(() => window.browserConsumption.rejectNextCommit());
   await first.getByLabel('浏览器引用批注').fill('saved but unaccepted');
@@ -311,8 +320,8 @@ test('recovery checks durable activity even when the controller still displays t
   await first.waitForFunction(revision => window.browserConsumption.snapshot()?.revision === revision, saved.revision);
   assert.equal(await first.evaluate(() => window.browserConsumption.canLeave()), false, 'Displaying after alone does not release protection');
   await writer.evaluate(snapshot => window.browserConsumption.replaceVersion(snapshot, 'cross-page-replacement', 'newer cross-page edit'), saved);
-  await first.waitForFunction(async ({ target, revision }) => !(await window.browserConsumption.versions(target)).versions
-    .some(version => version.revision === revision), { target: owner, revision: saved.revision });
+  await waitForBrowser(() => first.evaluate(async ({ target, revision }) => !(await window.browserConsumption.versions(target)).versions
+    .some(version => version.revision === revision), { target: owner, revision: saved.revision }));
   assert.deepEqual(await first.evaluate(() => window.browserConsumption.snapshot()), saved, 'The old after is still displayed in memory');
   await recovery.getByRole('button', { name: '核对已保存的草稿版本' }).click();
   await first.getByText('当前草稿未能确认此活动版本', { exact: false }).waitFor();
@@ -463,7 +472,7 @@ test('same-owner actions cannot race the original acceptance or replace its pend
   await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('base draft');
   await addAndAttach(page, owner); await addAndAttach(page, owner);
   await page.evaluate(target => window.browserConsumption.forkVersion(target, 'independent-race', 'independent race'), owner);
-  await page.waitForFunction(async target => (await window.browserConsumption.versions(target)).versions.length === 2, owner);
+  await waitForBrowser(() => page.evaluate(async target => (await window.browserConsumption.versions(target)).versions.length === 2, owner));
   await page.getByLabel('浏览器引用批注').nth(0).fill('first edit');
   await page.getByLabel('浏览器引用批注').nth(1).fill('second edit');
   const beforeRejectedBegin = await roots(page);
@@ -499,8 +508,8 @@ test('same-owner actions cannot race the original acceptance or replace its pend
   assert.equal(await page.evaluate(() => window.browserConsumption.canLeave()), false, 'The second unsaved edit remains protected');
   assert.equal(await page.getByLabel('浏览器引用批注').nth(1).inputValue(), 'second edit');
   await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('newer local edit');
-  await page.waitForFunction(async target => (await window.browserConsumption.versions(target)).versions.some(version =>
-    version.draft.text === 'newer local edit' && version.draft.references?.some(reference => reference.text.includes('first edit'))), owner);
+  await waitForBrowser(() => page.evaluate(async target => (await window.browserConsumption.versions(target)).versions.some(version =>
+    version.draft.text === 'newer local edit' && version.draft.references?.some(reference => reference.text.includes('first edit'))), owner));
   await page.getByRole('button', { name: '保存批注' }).nth(1).click();
   await page.waitForFunction(() => !window.browserConsumption.dirty());
   const comments = (await page.evaluate(target => window.browserConsumption.comments(target), owner)).comments;

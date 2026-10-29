@@ -13,6 +13,15 @@ import { browserOwnerKey } from '../src/renderer/browser/comments.ts';
 import type { BrowserOwner } from '../src/renderer/browser/comments.ts';
 import type { Fixture } from './browser-consumption-fixture.tsx';
 
+async function waitForBrowser(check: () => Promise<unknown>) {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  throw new Error('Timed out waiting for the asynchronous browser condition.');
+}
+
 declare global { interface Window { browserConsumption: Fixture } }
 
 test('real composer and browser panel preserve complete comment versions and claim legacy records', {
@@ -55,16 +64,16 @@ test('real composer and browser panel preserve complete comment versions and cla
       const snapshot = window.browserConsumption.snapshot();
       return snapshot?.owner.hostId === value.hostId && snapshot.owner.threadId === value.threadId && snapshot.owner.draftId === value.draftId;
     }, owner);
-    await page.waitForFunction(async value => {
+    await waitForBrowser(() => page.evaluate(async value => {
       const snapshot = window.browserConsumption.snapshot();
       const versions = await window.browserConsumption.versions(value);
       return !!snapshot && versions.versions.some(version => version.revision === snapshot.revision);
-    }, owner);
+    }, owner));
   };
-  const waitDurable = (page: Page) => page.waitForFunction(async () => {
+  const waitDurable = (page: Page) => waitForBrowser(() => page.evaluate(async () => {
     const snapshot = window.browserConsumption.snapshot();
     return !!snapshot && (await window.browserConsumption.versions(snapshot.owner)).versions.some(item => item.revision === snapshot.revision);
-  });
+  }));
   try {
     await context.addInitScript(value => {
       if (location.hostname === '127.0.0.1' && !localStorage.getItem('workbench.browser-comments.v1')) localStorage.setItem('workbench.browser-comments.v1', value);
@@ -75,7 +84,7 @@ test('real composer and browser panel preserve complete comment versions and cla
     assert.match(await first.locator('section[aria-label="浏览器引用"]').innerText(), /legacy value/);
     assert.match(await first.locator('section[aria-label="浏览器引用"]').innerText(), /already saved/);
     await first.getByRole('button', { name: '保留两份并认领批注' }).click();
-    await first.waitForFunction(async owner => (await window.browserConsumption.comments(owner)).comments.length === 2, target);
+    await waitForBrowser(() => first.evaluate(async owner => (await window.browserConsumption.comments(owner)).comments.length === 2, target));
     const claimed = await first.evaluate(owner => window.browserConsumption.comments(owner), target);
     const values = claimed.comments as typeof original[];
     assert.notEqual(values[0]!.localBrowserCommentMetadata.commentId, values[1]!.localBrowserCommentMetadata.commentId);
@@ -90,14 +99,14 @@ test('real composer and browser panel preserve complete comment versions and cla
     assert.equal(await first.evaluate(() => localStorage.getItem('workbench.browser-comments.v1')), raw);
     await first.getByLabel('浏览器引用批注').nth(1).fill('edited claimed value');
     await first.getByRole('button', { name: '保存批注' }).nth(1).click();
-    await first.waitForFunction(async owner => JSON.stringify((await window.browserConsumption.comments(owner)).comments).includes('edited claimed value'), target);
+    await waitForBrowser(() => first.evaluate(async owner => JSON.stringify((await window.browserConsumption.comments(owner)).comments).includes('edited claimed value'), target));
     await first.getByRole('button', { name: '添加到草稿' }).nth(1).click();
     await first.waitForFunction(() => window.browserConsumption.snapshot()?.draft.references?.some(ref => ref.text.includes('edited claimed value')));
     await first.reload(); await mount(first, target);
     assert.ok((await first.evaluate(() => window.browserConsumption.input())).some(part => String(part.text).includes('edited claimed value')));
     await first.evaluate(({ owner }) => window.browserConsumption.setLegacyEvidence('proven', owner), { owner: remote });
     await mount(first, remote);
-    await first.waitForFunction(async owner => (await window.browserConsumption.comments(owner)).comments.length === 1, remote);
+    await waitForBrowser(() => first.evaluate(async owner => (await window.browserConsumption.comments(owner)).comments.length === 1, remote));
     assert.deepEqual((await first.evaluate(owner => window.browserConsumption.comments(owner), remote)).comments, [known]);
     stored = await first.evaluate(() => window.browserConsumption.atom('codex-yard.browser-comments.v1')) as Record<string, unknown>;
     assert.deepEqual((stored.entries as Record<string, unknown>).ambiguous, [{ future: 'unknown' }]);
@@ -165,7 +174,7 @@ test('real composer and browser panel preserve complete comment versions and cla
     for (const text of ['R2 from A', 'R3 from A']) {
       await first.getByLabel('浏览器引用批注').fill(text);
       await first.getByRole('button', { name: '保存批注' }).click();
-      await first.waitForFunction(async ({ owner, text }) => JSON.stringify((await window.browserConsumption.comments(owner)).comments).includes(text), { owner, text });
+      await waitForBrowser(() => first.evaluate(async ({ owner, text }) => JSON.stringify((await window.browserConsumption.comments(owner)).comments).includes(text), { owner, text }));
       await first.waitForFunction(value => window.browserConsumption.snapshot()?.draft.references?.[0]?.text.includes(value), text);
     }
     await second.evaluate(() => window.browserConsumption.showBrowser(true));
@@ -196,7 +205,7 @@ test('real composer and browser panel preserve complete comment versions and cla
     const frozen = await second.evaluate(() => window.browserConsumption.prepare());
     assert.deepEqual(frozen.draft.references?.[0], reference);
     await first.getByRole('button', { name: '删除引用' }).click();
-    await first.waitForFunction(async value => (await window.browserConsumption.comments(value)).comments.length === 0, owner);
+    await waitForBrowser(() => first.evaluate(async value => (await window.browserConsumption.comments(value)).comments.length === 0, owner));
     assert.deepEqual((await second.evaluate(() => window.browserConsumption.recovery())).requests[frozen.id]?.draft.references?.[0], reference);
     assert.deepEqual((await second.evaluate(() => window.browserConsumption.snapshot()))?.draft.references?.[0], reference);
 
