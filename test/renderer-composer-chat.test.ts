@@ -945,6 +945,113 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
+    await t.test('C final segmented structure adoption discards only the prior version history', async () => {
+      for (const fromBreak of [false, true]) {
+        const { page, errors } = await open(fromBreak ? 'c-final-break-to-paragraph' : 'c-final-paragraph-to-break');
+        await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+        const firstParagraphs = fromBreak
+          ? [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }, { type: 'hard_break' }, { type: 'text', text: 'B' }] }]
+          : [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'B' }] }];
+        const original = { text: 'A\nB\nTail', images: [], files: [], references: [], skills: [], input: [
+          { type: 'text', text: 'A\nB', text_elements: [] }, { type: 'image', fileId: 'image-one', detail: 'high' },
+          { type: 'text', text: 'Tail', text_elements: [] },
+        ], document: { type: 'doc', content: [...firstParagraphs, { type: 'paragraph', content: [{ type: 'text', text: 'Tail' }] }] } };
+        assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+        const first = page.getByRole('textbox', { name: 'Work with Codex 1' });
+        const second = page.getByRole('textbox', { name: 'Work with Codex 2' });
+        await second.focus(); await second.press('End'); await second.pressSequentially('Y');
+        assert.equal(await second.inputValue(), 'TailY');
+        await first.focus(); await first.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(element.value.length, element.value.length));
+        await first.pressSequentially('X'); assert.equal(await first.inputValue(), 'A\nBX');
+        assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller;
+          return c.update(c.snapshot().owner, (draft: any) => ({ ...draft, files: [{ name: 'notes.txt', path: '/workspace/notes.txt' }] })); }), true);
+        await first.press('Control+z'); assert.equal(await first.inputValue(), 'A\nB');
+        await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'A\nBX');
+        assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+        const alternate = await page.evaluate(useBreak => {
+          const draft = structuredClone((window as any).fixture.state.controller.snapshot().draft);
+          const tail = draft.document.content.at(-1);
+          draft.document.content = useBreak
+            ? [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }, { type: 'hard_break' }, { type: 'text', text: 'BX' }] }, tail]
+            : [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'BX' }] }, tail];
+          return draft;
+        }, !fromBreak);
+        const revision = fromBreak ? 'c-final-paragraph' : 'c-final-break';
+        await page.evaluate(({ draft, revision }) => (window as any).fixture.addVersion(draft, revision), { draft: alternate, revision });
+        await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
+        await page.getByRole('button', { name: 'A BX TailY', exact: true }).click();
+        await page.waitForFunction(revision => (window as any).fixture.state.controller.snapshot().revision === revision, revision);
+        await first.focus(); await first.press('Control+z');
+        assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+        const current = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+        const saved = await page.evaluate(() => (window as any).fixture.versions());
+        assert.equal(await first.inputValue(), 'A\nBX');
+        assert.equal(current.revision, revision);
+        assert.deepEqual(current.draft, alternate);
+        assert.deepEqual(saved.versions.find((version: any) => version.revision === revision)?.draft, alternate);
+        await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'A\nBX');
+        await second.focus(); await second.press('Control+z'); assert.equal(await second.inputValue(), 'Tail');
+        await second.press('Control+Shift+z'); assert.equal(await second.inputValue(), 'TailY');
+        await first.focus();
+        await first.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(element.value.length, element.value.length));
+        await first.pressSequentially('C'); await first.press('Control+z'); assert.equal(await first.inputValue(), 'A\nBX');
+        await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'A\nBXC');
+        assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+        const persisted = await page.evaluate(() => (window as any).fixture.read());
+        assert.deepEqual(persisted.draft.input[1], original.input[1]);
+        assert.equal(persisted.draft.input[0].text, 'A\nBXC');
+        assert.equal(persisted.draft.document.content[0].content.some((node: any) => node.type === 'hard_break'), !fromBreak);
+        await page.reload(); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+        assert.equal(await page.getByRole('textbox', { name: 'Work with Codex 1' }).inputValue(), 'A\nBXC');
+        assert.deepEqual(errors, []); await page.close();
+      }
+    });
+
+    await t.test('C final segmented separator structure invalidates both adjacent histories', async () => {
+      for (const fromBreak of [false, true]) {
+        const { page, errors } = await open(fromBreak ? 'c-final-separator-to-paragraph' : 'c-final-separator-to-break');
+        await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+        const content = fromBreak ? [{ type: 'paragraph', content: [
+          { type: 'text', text: 'A' }, { type: 'hard_break' }, { type: 'text', text: 'B' },
+        ] }] : [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'B' }] }];
+        const original = { text: 'A\nB', images: [], files: [], references: [], skills: [], input: [
+          { type: 'text', text: 'A', text_elements: [] }, { type: 'image', fileId: 'image-one', detail: 'high' },
+          { type: 'text', text: 'B', text_elements: [] },
+        ], document: { type: 'doc', content } };
+        assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+        const first = page.getByRole('textbox', { name: 'Work with Codex 1' }), second = page.getByRole('textbox', { name: 'Work with Codex 2' });
+        await first.focus(); await first.press('End'); await first.pressSequentially('X');
+        await second.focus(); await second.press('End'); await second.pressSequentially('Y');
+        assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+        const alternate = await page.evaluate(useBreak => {
+          const draft = structuredClone((window as any).fixture.state.controller.snapshot().draft);
+          draft.document.content = useBreak ? [{ type: 'paragraph', content: [
+            { type: 'text', text: 'AX' }, { type: 'hard_break' }, { type: 'text', text: 'BY' },
+          ] }] : [{ type: 'paragraph', content: [{ type: 'text', text: 'AX' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'BY' }] }];
+          return draft;
+        }, !fromBreak);
+        const revision = fromBreak ? 'c-final-separator-paragraph' : 'c-final-separator-break';
+        await page.evaluate(({ draft, revision }) => (window as any).fixture.addVersion(draft, revision), { draft: alternate, revision });
+        await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
+        await page.getByRole('button', { name: 'AX BY', exact: true }).click();
+        await page.waitForFunction(revision => (window as any).fixture.state.controller.snapshot().revision === revision, revision);
+        await first.focus(); await first.press('Control+z');
+        await second.focus(); await second.press('Control+z');
+        assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+        const current = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+        const saved = await page.evaluate(() => (window as any).fixture.versions());
+        assert.equal(await first.inputValue(), 'AX'); assert.equal(await second.inputValue(), 'BY');
+        assert.equal(current.revision, revision); assert.deepEqual(current.draft, alternate);
+        assert.deepEqual(saved.versions.find((version: any) => version.revision === revision)?.draft, alternate);
+        await first.focus(); await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'AX');
+        await second.focus(); await second.press('Control+Shift+z'); assert.equal(await second.inputValue(), 'BY');
+        await second.press('End'); await second.pressSequentially('Z');
+        await second.press('Control+z'); assert.equal(await second.inputValue(), 'BY');
+        await second.press('Control+Shift+z'); assert.equal(await second.inputValue(), 'BYZ');
+        assert.deepEqual(errors, []); await page.close();
+      }
+    });
+
     await t.test('C review rich composition A ending cannot release newer B', async () => {
       const { page, errors } = await open('c-review-rich-generation');
       await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());

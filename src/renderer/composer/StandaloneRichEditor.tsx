@@ -7,7 +7,7 @@ import type { Node as ProseMirrorNode } from 'prosemirror-model';
 import { EditorState, Plugin, Selection, TextSelection } from 'prosemirror-state';
 import type { Transaction } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
-import type { ComposerDocument } from '../workbench-contract.ts';
+import type { ComposerDocument, ComposerDraft } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
 import { documentChanges } from '../messages/message-edit.ts';
 import { composerSchema, httpAutolinkHref, linkOccurrenceAllocator, parseAgentThreadPath, readRichDocument, safeRichLinkHref } from './rich-document.ts';
@@ -16,7 +16,7 @@ import type { AgentMentionChoice, AgentMentionCurrent, AgentMentionTarget, RichC
 import type { Completion } from './standalone-completions.tsx';
 import { isStructuredAppInput } from './standalone-draft.ts';
 import type { Draft } from './standalone-draft.ts';
-import { projectTextAgentDocument, textInlineLabel, textInlineNode, textInlineSpan, updateTextAgentDocument } from './text-agent-document.ts';
+import { projectTextAgentDocument, textInlineLabel, textInlineNode, textInlineSpan, textSegmentDocuments, updateTextAgentDocument } from './text-agent-document.ts';
 import type { TextAgentSpan, TextMarkSpan } from './text-agent-document.ts';
 export type { TextMarkSpan } from './text-agent-document.ts';
 
@@ -46,7 +46,7 @@ export interface PreparedPromptAppend {
   document: ComposerDocument | null;
   text: string;
   agents?: TextAgentChange;
-  apply(): boolean;
+  apply(draft: ComposerDraft): boolean;
 }
 export interface TextCompletionSkill { name: string; path: string; managed: boolean }
 export interface TextSkillChange { before: TextCompletionSkill[]; after: TextCompletionSkill[] }
@@ -54,6 +54,7 @@ export interface TextAgentSegment { index: number; text: string; agents: TextAge
 export interface TextAgentChange { before: TextAgentSegment[]; after: TextAgentSegment[]; document?: ComposerDocument }
 export interface StructuredInputEditorProps {
   draft: Draft;
+  currentDraft(): Draft;
   onEdit(index: number, expectedText: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
   agentMentions?(index: number): readonly TextAgentSpan[];
   sourceMarks?(index: number): readonly TextMarkSpan[];
@@ -346,8 +347,11 @@ function textChange(state: EditorState, before: string, after: string): Transact
   return replaceHistoryText(state, start, end, inserted);
 }
 
+type SegmentBoundary = { kind: 'paragraph' } | { kind: 'inline'; node: ProseMirrorNode };
+interface SegmentDocument { document: ProseMirrorNode; before: SegmentBoundary | null; after: SegmentBoundary | null }
 interface TextControlModel {
   state: EditorState; element: HTMLTextAreaElement | null; index: number;
+  sourceDocument: SegmentDocument | null;
   view: EditorView | null; activateView(): void;
   historyPlugin: Plugin; composing: boolean; rich: boolean; plainMode: boolean; applyMode(): void; canEdit(): boolean;
   apply(transaction: Transaction, inputType?: string): boolean;
@@ -364,6 +368,8 @@ interface TextControlProps {
   onEdit(index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
   agentMentions?: readonly TextAgentSpan[];
   sourceMarks?: readonly TextMarkSpan[];
+  sourceDocument?: SegmentDocument | null;
+  currentSourceDocument?(): SegmentDocument | null;
   onSelection?(index: number, cursor: number, text?: string): void;
   onKeyDown(event: KeyboardEvent): boolean;
   onPaste?(event: TextPasteEvent): void;
@@ -382,7 +388,7 @@ function TextControl(props: TextControlProps) {
   const model = useRef<TextControlModel | null>(null);
   if (!model.current) {
     const state = applySourceMarks(textHistoryState(props.text, props.agentMentions), props.sourceMarks ?? []);
-    model.current = { state, element: null, index: props.index, historyPlugin: state.plugins[0]!,
+    model.current = { state, element: null, index: props.index, sourceDocument: props.sourceDocument ?? null, historyPlugin: state.plugins[0]!,
       view: null, activateView: () => {}, composing: false, rich: false, plainMode: false,
       applyMode: () => {}, canEdit: () => false, apply: () => false };
   }
@@ -429,6 +435,7 @@ function TextControl(props: TextControlProps) {
       after: all.map(item => segment(item, item === control ? next : item.state)), ...(document ? { document } : {}) };
     if (transaction.docChanged && latest.current.onEdit(control.index, beforeText, afterText, inputType, { before, after }, agents) === false) return false;
     control.state = next;
+    if (transaction.docChanged && latest.current.currentSourceDocument) control.sourceDocument = latest.current.currentSourceDocument();
     if (control.view && !control.view.isDestroyed) control.view.updateState(next);
     return true;
   };
@@ -462,6 +469,8 @@ function TextControl(props: TextControlProps) {
   }, [control, props.controls, props.index]);
   useLayoutEffect(() => {
     if (composing.current || control.view?.composing) return;
+    if (props.sourceDocument !== undefined && props.currentSourceDocument
+      && !sameSegmentDocument(props.sourceDocument, props.currentSourceDocument())) return;
     if (control.rich && props.formatting && props.document && props.currentDocument?.() === props.document) {
       const source = readRichDocument(props.document), projected = fullHistoryDocument(control.state);
       const displayed = projected && readRichDocument(projected);
@@ -487,13 +496,16 @@ function TextControl(props: TextControlProps) {
     }
     const sourceMarksChanged = !props.formatting
       && !applySourceMarks(control.state, props.sourceMarks ?? []).doc.eq(control.state.doc);
+    const sourceDocumentChanged = props.sourceDocument !== undefined && !sameSegmentDocument(control.sourceDocument, props.sourceDocument);
     if (!control.rich && (historyText(control.state) !== props.text
-      || JSON.stringify(historyAgents(control.state)) !== JSON.stringify(props.agentMentions ?? []) || sourceMarksChanged)) {
+      || JSON.stringify(historyAgents(control.state)) !== JSON.stringify(props.agentMentions ?? []) || sourceMarksChanged || sourceDocumentChanged)) {
       control.state = applySourceMarks(textHistoryState(props.text, props.agentMentions), props.sourceMarks ?? []);
       control.historyPlugin = control.state.plugins[0]!;
       control.view?.updateState(control.state);
     }
-  }, [control, props.text, props.agentMentions, props.sourceMarks, props.formatting, props.document, props.currentDocument, props.plainTextMode]);
+    if (props.sourceDocument !== undefined) control.sourceDocument = props.sourceDocument;
+  }, [control, props.text, props.agentMentions, props.sourceMarks, props.sourceDocument, props.currentSourceDocument,
+    props.formatting, props.document, props.currentDocument, props.plainTextMode]);
   useLayoutEffect(() => { control.applyMode(); }, [control, props.formatting, props.plainTextMode]);
   useLayoutEffect(() => {
     const element = control.element;
@@ -921,10 +933,11 @@ function textEditorHandle(controls: Map<number, TextControlModel>): StructuredIn
         agents: historyAgents(state), marks: historyMarks(state) });
       return { document, text: historyText(next), agents: { before: all.map(item => segment(item, item.state)),
         after: all.map(item => segment(item, item === control ? next : item.state)), ...(document ? { document } : {}) },
-      apply() {
+      apply(draft) {
         if (controls.get(index) !== control || control.state !== original || control.view !== view || control.element !== element
           || control.composing || view?.composing || !(view && !view.isDestroyed && view.dom.isConnected || element && element.isConnected)) return false;
         control.state = next;
+        if (index !== -1) control.sourceDocument = structuredSegmentDocuments(draft).get(index) ?? null;
         if (index === -1) control.rich = true;
         if (view) { view.updateState(next); view.focus(); }
         else { if (element) element.value = historyText(next); control.activateView(); }
@@ -1047,6 +1060,43 @@ function textEditorHandle(controls: Map<number, TextControlModel>): StructuredIn
   };
 }
 
+function sameSegmentBoundary(left: SegmentBoundary | null, right: SegmentBoundary | null): boolean {
+  return left === right || !!left && !!right && left.kind === right.kind
+    && (left.kind === 'paragraph' || right.kind === 'inline' && left.node.eq(right.node));
+}
+
+function sameSegmentDocument(left: SegmentDocument | null, right: SegmentDocument | null): boolean {
+  return left === right || !!left && !!right && left.document.eq(right.document)
+    && sameSegmentBoundary(left.before, right.before) && sameSegmentBoundary(left.after, right.after);
+}
+
+function structuredSegmentDocuments(draft: ComposerDraft): Map<number, SegmentDocument> {
+  const entries = (draft.input ?? []).flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
+    ? [{ index, text: entry.text }] : []);
+  const document = draft.document && readRichDocument(draft.document);
+  const parts = document && textSegmentDocuments(document, entries.map(entry => entry.text));
+  const projection = document && parts && projectTextAgentDocument(document);
+  if (!parts || !projection) return new Map();
+  let offset = 0, tokenIndex = 0, previous: SegmentBoundary | null = null;
+  const result = new Map<number, SegmentDocument>();
+  for (let position = 0; position < entries.length; position++) {
+    const entry = entries[position]!;
+    const end = offset + entry.text.length;
+    let next: SegmentBoundary | null = null;
+    if (position < entries.length - 1) {
+      while (tokenIndex < projection.tokens.length && projection.tokens[tokenIndex]!.end <= end) tokenIndex++;
+      const token = projection.tokens[tokenIndex];
+      if (!token || token.start > end) return new Map();
+      // A text-item separator may be a paragraph boundary or an inline break.
+      next = token.node ? { kind: 'inline', node: token.node.isText ? token.node.cut(end - token.start, end - token.start + 1) : token.node }
+        : { kind: 'paragraph' };
+    }
+    result.set(entry.index, { document: parts[position]!, before: previous, after: next });
+    previous = next; offset = end + 1;
+  }
+  return result;
+}
+
 /** Each control corresponds to one original text item; non-text items remain in the draft. */
 export const StandaloneStructuredInputEditor = forwardRef<StructuredInputEditorHandle, StructuredInputEditorProps>(
   function StandaloneStructuredInputEditor(props, ref) {
@@ -1056,9 +1106,15 @@ export const StandaloneStructuredInputEditor = forwardRef<StructuredInputEditorH
     useImperativeHandle(ref, () => textEditorHandle(controls.current), []);
     const entries = (props.draft.input ?? []).flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
       ? [{ entry, index, text: entry.text }] : []);
+    const documents = structuredSegmentDocuments(props.draft);
+    const currentDocuments = () => {
+      const current = props.currentDraft();
+      return current === props.draft ? documents : structuredSegmentDocuments(current);
+    };
     return <>{entries.map(({ entry, index, text }, position) => <ReactFragment key={position}>
       {isStructuredAppInput(entry) ? <div role="status">{t('This app input contains retained context and cannot be edited here.')}</div> : null}
       <TextControl index={index} text={text} agentMentions={props.agentMentions?.(index)} sourceMarks={props.sourceMarks?.(index)} controls={controls.current} onEdit={props.onEdit} onSelection={props.onSelection}
+        sourceDocument={documents.get(index) ?? null} currentSourceDocument={() => currentDocuments().get(index) ?? null}
         label={(props.ariaLabel ?? t('Work with Codex')) + (entries.length > 1 ? ' ' + new Intl.NumberFormat(locale).format(position + 1) : '')}
         placeholder={props.placeholder ?? t('Message')} readOnly={!!props.readOnly || isStructuredAppInput(entry)} onKeyDown={props.onKeyDown}
         onPaste={props.onPaste} onInvalid={props.onInvalid} onCompositionChange={value => {

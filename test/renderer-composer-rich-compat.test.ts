@@ -273,7 +273,7 @@ test('segmented editor uses the original draft controller for editing, undo, ref
       };
       return React.createElement('div',{className:'standalone-composer'},
         React.createElement('div',{className:'standalone-composer__editor'},loaded&&canEditStructuredDraft(draft)
-          ?React.createElement(StandaloneStructuredInputEditor,{draft,onEdit:edit,ref(value){state.editor=value},
+          ?React.createElement(StandaloneStructuredInputEditor,{draft,currentDraft:()=>current.current.draft,onEdit:edit,ref(value){state.editor=value},
             onCompositionChange(value){state.composition.push(value)},onKeyDown(event){state.keys.push(event.key);return false}}):null),
         React.createElement('button',{onClick:async()=>{const snapshot=controller.snapshot();
           if(await controller.flush(snapshot.owner)){const value=controller.snapshot();state.submitted={draft:value.draft,input:draftToInput(value.draft,'local')}}}},'Submit'));

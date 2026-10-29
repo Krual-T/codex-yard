@@ -795,7 +795,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
             }, () => {
               verify();
               if (duplicate) return true;
-              if (!prepared || !prepared.stage.apply()) return false;
+              if (!prepared || !prepared.stage.apply(prepared.draft)) return false;
               if (prepared.textControl) {
                 textAgentView.current = composerOwnerKey;
                 setTextFormattingOwner(composerOwnerKey);
@@ -1139,7 +1139,8 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
         onImages={files => { void addFiles(files); }}
         onInvalid={message => setError(message ?? t('Unsupported document changes were not saved.'))} /> :
       segmented ? <>
-        <StandaloneStructuredInputEditor key={composerOwnerKey} ref={structuredEditor} draft={draft} onEdit={editSegment} agentMentions={index => agentSegments.get(index) ?? []}
+        <StandaloneStructuredInputEditor key={composerOwnerKey} ref={structuredEditor} draft={draft} currentDraft={() => current.current.draft}
+          onEdit={editSegment} agentMentions={index => agentSegments.get(index) ?? []}
           sourceMarks={index => markSegments.get(index) ?? []}
           placeholder={context.threadId ? t('Work with Codex') : locale.toLowerCase().startsWith('en') ? 'Do anything' : t('Message')}
           activeIndex={segmentSelection?.index} completionListId={completions.query ? completions.listId : undefined}

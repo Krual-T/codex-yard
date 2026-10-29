@@ -188,9 +188,9 @@ export function applyTextAgentMarks(original: ComposerDocument, ranges: readonly
 }
 
 /** Recover the document portion belonging to each original protocol text item. */
-export function textAgentSegmentDocuments(doc: ProseMirrorNode, segments: readonly string[]): ProseMirrorNode[] | null {
+export function textSegmentDocuments(doc: ProseMirrorNode, segments: readonly string[]): ProseMirrorNode[] | null {
   const projection = projectTextAgentDocument(doc);
-  if (!projection || !projection.agents.length || projection.text !== segments.join('\n')) return null;
+  if (!projection || projection.text !== segments.join('\n')) return null;
   let offset = 0;
   const result: ProseMirrorNode[] = [];
   for (const segment of segments) {
@@ -200,6 +200,11 @@ export function textAgentSegmentDocuments(doc: ProseMirrorNode, segments: readon
     offset += segment.length + 1;
   }
   return result;
+}
+
+export function textAgentSegmentDocuments(doc: ProseMirrorNode, segments: readonly string[]): ProseMirrorNode[] | null {
+  if (!projectTextAgentDocument(doc)?.agents.length) return null;
+  return textSegmentDocuments(doc, segments);
 }
 
 /** Serialize each original input segment without merging its surrounding non-text items. */
