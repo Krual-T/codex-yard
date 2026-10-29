@@ -36,7 +36,8 @@ function View() {
       calls.push({ kind: 'create', value: kind, hostId: originalHost, threadId: originalThread });
       if (failCreate) throw Error('controlled create failure');
     }}
-    onOpenFile={value => { calls.push({ kind: 'file', value, hostId: originalHost, threadId: originalThread }); }} />}</I18nProvider>;
+    onOpenFile={value => { calls.push({ kind: 'file', value, hostId: originalHost, threadId: originalThread }); }}
+    onOpenCreatedChat={value => { calls.push({ kind: 'created', value, hostId: originalHost, threadId: originalThread }); }} />}</I18nProvider>;
 }
 function render() { root.render(<View />); }
 window.summaryParityFixture = {

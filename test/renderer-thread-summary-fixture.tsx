@@ -79,7 +79,7 @@ function View() {
     subagents: [{ threadId: 'agent-a', label: 'Review agent', working: true }], onOpenSubagent: value => note('agent', value),
     backgroundProcesses: [{ id: 'process-a', command: 'npm test', working: true }], onOpenBackgroundProcess: value => note('process', value),
     onStopBackgroundProcesses: () => note('stop-processes'),
-    createdChats: [{ threadId: 'created-a', label: 'Created chat' }], onOpenCreatedChat: value => note('created', value),
+    createdChats: [{ hostId: 'local', threadId: 'created-a', label: 'Created chat' }], onOpenCreatedChat: value => note('created', value),
     onAddSource: () => note('add-source'),
   };
   return <I18nProvider locale={locale}><div style={{ height: '100dvh' }}><ThreadSummaryPanel {...props} /></div></I18nProvider>;

@@ -10,6 +10,7 @@ import type { ConversationSnapshot } from './conversation-sessions.ts';
 import { projectThreadSummary } from './thread-summary-model.ts';
 import type { ThreadSummaryPlan, ThreadSummarySource } from './thread-summary-model.ts';
 import { useProjectlessGeneratedImages } from './thread-summary-generated-images.ts';
+import { useCreatedChats } from './thread-summary-created-chats.ts';
 import './thread-summary-panel.css';
 
 export interface ThreadSummarySideChat {
@@ -33,7 +34,10 @@ export interface ThreadSummaryOutputs {
 }
 export interface ThreadSummarySubagent { threadId: string; label: string; working?: boolean; detail?: string }
 export interface ThreadSummaryProcess { id: string; command: string; working?: boolean }
-export interface ThreadSummaryCreatedChat { threadId: string; label: string }
+export interface ThreadSummaryCreatedChat {
+  hostId: string; threadId: string; label: string;
+  source?: { hostId: string; threadId: string; turnId: string; itemId: string };
+}
 export interface ThreadSummaryAutomation { entry: AutomationEntry; kind: 'goal' | 'scheduled'; detail?: string }
 
 export interface ThreadSummaryPanelProps {
@@ -76,7 +80,7 @@ const en = { summary: 'Summary', sources: 'Sources', sideChats: 'Side chats', ou
   createPresentation: 'Create presentation', createSpreadsheet: 'Create spreadsheet', createSite: 'Create site',
   storageError: 'Could not save section preference', loadingOutputs: 'Loading outputs…', outputError: 'Could not load all outputs',
   web: 'Web search', subagents: 'Subagents', processes: 'Background processes', process: 'Background terminal',
-  stop: 'Stop all background terminals', createdChats: 'Created chats', working: 'is working',
+  stop: 'Stop all background terminals', createdChats: 'Created chats', createdChat: 'Created chat', working: 'is working',
   addSource: 'Add sources', emptySources: 'Attach files or connect apps', more: 'View all', less: 'Show less',
   actionError: 'Could not complete action', scheduled: 'Scheduled',
   sideChatsLoading: 'Loading side chats…', sideChatsError: 'Could not load side chats' } as const;
@@ -84,54 +88,54 @@ const translations: Record<string, Partial<Record<keyof Labels, string>>> = {
   zh: { summary: '摘要', sources: '来源', sideChats: '侧聊', outputs: '输出', emptyOutputs: '暂无输出',
     createOutput: '创建文件或网站', createDocument: '创建文档', createPresentation: '创建演示文稿', createSpreadsheet: '创建电子表格', createSite: '创建网站', storageError: '无法保存分区偏好',
     loadingOutputs: '正在加载输出…', outputError: '无法加载全部输出', web: '网页搜索', subagents: '子代理', processes: '后台进程',
-    process: '后台终端', stop: '停止所有后台终端', createdChats: '创建的对话', working: '正在工作', addSource: '添加来源',
+    process: '后台终端', stop: '停止所有后台终端', createdChats: '创建的对话', createdChat: '创建的对话', working: '正在工作', addSource: '添加来源',
     emptySources: '附加文件或连接应用', more: '查看全部', less: '收起', actionError: '无法完成操作', scheduled: '计划任务',
     sideChatsLoading: '正在加载侧聊…', sideChatsError: '无法加载侧聊' },
   ja: { summary: '概要', sources: 'ソース', sideChats: 'サイドチャット', outputs: '出力', emptyOutputs: '出力はまだありません',
     createOutput: 'ファイルまたはサイトを作成', createDocument: '文書を作成', createPresentation: 'プレゼンテーションを作成', createSpreadsheet: 'スプレッドシートを作成', createSite: 'サイトを作成', storageError: 'セクション設定を保存できません',
     loadingOutputs: '出力を読み込み中…', outputError: '一部の出力を読み込めません', web: 'ウェブ検索', subagents: 'サブエージェント',
-    processes: 'バックグラウンドプロセス', process: 'バックグラウンドターミナル', stop: 'すべてのターミナルを停止', createdChats: '作成されたチャット',
+    processes: 'バックグラウンドプロセス', process: 'バックグラウンドターミナル', stop: 'すべてのターミナルを停止', createdChats: '作成されたチャット', createdChat: '作成されたチャット',
     working: '作業中', addSource: 'ソースを追加', emptySources: 'ファイルを添付またはアプリを接続', more: 'すべて表示', less: '折りたたむ',
     actionError: '操作を完了できません', scheduled: 'スケジュール', sideChatsLoading: 'サイドチャットを読み込み中…', sideChatsError: 'サイドチャットを読み込めません' },
   ko: { summary: '요약', sources: '소스', sideChats: '사이드 채팅', outputs: '출력', emptyOutputs: '아직 출력이 없습니다',
     createOutput: '파일 또는 사이트 만들기', createDocument: '문서 만들기', createPresentation: '프레젠테이션 만들기', createSpreadsheet: '스프레드시트 만들기', createSite: '사이트 만들기', storageError: '섹션 설정을 저장할 수 없습니다',
     loadingOutputs: '출력 불러오는 중…', outputError: '일부 출력을 불러오지 못했습니다', web: '웹 검색', subagents: '하위 에이전트',
-    processes: '백그라운드 프로세스', process: '백그라운드 터미널', stop: '모든 백그라운드 터미널 중지', createdChats: '생성된 채팅', working: '작업 중',
+    processes: '백그라운드 프로세스', process: '백그라운드 터미널', stop: '모든 백그라운드 터미널 중지', createdChats: '생성된 채팅', createdChat: '생성된 채팅', working: '작업 중',
     addSource: '소스 추가', emptySources: '파일을 첨부하거나 앱 연결', more: '모두 보기', less: '접기', actionError: '작업을 완료하지 못했습니다', scheduled: '예약됨',
     sideChatsLoading: '사이드 채팅 불러오는 중…', sideChatsError: '사이드 채팅을 불러오지 못했습니다' },
   es: { summary: 'Resumen', sources: 'Fuentes', sideChats: 'Chats laterales', outputs: 'Resultados',
     createOutput: 'Crear un archivo o sitio', createDocument: 'Crear documento', createPresentation: 'Crear presentación', createSpreadsheet: 'Crear hoja de cálculo', createSite: 'Crear sitio', storageError: 'No se pudo guardar la preferencia de sección',
     emptyOutputs: 'Todavía no hay resultados', loadingOutputs: 'Cargando resultados…', outputError: 'No se pudieron cargar todos los resultados',
     web: 'Búsqueda web', subagents: 'Subagentes', processes: 'Procesos en segundo plano', process: 'Terminal en segundo plano',
-    stop: 'Detener terminales en segundo plano', createdChats: 'Chats creados', working: 'trabajando', addSource: 'Añadir fuentes',
+    stop: 'Detener terminales en segundo plano', createdChats: 'Chats creados', createdChat: 'Chat creado', working: 'trabajando', addSource: 'Añadir fuentes',
     emptySources: 'Adjunta archivos o conecta aplicaciones', more: 'Ver todo', less: 'Mostrar menos', actionError: 'No se pudo completar la acción', scheduled: 'Programado',
     sideChatsLoading: 'Cargando chats laterales…', sideChatsError: 'No se pudieron cargar los chats laterales' },
   fr: { summary: 'Résumé', sources: 'Sources', sideChats: 'Conversations latérales', outputs: 'Résultats',
     createOutput: 'Créer un fichier ou un site', createDocument: 'Créer un document', createPresentation: 'Créer une présentation', createSpreadsheet: 'Créer une feuille de calcul', createSite: 'Créer un site', storageError: 'Impossible de conserver la préférence de section',
     emptyOutputs: 'Aucun résultat pour le moment', loadingOutputs: 'Chargement des résultats…', outputError: 'Impossible de charger tous les résultats',
     web: 'Recherche web', subagents: 'Sous-agents', processes: 'Processus en arrière-plan', process: 'Terminal en arrière-plan',
-    stop: 'Arrêter les terminaux en arrière-plan', createdChats: 'Conversations créées', working: 'en cours', addSource: 'Ajouter des sources',
+    stop: 'Arrêter les terminaux en arrière-plan', createdChats: 'Conversations créées', createdChat: 'Conversation créée', working: 'en cours', addSource: 'Ajouter des sources',
     emptySources: 'Joindre des fichiers ou connecter des applications', more: 'Tout voir', less: 'Réduire', actionError: 'Action impossible', scheduled: 'Planifié',
     sideChatsLoading: 'Chargement des conversations latérales…', sideChatsError: 'Impossible de charger les conversations latérales' },
   de: { summary: 'Übersicht', sources: 'Quellen', sideChats: 'Seitenchats', outputs: 'Ergebnisse',
     createOutput: 'Datei oder Website erstellen', createDocument: 'Dokument erstellen', createPresentation: 'Präsentation erstellen', createSpreadsheet: 'Tabelle erstellen', createSite: 'Website erstellen', storageError: 'Abschnitteinstellung konnte nicht gespeichert werden',
     emptyOutputs: 'Noch keine Ergebnisse', loadingOutputs: 'Ergebnisse werden geladen…', outputError: 'Nicht alle Ergebnisse konnten geladen werden',
     web: 'Websuche', subagents: 'Unteragenten', processes: 'Hintergrundprozesse', process: 'Hintergrundterminal',
-    stop: 'Alle Hintergrundterminals stoppen', createdChats: 'Erstellte Chats', working: 'arbeitet', addSource: 'Quellen hinzufügen',
+    stop: 'Alle Hintergrundterminals stoppen', createdChats: 'Erstellte Chats', createdChat: 'Erstellter Chat', working: 'arbeitet', addSource: 'Quellen hinzufügen',
     emptySources: 'Dateien anhängen oder Apps verbinden', more: 'Alle anzeigen', less: 'Weniger anzeigen', actionError: 'Aktion fehlgeschlagen', scheduled: 'Geplant',
     sideChatsLoading: 'Seitenchats werden geladen…', sideChatsError: 'Seitenchats konnten nicht geladen werden' },
   pt: { summary: 'Resumo', sources: 'Fontes', sideChats: 'Conversas laterais', outputs: 'Resultados',
     createOutput: 'Criar arquivo ou site', createDocument: 'Criar documento', createPresentation: 'Criar apresentação', createSpreadsheet: 'Criar planilha', createSite: 'Criar site', storageError: 'Não foi possível salvar a preferência da seção',
     emptyOutputs: 'Ainda não há resultados', loadingOutputs: 'Carregando resultados…', outputError: 'Não foi possível carregar todos os resultados',
     web: 'Pesquisa na web', subagents: 'Subagentes', processes: 'Processos em segundo plano', process: 'Terminal em segundo plano',
-    stop: 'Parar terminais em segundo plano', createdChats: 'Conversas criadas', working: 'trabalhando', addSource: 'Adicionar fontes',
+    stop: 'Parar terminais em segundo plano', createdChats: 'Conversas criadas', createdChat: 'Conversa criada', working: 'trabalhando', addSource: 'Adicionar fontes',
     emptySources: 'Anexe arquivos ou conecte aplicativos', more: 'Ver tudo', less: 'Mostrar menos', actionError: 'Não foi possível concluir a ação', scheduled: 'Agendado',
     sideChatsLoading: 'Carregando conversas laterais…', sideChatsError: 'Não foi possível carregar as conversas laterais' },
 };
 const traditionalChinese: Partial<Record<keyof Labels, string>> = { summary: '摘要', sources: '來源', sideChats: '側聊',
   createOutput: '建立檔案或網站', createDocument: '建立文件', createPresentation: '建立簡報', createSpreadsheet: '建立試算表', createSite: '建立網站', storageError: '無法儲存區段偏好',
   outputs: '輸出', emptyOutputs: '尚無輸出', loadingOutputs: '正在載入輸出…', outputError: '無法載入全部輸出', web: '網頁搜尋',
-  subagents: '子代理', processes: '背景程序', process: '背景終端機', stop: '停止所有背景終端機', createdChats: '建立的對話',
+  subagents: '子代理', processes: '背景程序', process: '背景終端機', stop: '停止所有背景終端機', createdChats: '建立的對話', createdChat: '建立的對話',
   working: '正在工作', addSource: '新增來源', emptySources: '附加檔案或連接應用程式', more: '查看全部', less: '收合',
   actionError: '無法完成操作', scheduled: '排程', sideChatsLoading: '正在載入側聊…', sideChatsError: '無法載入側聊' };
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -268,6 +272,7 @@ function SummaryContents(props: ThreadSummaryPanelProps) {
   const thread = snapshot.thread?.id === threadId ? snapshot.thread : null;
   const { plan, sources } = useMemo(() => projectThreadSummary(thread, hostId), [thread, hostId]);
   const generatedImages = useProjectlessGeneratedImages(props.client, hostId, thread, props.projectless === true);
+  const discoveredChats = useCreatedChats(props.client, hostId, thread, labels.createdChat);
   const byDraft = new Map<string, ThreadSummarySideChat>();
   for (const item of props.sideChats) {
     if (item.identity.hostId !== hostId || item.identity.parentThreadId !== threadId) continue;
@@ -299,6 +304,7 @@ function SummaryContents(props: ThreadSummaryPanelProps) {
   } : undefined;
   const goals = props.automations?.filter(item => item.kind === 'goal') ?? [];
   const scheduled = props.automations?.filter(item => item.kind === 'scheduled') ?? [];
+  const createdChats = new Map([...discoveredChats, ...(props.createdChats ?? [])].map(chat => [JSON.stringify([chat.hostId, chat.threadId]), chat]));
   const automationRow = (automation: ThreadSummaryAutomation) => <Row
     key={JSON.stringify([automation.entry.sourceKey, automation.entry.item.id])}
     icon={<Target size={16} aria-hidden="true" />} label={automation.entry.item.name} detail={automation.detail}
@@ -342,8 +348,8 @@ function SummaryContents(props: ThreadSummaryPanelProps) {
         {props.sideChatsError && <div role="alert" className="yard-thread-summary__error">{labels.sideChatsError}: {props.sideChatsError}
           {props.onRetrySideChats && <button type="button" onClick={() => perform(props.onRetrySideChats!)}>{t('Retry')}</button>}</div>}
       </Section>}
-      {!!props.createdChats?.length && <Section client={props.client} sectionKey="created-tasks" storageError={labels.storageError} title={labels.createdChats} count={props.createdChats.length}>{props.createdChats.map(chat =>
-        <Row key={chat.threadId} icon={<MessageSquare size={16} aria-hidden="true" />} label={chat.label}
+      {createdChats.size > 0 && <Section client={props.client} sectionKey="created-tasks" storageError={labels.storageError} title={labels.createdChats} count={createdChats.size}>{[...createdChats.values()].map(chat =>
+        <Row key={JSON.stringify([chat.hostId, chat.threadId])} icon={<MessageSquare size={16} aria-hidden="true" />} label={chat.label}
           action={props.onOpenCreatedChat ? () => perform(() => props.onOpenCreatedChat!(chat)) : undefined} />)}</Section>}
       {!!props.subagents?.length && <Section client={props.client} sectionKey="background-subagents" storageError={labels.storageError} title={labels.subagents} count={props.subagents.length}>{props.subagents.map(agent =>
         <Row key={agent.threadId} icon={<Bot size={16} aria-hidden="true" />} label={agent.label} detail={agent.detail} working={agent.working ? labels.working : undefined}
