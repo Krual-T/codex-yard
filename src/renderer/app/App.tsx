@@ -32,6 +32,7 @@ import type { ThreadSummaryCreateKind } from './ThreadSummaryPanel.tsx';
 import { createSummaryOutputPrefill } from './summary-output-prefill.ts';
 import { HomeSubagentsBanner } from './HomeSubagentsBanner.tsx';
 import { projectCreatedChats } from './thread-summary-created-chats.ts';
+import { useThreadSummaryOutputs } from './use-thread-summary-outputs.ts';
 import { sameSummarySideChat, useSummarySideChats } from './use-summary-side-chats.ts';
 import { commitSidebarProjectMembership, createSidebarProjectInventory } from './sidebar-project-inventory.ts';
 import { WorkspacePanels } from '../panels/WorkspacePanels.tsx';
@@ -1486,6 +1487,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const summarySideChats = useSummarySideChats({ controller: sideChats, hostId: current.hostId, threadId: current.threadId,
     enabled: summaryOpen && !loading && !!thread && !current.section, sourceKey: summarySourceKey,
     fallbackTitle: previewAppearance.locale.startsWith('zh') ? '侧聊' : 'Side chat', assertCurrent: assertSummaryCurrent });
+  const summaryOutputs = useThreadSummaryOutputs({ client, hostId: current.hostId, threadId: current.threadId ?? '',
+    snapshot: conversation, projectState, enabled: summaryOpen && !loading && !!thread && !current.section,
+    sourceKey: summarySourceKey, assertCurrent: assertSummaryCurrent });
   const showSummarySideChat = async (identity: Parameters<SideChatRootController['restore']>[0], recover: boolean) => {
     assertSummaryCurrent();
     if (identity.hostId !== current.hostId || identity.parentThreadId !== current.threadId) throw new Error('The side chat belongs to another conversation.');
@@ -1607,8 +1611,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
                 throw new Error('The original summary conversation changed.');
             });
           }}
-          projectless={!activeProject} outputs={{ entries: [], loading: false, showWhenEmpty: true,
+          projectless={!activeProject} outputs={{ entries: summaryOutputs.entries, loading: summaryOutputs.loading,
+            error: summaryOutputs.error, notice: summaryOutputs.notice, showWhenEmpty: true,
             canCreate: !current.readOnly && composerIsCurrent && !!mainPromptAppendPort.current }}
+          onRetryOutputs={summaryOutputs.retry}
           onCreateOutput={createSummaryOutput}
           onOpenPlan={async plan => { assertSummaryCurrent();
             if (plan.hostId !== current.hostId || plan.threadId !== current.threadId) throw new Error('The plan belongs to another conversation.');
@@ -1620,8 +1626,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
               });
           }}
           onOpenFile={value => { assertSummaryCurrent(); if (value.hostId !== current.hostId) throw new Error('The file host changed.'); openFile(value.path, undefined, undefined, value.cwd); }}
-          onOpenOutput={output => { assertSummaryCurrent(); if (output.kind === 'file') openFile(output.path, undefined, undefined, thread.cwd);
-            else showBrowser({ hostId: current.hostId, threadId: current.threadId!, url: output.url }); }}
+          onOpenOutput={output => { assertSummaryCurrent(); summaryOutputs.assertEntryCurrent(output);
+            const source = output.source;
+            if (!source || source.hostId !== current.hostId || source.threadId !== current.threadId) throw new Error('The output belongs to another conversation.');
+            if (output.kind === 'file') openFile(output.path, undefined, undefined, source.cwd);
+            else showBrowser({ hostId: source.hostId, threadId: source.threadId, url: output.url }); }}
           onOpenWebSearch={source => { assertSummaryCurrent();
             if (!source.urls[0]) throw new Error('This search has no result URL to open.');
             showBrowser({ hostId: current.hostId, threadId: current.threadId!, url: source.urls[0] }); }} />

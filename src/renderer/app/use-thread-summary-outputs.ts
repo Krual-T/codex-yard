@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ThreadItemSummary } from '../../../lib/codex-protocol.ts';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import type { ThreadSummaryOutput } from './ThreadSummaryPanel.tsx';
 import type { ConversationSnapshot } from './conversation-sessions.ts';
@@ -61,41 +60,6 @@ function outputDirectory(state: ProjectState | null, hostId: string, threadId: s
   return outputs[0] ? { status: 'known', path: outputs[0].value } : { status: 'none' };
 }
 
-// Recognize previously identified legacy outputs without projecting arbitrary MCP text.
-function recognizedLegacyOutput(item: ThreadItemSummary): boolean {
-  if (item.type !== 'mcpToolCall' || item.status !== 'completed' || item.error != null
-    || typeof item.tool !== 'string' || !record(item.result)) return false;
-  const metadata = record(item.result._meta) ? item.result._meta : null;
-  if (metadata && Object.hasOwn(metadata, 'openai/resourceActivities')) return false;
-  const rawTool = item.tool.trim();
-  const googleName = (value: unknown) => typeof value === 'string' && value.toLowerCase().replace(/[^a-z0-9]+/gu, '-').includes('google-drive');
-  const prefixed = /^google[\s_-]+drive(?:[\s_-]+app)?[.\s_-]+(.+)$/iu.exec(rawTool)?.[1];
-  const dot = rawTool.lastIndexOf('.');
-  const googleTool = prefixed ?? (dot >= 0 && googleName(rawTool.slice(0, dot)) ? rawTool.slice(dot + 1) : rawTool);
-  const googleProvider = !!prefixed || dot >= 0 && googleName(rawTool.slice(0, dot)) || googleName(item.server) || googleName(item.pluginId);
-  const googleWrites = ['batch_update_document', 'batch_update_presentation', 'batch_update_spreadsheet', 'copy_file',
-    'create_file', 'create_folder', 'create_presentation_from_template', 'duplicate_sheet_in_new_spreadsheet',
-    'import_document', 'import_presentation', 'import_spreadsheet', 'share_file'];
-  const structuredContent = record(item.result.structuredContent) ? item.result.structuredContent : null;
-  if (googleProvider && googleWrites.includes(googleTool) && structuredContent
-    && ['documentUrl', 'document_url', 'fileUrl', 'file_url', 'presentationUrl', 'presentation_url',
-      'spreadsheetUrl', 'spreadsheet_url', 'display_url', 'url', 'webViewLink', 'web_view_link']
-      .some(key => typeof structuredContent[key] === 'string')) return true;
-  const tool = item.tool.trim().toLowerCase().replace(/[^a-z0-9]+/gu, '-');
-  if (!tool.endsWith('figma-create-new-file') && !tool.endsWith('notion-create-pages')) return false;
-  if (!Array.isArray(item.result.content)) return false;
-  return item.result.content.some(value => {
-    if (!record(value) || value.type !== 'text' || typeof value.text !== 'string') return false;
-    try {
-      const parsed: unknown = JSON.parse(value.text);
-      if (!record(parsed)) return false;
-      if (tool.endsWith('figma-create-new-file')) return typeof parsed.file_key === 'string' && typeof parsed.file_url === 'string';
-      return Array.isArray(parsed.pages) && parsed.pages.some(page => record(page) && typeof page.id === 'string'
-        && typeof page.url === 'string' && record(page.properties) && typeof page.properties.title === 'string');
-    } catch { return false; }
-  });
-}
-
 function messageForGap(gap: string): string {
   const messages: Record<string, string> = {
     'missing-thread': 'Conversation history is not available.',
@@ -114,7 +78,6 @@ function messageForGap(gap: string): string {
     'invalid-resource-activities': 'Some resource output metadata is invalid.',
     'unknown-provider-scope': 'Some resource outputs lack a verified provider identity.',
     'page-resource': 'Some Page outputs require the original access and availability checks.',
-    'legacy-tool-result': 'Some recognized legacy app outputs are not yet available.',
   };
   return messages[gap] ?? `Output source is incomplete: ${gap}.`;
 }
@@ -182,8 +145,7 @@ export function useThreadSummaryOutputs(options: ThreadSummaryOutputsOptions): T
           outputDirectory: outputDirectory(scope.projectState, scope.hostId, scope.threadId) });
         const resource = projectThreadSummaryResourceOutputs({ hostId: scope.hostId, thread,
           historyComplete: scope.snapshot.historyComplete, streamGap: scope.snapshot.streamGap });
-        const gaps = new Set<string>([...file.gaps, ...resource.gaps.filter(gap => gap !== 'legacy-tool-result')]);
-        if (resource.gaps.includes('legacy-tool-result') && thread?.turns?.some(turn => turn.items?.some(recognizedLegacyOutput))) gaps.add('legacy-tool-result');
+        const gaps = new Set<string>([...file.gaps, ...resource.gaps]);
         const notices = [...gaps].map(messageForGap);
         if (scope.snapshot.error) notices.push(`Conversation history: ${scope.snapshot.error}`);
         notice = notices.length ? notices.join(' ') : null;

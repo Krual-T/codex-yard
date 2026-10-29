@@ -238,11 +238,16 @@ test('summary output consumer uses real host checks and rejects stale owner, con
   assert.deepEqual(value.entries, []); assert.equal(value.notice, null); assert.equal(value.error, null);
   await show('local', snapshot(thread('/workspace', [ordinary, legacy]))); await ready();
   value = await page.evaluate(() => window.outputConsumer.value());
-  assert.equal(value.entries.length, 0); assert.match(value.notice ?? '', /recognized legacy app outputs/); assert.equal(value.error, null);
+  assert.deepEqual(value.entries.map(entry => entry.kind === 'link' ? entry.url : entry.path), ['https://example.invalid/file']);
+  assert.deepEqual(value.entries[0]?.source, { hostId: 'local', threadId: 'same', turnId: 'turn', itemId: 'figma' });
+  assert.equal(value.notice, null); assert.equal(value.error, null);
   const google: ThreadItemSummary = { id: 'google', type: 'mcpToolCall', server: 'google-drive', tool: 'create_file', status: 'completed',
     result: { structuredContent: { webViewLink: 'https://example.invalid/document' } } };
   await show('local', snapshot(thread('/workspace', [google]))); await ready();
-  assert.match((await page.evaluate(() => window.outputConsumer.value())).notice ?? '', /recognized legacy app outputs/);
+  value = await page.evaluate(() => window.outputConsumer.value());
+  assert.deepEqual(value.entries.map(entry => entry.kind === 'link' ? entry.url : entry.path), ['https://example.invalid/document']);
+  assert.deepEqual(value.entries[0]?.source, { hostId: 'local', threadId: 'same', turnId: 'turn', itemId: 'google' });
+  assert.equal(value.notice, null);
   await show('local', snapshot(thread('/workspace', [{ ...google, tool: 'get_document' }]))); await ready();
   assert.equal((await page.evaluate(() => window.outputConsumer.value())).notice, null);
   const partial = snapshot(thread('/workspace', [])); partial.historyComplete = false;
