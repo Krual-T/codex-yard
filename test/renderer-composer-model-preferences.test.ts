@@ -55,11 +55,17 @@ test('home model preferences use versioned single-field writes and thread choice
     await page.route('**/*', route => new URL(route.request().url()).origin === 'http://models.test'
       ? route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }) : route.abort());
     await page.goto('http://models.test/'); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
-    const model = page.getByLabel('模型'), effort = page.getByLabel('推理强度');
+    const model = page.getByLabel('模型');
+    const openModel = async () => {
+      const menu = page.locator('.standalone-composer__model');
+      if (!await menu.evaluate(element => (element as HTMLDetailsElement).open)) await menu.locator(':scope > summary').click();
+      const choices = menu.locator('.standalone-composer__model-choices');
+      if (!await choices.evaluate(element => (element as HTMLDetailsElement).open)) await choices.locator('summary').click();
+    };
     await page.waitForFunction(() => (document.querySelector('select[aria-label="模型"]') as HTMLSelectElement)?.value === 'alpha');
     // An explicit model equal to the effective default is still a changed configured value.
     await page.evaluate(() => (window as any).fixture.external('alpha'));
-    await effort.selectOption('low');
+    await openModel(); await page.getByLabel('强度', { exact: true }).fill('0');
     await page.getByRole('alert').filter({ hasText: 'Configuration changed elsewhere' }).waitFor();
     assert.equal((await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'config/batchWrite'))).length, 0);
     await page.evaluate(() => (window as any).fixture.external(null));
@@ -75,14 +81,14 @@ test('home model preferences use versioned single-field writes and thread choice
     assert.equal(await page.evaluate(() => (window as any).fixture.saved().profile), 'work');
     await page.reload(); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     await page.waitForFunction(() => (document.querySelector('select[aria-label="推理强度"]') as HTMLSelectElement)?.value === 'low');
-    await model.selectOption('beta');
+    await openModel(); await model.selectOption('beta');
     await page.waitForFunction(() => (window as any).fixture.saved().model === 'beta');
     await page.waitForFunction(() => !(document.querySelector('select[aria-label="模型"]') as HTMLSelectElement)?.disabled);
     calls = await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'config/batchWrite'));
     assert.deepEqual(calls[0].params.edits, [{ keyPath: 'model', value: 'beta', mergeStrategy: 'upsert' }]);
     assert.equal(await page.evaluate(() => (window as any).fixture.saved().model_reasoning_effort), 'low');
     await page.evaluate(() => (window as any).fixture.external('alpha'));
-    await model.selectOption('gamma');
+    await openModel(); await model.selectOption('gamma');
     await page.getByRole('alert').filter({ hasText: 'changed elsewhere' }).waitFor();
     assert.equal((await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'config/batchWrite'))).length, 1);
     await page.getByRole('button', { name: '重新读取默认设置' }).click();
@@ -95,7 +101,7 @@ test('home model preferences use versioned single-field writes and thread choice
     assert.equal(await page.evaluate(() => (window as any).fixture.saved().profile), 'work');
     await page.waitForFunction(() => !(document.querySelector('select[aria-label="模型"]') as HTMLSelectElement)?.disabled);
     await page.evaluate(() => { (window as any).fixture.state.mode = 'reject'; });
-    await model.selectOption('alpha');
+    await openModel(); await model.selectOption('alpha');
     await page.getByRole('alert').filter({ hasText: /configuration write was rejected/i }).waitFor();
     await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('waiting for settings');
     assert.equal(await page.getByRole('button', { name: '发送', exact: true }).isDisabled(), true);
@@ -105,7 +111,7 @@ test('home model preferences use versioned single-field writes and thread choice
     await page.waitForFunction(() => (window as any).fixture.saved().model === 'alpha');
     await page.waitForFunction(() => !(document.querySelector('select[aria-label="模型"]') as HTMLSelectElement)?.disabled);
     await page.evaluate(() => { (window as any).fixture.state.mode = 'unknown'; });
-    await model.selectOption('beta');
+    await openModel(); await model.selectOption('beta');
     await page.getByRole('alert').filter({ hasText: 'fixture response lost' }).waitFor();
     assert.equal(await page.evaluate(() => (window as any).fixture.saved().model), 'beta');
     assert.equal((await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'config/batchWrite'))).length, 5);
@@ -114,7 +120,7 @@ test('home model preferences use versioned single-field writes and thread choice
     assert.equal((await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'config/batchWrite'))).length, 5);
     await page.evaluate(() => (window as any).fixture.render({context:{threadId:'existing',draftId:'existing'},initialOptions:{model:'beta',effort:'low'}}));
     await page.waitForFunction(() => (window as any).fixture.state.calls.some((call: any) => call.method === 'thread/queue/list'));
-    await model.selectOption('alpha');
+    await openModel(); await model.selectOption('alpha');
     await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('thread choice');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);

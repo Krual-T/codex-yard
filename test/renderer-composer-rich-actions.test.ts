@@ -122,6 +122,7 @@ test('rich completion and Markdown list operations survive editing, undo, refres
     await page.evaluate(() => (window as any).fixture.newDraft('list'));
     await page.waitForFunction(() => (window as any).fixture.state.ready === 'list');
     await page.locator('.ProseMirror[contenteditable="true"]').waitFor();
+    await page.locator('.standalone-composer__add summary').click();
     await page.getByRole('combobox', { name: '发送方式' }).selectOption('cmdAlways');
     await editor.click();
     await page.keyboard.type('- first');

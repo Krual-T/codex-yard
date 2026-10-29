@@ -92,6 +92,7 @@ test('composer leases drain real attachment, reference and queue edits before th
     await page.waitForFunction(() => (window as any).fixture.state.snapshots.length > 0);
     const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' });
     await editor.fill('retained');
+    await page.locator('.standalone-composer__add summary').click();
     await page.getByRole('button', { name: '富文本编辑' }).click();
     const rich = page.locator('.ProseMirror');
     await rich.focus();
@@ -147,6 +148,7 @@ test('composer leases drain real attachment, reference and queue edits before th
       await page.goto('http://composer.test/'); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
       await page.waitForFunction(() => (window as any).fixture.state.snapshots.length > 0);
       await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('image fixture');
+      await page.locator('.standalone-composer__add summary').click();
       await page.getByRole('button', { name: '富文本编辑' }).click();
       const rich = page.locator('.ProseMirror'); await rich.waitFor();
       const initial = await page.evaluate(() => (window as any).fixture.state.uploadStarts);

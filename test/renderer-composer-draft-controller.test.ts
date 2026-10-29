@@ -45,6 +45,7 @@ test('composer draft controller preserves current edits across reference removal
     await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
     const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' });
     await editor.fill('Initial');
+    await page.locator('.standalone-composer__add summary').click();
     await page.getByRole('button', { name: '富文本编辑' }).click();
     const rich = page.locator('.ProseMirror');
     await rich.waitFor();

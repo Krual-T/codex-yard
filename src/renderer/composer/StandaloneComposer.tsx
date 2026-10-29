@@ -11,6 +11,7 @@ import { importAttachments } from './standalone-files.ts';
 import { useCompletions } from './standalone-completions.tsx';
 import type { Completion } from './standalone-completions.tsx';
 import { StandaloneOptions } from './standalone-options.tsx';
+import { positionComposerMenu } from './composer-menu-position.ts';
 import { StandaloneQueue } from './standalone-queue.tsx';
 import type { DispatchQueueMutation } from './standalone-queue.tsx';
 import type { QueueEditEntry } from './standalone-queue-storage.ts';
@@ -19,11 +20,11 @@ import { useFollowUpSetting } from './standalone-follow-up.ts';
 import { usePlainTextSetting } from './standalone-plain-text-setting.ts';
 import type { FollowUpAction } from './standalone-follow-up.ts';
 import { StandaloneTarget } from './standalone-target.tsx';
-import type { ComposerHost, ComposerTarget } from './standalone-target.tsx';
+import type { ComposerHost, ComposerProjectDisplay, ComposerTarget } from './standalone-target.tsx';
 import { StandalonePlainInputEditor, StandaloneRichEditor, StandaloneStructuredInputEditor } from './StandaloneRichEditor.tsx';
 import type { RichEditorHandle, StructuredInputEditorHandle, TextSkillChange } from './StandaloneRichEditor.tsx';
 import type { RichCompletionContext } from './rich-editor-actions.ts';
-import { FilePenLine } from 'lucide-react';
+import { ArrowUp, FilePenLine, Lightbulb, Mic, Paperclip, Plus } from 'lucide-react';
 import './standalone-composer.css';
 
 export { draftToInput } from './standalone-draft.ts';
@@ -48,6 +49,8 @@ export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSu
   activeTurnId?: string | null;
   initialOptions?: SubmitOptions;
   hosts?: ComposerHost[];
+  /** Display only a project confirmed for this composer host and cwd. */
+  projectDisplay?: ComposerProjectDisplay | null;
   /** Reuse the borrowed lease in navigation guards; resolve after committing the requested owner. */
   onTargetChange?: (target: ComposerTarget, lease: ComposerDraftLease) => Promise<void>;
   onPrefillConsumed?: (id: string) => void;
@@ -80,7 +83,7 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
   }}><summary>{name}</summary>{preview == null ? t('Reading...') : <pre>{preview}</pre>}</details>;
 }
 
-function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, removeQueuedOriginal, dispatchQueueMutation, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
+function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, removeQueuedOriginal, dispatchQueueMutation, prefill, activeTurnId, initialOptions, hosts, projectDisplay, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
   const { t, locale } = useI18n('zh-CN');
   const inputRoot = useRef<HTMLDivElement>(null);
   const freezeGuard = useRef<(afterDrain: boolean) => boolean>(() => false);
@@ -138,6 +141,38 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const structuredEditor = useRef<StructuredInputEditorHandle>(null);
   const picker = useRef<HTMLInputElement>(null);
   const modelPicker = useRef<HTMLSelectElement>(null);
+  const focusModelPicker = () => {
+    const picker = modelPicker.current;
+    const menu = picker?.closest<HTMLDetailsElement>('.standalone-composer__model');
+    if (!picker || !menu) return;
+    inputRoot.current?.querySelectorAll<HTMLDetailsElement>('.standalone-composer__menu[open]').forEach(other => {
+      if (other !== menu) other.open = false;
+    });
+    menu.open = true;
+    const choices = picker.closest<HTMLDetailsElement>('.standalone-composer__model-choices');
+    if (choices) choices.open = true;
+    positionComposerMenu(menu);
+    requestAnimationFrame(() => picker.focus());
+  };
+  useEffect(() => {
+    const closeOtherMenus = (event: MouseEvent) => {
+      const root = inputRoot.current;
+      if (!root || !(event.target instanceof Node)) return;
+      root.querySelectorAll<HTMLDetailsElement>('.standalone-composer__menu[open]').forEach(menu => {
+        if (!menu.contains(event.target as Node)) menu.open = false;
+      });
+    };
+    const reposition = () => inputRoot.current?.querySelectorAll<HTMLDetailsElement>('.standalone-composer__menu[open]')
+      .forEach(positionComposerMenu);
+    document.addEventListener('click', closeOtherMenus, true);
+    document.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    return () => {
+      document.removeEventListener('click', closeOtherMenus, true);
+      document.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+    };
+  }, []);
   freezeGuard.current = afterDrain => {
     const reason = !loaded || prefill && !current.current.prefills.includes(prefill.id) ? 'loading'
       : compositions.current.size ? 'composition' : pickerOpen.current ? 'picker'
@@ -423,7 +458,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         completions.dismiss(); return;
       }
       if (item.kind === 'directory') completions.show(); else completions.dismiss();
-      requestAnimationFrame(() => { if (item.kind === 'command') modelPicker.current?.focus(); else richEditor.current?.focus(); });
+      requestAnimationFrame(() => { if (item.kind === 'command') focusModelPicker(); else richEditor.current?.focus(); });
       return;
     }
     let replacement = '';
@@ -456,7 +491,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       }
       setSegmentSelection({ index, cursor: caret });
       if (item.kind === 'directory') completions.show(); else completions.dismiss();
-      if (item.kind === 'command') modelPicker.current?.focus(); else structuredEditor.current?.focus(index, caret);
+      if (item.kind === 'command') focusModelPicker(); else structuredEditor.current?.focus(index, caret);
       return;
     }
     const before = current.current.draft;
@@ -475,7 +510,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     }
     setCursor(caret);
     if (item.kind === 'directory') completions.show(); else completions.dismiss();
-    if (item.kind === 'command') modelPicker.current?.focus();
+    if (item.kind === 'command') focusModelPicker();
     else editor.current?.focus(-1, caret);
   };
   const keyDown = (event: globalThis.KeyboardEvent): boolean => {
@@ -512,7 +547,13 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     finally { interruptInFlight.current = false; if (mounted.current) setInterrupting(false); }
   };
   return <div className="standalone-composer">
-    <div ref={inputRoot} inert={frozen} aria-busy={frozen || undefined}>
+    <div ref={inputRoot} inert={frozen} aria-busy={frozen || undefined} onKeyDown={event => {
+      if (event.key !== 'Escape' || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+      const menu = (event.target as Element).closest<HTMLDetailsElement>('.standalone-composer__menu[open]');
+      if (!menu) return;
+      event.preventDefault(); event.stopPropagation(); menu.open = false;
+      menu.querySelector<HTMLElement>('summary')?.focus();
+    }}>
     {context.threadId ? <StandaloneQueue key={JSON.stringify([context.hostId, context.threadId])} client={client} hostId={context.hostId} threadId={context.threadId} busy={busy} refreshVersion={queueVersion} onStartQueued={onStartQueued} frozen={frozen}
       captureAuthority={captureSubmissionAuthority ? () => captureSubmissionAuthority(structuredClone(owner)) : undefined}
       dispatchQueueMutation={dispatchQueueMutation}
@@ -527,6 +568,16 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       onQueueDraftCommitted={(before, after) => controller.acceptCommittedVersion(before, after)}
       beginOperation={beginOperation} onEditStateChange={(editing, pending) => { queueEditState.current = { editing, pending }; }}
       onCompositionChange={value => setComposition('queue', value)} /> : null}
+    {onTargetChange ? <StandaloneTarget client={client} context={context} hosts={hosts} projectDisplay={projectDisplay} disabled={busy || sending || uploading || !!removing || switchingTarget}
+      onTargetChange={async target => {
+        const lease = controller.freeze(owner);
+        if (!lease) throw new Error('Draft input is not ready to switch.');
+        setSwitchingTarget(true);
+        try {
+          if (!await lease.flush()) throw new Error('Draft input could not be saved.');
+          await onTargetChange(target, lease);
+        } finally { lease.release(); if (mounted.current) setSwitchingTarget(false); }
+      }} /> : null}
     <div className="standalone-composer__editor" inert={switchingTarget} aria-busy={switchingTarget || undefined}>
       {conflicts.length ? <div role="status">{t('Other pages or legacy data contain {count} independent drafts.').replace('{count}', new Intl.NumberFormat(locale).format(conflicts.length))}<details><summary>{t('Select draft version')}</summary>
         {conflicts.map(version => <button type="button" disabled={unresolved} key={version.revision} onClick={() => void selectVersion(version.revision)
@@ -579,7 +630,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         <details className="standalone-composer__retained"><summary>{t('View retained content')}</summary>
           <pre>{JSON.stringify({ input: draft.input, document: draft.document, hints: draft.hints, preserved: draft.preserved }, null, 2)}</pre></details>
       </> :
-      <StandalonePlainInputEditor ref={editor} label={t('Work with Codex')} placeholder={t('Message')} text={draft.text} readOnly={!!editIssue}
+      <StandalonePlainInputEditor ref={editor} label={t('Work with Codex')} placeholder={locale.toLowerCase().startsWith('en') ? 'Do anything' : t('Message')} text={draft.text} readOnly={!!editIssue}
         canEdit={() => !frozenRef.current} completionListId={completions.query ? completions.listId : undefined}
         completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
         onEdit={(_index, expected, text, inputType, skills) => {
@@ -607,31 +658,37 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         <input ref={picker} type="file" multiple hidden onChange={event => {
           pickerOpen.current = false; const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ''; void addFiles(files);
         }} />
-        <button type="button" aria-label={t('Add attachment')} title={t('Add attachment')} disabled={uploading || !!editIssue} onClick={() => {
-          if (!picker.current || frozenRef.current) return;
-          pickerOpen.current = true;
-          try { picker.current.click(); } catch (reason) { pickerOpen.current = false; setError(t('Image upload failed:') + message(reason)); }
-        }}>＋</button>
-        {!draft.document && !plainTextSetting.value ? <button type="button" aria-label={t('Rich text editor')} title={t('Rich text editor')} disabled={!!editIssue || structuredInput}
-          onClick={() => { changeDraft(value => ({ ...value, document: documentFromText(value.text) }));
-            requestAnimationFrame(() => richEditor.current?.focus()); }}><FilePenLine size={16} /></button> : null}
-        {onTargetChange ? <StandaloneTarget client={client} context={context} hosts={hosts} disabled={busy || sending || uploading || !!removing || switchingTarget}
-          onTargetChange={async target => {
-            const lease = controller.freeze(owner);
-            if (!lease) throw new Error('Draft input is not ready to switch.');
-            setSwitchingTarget(true);
-            try {
-              if (!await lease.flush()) throw new Error('Draft input could not be saved.');
-              await onTargetChange(target, lease);
-            } finally { lease.release(); if (mounted.current) setSwitchingTarget(false); }
-          }} /> : null}
+        <details className="standalone-composer__menu standalone-composer__add" onToggle={event => positionComposerMenu(event.currentTarget)}>
+          <summary aria-label={locale.toLowerCase().startsWith('en') ? 'Add files and more' : t('Add attachment')}
+            title={locale.toLowerCase().startsWith('en') ? 'Add files and more' : t('Add attachment')}><Plus size={18} aria-hidden="true" /></summary>
+          <div className="standalone-composer__menu-panel standalone-composer__add-panel">
+            <button type="button" disabled={uploading || !!editIssue} onClick={event => {
+              if (!picker.current || frozenRef.current) return;
+              event.currentTarget.closest('details')?.removeAttribute('open');
+              pickerOpen.current = true;
+              try { picker.current.click(); } catch (reason) { pickerOpen.current = false; setError(t('Image upload failed:') + message(reason)); }
+            }}><Paperclip size={16} aria-hidden="true" />{t('Add attachment')}</button>
+            <button type="button" aria-pressed={options.mode === 'plan'} disabled={busy} onClick={event => {
+              setOverrides(previous => ({ ...previous, mode: options.mode === 'plan' ? 'default' : 'plan' }));
+              event.currentTarget.closest('details')?.removeAttribute('open');
+            }}><Lightbulb size={16} aria-hidden="true" />{locale.toLowerCase().startsWith('en') ? 'Plan mode' : t('Plan')}</button>
+            {!draft.document && !plainTextSetting.value ? <button type="button" className="standalone-composer__rich-action" disabled={!!editIssue || structuredInput}
+              onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open');
+                changeDraft(value => ({ ...value, document: documentFromText(value.text) }));
+                requestAnimationFrame(() => richEditor.current?.focus()); }}><FilePenLine size={16} aria-hidden="true" />{t('Rich text editor')}</button> : null}
+            <label className="standalone-composer__enter">{t('Send method')} <select aria-label={t('Send method')} value={enterSetting.value} disabled={enterSetting.pending} onChange={event => {
+              const value = event.target.value;
+              if (value === 'enter' || value === 'cmdIfMultiline' || value === 'cmdAlways') void enterSetting.update(value);
+            }}><option value="enter">Enter</option><option value="cmdIfMultiline">{t('Ctrl/Command + Enter for multiline')}</option><option value="cmdAlways">Ctrl/⌘ + Enter</option></select></label>
+          </div>
+        </details>
         <StandaloneOptions client={client} hostId={context.hostId} cwd={context.cwd} threadId={context.threadId} busy={busy} modelRef={modelPicker} value={options}
           onDefaultPendingChange={notifyDefaultPending}
           onChange={patch => setOverrides(previous => ({ ...previous, ...patch }))} />
-        <label className="standalone-composer__enter">{t('Send method')} <select aria-label={t('Send method')} value={enterSetting.value} disabled={enterSetting.pending} onChange={event => {
-          const value = event.target.value;
-          if (value === 'enter' || value === 'cmdIfMultiline' || value === 'cmdAlways') void enterSetting.update(value);
-        }}><option value="enter">Enter</option><option value="cmdIfMultiline">{t('Ctrl/Command + Enter for multiline')}</option><option value="cmdAlways">Ctrl/⌘ + Enter</option></select></label>
+        <button type="button" className="standalone-composer__dictation" aria-label={t('Dictation')}
+          title={t('Voice chat and dictation are not available for this connection. A microphone preference can be saved for when they become available.')} disabled>
+          <Mic size={16} aria-hidden="true" />
+        </button>
         {busy ? <button type="button" onClick={() => void interrupt()} disabled={interrupting} title={t('Stop current task')}>{t('Stop')}</button> : null}
         {busy ? <button type="button" onClick={() => void submit(followUpSetting.value === 'queue' ? 'steer' : 'queue')}
           title={followUpSetting.value === 'queue' && !activeTurnId ? t('Current task has no confirmed turn ID') : undefined}
@@ -641,7 +698,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           title={busy && followUpSetting.value === 'steer' && !activeTurnId ? t('Current task has no confirmed turn ID') : undefined}
           disabled={sending || uploading || !!failedUploadView.length || unresolved || defaultPending || !hasContent(draft) || plainModeUnavailable
             || busy && (followUpSetting.pending || followUpSetting.value === 'steer' && !activeTurnId)}>
-          {t(sending ? 'Sending...' : busy ? followUpSetting.value === 'queue' ? 'Queue message' : 'Send to current task' : 'Send')}</button>
+          <ArrowUp size={18} aria-hidden="true" /><span className="standalone-composer__sr-only">{t(sending ? 'Sending...' : busy ? followUpSetting.value === 'queue' ? 'Queue message' : 'Send to current task' : 'Send')}</span></button>
       </div>
     </div>
     </div>

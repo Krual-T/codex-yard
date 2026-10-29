@@ -432,6 +432,7 @@ test('main composer creates and restores null-href automatic links without losin
       ? route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }) : route.abort());
     await page.goto('http://localhost/'); await page.addScriptTag({ content: bundle });
     await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+    await page.locator('.standalone-composer__add summary').click();
     await page.getByRole('button', { name: '富文本编辑' }).click();
     const editor = page.locator('.ProseMirror'); await editor.waitFor(); await editor.click();
     const url = 'https://example.test/path';

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { Ref } from 'react';
+import { ChevronDown, Shield } from 'lucide-react';
+import { positionComposerMenu } from './composer-menu-position.ts';
 import type { SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
 import { ModelSettings } from '../settings/model-settings.ts';
@@ -60,7 +62,7 @@ async function models(client: WorkbenchClient, hostId: string): Promise<Model[]>
 }
 
 export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRef, value, onChange, onDefaultPendingChange }: OptionsProps) {
-  const { t } = useI18n('zh-CN');
+  const { t, locale } = useI18n('zh-CN');
   const [available, setAvailable] = useState<Model[]>([]);
   const [defaults, setDefaults] = useState<SubmitOptions>({});
   const [loading, setLoading] = useState(true);
@@ -113,47 +115,85 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, busy, modelRe
   };
   const configuredLabel = (setting: string | undefined | null) => setting ? `${t('Configured default')} (${setting})` : t('Session default');
   const approvalLabel = (policy: ApprovalPolicy | undefined) => policy && typeof policy === 'object' ? t('Custom approval') : policy;
-  return <fieldset className="standalone-composer__options" disabled={busy} title={busy ? t('Queued messages use conversation settings') : undefined} aria-label={t('Conversation options')}>
-    <label>{t('Model')} <select ref={modelRef} aria-label={t('Model')}
-      title={modelValue ? selected?.label ?? modelValue : configuredLabel(configured.model ? selected?.label ?? configured.model : undefined)}
-      value={modelValue} disabled={loading || !available.length || defaultUnavailable} onChange={event => {
-      if (isHome) { saveDefault('model', event.target.value); return; }
-      const model = available.find(item => item.value === (event.target.value || configured.model));
-      const effort = model?.efforts.includes(value.effort ?? '') ? value.effort : model?.defaultEffort ?? model?.efforts[0] ?? null;
-      change({ model: event.target.value || undefined, effort: event.target.value ? effort : undefined });
-    }}>
-      {!selected && modelValue ? <option value={modelValue}>{modelValue}</option> : null}
-      <option value="" disabled={isHome && !!modelValue}>{loading ? t('Loading') : configuredLabel(configured.model ? selected?.label ?? configured.model : undefined)}</option>
-      {available.map(model => <option key={model.value} value={model.value}>{model.label}</option>)}
-    </select></label>
-    <label>{t('Effort')} <select aria-label={t('Reasoning effort')} value={effortValue} disabled={loading || !selected?.efforts.length || defaultUnavailable}
-      onChange={event => isHome ? saveDefault('effort', event.target.value) : change({ effort: event.target.value || null })}>
-      <option value="" disabled={isHome && !!effortValue}>{configuredLabel(configured.effort)}</option>
-      {effortValue && !selected?.efforts.includes(effortValue) ? <option value={effortValue}>{effortValue}</option> : null}
-      {selected?.efforts.map(effort => <option key={effort} value={effort}>{effort}</option>)}
-    </select></label>
-    <label>{t('Approval')} <select aria-label={t('Approval policy')} value={typeof value.approvalPolicy === 'object' ? '__granular__' : value.approvalPolicy ?? ''} onChange={event => change({ approvalPolicy: approval(event.target.value) })}>
-      {typeof value.approvalPolicy === 'object' ? <option value="__granular__">{t('Custom approval')}</option> : null}
-      <option value="">{configuredLabel(approvalLabel(configured.approvalPolicy))}</option><option value="untrusted">{t('When untrusted')}</option><option value="on-request">{t('On request')}</option><option value="never">{t('Never')}</option>
-    </select></label>
-    <label>{t('Sandbox')} <select aria-label={t('Sandbox permissions')} value={value.sandboxMode ?? ''} onChange={event => change({ sandboxMode: sandbox(event.target.value), permissionProfileId: undefined })}>
-      <option value="">{configuredLabel(configured.sandboxMode)}</option><option value="read-only">{t('Read only')}</option><option value="workspace-write">{t('Workspace write')}</option><option value="danger-full-access">{t('Full access')}</option>
-    </select></label>
-    <label><input type="checkbox" checked={(value.serviceTier === undefined ? configured.serviceTier : value.serviceTier) === 'fast'} onChange={event => change({ serviceTier: event.target.checked ? 'fast' : null })} />{t('Fast')}</label>
-    <label><input type="checkbox" checked={value.mode === 'plan'} onChange={event => change({ mode: event.target.checked ? 'plan' : 'default' })} />{t('Plan')}</label>
-    {error ? <span role="alert">{error}</span> : null}
+  const selectedSandbox = value.sandboxMode ?? configured.sandboxMode;
+  const selectedApproval = value.approvalPolicy ?? configured.approvalPolicy;
+  const selectedProfile = Object.hasOwn(value, 'permissionProfileId') ? value.permissionProfileId : configured.permissionProfileId;
+  const accessLabel = selectedProfile || (selectedSandbox === 'danger-full-access' ? selectedApproval === 'never' ? t('Full access') : t('Sandbox') + ': ' + t('Full access')
+    : selectedSandbox === 'workspace-write' ? t('Workspace write')
+    : selectedSandbox === 'read-only' ? t('Read only') : t('Session default'));
+  const effectiveEffort = effortValue || configured.effort;
+  const effortLabel = effectiveEffort && locale.toLowerCase().startsWith('en')
+    ? effectiveEffort[0]!.toUpperCase() + effectiveEffort.slice(1) : effectiveEffort;
+  const effortChoices = selected?.efforts ?? [];
+  const effortIndex = Math.max(0, effortChoices.indexOf(effectiveEffort ?? selected?.defaultEffort ?? ''));
+  const modelLabel = selected?.label ?? modelValue ?? configured.model ?? t('Model');
+  return <div className="standalone-composer__options" role="group" title={busy ? t('Queued messages use conversation settings') : undefined} aria-label={t('Conversation options')}>
+    <details className="standalone-composer__menu standalone-composer__access" data-danger={!selectedProfile && selectedSandbox === 'danger-full-access' || undefined} onToggle={event => positionComposerMenu(event.currentTarget)}>
+      <summary aria-label={t('Approval') + ': ' + accessLabel} aria-disabled={busy} onClick={event => { if (busy) event.preventDefault(); }}>
+        <Shield size={16} aria-hidden="true" /><span>{accessLabel}</span>
+      </summary>
+      <div className="standalone-composer__menu-panel">
+        <label>{t('Approval')} <select aria-label={t('Approval policy')} disabled={busy} value={typeof value.approvalPolicy === 'object' ? '__granular__' : value.approvalPolicy ?? ''} onChange={event => change({ approvalPolicy: approval(event.target.value) })}>
+          {typeof value.approvalPolicy === 'object' ? <option value="__granular__">{t('Custom approval')}</option> : null}
+          <option value="">{configuredLabel(approvalLabel(configured.approvalPolicy))}</option><option value="untrusted">{t('When untrusted')}</option><option value="on-request">{t('On request')}</option><option value="never">{t('Never')}</option>
+        </select></label>
+        <label>{t('Sandbox')} <select aria-label={t('Sandbox permissions')} disabled={busy} value={value.sandboxMode ?? ''} onChange={event => change({ sandboxMode: sandbox(event.target.value), permissionProfileId: undefined })}>
+          <option value="">{configuredLabel(configured.sandboxMode)}</option><option value="read-only">{t('Read only')}</option><option value="workspace-write">{t('Workspace write')}</option><option value="danger-full-access">{t('Full access')}</option>
+        </select></label>
+      </div>
+    </details>
+    <details className="standalone-composer__menu standalone-composer__model" onToggle={event => positionComposerMenu(event.currentTarget)}>
+      <summary title={t('Select model')}>
+        <span>{modelLabel || t('Model')}{effortLabel ? ' ' + effortLabel : ''}</span><ChevronDown size={13} aria-hidden="true" />
+      </summary>
+      <div className="standalone-composer__menu-panel standalone-composer__menu-panel--right">
+        <div className="standalone-composer__power-label">{effortLabel || t('Session default')}</div>
+        <details className="standalone-composer__model-choices" onToggle={event => {
+          const menu = event.currentTarget.closest<HTMLDetailsElement>('.standalone-composer__model');
+          if (menu) positionComposerMenu(menu);
+        }}><summary><span>{t('Select model')}</span><span>{modelLabel || t('Model')}</span><ChevronDown size={13} aria-hidden="true" /></summary>
+        <label>{t('Model')} <select ref={modelRef} aria-label={t('Model')}
+          title={modelValue ? selected?.label ?? modelValue : configuredLabel(configured.model ? selected?.label ?? configured.model : undefined)}
+          value={modelValue} disabled={busy || loading || !available.length || defaultUnavailable} onChange={event => {
+            if (isHome) { saveDefault('model', event.target.value); return; }
+            const model = available.find(item => item.value === (event.target.value || configured.model));
+            const effort = model?.efforts.includes(value.effort ?? '') ? value.effort : model?.defaultEffort ?? model?.efforts[0] ?? null;
+            change({ model: event.target.value || undefined, effort: event.target.value ? effort : undefined });
+          }}>
+          {!selected && modelValue ? <option value={modelValue}>{modelValue}</option> : null}
+          <option value="" disabled={isHome && !!modelValue}>{loading ? t('Loading') : configuredLabel(configured.model ? selected?.label ?? configured.model : undefined)}</option>
+          {available.map(model => <option key={model.value} value={model.value}>{model.label}</option>)}
+        </select></label></details>
+        <input className="standalone-composer__power" type="range" aria-label={t('Effort')}
+          aria-valuetext={effortLabel || t('Session default')} min={0} max={Math.max(0, effortChoices.length - 1)} step={1}
+          value={effortIndex} disabled={busy || loading || effortChoices.length < 2 || defaultUnavailable} onChange={event => {
+            const next = effortChoices[event.currentTarget.valueAsNumber];
+            if (next) isHome ? saveDefault('effort', next) : change({ effort: next });
+          }} />
+        <details className="standalone-composer__model-advanced"><summary>{t('Conversation options')}</summary>
+          <label>{t('Effort')} <select aria-label={t('Reasoning effort')} value={effortValue} disabled={busy || loading || !selected?.efforts.length || defaultUnavailable}
+            onChange={event => isHome ? saveDefault('effort', event.target.value) : change({ effort: event.target.value || null })}>
+            <option value="" disabled={isHome && !!effortValue}>{configuredLabel(configured.effort)}</option>
+            {effortValue && !selected?.efforts.includes(effortValue) ? <option value={effortValue}>{effortValue}</option> : null}
+            {selected?.efforts.map(effort => <option key={effort} value={effort}>{effort}</option>)}
+          </select></label>
+          <label><input type="checkbox" disabled={busy} checked={(value.serviceTier === undefined ? configured.serviceTier : value.serviceTier) === 'fast'} onChange={event => change({ serviceTier: event.target.checked ? 'fast' : null })} />{t('Fast')}</label>
+        </details>
+      </div>
+    </details>
+    {error ? <span className="standalone-composer__options-status" role="alert">{error}</span> : null}
     {isHome && (modelSettings.dirty || homeState.error) ? <div className="standalone-composer__model-save" role="status">
       {homeState.error || homeState.writeError ? <span role="alert">{homeState.error ?? homeState.writeError}</span> : null}
       {homeState.conflicts.map(field => <div key={field}>
         <span>{t('Default setting changed elsewhere:')} {field === 'model' ? t('Model') : t('Reasoning effort')} ({t('Current value')}: {field === 'model' ? homeState.savedModel : homeState.savedEffort}; {t('Your change')}: {field === 'model' ? homeState.model : homeState.effort})</span>
-        <button type="button" onClick={() => modelSettings.resolveConflict(field, 'current')}>{t('Use current value')}</button>
-        <button type="button" onClick={() => modelSettings.resolveConflict(field, 'draft')}>{t('Keep my change')}</button>
+        <button type="button" disabled={busy} onClick={() => modelSettings.resolveConflict(field, 'current')}>{t('Use current value')}</button>
+        <button type="button" disabled={busy} onClick={() => modelSettings.resolveConflict(field, 'draft')}>{t('Keep my change')}</button>
       </div>)}
-      <button type="button" disabled={homeState.saving || homeState.loading} onClick={() => void modelSettings.load()}>{t('Reload default settings')}</button>
-      {modelSettings.dirty && <><button type="button" disabled={homeState.saving || homeState.loading || !!homeState.error || !!homeState.writeError || !!homeState.conflicts.length}
+      <button type="button" disabled={busy || homeState.saving || homeState.loading} onClick={() => void modelSettings.load()}>{t('Reload default settings')}</button>
+      {modelSettings.dirty && <><button type="button" disabled={busy || homeState.saving || homeState.loading || !!homeState.error || !!homeState.writeError || !!homeState.conflicts.length}
         onClick={() => void modelSettings.save()}>{t('Save default change')}</button>
-      <button type="button" disabled={homeState.saving || homeState.loading} onClick={() => modelSettings.discard()}>{t('Discard change')}</button></>}
+      <button type="button" disabled={busy || homeState.saving || homeState.loading} onClick={() => modelSettings.discard()}>{t('Discard change')}</button></>}
     </div> : null}
-    {isHome && homeState.warning ? <span role="status">{homeState.warning}</span> : null}
-  </fieldset>;
+    {isHome && homeState.warning ? <span className="standalone-composer__options-status" role="status">{homeState.warning}</span> : null}
+  </div>;
 }

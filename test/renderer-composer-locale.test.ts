@@ -50,7 +50,9 @@ test('locale changes update composer controls without replacing the draft or ric
       const model = document.querySelector('[aria-label="Model"]') as HTMLSelectElement | null;
       return model?.value === 'fixture-model' && model.title === 'Fixture Model';
     });
+    await page.locator('.standalone-composer__access summary').click();
     await page.getByLabel('Sandbox permissions').selectOption('read-only');
+    await page.locator('.standalone-composer__add summary').click();
     await page.getByRole('button', { name: 'Rich text editor' }).click();
     const rich = page.getByRole('textbox', { name: 'Work with Codex' });
     await rich.waitFor();

@@ -1,13 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
+import { ChevronDown, Folder } from 'lucide-react';
+import { positionComposerMenu } from './composer-menu-position.ts';
 import type { ComposerContext, WorkbenchClient } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
 
 export interface ComposerHost { hostId: string; displayName: string }
 export interface ComposerTarget { hostId: string; cwd: string }
+export interface ComposerProjectDisplay { hostId: string; cwd: string; name: string }
 interface TargetProps {
   client: WorkbenchClient;
   context: ComposerContext;
   hosts?: ComposerHost[];
+  projectDisplay?: ComposerProjectDisplay | null;
   disabled: boolean;
   onTargetChange(target: ComposerTarget): void | Promise<void>;
 }
@@ -17,7 +21,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value);
 }
 
-export function StandaloneTarget({ client, context, hosts, disabled, onTargetChange }: TargetProps) {
+export function StandaloneTarget({ client, context, hosts, projectDisplay, disabled, onTargetChange }: TargetProps) {
   const { t } = useI18n('zh-CN');
   const [roots, setRoots] = useState<Root[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,11 +65,20 @@ export function StandaloneTarget({ client, context, hosts, disabled, onTargetCha
     catch (reason) { setError(t('Could not switch workspace:') + String(reason instanceof Error ? reason.message : reason)); }
     finally { setChanging(false); }
   };
+  const unavailable = disabled || changing || loading || context.threadId !== null;
+  const projectName = projectDisplay?.hostId === context.hostId && projectDisplay.cwd === context.cwd ? projectDisplay.name.trim() : '';
   return <div className="standalone-composer__target">
-    <label>{t('Run location')} <select aria-label={t('Run location')} value={current} disabled={disabled || changing || loading || context.threadId !== null}
-      onChange={event => void change(event.target.value)}>
-      {options.map(option => <option key={key(option)} value={key(option)}>{option.hostId === 'local' && option.hostName === 'local' ? t('Local target') : option.hostName}: {option.cwd || t('No workspace selected')}</option>)}
-    </select></label>
+    <details className="standalone-composer__menu" onToggle={event => positionComposerMenu(event.currentTarget)}>
+      <summary aria-disabled={unavailable} onClick={event => { if (unavailable) event.preventDefault(); }} title={context.cwd || t('No workspace selected')}>
+        <Folder size={15} aria-hidden="true" /><span>{projectName || context.cwd || t('No workspace selected')}</span><ChevronDown size={13} aria-hidden="true" />
+      </summary>
+      <div className="standalone-composer__menu-panel">
+        <label>{t('Run location')} <select aria-label={t('Run location')} value={current} disabled={unavailable}
+          onChange={event => void change(event.target.value)}>
+          {options.map(option => <option key={key(option)} value={key(option)}>{option.hostId === 'local' && option.hostName === 'local' ? t('Local target') : option.hostName}: {option.cwd || t('No workspace selected')}</option>)}
+        </select></label>
+      </div>
+    </details>
     {error ? <span role="alert">{error} <button type="button" onClick={() => setVersion(value => value + 1)}>{t('Retry')}</button></span> : null}
   </div>;
 }

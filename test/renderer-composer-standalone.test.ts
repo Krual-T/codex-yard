@@ -84,13 +84,23 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     await page.goto('http://localhost/');
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' });
+    const openMenu = async (name: 'access' | 'model' | 'add') => {
+      const menu = page.locator('.standalone-composer__' + name);
+      if (!await menu.evaluate(element => (element as HTMLDetailsElement).open)) await menu.locator(':scope > summary').click();
+    };
     await page.locator('select[aria-label="模型"] option[value="model-b"]').waitFor({ state: 'attached' });
     assert.equal(await page.getByLabel('审批策略').inputValue(), '__granular__');
+    await openMenu('model');
+    await page.locator('.standalone-composer__model-choices summary').click();
     await page.getByLabel('模型').selectOption('model-b');
+    await page.locator('.standalone-composer__model-advanced summary').click();
     await page.getByLabel('推理强度').selectOption('low');
+    await openMenu('access');
     await page.getByLabel('沙箱权限').selectOption('read-only');
+    await openMenu('model');
     await page.getByLabel('快速').check();
-    await page.getByLabel('计划').check();
+    await openMenu('add');
+    await page.getByRole('button', { name: '计划', exact: true }).click();
     await page.evaluate(() => (window as any).fixture.render({ initialOptions: {
       approvalPolicy: { granular: { sandbox_approval: false, rules: true, skill_approval: false, request_permissions: true, mcp_elicitations: false } },
       approvalsReviewer: 'user', permissionProfileId: 'updated-profile', sandboxMode: 'workspace-write',
@@ -151,6 +161,7 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.snapshot.draft.references.find((item: any) => item.id === 'browser:fixture').original), { unknown: 'preserved' });
     await reference.getByRole('button', { name: '移除引用' }).click();
     await reference.waitFor({ state: 'detached' });
+    await openMenu('add');
     await page.getByLabel('发送方式').selectOption('cmdAlways');
     await page.waitForFunction(() => (window as any).fixture.state.settings.composerEnterBehavior === 'cmdAlways');
     await editor.press('Enter');

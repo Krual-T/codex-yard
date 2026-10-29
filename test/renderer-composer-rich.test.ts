@@ -278,6 +278,7 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
 
     await page.evaluate(() => (window as any).fixture.render({ context: { draftId: 'new-rich' }, prefill: null }));
     await editor.fill('new plain draft');
+    await page.locator('.standalone-composer__add summary').click();
     await page.getByRole('button', { name: '富文本编辑' }).click();
     await page.locator('.ProseMirror[contenteditable="true"]').waitFor();
     await editor.press('End');

@@ -94,7 +94,8 @@ test('the main composer edits ordered input, retains attachments and survives re
     await page.getByRole('button', { name: '移除图片 one.png' }).click();
     await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.images[0]?.id === 'image-2');
     const chooser = page.waitForEvent('filechooser');
-    await page.getByRole('button', { name: '添加附件' }).click();
+    await page.locator('.standalone-composer__add summary').click();
+    await page.locator('.standalone-composer__add-panel').getByRole('button', { name: '添加附件' }).click();
     await (await chooser).setFiles({ name: 'added.png', mimeType: 'image/png', buffer: Buffer.from('89504e470d0a1a0a', 'hex') });
     await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.images.some((item: any) => item.name === 'added.png'));
     saved = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);

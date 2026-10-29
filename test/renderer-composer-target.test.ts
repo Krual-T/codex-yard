@@ -59,8 +59,13 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     const target = page.getByLabel('运行位置');
     const editor = page.getByRole('textbox', { name: '和 Codex 一起工作' });
+    const openTarget = async () => {
+      const menu = page.locator('.standalone-composer__target details');
+      if (!await menu.evaluate(element => (element as HTMLDetailsElement).open)) await menu.locator('summary').click();
+    };
     await page.getByRole('option', { name: 'SSH fixture: /remote/project' }).waitFor({ state: 'attached' });
     await editor.fill('local draft');
+    await openTarget();
     await target.selectOption({ label: 'Local: /work/two' });
     await page.waitForFunction(() => (window as any).fixture.changes.length === 1);
     assert.equal(await editor.inputValue(), 'local draft');
@@ -73,6 +78,7 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     await editor.fill('local draft after recovery');
     await page.waitForFunction(() => (window as any).fixture.consumed.includes('one-time'));
     await page.evaluate(() => { (window as any).fixture.deferTarget = true; });
+    await openTarget();
     await target.selectOption({ label: 'SSH fixture: /remote/project' });
     await page.waitForFunction(() => typeof (window as any).fixture.resolveTarget === 'function');
     assert.equal(await editor.evaluate(element => element.closest('[inert]') !== null), true);
@@ -90,10 +96,12 @@ test('composer chooses real host roots through its parent and keeps drafts parti
     assert.equal(submission.context.cwd, '/remote/project');
     assert.equal(submission.draft.text, 'remote draft');
     assert.deepEqual(submission.action, { type: 'send' });
+    await openTarget();
     await target.selectOption({ label: 'Local: /work/two' });
     await page.waitForFunction(() => (document.querySelector('textarea[aria-label="和 Codex 一起工作"]') as HTMLTextAreaElement)?.value === 'local draft after recovery');
     await page.getByText('local reference').waitFor();
     await page.evaluate(() => { (window as any).fixture.fail = true; });
+    await openTarget();
     await target.selectOption({ label: 'SSH fixture: /remote/project' });
     await page.getByRole('alert').filter({ hasText: 'fixture rejected' }).waitFor();
     assert.equal(await editor.inputValue(), 'local draft after recovery');
