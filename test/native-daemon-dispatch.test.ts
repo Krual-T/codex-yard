@@ -117,3 +117,57 @@ test('a bound ordinary send queued before reconnect is rejected at actual dispat
   assert.equal(result.error.data.sendPhase, 'before-send'); assert.equal(result.error.data.uncertain, false);
   assert.equal(f.peer.calls('turn/start').length, 1);
 });
+
+test('queue editing compares complete input and coordinates Yard updates through the original connection', async t => {
+  const f = await fixture(t), a = await f.page(), b = await f.page();
+  const first = { id: 'queued', clientUserMessageId: 'queued-client', input: [{ type: 'text', text: 'V1', text_elements: [] }] };
+  let queued: typeof first | null = structuredClone(first), pause = false;
+  const entered = gate(), release = gate();
+  f.peer.handlers.set('thread/queue/list', async () => {
+    if (pause) { entered.release(); await release.wait; }
+    return { data: queued ? [structuredClone(queued)] : [], nextCursor: null };
+  });
+  f.peer.handlers.set('thread/queue/update', params => {
+    if (!queued) throw new Error('Original queue entry no longer exists');
+    queued = { ...queued, input: params.input as typeof first.input }; return { queuedSubmission: queued };
+  });
+  f.peer.handlers.set('thread/queue/delete', () => { const deleted = !!queued; queued = null; return { deleted }; });
+  await b.rpc('thread/queue/update', { threadId: 'thread', queuedSubmissionId: first.id,
+    input: [{ type: 'text', text: 'V2', text_elements: [] }] }, b.generation);
+  const changed = await a.host('queue-edit', { hostId: 'local', threadId: 'thread', entry: first, daemonConnectionGeneration: a.generation });
+  assert.equal(changed.body, 'changed'); assert.equal(f.peer.calls('thread/queue/delete').length, 0);
+  assert.equal(queued!.input[0]!.text, 'V2');
+  queued = structuredClone(first); pause = true;
+  const removing = a.host('queue-edit', { hostId: 'local', threadId: 'thread', entry: first, daemonConnectionGeneration: a.generation });
+  await entered.wait;
+  const updating = b.rpc('thread/queue/update', { threadId: 'thread', queuedSubmissionId: first.id,
+    input: [{ type: 'text', text: 'V3', text_elements: [] }] }, b.generation);
+  await b.host('locale-info', {});
+  assert.equal(f.peer.calls('thread/queue/update').length, 1);
+  release.release();
+  assert.equal((await removing).body, 'deleted');
+  assert((await updating).error);
+  assert.equal(f.peer.calls('thread/queue/update').length, 2);
+  assert.equal(f.peer.calls('thread/queue/delete').length, 1);
+  assert.equal(queued, null);
+});
+
+test('queue editing waiting behind another Yard write cannot borrow a replacement daemon', async t => {
+  const f = await fixture(t), a = await f.page(), b = await f.page();
+  let originalSocket!: WebSocket;
+  f.peer.handlers.set('thread/read', (params, context) => { originalSocket = context.socket; return f.peer.defaultResult('thread/read', params); });
+  await b.rpc('thread/read', { threadId: 'thread', includeTurns: false });
+  const blocker = gate(), entered = gate();
+  f.peer.handlers.set('turn/start', async () => { entered.release(); await blocker.wait; return { turn: fixtureTurn('blocker') }; });
+  const blocking = a.rpc('turn/start', { threadId: 'thread', input: [] }, a.generation); await entered.wait;
+  const removing = b.host('queue-edit', { hostId: 'local', threadId: 'thread', daemonConnectionGeneration: b.generation,
+    entry: { id: 'queued', clientUserMessageId: 'original', input: [{ type: 'text', text: 'retained' }] } });
+  await b.host('locale-info', {});
+  const from = b.messages.length; originalSocket.terminate();
+  await b.until(message => message.type === 'codex-app-server-connection-changed' && message.state === 'disconnected', from);
+  await b.rpc('thread/read', { threadId: 'thread', includeTurns: false });
+  blocker.release(); await blocking;
+  const result = await removing;
+  assert.equal(result.responseType, 'error'); assert.equal(result.uncertain, false); assert.equal(result.sendPhase, 'before-send');
+  assert.equal(f.peer.calls('thread/queue/list').length, 0); assert.equal(f.peer.calls('thread/queue/delete').length, 0);
+});

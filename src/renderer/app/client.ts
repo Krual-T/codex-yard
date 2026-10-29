@@ -124,7 +124,8 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
           this.settle(String(reply.id), reply.result, reply.error && new WorkbenchError(reply.error.message, reply.error.data?.uncertain === true, reply.error.code,
             reply.error.data?.uncertain === false && reply.error.data.sendPhase === 'before-send' ? 'before-send' : undefined), message.late === true);
         } else if (message.type === 'fetch-response') {
-          this.settle(String(message.requestId), message.body, message.responseType === 'error' ? new WorkbenchError(String(message.error), message.uncertain === true) : undefined);
+          this.settle(String(message.requestId), message.body, message.responseType === 'error' ? new WorkbenchError(String(message.error), message.uncertain === true,
+            undefined, message.uncertain === false && message.sendPhase === 'before-send' ? 'before-send' : undefined) : undefined);
         } else if (message.type === 'server-request-response') {
           this.settle(String(message.requestId), undefined, message.error ? new WorkbenchError(String(message.error), message.uncertain === true) : undefined);
         }

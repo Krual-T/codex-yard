@@ -10,6 +10,7 @@ import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { CodexConnection } from '../../lib/codex.ts';
+import { removeQueuedOriginal } from './queue-edit.ts';
 import { createAppTools } from '../../lib/app-tools.ts';
 import { appToolCatalog, createHostToolHandler } from '../../lib/host-tools.ts';
 import { projectRoot, rendererVersion } from '../../lib/app-resources.ts';
@@ -500,7 +501,8 @@ export async function createNativeWorkbench(options: Options = {}) {
         if (message.type === 'mcp-response' && message.requestId) send(client, { type: 'server-request-response', requestId: message.requestId, error: error.message, uncertain: error.uncertain === true });
         else if (message.type === 'fetch') send(client, { type: 'fetch-response', requestId: message.requestId, responseType: 'error', status: 500, error: error.message,
           uncertain: error.uncertain === true || typeof message.url === 'string'
-            && message.url.split('/').at(-1) === 'side-chat' && error.uncertain !== false });
+            && message.url.split('/').at(-1) === 'side-chat' && error.uncertain !== false,
+          ...(error.uncertain === false && error.sendPhase === 'before-send' ? { sendPhase: 'before-send' } : {}) });
         else if (message.request) send(client, { type: 'mcp-response', hostId: message.hostId ?? 'local', message: { id: message.request.id,
           error: { code: typeof error.code === 'number' ? error.code : -32000, message: error.message,
             data: error.data === undefined ? { uncertain: error.uncertain === true,
@@ -751,7 +753,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       };
       let response;
       try {
-        response = ['thread/inject_items', 'turn/start', 'thread/revert', 'thread/queue/start'].includes(method) && typeof params.threadId === 'string'
+        response = writeMethods.has(method) && typeof params.threadId === 'string'
           ? await conversationWrite(hostId, params.threadId, request) : await request();
       } catch (error) {
         if (parentAttempt && record(error).code !== 'TIMEOUT') sideChatParents.cancel(parentAttempt);
@@ -888,6 +890,11 @@ export async function createNativeWorkbench(options: Options = {}) {
       }
       case 'thread-projects': return threadProjects(params.operation as ThreadProjectOperation, params.value);
       case 'project-add': return addProject(hostId, params.path, params.name);
+      case 'queue-edit': {
+        if (typeof params.threadId !== 'string' || !params.threadId) throw Object.assign(new Error('原队列会话无效，未删除。'), { uncertain: false, sendPhase: 'before-send' });
+        const original = capturePageConnection(client, connections, hostId, params.daemonConnectionGeneration);
+        return conversationWrite(hostId, params.threadId, () => removeQueuedOriginal(original.connection, params.threadId as string, params.entry, original.assertOriginal));
+      }
       case 'message-edit': {
         if (typeof params.threadId !== 'string' || !params.threadId) throw new Error('编辑需要会话身份。');
         let entered = false;
