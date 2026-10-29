@@ -259,7 +259,7 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, 
     change({ model: next || undefined, effort: next ? effort : undefined });
   };
   return <div className="standalone-composer__options" role="group" title={busy ? t('Queued messages use conversation settings') : undefined} aria-label={t('Conversation options')}>
-    {!isHome && <details ref={accessMenu} className="standalone-composer__menu standalone-composer__access" data-danger={selectedProfile === ':danger-full-access' || !selectedProfile && selectedSandbox === 'danger-full-access' || undefined} onToggle={event => {
+    <details ref={accessMenu} className="standalone-composer__menu standalone-composer__access" data-danger={selectedProfile === ':danger-full-access' || !selectedProfile && selectedSandbox === 'danger-full-access' || undefined} onToggle={event => {
       if (event.target !== event.currentTarget) return;
       positionComposerMenu(event.currentTarget);
       if (event.currentTarget.open) void readPermissions();
@@ -310,8 +310,8 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, 
           </select></label>
         </details> : null}
       </div>
-    </details>}
-    {!isHome && confirmFullAccess && fullAccessVisible ? <div className="standalone-composer__confirm-backdrop" role="presentation">
+    </details>
+    {confirmFullAccess && fullAccessVisible ? <div className="standalone-composer__confirm-backdrop" role="presentation">
       <div className="standalone-composer__confirm" role="dialog" aria-modal="true" aria-labelledby={confirmationId}
         onKeyDown={event => {
           if (event.key === 'Escape' && !event.nativeEvent.isComposing && !permissionLoading) { event.stopPropagation(); closeConfirmation(); }

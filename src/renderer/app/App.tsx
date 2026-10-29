@@ -60,6 +60,9 @@ import { ProductWorkspace } from './ProductWorkspace.tsx';
 import { readProductRoute } from './product-routes.ts';
 import type { ProductRouteOwner } from './ProductRoutePage.tsx';
 import { settingsConfigOperations } from '../settings/config-operations.ts';
+import { configReadSource, sameConfigSource } from '../settings/config-source.ts';
+import { userConfigTarget } from '../settings/config-target.ts';
+import type { ConfigReadSource } from '../../../lib/config-write-protocol.ts';
 import { saveComposerDraftConflict } from '../composer/composer-draft-store.ts';
 import { normalizeDraft } from '../composer/standalone-draft.ts';
 import type { NumberShortcutSlot } from './workbench-shortcuts.ts';
@@ -1179,6 +1182,32 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   };
   const openFile = (path: string, line?: number, column?: number, fileCwd = thread?.cwd || cwd || workspace) =>
     showPanel({ kind: 'file', path: resolveFilePath(fileCwd, path), line, column });
+  const openSettingsConfig = (hostId: string, file: string, input: ConfigReadSource) => {
+    void (async () => {
+      const original = routeRef.current, generation = navigationGeneration.current;
+      const source = { ...input }, daemon = client.captureDaemonConnection(hostId);
+      const assertOriginal = () => {
+        daemon.assertOriginal();
+        if (routeRef.current !== original || navigationGeneration.current !== generation
+          || !original.section || original.hostId !== hostId || source.hostId !== hostId)
+          throw new Error('The original configuration source changed. Reload the settings before opening the file.');
+      };
+      assertOriginal();
+      const read = await client.rpc<{ yardConfigSource?: unknown; layers?: unknown }>('config/read', { includeLayers: true }, hostId,
+        { assertBeforeSend: assertOriginal });
+      assertOriginal();
+      // Configuration reads use their own owned socket. Its source is compared
+      // with the original settings read, rather than the Main daemon generation.
+      const target = userConfigTarget(read.layers, source.codexHome).target;
+      if (!sameConfigSource(source, configReadSource(read.yardConfigSource, hostId)) || target?.file !== file)
+        throw new Error('The configuration file source changed. Reload the settings before opening it.');
+      // Match the existing Web openIn behavior: download the actual bytes and
+      // keep Settings visible, rather than introducing file-panel navigation.
+      const opened = await client.files.open({ hostId, path: file, cwd: source.codexHome });
+      assertOriginal();
+      if (!opened.success) throw new Error('Could not open the configuration file.');
+    })().catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
+  };
   const addReference = async (draft: ComposerDraft) => {
     const controller = panelComposer(), snapshot = controller?.snapshot(), source = sideChatSourceRef.current;
     if (!controller || !snapshot || navigationLocked.current || routeRef.current.readOnly
@@ -1388,6 +1417,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       <div className="yard-workspace" data-panel-open={panelOpen && !settings}>
       <div className="yard-chat-pane" inert={leaving}>
       {settings ? <InstructionEditorTheme.Provider value={panelAppearance.theme}><StandaloneSettings client={client} hostId={current.hostId}
+        onOpenConfig={openSettingsConfig}
         onOpenArchivedThread={async (hostId, threadId) => {
           const original = routeRef.current;
           if (!original.section || original.hostId !== hostId) throw new Error('原归档列表已改变，请重新打开。');
