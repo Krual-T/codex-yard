@@ -905,6 +905,112 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
+    await t.test('C review segmented version adoption discards only the replaced document history', async () => {
+      const { page, errors } = await open('c-review-segment-version');
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      const original = { text: 'A\nTail', images: [], files: [], references: [], skills: [], input: [
+        { type: 'text', text: 'A', text_elements: [] }, { type: 'image', fileId: 'image-one', detail: 'high' },
+        { type: 'text', text: 'Tail', text_elements: [] },
+      ], document: { type: 'doc', content: [
+        { type: 'paragraph', content: [{ type: 'text', text: 'A' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'Tail', marks: [{ type: 'em' }] }] },
+      ] } };
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const first = page.getByRole('textbox', { name: 'Work with Codex 1' });
+      await first.focus(); await first.press('End'); await first.pressSequentially('B');
+      assert.equal(await first.inputValue(), 'AB');
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller;
+        return c.update(c.snapshot().owner, (draft: any) => ({ ...draft, references: [{ id: 'ref', text: 'Retained context' }] })); }), true);
+      await first.press('Control+z'); assert.equal(await first.inputValue(), 'A');
+      await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'AB');
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const alternate = await page.evaluate(() => {
+        const draft = structuredClone((window as any).fixture.state.controller.snapshot().draft);
+        draft.document.content[0].content[0].marks = [{ type: 'strong' }]; return draft;
+      });
+      await page.evaluate(value => (window as any).fixture.addVersion(value, 'c-review-segment-bold'), alternate);
+      await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
+      await page.getByRole('button', { name: 'AB Tail', exact: true }).click();
+      await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().revision === 'c-review-segment-bold');
+      await first.focus(); await first.press('Control+z');
+      assert.equal(await first.inputValue(), 'AB');
+      await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'AB');
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const saved = await page.evaluate(() => (window as any).fixture.versions());
+      const chosen = saved.versions.find((version: any) => version.revision === 'c-review-segment-bold');
+      assert.deepEqual(chosen.draft, alternate);
+      await first.press('End'); await first.pressSequentially('C');
+      await first.press('Control+z'); assert.equal(await first.inputValue(), 'AB');
+      await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'ABC');
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('C review rich composition A ending cannot release newer B', async () => {
+      const { page, errors } = await open('c-review-rich-generation');
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      const original = { text: '**Original**', images: [], files: [], references: [], skills: [],
+        document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Original', marks: [{ type: 'strong' }] }] }] } };
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const editor = page.locator('[contenteditable="true"][role="textbox"]'); await editor.waitFor(); await editor.focus();
+      const frozen = await editor.evaluate(async element => {
+        element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+        element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+        element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+        const c = (window as any).fixture.state.controller, lease = c.freeze(c.snapshot().owner);
+        lease?.release(); return !lease;
+      });
+      assert.equal(frozen, true);
+      await editor.evaluate(async element => {
+        element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      });
+      const available = await page.evaluate(() => { const c = (window as any).fixture.state.controller, lease = c.freeze(c.snapshot().owner);
+        lease?.release(); return !!lease; });
+      assert.equal(available, true);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('C review pending draft and rich composition generation keep the original editor frozen', async () => {
+      const { page, errors } = await open('c-review-rich-composition');
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      const original = { text: '**Original**', images: [], files: [], references: [], skills: [],
+        document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Original', marks: [{ type: 'strong' }] }] }] },
+        pendingDrafts: [{ text: 'Retained', images: [], files: [], references: [], skills: [] }] };
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const editor = page.locator('[contenteditable="true"][role="textbox"]'); await editor.waitFor(); await editor.focus();
+      await page.getByRole('button', { name: 'Switch draft' }).waitFor();
+      const blockedTail = await editor.evaluate(element => {
+        element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+        element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+        (Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Switch draft') as HTMLButtonElement).click();
+        return (window as any).fixture.state.controller.snapshot().draft.text;
+      });
+      assert.equal(blockedTail, original.text);
+      await editor.evaluate(async element => { await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))); });
+      const frozenDuringB = await editor.evaluate(async element => {
+        element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+        element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+        element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+        const c = (window as any).fixture.state.controller, lease = c.freeze(c.snapshot().owner);
+        lease?.release();
+        (Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Switch draft') as HTMLButtonElement).click();
+        return { frozen: !lease, draft: c.snapshot().draft };
+      });
+      assert.equal(frozenDuringB.frozen, true);
+      assert.equal(frozenDuringB.draft.text, original.text);
+      assert.equal(await editor.innerText(), 'Original');
+      await editor.evaluate(async element => {
+        element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      });
+      await page.getByRole('button', { name: 'Switch draft' }).click();
+      await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.text === 'Retained');
+      assert.equal(await page.getByRole('textbox', { name: 'Work with Codex' }).inputValue(), 'Retained');
+      assert.deepEqual(errors, []); await page.close();
+    });
+
     await t.test('a slow textarea composition is one undo event and blocks another draft adoption', async () => {
       const { page, errors } = await open('chat-slow-composition');
       const editor = page.getByRole('textbox', { name: 'Work with Codex' });

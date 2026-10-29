@@ -1101,7 +1101,8 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
           .catch(reason => setError(t('Could not switch drafts:') + message(reason)))}>{version.draft.text.slice(0, 80) || t('Draft with attachments or retained data')}</button>)}
       </details></div> : null}
       {draft.pendingDrafts?.length ? <div role="status">{new Intl.NumberFormat(locale).format(draft.pendingDrafts.length)} {t('Contents were retained separately to preserve formatting.')} <button type="button" onClick={() => {
-        if (pendingLink.current) setError(t('Apply or close the link editor first.'));
+        if (pendingComposition.current) setError(locale.toLowerCase().startsWith('zh') ? '请先完成输入法输入。' : 'Finish text composition first.');
+        else if (pendingLink.current) setError(t('Apply or close the link editor first.'));
         else void changeDraft(value => activatePending(value, true));
       }}>{t('Switch draft')}</button></div> : null}
       {draft.images.length || draft.files.length || draft.references.length || draft.skills.length ? <div className="standalone-composer__attachments">

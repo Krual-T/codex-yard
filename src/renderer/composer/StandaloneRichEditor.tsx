@@ -485,18 +485,16 @@ function TextControl(props: TextControlProps) {
       control.view?.updateState(control.state);
       return;
     }
-    if (!control.rich && (historyText(control.state) !== props.text || JSON.stringify(historyAgents(control.state)) !== JSON.stringify(props.agentMentions ?? []))) {
+    const sourceMarksChanged = !props.formatting && props.sourceMarks
+      && !applySourceMarks(control.state, props.sourceMarks).doc.eq(control.state.doc);
+    if (!control.rich && (historyText(control.state) !== props.text
+      || JSON.stringify(historyAgents(control.state)) !== JSON.stringify(props.agentMentions ?? []) || sourceMarksChanged)) {
       control.state = applySourceMarks(textHistoryState(props.text, props.agentMentions), props.sourceMarks ?? []);
       control.historyPlugin = control.state.plugins[0]!;
       control.view?.updateState(control.state);
     }
-  }, [control, props.text, props.agentMentions, props.formatting, props.document, props.currentDocument, props.plainTextMode]);
+  }, [control, props.text, props.agentMentions, props.sourceMarks, props.formatting, props.document, props.currentDocument, props.plainTextMode]);
   useLayoutEffect(() => { control.applyMode(); }, [control, props.formatting, props.plainTextMode]);
-  useLayoutEffect(() => {
-    if (props.formatting || !props.sourceMarks || composing.current) return;
-    const next = applySourceMarks(control.state, props.sourceMarks);
-    if (next !== control.state) { control.state = next; control.view?.updateState(next); }
-  }, [control, props.sourceMarks, props.formatting, showView]);
   useLayoutEffect(() => {
     const element = control.element;
     const beforeInput = (event: InputEvent) => {
@@ -1253,6 +1251,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
   const agentIcon = useRef<SVGSVGElement>(null);
   const view = useRef<EditorView | null>(null);
   const composing = useRef(false);
+  const compositionGeneration = useRef(0);
   const latest = useRef(props);
   latest.current = props;
   const latestTranslation = useRef(t);
@@ -1388,15 +1387,18 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         paste: editor => { if (!composing.current) syncRichSelection(editor); return false; },
         focus: editor => { latest.current.onCompletionContext(composing.current ? null : richCompletionContext(editor)); return false; },
         blur: () => { latest.current.onCompletionContext(null); return false; },
-        compositionstart: () => { composing.current = true; latest.current.onCompositionChange?.(true); latest.current.onCompletionContext(null); return false; },
+        compositionstart: () => { compositionGeneration.current++; composing.current = true; latest.current.onCompositionChange?.(true); latest.current.onCompletionContext(null); return false; },
         compositionend: editor => {
-          requestAnimationFrame(() => {
-            if (view.current !== editor || editor.isDestroyed) return;
+          const generation = compositionGeneration.current;
+          const finish = () => {
+            if (view.current !== editor || editor.isDestroyed || generation !== compositionGeneration.current) return;
+            if (editor.composing) { requestAnimationFrame(finish); return; }
             composing.current = false;
             applyMode.current?.();
             latest.current.onCompositionChange?.(false);
             if (editor.hasFocus()) latest.current.onCompletionContext(richCompletionContext(editor));
-          });
+          };
+          requestAnimationFrame(finish);
           return false;
         },
       },
@@ -1451,6 +1453,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
       editor.updateState(editor.state.reconfigure({ plugins: plain ? plugins.plain : plugins.rich }));
     };
     return () => {
+      compositionGeneration.current++;
       applyMode.current = null; view.current = null; editor.destroy();
       latest.current.onCompositionChange?.(false); latest.current.onPendingLinkChange?.(false);
     };
