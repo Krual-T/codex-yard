@@ -295,12 +295,28 @@ async function waitForVersion(page: Page, threadId: string, text: string, refere
   });
   try {
     for (;;) {
-      const versions = await Promise.race([activeVersions(page, threadId), timeout]);
-      const matching = versions.filter(version => {
-        const draft = record(version.draft);
-        return draft.text === text && (reference === null || JSON.stringify(draft.references).includes(reference));
-      });
-      if (matching.length === 1) return;
+      const matched = await Promise.race([page.evaluate(async expected => {
+        const raw = await new Promise<unknown>((resolve, reject) => {
+          const open = indexedDB.open('codex-yard.ui-atoms.v1', 1);
+          open.onerror = () => reject(open.error);
+          open.onsuccess = () => {
+            const db = open.result, tx = db.transaction('atoms', 'readonly'), request = tx.objectStore('atoms').get('native-atoms');
+            request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+            tx.oncomplete = () => db.close();
+          };
+        });
+        const obj = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value)
+          ? value as Record<string, unknown> : {};
+        const entries = obj(obj(obj(raw).atoms)['codex-yard.composer-drafts.v3']).entries;
+        const versions = Object.values(obj(entries)).flatMap(entry => Array.isArray(obj(entry).versions) ? obj(entry).versions as unknown[] : []);
+        const matching = versions.map(obj).filter(version => {
+          const owner = obj(version.owner), draft = obj(version.draft);
+          return owner.hostId === 'local' && owner.threadId === expected.threadId && owner.draftId === expected.threadId
+            && draft.text === expected.text && (expected.reference === null || JSON.stringify(draft.references).includes(expected.reference));
+        });
+        return matching.length === 1;
+      }, { threadId, text, reference }), timeout]);
+      if (matched) return;
       await Promise.race([page.waitForTimeout(30), timeout]);
     }
   } finally { clearTimeout(timer); }
