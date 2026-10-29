@@ -309,7 +309,7 @@ function searchText(value: unknown): string {
   return typeof value === 'number' || typeof value === 'boolean' ? String(value) : '';
 }
 
-export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser,
+export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser,
   editRecovery, editAccess, onEditDraftChange, onEditNavigationController, editRebase, onPrepareEditRebase, onCommitEditRebase,
   editHistory }: StandaloneMessagesProps & StandaloneMessagesRecoveryProps & { editHistory?: MessageEditHistory }) {
   const [query, setQuery] = useState('');
@@ -320,9 +320,10 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
   const nodes = useRef(new Map<string, HTMLElement>());
   const searchOpened = useRef(new Set<HTMLDetailsElement>());
   const followRef = useRef(true);
-  const threadIdentity = JSON.stringify([hostId, thread?.id]);
+  const requestedThreadId = threadId ?? thread?.id ?? null;
+  const threadIdentity = JSON.stringify([hostId, requestedThreadId]);
   const { editingHere, recoveryAvailable, rebaseRequired, canRebase, startRebase, cancelRebase, startEdit, updateEdit, endEdit, submitEdit, accessRestricted, accessError } = useMessageEditing({
-    hostId, thread, threadIdentity, editRecovery, editAccess, onEditDraftChange, onEditNavigationController, editRebase, onPrepareEditRebase, onCommitEditRebase,
+    hostId, thread, threadId: requestedThreadId, threadIdentity, editRecovery, editAccess, onEditDraftChange, onEditNavigationController, editRebase, onPrepareEditRebase, onCommitEditRebase,
   });
   const currentThread = useRef(threadIdentity);
   const openImages = useCallback((images: ImageSource[], index: number) => setViewer({ images, index }), []);

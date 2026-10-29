@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v20，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v21，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -85,7 +85,7 @@ v17修订：文件与可视化预填必须在来源回调的首await前登记原
 
 已挂载但尚无编辑或获取流程的消息视图同样建立host/thread冻结token，阻止等待中到达的恢复记录获取权限；取消时重新核对，真正离开后移交。取消和恢复写在排队前捕获原授予，沿原atom条件更新复核，旧排队取消不能借后来owner的新基线删除其稿件。
 
-消息hook调用onEdit(draft,origin,prepare)时先同步进入父回调；prepare是本次不可变编辑快照的幂等保存函数，父在首次await前捕获原access、目标、导航和connectionRevision，再实际调用并等待prepare。保存完成与宿主调用前复核原host/thread/turn/item、连接及目标；消息编辑没有模型选择控件，overrides为空，由当前会话核对真实设置。WorkbenchClient的assertBeforeSend将同一断言带到连接准备的最后等待之后、原socket.send前；明确未派发才按原operationId条件恢复之前阶段，已派发或未知仍保留原恢复证据。取消、重取权和提交完成只能操作本次原身份，不能删除后来保存的新稿。该使用权仅协调同一renderer的双视图；跨页仍由现有IDB事务冲突检查负责。主页面已接v20合同，真实App故障复验及Mini父消费者验收仍待完成。
+消息hook调用onEdit(draft,origin,prepare)时先同步进入父回调；prepare是本次不可变编辑快照的幂等保存函数，父在首次await前捕获原access、目标、导航和connectionRevision，再实际调用并等待prepare。保存完成与宿主调用前复核原host/thread/turn/item、连接及目标；消息编辑没有模型选择控件，overrides为空，由当前会话核对真实设置。WorkbenchClient的assertBeforeSend将同一断言带到连接准备的最后等待之后、原socket.send前；明确未派发才按原operationId条件恢复之前阶段，已派发或未知仍保留原恢复证据。取消、重取权和提交完成只能操作本次原身份，不能删除后来保存的新稿。该使用权仅协调同一renderer的双视图；跨页仍由现有IDB事务冲突检查负责。主页面已接v20合同，v21在离页首等待前按原路由host/thread冻结本视图的后续acquire，即使消息数据仍在loading、组件未挂载；现有编辑权仍可排空。消息组件接收独立于loaded thread的route threadId，失败离页只释放本次冻结并唤醒恢复。通用Retry重试实际当前History状态和URL事实同步，History写失败继续保持局部错误。真实daemon原socket/generation与Mini父消费者仍待后续接线，v20页面socket证明不替代它们。
 
 浏览器选择、保存、附加和删除先取得原owner外部句柄，根atom事务共用既有composer版本更新。父级用实际home/thread binding核对browser owner；composer删除借用同一句柄，完整after在投影接收前保留，根事务已提交时返回handled，不再进行第二次删除。接收失败保留完整快照及复制、另存、核对与明确放弃出口，阻止静默离页；已持久版本不会被旧投影二次写回。跨页删除watcher也经同一外部操作队列和根事务，只处理精确删除标记。发送确认仍从不可变intent记录实际完整引用后按精确revision清理。
 

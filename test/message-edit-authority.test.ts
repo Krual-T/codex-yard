@@ -152,3 +152,36 @@ test('a stale acquisition can neither accept its read nor release a later grant 
   assert.equal(h.access.owns(origin), true);
   h.access.capture(origin)();
 });
+
+test('a route frozen before its transcript mounts rejects late acquisition and wakes the original view on release', () => {
+  const h = fixture();
+  let notifications = 0;
+  const unsubscribe = h.access.subscribe(() => { notifications++; });
+  const release = h.access.freezeAcquisition(origin);
+  assert.equal(h.access.acquire(origin), false);
+  assert.equal(h.access.available(origin), false);
+  assert.equal(h.access.owns(origin), false);
+  assert.equal(h.access.acquire({ ...origin, threadId: 'another-thread' }), true);
+  release();
+  assert.equal(notifications, 1);
+  assert.equal(h.access.acquire(origin), true);
+  release();
+  assert.equal(notifications, 1);
+  unsubscribe();
+});
+
+test('a stale route-freeze release cannot reopen a later freeze or invalidate an existing flush authority', () => {
+  const h = fixture();
+  assert.equal(h.access.acquire(origin), true);
+  const authority = h.access.capture(origin);
+  const releaseOld = h.access.freezeAcquisition(origin), releaseCurrent = h.access.freezeAcquisition(origin);
+  releaseOld();
+  assert.equal(h.access.acquire(origin), false);
+  authority();
+  h.access.release(origin, authority);
+  assert.equal(h.access.owns(origin), false);
+  assert.equal(h.access.acquire(origin), false);
+  releaseCurrent();
+  assert.equal(h.access.acquire(origin), true);
+  assert.throws(authority, /使用权已改变/);
+});

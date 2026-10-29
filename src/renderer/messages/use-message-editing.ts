@@ -12,6 +12,8 @@ export type MessageEditRecoveryRead = { recovery: MessageEditRecovery | null; ac
 /** A view-local handle from the shared recovery store. */
 export interface MessageEditAccess {
   acquire(identity: MessageEditIdentity): boolean;
+  /** Freeze future acquisition for a route even while its editor has not mounted. */
+  freezeAcquisition(identity: MessageEditIdentity): () => void;
   owns(identity: MessageEditIdentity): boolean;
   available(identity: MessageEditIdentity): boolean;
   capture(identity: MessageEditIdentity): () => void;
@@ -133,9 +135,9 @@ const recoveryKey = (origin: MessageEditOrigin) => JSON.stringify([origin.hostId
 const newRecoveryId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
 const recoveryVersion = (session: EditingSession): MessageEditRecoveryVersion => ({ sessionId: session.sessionId, revision: session.revision });
 
-export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery, editAccess, onEditDraftChange, onEditNavigationController,
+export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? null, threadIdentity, editRecovery, editAccess, onEditDraftChange, onEditNavigationController,
   editRebase, onPrepareEditRebase, onCommitEditRebase }: StandaloneMessagesRecoveryProps & {
-  hostId: string; thread: ThreadSummary | null; threadIdentity: string;
+  hostId: string; thread: ThreadSummary | null; threadId?: string | null; threadIdentity: string;
 }) {
   const [sessions, setSessions] = useState<Map<string, EditingSession>>(() => new Map());
   const sessionsRef = useRef(sessions);
@@ -458,9 +460,9 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
     const session = sessionsRef.current.get(identity);
     if (!session) {
       const attempt = acquisitions.current.get(identity);
-      if (!attempt && !thread) return null;
+      if (!attempt && !threadId) return null;
       const token = Symbol('message-edit-acquisition-navigation');
-      const origin = attempt ? structuredClone(attempt.origin) : { hostId, threadId: thread!.id };
+      const origin = attempt ? structuredClone(attempt.origin) : { hostId, threadId: threadId! };
       frozenSessions.current.set(identity, token);
       if (attempt) cancelAcquisition(attempt);
       let flushed = false;
@@ -544,7 +546,7 @@ export function useMessageEditing({ hostId, thread, threadIdentity, editRecovery
         if (mounted.current && current?.id === sessionId) putSession(identity, { ...current, navigationFrozen: false });
       },
     };
-  }, [cancelAcquisition, editAccess, hostId, notifyRecovery, putSession, thread]);
+  }, [cancelAcquisition, editAccess, hostId, notifyRecovery, putSession, threadId]);
   const navigationController = useMemo<MessageEditNavigationController>(() => ({ freeze }), [freeze]);
   useLayoutEffect(() => {
     onEditNavigationController?.(navigationController);

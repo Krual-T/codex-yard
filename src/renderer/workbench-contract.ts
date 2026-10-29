@@ -99,6 +99,8 @@ export interface StandaloneComposerProps {
 export interface StandaloneMessagesProps {
   client: WorkbenchClient;
   hostId: string;
+  /** The committed route target is known before its transcript finishes loading. */
+  threadId?: string | null;
   thread: ThreadSummary | null;
   onEdit?(draft: ComposerDraft, origin: MessageEditOrigin, prepare: () => Promise<void>): Promise<void>;
   onFork?(turnId: string): void | Promise<void>;

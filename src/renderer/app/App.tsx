@@ -151,6 +151,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const messageEditController = useRef<MessageEditNavigationController | null>(null);
   const receiveMessageEditController = useCallback((controller: MessageEditNavigationController | null) => { messageEditController.current = controller; }, []);
   const navigationLease = useRef<MessageEditNavigationLease | null>(null);
+  const releaseEditAcquisitionFreeze = useRef<(() => void) | null>(null);
   const composerNavigationLease = useRef<ComposerDraftLease | null>(null);
   const targetChange = useRef<{ controller: ComposerDraftController; owner: ComposerDraftSnapshot['owner']; lease: ComposerDraftLease;
     target: { hostId: string; cwd: string }; committed(): void } | null>(null);
@@ -175,6 +176,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       navigationLease.current = null;
+      releaseEditAcquisitionFreeze.current?.(); releaseEditAcquisitionFreeze.current = null;
       composerNavigationLease.current?.release(); composerNavigationLease.current = null; navigationLocked.current = false;
       committedNavigation.current = null;
       setLeaving(false);
@@ -317,6 +319,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       navigationLocked.current = true;
       let accepted = false;
       try {
+        const originalRoute = routeRef.current;
+        releaseEditAcquisitionFreeze.current = !originalRoute.section && originalRoute.threadId
+          ? editAccess.freezeAcquisition({ hostId: originalRoute.hostId, threadId: originalRoute.threadId }) : null;
         navigationLease.current = messageEditController.current?.freeze() ?? null;
         const composer = composerController.current, snapshot = composer?.snapshot();
         const borrowed = targetChange.current?.controller === composer ? targetChange.current.lease : undefined;
@@ -339,12 +344,14 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       } catch (cause) { accepted = false; setError(String(cause)); return false; }
       finally { if (!accepted) {
         navigationLease.current?.release(); navigationLease.current = null;
+        releaseEditAcquisitionFreeze.current?.(); releaseEditAcquisitionFreeze.current = null;
         composerNavigationLease.current?.release(); composerNavigationLease.current = null; navigationLocked.current = false; setLeaving(false);
       } }
     }, (committed, cause) => {
       if (!committed) {
         committedNavigation.current = null;
         navigationLease.current?.release(); navigationLease.current = null;
+        releaseEditAcquisitionFreeze.current?.(); releaseEditAcquisitionFreeze.current = null;
         composerNavigationLease.current?.release(); composerNavigationLease.current = null;
         navigationLocked.current = false; setLeaving(false);
         if (cause) setError(cause instanceof Error ? cause.message : String(cause));
@@ -421,8 +428,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const preferences = () => { void reloadPreferences().catch(cause => setError(String(cause))); };
     media.addEventListener('change', preferences); reduced.addEventListener('change', preferences);
     window.addEventListener('languagechange', preferences);
-    return () => { hostCatalogRead.current++; hostCatalogConfirmed.current = false; unsubscribe(); controller.dispose(); navigationLease.current?.release(); composerNavigationLease.current?.release(); if (navigation.current === controller) navigation.current = null; media.removeEventListener('change', preferences); reduced.removeEventListener('change', preferences); window.removeEventListener('languagechange', preferences); };
-  }, [client, reloadPreferences, reloadProjects, reloadHosts]);
+    return () => { hostCatalogRead.current++; hostCatalogConfirmed.current = false; unsubscribe(); controller.dispose(); navigationLease.current?.release(); releaseEditAcquisitionFreeze.current?.(); releaseEditAcquisitionFreeze.current = null; composerNavigationLease.current?.release(); if (navigation.current === controller) navigation.current = null; media.removeEventListener('change', preferences); reduced.removeEventListener('change', preferences); window.removeEventListener('languagechange', preferences); };
+  }, [client, editAccess, reloadPreferences, reloadProjects, reloadHosts]);
   useEffect(() => {
     if (bridgeStatus !== 'connected') return;
     const hostId = current.hostId, generation = ++connectionReadGeneration.current;
@@ -938,7 +945,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         {visualization?.hostId === current.hostId && visualization.threadId === current.threadId && <button aria-label="Open visualization" onClick={() => showVisualization(visualization)}>Preview</button>}
         {turnDiff !== undefined && <button aria-label="Open turn changes" onClick={() => showPanel({ kind: 'diff', diff: turnDiff })}>Changes</button>}
       </header>
-      {error && <div role="alert" className="yard-error">{error}<button onClick={() => { setError(''); setRefresh(value => value + 1); }}>Retry</button><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
+      {error && <div role="alert" className="yard-error">{error}<button onClick={() => { setError(''); navigation.current?.replaceCurrentURL(location.href); setRefresh(value => value + 1); setNavigationFactsEpoch(value => value + 1); }}>Retry</button><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
       {browserSyncError && <div role="alert" className="yard-error">{browserSyncError}<button onClick={() => setBrowserSyncRetry(value => value + 1)}>Retry browser reference sync</button></div>}
       {Object.entries(browserProjectionState).map(([key, receipt]) => <BrowserDraftRecoveryNotice key={key} before={receipt.before} snapshot={receipt.after}
         onAccept={() => acceptBrowserCommittedVersion(receipt.before, receipt.after)} onDiscard={() => releaseBrowserProjection(receipt.after)} />)}
@@ -968,7 +975,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         {current.threadId && <header className="yard-conversation-header"><strong>{thread?.name || threads.find(item => item.id === current.threadId)?.name || 'Conversation'}</strong><span>{thread?.cwd}</span><button aria-label="Conversation menu" onClick={() => setMenu(value => !value)}>•••</button>{menu && <div className="yard-menu" role="menu">{['rename', 'fork', 'copy', 'archive'].map(name => <button role="menuitem" key={name} onClick={() => { void action(name); }}>{name === 'copy' ? 'Copy conversation link' : name[0]!.toUpperCase() + name.slice(1)}</button>)}</div>}</header>}
         <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')} inert={leaving}>
           {streamGap && <p role="status" className="yard-stream-gap">此页面未收到连续的活动内容，正在核对会话记录。{isThreadBusy(thread) && '任务正在运行；完成后将重新读取完整记录。'}</p>}
-          {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} thread={thread} editRecovery={editState?.recovery ?? null} editAccess={editAccess} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
+          {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} threadId={current.threadId} thread={thread} editRecovery={editState?.recovery ?? null} editAccess={editAccess} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
             editRebase={messageEditRebaseMarker(editState)} onPrepareEditRebase={(origin, version) => editStore.prepareRebase(origin, version)}
             onCommitEditRebase={async candidate => {
               const recovered = await editStore.commitRebase(candidate);

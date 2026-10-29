@@ -56,6 +56,11 @@ test('History API failures release leave guards without committing or consuming 
     await run('navigationHarness.restart(true)');
     assert.deepEqual(await run('navigationHarness.historyErrors()'), ['blocked replaceState', 'blocked replaceState']);
     assert.equal((await run('navigationHarness.state()') as { path: string }).path, '/settings/browser-use/downloads');
+    assert.equal(await run("navigationHarness.replace('/settings/browser-use/downloads?recovered=1#retained')"), true);
+    assert.equal(await run('history.state.__yardIndex'), 0);
+    assert.equal(await run('history.state.__yardState'), null);
+    assert.equal(await run('location.search + location.hash'), '?recovered=1#retained');
+    assert.equal((await run('navigationHarness.state()') as { commits: number }).commits, 0);
     assert.equal(await run("navigationHarness.navigate('/local/recovered')"), true);
     assert.deepEqual(errors, []);
   } finally { await browser.close(); }

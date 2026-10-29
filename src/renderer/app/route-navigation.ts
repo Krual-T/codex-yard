@@ -60,7 +60,9 @@ export function createRouteNavigation(changed: () => void, requestLeave: () => P
       const target = new URL(path, committed.url), previous = new URL(committed.url);
       if (target.origin !== previous.origin || target.pathname !== previous.pathname) return false;
       try {
-        history.replaceState(committed.state, '', target.href);
+        const state = Object.hasOwn(committed.state ?? {}, '__yardIndex') ? committed.state
+          : { __yardIndex: index, __yardState: committed.state };
+        history.replaceState(state, '', target.href);
         committed = { url: location.href, state: history.state };
         return true;
       } catch (error) { reportHistoryError?.(error); return false; }

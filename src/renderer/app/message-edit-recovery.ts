@@ -197,6 +197,7 @@ export class MessageEditRecoveryStore {
 
   createAccess(): MessageEditAccess {
     const owner = Symbol('message-edit-view');
+    const frozenAcquisitions = new Map<string, symbol>();
     const notifyPeers = () => {
       for (const [peer, listeners] of this.accessListeners) {
         if (peer !== owner) for (const listener of listeners) listener();
@@ -206,13 +207,23 @@ export class MessageEditRecoveryStore {
     return {
       acquire: identity => {
         const key = keyFor(identity), current = this.editOwners.get(key);
+        if (frozenAcquisitions.has(key)) return false;
         if (current && current.owner !== owner) return false;
         this.editOwners.set(key, { owner });
         if (!current) notifyPeers();
         return true;
       },
+      freezeAcquisition: identity => {
+        const key = keyFor(identity), token = Symbol('message-edit-route-freeze');
+        frozenAcquisitions.set(key, token);
+        return () => {
+          if (frozenAcquisitions.get(key) !== token) return;
+          frozenAcquisitions.delete(key);
+          for (const listener of this.accessListeners.get(owner) ?? []) listener();
+        };
+      },
       owns,
-      available: identity => !this.editOwners.has(keyFor(identity)) || owns(identity),
+      available: identity => !frozenAcquisitions.has(keyFor(identity)) && (!this.editOwners.has(keyFor(identity)) || owns(identity)),
       capture: identity => {
         const key = keyFor(identity), current = this.editOwners.get(key);
         if (!current || current.owner !== owner) throw new Error('此消息编辑已由另一视图持有，未发送。');
