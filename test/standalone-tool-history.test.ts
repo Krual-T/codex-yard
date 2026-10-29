@@ -41,9 +41,10 @@ async function fixture(t: TestContext) {
     while (!messages.some(message => message.id === id)) await once(socket, 'received', { signal });
     return messages.find(message => message.id === id)!;
   }
+  let nextCall = 0;
   function call(id: number, args: Record<string, unknown>) {
     send({ jsonrpc: '2.0', id, method: 'tools/call', params: { callerSource: 'codex', hostId: 'local', threadId: 'caller',
-      turnId: null, callId: null, namespace: 'codex_app', tool: 'read_thread', arguments: { threadId: 'history', ...args } } });
+      turnId: null, callId: 'fixture-call-' + ++nextCall, namespace: 'codex_app', tool: 'read_thread', arguments: { threadId: 'history', ...args } } });
     return reply(id);
   }
   function contents(message: Record<string, unknown>) {
@@ -53,24 +54,75 @@ async function fixture(t: TestContext) {
   return { fake, socket, messages, send, reply, call, contents };
 }
 
-test('actual tool pipe reads both history cursors, filters outputs and enforces one output budget per item', async t => {
-  const h = await fixture(t), first = h.contents(await h.call(1, {}));
-  const turns = record(first.thread).turns as Record<string, unknown>[];
-  assert.equal(turns.length, 10); assert.equal(turns[0]!.id, 'turn-2'); assert.equal(turns.at(-1)!.id, 'turn-11');
-  const last = turns.at(-1)!, items = last.items as Record<string, unknown>[];
-  assert.equal(items.length, 60); assert.equal(items[0]!.id, 'item-5'); assert.equal(items.at(-1)!.id, 'item-64');
-  assert.ok(items.every(item => !Object.hasOwn(item, 'aggregatedOutput')));
-  assert.equal(last.itemsView, 'summary'); assert.equal(typeof last.itemsNextCursor, 'string');
-  const itemPage = h.contents(await h.call(2, { cursor: last.itemsNextCursor, includeOutputs: true, maxOutputCharsPerItem: 4 }));
-  const page = record(itemPage.itemPage), older = page.items as Record<string, unknown>[];
-  assert.equal(page.turnId, 'turn-11'); assert.equal(older.length, 5); assert.equal(older[0]!.id, 'item-0');
-  assert.equal(older[0]!.aggregatedOutput, 'priv'); assert.deepEqual(older[0]!.outputTruncatedFields, ['aggregatedOutput']);
-  assert.equal(page.nextCursor, null);
-  const before = h.contents(await h.call(3, { cursor: first.nextCursor }));
-  assert.deepEqual((record(before.thread).turns as { id: string }[]).map(turn => turn.id), ['turn-0', 'turn-1']);
-  assert.equal(before.nextCursor, null);
-  const bad = record((await h.call(4, { threadId: 'caller', cursor: last.itemsNextCursor })).result);
-  assert.equal(bad.success, false); assert.match(JSON.stringify(bad), /游标/);
+test('actual tool pipe reads complete newest-first history pages and projects outputs only when requested', async t => {
+  const h = await fixture(t), history = h.fake.threads.get('history')!;
+  const first = h.contents(await h.call(1, {}));
+  assert.equal(first.schemaVersion, 1);
+  assert.equal(record(first.thread).id, 'history');
+  assert.equal(record(first.thread).hostId, 'local');
+  assert.equal(record(first.thread).cwd, history.cwd);
+  assert.equal(Object.hasOwn(record(first.thread), 'turns'), false);
+  assert.deepEqual(first.page, { order: 'newest_first', limit: 1, nextCursor: '1', hasMore: true });
+  assert.deepEqual((first.turns as { id: string }[]).map(turn => turn.id), ['turn-11']);
+
+  const recent = h.contents(await h.call(2, { turnLimit: 10 }));
+  const turns = recent.turns as Record<string, unknown>[];
+  assert.deepEqual(turns.map(turn => turn.id), Array.from({ length: 10 }, (_, index) => 'turn-' + (11 - index)));
+  assert.deepEqual(recent.page, { order: 'newest_first', limit: 10, nextCursor: '10', hasMore: true });
+  const older = h.contents(await h.call(3, { cursor: record(recent.page).nextCursor, turnLimit: 10 }));
+  const olderTurns = older.turns as Record<string, unknown>[];
+  assert.deepEqual(olderTurns.map(turn => turn.id), ['turn-1', 'turn-0']);
+  assert.deepEqual(older.page, { order: 'newest_first', limit: 10, nextCursor: null, hasMore: false });
+  for (const turn of [...turns, ...olderTurns]) {
+    const items = turn.items as Record<string, unknown>[];
+    assert.equal(items.length, 65);
+    assert.deepEqual(items.map(item => item.id), Array.from({ length: 65 }, (_, index) => 'item-' + index));
+    assert.ok(items.every(item => item.type === 'commandExecution' && item.cwd === history.cwd
+      && !Object.hasOwn(item, 'output') && !Object.hasOwn(item, 'aggregatedOutput')));
+  }
+
+  const truncated = h.contents(await h.call(4, { includeOutputs: true, maxOutputCharsPerItem: 4 }));
+  const outputs = record((truncated.turns as unknown[])[0]).items as Record<string, unknown>[];
+  assert.equal(outputs.length, 65);
+  for (let index = 0; index < outputs.length; index++) {
+    assert.equal(outputs[index]!.id, 'item-' + index);
+    assert.deepEqual(outputs[index]!.output, { text: 'priv', truncated: true, originalChars: ('private-output-' + index).length });
+    assert.equal(Object.hasOwn(outputs[index]!, 'aggregatedOutput'), false);
+  }
+  const untruncated = h.contents(await h.call(5, { includeOutputs: true, maxOutputCharsPerItem: 2000 }));
+  const full = record((untruncated.turns as unknown[])[0]).items as Record<string, unknown>[];
+  assert.deepEqual(full.map(item => item.output), Array.from({ length: 65 }, (_, index) => ({
+    text: 'private-output-' + index, truncated: false,
+  })));
+  const bad = record((await h.call(6, { cursor: '' })).result);
+  assert.equal(bad.success, false); assert.match(JSON.stringify(bad), /invalid arguments.*cursor/i);
+
+  const reads = h.fake.calls('thread/turns/list');
+  assert.equal(reads.length, 5);
+  assert.deepEqual(reads.map(call => [call.params.cursor ?? null, call.params.limit]),
+    [[null, 1], [null, 10], ['10', 10], [null, 1], [null, 1]]);
+  assert.ok(reads.every(call => call.params.threadId === 'history' && call.params.itemsView === 'full'
+    && call.params.itemLimit === null && call.params.itemSnapshot === 'latest' && call.params.maxBytes === 16 * 1024 * 1024));
+  assert.equal(h.fake.calls('thread/items/list').length, 0);
+  assert.equal(h.fake.calls('thread/resume').length, 0); assert.equal(h.fake.calls('turn/start').length, 0);
+});
+
+test('actual tool pipe bounds history responses by UTF-8 bytes', async t => {
+  const h = await fixture(t), cwd = h.fake.threads.get('history')!.cwd;
+  const text = '界'.repeat(20_000);
+  const items = Array.from({ length: 18 }, (_, index) => commandItem('wide-' + index, text, cwd));
+  const large = fixtureThread('large', cwd, { turns: [fixtureTurn('wide-turn', items)] });
+  h.fake.threads.set('large', large);
+  const rejected = record((await h.call(10, { threadId: 'large', includeOutputs: true, maxOutputCharsPerItem: 20_000 })).result);
+  assert.equal(rejected.success, false); assert.match(JSON.stringify(rejected), /response exceeds the size limit/i);
+  large.turns[0]!.items.pop();
+  const accepted = h.contents(await h.call(11, { threadId: 'large', includeOutputs: true, maxOutputCharsPerItem: 20_000 }));
+  const size = Buffer.byteLength(JSON.stringify(accepted), 'utf8');
+  assert.ok(size > 1_000_000 && size <= 1_048_576, `unexpected response size: ${size}`);
+  const returned = record((accepted.turns as unknown[])[0]).items as Record<string, unknown>[];
+  assert.equal(returned.length, 17);
+  assert.ok(returned.every(item => record(item.output).text === text && record(item.output).truncated === false));
+  assert.equal(Buffer.byteLength(text, 'utf8'), 60_000);
   assert.equal(h.fake.calls('thread/resume').length, 0); assert.equal(h.fake.calls('turn/start').length, 0);
 });
 
