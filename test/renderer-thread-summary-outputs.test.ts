@@ -94,7 +94,7 @@ test('malformed metadata is rejected as a whole and unhandled sources remain exp
     ] } } } }),
     receipt('version', [], { result: { content: [], _meta: { 'openai/resourceActivities': { version: 2, resources: [] } } } }),
     receipt('legacy', [], { result: { content: [] } }),
-    receipt('no-scope', [{ id: 'unknown', url: 'https://example.test/no-scope', activities: ['created'] }], { appContext: null }),
+    receipt('no-scope', [{ id: 'unknown', url: 'https://example.test/no-scope', activities: ['created'] }], { appContext: null, server: undefined }),
     receipt('page', [{ id: 'page', url: 'https://chatgpt.com/space/known-page', activities: ['created'] }]),
     receipt('codex-page', [{ id: 'page', url: 'https://chatgpt.com/codex/app/space/known-page', activities: ['updated'] }]),
     receipt('failed', [{ id: 'fail', url: 'https://example.test/fail', activities: ['created'] }], { status: 'failed' }),
@@ -103,7 +103,94 @@ test('malformed metadata is rejected as a whole and unhandled sources remain exp
   ] }]);
   const result = project(value);
   assert.deepEqual(result.entries, []);
-  assert.deepEqual(new Set(result.gaps), new Set(['invalid-resource-activities', 'legacy-tool-result', 'unknown-provider-scope', 'page-resource']));
+  assert.deepEqual(new Set(result.gaps), new Set(['invalid-resource-activities', 'unknown-provider-scope', 'page-resource']));
+});
+
+test('legacy Google Drive results retain create, update and read provenance without treating ordinary tools as outputs', () => {
+  const documentUrl = 'https://docs.google.com/document/d/legacy-document/edit';
+  const value = thread([
+    { id: 'create-turn', status: 'completed', itemsView: 'full', items: [
+      receipt('copy', [], { server: 'Google Drive app', appContext: null, tool: 'copy_file', result: {
+        content: [], structuredContent: { documentUrl, display_title: ' Original document ', mime_type: 'application/vnd.google-apps.document' },
+      } }),
+      receipt('share', [], { server: 'codex_apps', appContext: null, tool: 'google_drive.share_file', result: {
+        content: [], structuredContent: { file_url: 'https://drive.google.com/file/d/shared-file/view', name: 'Shared file' },
+      } }),
+    ] },
+    { id: 'read-turn', status: 'completed', itemsView: 'full', items: [
+      receipt('read', [], { server: 'codex_apps', appContext: null, tool: 'google_drive.get_document', result: {
+        content: [], structuredContent: { document_url: documentUrl.replace('/edit', '/view#section'), title: 'Current title' },
+      } }),
+      receipt('delete', [], { server: 'google-drive', appContext: null, tool: 'delete_file', result: {
+        content: [], structuredContent: { fileUrl: 'https://drive.google.com/file/d/deleted/view' },
+      } }),
+      receipt('ordinary', [], { appContext: null, tool: 'create_file', result: {
+        content: [], structuredContent: { documentUrl: 'https://example.test/ordinary' },
+      } }),
+    ] },
+  ]);
+  const result = project(value, 'ssh-original');
+  assert.deepEqual(result.gaps, []);
+  assert.deepEqual(result.entries.map(entry => entry.label), ['Shared file', 'Current title']);
+  assert.deepEqual(result.entries.map(entry => entry.activities), [['updated'], ['read', 'created']]);
+  assert.equal(result.entries[1]?.mimeType, 'application/vnd.google-apps.document');
+  assert.deepEqual(result.entries[1]?.source, { hostId: 'ssh-original', threadId: 'thread-1', turnId: 'create-turn', itemId: 'copy' });
+});
+
+test('legacy Figma and Notion JSON receipts produce only the original successful created resources', () => {
+  const first = '0123456789abcdef0123456789abcdef', second = 'fedcba9876543210fedcba9876543210';
+  const figmaResult = { content: [{ type: 'text', text: 'Created file follows.' }, { type: 'text', text: JSON.stringify({
+    file_key: 'legacy-figma', file_url: 'https://www.figma.com/design/legacy-figma/Diagram', message: 'File "Original diagram" created successfully.',
+  }) }] };
+  const value = thread([
+    { id: 'figma-turn', status: 'completed', itemsView: 'full', items: [
+      receipt('figma', [], { server: 'figma', appContext: null, tool: 'mcp__figma__figma_create_new_file', result: figmaResult }),
+    ] },
+    { id: 'notion-turn', status: 'completed', itemsView: 'full', items: [
+      receipt('notion-create', [], { server: 'notion', appContext: null, tool: 'mcp__notion__notion_create_pages', result: {
+        content: [{ type: 'text', text: JSON.stringify({ pages: [
+          { id: first, url: 'https://www.notion.so/' + first, properties: { title: 'First page' } },
+          { id: second, url: 'https://www.notion.so/' + second, properties: { title: 'Second page' } },
+        ] }) }],
+      } }),
+      receipt('notion-read', [], { server: 'notion', appContext: null, tool: 'notion-fetch', result: {
+        content: [{ type: 'text', text: JSON.stringify({ metadata: { type: 'page' }, title: 'Read title', url: 'https://www.notion.so/' + first }) }],
+      } }),
+      receipt('failed-figma', [], { server: 'figma', appContext: null, tool: 'figma-create-new-file', status: 'failed', result: figmaResult }),
+      receipt('explicit-invalid-metadata', [], { server: 'figma', appContext: null, tool: 'figma-create-new-file', result: {
+        ...figmaResult, _meta: { 'openai/resourceActivities': { version: 2, resources: [] } },
+      } }),
+      receipt('ordinary-json', [], { appContext: null, tool: 'inspect', result: figmaResult }),
+    ] },
+  ]);
+  const result = project(value);
+  assert.deepEqual(result.gaps, ['invalid-resource-activities']);
+  assert.deepEqual(result.entries.map(entry => entry.label), ['Read title', 'Second page', 'Original diagram']);
+  assert.deepEqual(result.entries.map(entry => entry.source.itemId), ['notion-create', 'notion-create', 'figma']);
+  assert.deepEqual(result.entries[0]?.activities, ['read', 'created']);
+  assert.deepEqual(result.entries[2]?.activities, ['created']);
+});
+
+test('actual MCP server identity supplies provider scope and legacy receipts merge with resource activities', () => {
+  const value = thread([
+    { id: 'legacy-turn', status: 'completed', itemsView: 'full', items: [
+      receipt('legacy-create', [], { server: 'figma', appContext: null, tool: 'figma-create-new-file', result: {
+        content: [{ type: 'text', text: JSON.stringify({ file_key: 'same-file', file_url: 'https://figma.com/file/same-file/Original' }) }],
+      } }),
+    ] },
+    { id: 'metadata-turn', status: 'completed', itemsView: 'full', items: [
+      receipt('server-output', [{ id: 'result', url: 'https://example.test/server-output', activities: ['created'] }], { server: 'custom-server', appContext: null }),
+      receipt('metadata-update', [{ id: 'same-file', url: 'https://figma.com/design/same-file/Updated', title: 'Updated diagram', activities: ['updated'] }],
+        { server: 'figma', appContext: null }),
+    ] },
+  ]);
+  const result = project(value);
+  assert.deepEqual(result.gaps, []);
+  assert.equal(result.entries.length, 2);
+  assert.equal(result.entries[0]?.label, 'Updated diagram');
+  assert.deepEqual(result.entries[0]?.activities, ['created', 'updated']);
+  assert.equal(result.entries[0]?.source.itemId, 'metadata-update');
+  assert.equal(result.entries[1]?.id, 'provider:mcp-server:custom-server:result');
 });
 
 test('missing or incomplete history and stream gaps cannot prove an empty Outputs list', () => {

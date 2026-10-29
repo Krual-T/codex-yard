@@ -16,7 +16,7 @@ export interface SummaryResourceOutput {
   source: { hostId: string; threadId: string; turnId: string; itemId: string };
 }
 export interface SummaryResourceProjection {
-  /** This covers only structured MCP resources, never the whole Outputs list. */
+  /** This covers MCP resource receipts, never the whole Outputs list. */
   scope: 'structured-mcp-resources';
   entries: SummaryResourceOutput[];
   gaps: SummaryResourceGap[];
@@ -40,6 +40,24 @@ const resourceSchema = z.object({
   activities: z.array(z.enum(['read', 'created', 'updated'])).min(1),
 }).loose();
 const activitiesSchema = z.object({ version: z.literal(1), resources: z.array(resourceSchema) }).loose();
+type Resource = z.infer<typeof resourceSchema>;
+const legacyFigmaSchema = z.object({ file_key: z.string(), file_url: z.string(), message: z.string().optional() }).loose();
+const legacyNotionReadSchema = z.object({ metadata: z.object({ type: z.literal('page') }).loose(), title: z.string(), url: z.string() }).loose();
+const legacyNotionCreateSchema = z.object({ pages: z.array(z.object({
+  id: z.string(), url: z.string(), properties: z.object({ title: z.string() }).loose(),
+}).loose()) }).loose();
+const googleReads = new Set([
+  'export_file', 'fetch', 'find_document_text_range', 'get_document', 'get_document_comments', 'get_document_paragraph_range',
+  'get_document_tables', 'get_document_text', 'get_file_metadata', 'get_presentation', 'get_presentation_comments',
+  'get_presentation_outline', 'get_presentation_tables', 'get_presentation_text', 'get_profile', 'get_slide', 'get_slide_thumbnail',
+  'get_spreadsheet_cells', 'get_spreadsheet_comments', 'get_spreadsheet_metadata', 'get_spreadsheet_range', 'list_drives',
+  'list_folder', 'recent_documents', 'search', 'search_spreadsheet_rows',
+]);
+const googleCreates = new Set(['copy_file', 'create_file', 'create_folder', 'create_presentation_from_template',
+  'duplicate_sheet_in_new_spreadsheet', 'import_document', 'import_presentation', 'import_spreadsheet']);
+const googleUpdates = new Set(['batch_update_document', 'batch_update_presentation', 'batch_update_spreadsheet', 'share_file']);
+const googleUrlFields = ['documentUrl', 'document_url', 'fileUrl', 'file_url', 'presentationUrl', 'presentation_url',
+  'spreadsheetUrl', 'spreadsheet_url', 'display_url', 'url', 'webViewLink', 'web_view_link'] as const;
 
 function normalizedUrl(url: URL): string {
   const normalized = new URL(url.href);
@@ -84,11 +102,64 @@ function isPageTool(item: ThreadItemSummary): boolean {
 function providerScope(item: ThreadItemSummary): string | null {
   if (typeof item.pluginId === 'string') return item.pluginId;
   const context = asRecord(item.appContext);
-  return typeof context?.connectorId === 'string' ? context.connectorId : null;
+  if (typeof context?.connectorId === 'string') return context.connectorId;
+  return typeof item.server === 'string' && item.server.trim() ? `mcp-server:${item.server}` : null;
 }
 function isPageUrl(url: URL): boolean {
   return url.hostname === 'chatgpt.com'
     && (url.pathname.startsWith('/space/') || url.pathname.startsWith('/codex/app/space/'));
+}
+
+function legacyResource(url: string, activity: ResourceActivity, title?: string | null, id?: string, mimeType?: string | null): Resource[] {
+  const parsed = safeUrl(url);
+  if (!parsed) return [];
+  return [{ id: id || knownProviderKey(parsed) || normalizedUrl(parsed), url: parsed.href, activities: [activity],
+    ...(title ? { title } : {}), ...(mimeType ? { mimeType } : {}) }];
+}
+
+/** Existing tool receipts predate resourceActivities; no provider request is made here. */
+function legacyResources(item: ThreadItemSummary): Resource[] {
+  const result = asRecord(item.result);
+  if (!result || typeof item.tool !== 'string') return [];
+  const tool = item.tool.trim();
+  const googleName = (value: unknown) => typeof value === 'string'
+    && value.toLowerCase().replace(/[^a-z0-9]+/gu, '-').includes('google-drive');
+  const prefixed = /^google[\s_-]+drive(?:[\s_-]+app)?[.\s_-]+(.+)$/iu.exec(tool)?.[1];
+  const dot = tool.lastIndexOf('.');
+  const googleTool = prefixed ?? (dot >= 0 && googleName(tool.slice(0, dot)) ? tool.slice(dot + 1) : tool);
+  if (prefixed || dot >= 0 && googleName(tool.slice(0, dot)) || googleName(item.server) || googleName(item.pluginId)) {
+    const activity = googleReads.has(googleTool) ? 'read' : googleCreates.has(googleTool) ? 'created' : googleUpdates.has(googleTool) ? 'updated' : null;
+    const data = asRecord(result.structuredContent);
+    if (activity && data) {
+      const url = googleUrlFields.map(key => data[key]).find(value => typeof value === 'string');
+      if (typeof url === 'string') {
+        const firstText = (values: unknown[]) => values.find((value): value is string => typeof value === 'string' && !!value.trim())?.trim();
+        return legacyResource(url, activity, firstText([data.title, data.display_title, data.name, asRecord(data.properties)?.title]),
+          undefined, firstText([data.mimeType, data.mime_type]));
+      }
+    }
+  }
+  const name = tool.toLowerCase().replace(/[^a-z0-9]+/gu, '-');
+  const figma = name.endsWith('figma-create-new-file'), notionRead = name === 'notion-fetch', notionCreate = name.endsWith('notion-create-pages');
+  if (!figma && !notionRead && !notionCreate) return [];
+  for (const part of Array.isArray(result.content) ? result.content : []) {
+    const text = asRecord(part);
+    if (text?.type !== 'text' || typeof text.text !== 'string') continue;
+    let json: unknown;
+    try { json = JSON.parse(text.text); } catch { continue; }
+    if (figma) {
+      const parsed = legacyFigmaSchema.safeParse(json);
+      if (parsed.success) return legacyResource(parsed.data.file_url, 'created',
+        parsed.data.message?.match(/^File\s+"(.+)"\s+created successfully\.?$/u)?.[1]?.trim(), parsed.data.file_key);
+    } else if (notionRead) {
+      const parsed = legacyNotionReadSchema.safeParse(json);
+      if (parsed.success) return legacyResource(parsed.data.url, 'read', parsed.data.title);
+    } else {
+      const parsed = legacyNotionCreateSchema.safeParse(json);
+      if (parsed.success) return parsed.data.pages.flatMap(page => legacyResource(page.url, 'created', page.properties.title, page.id));
+    }
+  }
+  return [];
 }
 
 interface Group {
@@ -171,12 +242,16 @@ export function projectThreadSummaryResourceOutputs({ hostId, thread, historyCom
       if (item.type !== 'mcpToolCall' || item.status !== 'completed' || item.error != null || item.result == null) continue;
       if (isPageTool(item)) { gaps.add('page-resource'); continue; }
       const result = asRecord(item.result), metadata = asRecord(result?._meta);
-      if (!metadata || !('openai/resourceActivities' in metadata)) { gaps.add('legacy-tool-result'); continue; }
-      const parsed = activitiesSchema.safeParse(metadata['openai/resourceActivities']);
-      if (!parsed.success) { gaps.add('invalid-resource-activities'); continue; }
+      let resources: Resource[];
+      if (!metadata || !('openai/resourceActivities' in metadata)) resources = legacyResources(item);
+      else {
+        const parsed = activitiesSchema.safeParse(metadata['openai/resourceActivities']);
+        if (!parsed.success) { gaps.add('invalid-resource-activities'); continue; }
+        resources = parsed.data.resources;
+      }
       const scope = providerScope(item);
-      if (scope === null && parsed.data.resources.length) { gaps.add('unknown-provider-scope'); continue; }
-      for (const resource of parsed.data.resources) {
+      if (scope === null && resources.length) { gaps.add('unknown-provider-scope'); continue; }
+      for (const resource of resources) {
         const url = safeUrl(resource.url)!;
         if (isPageUrl(url)) { gaps.add('page-resource'); continue; }
         const provider = `provider:${scope}:${resource.id}`;
