@@ -101,6 +101,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [settingsSourceRetry, setSettingsSourceRetry] = useState(0);
   const settingsContext = settingsSource.key === settingsSourceKey ? settingsSource.context : emptySettingsContext;
   const [hosts, setHosts] = useState<Host[]>([{ hostId: 'local', displayName: 'Local' }]);
+  const [hostCatalogReady, setHostCatalogReady] = useState(false);
+  const hostCatalogConfirmed = useRef(false);
+  const hostCatalogRead = useRef(0);
   const [cwd, setCwd] = useState('');
   const [search, setSearch] = useState('');
   const [archived, setArchived] = useState(false);
@@ -250,6 +253,18 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     return navigate(`/local/${encodeURIComponent(id)}${search.size ? '?' + search : ''}`);
   };
   const refreshList = useCallback(() => listRef.current.refresh(), []);
+  const reloadHosts = useCallback(async () => {
+    const generation = ++hostCatalogRead.current;
+    hostCatalogConfirmed.current = false; setHostCatalogReady(false);
+    const result = await client.host<{ remoteConnections: unknown }>('refresh-remote-connections');
+    if (generation !== hostCatalogRead.current) return;
+    if (!Array.isArray(result.remoteConnections) || result.remoteConnections.some(value =>
+      typeof record(value).hostId !== 'string' || typeof record(value).displayName !== 'string')) {
+      throw new Error('执行主机列表尚未核实，请重新连接后重试。');
+    }
+    setHosts([{ hostId: 'local', displayName: 'Local' }, ...result.remoteConnections as Host[]]);
+    hostCatalogConfirmed.current = true; setHostCatalogReady(true);
+  }, [client]);
   const reloadPreferences = useCallback(async () => {
     const generation = ++preferenceGeneration.current;
     const [{ values }, reduced, locales] = await Promise.all([
@@ -325,10 +340,13 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       if (event.type === 'connection-state') {
         connectionReadGeneration.current++;
         setBridgeStatus(String(event.state)); setSettingsSourceEpoch(value => value + 1);
+        hostCatalogRead.current++; hostCatalogConfirmed.current = false; setHostCatalogReady(false);
+        if (event.state === 'connected') void reloadHosts().catch(cause => setError(String(cause)));
       }
       if (event.type === 'page-resumed') {
         setSettingsSourceEpoch(value => value + 1);
         setRefresh(value => value + 1);
+        void reloadHosts().catch(cause => setError(String(cause)));
         void reloadProjects().catch(cause => setError(String(cause)));
         void reloadPreferences().catch(cause => setError(String(cause)));
       }
@@ -341,9 +359,16 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           if (event.state === 'connected') setRefresh(value => value + 1);
         }
       }
-      if (event.type === 'shared-object-updated' && event.key === 'remote_ssh_connections' && Array.isArray(event.value)) {
-        setHosts([{ hostId: 'local', displayName: 'Local' }, ...event.value as Host[]]);
-        void reloadProjects().catch(cause => setError(String(cause)));
+      if (event.type === 'shared-object-updated' && event.key === 'remote_ssh_connections') {
+        hostCatalogRead.current++;
+        if (Array.isArray(event.value)) {
+          setHosts([{ hostId: 'local', displayName: 'Local' }, ...event.value as Host[]]);
+          hostCatalogConfirmed.current = true; setHostCatalogReady(true);
+          void reloadProjects().catch(cause => setError(String(cause)));
+        } else {
+          hostCatalogConfirmed.current = false; setHostCatalogReady(false);
+          void reloadHosts().catch(cause => setError(String(cause)));
+        }
       }
       if (event.type === 'protocol-error') setError(String(event.error));
       if (event.type === 'mcp-notification' && event.method === 'thread/name/updated') {
@@ -377,8 +402,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const preferences = () => { void reloadPreferences().catch(cause => setError(String(cause))); };
     media.addEventListener('change', preferences); reduced.addEventListener('change', preferences);
     window.addEventListener('languagechange', preferences);
-    return () => { unsubscribe(); controller.dispose(); navigationLease.current?.release(); composerNavigationLease.current?.release(); if (navigation.current === controller) navigation.current = null; media.removeEventListener('change', preferences); reduced.removeEventListener('change', preferences); window.removeEventListener('languagechange', preferences); };
-  }, [client, reloadPreferences, reloadProjects]);
+    return () => { hostCatalogRead.current++; hostCatalogConfirmed.current = false; unsubscribe(); controller.dispose(); navigationLease.current?.release(); composerNavigationLease.current?.release(); if (navigation.current === controller) navigation.current = null; media.removeEventListener('change', preferences); reduced.removeEventListener('change', preferences); window.removeEventListener('languagechange', preferences); };
+  }, [client, reloadPreferences, reloadProjects, reloadHosts]);
   useEffect(() => {
     if (bridgeStatus !== 'connected') return;
     const hostId = current.hostId, generation = ++connectionReadGeneration.current;
@@ -800,7 +825,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           const slot = document.documentElement.dir === 'rtl' ? tabs.length - index : index + 1;
           return <div className="yard-tab" key={tab.hostId + ':' + tab.id}><button role="tab" aria-selected={tab.id === current.threadId && tab.hostId === current.hostId} onClick={() => { void openTab(tab); }}>{tab.title}{shortcuts.hints === 'tabs' && slot <= 9 && <kbd>{shortcuts.label('tabs', slot as NumberShortcutSlot)}</kbd>}</button><button aria-label={'Close ' + tab.title} onClick={() => setTabs(previous => previous.filter(item => item !== tab))}>×</button></div>;
         })}</div>
-        <select aria-label="Execution host" value={current.hostId} onChange={event => navigate('/?hostId=' + encodeURIComponent(event.target.value))}>{hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.displayName}</option>)}</select>
+        <select aria-label="Execution host" value={current.hostId} disabled={!hostCatalogReady} onChange={event => navigate('/?hostId=' + encodeURIComponent(event.target.value))}>{hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.displayName}</option>)}</select>
+        {!hostCatalogReady && <button type="button" onClick={() => { void reloadHosts().catch(cause => setError(String(cause))); }}>Retry hosts</button>}
         <span className="yard-connection" title={'Browser: ' + bridgeStatus + '; Host: ' + (hostStatuses[current.hostId] ?? 'connecting')} data-state={status}>●</span>
         {requests.length > 0 && <label>Requests <select aria-label="Inspect approval request" value={selectedRequestEntry ? JSON.stringify(selectedRequestEntry.request.ref) : ''}
           onChange={event => { setSelectedRequest(JSON.parse(event.target.value) as ServerRequestRef); setRequestViewHidden(false); }}>
@@ -873,6 +899,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} initialOptions={initialOptions ?? undefined} hosts={hosts} onTargetChange={async (target, lease) => {
           const controller = composerController.current, snapshot = controller?.snapshot();
           if (!controller || !snapshot || targetChange.current) throw new Error('原输入区不能切换目标。');
+          if (!hostCatalogConfirmed.current) throw new Error('执行主机列表尚未核实，请重新连接后重试。');
           let committed!: () => void;
           const completion = new Promise<void>(resolve => { committed = resolve; });
           const pending = { controller, owner: snapshot.owner, lease, target, committed };
