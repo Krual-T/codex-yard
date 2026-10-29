@@ -5,6 +5,7 @@
 .standalone-composer textarea::placeholder { color: var(--yard-muted, #666); opacity: 1; }
 .standalone-composer__editor > textarea { display: block; min-height: 59px; max-height: 320px; border: 0; padding: 13px 12px 2px; outline: none; }
 .standalone-composer__rich .ProseMirror { box-sizing: border-box; min-height: 59px; max-height: 320px; overflow: auto; padding: 13px 12px 2px; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
+.standalone-composer__rich .ProseMirror:has(> p:only-child > br.ProseMirror-trailingBreak:only-child)::before { content: attr(data-placeholder); position: absolute; color: var(--yard-muted, #666); pointer-events: none; }
 .standalone-composer__rich .ProseMirror p { margin: 0; }
 .standalone-composer__rich .ProseMirror pre { overflow-x: auto; }
 .standalone-composer pre, .standalone-composer code { font-family: var(--yard-code-font, monospace); font-size: var(--yard-code-size, var(--yard-font-size, 13px)); }

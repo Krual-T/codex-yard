@@ -2,6 +2,10 @@ import type { ComposerContext, ComposerDocument, ComposerDraft, ComposerImage } 
 import { applyTextEdits, canRemoveImageAttachment, textEdits } from '../messages/message-edit.ts';
 import { composerSchema, isOrdinaryRichText, readRichDocument, richDocumentSkills, serializePlainDocument, serializeRichDocument } from './rich-document.ts';
 import type { Node as ProseMirrorNode } from 'prosemirror-model';
+import { documentFromText, isPlainTextAgentDocument, projectTextAgentDocument, serializeTextAgentSegments, textAgentSegments } from './text-agent-document.ts';
+import type { TextAgentSpan } from './text-agent-document.ts';
+
+export { documentFromText } from './text-agent-document.ts';
 
 export interface DraftImage extends ComposerImage { previewSrc: string }
 export interface DraftSkill { name: string; path: string }
@@ -132,11 +136,6 @@ function editedPlainDocument(document: ComposerDocument, previous: ComposerDocum
   const separator = before.join('\n\n') === text && before.join('\n') !== text ? '\n\n' : '\n';
   return after.join(separator);
 }
-export function documentFromText(text: string): ComposerDocument {
-  return { type: 'doc', content: text.split('\n').map(line => ({ type: 'paragraph',
-    ...(line ? { content: [{ type: 'text', text: line }] } : {}) })) };
-}
-
 function legacyKeys(context: ComposerContext, atoms: Record<string, unknown>): string[] {
   const keys: string[] = [];
   const add = (key: unknown) => { if (typeof key === 'string' && key && !keys.includes(key)) keys.push(key); };
@@ -329,8 +328,10 @@ export function richEditIssue(draft: Draft): string | null {
   const document = draft.document && readRichDocument(draft.document);
   if (!document) return '此草稿包含尚不支持的文档内容，已保留原始数据。';
   const serialized = legacyPlainTextMode(draft) === true ? serializePlainDocument(document, true) : serializeRichDocument(document);
+  const visible = projectTextAgentDocument(document);
   if (serialized !== draft.text && (legacyPlainTextMode(draft) === true || plainDocument(draft.document!, draft.text) !== draft.text)
-    && !(draft.input && serializePlainDocument(document) === draft.text)) {
+    && !(draft.input && serializePlainDocument(document) === draft.text)
+    && !(visible?.agents.length && visible.text === draft.text)) {
     return '此草稿的文档与保存的文本不一致，已保留两个版本。';
   }
   if (draft.hints?.length) return '此草稿包含提示信息，当前编辑器不能无损编辑。';
@@ -386,8 +387,9 @@ export function canEditStructuredDraft(draft: Draft): boolean {
     const document = readRichDocument(draft.document);
     if (!document) return false;
     const saved = legacyPlainTextMode(draft) === true ? serializePlainDocument(document, true) : serializeRichDocument(document);
+    const visible = projectTextAgentDocument(document);
     if (saved !== draft.text && plainDocument(draft.document, draft.text) !== draft.text
-      && serializePlainDocument(document) !== draft.text) return false;
+      && serializePlainDocument(document) !== draft.text && !(visible?.agents.length && visible.text === draft.text)) return false;
   }
   return true;
 }
@@ -569,9 +571,59 @@ function remapFormattedRanges(item: Record<string, unknown>, before: string, aft
   return { ...item, text: after, text_elements: next };
 }
 
+/** Map existing references through known agent insertions without guessing repeated text. */
+function remapAgentRanges(item: Record<string, unknown>, before: string, after: string, agents: readonly TextAgentSpan[]): Record<string, unknown> | null {
+  if (!agents.length || !Array.isArray(item.text_elements) || !item.text_elements.length) return null;
+  const encoder = new TextEncoder();
+  const replacements = agents.map(agent => {
+    const node = composerSchema.nodes.agentMention!.create(agent.attrs);
+    const document = composerSchema.nodes.doc!.create(null, composerSchema.nodes.paragraph!.create(null, node));
+    return { ...agent, replacement: serializePlainDocument(document) };
+  });
+  let expected = '', offset = 0;
+  for (const agent of replacements) {
+    expected += before.slice(offset, agent.start) + agent.replacement;
+    offset = agent.end;
+  }
+  expected += before.slice(offset);
+  if (expected !== after) return null;
+  if (Object.keys(item).some(key => !['type', 'text', 'text_elements'].includes(key))) {
+    throw new Error('格式化文本包含无法安全转换的原始上下文，已保留原始草稿。');
+  }
+  const changes = replacements.map(agent => ({ start: encoder.encode(before.slice(0, agent.start)).length,
+    end: encoder.encode(before.slice(0, agent.end)).length,
+    delta: encoder.encode(agent.replacement).length - encoder.encode(before.slice(agent.start, agent.end)).length }));
+  const elements = item.text_elements.map(element => {
+    if (!record(element) || !record(element.byteRange) || Object.keys(element).some(key => !['byteRange', 'placeholder'].includes(key))
+      || Object.keys(element.byteRange).some(key => !['start', 'end'].includes(key))
+      || element.placeholder !== null && typeof element.placeholder !== 'string') {
+      throw new Error('格式化文本包含未识别的引用信息，已保留原始草稿。');
+    }
+    const { start, end } = element.byteRange;
+    if (typeof start !== 'number' || typeof end !== 'number' || changes.some(change => start < change.end && end > change.start
+      || start === end && start > change.start && start < change.end)) {
+      throw new Error('格式化文本与引用内容重叠，已保留原始草稿。');
+    }
+    const shift = changes.filter(change => change.end <= start).reduce((sum, change) => sum + change.delta, 0);
+    return { ...element, byteRange: { ...element.byteRange, start: start + shift, end: end + shift } };
+  });
+  return { ...item, text: after, text_elements: elements };
+}
+
 function formatOrderedDocument(input: Record<string, unknown>[], document: ProseMirrorNode, plain: boolean,
   appContexts: ReadonlyMap<number, { context: Record<string, unknown>; text: string }>): void {
   const indexes = input.flatMap((item, index) => item.type === 'text' ? [index] : []);
+  const sourceSegments = indexes.map(index => input[index]!.text as string);
+  const visibleSegments = serializeTextAgentSegments(document, sourceSegments, plain);
+  if (visibleSegments) {
+    const agents = textAgentSegments(document, sourceSegments);
+    indexes.forEach((index, position) => {
+      const item = input[index]!;
+      input[index] = remapAgentRanges(item, item.text as string, visibleSegments[position]!, agents?.[position] ?? [])
+        ?? remapFormattedRanges(item, item.text as string, visibleSegments[position]!, appContexts.get(index)?.context);
+    });
+    return;
+  }
   const full = plain ? serializePlainDocument(document) : serializeRichDocument(document);
   if (indexes.map(index => input[index]!.text).join('\n') === full) return;
   if (indexes.length === 1 && appContexts.has(indexes[0]!)) {
@@ -799,8 +851,11 @@ function convertDraftToInput(draft: ComposerDraft, hostId: string, options?: Dra
   const legacyPlain = legacyPlainTextMode(draft) === true;
   const savedText = rich && (legacyPlain ? serializePlainDocument(rich, true) : serializeRichDocument(rich));
   const plainText = draft.document && plainDocument(draft.document, draft.text);
+  const visible = rich && projectTextAgentDocument(rich);
+  const visibleAgents = !!visible?.agents.length && visible.text === draft.text;
+  const sendPlainDocument = !!rich && isPlainTextAgentDocument(rich, draft.text) || (options?.plainTextMode ?? legacyPlain);
   if (draft.document && (!rich || savedText !== draft.text && (legacyPlain || plainText !== draft.text)
-    && !(draft.input && serializePlainDocument(rich) === draft.text))) {
+    && !(draft.input && serializePlainDocument(rich) === draft.text) && !visibleAgents)) {
     throw new Error('草稿文档无法与待发送文本无损对应，已保留原始草稿。');
   }
   if (draft.hints?.length) throw new Error('此草稿包含尚不支持的提示信息，已保留原始数据。');
@@ -848,7 +903,7 @@ function convertDraftToInput(draft: ComposerDraft, hostId: string, options?: Dra
     }
   }
   if (rich && draft.input) {
-    formatOrderedDocument(input, rich, options?.plainTextMode ?? legacyPlain, appContexts);
+    formatOrderedDocument(input, rich, sendPlainDocument, appContexts);
     // Reviewed app content must still match the exact emitted text.
     for (const [index, { context, text }] of appContexts) {
       const formatted = input[index]!.text as string;
@@ -860,9 +915,10 @@ function convertDraftToInput(draft: ComposerDraft, hostId: string, options?: Dra
   const original = input.slice(), matched = new Set<number>();
   let submittedText = draft.text;
   if (rich && !draft.input) {
-    if (options?.plainTextMode ?? legacyPlain) {
+    if (sendPlainDocument) {
       if (legacyPlain || plainText !== draft.text) submittedText = serializePlainDocument(rich);
-    } else if (isOrdinaryRichText(rich)) {
+    } else if (visibleAgents) submittedText = serializeRichDocument(rich);
+    else if (isOrdinaryRichText(rich)) {
       if (plainText !== draft.text) submittedText = serializePlainDocument(rich);
     } else if (options?.plainTextMode === false && legacyPlain) submittedText = serializeRichDocument(rich);
   }

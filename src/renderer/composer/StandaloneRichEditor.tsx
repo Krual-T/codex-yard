@@ -12,11 +12,12 @@ import type { ComposerDocument } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
 import { documentChanges } from '../messages/message-edit.ts';
 import { composerSchema, httpAutolinkHref, linkOccurrenceAllocator, parseAgentThreadPath, readRichDocument, safeRichLinkHref } from './rich-document.ts';
-import { captureAgentMentionTarget, insertAgentMention, insertRichCompletion, richCompletionContext, richEditorPlugins, syncRichSelection } from './rich-editor-actions.ts';
+import { agentMentionAttributes, captureAgentMentionTarget, insertAgentMention, insertRichCompletion, richCompletionContext, richEditorPlugins, syncRichSelection } from './rich-editor-actions.ts';
 import type { AgentMentionChoice, AgentMentionCurrent, AgentMentionTarget, RichCompletionContext, RichCompletionQuery } from './rich-editor-actions.ts';
 import type { Completion } from './standalone-completions.tsx';
 import { isStructuredAppInput } from './standalone-draft.ts';
 import type { Draft } from './standalone-draft.ts';
+import type { TextAgentSpan } from './text-agent-document.ts';
 
 export interface RichEditorHandle {
   focus(): void;
@@ -30,18 +31,24 @@ export interface StructuredInputEditorHandle {
   replace(index: number, start: number, end: number, text: string, skill?: TextCompletionSkill): boolean;
   removeSkill(name: string, path: string): void;
   skills(): TextCompletionSkill[];
+  captureAgentMentionTarget(index: number, readCurrent: () => AgentMentionCurrent | null, query?: RichCompletionQuery): TextAgentTarget | null;
+  insertAgentMention(target: TextAgentTarget, choice: AgentMentionChoice): boolean;
 }
 export interface TextCompletionSkill { name: string; path: string; managed: boolean }
 export interface TextSkillChange { before: TextCompletionSkill[]; after: TextCompletionSkill[] }
+export interface TextAgentSegment { index: number; text: string; agents: TextAgentSpan[] }
+export interface TextAgentChange { before: TextAgentSegment[]; after: TextAgentSegment[] }
 export interface StructuredInputEditorProps {
   draft: Draft;
-  onEdit(index: number, expectedText: string, text: string, inputType?: string, skills?: TextSkillChange): boolean;
+  onEdit(index: number, expectedText: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
+  agentMentions?(index: number): readonly TextAgentSpan[];
   onSelection?(index: number, cursor: number): void;
   onKeyDown(event: KeyboardEvent): boolean;
   onCompositionChange?(composing: boolean): void;
   onPaste?(event: ClipboardEvent<HTMLTextAreaElement>): void;
   readOnly?: boolean;
   ariaLabel?: string;
+  placeholder?: string;
   activeIndex?: number;
   completionListId?: string;
   completionSelectedId?: string;
@@ -51,13 +58,40 @@ export interface StructuredInputEditorProps {
 const textHistorySchema = new Schema({ nodes: {
   doc: { content: 'paragraph' }, paragraph: { content: 'inline*' },
   text: { group: 'inline' }, skill: { inline: true, group: 'inline', atom: true, attrs: { name: {}, path: {}, managed: {} } },
+  agentMention: { inline: true, group: 'inline', atom: true, attrs: { name: {}, displayName: {}, conversationId: {}, path: {} } },
 } });
-function textHistoryState(text: string): EditorState {
-  const paragraph = textHistorySchema.nodes.paragraph!.create(null, text ? textHistorySchema.text(text) : undefined);
+function textHistoryState(text: string, agents: readonly TextAgentSpan[] = []): EditorState {
+  const children: ProseMirrorNode[] = [];
+  let offset = 0;
+  for (const agent of agents) {
+    if (agent.start < offset || agent.end > text.length || text.slice(agent.start, agent.end) !== (agent.attrs.displayName || agent.attrs.name)) {
+      throw new Error('The saved chat references cannot be mapped to this input.');
+    }
+    if (agent.start > offset) children.push(textHistorySchema.text(text.slice(offset, agent.start)));
+    children.push(textHistorySchema.nodes.agentMention!.create(agent.attrs));
+    offset = agent.end;
+  }
+  if (offset < text.length) children.push(textHistorySchema.text(text.slice(offset)));
+  const paragraph = textHistorySchema.nodes.paragraph!.create(null, children);
   return EditorState.create({ doc: textHistorySchema.nodes.doc!.create(null, paragraph), plugins: [history()] });
 }
+const agentLabel = (node: ProseMirrorNode): string => node.attrs.displayName || node.attrs.name;
 function historyText(state: EditorState): string {
-  return state.doc.textBetween(0, state.doc.content.size, '', () => '');
+  return state.doc.textBetween(0, state.doc.content.size, '', node => node.type.name === 'agentMention' ? agentLabel(node) : '');
+}
+function historyAgents(state: EditorState): TextAgentSpan[] {
+  const agents: TextAgentSpan[] = [];
+  let offset = 0;
+  state.doc.descendants(node => {
+    if (node.isText) offset += node.text?.length ?? 0;
+    else if (node.type.name === 'agentMention') {
+      const label = agentLabel(node), start = offset;
+      offset += label.length;
+      agents.push({ start, end: offset, attrs: { name: node.attrs.name, displayName: node.attrs.displayName,
+        conversationId: node.attrs.conversationId, path: node.attrs.path } });
+    }
+  });
+  return agents;
 }
 function historySkills(state: EditorState): TextCompletionSkill[] {
   const result: TextCompletionSkill[] = [];
@@ -70,6 +104,7 @@ function textOffset(state: EditorState, position: number): number {
   let offset = 0;
   state.doc.descendants((node, pos) => {
     if (node.isText && pos < position) offset += Math.min(node.nodeSize, position - pos);
+    else if (node.type.name === 'agentMention' && pos < position) offset += agentLabel(node).length;
   });
   return offset;
 }
@@ -79,24 +114,42 @@ function historyPosition(state: EditorState, offset: number): number {
     if (node.isText) {
       position += Math.max(0, Math.min(offset - seen, node.nodeSize));
       seen += node.nodeSize;
+    } else if (node.type.name === 'agentMention') {
+      const length = agentLabel(node).length;
+      if (offset >= seen + length || offset > seen && offset - seen >= length / 2) position += node.nodeSize;
+      seen += length;
     } else if (seen <= offset) position += node.nodeSize;
   });
   return position;
 }
 function replaceHistoryText(state: EditorState, start: number, end: number, inserted: string): Transaction {
-  // Textarea offsets exclude skill atoms, which must survive unrelated text edits.
-  const ranges: { from: number; to: number }[] = [];
-  let offset = 0;
-  state.doc.descendants((node, pos) => {
-    if (!node.isText) return;
-    const from = Math.max(start, offset), to = Math.min(end, offset + node.nodeSize);
-    if (from < to) ranges.push({ from: pos + from - offset, to: pos + to - offset });
-    offset += node.nodeSize;
+  // Expand only touched agent atoms so edits inside a visible label become ordinary text.
+  let transaction = state.tr, offset = 0;
+  const expanded: { position: number; label: string }[] = [];
+  state.doc.descendants((node, position) => {
+    if (node.isText) offset += node.text?.length ?? 0;
+    else if (node.type.name === 'agentMention') {
+      const label = agentLabel(node), from = offset, to = from + label.length;
+      if (start < to && end > from || start === end && start > from && start < to) expanded.push({ position, label });
+      offset = to;
+    }
   });
-  let transaction = state.tr;
-  for (const range of ranges.reverse()) transaction = transaction.delete(range.from, range.to);
-  const position = transaction.mapping.map(historyPosition(state, start), 1);
-  if (inserted) transaction = transaction.insertText(inserted, position);
+  for (const item of expanded.reverse()) transaction = transaction.replaceWith(item.position, item.position + 1, textHistorySchema.text(item.label));
+  const working = transaction.docChanged ? state.apply(transaction) : state;
+  const ranges: { from: number; to: number }[] = [];
+  offset = 0;
+  working.doc.descendants((node, pos) => {
+    if (node.isText) {
+      const from = Math.max(start, offset), to = Math.min(end, offset + node.nodeSize);
+      if (from < to) ranges.push({ from: pos + from - offset, to: pos + to - offset });
+      offset += node.nodeSize;
+    } else if (node.type.name === 'agentMention') offset += agentLabel(node).length;
+  });
+  let edit = working.tr;
+  for (const range of ranges.reverse()) edit = edit.delete(range.from, range.to);
+  const position = edit.mapping.map(historyPosition(working, start), 1);
+  if (inserted) edit = edit.insertText(inserted, position);
+  for (const step of edit.steps) transaction = transaction.step(step);
   return transaction;
 }
 function textChange(state: EditorState, before: string, after: string): Transaction {
@@ -113,12 +166,18 @@ function textChange(state: EditorState, before: string, after: string): Transact
 
 interface TextControlModel {
   state: EditorState; element: HTMLTextAreaElement | null; index: number;
+  composing: boolean; canEdit(): boolean;
   apply(transaction: Transaction, inputType?: string): boolean;
+}
+export interface TextAgentTarget {
+  control: TextControlModel; doc: ProseMirrorNode; selectionStart: number; selectionEnd: number;
+  current: AgentMentionCurrent; readCurrent(): AgentMentionCurrent | null; from: number; to: number; used: boolean;
 }
 interface TextControlProps {
   index: number; text: string; readOnly: boolean; label: string; placeholder: string;
   controls: Map<number, TextControlModel>;
-  onEdit(index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange): boolean;
+  onEdit(index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
+  agentMentions?: readonly TextAgentSpan[];
   onSelection?(index: number, cursor: number): void;
   onKeyDown(event: KeyboardEvent): boolean;
   onPaste?(event: ClipboardEvent<HTMLTextAreaElement>): void;
@@ -128,18 +187,22 @@ interface TextControlProps {
 }
 function TextControl(props: TextControlProps) {
   const model = useRef<TextControlModel | null>(null);
-  if (!model.current) model.current = { state: textHistoryState(props.text), element: null, index: props.index, apply: () => false };
+  if (!model.current) model.current = { state: textHistoryState(props.text, props.agentMentions), element: null, index: props.index,
+    composing: false, canEdit: () => false, apply: () => false };
   const control = model.current;
   const latest = useRef(props); latest.current = props;
   const composing = useRef(false);
   const compositionGeneration = useRef(0);
+  control.canEdit = () => !latest.current.readOnly && latest.current.canEdit?.() !== false && !composing.current;
   const publish = (transaction: Transaction, inputType?: string): boolean => {
     const previous = control.state, next = previous.apply(transaction);
     const beforeText = historyText(previous), afterText = historyText(next);
     const all = Array.from(latest.current.controls.values());
     const before = all.flatMap(item => historySkills(item.state));
     const after = all.flatMap(item => historySkills(item === control ? next : item.state));
-    if (transaction.docChanged && latest.current.onEdit(control.index, beforeText, afterText, inputType, { before, after }) === false) return false;
+    const segment = (item: TextControlModel, state: EditorState): TextAgentSegment => ({ index: item.index, text: historyText(state), agents: historyAgents(state) });
+    const agents = { before: all.map(item => segment(item, item.state)), after: all.map(item => segment(item, item === control ? next : item.state)) };
+    if (transaction.docChanged && latest.current.onEdit(control.index, beforeText, afterText, inputType, { before, after }, agents) === false) return false;
     control.state = next;
     return true;
   };
@@ -171,8 +234,10 @@ function TextControl(props: TextControlProps) {
     return () => { if (props.controls.get(props.index) === control) props.controls.delete(props.index); };
   }, [control, props.controls, props.index]);
   useLayoutEffect(() => {
-    if (historyText(control.state) !== props.text) control.state = textHistoryState(props.text);
-  }, [control, props.text]);
+    if (historyText(control.state) !== props.text || JSON.stringify(historyAgents(control.state)) !== JSON.stringify(props.agentMentions ?? [])) {
+      control.state = textHistoryState(props.text, props.agentMentions);
+    }
+  }, [control, props.text, props.agentMentions]);
   useLayoutEffect(() => {
     const element = control.element;
     const beforeInput = (event: InputEvent) => {
@@ -193,7 +258,7 @@ function TextControl(props: TextControlProps) {
   }, [control]);
   useEffect(() => () => {
     compositionGeneration.current++;
-    if (composing.current) { composing.current = false; latest.current.onCompositionChange?.(false); }
+    if (composing.current) { control.composing = false; composing.current = false; latest.current.onCompositionChange?.(false); }
   }, []);
   return <textarea ref={element => { control.element = element; }} data-composer-input-index={props.index}
     aria-label={props.label} aria-autocomplete="list" aria-controls={props.completionListId}
@@ -224,13 +289,13 @@ function TextControl(props: TextControlProps) {
     }} onPaste={props.onPaste}
     onCompositionStart={() => {
       compositionGeneration.current++;
-      if (!composing.current) { composing.current = true; latest.current.onCompositionChange?.(true); }
+      if (!composing.current) { control.composing = true; composing.current = true; latest.current.onCompositionChange?.(true); }
     }}
     onCompositionEnd={event => {
       const element = event.currentTarget, generation = compositionGeneration.current;
       requestAnimationFrame(() => {
         if (!composing.current || generation !== compositionGeneration.current) return;
-        composing.current = false; latest.current.onCompositionChange?.(false);
+        control.composing = false; composing.current = false; latest.current.onCompositionChange?.(false);
         const index = Number(element.dataset.composerInputIndex);
         if (element.isConnected && element.ownerDocument.activeElement === element && Number.isSafeInteger(index)
           && latest.current.controls.get(index) === control) latest.current.onSelection?.(index, element.selectionStart);
@@ -353,6 +418,46 @@ function textEditorHandle(controls: Map<number, TextControlModel>): StructuredIn
       }
     },
     skills() { return Array.from(controls.values()).flatMap(control => historySkills(control.state)); },
+    captureAgentMentionTarget(index, readCurrent, query) {
+      const control = controls.get(index), element = control?.element, current = readCurrent();
+      if (!control || !element || !element.isConnected || element.ownerDocument.activeElement !== element
+        || !control.canEdit() || control.composing || !current?.revision || !current.owner.draftId
+        || element.value !== historyText(control.state)) return null;
+      const selectionStart = element.selectionStart, selectionEnd = element.selectionEnd;
+      let from = selectionStart, to = selectionEnd;
+      if (query) {
+        if (selectionStart !== selectionEnd || query.end !== selectionStart || !query.token.startsWith('@')
+          || !Number.isSafeInteger(query.start) || !Number.isSafeInteger(query.end)
+          || query.start < 0 || query.start > query.end || element.value.slice(query.start, query.end) !== query.token) return null;
+        from = query.start;
+        to = query.end + (element.value.slice(query.end).match(/^[^\s@$\ufffc]*/)?.[0].length ?? 0);
+      }
+      return { control, doc: control.state.doc, selectionStart, selectionEnd,
+        current: { owner: { ...current.owner }, revision: current.revision }, readCurrent, from, to, used: false };
+    },
+    insertAgentMention(target, choice) {
+      const control = target?.control, element = control?.element, current = target?.readCurrent(), attrs = agentMentionAttributes(choice);
+      if (!control || !element || !attrs || target.used || controls.get(control.index) !== control || !element.isConnected
+        || !control.canEdit() || control.composing || control.state.doc !== target.doc
+        || element.value !== historyText(control.state) || element.selectionStart !== target.selectionStart
+        || element.selectionEnd !== target.selectionEnd || !current || current.revision !== target.current.revision
+        || current.owner.hostId !== target.current.owner.hostId || current.owner.threadId !== target.current.owner.threadId
+        || current.owner.draftId !== target.current.owner.draftId) return false;
+      const before = historyText(control.state), label = attrs.displayName || attrs.name;
+      let transaction = replaceHistoryText(control.state, target.from, target.to, '');
+      const interim = control.state.apply(transaction), position = historyPosition(interim, target.from);
+      transaction = transaction.insert(position, textHistorySchema.nodes.agentMention!.create(attrs));
+      const space = !/^\s/u.test(before.slice(target.to));
+      if (space) transaction = transaction.insertText(' ', position + 1);
+      transaction = transaction.setSelection(TextSelection.create(transaction.doc, position + 1 + (space ? 1 : 0)));
+      if (!control.apply(closeHistory(transaction), 'insertReplacementText')) return false;
+      target.used = true;
+      control.state = control.state.apply(closeHistory(control.state.tr));
+      element.value = historyText(control.state); element.focus();
+      const caret = target.from + label.length + (space ? 1 : 0);
+      element.setSelectionRange(caret, caret);
+      return true;
+    },
   };
 }
 
@@ -367,9 +472,9 @@ export const StandaloneStructuredInputEditor = forwardRef<StructuredInputEditorH
       ? [{ entry, index, text: entry.text }] : []);
     return <>{entries.map(({ entry, index, text }, position) => <ReactFragment key={position}>
       {isStructuredAppInput(entry) ? <div role="status">{t('This app input contains retained context and cannot be edited here.')}</div> : null}
-      <TextControl index={index} text={text} controls={controls.current} onEdit={props.onEdit} onSelection={props.onSelection}
+      <TextControl index={index} text={text} agentMentions={props.agentMentions?.(index)} controls={controls.current} onEdit={props.onEdit} onSelection={props.onSelection}
         label={(props.ariaLabel ?? t('Work with Codex')) + (entries.length > 1 ? ' ' + new Intl.NumberFormat(locale).format(position + 1) : '')}
-        placeholder={t('Message')} readOnly={!!props.readOnly || isStructuredAppInput(entry)} onKeyDown={props.onKeyDown}
+        placeholder={props.placeholder ?? t('Message')} readOnly={!!props.readOnly || isStructuredAppInput(entry)} onKeyDown={props.onKeyDown}
         onPaste={props.onPaste} onCompositionChange={value => {
           if (value) compositions.current.add(position); else compositions.current.delete(position);
           props.onCompositionChange?.(compositions.current.size > 0);
@@ -401,6 +506,7 @@ interface RichEditorProps {
   completionListId?: string;
   completionSelectedId?: string;
   ariaLabel?: string;
+  placeholder?: string;
   readOnly?: boolean;
   canEdit?(): boolean;
   allowMentions?: boolean;
@@ -619,6 +725,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         agentMention: node => inlineNode(parseAgentThreadPath(node.attrs.path) ? agentIcon.current : null)(node) },
       editable: () => !latest.current.readOnly,
       attributes: { role: 'textbox', 'aria-label': latest.current.ariaLabel ?? latestTranslation.current('Work with Codex'), 'aria-multiline': 'true',
+        ...(latest.current.placeholder ? { 'data-placeholder': latest.current.placeholder, 'aria-placeholder': latest.current.placeholder } : {}),
         ...(latest.current.enableCompletions === false ? {} : { 'aria-autocomplete': 'list' }) },
       handleDOMEvents: {
         keydown: (editor, event) => {
@@ -732,11 +839,12 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
   useLayoutEffect(() => {
     view.current?.setProps({ attributes: {
       role: 'textbox', 'aria-label': props.ariaLabel ?? t('Work with Codex'), 'aria-multiline': 'true',
+      ...(props.placeholder ? { 'data-placeholder': props.placeholder, 'aria-placeholder': props.placeholder } : {}),
       ...(props.enableCompletions === false ? {} : { 'aria-autocomplete': 'list' }),
       ...(props.completionListId ? { 'aria-controls': props.completionListId } : {}),
       ...(props.completionSelectedId ? { 'aria-activedescendant': props.completionSelectedId } : {}),
     }, editable: () => !props.readOnly });
-  }, [props.ariaLabel, props.readOnly, props.enableCompletions, props.completionListId, props.completionSelectedId, t]);
+  }, [props.ariaLabel, props.placeholder, props.readOnly, props.enableCompletions, props.completionListId, props.completionSelectedId, t]);
 
   const mark = (name: 'strong' | 'em' | 'code') => {
     const editor = view.current, type = composerSchema.marks[name];

@@ -82,15 +82,7 @@ test('standalone composer preserves drafts, routes settings and controls the aut
         input(){return draftToInput(state.snapshot.draft,props.context.hostId);}};
       window.fixture.render();
     ` },
-    bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' }, plugins: [{
-      name: 'unreachable-node-util', setup(builder) {
-        builder.onResolve({ filter: /^node:util$/ }, args => args.importer.endsWith('/lib/native-tool-wait.ts')
-          ? { path: 'node:util', namespace: 'unreachable-node-util' } : undefined);
-        builder.onLoad({ filter: /.*/, namespace: 'unreachable-node-util' }, () => ({
-          contents: "export function isDeepStrictEqual(){throw new Error('Unexpected native-only utility call')}", loader: 'js',
-        }));
-      },
-    }],
+    bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' },
   });
   const browser = await chromium.launch({ executablePath: chromePath, headless: true, args: ['--no-sandbox'] });
   const context = await browser.newContext();
