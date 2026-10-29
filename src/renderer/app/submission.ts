@@ -2,6 +2,8 @@ import type { ThreadSettingsResponse, ThreadSummary, TurnSummary } from '../../.
 import type { ComposerDraft, MessageEditOrigin, SubmissionCollaborationMode, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { draftToInput, isStructuredAppInput, prepareDraftInput } from '../composer/standalone-draft.ts';
 import type { SendInjectedInput, SendIntent } from './send-recovery.ts';
+import { sendNativeInjection } from './send-injection-client.ts';
+import type { NativeSubmissionInjection } from './send-injection-client.ts';
 
 /** Capture the original app payload once; retries retain the stored call ID. */
 export function captureDraftInjection(draft: ComposerDraft, hostId: string, documentPlainTextMode?: boolean): SendInjectedInput | undefined {
@@ -30,6 +32,8 @@ export interface SubmissionContext {
   /** Actual thread/start settings retained by an older, not-yet-resolved intent. */
   createdOptions?: Pick<SubmitOptions, 'model' | 'effort'>;
   injection?: SendIntent['injection'];
+  /** Captured before the caller's first await; the store owns the original intent. */
+  nativeInjection?: NativeSubmissionInjection;
   /** Recheck this original owner/connection and the actual idle session. */
   assertInjectionAuthority?(threadId: string): void;
   /** A durable submission intent; hooks complete before issuing each write. */
@@ -67,11 +71,23 @@ function sharedOptions(options: SubmitOptions) {
 export async function submitDraft(client: WorkbenchClient, context: SubmissionContext, draft: ComposerDraft,
   options: SubmitOptions, action: SubmitAction, selectCreatedThread: (thread: ThreadSummary, settings: ThreadSettingsResponse) => Promise<void>, origin?: MessageEditOrigin,
   edit?: (origin: MessageEditOrigin, expectedTurnIds: string[], turnParams: Record<string, unknown>) => Promise<{ turn?: TurnSummary }>) {
+  if (context.nativeInjection) {
+    const { store, intent, authority } = context.nativeInjection;
+    const originalAssertion = authority.assertBeforeSend;
+    context = { ...context, injection: structuredClone(context.injection),
+      nativeInjection: { store, intent: structuredClone(intent), authority: {
+        daemonConnectionGeneration: authority.daemonConnectionGeneration, assertBeforeSend: originalAssertion } },
+      initialOptions: structuredClone(context.initialOptions), overrides: structuredClone(context.overrides),
+      additionalContext: structuredClone(context.additionalContext), collaborationMode: structuredClone(context.collaborationMode),
+      createdOptions: structuredClone(context.createdOptions), send: context.send && { ...context.send } };
+    draft = structuredClone(draft); options = structuredClone(options); action = structuredClone(action);
+  }
   if (context.readOnly) throw new Error('归档会话为只读，请先恢复会话。');
   if (draft.hints?.length) throw new Error('此输入包含尚未转换的编辑提示，内容已保留，未发送。');
   // Restored controls are a projection. Sending without an edit must leave the
   // backend's full sandbox, profile and collaboration instructions untouched.
-  const changes: SubmitOptions = context.overrides ?? (context.threadId && context.initialOptions
+  const changes: SubmitOptions = context.injection && context.nativeInjection ? context.nativeInjection.intent.overrides
+    : context.overrides ?? (context.threadId && context.initialOptions
     ? Object.fromEntries(Object.entries(options).filter(([key, value]) =>
       JSON.stringify(value) !== JSON.stringify(context.initialOptions![key as keyof SubmitOptions]))) : options);
   const prepared = draft.input?.some(isStructuredAppInput)
@@ -79,8 +95,20 @@ export async function submitDraft(client: WorkbenchClient, context: SubmissionCo
     : { input: draftToInput(draft, context.hostId, { plainTextMode: context.documentPlainTextMode }), responseItems: [] };
   const { input } = prepared, injection = context.injection, send = context.send;
   if (injection || prepared.responseItems.length) {
-    if (!injection || action.type !== 'send' || origin || !send?.injecting || !send.injected || !send.injectionFailed || !context.assertInjectionAuthority) {
+    if (!injection || action.type !== 'send' || origin || !send || !context.nativeInjection
+      || context.nativeInjection.intent.clientUserMessageId !== send.clientUserMessageId
+      || context.nativeInjection.intent.owner.hostId !== context.hostId
+      || JSON.stringify(context.nativeInjection.intent.injection) !== JSON.stringify(injection)) {
       throw new Error('此 app 上下文须由原发送记录在会话空闲时注入，原内容已保留。');
+    }
+    const original = context.nativeInjection.intent;
+    if (original.cwd !== context.cwd || original.threadId !== context.threadId
+      || original.documentPlainTextMode !== context.documentPlainTextMode
+      || JSON.stringify(original.draft) !== JSON.stringify(draft)
+      || JSON.stringify(original.additionalContext ?? {}) !== JSON.stringify(context.additionalContext ?? {})
+      || !injection.native && (JSON.stringify(original.options) !== JSON.stringify(options)
+        || JSON.stringify(original.overrides) !== JSON.stringify(context.overrides ?? {}))) {
+      throw new Error('原输入版本或提交选项已改变，原内容已保留。');
     }
     if (!['prepared', 'confirmed'].includes(injection.phase)
       || JSON.stringify(input) !== JSON.stringify(injection.input) || JSON.stringify(prepared.responseItems) !== JSON.stringify(injection.responseItems)) {
@@ -135,8 +163,9 @@ export async function submitDraft(client: WorkbenchClient, context: SubmissionCo
     // be readable; install the route/listener from this authoritative response.
     await selectCreatedThread(result.thread, result);
   }
-  let collaborationMode = context.collaborationMode;
-  if (collaborationMode === undefined) {
+  const savedTurnParams = injection?.native?.turnParams;
+  let collaborationMode = savedTurnParams ? context.nativeInjection?.intent.collaborationMode : context.collaborationMode;
+  if (collaborationMode === undefined && !savedTurnParams) {
     collaborationMode = null;
     if (changes.mode) {
       let model = options.model ?? settings.model ?? context.createdOptions?.model;
@@ -151,34 +180,16 @@ export async function submitDraft(client: WorkbenchClient, context: SubmissionCo
     }
   }
   // Persist the resolved values (including omission) before the first write.
-  await context.send?.resolvedCollaboration?.(collaborationMode);
-  const turnParams = { threadId: id, input, clientUserMessageId,
+  if (!savedTurnParams) await context.send?.resolvedCollaboration?.(collaborationMode ?? null);
+  const turnParams = savedTurnParams ?? { threadId: id, input, clientUserMessageId,
     ...sharedOptions(changes), ...permissions(changes, context.cwd, false),
     ...(changes.effort !== undefined ? { effort: changes.effort } : {}),
     ...(collaborationMode ? { collaborationMode } : {}),
     ...(origin ? { turnTrigger: 'edit_user_message' } : {}),
     ...(Object.keys(additionalContext).length ? { additionalContext } : {}) };
   if (injection) {
-    if (injection.phase === 'prepared') {
-      context.assertInjectionAuthority!(id);
-      await send!.injecting!();
-      try {
-        try { context.assertInjectionAuthority!(id); }
-        catch (cause) { throw Object.assign(new Error('原上下文注入尚未派发：' + (cause instanceof Error ? cause.message : String(cause)), { cause }),
-          { uncertain: false, sendPhase: 'before-send' }); }
-        const result = await client.rpc<unknown>('thread/inject_items', { threadId: id, items: injection.responseItems }, context.hostId);
-        if (!result || typeof result !== 'object' || Array.isArray(result) || Object.keys(result).length !== 0) {
-          throw Object.assign(new Error('原 app 上下文注入回执无法确认，未发送消息。'), { uncertain: true });
-        }
-      } catch (cause) {
-        await send!.injectionFailed!(cause);
-        throw cause;
-      }
-      // A received success is retained by the existing send store if its local
-      // atom commit fails. That recovery never repeats the backend injection.
-      await send!.injected!();
-    }
-    context.assertInjectionAuthority!(id);
+    const result = await sendNativeInjection(client, context.nativeInjection!, id, turnParams);
+    return { threadId: id, turn: result.turn };
   }
   // The edit controller durably records each phase; the host verifies full history.
   if (!origin) await context.send?.sending();
