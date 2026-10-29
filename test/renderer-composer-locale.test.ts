@@ -20,7 +20,7 @@ test('locale changes update composer controls without replacing the draft or ric
       if(method==='config/read') return {config:{model:'fixture-model',sandbox_mode:'workspace-write'},
         layers:[{name:{type:'user',file:'/fixture/codex/config.toml',profile:null},version:'1'}]};
       throw Error('unexpected RPC '+method);
-    },async host(endpoint){if(endpoint==='get-setting') return {value:undefined};
+    },async host(endpoint){if(endpoint==='get-setting') return {exists:false};
       if(endpoint==='codex-home') return {codexHome:'/fixture/codex'}; throw Error('unexpected host '+endpoint);},
       subscribe(){return ()=>{};},async reply(){throw Error('unexpected approval');}};
     const props={client,context:{hostId:'local',threadId:null,draftId:'locale-fixture',cwd:'/fixture'},busy:false,

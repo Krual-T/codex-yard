@@ -100,9 +100,22 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
     const page = await context.newPage();
     page.setDefaultTimeout(5_000);
     const failures: string[] = [];
+    const uploads: string[] = [];
     page.on('pageerror', error => failures.push(error.message));
     await page.route('**/*', route => new URL(route.request().url()).pathname === '/'
       ? route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }) : route.abort());
+    await page.route('**/api/files/**', route => {
+      const request = route.request(), url = new URL(request.url());
+      assert.equal(request.method(), 'POST');
+      uploads.push(url.pathname);
+      if (url.pathname.endsWith('/uploads')) return route.fulfill({ contentType: 'application/json',
+        body: JSON.stringify({ uploadId: 'fixture-upload', directory: '/fixture/uploads' }) });
+      assert.equal(url.searchParams.get('uploadId'), 'fixture-upload');
+      assert.equal(url.searchParams.get('name'), 'fixture.png');
+      assert.equal(request.postDataBuffer()?.toString(), 'image');
+      return route.fulfill({ contentType: 'application/json',
+        body: JSON.stringify({ label: 'fixture.png', path: '/fixture/uploads/fixture.png', fsPath: '/fixture/uploads/fixture.png' }) });
+    });
     await page.goto('http://localhost/');
     const prompt = serializeRichDocument(readRichDocument(document)!);
     const atoms = { 'composer-prompt-drafts-v2': { legacy: { prompt: { document, plainTextMode: false } } },
@@ -231,7 +244,9 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
       clipboard.items.add(new File(['image'], 'fixture.png', { type: 'image/png' }));
       element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
     });
-    await page.getByRole('alert').filter({ hasText: '此结构化草稿暂不支持添加图片' }).waitFor();
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.images.some((image: any) =>
+      image.name === 'fixture.png' && image.path === '/fixture/uploads/fixture.png'));
+    assert.deepEqual(uploads, ['/api/files/uploads', '/api/files/upload']);
     await saved();
     await page.reload();
     await page.addStyleTag({ content: css });
@@ -239,6 +254,9 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
     await page.evaluate(() => (window as any).fixture.render({ context: { draftId: 'ordered' } }));
     await page.locator('[contenteditable="true"][aria-label="和 Codex 一起工作"]').waitFor();
     assert.equal(await editor.locator('[data-mention="skill"]').count(), 0);
+    const restoredImage = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.images[0]);
+    assert.equal(restoredImage.path, '/fixture/uploads/fixture.png');
+    assert.match(restoredImage.src, /^data:image\/png;base64,/);
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);
     const ordered = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
@@ -246,6 +264,7 @@ test('ProseMirror mounts, edits a legacy document, restores it after refresh and
     assert.equal(ordered.input[1].type, 'text');
     assert.equal(ordered.input.some((item: any) => item.type === 'skill'), false);
     assert.doesNotMatch(ordered.input[1].text, /\/workspace\/a\.ts/);
+    assert.deepEqual(ordered.input[2], { type: 'localImage', path: '/fixture/uploads/fixture.png' });
 
     await page.evaluate(() => (window as any).fixture.render({ context: { draftId: 'unsupported' }, prefill: { id: 'unsupported', draft: {
       text: 'retained', images: [], files: [], input: [{ type: 'text', text: 'retained', text_elements: [] }],

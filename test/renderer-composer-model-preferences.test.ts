@@ -18,7 +18,8 @@ test('home model preferences use versioned single-field writes and thread choice
     const client={async rpc(method,params={},hostId){state.calls.push({method,params:structuredClone(params),hostId});
       if(method==='model/list')return {data:models,nextCursor:null};
       if(method==='thread/queue/list')return {data:[],nextCursor:null};
-      if(method==='config/read'){const config=saved();return {config,layers:[{name:{type:'user',file:'/fixture/codex/config.toml',profile:null},version:String(config.version)}]};}
+      if(method==='config/read'){const config=saved();return {config,layers:[{name:{type:'user',file:'/fixture/codex/config.toml',profile:null},version:String(config.version)}],
+        yardConfigSource:{hostId,generation:'fixture-generation',homeDirectory:'/fixture',codexHome:'/fixture/codex'}};}
       if(method==='config/batchWrite'){
         const config=saved();if(params.expectedVersion!==String(config.version))throw Error('version conflict');
         if(state.mode==='reject'){state.mode='ok';throw Error('fixture rejected');}
@@ -30,6 +31,13 @@ test('home model preferences use versioned single-field writes and thread choice
       throw Error('unexpected RPC '+method)},
       async host(method,params){if(method==='codex-home')return {codexHome:'/fixture/codex'};
         if(method==='get-setting')return {exists:true,value:params.key==='composerPlainTextMode'?false:params.key==='composerEnterBehavior'?'cmdAlways':'queue'};
+        if(method==='configuration-write' && params.action==='submit'){
+          const operation={operationId:params.operationId,hostId:params.hostId,method:params.method};
+          try {const result=await client.rpc(params.method,params.params,params.hostId);
+            return {outcome:'success',result,operation:{...operation,state:'succeeded',terminal:{kind:result.status}}};
+          } catch(error) {if(error.message==='fixture response lost')throw error;
+            return {outcome:'error',error:{message:error.message},operation:{...operation,state:'failed',terminal:{kind:'rejected'}}};}
+        }
         throw Error('unexpected host '+method)},subscribe(){return ()=>{}},async reply(){throw Error('unexpected approval')}};
     const root=createRoot(document.getElementById('root'));
     let props={client,context:{hostId:'ssh:fixture',threadId:null,draftId:'home-model',cwd:'/fixture'},busy:false,
@@ -86,7 +94,7 @@ test('home model preferences use versioned single-field writes and thread choice
     await page.waitForFunction(() => !(document.querySelector('select[aria-label="模型"]') as HTMLSelectElement)?.disabled);
     await page.evaluate(() => { (window as any).fixture.state.mode = 'reject'; });
     await model.selectOption('alpha');
-    await page.getByRole('alert').filter({ hasText: 'fixture rejected' }).waitFor();
+    await page.getByRole('alert').filter({ hasText: /configuration write was rejected/i }).waitFor();
     await page.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('waiting for settings');
     assert.equal(await page.getByRole('button', { name: '发送', exact: true }).isDisabled(), true);
     assert.equal(await page.evaluate(() => (window as any).fixture.saved().model), 'gamma');
