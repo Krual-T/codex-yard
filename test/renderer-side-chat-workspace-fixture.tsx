@@ -26,6 +26,7 @@ let ownerCurrent = true, frozen = false, closed = 0, exited = 0, cleanups = 0, n
 let lease: SideChatWorkspaceNavigationLease | null = null, drainGate: Promise<void> | null = null, releaseDrain: (() => void) | null = null;
 let dispatchGate: Promise<void> | null = null, releaseDispatch: (() => void) | null = null, dispatchWaiting = false;
 let draftController: ComposerDraftController | null = null, draftSnapshot: ComposerDraftSnapshot | null = null;
+let pendingQueueReads = 0;
 let openBehavior: 'success' | 'unsent' | 'unknown' = 'success';
 let presentedIdentity = { ...identity, mode: 'new' as 'new' | 'restore' };
 const opened: { scope: SideChatChildScope; operationId: string; draftId: string }[] = [];
@@ -35,6 +36,12 @@ const originalAuthorities = new WeakSet<() => void>();
 const childAuthorities = new WeakMap<() => void, SideChatChildDispatchAuthority>();
 const authorityDispatches: { method: string; original: boolean }[] = [];
 const root = createRoot(document.getElementById('root')!);
+const rpc = client.rpc.bind(client);
+client.rpc = <T,>(method: string, params?: Record<string, unknown>, hostId?: string, options?: WorkbenchDispatchOptions): Promise<T> => {
+  if (method !== 'thread/queue/list') return rpc<T>(method, params, hostId, options);
+  pendingQueueReads++;
+  return rpc<T>(method, params, hostId, options).finally(() => { pendingQueueReads--; });
+};
 function assertCurrent() { if (!ownerCurrent || !client.connected) throw Error('Synthetic original owner is unavailable.'); }
 function capture(owner: ComposerDraftOwner, childAuthority?: SideChatChildDispatchAuthority) {
   assertCurrent(); if (frozen || owner.hostId !== identity.hostId || owner.draftId !== identity.draftId) throw Error('Synthetic owner is frozen.');
@@ -74,7 +81,8 @@ function render() {
         guard(); await client.rpc('turn/interrupt', { threadId: scope.childThreadId, turnId: scope.turnId }, scope.hostId, options(originalAuthority, guard));
       }}
       cancelSend={async (intent, guard) => { guard(); await sends.cancel(intent.id); }} cleanupChild={async () => { cleanups++; }}
-      onNavigationController={value => { navigation = value; }} onClosed={() => { closed++; }} onExitObservation={() => { exited++; }}
+      onNavigationController={value => { navigation = value; }}
+      onClosed={() => { closed++; }} onExitObservation={() => { exited++; }}
       onOpenNew={async scope => {
         openAttempts.push(structuredClone(scope));
         if (openBehavior === 'unsent') throw Object.assign(new Error('Synthetic new authority unavailable.'), { uncertain: false });
@@ -101,7 +109,8 @@ function render() {
             + JSON.stringify({ phase: nextController.getSnapshot().phase, error: nextController.getSnapshot().error, view, association }));
         opened.push({ scope: structuredClone(scope), operationId: view.operationId, draftId: next.draftId });
       }}
-      onDraftController={value => { draftController = value; }} onDraftChange={value => { draftSnapshot = structuredClone(value); }}
+      onDraftController={value => { draftController = value; }}
+      onDraftChange={value => { draftSnapshot = structuredClone(value); }}
       onRemoveReference={(owner, reference, operation) => {
         removedOwners.push(structuredClone(owner));
         return removeBrowserDraftReference(browserDraftOwner(owner, {}), reference, operation, () => {}, () => {});
@@ -123,6 +132,10 @@ const fixture = {
   setOpenBehavior(value: typeof openBehavior) { openBehavior = value; },
   changePresentedScope() { presentedIdentity = { ...presentedIdentity, parentThreadId: 'other-parent' }; flushSync(render); },
   draftSnapshot: () => draftSnapshot, hasDraftController: () => !!draftController, removedOwners: () => removedOwners,
+  async flushDraft() {
+    const controller = draftController, snapshot = controller?.snapshot();
+    return controller && snapshot ? controller.flush(snapshot.owner) : false;
+  },
   async attachBrowserReference() {
     const controller = draftController, snapshot = controller?.snapshot();
     if (!controller || !snapshot) throw Error('Synthetic side-chat draft is not ready.');
@@ -158,6 +171,7 @@ const fixture = {
   releaseDispatch() { releaseDispatch?.(); dispatchGate = null; releaseDispatch = null; },
   dispatchWaiting: () => dispatchWaiting,
   freezeNavigation() { lease = navigation?.freeze() ?? null; return !!lease; },
+  pendingQueueReads: () => pendingQueueReads,
   async flushNavigation() { return lease?.flush() ?? false; },
   async revokeNavigation() { await lease?.revoke(); },
   releaseNavigation() { lease?.release(); },

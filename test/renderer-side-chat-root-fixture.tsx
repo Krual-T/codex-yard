@@ -22,7 +22,7 @@ const client = new BrowserWorkbenchClient(), sessions = new ConversationSessions
 const sends = new SendRecoveryStore(client), edits = new MessageEditRecoveryStore(client), approvals = new ApprovalRequestsController(client);
 const root = createRoot(document.getElementById('root')!);
 let controller: SideChatRootController | null = null, child: SideChatRootChild | null = null, lease: SideChatWorkspaceNavigationLease | null = null;
-let version = 0, closed = 0, exited = 0, cleanups = 0, visible = true;
+let version = 0, closed = 0, exited = 0, cleanups = 0, visible = true, publications = 0;
 let heldDraft: ComposerDraftExternalOperation | null = null, nativeGate: Promise<void> | null = null;
 let releaseNative: (() => void) | null = null, nativeWaiting = false;
 let flushPromise: Promise<boolean> | null = null, flushDone = false;
@@ -60,7 +60,7 @@ function render() {
         assertCurrent() { if (version !== original) throw Object.assign(new Error('Synthetic parent changed.'), { uncertain: false }); } };
     }}
     onController={value => { controller = value; }} onActiveChild={value => {
-      child = value; if (value) observedChildren.set(value.identity.draftId, value);
+      publications++; child = value; if (value) observedChildren.set(value.identity.draftId, value);
     }}
     onClosed={() => { closed++; }} onExitObservation={() => { exited++; }} cleanupChild={async () => { cleanups++; }}
     freezeChildOwner={(owner, identity, _draft, assertOriginal) => {
@@ -88,6 +88,8 @@ const fixture = {
   mounted() { return !!controller; },
   open() { return api().open(); },
   listRecoverable() { return api().listRecoverable(); },
+  listMounted() { return api().listMounted(); },
+  publications() { return publications; },
   restore(identity: Parameters<SideChatRootController['restore']>[0]) { return api().restore(identity); },
   show(draftId: string) { return api().show(draftId); },
   rpcProofs() { return rpcCaptures.map(({ method, proof }) => ({ method, proof })); },

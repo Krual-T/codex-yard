@@ -46,6 +46,11 @@ export interface SideChatWorkspaceNavigationController {
 export type { SideChatQueueMutation } from '../side-chat/SideChatPanel.tsx';
 export type SideChatWriteDispatch = <T>(method: ConversationWriteMethod, params: Record<string, unknown>, hostId: string,
   assertBeforeSend: () => void, originalAuthority: (() => void) | null) => Promise<T>;
+export interface SideChatWorkspaceProjection {
+  childThreadId: string | null;
+  title: string | null;
+  working: boolean | null;
+}
 export interface SideChatWorkspaceProps {
   client: WorkbenchClient;
   identity: SideChatWorkspaceIdentity;
@@ -86,6 +91,8 @@ export interface SideChatWorkspaceProps {
   onOpenNew?(scope: SideChatChildScope): void | Promise<void>;
   onDraftController?: StandaloneComposerRuntimeProps['onDraftController'];
   onDraftChange?: StandaloneComposerRuntimeProps['onDraftChange'];
+  /** Read-only metadata from this workspace's existing conversation projection. */
+  onProjectionChange?(projection: SideChatWorkspaceProjection): void;
   onRemoveReference?: StandaloneComposerRuntimeProps['onRemoveReference'];
   onEditNavigationController?(controller: MessageEditNavigationController | null): void;
   onOpenFile?(location: { hostId: string; threadId: string; path: string; cwd?: string; line?: number; column?: number }): void;
@@ -172,6 +179,12 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
   const identity = childId ? { hostId: original.hostId, threadId: childId } : null;
   useSyncExternalStore(runtime.subscribeProjection, runtime.projectionSnapshot, runtime.projectionSnapshot);
   const conversation = useConversationSession(sessions, identity, false, !!childId && runtime.bridge.hasLiveChild(childId), 0);
+  const projectedThread = conversation.thread?.id === childId ? conversation.thread : null;
+  const receiptThread = state.view?.child?.thread.id === childId ? state.view.child.thread : null;
+  const threadName = (projectedThread ?? receiptThread)?.name?.trim() || null;
+  const working = projectedThread && conversation.liveReady && !conversation.loading && !conversation.error && !conversation.streamGap
+    && (projectedThread.status?.type === 'idle' || projectedThread.status?.type === 'active') ? isThreadBusy(projectedThread) : null;
+  useEffect(() => { latest.current.onProjectionChange?.({ childThreadId: childId, title: threadName, working }); }, [childId, threadName, working]);
   const editAccess = useMemo(() => edits.createAccess(), [edits]);
   const editor = useRef<MessageEditNavigationController | null>(null);
   const locked = useRef(false), mounted = useRef(true), active = useRef(0), waiters = useRef<Set<() => void>>(new Set());

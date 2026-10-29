@@ -1,6 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { SideChatWorkspace } from '../app/SideChatWorkspace.tsx';
-import type { SideChatWorkspaceNavigationController, SideChatWorkspaceNavigationLease, SideChatWorkspaceProps } from '../app/SideChatWorkspace.tsx';
+import type { SideChatWorkspaceNavigationController, SideChatWorkspaceNavigationLease, SideChatWorkspaceProjection, SideChatWorkspaceProps } from '../app/SideChatWorkspace.tsx';
 import type { SideChatWorkspaceIdentity } from '../app/side-chat-workspace-runtime.ts';
 import type { BrowserWorkbenchClient } from '../app/client.ts';
 import type { ConversationSessions } from '../app/conversation-sessions.ts';
@@ -35,12 +35,21 @@ export interface SideChatRootChild {
   editNavigation: MessageEditNavigationController | null;
   navigation: SideChatWorkspaceNavigationController | null;
 }
+export interface SideChatMountedEntry {
+  readonly identity: Readonly<SideChatWorkspaceIdentity>;
+  readonly owner: Readonly<ComposerDraftOwner> | null;
+  readonly title: string | null;
+  readonly working: boolean | null;
+  readonly active: boolean;
+}
 export interface SideChatRootController {
   /** Explicit user action; captures Main and the current daemon before scheduling React work. */
   open(): Promise<SideChatWorkspaceIdentity>;
   /** Observe an existing durable association; never grants its old operation dispatch rights. */
   restore(identity: SideChatDraftIdentity): Promise<SideChatWorkspaceIdentity>;
   listRecoverable(): Promise<SideChatDraftAssociation[]>;
+  /** Read mounted UI projections without acquiring or changing an operation's authority. */
+  listMounted(): readonly SideChatMountedEntry[];
   show(draftId: string): Promise<void>;
   activeChild(): SideChatRootChild | null;
   submitVisualization(request: VisualizationFollowUp, signal: AbortSignal): Promise<void>;
@@ -84,6 +93,7 @@ interface Entry {
   navigation: SideChatWorkspaceNavigationController | null;
   draft: ComposerDraftController | null;
   editNavigation: MessageEditNavigationController | null;
+  projection: SideChatWorkspaceProjection | null;
   frozen: { purpose?: 'cancel' } | null;
   pending: Set<Promise<unknown>>;
   activation: number;
@@ -151,7 +161,7 @@ export function SideChatRoot(props: SideChatRootProps) {
     }
     const now = latest.current;
     const entry: Entry = { identity: structuredClone(identity), parent, daemon, client: now.client, sessions: now.sessions,
-      sends: now.sends, edits: now.edits, approvals: now.approvals, navigation: null, draft: null, editNavigation: null,
+      sends: now.sends, edits: now.edits, approvals: now.approvals, navigation: null, draft: null, editNavigation: null, projection: null,
       frozen: null, pending: new Set(), activation: 0 };
     entries.current.push(entry); select(identity.draftId);
     return structuredClone(identity);
@@ -319,6 +329,17 @@ export function SideChatRoot(props: SideChatRootProps) {
       }
       return found;
     },
+    listMounted() {
+      return entries.current.map(entry => {
+        const snapshot = entry.draft?.snapshot();
+        const owned = snapshot?.owner.hostId === entry.identity.hostId && snapshot.owner.draftId === entry.identity.draftId ? snapshot : null;
+        const projection = !owned?.owner.threadId || !entry.projection?.childThreadId
+          || owned.owner.threadId === entry.projection.childThreadId ? entry.projection : null;
+        const title = projection?.title || owned?.draft.text.split(/\r?\n/, 1)[0]?.trim() || null;
+        return { identity: structuredClone(entry.identity), owner: owned ? structuredClone(owned.owner) : null,
+          title, working: projection?.working ?? null, active: active.current === entry.identity.draftId };
+      });
+    },
     show(draftId) {
       if (navigating.current || !entries.current.some(entry => entry.identity.draftId === draftId)) throw beforeSend('原侧聊未挂载。');
       assertSwitch(draftId);
@@ -451,8 +472,9 @@ export function SideChatRoot(props: SideChatRootProps) {
           draftId: crypto.randomUUID(), prepareId: crypto.randomUUID(), mode: 'new' };
         return switchTo(identity.draftId, () => { synchronous(parent.assertCurrent()); daemon.assertOriginal(); add(identity, parent, daemon); }, true);
       }}
-      onDraftController={value => { entry.draft = value; if (active.current === entry.identity.draftId) publish(); }}
-      onDraftChange={() => { if (active.current === entry.identity.draftId) publish(); }}
+      onDraftController={value => { entry.draft = value; publish(); }}
+      onDraftChange={() => publish()}
+      onProjectionChange={value => { entry.projection = value; publish(); }}
       onEditNavigationController={value => { entry.editNavigation = value; if (active.current === entry.identity.draftId) publish(); }}
       onRemoveReference={(owner, reference, operation) => {
         assertEntry(entry); const current = child(entry);
