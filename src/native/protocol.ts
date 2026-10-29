@@ -1,3 +1,6 @@
+import { projectAgentConfiguration } from './agent-config-projection.ts';
+import type { AgentConfigProjection } from './agent-config-projection.ts';
+
 export type ObjectValue = Record<string, unknown>;
 export type RequestId = string | number;
 export interface RpcRequest { id: RequestId; method: string; params?: ObjectValue }
@@ -71,9 +74,31 @@ export function updatedAtom(previous: unknown, message: ObjectValue): unknown {
 // settings and the selected profile name used by the native model selector.
 const sessionKeys = ['model', 'model_provider', 'model_reasoning_effort', 'profile', 'approval_policy',
   'sandbox_mode', 'service_tier', 'approvals_reviewer', 'default_permissions'];
-export function publicConfig(result: unknown) {
+export function publicConfig(result: unknown, agent: AgentConfigProjection = projectAgentConfiguration(result, { codexHome: null, appServerVersion: null })) {
   const response = record(result), config = record(response.config);
-  const values = Object.fromEntries(sessionKeys.filter(key => key in config).map(key => [key, config[key]]));
+  const values: ObjectValue = Object.fromEntries(sessionKeys.filter(key => key !== 'approval_policy' && key !== 'sandbox_mode' && Object.hasOwn(config, key))
+    .map(key => [key, config[key]]));
+  if (['approval_policy', 'sandbox_mode'].some(key => Object.hasOwn(config, key) && !Object.hasOwn(agent.config, key))) {
+    throw new Error('The approval or sandbox configuration cannot be safely represented.');
+  }
+  Object.assign(values, agent.config);
+  if (Object.hasOwn(config, 'sandbox_workspace_write')) {
+    const workspace = config.sandbox_workspace_write;
+    if (workspace === null) values.sandbox_workspace_write = null;
+    else {
+      const keys = ['writable_roots', 'network_access', 'exclude_tmpdir_env_var', 'exclude_slash_tmp'];
+      if (typeof workspace !== 'object' || Array.isArray(workspace)
+        || Object.keys(workspace).some(key => !keys.includes(key))) throw new Error('The workspace sandbox configuration cannot be safely represented.');
+      const policy = record(workspace);
+      if ((Object.hasOwn(policy, 'writable_roots') && (!Array.isArray(policy.writable_roots)
+        || !policy.writable_roots.every(root => typeof root === 'string')))
+        || keys.slice(1).some(key => Object.hasOwn(policy, key) && typeof policy[key] !== 'boolean')) {
+        throw new Error('The workspace sandbox configuration cannot be safely represented.');
+      }
+      values.sandbox_workspace_write = Object.fromEntries(keys.filter(key => Object.hasOwn(policy, key))
+        .map(key => [key, key === 'writable_roots' ? [...policy.writable_roots as string[]] : policy[key]]));
+    }
+  }
   const desktop = record(config.desktop);
   if (config.desktop && typeof config.desktop === 'object') values.desktop = Object.fromEntries(
     ['git-worktree-root', 'worktree-auto-cleanup-enabled', 'worktree-keep-count']
@@ -85,7 +110,7 @@ export function publicConfig(result: unknown) {
     return { name: { type: 'user', file: name.file, profile: name.profile ?? null }, version: layer.version };
   };
   const origins = record(response.origins);
-  return { config: values, origins: Object.fromEntries(sessionKeys.flatMap(key => {
+  return { config: values, yardAgentConfiguration: agent.yardAgentConfiguration, origins: Object.fromEntries(sessionKeys.flatMap(key => {
     const origin = metadata(origins[key]); return origin ? [[key, origin]] : [];
   })), layers: Array.isArray(response.layers) ? response.layers.flatMap(value => {
     const layer = metadata(value); return layer ? [layer] : [];

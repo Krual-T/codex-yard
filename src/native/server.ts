@@ -23,6 +23,7 @@ import { catalog as nativeToolCatalog } from '../../lib/native-tool-kernel.ts';
 import type { NativeProject } from '../../lib/native-app-tools.ts';
 import { record, publicConfig, readMethods, writeMethods } from './protocol.ts';
 import type { HostMessage, ObjectValue } from './protocol.ts';
+import { projectAgentConfiguration } from './agent-config-projection.ts';
 import { createThreadProjects, readThreadProjectState } from './thread-projects.ts';
 import { mergeThreadProjectCatalog } from './thread-project-catalog.ts';
 import { createThreadProjectInventory } from './thread-project-inventory.ts';
@@ -77,7 +78,8 @@ const mime: Record<string, string> = {
 };
 const compress = promisify(gzip);
 function serverVersion(connection: CodexConnection) {
-  return connection.server?.userAgent.match(/^[^/]+\/(\S+)/)?.[1] ?? null;
+  const userAgent = connection.server?.userAgent;
+  return typeof userAgent === 'string' ? userAgent.match(/^[^/]+\/(\S+)/)?.[1] ?? null : null;
 }
 function acceptsGzip(value = '') {
   return value.split(',').some(encoding => {
@@ -871,6 +873,8 @@ export async function createNativeWorkbench(options: Options = {}) {
       original?.assertOriginal();
       const sourceSocket = connection.socket;
       const readSource = readsConfigurationSource ? configurationSource(hostId, connection, sourceSocket) : undefined;
+      const readVersion = method === 'config/read' ? serverVersion(connection) : null;
+      const readHome = method === 'config/read' ? connection.server?.codexHome : undefined;
       if (method === 'thread/delete') {
         if (!createdThreads.has(hostId + ':' + String(params.threadId))) throw new Error('仅清理本次宿主创建的空预热对话');
         original?.assertOriginal();
@@ -939,11 +943,18 @@ export async function createNativeWorkbench(options: Options = {}) {
       }
       if (method === 'thread/start' && record(record(result).thread).id) createdThreads.add(hostId + ':' + String(record(record(result).thread).id));
       if (method === 'thread/delete') createdThreads.delete(hostId + ':' + String(params.threadId));
-      if (method === 'config/read') result = publicConfig(result);
       if (readSource) {
         const current = configurationSource(hostId, connection, sourceSocket);
         if (current.generation !== readSource.generation || current.homeDirectory !== readSource.homeDirectory || current.codexHome !== readSource.codexHome) {
           throw new Error('The settings source changed while reading. Reload the settings.');
+        }
+        if (method === 'config/read') {
+          if (serverVersion(connection) !== readVersion || connection.server?.codexHome !== readHome) {
+            throw new Error('The settings source changed while reading. Reload the settings.');
+          }
+          const agent = projectAgentConfiguration(result, { codexHome: readHome === readSource.codexHome ? readSource.codexHome : null,
+            appServerVersion: readVersion });
+          result = publicConfig(result, agent);
         }
         result = { ...record(result), yardConfigSource: readSource };
       }

@@ -53,12 +53,14 @@ function selectConfig(value: unknown): { config: Config; valid: boolean } {
   return { config, valid };
 }
 
-function supportsIndexed(version: string | null): boolean {
-  if (version === '0.0.0') return true;
+function knownVersion(version: string | null): boolean {
   if (version === null || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version)) return false;
   const prerelease = version.split('+', 1)[0]?.split('-').slice(1).join('-');
-  if (prerelease?.split('.').some(part => /^\d+$/.test(part) && part.length > 1 && part.startsWith('0'))) return false;
-  return versionAtLeast(version, 0, 142, 0, 6);
+  return !prerelease?.split('.').some(part => /^\d+$/.test(part) && part.length > 1 && part.startsWith('0'));
+}
+
+function supportsIndexed(version: string | null): boolean {
+  return knownVersion(version) && (version === '0.0.0' || versionAtLeast(version, 0, 142, 0, 6));
 }
 
 /** Project one raw config/read response using that same connection's home and version. */
@@ -81,7 +83,7 @@ export function projectAgentConfiguration(result: unknown, options: { codexHome:
 
   const layers = response.layers;
   let base: Config | null = null;
-  if (effective.valid && originsValid && Array.isArray(layers)
+  if (effective.valid && originsValid && knownVersion(options.appServerVersion) && Array.isArray(layers)
     && layers.every(layer => isRecord(layer) && isRecord(layer.name) && typeof layer.name.type === 'string')) {
     const users = layers.filter(layer => isRecord(layer) && isRecord(layer.name) && layer.name.type === 'user');
     if (users.length === 1 && userConfigTarget(layers, options.codexHome).target) {
