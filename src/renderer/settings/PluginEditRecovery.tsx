@@ -7,6 +7,7 @@ export interface PluginEditRecoveryProps {
   drafts: readonly SettingsDraftRecord[];
   activeHostId: string;
   disabled: boolean;
+  saveDisabled?: boolean;
   onEdit?(draft: SettingsDraftRecord, enabled: boolean): Promise<void>;
   onPendingChange?(pending: boolean): void;
   onSave(draft: SettingsDraftRecord): Promise<void>;
@@ -69,8 +70,8 @@ type Action = (draft: SettingsDraftRecord) => Promise<void>;
 type Run = (item: SettingsDraftRecord, name: 'save' | 'discard', action: Action) => Promise<boolean>;
 type Edit = (item: SettingsDraftRecord, enabled: boolean, retry?: boolean) => Promise<void>;
 
-function SavedPluginEdit({ item, present, stale, choice, activeHostId, disabled, busy, canEdit, onSave, onDiscard, run, editChoice, discardChoice }: {
-  item: SettingsDraftRecord; activeHostId: string; disabled: boolean; busy: boolean;
+function SavedPluginEdit({ item, present, stale, choice, activeHostId, disabled, saveDisabled, busy, canEdit, onSave, onDiscard, run, editChoice, discardChoice }: {
+  item: SettingsDraftRecord; activeHostId: string; disabled: boolean; saveDisabled: boolean; busy: boolean;
   present: boolean; stale: boolean; choice: Choice | undefined; canEdit: boolean;
   onSave: Action; onDiscard: Action; run: Run; editChoice: Edit; discardChoice: () => void;
 }) {
@@ -126,7 +127,7 @@ function SavedPluginEdit({ item, present, stale, choice, activeHostId, disabled,
     <details ref={details}><summary>View saved edit</summary><pre className="yard-instructions">{content ?? 'This saved edit cannot be represented as JSON.'}</pre></details>
     {copyMessage && <p role="status">{copyMessage}</p>}
     <div className="yard-actions">
-      <button type="button" disabled={!present || stale || !valid || item.hostId !== activeHostId || disabled || busy || !!choice}
+      <button type="button" disabled={!present || stale || !valid || item.hostId !== activeHostId || disabled || saveDisabled || busy || !!choice}
         onClick={() => { void run(item, 'save', onSave); }}>Save this plugin edit</button>
       <button type="button" disabled={content === null} onClick={() => copy(content, details.current)}>Copy saved edit</button>
       <button type="button" disabled={!present || stale || disabled || busy || confirming} onClick={() => {
@@ -146,7 +147,7 @@ function SavedPluginEdit({ item, present, stale, choice, activeHostId, disabled,
   </article>;
 }
 
-export function PluginEditRecovery({ drafts, activeHostId, disabled, onEdit, onPendingChange, onSave, onDiscard }: PluginEditRecoveryProps) {
+export function PluginEditRecovery({ drafts, activeHostId, disabled, saveDisabled = false, onEdit, onPendingChange, onSave, onDiscard }: PluginEditRecoveryProps) {
   const busyRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -229,7 +230,7 @@ export function PluginEditRecovery({ drafts, activeHostId, disabled, onEdit, onP
   const run: Run = async (item, name, action) => {
     const key = ownerKey(item);
     if (disabled || busyRef.current || (seenRevisions.current.get(key) ?? item.revision) > item.revision
-      || (name === 'save' && (!validEdit(item) || item.hostId !== activeHostId || choicesRef.current.has(key)))) return false;
+      || (name === 'save' && (saveDisabled || !validEdit(item) || item.hostId !== activeHostId || choicesRef.current.has(key)))) return false;
     const identity = `${item.hostId}, ${item.editorId}, revision ${item.revision}`;
     busyRef.current = true; setBusy(true); setError(null);
     try {
@@ -252,7 +253,7 @@ export function PluginEditRecovery({ drafts, activeHostId, disabled, onEdit, onP
     {rows.map(({ item, present }) => {
       const key = ownerKey(item);
       return <SavedPluginEdit key={key} item={item} present={present} stale={(seenRevisions.current.get(key) ?? item.revision) > item.revision}
-        choice={choices.get(key)} activeHostId={activeHostId} disabled={disabled} busy={busy} canEdit={!!onEdit && !!onPendingChange && !pendingGuardFault.current}
+        choice={choices.get(key)} activeHostId={activeHostId} disabled={disabled} saveDisabled={saveDisabled} busy={busy} canEdit={!!onEdit && !!onPendingChange && !pendingGuardFault.current}
         onSave={onSave} onDiscard={onDiscard} run={run} editChoice={editChoice} discardChoice={() => updateChoice(key, null)} />;
     })}
   </section>;

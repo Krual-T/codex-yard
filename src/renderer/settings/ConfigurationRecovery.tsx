@@ -32,7 +32,8 @@ export function ConfigurationRecovery({ client, hostId, captureAuthority, onPend
     {error && <p role="alert">{error}</p>}
     <PluginEditRecovery drafts={savedPluginEdits} activeHostId={hostId ?? 'local'}
       onPendingChange={reportPending}
-      disabled={!captureAuthority || busy !== null || state.loading || !!state.error || state.draftPending > 0 || state.inFlight.length > 0
+      disabled={state.loading || !!state.error || state.draftPending > 0}
+      saveDisabled={!captureAuthority || busy !== null || state.inFlight.length > 0
         || state.records.some(item => item.phase === 'pending' || item.phase === 'unknown' || item.phase === 'blocked')}
       onSave={draft => {
         const assertOriginal = captureAuthority?.(draft.hostId);
@@ -41,12 +42,8 @@ export function ConfigurationRecovery({ client, hostId, captureAuthority, onPend
         return perform(draft.editorId, () => saveRecoveredPluginEdit(operations, client, draft, () => {
           try { assertOriginal(); return true; } catch { return false; }
         }));
-      }} onEdit={(draft, enabled) => {
-        const assertOriginal = captureAuthority?.(draft.hostId);
-        if (!assertOriginal) return Promise.reject(new Error('The original settings page authority is unavailable.'));
-        assertOriginal();
-        return perform(draft.editorId, () => operations.editRecoveredPluginDraft(draft, enabled));
-      }} onDiscard={draft => perform(draft.editorId, () => operations.discardDraft(draft))} />
+      }} onEdit={(draft, enabled) => operations.editRecoveredPluginDraft(draft, enabled)}
+      onDiscard={draft => operations.discardDraft(draft)} />
     {state.draftRetry.map(editorId => <p key={editorId}>A newer edit is still in this page.{' '}
       <button type="button" disabled={busy !== null} onClick={() => run(editorId, () => operations.retryDraft(editorId))}>Retry saving browser edit</button></p>)}
     {state.localRetry.filter(id => !state.records.some(item => item.operationId === id)).map(id => <p key={id}>The original browser receipt is still in this page.{' '}
