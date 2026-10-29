@@ -37,8 +37,13 @@ fake.handlers.set('thread/resume', params => ({ ...fake.defaultResult('thread/re
 const config = record(fake.defaultResult('config/read', {}).config);
 type Values = { model: string | null; model_reasoning_effort: string | null };
 type FixtureConfig = { version: number; activeProfile: 'work' | null; base: Values; profiles: { work: Values } };
+type ConfigReadObservation = { version: number; activeProfile: FixtureConfig['activeProfile']; effective: Values };
+type ConfigTerminal = { status: 'ok' | 'okOverridden'; version: string; filePath: string; overriddenMetadata: { message: string } | null };
 const fixturePath = join(root, 'model-config-fixture.json');
 const configFile = join(codexHome, 'config.toml');
+const overrideMessage = 'Fixture profile overrides the base configuration.';
+const configReads: ConfigReadObservation[] = [];
+const configTerminals: ConfigTerminal[] = [];
 const readFixture = (): FixtureConfig => JSON.parse(readFileSync(fixturePath, 'utf8')) as FixtureConfig;
 const writeFixture = (value: FixtureConfig) => writeFileSync(fixturePath, JSON.stringify(value), { mode: 0o600 });
 writeFixture({ version: 1, activeProfile: null, base: { model: null, model_reasoning_effort: null },
@@ -46,6 +51,7 @@ writeFixture({ version: 1, activeProfile: null, base: { model: null, model_reaso
 fake.handlers.set('config/read', () => {
   const state = readFixture();
   const effective = state.activeProfile ? state.profiles[state.activeProfile] : state.base;
+  configReads.push({ version: state.version, activeProfile: state.activeProfile, effective: { ...effective } });
   return { config: { ...config, ...effective, profile: state.activeProfile, model_provider: 'openai' }, origins: {},
     layers: [{ name: { type: 'user', file: configFile, profile: null }, version: String(state.version) }] };
 });
@@ -69,19 +75,19 @@ fake.handlers.set('config/batchWrite', params => {
     if (key === 'model' || key === 'model_reasoning_effort') {
       state.base[key] = edit.value;
       overridden ||= state.activeProfile !== null;
-    } else if (key === 'profiles.work.model' || key === 'profiles.work.model_reasoning_effort') {
-      state.profiles.work[key.endsWith('model_reasoning_effort') ? 'model_reasoning_effort' : 'model'] = edit.value;
     } else throw new Error('Unexpected fixture config edit: ' + key);
   }
   state.version++;
   writeFixture(state);
-  return { status: overridden ? 'okOverridden' : 'ok', version: String(state.version), filePath: configFile,
-    overriddenMetadata: overridden ? { message: 'Fixture profile overrides the base configuration.' } : null };
+  const terminal: ConfigTerminal = { status: overridden ? 'okOverridden' : 'ok', version: String(state.version), filePath: configFile,
+    overriddenMetadata: overridden ? { message: overrideMessage } : null };
+  configTerminals.push(terminal);
+  return terminal;
 });
 const checks: string[] = [], gaps: string[] = [], errors: string[] = [];
-const profileObservations: { field: string; before: FixtureConfig; after: FixtureConfig }[] = [];
+const profileObservations: Record<string, unknown>[] = [];
 const report: Record<string, unknown> = { checks, gaps, errors, renderer: 'owned', realDaemonUsed: false, locale: 'en-US',
-  profileFixture: 'synthetic legacy override; not a claim of current CLI profile support', profileObservations };
+  profileFixture: 'synthetic active override; not a claim of current CLI named-profile support', profileObservations };
 let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
 let browser: Browser | undefined, page: Page | undefined;
 async function setup(current: Page) {
@@ -254,32 +260,52 @@ try {
   await checkLocale(page);
   const profileModel = page.getByRole('combobox', { name: 'Model', exact: true });
   const profileEffort = page.getByRole('combobox', { name: 'Reasoning effort', exact: true });
+  await waitEnabled(profileModel); await waitEnabled(profileEffort);
+  await waitValue(profileModel, fixture.profiles.work.model!);
+  await waitValue(profileEffort, fixture.profiles.work.model_reasoning_effort!);
   for (const test of [
     { field: 'model_reasoning_effort' as const, value: 'high', control: profileEffort },
     { field: 'model' as const, value: 'gpt-6.1-terra', control: profileModel },
   ]) {
     try {
       await waitEnabled(test.control);
-      const before = readFixture(), writes = fake.calls('config/batchWrite').length;
+      const before = readFixture(), writes = fake.calls('config/batchWrite').length, reads = configReads.length;
+      assert.equal(before.activeProfile, 'work');
       await test.control.selectOption(test.value);
       await waitWrite(writes); await waitVersion(before.version);
       const after = readFixture();
-      profileObservations.push({ field: test.field, before, after });
-      try {
-        assert.equal(after.profiles.work[test.field], test.value, 'The selected profile must receive the edit');
-        checks.push(`Profile ${test.field} is written to its own configuration`);
-      } catch (error) {
-        gaps.push(`Profile ${test.field} persistence: ${String(error)}`);
-        await capture(`profile-${test.field}-failure`).catch(() => {});
-      }
-      try { assert.deepEqual(after.base, before.base, 'A profile edit must not change the base defaults'); }
-      catch (error) { gaps.push(`Profile ${test.field} changed base defaults: ${String(error)}`); }
+      const request = fake.calls('config/batchWrite').at(-1)?.params;
+      const terminal = configTerminals.at(-1);
+      const observation: Record<string, unknown> = { field: test.field, before, after, request, terminal };
+      profileObservations.push(observation);
+      assert.deepEqual(request, { edits: [{ keyPath: test.field, value: test.value, mergeStrategy: 'upsert' }],
+        filePath: null, expectedVersion: String(before.version), reloadUserConfig: true });
+      assert.equal(after.version, before.version + 1);
+      assert.deepEqual(after.base, { ...before.base, [test.field]: test.value });
+      assert.equal(after.activeProfile, before.activeProfile);
+      assert.deepEqual(after.profiles, before.profiles, 'The synthetic effective override must remain unchanged');
+      assert.deepEqual(terminal, { status: 'okOverridden', version: String(after.version), filePath: configFile,
+        overriddenMetadata: { message: overrideMessage } });
+      await page.getByRole('status').filter({ hasText: overrideMessage }).waitFor({ timeout: 10000 });
+      await page.getByRole('alert').filter({ hasText: 'The saved configuration differs from your edit.' }).waitFor({ timeout: 10000 });
+      assert.equal(await test.control.inputValue(), test.value, 'The unaccepted edit remains visible for review');
+      const readback = configReads.slice(reads).reverse().find(read => read.version === after.version);
+      assert.deepEqual(readback, { version: after.version, activeProfile: 'work', effective: before.profiles.work });
+      observation.readback = readback;
+      checks.push(`Profile override: ${test.field} writes versioned base, retains the effective profile and displays the override`);
+      await capture(`profile-${test.field}-overridden`);
+      const reloadReads = configReads.length;
       await page.reload({ waitUntil: 'commit' });
-      await checkLocale(page); await waitEnabled(test.control);
-      try {
-        await waitValue(test.control, test.value);
-        checks.push(`Profile ${test.field} survives reload`);
-      } catch (error) { gaps.push(`Profile ${test.field} after reload: ${String(error)}`); }
+      await checkLocale(page); await waitEnabled(profileModel); await waitEnabled(profileEffort);
+      await waitValue(profileModel, before.profiles.work.model!);
+      await waitValue(profileEffort, before.profiles.work.model_reasoning_effort!);
+      assert.deepEqual(readFixture(), after, 'Reload must retain the base write and unchanged override');
+      assert.equal(fake.calls('config/batchWrite').length, writes + 1, 'Reload must not repeat the base write');
+      const refreshed = configReads.slice(reloadReads).reverse().find(read => read.version === after.version);
+      assert.deepEqual(refreshed, { version: after.version, activeProfile: 'work', effective: before.profiles.work });
+      observation.refreshed = refreshed;
+      observation.displayedAfterReload = { model: await profileModel.inputValue(), effort: await profileEffort.inputValue() };
+      checks.push(`Profile override: ${test.field} reload shows effective values without replaying the base write`);
     } catch (error) {
       gaps.push(`Profile ${test.field} verification: ${String(error)}`);
       await capture(`profile-${test.field}-setup-failure`).catch(() => {});
@@ -321,6 +347,7 @@ try {
   throw error;
 } finally {
   report.configWrites = fake.calls('config/batchWrite').map(message => message.params);
+  report.configTerminals = configTerminals;
   report.fixtureConfig = readFixture();
   await writeFile(join(output, 'result.json'), JSON.stringify(report, null, 2));
   await browser?.close(); await app?.close(); await fake.close(); await rm(root, { recursive: true, force: true });
