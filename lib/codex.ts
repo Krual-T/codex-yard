@@ -281,6 +281,8 @@ export class CodexConnection extends EventEmitter<{ message: [RpcMessage, WebSoc
     this.closed = true;
     this.connected = false;
     this.rejectPending('工作台已关闭连接；Codex 进程继续运行。');
-    this.socket?.terminate();
+    const socket = this.socket;
+    this.socket = undefined;
+    socket?.terminate();
   }
 }

@@ -19,6 +19,7 @@ import { projectRoot, rendererVersion } from '../../lib/app-resources.ts';
 import type { ConfigReadSource } from '../../lib/config-write-protocol.ts';
 import { ApprovalRequestRegistry } from './approval-requests.ts';
 import { createNativeAppToolHost } from '../../lib/native-app-tools.ts';
+import { catalog as nativeToolCatalog } from '../../lib/native-tool-kernel.ts';
 import type { NativeProject } from '../../lib/native-app-tools.ts';
 import { record, publicConfig, readMethods, writeMethods } from './protocol.ts';
 import type { HostMessage, ObjectValue } from './protocol.ts';
@@ -129,6 +130,27 @@ export async function createNativeWorkbench(options: Options = {}) {
   const html = await readFile(join(projectRoot, 'public', 'index.html'), 'utf8');
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   await chmod(dataDir, 0o700);
+  let toolHostReady = false, shuttingDown = false;
+  let stopReconnect = () => {};
+  let nativeTools: ReturnType<typeof createNativeAppToolHost> | undefined;
+  let finishOwner: (() => Promise<void>) | undefined;
+  const ownerRequests = new Set<Promise<unknown>>();
+  const trackOwnerRequest = <T,>(request: Promise<T>) => {
+    ownerRequests.add(request);
+    void request.then(() => ownerRequests.delete(request), () => ownerRequests.delete(request));
+    return request;
+  };
+  // Claim the existing private pipe before reading or changing shared state.
+  // Old owners retain this binding through their complete request/state drain.
+  const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'),
+    tools: nativeToolCatalog.map(tool => ({ ...tool, namespace: 'codex_app' })),
+    callTool(params, context) {
+      if (!toolHostReady || shuttingDown || !nativeTools) throw new Error('The workspace tool host is not accepting requests.');
+      return nativeTools.callTool(params, context);
+    },
+    beforeRelease: () => finishOwner?.() ?? Promise.resolve(),
+  });
+  try {
   async function load(name: string, fallback: unknown) {
     try { return JSON.parse(await readFile(join(dataDir, name), 'utf8')); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallback; throw error; }
@@ -175,6 +197,13 @@ export async function createNativeWorkbench(options: Options = {}) {
       publishRecoveredState();
     }
   });
+  finishOwner = async () => {
+    control.close();
+    for (const connection of fileConnections.values()) connection.close();
+    while (ownerRequests.size) await Promise.allSettled([...ownerRequests]);
+    await nativeTools?.close();
+    await stateMutations.flush();
+  };
   const ownedPaths = new WeakMap<CodexConnection, { paths?: HostPaths; sshHost: typeof catalog.hosts[number] }>();
   const connectionSnapshots = new WeakMap<WebSocket, { connection: CodexConnection; hostId: string; paths: HostPaths; sshHost?: typeof catalog.hosts[number] }>();
   const connectionGenerations = new WeakMap<WebSocket, string>();
@@ -199,6 +228,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       sshHost: ssh.sshHost, sshPort: ssh.sshPort, identity: ssh.identity } : null };
   }
   async function ownedConnectionFor(hostId: string) {
+    if (shuttingDown) throw new Error('The workspace host is closing.');
     validHost(hostId);
     let connection = hostId === 'local' ? control : fileConnections.get(hostId);
     if (!connection) {
@@ -210,6 +240,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       fileConnections.set(hostId, connection);
     }
     await connection.connect();
+    if (shuttingDown) { connection.close(); throw new Error('The workspace host is closing.'); }
     const remote = ownedPaths.get(connection);
     const paths = hostId === 'local' ? { homeDirectory: homedir(), codexHome } : remote?.paths;
     if (connection.socket && paths) connectionSnapshots.set(connection.socket, {
@@ -282,12 +313,18 @@ export async function createNativeWorkbench(options: Options = {}) {
   const sendInjections = createSendInjection({ mutations: stateMutations, assertStateAvailable: nativeState.assertAvailable,
     readSection: () => state.sendInjections,
     persistSection: section => persistRoot({ ...state, globals, settings, sendInjections: section }),
+    assertPreviousOwnerStopped() {
+      if (toolHostReady || shuttingDown) throw new Error('Interrupted sends can only be recovered before this owner accepts requests.');
+      // The same private socket was claimed successfully above; old owners
+      // keep it bound until their handlers and original observers stop.
+    },
     onChange(reference, receipt) {
       for (const page of injectionObservers) {
         try { send(page, { type: 'send-injection-updated', reference, receipt }); } catch { /* The durable result remains queryable. */ }
       }
     },
   });
+  await sendInjections.recoverInterruptedPreparations();
   function broadcastRecovery(message: unknown) {
     for (const client of clients.keys()) {
       try { send(client, message); } catch { /* The state owner must remain available to other pages. */ }
@@ -355,7 +392,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     listThreads: async params => control.request('thread/list', { ...params, archived: false }),
     readThread: (params, options) => readToolHistory(control, params, options),
   });
-  const nativeTools = createNativeAppToolHost({ connectionFor: ownedConnectionFor, hostIds: () => ['local', ...sshHosts.keys()],
+  nativeTools = createNativeAppToolHost({ connectionFor: ownedConnectionFor, hostIds: () => ['local', ...sshHosts.keys()],
     globals, projectlessRoot: join(dataDir, 'workspaces'), configFor: hostId => hostId === 'local' ? hostTools.config : {},
     async listProjects() {
       const local: NativeProject[] = Object.entries(record(globals['local-projects'])).flatMap(([id, value]) => {
@@ -411,9 +448,6 @@ export async function createNativeWorkbench(options: Options = {}) {
       if (!project) await threadProjects('updateProjectlessThread', { threadId, hostId, outputDirectory: cwd, workspaceRoot: join(dataDir, 'workspaces') });
     },
   });
-  const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'),
-    tools: nativeTools.tools, callTool: nativeTools.callTool,
-  });
   const sideChatBrowserAuthority: ReturnType<typeof createSideChatNativeBrowserAuthority> = createSideChatNativeBrowserAuthority({
     assertOrigin: scope => sideChats.assertBrowserOrigin(scope),
     notify(page, request) {
@@ -451,6 +485,7 @@ export async function createNativeWorkbench(options: Options = {}) {
   const reconnectControl = setInterval(() => {
     if (!control.connected) void control.connect().catch(() => {});
   }, 2000);
+  stopReconnect = () => clearInterval(reconnectControl);
   reconnectControl.unref();
 
   function allowed(request: import('node:http').IncomingMessage, requireOrigin = false, pageRoute = false) {
@@ -465,7 +500,8 @@ export async function createNativeWorkbench(options: Options = {}) {
       (request.headers['sec-fetch-site'] !== 'cross-site' || documentNavigation) &&
       (!request.headers.origin ? !requireOrigin : allowedOrigins.includes(request.headers.origin));
   }
-  const server = createServer(async (request, response) => {
+  const server = createServer((request, response) => { void trackOwnerRequest((async () => {
+    if (shuttingDown) { response.writeHead(503); response.end(); return; }
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:; frame-ancestors 'self'");
@@ -572,10 +608,11 @@ export async function createNativeWorkbench(options: Options = {}) {
       response.writeHead(200, { 'Content-Type': mime[extname(path)] || 'application/octet-stream' });
       response.end(request.method === 'HEAD' ? undefined : content);
     } catch { response.writeHead(404); response.end(); }
-  });
+  })()); });
   const webSockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
   const chromeSockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
   server.on('upgrade', (request, socket, head) => {
+    if (shuttingDown) { socket.destroy(); return; }
     if (request.url === clientChromePath && allowed(request, true)) {
       let label: string;
       try { label = decodeURIComponent(String(request.headers['x-workbench-device'] ?? '')); } catch { socket.destroy(); return; }
@@ -589,6 +626,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     webSockets.handleUpgrade(request, socket, head, client => webSockets.emit('connection', client));
   });
   webSockets.on('connection', client => {
+    if (shuttingDown) { client.terminate(); return; }
     const connections = new Map<string, CodexConnection>();
     clients.set(client, connections);
     const address = server.address() as import('node:net').AddressInfo;
@@ -598,9 +636,10 @@ export async function createNativeWorkbench(options: Options = {}) {
       send: event => send(client, { type: 'terminal-event', event }) });
     terminals.set(client, terminal);
     client.on('message', data => {
+      if (shuttingDown) return;
       let message: HostMessage;
       try { message = JSON.parse(String(data)); } catch { client.close(1007); return; }
-      void handle(message, client, connections).catch(error => {
+      void trackOwnerRequest(handle(message, client, connections).catch(error => {
         if (message.type === 'mcp-response' && message.requestId) send(client, { type: 'server-request-response', requestId: message.requestId, error: error.message, uncertain: error.uncertain === true });
         else if (message.type === 'fetch') send(client, { type: 'fetch-response', requestId: message.requestId, responseType: 'error', status: 500, error: error.message,
           uncertain: error.uncertain === true || typeof message.url === 'string'
@@ -614,7 +653,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         if (message.type === 'fetch' && typeof message.url === 'string' && message.url.split('/').at(-1) === 'side-chat') {
           sideChats.flushNotifications(client);
         }
-      });
+      }));
     });
     client.on('close', () => {
       clients.delete(client);
@@ -623,13 +662,13 @@ export async function createNativeWorkbench(options: Options = {}) {
       sideChatBrowserAuthority.invalidate(client);
       sideChats.forgetPage(client);
       approvalRequests.closePage(client);
-      void browser.close().finally(() => browsers.delete(client));
+      void trackOwnerRequest(browser.close().finally(() => browsers.delete(client)));
       // Hang up page-owned shells before closing their daemon connection, so
       // an interactive shell can notify its background jobs before exiting.
-      void terminal.dispose().catch(() => {}).finally(() => {
+      void trackOwnerRequest(terminal.dispose().catch(() => {}).finally(() => {
         terminals.delete(client);
         for (const connection of connections.values()) connection.close();
-      });
+      }));
     });
     client.on('error', () => { client.terminate(); });
   });
@@ -700,7 +739,7 @@ export async function createNativeWorkbench(options: Options = {}) {
             threadId: params.threadId, turnId: params.turnId, callId: params.callId, arguments: params.arguments });
           calls.set(params.callId, result);
         }
-        void result.then(reply => {
+        void trackOwnerRequest(result.then(reply => {
           const payload = JSON.stringify({ id: message.id, result: reply });
           return approvalRequests.dispatch(claimed.claim, socket => new Promise<void>((resolve, reject) => {
             if (socket.readyState !== WebSocket.OPEN) { reject(new Error('Original socket closed')); return; }
@@ -708,7 +747,7 @@ export async function createNativeWorkbench(options: Options = {}) {
           }));
         })
           // A lost reply is uncertain; never retry a title write on reconnect.
-          .catch(() => {});
+          .catch(() => {}));
         return;
       }
       send(client, registered?.status === 'registered' ? { type: 'mcp-request', hostId, request: message, requestRef: registered.ref }
@@ -729,12 +768,14 @@ export async function createNativeWorkbench(options: Options = {}) {
   }
 
   async function connectedFor(client: WebSocket, connections: Map<string, CodexConnection>, hostId: string) {
+    if (shuttingDown) throw new Error('The workspace host is closing.');
     const connection = connectionFor(client, connections, hostId);
     try { await connection.connect(); }
     catch (error) {
       send(client, { type: 'codex-app-server-connection-changed', hostId, transport: 'websocket', state: 'disconnected', error: (error as Error).message });
       throw error;
     }
+    if (shuttingDown) { connection.close(); throw new Error('The workspace host is closing.'); }
     return connection;
   }
 
@@ -1134,23 +1175,38 @@ export async function createNativeWorkbench(options: Options = {}) {
     await control.connect();
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
   } catch (error) { clearInterval(reconnectControl); control.close(); await hostTools.close(); throw error; }
+  toolHostReady = true;
+  let closingWorkbench: Promise<void> | undefined;
   return {
     server, control,
     url: 'http://127.0.0.1:' + (server.address() as import('node:net').AddressInfo).port,
-    async close() {
-      clearInterval(reconnectControl);
-      chromeClients.close();
-      files.close();
-      await Promise.all([...browsers.values()].map(browser => browser.close()));
-      await Promise.all([...terminals.values()].map(terminal => terminal.dispose()));
-      for (const connection of fileConnections.values()) connection.close();
-      for (const controller of httpRequests) controller.abort();
-      for (const [client, connections] of clients) { client.terminate(); for (const connection of connections.values()) connection.close(); }
-      control.close(); webSockets.close(); chromeSockets.close();
-      await new Promise<void>(resolve => server.close(() => resolve()));
-      await hostTools.close(); await nativeTools.close(); await stateMutations.flush();
+    close() {
+      if (closingWorkbench) return closingWorkbench;
+      shuttingDown = true; toolHostReady = false; stopReconnect();
+      closingWorkbench = Promise.resolve().then(async () => {
+        const httpClosed = new Promise<void>(resolve => server.close(() => resolve()));
+        chromeClients.close(); files.close();
+        await Promise.all([...browsers.values()].map(browser => browser.close()));
+        await Promise.all([...terminals.values()].map(terminal => terminal.dispose()));
+        for (const connection of fileConnections.values()) connection.close();
+        for (const controller of httpRequests) controller.abort();
+        const pagesClosed = [...clients].map(([client, connections]) => new Promise<void>(resolve => {
+          if (client.readyState === WebSocket.CLOSED) resolve(); else client.once('close', resolve);
+          for (const connection of connections.values()) connection.close();
+          client.terminate();
+        }));
+        control.close(); webSockets.close(); chromeSockets.close();
+        await Promise.all([httpClosed, ...pagesClosed]);
+        await hostTools.close();
+      }).catch(error => { closingWorkbench = undefined; throw error; });
+      return closingWorkbench;
     },
   };
+  } catch (error) {
+    shuttingDown = true; toolHostReady = false; stopReconnect();
+    await hostTools.close();
+    throw error;
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

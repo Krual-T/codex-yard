@@ -158,6 +158,80 @@ for (const reconnect of [false, true]) test(`native injection fences all Yard co
   assert.deepEqual(persisted.globals['pinned-thread-ids'], [reference.threadId], 'The tool state transaction preserves the injection section.');
   const observed = await host({ action: 'status' });
   assert.equal(observed.body.turn.phase, 'accepted');
+  if (!reconnect) {
+    const options = { socketPath: h.fake.socketPath, codexHome: join(h.root, 'codex'), dataDir: join(h.root, 'data'), workspace: h.root,
+      renderer: join(h.root, 'renderer'), adapterPath: join(process.cwd(), 'test/native-fixture.ts'),
+      hostCatalog: { hosts: [], projects: [], assignments: {} }, port: 0 };
+    const before = await readFile(join(h.root, 'data/native-state.json'), 'utf8');
+    let stateLoads = 0;
+    await assert.rejects(createNativeWorkbench({ ...options, nativeStateCheckpoint() { stateLoads++; } }), /socket 已由运行中的实例使用/);
+    assert.equal(stateLoads, 0, 'A second owner must be refused before reading shared native state.');
+    assert.equal(await readFile(join(h.root, 'data/native-state.json'), 'utf8'), before);
+    await h.app.close();
+    const root = JSON.parse(before), template = root.sendInjections.operations[0];
+    const operations = ['preparing', 'sending', 'unknown', 'turn-preparing'].map(phase => {
+      const operation = structuredClone(template), id = 'startup-' + phase;
+      Object.assign(operation.reference, { threadId: id, intentId: id, injectionAttemptId: id, callId: id, clientUserMessageId: id });
+      operation.reference.owner.threadId = id;
+      operation.items[0].call_id = id; operation.items[1].call_id = id;
+      Object.assign(operation.turnParams, { threadId: id, clientUserMessageId: id });
+      operation.turn = phase === 'turn-preparing' ? { phase: 'preparing', attemptId: id, attempts: [id], connectionGeneration: 'old-generation' }
+        : { phase: 'waiting', attempts: [] };
+      if (phase !== 'turn-preparing') operation.injection = { phase };
+      return operation;
+    });
+    root.sendInjections.operations = operations; root.future = { retained: true };
+    await writeFile(join(h.root, 'data/native-state.json'), JSON.stringify(root));
+    const restarted = await createNativeWorkbench(options);
+    try {
+      const recovered = JSON.parse(await readFile(join(h.root, 'data/native-state.json'), 'utf8'));
+      assert.deepEqual(recovered.future, { retained: true });
+      assert.deepEqual(recovered.sendInjections.operations.map((value: any) => [value.injection.phase, value.turn.phase]),
+        [['not-sent', 'waiting'], ['sending', 'waiting'], ['unknown', 'waiting'], ['injected', 'not-sent']]);
+      for (const index of [0, 3]) {
+        const value = recovered.sendInjections.operations[index];
+        assert.deepEqual((index === 0 ? value.injection : value.turn).terminal, { kind: 'not-sent', reason: 'previous-owner-stopped' });
+        assert.deepEqual(value.reference, operations[index].reference);
+        assert.deepEqual(value.items, operations[index].items);
+        assert.deepEqual(value.turnParams, operations[index].turnParams);
+      }
+      assert.equal(h.fake.calls('thread/inject_items').length, 1, 'Startup recovery never replays an injection.');
+      assert.equal(h.fake.calls('turn/start').length, 1, 'Startup recovery never submits a turn.');
+    } finally { await restarted.close(); }
+  }
+});
+
+test('closing retains the private owner pipe until page writes have persisted', async t => {
+  let holdCommit = false;
+  let entered!: () => void, release!: () => void;
+  const enteredPromise = new Promise<void>(resolve => { entered = resolve; });
+  const released = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  const h = await fixture(t, undefined, undefined, { hostCatalog: { hosts: [], projects: [], assignments: {} },
+    async nativeStateCheckpoint(step) {
+      if (holdCommit && step === 'file-sync') { entered(); await released; }
+    },
+  });
+  const page = await h.connect();
+  holdCommit = true;
+  page.send({ type: 'fetch', requestId: 'last-owner-write', url: 'vscode://codex/set-global-state',
+    body: JSON.stringify({ key: 'owner-drained-value', value: 'retained' }) });
+  await enteredPromise;
+  const closing = h.app.close();
+  assert.equal(h.app.close(), closing, 'Concurrent close callers share the same complete drain.');
+  const options = { socketPath: h.fake.socketPath, codexHome: join(h.root, 'codex'), dataDir: join(h.root, 'data'), workspace: h.root,
+    renderer: join(h.root, 'renderer'), adapterPath: join(process.cwd(), 'test/native-fixture.ts'),
+    hostCatalog: { hosts: [], projects: [], assignments: {} }, port: 0 };
+  let stateLoads = 0;
+  try {
+    await assert.rejects(createNativeWorkbench({ ...options, nativeStateCheckpoint() { stateLoads++; } }), /socket 已由运行中的实例使用/);
+    assert.equal(stateLoads, 0, 'A draining owner still excludes a second native-state reader.');
+  } finally { release(); }
+  await closing;
+  const retained = JSON.parse(await readFile(join(h.root, 'data/native-state.json'), 'utf8'));
+  assert.equal(retained.globals['owner-drained-value'], 'retained');
+  const restarted = await createNativeWorkbench(options);
+  await restarted.close();
 });
 
 test('native state recovery precedes settings, project, Mini and configuration consumers', async t => {
