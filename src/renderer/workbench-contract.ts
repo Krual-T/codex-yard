@@ -102,6 +102,16 @@ export interface StandaloneComposerProps {
   /** Called only after this prefill has been durably merged into its draft. */
   onPrefillConsumed?(id: string): void;
 }
+export interface ArtifactSessionTarget {
+  hostId: string;
+  threadId: string;
+  artifactRef: string;
+  kind: 'spreadsheet' | 'presentation';
+  title: string;
+  pageId?: string;
+  /** Captured message source, checked only when handing this resource to its workspace tab. */
+  assertCurrent?: () => void;
+}
 export interface StandaloneMessagesProps {
   client: WorkbenchClient;
   hostId: string;
@@ -115,6 +125,7 @@ export interface StandaloneMessagesProps {
     /** One message open's captured source, used until the file is handed to its tab. */
     assertCurrent?: () => void }): void;
   onOpenVisualization?(value: { hostId: string; threadId: string; path: string }): void;
+  onOpenArtifactSession?(value: ArtifactSessionTarget): void;
   onOpenBrowser?(value: { hostId: string; threadId: string; url?: string; source?: 'link' }): void;
 }
 export interface StandaloneSettingsProps {

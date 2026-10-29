@@ -78,6 +78,7 @@ export interface SideChatRootProps {
   outputPreviewAuthority?: SideChatWorkspaceProps['outputPreviewAuthority'];
   onOpenBrowser: NonNullable<SideChatWorkspaceProps['onOpenBrowser']>;
   onOpenVisualization: NonNullable<SideChatWorkspaceProps['onOpenVisualization']>;
+  onOpenArtifactSession?: SideChatWorkspaceProps['onOpenArtifactSession'];
   approvalOptions?: SideChatWorkspaceProps['approvalOptions'];
 }
 
@@ -513,6 +514,18 @@ export function SideChatRoot(props: SideChatRootProps) {
       onOpenVisualization={value => { assertEntry(entry); if (navigating.current || entry.frozen || active.current !== entry.identity.draftId
         || value.hostId !== entry.identity.hostId || value.threadId !== child(entry)?.owner.threadId)
         throw beforeSend('原侧聊可视化目标已改变。'); latest.current.onOpenVisualization(value); }}
+      onOpenArtifactSession={value => {
+        const activation = entry.activation;
+        const assertCurrent = () => {
+          assertEntry(entry); value.assertCurrent?.();
+          if (navigating.current || entry.frozen || entry.activation !== activation || active.current !== entry.identity.draftId
+            || value.hostId !== entry.identity.hostId || value.threadId !== child(entry)?.owner.threadId)
+            throw beforeSend('原侧聊文档目标已改变。');
+        };
+        assertCurrent();
+        if (!latest.current.onOpenArtifactSession) throw beforeSend('Live Artifact Sessions aren’t available in this app host.');
+        latest.current.onOpenArtifactSession({ ...value, assertCurrent });
+      }}
       approvalOptions={props.approvalOptions} /></div>)}
   </section>;
 }

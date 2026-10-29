@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { flushSync } from 'react-dom';
 import { Folder, Globe, ListTodo, MoreHorizontal, PanelLeftOpen, PanelRight, Terminal } from 'lucide-react';
 import type { ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-protocol.ts';
-import type { ComposerDocument, ComposerDraft, MessageEditOrigin, ServerRequestRef, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
+import type { ArtifactSessionTarget, ComposerDocument, ComposerDraft, MessageEditOrigin, ServerRequestRef, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
 import { StandaloneComposer, bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from '../composer/StandaloneComposer.tsx';
 import type { ComposerDraftController, ComposerDraftLease, ComposerDraftOwner, ComposerDraftSnapshot, ComposerPromptAppendPort, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
 import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
@@ -37,6 +37,8 @@ import { threadOutputDirectory, useThreadSummaryOutputs } from './use-thread-sum
 import { sameSummarySideChat, useSummarySideChats } from './use-summary-side-chats.ts';
 import { commitSidebarProjectMembership, createSidebarProjectInventory } from './sidebar-project-inventory.ts';
 import { WorkspacePanels } from '../panels/WorkspacePanels.tsx';
+import { ArtifactSessionTabs, ArtifactSessionUnavailable } from './ArtifactSessionWorkspace.tsx';
+import type { ArtifactSessionTab } from './ArtifactSessionWorkspace.tsx';
 import type { WorkspacePanelAppearance, WorkspacePanelRequest, WorkspacePanelsHandle } from '../panels/WorkspacePanels.tsx';
 import { resolveFilePath } from '../files/file-service.ts';
 import { createRouteNavigation } from './route-navigation.ts';
@@ -156,6 +158,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [archived, setArchived] = useState(false);
   const [sidebar, setSidebar] = useState(() => saved('yard-sidebar-open', true));
   const [tabs, setTabs] = useState<{ id: string; hostId: string; title: string; readOnly?: boolean }[]>(() => saved('yard-workspace-tabs', []));
+  const [artifactTabs, setArtifactTabs] = useState<ArtifactSessionTab[]>([]);
+  const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
+  const artifactParentScope = JSON.stringify([current.hostId, current.threadId, current.section]);
+  const visibleArtifactTabs = artifactTabs.filter(tab => tab.parentScope === artifactParentScope);
+  const activeArtifact = visibleArtifactTabs.find(tab => tab.key === selectedArtifact);
   const list = useThreadList(client, { hostId: current.hostId, archived, search, refreshKey: refresh });
   const threads = list.rows;
   const listRef = useRef(list); listRef.current = list;
@@ -425,7 +432,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const registerNavigationGuard = useCallback((guard: { requestLeave(): Promise<boolean> } | null) => { settingsGuard.current = guard; }, []);
   const openThread = (id: string, hostId = current.hostId, readOnly = false) => {
     const search = new URLSearchParams(); if (hostId !== 'local') search.set('hostId', hostId); if (readOnly) search.set('archived', '1');
-    return navigate(`/local/${encodeURIComponent(id)}${search.size ? '?' + search : ''}`);
+    return navigate(`/local/${encodeURIComponent(id)}${search.size ? '?' + search : ''}`).then(committed => {
+      if (committed) setSelectedArtifact(null);
+      return committed;
+    });
   };
   const refreshList = useCallback(() => listRef.current.refresh(), []);
   const reloadHosts = useCallback(async () => {
@@ -1260,6 +1270,22 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     setSideChatSource(child);
     setVisualization(source); setPanelKind('visualization'); setPanelOpen(true);
   };
+  const showArtifactSession = (source: ArtifactSessionTarget, child: SideChatPanelSource | null = null) => {
+    source.assertCurrent?.();
+    if (child) checkPanelChild(child);
+    const hostId = child?.owner.hostId ?? current.hostId, threadId = child?.owner.threadId ?? current.threadId;
+    if (source.hostId !== hostId || source.threadId !== threadId || !threadId || current.section)
+      throw new Error('The original artifact conversation changed.');
+    if (source.hostId !== 'local' || source.pageId || source.artifactRef.startsWith('artifact_external_'))
+      throw new Error('Live Artifact Sessions aren’t available in this app host.');
+    messageOutputAuthority(hostId, threadId, child?.identity.cwd ?? thread?.cwd ?? panelCwd).assertCurrent();
+    const { assertCurrent: _assertCurrent, ...target } = source;
+    const key = JSON.stringify([hostId, threadId, source.artifactRef]);
+    const tab: ArtifactSessionTab = { ...target, key, parentScope: artifactParentScope };
+    setArtifactTabs(previous => previous.some(value => value.key === key && value.parentScope === artifactParentScope)
+      ? previous : [...previous, tab]);
+    setSelectedArtifact(key); setSummaryOpen(false); setMenu(false);
+  };
   const showPanel = (request?: { kind: 'terminal'; reuse?: boolean } | { kind: 'file'; path: string; line?: number; column?: number; assertCurrent?: () => void } | { kind: 'diff'; path?: string; diff?: string }, child: SideChatPanelSource | null = null) => {
     if (request?.kind === 'file') request.assertCurrent?.();
     if (child) checkPanelChild(child);
@@ -1346,13 +1372,22 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       const readOnly = await readThreadArchived(client, { hostId: tab.hostId, threadId: tab.id });
       if (navigationGeneration.current !== generation) return;
       setTabs(previous => previous.map(value => value.id === tab.id && value.hostId === tab.hostId ? { ...value, readOnly } : value));
-      if (navigationGeneration.current === generation) await openThread(tab.id, tab.hostId, readOnly);
+      if (navigationGeneration.current === generation) {
+        await openThread(tab.id, tab.hostId, readOnly);
+        setSelectedArtifact(null);
+      }
     } catch (cause) { setError(String(cause)); }
   };
 
   const shortcuts = useWorkbenchShortcuts(client, {
     blocked: () => navigationLocked.current || leaving || menu || Boolean(approvalDialog),
     selectTab: slot => {
+      if (activeArtifact) {
+        const ordered = document.documentElement.dir === 'rtl' ? [...visibleArtifactTabs].reverse() : visibleArtifactTabs;
+        const tab = ordered[slot - 1];
+        if (!tab) return false;
+        setSelectedArtifact(tab.key); return true;
+      }
       const ordered = document.documentElement.dir === 'rtl' ? [...tabs].reverse() : tabs;
       const tab = ordered[slot - 1];
       if (!tab) return false;
@@ -1583,7 +1618,12 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       onOpenScheduled={() => { void navigate('/scheduled' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId))); }}
       onRefresh={() => { void list.refresh(); }} onLoadMore={() => { void list.loadMore(); }} onRetryProjectLookup={() => { void reloadProjects().catch(cause => setError(String(cause))); }} />}
     <main className="yard-main">
-      {!settings && <header className="yard-toolbar">
+      {!settings && activeArtifact && <ArtifactSessionTabs tabs={visibleArtifactTabs} selected={activeArtifact.key}
+        onSelect={setSelectedArtifact} onNewTab={() => { void newChat(); }} onClose={key => {
+          setArtifactTabs(previous => previous.filter(tab => tab.key !== key || tab.parentScope !== artifactParentScope));
+          if (selectedArtifact === key) setSelectedArtifact(visibleArtifactTabs.find(tab => tab.key !== key)?.key ?? null);
+        }} />}
+      {!settings && !activeArtifact && <header className="yard-toolbar">
         {!sidebar && <button className="yard-icon-button" aria-label="Toggle sidebar" onClick={() => setSidebar(true)}><PanelLeftOpen aria-hidden="true" /></button>}
         {current.threadId && <div className="yard-thread-title"><Folder aria-hidden="true" /><strong>{thread?.name || threads.find(item => item.id === current.threadId)?.name || 'Conversation'}</strong></div>}
         <div className="yard-toolbar-spacer" />
@@ -1663,7 +1703,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
             if (!source.urls[0]) throw new Error('This search has no result URL to open.');
             showBrowser({ hostId: current.hostId, threadId: current.threadId!, url: source.urls[0] }); }} />
       </div>}
-      {!settings && tabs.length > 1 && <div className="yard-tab-strip" role="tablist" aria-label="Workspace tabs">{tabs.map((tab, index) => {
+      {!settings && !activeArtifact && tabs.length > 1 && <div className="yard-tab-strip" role="tablist" aria-label="Workspace tabs">{tabs.map((tab, index) => {
           const slot = document.documentElement.dir === 'rtl' ? tabs.length - index : index + 1;
           return <div className="yard-tab" key={tab.hostId + ':' + tab.id}><button role="tab" aria-selected={tab.id === current.threadId && tab.hostId === current.hostId} onClick={() => { void openTab(tab); }}>{tab.title}{shortcuts.hints === 'tabs' && slot <= 9 && <kbd>{shortcuts.label('tabs', slot as NumberShortcutSlot)}</kbd>}</button><button aria-label={'Close ' + tab.title} onClick={() => setTabs(previous => previous.filter(item => item !== tab))}>×</button></div>;
         })}</div>}
@@ -1757,7 +1797,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         onTrySkill={(owner, target) => tryProductDraft(owner, target.cwd, { text: '', images: [], files: [], skills: [target.skill] })}
         onTryPlugin={(owner, target) => tryProductDraft(owner, target.cwd, { text: '$' + target.plugin.name + ' ', images: [], files: [] })}
       /> : <>
-        <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')} inert={leaving}>
+        {activeArtifact && <ArtifactSessionUnavailable title={activeArtifact.title} />}
+        <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')} hidden={Boolean(activeArtifact)} inert={leaving || Boolean(activeArtifact)}>
           {streamGap && <p role="status" className="yard-stream-gap">此页面未收到连续的活动内容，正在核对会话记录。{isThreadBusy(thread) && '任务正在运行；完成后将重新读取完整记录。'}</p>}
           {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} threadId={current.threadId} thread={thread} editRecovery={editState?.recovery ?? null} editAccess={editAccess} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
             outputPreviewAuthority={thread ? messageOutputAuthority(current.hostId, current.threadId, thread.cwd) : undefined}
@@ -1776,7 +1817,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
               const authority = messageOutputAuthority(current.hostId, current.threadId, thread.cwd);
               const assertCurrent = () => { location.assertCurrent?.(); authority.assertCurrent(); };
               openFile(location.path, location.line, location.column, location.cwd ?? panelCwd, assertCurrent);
-            }} onOpenVisualization={showVisualization} onOpenBrowser={showBrowser}
+            }} onOpenVisualization={showVisualization} onOpenBrowser={showBrowser} onOpenArtifactSession={showArtifactSession}
             onEdit={current.readOnly ? undefined : (draft, origin, prepare?: () => Promise<void>) => submit(draft, {}, { type: 'send' }, origin, undefined, undefined, undefined, prepare)} onFork={turnId => action('fork', turnId)} /> : <div className="yard-home-heading"><img src="/brand/icon.svg" alt="" /><h1>{activeProject
               ? <>{chinese ? '我们应该在' : 'What should we work on in'}{' '}<button aria-haspopup="menu" aria-expanded={projectPickerOpen} onClick={() => setProjectPickerOpen(value => !value)}>{activeProject.name}</button>{chinese ? '中做些什么？' : '?'}</>
               : chinese ? '我们来做些什么？' : 'What should we work on?'}</h1>
@@ -1890,6 +1931,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
             const child = sideChatActive.current;
             if (!child || child.owner.hostId !== value.hostId || child.owner.threadId !== value.threadId) throw new Error('原侧聊可视化来源已改变。');
             showVisualization(value, child);
+          }} onOpenArtifactSession={value => {
+            const child = sideChatActive.current;
+            if (!child || child.owner.hostId !== value.hostId || child.owner.threadId !== value.threadId)
+              throw new Error('原侧聊文档来源已改变。');
+            showArtifactSession(value, child);
           }} /></div>
         <div hidden={panelKind !== 'workspace'} style={{ height: '100%' }}>{panelMounted && <WorkspacePanels ref={workspacePanels} client={client} scopeId={panelScope} hostId={panelHostId} threadId={panelThreadId ?? undefined} cwd={panelCwd}
           appearance={panelAppearance} request={panelRequest} onRequestConsumed={id => setPanelRequest(previous => previous?.id === id ? null : previous)}
