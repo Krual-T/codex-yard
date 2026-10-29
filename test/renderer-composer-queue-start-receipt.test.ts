@@ -36,6 +36,7 @@ test('queue starts use the committed marker receipt and recover a known undispat
     let root;
     const fixture={state,
       render(){root=createRoot(document.getElementById('root'));root.render(React.createElement(StandaloneQueue,{client,hostId:'ssh-fixture',threadId:'thread',busy:false,refreshVersion:0,
+        captureAuthority(){return () => {};},
         async onStartQueued(){state.starts++;throw Error('synthetic unknown response')}}));},
       unmount(){root.unmount()},recovery(){return readUnknownQueueRecovery('ssh-fixture','thread')},
       failReadAfterMarker(){const put=IDBObjectStore.prototype.put,get=IDBObjectStore.prototype.get;

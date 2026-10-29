@@ -12,6 +12,7 @@ import { useCompletions } from './standalone-completions.tsx';
 import type { Completion } from './standalone-completions.tsx';
 import { StandaloneOptions } from './standalone-options.tsx';
 import { StandaloneQueue } from './standalone-queue.tsx';
+import type { DispatchQueueMutation } from './standalone-queue.tsx';
 import type { QueueEditEntry } from './standalone-queue-storage.ts';
 import { useEnterSetting } from './standalone-enter-setting.ts';
 import { useFollowUpSetting } from './standalone-follow-up.ts';
@@ -31,6 +32,7 @@ export type { DraftInputOptions, DraftSkill } from './standalone-draft.ts';
 export type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescription } from './composer-draft-store.ts';
 export type { ComposerDraftController, ComposerDraftExternalOperation, ComposerDraftLease } from './use-composer-draft.ts';
 export type { QueueEditEntry } from './standalone-queue-storage.ts';
+export type { DispatchQueueMutation, QueueMutationMethod } from './standalone-queue.tsx';
 export type ComposerReference = NonNullable<ComposerDraft['references']>[number];
 export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSubmit'> & {
   onSubmit(draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, description?: ComposerSubmissionDescription,
@@ -40,6 +42,8 @@ export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSu
   /** Remove after the host/thread Yard write queue compares the original complete entry. */
   removeQueuedOriginal?: (entry: QueueEditEntry, originalAuthority: () => void,
     assertBeforeSend: () => void) => Promise<'deleted' | 'changed'>;
+  /** Dispatch only through the original host connection and the supplied final guard. */
+  dispatchQueueMutation?: DispatchQueueMutation;
   /** The app's authoritative active turn, used as the steer precondition. */
   activeTurnId?: string | null;
   initialOptions?: SubmitOptions;
@@ -76,7 +80,7 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
   }}><summary>{name}</summary>{preview == null ? t('Reading...') : <pre>{preview}</pre>}</details>;
 }
 
-function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, removeQueuedOriginal, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
+function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, removeQueuedOriginal, dispatchQueueMutation, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
   const { t, locale } = useI18n('zh-CN');
   const inputRoot = useRef<HTMLDivElement>(null);
   const freezeGuard = useRef<(afterDrain: boolean) => boolean>(() => false);
@@ -511,6 +515,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     <div ref={inputRoot} inert={frozen} aria-busy={frozen || undefined}>
     {context.threadId ? <StandaloneQueue key={JSON.stringify([context.hostId, context.threadId])} client={client} hostId={context.hostId} threadId={context.threadId} busy={busy} refreshVersion={queueVersion} onStartQueued={onStartQueued} frozen={frozen}
       captureAuthority={captureSubmissionAuthority ? () => captureSubmissionAuthority(structuredClone(owner)) : undefined}
+      dispatchQueueMutation={dispatchQueueMutation}
       beginQueueEdit={removeQueuedOriginal && captureSubmissionAuthority ? () => {
         const capturedOwner = structuredClone(owner);
         const originalAuthority = captureSubmissionAuthority(capturedOwner);

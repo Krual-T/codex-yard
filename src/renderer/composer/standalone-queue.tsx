@@ -21,8 +21,12 @@ export interface QueueEditBinding {
    * Independent daemon clients are not serialized by this queue. */
   removeQueuedOriginal(entry: QueueEditEntry, assertBeforeSend: () => void): Promise<'deleted' | 'changed'>;
 }
-export interface QueueProps { client: WorkbenchClient; hostId: string; threadId: string; busy: boolean; refreshVersion: number; onStartQueued?: (id: string, assertAuthority?: () => void) => Promise<void>;
+export type QueueMutationMethod = 'thread/queue/reorder' | 'thread/queue/delete';
+export type DispatchQueueMutation = (method: QueueMutationMethod, params: Record<string, unknown>, hostId: string,
+  originalAuthority: () => void, assertBeforeSend: () => void) => Promise<unknown>;
+export interface QueueProps { client: WorkbenchClient; hostId: string; threadId: string; busy: boolean; refreshVersion: number; onStartQueued?: (id: string, assertAuthority?: () => void, originalAuthority?: () => void) => Promise<void>;
   captureAuthority?: () => () => void;
+  dispatchQueueMutation?: DispatchQueueMutation;
   beginQueueEdit?: () => QueueEditBinding | null;
   onQueueDraftCommitted?: (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => Promise<boolean>;
   beginOperation?: () => FinishComposerOperation | null; onEditStateChange?: (editing: boolean, pending: boolean) => void;
@@ -75,10 +79,10 @@ async function historyClientIds(client: WorkbenchClient, hostId: string, threadI
   }
   return found;
 }
-export function StandaloneQueue({ client, hostId, threadId, busy, refreshVersion, onStartQueued, captureAuthority, beginQueueEdit, onQueueDraftCommitted, beginOperation, onEditStateChange, onCompositionChange, frozen }: QueueProps) {
-  return <QueueSession key={JSON.stringify([hostId, threadId])} {...{ client, hostId, threadId, busy, refreshVersion, onStartQueued, captureAuthority, beginQueueEdit, onQueueDraftCommitted, beginOperation, onEditStateChange, onCompositionChange, frozen }} />;
+export function StandaloneQueue({ client, hostId, threadId, busy, refreshVersion, onStartQueued, captureAuthority, dispatchQueueMutation, beginQueueEdit, onQueueDraftCommitted, beginOperation, onEditStateChange, onCompositionChange, frozen }: QueueProps) {
+  return <QueueSession key={JSON.stringify([hostId, threadId])} {...{ client, hostId, threadId, busy, refreshVersion, onStartQueued, captureAuthority, dispatchQueueMutation, beginQueueEdit, onQueueDraftCommitted, beginOperation, onEditStateChange, onCompositionChange, frozen }} />;
 }
-function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQueued, captureAuthority, beginQueueEdit, onQueueDraftCommitted, beginOperation, onEditStateChange, frozen }: QueueProps) {
+function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQueued, captureAuthority, dispatchQueueMutation, beginQueueEdit, onQueueDraftCommitted, beginOperation, onEditStateChange, frozen }: QueueProps) {
   const { t, locale } = useI18n('zh-CN');
   const [unknown, setUnknown] = useState<UnknownQueueStart[]>([]);
   const unknownRef = useRef<UnknownQueueStart[]>([]);
@@ -89,6 +93,7 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
   const [storageState, setStorageState] = useState<'loading' | 'ready' | 'error'>('loading');
   const storageReady = useRef(false);
   const [entries, setEntries] = useState<QueueEntry[]>([]);
+  const entriesRef = useRef<QueueEntry[]>([]);
   const [listReady, setListReady] = useState(false);
   const listReadyRef = useRef(false);
   const [pending, setPending] = useState(false);
@@ -98,6 +103,7 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
   const generation = useRef(0);
   const storageGeneration = useRef(0);
   const mounted = useRef(false);
+  const lifecycle = useRef(0);
   const mutation = useRef(false);
   const queueChanges = useRef(0);
   const releases = useRef(new Map<string, { sent: boolean; pending: Promise<void> }>());
@@ -164,7 +170,7 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
       const next = await list(client, hostId, threadId);
       if (current !== generation.current) { success = true; return true; }
       listReadyRef.current = true; setListReady(true);
-      setEntries(next);
+      entriesRef.current = next; setEntries(next);
       for (const item of releaseRef.current) {
         await releaseMarker(item.marker, item.sent);
       }
@@ -206,7 +212,7 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
     const unsubscribeAtoms = subscribeBrowserAtoms(keys => {
       if (keys.includes(queueUnknownAtomKey)) void loadUnknown().then(ready => { if (ready) void refresh(); });
     });
-    return () => { mounted.current = false; generation.current++; storageGeneration.current++; unsubscribe(); unsubscribeAtoms(); };
+    return () => { mounted.current = false; lifecycle.current++; generation.current++; storageGeneration.current++; unsubscribe(); unsubscribeAtoms(); };
   }, [client, hostId, threadId, loadUnknown, refresh, refreshVersion]);
   useEffect(() => { if (!frozen) void loadUnknown().then(ready => { if (ready) void refresh(); }); }, [frozen, loadUnknown, refresh]);
   const run = async (action: () => Promise<void>) => {
@@ -223,16 +229,36 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
       onEditStateChange?.(!!volatileEdit, false); setPending(false); finish?.(success);
     }
   };
+  const captureQueueAuthority = (check: () => boolean) => {
+    if (!captureAuthority) throw new Error('会话控制器尚未提供队列授权');
+    const originalAuthority = captureAuthority();
+    const originalLifecycle = lifecycle.current;
+    const changes = queueChanges.current;
+    const snapshot = structuredClone(entries);
+    const assertBeforeSend = () => {
+      try {
+        originalAuthority();
+        if (!mounted.current || lifecycle.current !== originalLifecycle || !listReadyRef.current || queueChanges.current !== changes
+          || !sameComposerDraftValue(entriesRef.current, snapshot) || !check()) {
+          throw new Error('队列或页面状态已改变');
+        }
+      } catch (cause) {
+        throw Object.assign(new Error('原队列点击的连接或权限已改变，或队列状态已改变，未发送请求。', { cause }),
+          { uncertain: false, sendPhase: 'before-send' });
+      }
+    };
+    assertBeforeSend();
+    return { originalAuthority, assertBeforeSend };
+  };
   const start = (entry: QueueEntry) => run(async () => {
     if (!onStartQueued) throw new Error('会话控制器尚未提供队列发送');
-    const captured = captureAuthority?.();
-    const assertAuthority = () => {
-      try { captured?.(); }
-      catch (cause) { throw Object.assign(new Error('原队列点击的连接或权限已改变，未启动消息。', { cause }), { uncertain: false }); }
-    };
-    assertAuthority();
+    let ownLockId: string | undefined;
+    const { originalAuthority, assertBeforeSend: assertAuthority } = captureQueueAuthority(() =>
+      !editsRef.current.some(item => item.entry.id === entry.id)
+      && !unknownRef.current.some(item => item.id === entry.id && item.lockId !== ownLockId));
     if (!storageReady.current || unknownRef.current.some(item => item.id === entry.id)) throw new Error('无法确认先前的发送结果');
     const request = { hostId, conversationId: threadId, messageId: entry.id, lockId: createId() };
+    ownLockId = request.lockId;
     const result = await client.host<{ acquired: boolean }>('queued-follow-up-send-lock-acquire', request);
     if (!result.acquired) throw new Error('另一页面正在发送这条会话的消息');
     const marker = { id: entry.id, clientUserMessageId: entry.clientUserMessageId, lockId: request.lockId };
@@ -255,7 +281,7 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
     let sent = false, release = false;
     try {
       assertAuthority();
-      await onStartQueued(entry.id, assertAuthority);
+      await onStartQueued(entry.id, assertAuthority, originalAuthority);
       sent = true; release = true;
     } catch (reason) {
       const error = record(reason), data = record(error.data);
@@ -270,10 +296,19 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
     }
   });
   const reorder = (index: number, target: number) => run(async () => {
-    if (editsRef.current.length) throw new Error('请先处理队列编辑恢复记录。');
+    if (!dispatchQueueMutation) throw new Error('会话控制器尚未提供队列写入');
+    const { originalAuthority, assertBeforeSend } = captureQueueAuthority(() =>
+      storageReady.current && !unknownRef.current.length && !editsRef.current.length);
     const ids = entries.map(item => item.id);
     [ids[index], ids[target]] = [ids[target]!, ids[index]!];
-    await client.rpc('thread/queue/reorder', { threadId, queuedSubmissionIds: ids }, hostId);
+    await dispatchQueueMutation('thread/queue/reorder', { threadId, queuedSubmissionIds: ids }, hostId, originalAuthority, assertBeforeSend);
+  });
+  const remove = (entry: QueueEntry) => run(async () => {
+    if (!dispatchQueueMutation) throw new Error('会话控制器尚未提供队列写入');
+    const { originalAuthority, assertBeforeSend } = captureQueueAuthority(() => storageReady.current
+      && !unknownRef.current.some(item => item.id === entry.id) && !editsRef.current.some(item => item.entry.id === entry.id));
+    const result = record(await dispatchQueueMutation('thread/queue/delete', { threadId, queuedSubmissionId: entry.id }, hostId, originalAuthority, assertBeforeSend));
+    if (!result.deleted) throw new Error('消息已不存在');
   });
   const setVolatile = (value: typeof volatileEdit) => {
     setVolatileEdit(value);
@@ -437,15 +472,11 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
       return <div className="standalone-queue__row" key={entry.id}>
       <span className="standalone-queue__text">{summary(entry, t)}</span>
       <div className="standalone-queue__actions">
-        <button type="button" title={t('Move up')} aria-label={t('Move queued message up')} disabled={pending || !listReady || storageState !== 'ready' || !!unknown.length || !!editRecoveries.length || !!volatileEdit || index === 0} onClick={() => void reorder(index, index - 1)}>↑</button>
-        <button type="button" title={t('Move down')} aria-label={t('Move queued message down')} disabled={pending || !listReady || storageState !== 'ready' || !!unknown.length || !!editRecoveries.length || !!volatileEdit || index === entries.length - 1} onClick={() => void reorder(index, index + 1)}>↓</button>
+        <button type="button" title={t('Move up')} aria-label={t('Move queued message up')} disabled={pending || frozen || !captureAuthority || !dispatchQueueMutation || !listReady || storageState !== 'ready' || !!unknown.length || !!editRecoveries.length || !!volatileEdit || index === 0} onClick={() => void reorder(index, index - 1)}>↑</button>
+        <button type="button" title={t('Move down')} aria-label={t('Move queued message down')} disabled={pending || frozen || !captureAuthority || !dispatchQueueMutation || !listReady || storageState !== 'ready' || !!unknown.length || !!editRecoveries.length || !!volatileEdit || index === entries.length - 1} onClick={() => void reorder(index, index + 1)}>↓</button>
         <button type="button" title={t('Edit')} aria-label={t('Edit queued message')} disabled={pending || frozen || !beginQueueEdit || !listReady || storageState !== 'ready' || !!volatileEdit || recovering || unknown.some(item => item.id === entry.id)} onClick={() => void moveToComposer(entry)}>{t('Edit')}</button>
-        <button type="button" title={t('Delete')} aria-label={t('Delete queued message')} disabled={pending || !listReady || storageState !== 'ready' || !!volatileEdit || recovering || unknown.some(item => item.id === entry.id)} onClick={() => void run(async () => {
-          if (editsRef.current.some(item => item.entry.id === entry.id)) throw new Error('请先处理此消息的队列编辑恢复。');
-          const result = await client.rpc<{ deleted: boolean }>('thread/queue/delete', { threadId, queuedSubmissionId: entry.id }, hostId);
-          if (!result.deleted) throw new Error('消息已不存在');
-        })}>{t('Delete')}</button>
-        <button type="button" title={t(busy ? 'Wait for current task' : 'Send now')} aria-label={t('Send queued message now')} disabled={pending || !listReady || busy || !onStartQueued || storageState !== 'ready' || !!volatileEdit || recovering || unknown.some(item => item.id === entry.id)} onClick={() => void start(entry)}>{t('Send')}</button>
+        <button type="button" title={t('Delete')} aria-label={t('Delete queued message')} disabled={pending || frozen || !captureAuthority || !dispatchQueueMutation || !listReady || storageState !== 'ready' || !!volatileEdit || recovering || unknown.some(item => item.id === entry.id)} onClick={() => void remove(entry)}>{t('Delete')}</button>
+        <button type="button" title={t(busy ? 'Wait for current task' : 'Send now')} aria-label={t('Send queued message now')} disabled={pending || frozen || !captureAuthority || !listReady || busy || !onStartQueued || storageState !== 'ready' || !!volatileEdit || recovering || unknown.some(item => item.id === entry.id)} onClick={() => void start(entry)}>{t('Send')}</button>
       </div>
     </div>; })}
     {editRecoveries.map(item => <div className="standalone-queue__edit" role="status" key={item.operationId}>

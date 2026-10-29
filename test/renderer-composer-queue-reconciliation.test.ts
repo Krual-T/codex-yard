@@ -24,6 +24,7 @@ test('unknown queue start survives reload and resolves only with matching histor
     };
     window.fixture=state;
     createRoot(document.getElementById('root')).render(React.createElement(StandaloneQueue,{client,hostId:'ssh-fixture',threadId:'thread',busy:false,refreshVersion:0,
+      captureAuthority(){return () => {};},
       async onStartQueued(){state.starts++;state.queue=[];throw Error('connection lost');}}));
   ` }, bundle: true, write: false, format: 'iife' });
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] });
