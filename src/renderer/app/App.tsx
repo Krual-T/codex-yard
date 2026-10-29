@@ -26,6 +26,7 @@ import type { Project, ProjectState } from './projects.ts';
 import { StandaloneSidebar } from '../sidebar/StandaloneSidebar.tsx';
 import { useThreadList } from '../sidebar/use-thread-list.ts';
 import { useSidebarBehavior } from './use-sidebar-behavior.ts';
+import { createSidebarActionService } from './sidebar-action-service.ts';
 import { commitSidebarProjectMembership, createSidebarProjectInventory } from './sidebar-project-inventory.ts';
 import { WorkspacePanels } from '../panels/WorkspacePanels.tsx';
 import type { WorkspacePanelAppearance, WorkspacePanelRequest, WorkspacePanelsHandle } from '../panels/WorkspacePanels.tsx';
@@ -345,6 +346,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const settingsGuard = useRef<{ requestLeave(): Promise<boolean> } | null>(null);
   const navigation = useRef<ReturnType<typeof createRouteNavigation> | null>(null);
   const navigationGeneration = useRef(0);
+  // Archive notifications update the current thread's read-only facts, but do
+  // not change the document in which a sidebar action was requested.
+  const sidebarNavigationRevision = useRef(0);
   const threadRef = useRef(thread); threadRef.current = thread;
   const projectStateRef = useRef(projectState); projectStateRef.current = projectState;
   const selectedProjectRef = useRef(selectedProject); selectedProjectRef.current = selectedProject;
@@ -361,6 +365,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
 
   const navigate = useCallback((path: string, options?: { replace?: boolean; delta?: number; state?: unknown }, assertBeforeCommit?: () => void) => {
     navigationGeneration.current++;
+    sidebarNavigationRevision.current++;
     const previous = routeRef.current;
     if (!options?.delta && new URL(path, location.href).pathname.split('/')[1] === 'settings') {
       const origin = previous.section ? readSettingsOriginURL(previous.search) ?? readSettingsOrigin(previous.state)
@@ -419,6 +424,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       const next = route();
       if (next.section && !routeRef.current.section) setSettingsSourceEpoch(value => value + 1);
       const id = ++navigationGeneration.current;
+      sidebarNavigationRevision.current++;
       committedNavigation.current = { id, target: next };
       setLeaving(true); setCurrent(next); setNavigationCommit(id); setError(''); setMenu(false);
     }, async () => {
@@ -883,18 +889,12 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   };
   const action = async (name: string, lastTurnId?: string) => {
     setMenu(false); if (!current.threadId) return;
-    const hostId = current.hostId, threadId = current.threadId, generation = navigationGeneration.current;
+    const hostId = current.hostId, threadId = current.threadId;
     try {
       if (name === 'copy') { await navigator.clipboard.writeText(location.href); return; }
-      const daemon = client.captureDaemonConnection(hostId);
-      const assertBeforeSend = () => {
-        daemon.assertOriginal();
-        if (navigationGeneration.current !== generation || routeRef.current.hostId !== hostId || routeRef.current.threadId !== threadId) {
-          throw new Error('The original conversation changed before the action was sent.');
-        }
-      };
+      const authority = captureSidebarAuthority(hostId), assertBeforeSend = authority.assertBeforeSend;
       const dispatch = <T,>(method: string, params: Record<string, unknown>) => client.rpc<T>(method, params, hostId,
-        { daemonConnectionGeneration: daemon.generation, assertBeforeSend });
+        { daemonConnectionGeneration: authority.daemonConnectionGeneration, assertBeforeSend });
       if (name === 'rename') {
         const value = prompt('Conversation name', thread?.name ?? ''); if (value == null) return;
         await dispatch('thread/name/set', { threadId, name: value });
@@ -1296,18 +1296,59 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   sidebarInventoryScope.current = { key: sidebarInventoryKey, hostId: current.hostId, threadIds: list.rows.map(row => row.id) };
   const resolveSidebarThreadHosts = useMemo(() => createSidebarProjectInventory(client, () => sidebarInventoryScope.current,
     state => { projectResponseGeneration.current++; projectStateRef.current = state; setProjectState(state); }), [client]);
+  const captureSidebarAuthority = (hostId: string) => {
+    const original = routeRef.current, revision = sidebarNavigationRevision.current;
+    const daemon = client.captureDaemonConnection(hostId);
+    const pageKey = (value: Route) => {
+      const search = new URLSearchParams(value.search); search.delete('archived');
+      return JSON.stringify([value.hostId, value.threadId, value.section, value.pathname, search.toString(), value.hash]);
+    };
+    const key = pageKey(original);
+    return { daemonConnectionGeneration: daemon.generation, assertBeforeSend: () => {
+      daemon.assertOriginal();
+      if (navigationLocked.current || sidebarNavigationRevision.current !== revision || pageKey(routeRef.current) !== key || original.hostId !== hostId)
+        throw new Error('The original sidebar page or host changed.');
+    } };
+  };
+  const sidebarActions = useMemo(() => createSidebarActionService({
+    client,
+    requestName: row => window.prompt('Conversation name', row.name ?? row.preview ?? ''),
+    confirm: request => window.confirm(request.type === 'delete-thread'
+      ? 'Permanently delete this conversation? This cannot be undone.'
+      : request.type === 'archive-project' ? `Archive all ${request.rows.length} conversations in ${request.project.name}?`
+      : `Remove ${request.project.name} from the sidebar? Your files and conversations will be kept.`),
+    assertProjectCurrent: project => {
+      const state = projectStateRef.current;
+      const actual = state && projectsForHost(state, project.hostId).find(value => value.id === project.id);
+      if (!actual || actual.name !== project.name || JSON.stringify(actual.rootPaths) !== JSON.stringify(project.rootPaths))
+        throw new Error('The original project changed.');
+    },
+    onCommitted: async (result, authority) => {
+      authority.assertBeforeSend();
+      if (result.type === 'remove-project') setSelectedProject(previous => previous?.hostId === result.project.hostId && previous.id === result.project.id ? null : previous);
+      await Promise.all([reloadProjects(), refreshList()]);
+      authority.assertBeforeSend();
+      const route = routeRef.current;
+      if (result.type === 'fork') {
+        const search = result.row.hostId === 'local' ? '' : '?' + new URLSearchParams({ hostId: result.row.hostId });
+        if (!await navigate('/local/' + encodeURIComponent(result.thread.id) + search)) throw new Error('The fork was created; navigation was not completed.');
+      } else if ((result.type === 'archive' || result.type === 'delete') && route.hostId === result.row.hostId && route.threadId === result.row.id
+        || result.type === 'archive-chats' && route.hostId === result.project.hostId && route.threadId !== null && result.threadIds.includes(route.threadId)) {
+        if (!await navigate('/' + (route.hostId === 'local' ? '' : '?' + new URLSearchParams({ hostId: route.hostId }))))
+          throw new Error('The action was saved; navigation was not completed.');
+      } else if (result.type === 'restore' && route.hostId === result.row.hostId && route.threadId === result.row.id) {
+        const search = route.hostId === 'local' ? '' : '?' + new URLSearchParams({ hostId: route.hostId });
+        if (!await navigate('/local/' + encodeURIComponent(result.row.id) + search)) throw new Error('The conversation was restored; navigation was not completed.');
+      }
+      setRefresh(value => value + 1);
+    },
+  }), [client, navigate, reloadProjects, refreshList]);
   const sidebarBehavior = useSidebarBehavior({
     client, hostId: current.hostId, rows: list.rows, projectState,
     threadHostResolutionEpoch: sidebarInventoryKey, resolveThreadHosts: resolveSidebarThreadHosts,
-    captureAuthority: hostId => {
-      const original = routeRef.current, generation = navigationGeneration.current;
-      const daemon = client.captureDaemonConnection(hostId);
-      return { daemonConnectionGeneration: daemon.generation, assertBeforeSend: () => {
-        daemon.assertOriginal();
-        if (navigationLocked.current || navigationGeneration.current !== generation || routeRef.current !== original || original.hostId !== hostId)
-          throw new Error('The original sidebar page or host changed.');
-      } };
-    },
+    captureAuthority: captureSidebarAuthority,
+    availableThreadActions: sidebarActions.availableThreadActions, onThreadAction: sidebarActions.onThreadAction,
+    availableProjectActions: sidebarActions.availableProjectActions, onProjectAction: sidebarActions.onProjectAction,
     readStateWriteAvailable: true,
     commitProjectMembership: (request, authority) => commitSidebarProjectMembership(client, request, authority),
     requestProjectName: async project => window.prompt('Project name', project.name),
