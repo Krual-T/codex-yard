@@ -27,6 +27,8 @@ test('product workspace uses the browser client and existing host capabilities',
   const remoteDirectory = join(directory, 'remote'); await mkdir(remoteDirectory);
   const remote = await createFakeCodex(remoteDirectory);
   cleanup.push(async () => { await remote.close(); });
+  const remoteCodexHome = join(remoteDirectory, 'codex'); await mkdir(remoteCodexHome);
+  remote.handlers.set('initialize', () => ({ userAgent: 'codex/fixture', codexHome: remoteCodexHome }));
   const codexDir = join(directory, 'codex'); await mkdir(codexDir);
   peer.handlers.set('initialize', () => ({ userAgent: 'codex/fixture', codexHome: codexDir }));
   const skillFile = join(directory, 'SKILL.md'); await writeFile(skillFile, 'Synthetic skill instructions');
@@ -79,7 +81,7 @@ test('product workspace uses the browser client and existing host capabilities',
   const app = await createNativeWorkbench({ ...resources, socketPath: peer.socketPath, codexHome: codexDir,
     dataDir, workspace: directory, port: 0, hostCatalog: { hosts: [{ hostId: 'remote-ssh-fixture', displayName: 'Fixture SSH', sshAlias: null,
       sshHost: 'fixture', sshPort: null, identity: null }], projects: [{ id: 'remote-project', hostId: 'remote-ssh-fixture', label: 'Remote project', remotePath: '/remote/project' }], assignments: {} },
-    sshStream: (_host, onPaths) => { onPaths?.({ homeDirectory: remoteDirectory, codexHome: join(remoteDirectory, 'codex') }); return connect(remote.socketPath); },
+    sshStream: (_host, onPaths) => { onPaths?.({ homeDirectory: remoteDirectory, codexHome: remoteCodexHome }); return connect(remote.socketPath); },
     httpFetch: async () => { externalRequests++; throw new Error('External HTTP is blocked'); } });
   cleanup.push(async () => { await app.close(); });
   const alternateClient = process.env.PRODUCT_WORKSPACE_TEST_CLIENT;
@@ -128,6 +130,19 @@ test('product workspace uses the browser client and existing host capabilities',
   });
   await page.goto(app.url + '/');
   const show = (path: string, state?: unknown) => page.evaluate(({ path, state }) => window.productWorkspaceHarness.show(path, state), { path, state });
+  const waitForEntered = async (entered: Promise<void>, description: string) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([entered, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out waiting for ${description}`)), 8000);
+      })]);
+    } catch (error) {
+      console.error(`While waiting for ${description}:`, await page.locator('body').innerText(),
+        'local methods:', peer.messages.map(message => message.method).filter(Boolean),
+        'remote methods:', remote.messages.map(message => message.method).filter(Boolean));
+      throw error;
+    } finally { clearTimeout(timer); }
+  };
   try { await page.getByRole('button', { name: /Fixture skill/ }).waitFor(); }
   catch (error) { console.error('Initial product workspace:', await page.locator('body').innerText(), errors); throw error; }
   assert.ok(peer.calls('account/read').length > 0); assert.ok(peer.calls('skills/list').length > 0);
@@ -196,7 +211,7 @@ test('product workspace uses the browser client and existing host capabilities',
   holdFeature = true;
   const enteredFeature = new Promise<void>(resolve => { featureEntered = resolve; });
   await page.getByRole('button', { name: 'Manage' }).click();
-  await enteredFeature;
+  await waitForEntered(enteredFeature, 'plugin feature read');
   await show('/projects');
   await page.getByRole('button', { name: /Fixture project/ }).first().waitFor();
   assert.ok(releaseFeature); (releaseFeature as () => void)();
@@ -247,7 +262,7 @@ test('product workspace uses the browser client and existing host capabilities',
 
   holdRemote = true;
   const enteredRemote = new Promise<void>(resolve => { remoteEntered = resolve; });
-  await show('/skills?hostId=remote-ssh-fixture'); await enteredRemote;
+  await show('/skills?hostId=remote-ssh-fixture'); await waitForEntered(enteredRemote, 'remote skill read');
   await show('/skills'); await page.getByRole('button', { name: /Fixture skill/ }).waitFor();
   assert.ok(releaseRemote); (releaseRemote as () => void)();
   assert.equal(await page.getByRole('button', { name: /Remote skill/ }).count(), 0);
@@ -271,7 +286,7 @@ test('product workspace uses the browser client and existing host capabilities',
   await show('/skills'); await page.getByRole('button', { name: /Fixture skill/ }).waitFor();
   holdAccount = true;
   const enteredAccount = new Promise<void>(resolve => { accountEntered = resolve; });
-  await show('/skills'); await enteredAccount;
+  await show('/skills'); await waitForEntered(enteredAccount, 'account read');
   await show('/projects'); await page.getByRole('button', { name: /Fixture project/ }).first().waitFor();
   assert.ok(releaseAccount); (releaseAccount as () => void)();
   assert.equal(await page.getByRole('button', { name: /Fixture skill/ }).count(), 0);
