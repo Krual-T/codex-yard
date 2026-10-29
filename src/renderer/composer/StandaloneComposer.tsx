@@ -72,6 +72,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const { t, locale } = useI18n('zh-CN');
   const inputRoot = useRef<HTMLDivElement>(null);
   const freezeGuard = useRef<(afterDrain: boolean) => boolean>(() => false);
+  const pendingLink = useRef(false);
   const frozenRef = useRef(false);
   const thawWaiters = useRef(new Set<() => void>());
   const [frozen, setFrozen] = useState(false);
@@ -82,8 +83,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     if (!value) { for (const resolve of thawWaiters.current) resolve(); thawWaiters.current.clear(); }
   }, []);
   const { owner, controller, current, stored, changeDraft, changeDraftFromOperation, updateDraftFromOperation, beginOperation,
-    retain, clear, selectVersion, conflicts, storageError, saving, loaded, unresolved, saveUnresolved, retry, lastWrite }
-    = useComposerDraft(context, onDraftController, onDraftChange, freezeGuard, setInputFrozen);
+    retain, clear, selectVersion, conflicts, storageError, saving, loaded, unresolved, saveUnresolved, retry, lastWrite, recheckProjection }
+    = useComposerDraft(context, onDraftController, onDraftChange, freezeGuard, setInputFrozen, pendingLink);
   const draft = stored.draft;
   const [overrides, setOverrides] = useState<Partial<SubmitOptions>>({});
   const [appliedOptions, setAppliedOptions] = useState<{ changes: Partial<SubmitOptions>; baseline: SubmitOptions } | null>(null);
@@ -117,7 +118,6 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const setComposition = (source: 'editor' | 'queue', value: boolean) => {
     if (value) compositions.current.add(source); else compositions.current.delete(source);
   };
-  const pendingLink = useRef(false);
   const queueEditState = useRef({ editing: false, pending: false });
   const defaultPendingRef = useRef(false);
   const notifyDefaultPending = useCallback((value: boolean) => { defaultPendingRef.current = value; setDefaultPending(value); }, []);
@@ -289,6 +289,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   };
   const submit = async (followUp: FollowUpAction = followUpSetting.value) => {
     if (submitInFlight.current || uploadsInFlight.current || failedUploads.current.length || unresolved || !hasContent(current.current.draft)) return;
+    if (pendingLink.current) { setError(t('Apply or close the link editor first.')); return; }
     if (defaultPending) { setError(t('Resolve the default model change before sending.')); return; }
     const currentIssue = current.current.draft.document && richEditIssue(current.current.draft);
     if (current.current.draft.blocked || currentIssue && !(currentIssue === structuredEditIssue
@@ -318,13 +319,15 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     const finishPreparation = beginOperation();
     if (!finishPreparation) return;
     submitInFlight.current = true; setSending(true); setError('');
-    let confirmed = false;
+    let confirmed = false, submittedToParent = false;
     try {
       const submitted: ComposerDraft = captured.draft;
       let retained = false;
       try { retained = await retain(captured); } finally { finishPreparation(retained); }
       if (!retained) throw new Error(t('Could not persist the submitted version.'));
       if (activeController.current !== controller) return;
+      if (pendingLink.current) { setError(t('Apply or close the link editor first.')); return; }
+      submittedToParent = true;
       await onSubmit(submitted, submittedOptions, action, { owner: structuredClone(owner), revision: captured.revision,
         overrides: submittedOverrides, ...(submitted.document ? { documentPlainTextMode } : {}) });
       confirmed = true;
@@ -345,7 +348,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     } catch (reason) {
       if (activeController.current === controller) {
         if (busy && context.threadId) setQueueVersion(value => value + 1);
-        setError(t(confirmed ? 'Sent, but draft cleanup failed:' : 'Send unconfirmed; draft retained:') + message(reason));
+        setError(t(confirmed ? 'Sent, but draft cleanup failed:' : submittedToParent ? 'Send result:' : 'Send unconfirmed; draft retained:') + message(reason));
       }
     } finally { submitInFlight.current = false; if (mounted.current) setSending(false); }
   };
@@ -493,7 +496,10 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         {conflicts.map(version => <button type="button" disabled={unresolved} key={version.revision} onClick={() => void selectVersion(version.revision)
           .catch(reason => setError(t('Could not switch drafts:') + message(reason)))}>{version.draft.text.slice(0, 80) || t('Draft with attachments or retained data')}</button>)}
       </details></div> : null}
-      {draft.pendingDrafts?.length ? <div role="status">{new Intl.NumberFormat(locale).format(draft.pendingDrafts.length)} {t('Contents were retained separately to preserve formatting.')} <button type="button" onClick={() => changeDraft(value => activatePending(value, true))}>{t('Switch draft')}</button></div> : null}
+      {draft.pendingDrafts?.length ? <div role="status">{new Intl.NumberFormat(locale).format(draft.pendingDrafts.length)} {t('Contents were retained separately to preserve formatting.')} <button type="button" onClick={() => {
+        if (pendingLink.current) setError(t('Apply or close the link editor first.'));
+        else void changeDraft(value => activatePending(value, true));
+      }}>{t('Switch draft')}</button></div> : null}
       {draft.images.length || draft.files.length || draft.references.length || draft.skills.length ? <div className="standalone-composer__attachments">
         {draft.images.map(image => <div className="standalone-composer__image" key={image.id}>
           {image.previewSrc ? <img src={image.previewSrc} alt={image.name ?? t('Image attachment')} /> : <span>{t('Image preview unavailable')}</span>}
@@ -521,7 +527,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         plainTextMode={plainTextSetting.value} canEdit={() => !frozenRef.current}
         onChange={document => changeDraftFromOperation(value => updateRichDraft(value, document))} onKeyDown={keyDown}
         onCompositionChange={value => setComposition('editor', value)}
-        onPendingLinkChange={value => { pendingLink.current = value; }}
+        onPendingLinkChange={value => { const wasPending = pendingLink.current; pendingLink.current = value; if (wasPending && !value) recheckProjection(); }}
         onCompletionContext={onRichContext} completionListId={completions.query ? completions.listId : undefined}
         completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
         onImages={files => { void addFiles(files); }}

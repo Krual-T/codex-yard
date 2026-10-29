@@ -313,7 +313,7 @@ test('composer drafts commit and recover across isolated renderer pages', {
         assert.deepEqual(queued.description.overrides, {});
         assert.equal((await page.evaluate(s => (window as any).fixture.readComposerDraft(s.owner, s.revision), queued.description)).draft.text, 'queued message');
         await page.evaluate(() => (window as any).fixture.rejectSubmit());
-        await page.getByRole('alert').filter({ hasText: '发送未确认' }).waitFor();
+        await page.getByRole('alert').filter({ hasText: '发送结果：fixture unknown response' }).waitFor();
         assert.equal(await editor.inputValue(), 'queued message');
         assert.equal(await page.evaluate(() => (window as any).fixture.state.submissions.length), 1);
         await page.getByRole('button', { name: '发送到当前任务', exact: true }).click();

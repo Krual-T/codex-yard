@@ -10,7 +10,8 @@ import { EditorView } from 'prosemirror-view';
 import type { ClipboardEvent } from 'react';
 import type { ComposerDocument } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
-import { composerSchema, httpAutolinkHref, readRichDocument, safeRichLinkHref } from './rich-document.ts';
+import { documentChanges } from '../messages/message-edit.ts';
+import { composerSchema, httpAutolinkHref, linkOccurrenceAllocator, readRichDocument, safeRichLinkHref } from './rich-document.ts';
 import { insertRichCompletion, richCompletionContext, richEditorPlugins, syncRichSelection } from './rich-editor-actions.ts';
 import type { RichCompletionContext, RichCompletionQuery } from './rich-editor-actions.ts';
 import type { Completion } from './standalone-completions.tsx';
@@ -274,35 +275,38 @@ function linkOccurrence(editor: EditorView, element: HTMLElement): LinkOccurrenc
   } catch { return null; }
 }
 
-function replaceLink(editor: EditorView, before: LinkOccurrence, label: string, href: string | null): boolean {
+function replaceLink(editor: EditorView, before: LinkOccurrence, label: string, href: string | null): 'saved' | 'stale' | 'unmappable' {
   const current = linkOccurrence(editor, before.element);
   if (!current || current.from !== before.from || current.to !== before.to || current.signature !== before.signature
-    || current.href !== before.href) return false;
+    || current.href !== before.href) return 'stale';
   if (current.node) {
     const replacement = href === null ? composerSchema.text(label, current.node.marks)
       : composerSchema.nodes.richLink!.create({ ...current.node.attrs, displayText: label, href,
         sourceAppId: href === current.href ? current.node.attrs.sourceAppId : '',
-        literalMarkdownSource: null, literalMarkdownOccurrenceId: null, markdownSourceStart: null, markdownSourceEnd: null }, null, current.node.marks);
+        literalMarkdownSource: null, literalMarkdownOccurrenceId: current.node.attrs.literalMarkdownOccurrenceId ?? linkOccurrenceAllocator(editor.state.doc)(),
+        markdownSourceStart: null, markdownSourceEnd: null }, null, current.node.marks);
     editor.dispatch(closeHistory(editor.state.tr.replaceWith(current.from, current.to, replacement)));
   } else if (current.mark) {
-    const oldCharacters = Array.from(current.label), newCharacters = Array.from(label);
-    let prefix = 0, suffix = 0;
-    while (prefix < oldCharacters.length && prefix < newCharacters.length && oldCharacters[prefix] === newCharacters[prefix]) prefix++;
-    while (suffix < oldCharacters.length - prefix && suffix < newCharacters.length - prefix
-      && oldCharacters[oldCharacters.length - 1 - suffix] === newCharacters[newCharacters.length - 1 - suffix]) suffix++;
-    const start = oldCharacters.slice(0, prefix).join('').length, end = oldCharacters.slice(oldCharacters.length - suffix).join('').length;
-    const middle = newCharacters.slice(prefix, newCharacters.length - suffix).join('');
+    const styles: string[] = [];
+    editor.state.doc.nodesBetween(current.from, current.to, (node, position) => {
+      if (!node.isText) return;
+      const text = (node.text ?? '').slice(Math.max(0, current.from - position), Math.min(node.nodeSize, current.to - position));
+      const style = JSON.stringify(node.marks.filter(mark => mark.type.name !== 'link').map(mark => mark.toJSON()));
+      for (const _character of text) styles.push(style);
+    });
+    const changes = documentChanges(current.label, label, styles);
+    if (!changes) return 'unmappable';
     let transaction = editor.state.tr;
-    if (label !== current.label) transaction = transaction.insertText(middle, current.from + start, current.to - end);
+    for (const change of changes.reverse()) transaction = transaction.insertText(change.replacement, current.from + change.start, current.from + change.oldEnd);
     const to = current.from + label.length;
     transaction = transaction.removeMark(current.from, to, composerSchema.marks.link!);
     if (href !== null) transaction = transaction.addMark(current.from, to, composerSchema.marks.link!.create({ ...current.mark.attrs,
       href, sourceAppId: href === current.href ? current.mark.attrs.sourceAppId : null, isAutolink: false, isGeneratedAutolink: false,
-      literalMarkdownSource: null, literalMarkdownOccurrenceId: null }));
+      literalMarkdownSource: null, literalMarkdownOccurrenceId: current.mark.attrs.literalMarkdownOccurrenceId ?? linkOccurrenceAllocator(editor.state.doc)() }));
     editor.dispatch(closeHistory(transaction));
-  } else return false;
+  } else return 'stale';
   editor.dispatch(closeHistory(editor.state.tr));
-  return true;
+  return 'saved';
 }
 
 function textEditorHandle(controls: Map<number, TextControlModel>): StructuredInputEditorHandle {
@@ -490,9 +494,15 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     if (address.trim() && !safe) { setLinkError(t('Enter an HTTP, HTTPS, or mailto link.')); return; }
     const editor = view.current, source = latest.current.currentDocument();
     const document = source && readRichDocument(source);
-    if (!editor || !document || !editor.state.doc.eq(document)
-      || (label !== openedLink.label || safe !== openedLink.href) && !replaceLink(editor, openedLink, label, safe)) {
+    if (!editor || !document || !editor.state.doc.eq(document)) {
       setLinkError(t('This link changed. Open it again before saving.')); return;
+    }
+    if (label !== openedLink.label || safe !== openedLink.href) {
+      const result = replaceLink(editor, openedLink, label, safe);
+      if (result !== 'saved') {
+        setLinkError(t(result === 'unmappable' ? 'This link edit cannot safely preserve formatting.' : 'This link changed. Open it again before saving.'));
+        return;
+      }
     }
     closeRichLink(false); editor.focus();
   };
@@ -515,7 +525,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
       if (position.parent.type.spec.code || !before?.isText || before.marks.some(mark => mark.type.name === 'link')) return false;
       const contents = before.text ?? '', candidate = contents.slice(contents.lastIndexOf(' ') + 1);
       if (!httpAutolinkHref(candidate)) return false;
-      const mark = composerSchema.marks.link!.create({ href: null, sourceAppId: '' });
+      const mark = composerSchema.marks.link!.create({ href: null, sourceAppId: '', literalMarkdownOccurrenceId: linkOccurrenceAllocator(editor.state.doc)() });
       editor.dispatch(editor.state.tr.addMark(from - candidate.length, from, mark).insertText(' ', from));
       return true;
     };
@@ -591,12 +601,21 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
       },
       transformPastedHTML: html => {
         const parsed = new DOMParser().parseFromString(html, 'text/html');
-        for (const element of parsed.querySelectorAll('[data-mention="rich-link"][data-composer-attrs], a[data-composer-attrs], span[data-composer-autolink][data-composer-attrs]')) {
+        const allocate = linkOccurrenceAllocator(editor.state.doc), occurrences = new Map<string, number>();
+        for (const element of parsed.querySelectorAll('[data-mention="rich-link"][data-composer-attrs], a[href], a[data-composer-attrs], span[data-composer-autolink][data-composer-attrs]')) {
           try {
-            const attrs: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
+            const attrs: unknown = element.hasAttribute('data-composer-attrs')
+              ? JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null')
+              : { href: element.getAttribute('href'), title: element.getAttribute('title') };
             if (!attrs || typeof attrs !== 'object' || Array.isArray(attrs)) continue;
             const copied = { ...attrs } as Record<string, unknown>;
+            const previous = copied.literalMarkdownOccurrenceId;
+            const key = element.matches('[data-mention="rich-link"]') || !Number.isSafeInteger(previous) || Number(previous) < 0
+              ? null : JSON.stringify(copied);
+            const occurrence = key === null ? allocate() : occurrences.get(key) ?? allocate();
+            if (key !== null) occurrences.set(key, occurrence);
             for (const key of ['literalMarkdownSource', 'literalMarkdownOccurrenceId', 'markdownSourceStart', 'markdownSourceEnd', 'isLoading', 'loadingDisplayText']) delete copied[key];
+            copied.literalMarkdownOccurrenceId = occurrence;
             element.setAttribute('data-composer-attrs', JSON.stringify(copied));
           } catch { /* Invalid clipboard data is rejected by handlePaste. */ }
         }
@@ -664,7 +683,8 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         if (!safe) { setLinkError(t('Enter an HTTP, HTTPS, or mailto link.')); return; }
         if (editor && type && editable() && !editor.state.selection.empty) {
           const { from, to } = editor.state.selection;
-          editor.dispatch(editor.state.tr.addMark(from, to, type.create({ href: safe })));
+          editor.dispatch(closeHistory(editor.state.tr.addMark(from, to, type.create({ href: safe, literalMarkdownOccurrenceId: linkOccurrenceAllocator(editor.state.doc)() }))));
+          editor.dispatch(closeHistory(editor.state.tr));
           props.onPendingLinkChange?.(false); setLinkOpen(false); setHref(''); setLinkError(''); editor.focus();
         }
       }}><input aria-label={t('Link address')} aria-invalid={!!linkError} value={href} disabled={props.readOnly}

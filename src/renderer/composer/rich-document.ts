@@ -34,6 +34,23 @@ export function httpAutolinkHref(value: string): string | null {
   } catch { return null; }
 }
 
+/** Allocate identities only for explicitly created or copied link occurrences. */
+export function linkOccurrenceAllocator(document: ProseMirrorNode): () => number {
+  const used = new Set<number>();
+  document.descendants(node => {
+    const ids = [node.type.name === 'richLink' ? node.attrs.literalMarkdownOccurrenceId : null,
+      ...node.marks.filter(mark => mark.type.name === 'link').map(mark => mark.attrs.literalMarkdownOccurrenceId)];
+    for (const id of ids) if (typeof id === 'number' && Number.isSafeInteger(id) && id >= 0) used.add(id);
+  });
+  let next = 0;
+  return () => {
+    while (used.has(next)) next++;
+    const id = next++;
+    used.add(id);
+    return id;
+  };
+}
+
 /** The supported subset uses the names and attributes of retained composer documents. */
 export const composerSchema = new Schema({
   nodes: {

@@ -278,7 +278,9 @@ test('the main composer edits ordered input, retains attachments and survives re
     });
     await page.waitForFunction(() => document.querySelectorAll('[data-mention="rich-link"]').length === 3);
     const pasted = JSON.parse((await links.nth(2).getAttribute('data-composer-attrs'))!);
-    assert.equal(pasted.literalMarkdownSource, null); assert.equal(pasted.literalMarkdownOccurrenceId, null);
+    assert.equal(pasted.literalMarkdownSource, null);
+    assert.ok(Number.isInteger(pasted.literalMarkdownOccurrenceId));
+    assert.ok(![2, 3].includes(pasted.literalMarkdownOccurrenceId));
     assert.equal(pasted.markdownSourceStart, null); assert.equal(pasted.markdownSourceEnd, null);
     await rich.press('Control+z');
     await page.waitForFunction(() => document.querySelectorAll('[data-mention="rich-link"]').length === 2);

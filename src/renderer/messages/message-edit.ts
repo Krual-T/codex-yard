@@ -151,19 +151,25 @@ function adjustTextElements(entry: Record<string, unknown>, before: string, afte
 
 type TextLeaf = { node: ComposerDocument; start: number; end: number };
 
-type DocumentChange = { start: number; oldEnd: number; replacement: string };
+export type DocumentChange = { start: number; oldEnd: number; replacement: string };
 
-function documentChanges(before: string, after: string): DocumentChange[] | null {
-  const outer = textChange(before, after);
-  const old = Array.from(before.slice(outer.start, outer.oldEnd));
-  const updated = Array.from(after.slice(outer.start, outer.newEnd));
-  if ((old.length + 1) * (updated.length + 1) > 1_000_000) return null;
+function lcsScores(old: string[], updated: string[]): Uint32Array {
   const width = updated.length + 1;
   const scores = new Uint32Array((old.length + 1) * width);
   for (let i = old.length - 1; i >= 0; i--) for (let j = updated.length - 1; j >= 0; j--) {
     scores[i * width + j] = old[i] === updated[j] ? scores[(i + 1) * width + j + 1]! + 1
       : Math.max(scores[(i + 1) * width + j]!, scores[i * width + j + 1]!);
   }
+  return scores;
+}
+
+export function documentChanges(before: string, after: string, retainedStyles?: readonly string[]): DocumentChange[] | null {
+  const outer = textChange(before, after);
+  const old = Array.from(before.slice(outer.start, outer.oldEnd));
+  const updated = Array.from(after.slice(outer.start, outer.newEnd));
+  if ((old.length + 1) * (updated.length + 1) > 1_000_000) return null;
+  const width = updated.length + 1;
+  const scores = lcsScores(old, updated);
   const changes: DocumentChange[] = [];
   let i = 0, j = 0, position = outer.start;
   let current: DocumentChange | null = null;
@@ -178,6 +184,32 @@ function documentChanges(before: string, after: string): DocumentChange[] | null
     } else { current.replacement += updated[j]!; j++; }
   }
   finish();
+  if (retainedStyles && changes.some(change => change.start !== change.oldEnd)) {
+    const fullOld = Array.from(before), fullNew = Array.from(after);
+    if (retainedStyles.length !== fullOld.length) return null;
+    const stylesByCharacter = new Map<string, string>();
+    const possiblyAmbiguous = fullOld.some((character, index) => {
+      const style = retainedStyles[index]!, previous = stylesByCharacter.get(character);
+      stylesByCharacter.set(character, style);
+      return previous !== undefined && previous !== style;
+    });
+    if (possiblyAmbiguous) {
+      const fullWidth = fullNew.length + 1;
+      if ((fullOld.length + 1) * fullWidth > 1_000_000) return null;
+      // A whole-field edit cannot identify which equally matching styled character survived.
+      const suffix = lcsScores(fullOld, fullNew), prefix = lcsScores([...fullOld].reverse(), [...fullNew].reverse());
+      const best = suffix[0]!;
+      for (let j = 0; j < fullNew.length; j++) {
+        let style: string | undefined;
+        for (let i = 0; i < fullOld.length; i++) {
+          if (fullOld[i] !== fullNew[j] || prefix[(fullOld.length - i) * fullWidth + fullNew.length - j]!
+            + 1 + suffix[(i + 1) * fullWidth + j + 1]! !== best) continue;
+          if (style !== undefined && style !== retainedStyles[i]) return null;
+          style = retainedStyles[i];
+        }
+      }
+    }
+  }
   return changes;
 }
 
