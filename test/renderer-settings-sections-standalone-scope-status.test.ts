@@ -95,11 +95,16 @@ test('settings waits for host-bound scope and retains pending hook and skill edi
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     const main = page.getByRole('main');
     const idle = () => page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    const openSkills = async (target = page) => {
+      await target.getByRole('searchbox', { name: 'Search settings' }).fill('Skills');
+      await target.locator('[aria-label="Settings search results"]').getByRole('button', { name: 'Skills', exact: true }).click();
+    };
     const scopedCalls = () => page.evaluate(() => window.scopeStatusHarness.calls.filter(call =>
       ['hooks/list', 'skills/list', 'plugin/list', 'plugin/installed'].includes(call.method)));
 
     for (const section of ['Hooks', 'Skills', 'Plugins']) {
-      await page.getByRole('button', { name: section, exact: true }).click();
+      if (section === 'Skills') await openSkills();
+      else await page.getByRole('button', { name: section, exact: true }).click();
       await main.getByRole('status').waitFor();
       await idle();
       assert.deepEqual(await scopedCalls(), []);
@@ -123,7 +128,7 @@ test('settings waits for host-bound scope and retains pending hook and skill edi
     await page.evaluate(() => window.scopeStatusHarness.setScope({ hostId: 'local', paths: ['/fixture/local'] }, null));
     await page.getByRole('checkbox', { name: 'SessionStart hook 1' }).waitFor();
     await page.waitForFunction(() => window.scopeStatusHarness.calls.some(call => call.method === 'hooks/list'));
-    await page.getByRole('button', { name: 'Skills', exact: true }).click();
+    await openSkills();
     await page.getByRole('checkbox', { name: 'review (repo, /fixture/review/SKILL.md)' }).waitFor();
     await page.getByRole('button', { name: 'Plugins', exact: true }).click();
     await main.getByText('No installed plugins.').waitFor();
@@ -174,7 +179,7 @@ test('settings waits for host-bound scope and retains pending hook and skill edi
     skillPage.on('pageerror', error => errors.push(error.message));
     await skillPage.goto('http://settings-fixture.invalid/');
     await skillPage.addScriptTag({ content: bundle.outputFiles[0]!.text });
-    await skillPage.getByRole('button', { name: 'Skills', exact: true }).click();
+    await openSkills(skillPage);
     await skillPage.evaluate(() => window.scopeStatusHarness.setStatus('ready'));
     const skill = skillPage.getByRole('checkbox', { name: 'review (repo, /fixture/review/SKILL.md)' });
     await skill.waitFor();
