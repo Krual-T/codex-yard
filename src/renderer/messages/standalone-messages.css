@@ -74,6 +74,9 @@
 .yard-markdown th { background: var(--yard-surface, #eef2f1); }
 .yard-markdown a, .yard-file-link { color: color-mix(in srgb, var(--yard-accent, #086f70) 70%, var(--yard-fg, #202524)); text-decoration: underline; overflow-wrap: anywhere; }
 .yard-file-link { display: inline; padding: 0; border: 0; background: none; cursor: pointer; font: inherit; text-align: left; }
+.yard-markdown .yard-markdown-file-link { color: var(--yard-info, #0084ff); text-decoration: none; }
+.yard-markdown .yard-markdown-file-link:hover { text-decoration: underline; }
+.yard-markdown-file-icon { display: inline-block; vertical-align: -2px; margin-right: 3px; }
 .yard-markdown :not(pre) > code { padding: .1em .3em; border-radius: 3px; background: var(--yard-surface, #eef2f1); font-family: var(--yard-code-font, ui-monospace, monospace); font-size: var(--yard-code-size, 12px); }
 .yard-markdown .contains-task-list { padding-left: 1.4em; list-style: none; }
 .yard-markdown .task-list-item input { margin-left: -1.35em; margin-right: .4em; }

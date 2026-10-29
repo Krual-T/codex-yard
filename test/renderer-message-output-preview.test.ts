@@ -136,7 +136,7 @@ async function pending(page: Page, count: number) {
   await page.waitForFunction(n => window.outputHarness.calls.pending.length === n, count);
 }
 
-test('only actual inline file citations get the file icon and original link treatment',
+test('local Markdown files retain the original icon and link treatment',
   { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
     const { page, errors } = await newPage();
     try {
@@ -145,39 +145,41 @@ test('only actual inline file citations get the file icon and original link trea
       await page.evaluate(text => window.outputHarness.render({ status: 'inProgress', texts: [text] }), text);
       const file = page.getByRole('button', { name: 'report.md', exact: true });
       const ordinary = page.getByRole('button', { name: 'ordinary', exact: true });
-      await file.locator('.yard-citation-icon svg.lucide-file').waitFor();
-      assert.equal(await page.locator('.yard-citation-icon').count(), 1);
-      assert.equal(await ordinary.locator('.yard-citation-icon').count(), 0);
+      await file.locator('svg.yard-markdown-file-icon').waitFor();
+      assert.equal(await page.locator('.yard-markdown-file-icon').count(), 2);
+      assert.equal(await ordinary.locator('.yard-markdown-file-icon').count(), 1);
       assert.equal(await page.getByRole('link', { name: 'external', exact: true }).count(), 1);
       const styles = await file.evaluate(element => ({ color: getComputedStyle(element).color,
         decoration: getComputedStyle(element).textDecorationLine }));
       assert.deepEqual(styles, { color: 'rgb(0, 132, 255)', decoration: 'none' });
-      assert.equal(await ordinary.evaluate(element => getComputedStyle(element).textDecorationLine), 'underline');
+      // The original gUqh9f page gives ordinary local file links the same treatment.
+      assert.equal(await ordinary.evaluate(element => getComputedStyle(element).textDecorationLine), 'none');
       await file.click();
       assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.opens), [{hostId:'ssh-one',cwd:'/work',path:'/work/report.md'}]);
       await page.evaluate(text => window.outputHarness.render({ status: 'inProgress', texts: [text], host: 'ssh-two', cwd: '/other' }), text);
-      await file.locator('.yard-citation-icon svg.lucide-file').waitFor({ timeout: 3_000 });
+      await file.locator('svg.yard-markdown-file-icon').waitFor({ timeout: 3_000 });
       await file.click();
       assert.deepEqual((await page.evaluate(() => window.outputHarness.calls.opens))[1],
         {hostId:'ssh-two',cwd:'/other',path:'/other/report.md'});
       await page.evaluate(text => window.outputHarness.render({ status: 'inProgress', texts: [text] }),
         `${text} ${citation('other.pdf', 'source')}`);
-      await page.waitForFunction(() => document.querySelectorAll('.yard-citation-icon svg.lucide-file').length === 2);
-      assert.equal(await page.locator('.yard-citation-icon').count(), 2);
+      await page.waitForFunction(() => document.querySelectorAll('.yard-markdown-file-icon').length === 3);
+      assert.equal(await page.locator('.yard-markdown-file-icon').count(), 3);
       assert.equal((await page.evaluate(() => window.outputHarness.calls.pending)).length, 0);
 
       await page.evaluate(text => window.outputHarness.renderBasicHtml(text),
         `[ordinary](notes.md) <a href="notes.md"><span class="yard-citation-icon">forged</span></a> ${citation('report.md')}`);
       await page.getByRole('button', { name: 'report.md', exact: true }).waitFor();
       assert.equal(await page.locator('.yard-citation-icon').count(), 0);
+      assert.equal(await page.locator('.yard-markdown-file-icon').count(), 3);
       await page.getByRole('button', { name: 'report.md', exact: true }).click();
       assert.equal((await page.evaluate(() => window.outputHarness.calls.opens)).length, 3);
 
       await page.evaluate(text => window.outputHarness.renderStandaloneMarkdown(text), citation('standalone.md'));
       const standalone = page.getByRole('button', { name: 'standalone.md', exact: true });
       await standalone.waitFor();
-      assert.equal(await standalone.locator('svg').count(), 0);
-      assert.equal(await standalone.evaluate(element => getComputedStyle(element).textDecorationLine), 'underline');
+      assert.equal(await standalone.locator('svg').count(), 1);
+      assert.equal(await standalone.evaluate(element => getComputedStyle(element).textDecorationLine), 'none');
       assert.deepEqual(errors, []);
     } finally { await page.close(); }
   });

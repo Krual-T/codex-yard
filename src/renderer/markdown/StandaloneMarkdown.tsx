@@ -1,6 +1,6 @@
 import { Children, isValidElement, useEffect, useId, useMemo, useState } from 'react';
 import type { ComponentProps, ReactNode } from 'react';
-import { Check, Clipboard, Code2, Eye } from 'lucide-react';
+import { Check, Clipboard, Code2, Eye, File } from 'lucide-react';
 import Markdown from 'react-markdown';
 import type { Components, UrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -143,7 +143,7 @@ export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowB
           onOpenBrowser({ hostId, threadId, url: external, source: 'link' });
         }}>{children}</a>;
       if (!onOpenFile && !onOpenFileAt) return <span>{children}</span>;
-      return <button type="button" className="yard-file-link" onClick={() => {
+      return <button type="button" className="yard-file-link yard-markdown-file-link" onClick={() => {
         const location = resolveFileLocation(href, cwd, hostId);
         const encodedPath = href.replace(/#L[1-9]\d*(?:C[1-9]\d*)?(?:-L[1-9]\d*(?:C[1-9]\d*)?)?$/i, '');
         try {
@@ -151,7 +151,7 @@ export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowB
           if (/^(?:[a-z]:[\\/]|\\\\)/i.test(decodedPath)) location.path = resolveToolFileLocation(decodedPath, cwd, hostId).path;
         } catch { /* resolveFileLocation preserves malformed links */ }
         if (onOpenFileAt) onOpenFileAt(location); else onOpenFile?.(location.path);
-      }}>{children}</button>;
+      }}><File className="yard-markdown-file-icon" size={13} strokeWidth={1.5} aria-hidden="true" />{children}</button>;
     },
     img: ({ src, alt }) => {
       if (typeof src !== 'string' || !src) return <span>Image unavailable</span>;
