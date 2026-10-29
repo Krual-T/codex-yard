@@ -28,6 +28,7 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
     beforeStart?(fake: Awaited<ReturnType<typeof createFakeCodex>>, root: string): Promise<void> } = {}) {
   const root = await mkdtemp('/tmp/aw-native-test-');
   const fake = await createFakeCodex(root);
+  fake.handlers.set('initialize', () => ({ userAgent: 'disposable-codex-fixture', codexHome: join(root, 'codex') }));
   const fileRpc = fileDaemonFixture();
   for (const method of fileMethods) fake.handlers.set(method, params => fileRpc(method, record(params)));
   const { renderer, adapterPath } = await nativeFixture(root);
