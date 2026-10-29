@@ -14,7 +14,8 @@ if (!artifactRoot) throw new Error('Set YARD_TEST_ARTIFACTS to an isolated evide
 const selectedScenarios = process.env.YARD_PARENT_SCENARIOS?.split(',').filter(Boolean);
 const knownScenarios = new Set(['file-loading-and-drain', 'home-target-lease', 'visualization-source-retained',
   'browser-reference-retry', 'browser-reference-changed-draft', 'browser-reference-owner-guard', 'confirmed-send', 'deleted-reference-ime',
-  'pending-deletion-after-ime', 'pending-deletion-composition-end-only']);
+  'pending-deletion-after-ime', 'pending-deletion-composition-end-only', 'pending-deletion-independent-text',
+  'pending-deletion-different-reference']);
 if (selectedScenarios && (!selectedScenarios.length || selectedScenarios.some(name => !knownScenarios.has(name)))) {
   throw new Error('YARD_PARENT_SCENARIOS must name at least one known scenario.');
 }
@@ -70,7 +71,8 @@ fake.handlers.set('turn/start', async params => {
 });
 const fileRpc = fileDaemonFixture();
 for (const method of fileMethods) fake.handlers.set(method, params => fileRpc(method, record(params)));
-for (const name of ['loading', 'other', 'viz', 'retry', 'retry-changed', 'retry-owner', 'send', 'ime', 'ime-pending', 'ime-end']) {
+for (const name of ['loading', 'other', 'viz', 'retry', 'retry-changed', 'retry-owner', 'send', 'ime', 'ime-pending', 'ime-end',
+  'ime-conflict-text', 'ime-conflict-ref']) {
   fake.threads.set(name, fixtureThread(name, localRoot, { name: `Parent ${name}`,
     turns: [fixtureTurn('turn-' + name, [agentItem('message-' + name, 'Parent fixture ' + name)])] }));
 }
@@ -87,13 +89,18 @@ await writeFile(join(runtime, 'data/projects.json'), JSON.stringify([
 ]));
 
 const entries: Record<string, unknown[]> = {};
-for (const name of ['retry', 'retry-changed', 'retry-owner', 'send', 'ime', 'ime-pending', 'ime-end']) {
+for (const name of ['retry', 'retry-changed', 'retry-owner', 'send', 'ime', 'ime-pending', 'ime-end', 'ime-conflict-text', 'ime-conflict-ref']) {
   const owner = { hostId: 'local', threadId: name, draftId: name };
   const key = 'codex-yard.browser-owner.v1:' + JSON.stringify([owner.hostId, owner.threadId, owner.draftId]);
   entries[key] = [{ type: 'comment', origin: 'browser', content: [{ content_type: 'text', text: `Fixture ${name} comment` }],
     position: { side: 'right', path: 'browser:synthetic', line: 1 },
     localBrowserContext: { pageUrl: 'http://127.0.0.1/synthetic', targetDescription: `Fixture ${name} reference` },
     localBrowserCommentMetadata: { commentId: `comment-${name}`, kind: 'element', hasAnnotationFeatures: true } }];
+  if (name === 'ime-conflict-ref') entries[key]!.push({ type: 'comment', origin: 'browser',
+    content: [{ content_type: 'text', text: 'Fixture alternate comment' }],
+    position: { side: 'right', path: 'browser:alternate', line: 2 },
+    localBrowserContext: { pageUrl: 'http://127.0.0.1/alternate', targetDescription: 'Fixture alternate reference' },
+    localBrowserCommentMetadata: { commentId: 'comment-ime-conflict-ref-alternate', kind: 'element', hasAnnotationFeatures: true } });
 }
 const seed = { 'codex-yard.browser-comments.v1': { version: 1, legacyRaw: null, entries } };
 const browser: BrowserContext = await chromium.launchPersistentContext(join(runtime, 'browser'), {
@@ -270,6 +277,133 @@ async function readAtoms(page: Page): Promise<Record<string, unknown>> {
       tx.oncomplete = () => db.close();
     };
   }));
+}
+async function activeVersions(page: Page, threadId: string) {
+  const atoms = await readAtoms(page), repository = record(atoms['codex-yard.composer-drafts.v3']);
+  return Object.values(record(repository.entries)).flatMap(entry => {
+    const versions = record(entry).versions;
+    return Array.isArray(versions) ? versions.map(record).filter(version => {
+      const owner = record(version.owner);
+      return owner.hostId === 'local' && owner.threadId === threadId && owner.draftId === threadId;
+    }).map(version => ({ revision: version.revision, draft: version.draft })) : [];
+  });
+}
+async function waitForVersion(page: Page, threadId: string, text: string, reference: string | null) {
+  await page.waitForFunction(async expected => {
+    const raw = await new Promise<unknown>((resolve, reject) => {
+      const open = indexedDB.open('codex-yard.ui-atoms.v1', 1);
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result, tx = db.transaction('atoms', 'readonly'), request = tx.objectStore('atoms').get('native-atoms');
+        request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+        tx.oncomplete = () => db.close();
+      };
+    });
+    const obj = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown> : {};
+    const entries = obj(obj(obj(raw).atoms)['codex-yard.composer-drafts.v3']).entries;
+    const versions = Object.values(obj(entries)).flatMap(entry => Array.isArray(obj(entry).versions) ? obj(entry).versions as unknown[] : []);
+    const matching = versions.map(obj).filter(version => {
+      const owner = obj(version.owner), draft = obj(version.draft);
+      return owner.hostId === 'local' && owner.threadId === expected.threadId && owner.draftId === expected.threadId
+        && draft.text === expected.text && (expected.reference === null || JSON.stringify(draft.references).includes(expected.reference));
+    });
+    return matching.length === 1;
+  }, { threadId, text, reference });
+}
+async function holdDeletionReads(page: Page, threadId: string) {
+  await page.evaluate(threadId => {
+    const state = { fired: 0, holding: true };
+    (window as unknown as { parentFault: typeof state }).parentFault = state;
+    const originalGet = IDBObjectStore.prototype.get;
+    IDBObjectStore.prototype.get = function (...args: Parameters<IDBObjectStore['get']>) {
+      const request = originalGet.apply(this, args);
+      if ((new Error().stack ?? '').includes('readComposerDraftVersions')) {
+        request.addEventListener('success', () => {
+          const root = request.result as { atoms?: Record<string, unknown> } | undefined;
+          const comments = root?.atoms?.['codex-yard.browser-comments.v1'];
+          const deleted = comments && typeof comments === 'object' ? (comments as Record<string, unknown>)['codex-yard.browser-deletions.v1'] : undefined;
+          if (state.holding && JSON.stringify(deleted ?? null).includes(`comment-${threadId}`)) {
+            state.fired++; request.transaction?.abort();
+          }
+        }, { once: true });
+      }
+      return request;
+    };
+  }, threadId);
+}
+
+async function conflictingDeletion(name: 'ime-conflict-text' | 'ime-conflict-ref') {
+  const first = await newPage('/local/' + name); await ready(first, name);
+  let second: Page | undefined;
+  try {
+    await first.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
+    const primary = first.getByRole('listitem').filter({ hasText: `Fixture ${name} reference` });
+    await primary.getByRole('button', { name: '添加到草稿', exact: true }).click();
+    const chip = first.locator('.standalone-composer__reference').filter({ hasText: `Fixture ${name} reference` });
+    await chip.waitFor();
+    if (name === 'ime-conflict-ref') {
+      const alternate = first.getByRole('listitem').filter({ hasText: 'Fixture alternate reference' });
+      await alternate.getByRole('button', { name: '添加到草稿', exact: true }).click();
+      await first.locator('.standalone-composer__reference').filter({ hasText: 'Fixture alternate reference' }).waitFor();
+    }
+    const original = await activeVersions(first, name);
+    assert.equal(original.length, 1);
+    second = await newPage('/local/' + name); await ready(second, name); active.page = first;
+    const otherChip = second.locator('.standalone-composer__reference').filter({ hasText: `Fixture ${name} reference` });
+    await otherChip.waitFor();
+    const input = first.getByRole('textbox', { name: 'Work with Codex', exact: true });
+    await input.dispatchEvent('compositionstart', { data: 'a' });
+    await holdDeletionReads(first, name);
+    await otherChip.getByRole('button', { name: 'Remove reference', exact: true }).click();
+    await otherChip.waitFor({ state: 'hidden' });
+    await first.waitForFunction(() => (window as unknown as { parentFault?: { fired: number } }).parentFault?.fired);
+    assert.equal(await chip.isVisible(), true);
+    const otherInput = second.getByRole('textbox', { name: 'Work with Codex', exact: true });
+    if (name === 'ime-conflict-text') {
+      await otherInput.fill('INDEPENDENT_OTHER_PAGE_TEXT');
+      await waitForVersion(second, name, 'INDEPENDENT_OTHER_PAGE_TEXT', null);
+    } else {
+      await second.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
+      const alternate = second.getByRole('listitem').filter({ hasText: 'Fixture alternate reference' });
+      await alternate.getByRole('textbox', { name: '浏览器引用批注', exact: true }).fill('INDEPENDENT_CHANGED_COMMENT');
+      await alternate.getByRole('button', { name: '保存批注', exact: true }).click();
+      await second.locator('.standalone-composer__reference').filter({ hasText: 'INDEPENDENT_CHANGED_COMMENT' }).waitFor();
+      await waitForVersion(second, name, '', 'INDEPENDENT_CHANGED_COMMENT');
+    }
+    const before = await activeVersions(second, name);
+    assert.equal(before.length, 1, 'The competing durable version must be unique before retry.');
+    if (name === 'ime-conflict-ref') {
+      const initialReferences = record(original[0]!.draft).references, changedReferences = record(before[0]!.draft).references;
+      assert(Array.isArray(initialReferences) && Array.isArray(changedReferences));
+      const originalAlternate = initialReferences.map(record).find(reference => String(reference.id).includes('comment-ime-conflict-ref-alternate'));
+      assert(originalAlternate && changedReferences.length === 1);
+      assert.equal(record(changedReferences[0]).id, originalAlternate.id);
+      assert.notDeepEqual(changedReferences[0], originalAlternate, 'The same reference id must carry different complete content.');
+    }
+    await writeFile(join(artifacts, name + '-before.json'), JSON.stringify({ original, before }, null, 2));
+    assert.equal(await chip.isVisible(), true, 'The original projection must remain until the retry.');
+    const conflictAlert = first.getByRole('alert').filter({ hasText: '草稿版本已改变，请核对后重试。' });
+    assert.equal(await conflictAlert.count(), 0, 'The rejection must be observed after the composition-end retry.');
+    await first.evaluate(() => { (window as unknown as { parentFault: { holding: boolean } }).parentFault.holding = false; });
+    await input.dispatchEvent('compositionend', { data: 'a' });
+    await conflictAlert.waitFor();
+    assert.equal(await chip.isVisible(), true, 'A different complete draft must not be silently adopted.');
+    assert.equal(await input.inputValue(), '');
+    if (name === 'ime-conflict-text') assert.equal(await otherInput.inputValue(), 'INDEPENDENT_OTHER_PAGE_TEXT');
+    else {
+      assert.equal(await first.locator('.standalone-composer__reference').filter({ hasText: 'Fixture alternate comment' }).isVisible(), true);
+      assert.equal(await second.locator('.standalone-composer__reference').filter({ hasText: 'INDEPENDENT_CHANGED_COMMENT' }).isVisible(), true);
+    }
+    const after = await activeVersions(second, name);
+    assert.deepEqual(after, before, 'A rejected retry must preserve the competing durable version.');
+    const fault = await first.evaluate(() => (window as unknown as { parentFault: { fired: number; holding: boolean } }).parentFault);
+    assert(fault.fired >= 1 && !fault.holding);
+    await writeFile(join(artifacts, name + '-evidence.json'), JSON.stringify({ fault, original, before, after }, null, 2));
+  } finally {
+    if (second && !second.isClosed()) await second.close();
+    if (!first.isClosed() && currentPage() !== first) await first.close();
+  }
 }
 
 try {
@@ -510,9 +644,15 @@ try {
       const input = first.getByRole('textbox', { name: 'Work with Codex', exact: true });
       await input.dispatchEvent('compositionstart', { data: 'a' });
       await first.evaluate(() => {
-        const state = { fired: 0 };
+        const state = { fired: 0, inputEvents: 0, trackWrites: false, rootWrites: 0 };
         (window as unknown as { parentFault: typeof state }).parentFault = state;
+        window.addEventListener('input', () => { state.inputEvents++; });
         const get = IDBObjectStore.prototype.get;
+        const put = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function (...args: Parameters<IDBObjectStore['put']>) {
+          if (state.trackWrites && this.name === 'atoms' && args[1] === 'native-atoms') state.rootWrites++;
+          return put.apply(this, args);
+        };
         IDBObjectStore.prototype.get = function (...args: Parameters<IDBObjectStore['get']>) {
           const request = get.apply(this, args);
           if ((new Error().stack ?? '').includes('readComposerDraftVersions')) {
@@ -532,6 +672,10 @@ try {
       await otherChip.waitFor({ state: 'hidden' });
       await first.waitForFunction(() => (window as unknown as { parentFault?: { fired: number } }).parentFault?.fired === 1);
       assert.equal(await chip.isVisible(), true, 'The pending reference must remain while composing.');
+      const beforeRetry = await activeVersions(second, 'ime-end');
+      assert.equal(beforeRetry.length, 1);
+      assert.deepEqual(record(beforeRetry[0]!.draft).references, []);
+      await first.evaluate(() => { (window as unknown as { parentFault: { trackWrites: boolean } }).parentFault.trackWrites = true; });
       await input.dispatchEvent('compositionend', { data: 'a' });
       try { await chip.waitFor({ state: 'hidden' }); }
       catch (failure) {
@@ -542,11 +686,23 @@ try {
         throw failure;
       }
       assert.equal(await input.evaluate(element => element.closest('[inert]') !== null), false);
+      const afterRetry = await activeVersions(first, 'ime-end');
+      assert.deepEqual(afterRetry, beforeRetry, 'The exact committed deletion must be adopted without another draft write.');
+      const fault = await first.evaluate(() => (window as unknown as {
+        parentFault: { fired: number; inputEvents: number; rootWrites: number }
+      }).parentFault);
+      assert.equal(fault.fired, 1);
+      assert.equal(fault.inputEvents, 0, 'No later input event may trigger this recovery.');
+      assert.equal(fault.rootWrites, 0, 'Adopting the committed deletion must not write the root again.');
+      await writeFile(join(artifacts, 'pending-deletion-composition-end-only-evidence.json'),
+        JSON.stringify({ fault, beforeRetry, afterRetry }, null, 2));
     } finally {
       if (second && !second.isClosed()) await second.close();
       if (!first.isClosed() && currentPage() !== first) await first.close();
     }
   });
+  await scenario('pending-deletion-independent-text', () => conflictingDeletion('ime-conflict-text'));
+  await scenario('pending-deletion-different-reference', () => conflictingDeletion('ime-conflict-ref'));
 } finally {
   loading.resolve(); turn.resolve();
   await browser.close(); await app.close(); await fake.close(); await remote.close();
