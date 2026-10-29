@@ -45,6 +45,15 @@ test('the owned client isolates host requests and never replays them after disco
   const first = sockets[0]!;
   first.open();
   await opening;
+  let authority = 1;
+  const captured = authority;
+  const assertBeforeSend = () => { if (authority !== captured) throw new Error('The original authority changed.'); };
+  const oldRpc = client.rpc('turn/start', { threadId: 'same-thread' }, 'local', { assertBeforeSend });
+  const oldHost = client.host('conversation-edit', { threadId: 'same-thread' }, { assertBeforeSend });
+  authority++;
+  for (const pending of [oldRpc, oldHost]) await assert.rejects(pending, (error: unknown) =>
+    error instanceof WorkbenchError && !error.uncertain && error.sendPhase === 'before-send');
+  assert.deepEqual(first.sent, [{ type: 'ready' }], 'neither write passed the connection wait under a newer authority');
   const local = client.rpc('turn/start', { threadId: 'same-thread' }, 'local');
   const remote = client.rpc('turn/start', { threadId: 'same-thread' }, 'remote-ssh:fixture');
   const read = client.rpc('thread/read', { threadId: 'same-thread' }, 'remote-ssh:fixture');

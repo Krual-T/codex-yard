@@ -2,7 +2,7 @@ import { BrowserFiles } from '../../native/browser-files.ts';
 import { readMethods } from '../../native/protocol.ts';
 import type { HostMessage } from '../../native/protocol.ts';
 import type { LateRpcTerminal, RequestOptions } from '../../../lib/codex-protocol.ts';
-import type { ServerRequestEvent, ServerRequestRef, WorkbenchClient, WorkbenchEvent } from '../workbench-contract.ts';
+import type { ServerRequestEvent, ServerRequestRef, WorkbenchClient, WorkbenchDispatchOptions, WorkbenchEvent } from '../workbench-contract.ts';
 import { browserAtom } from './browser-atoms.ts';
 import { subscribeBrowserAtoms } from '../storage/ui-atoms.ts';
 
@@ -139,12 +139,19 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
     }
   }
   private async request<T>(message: HostMessage, id: string, mutating: boolean, requireOpen = false,
-    observation?: { onLateTerminal?: RequestOptions['onLateTerminal']; onResult?: (value: unknown) => void }): Promise<T> {
+    observation?: { onLateTerminal?: RequestOptions['onLateTerminal']; onResult?: (value: unknown) => void }, assertBeforeSend?: () => void): Promise<T> {
     let payload: string, socket: WebSocket;
+    const originalSocket = this.socket;
     try {
       payload = JSON.stringify(message);
+      if (assertBeforeSend) {
+        assertBeforeSend();
+        if (originalSocket?.readyState !== WebSocket.OPEN) throw new WorkbenchError('原页面连接已断开，未发送。');
+      }
       if (!requireOpen) await this.connect();
       if (this.socket?.readyState !== WebSocket.OPEN) throw new WorkbenchError('页面连接已断开。');
+      assertBeforeSend?.();
+      if (assertBeforeSend && this.socket !== originalSocket) throw new WorkbenchError('原页面连接已改变，未发送。');
       socket = this.socket;
     } catch (failure) {
       throw new WorkbenchError(failure instanceof Error ? failure.message : String(failure), false,
@@ -158,7 +165,7 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
       catch { this.settle(id, undefined, new WorkbenchError('请求发送失败。', mutating)); }
     });
   }
-  rpc<T = unknown>(method: string, params: Record<string, unknown> = {}, hostId = 'local', options?: Pick<RequestOptions, 'onLateTerminal'>) {
+  rpc<T = unknown>(method: string, params: Record<string, unknown> = {}, hostId = 'local', options?: WorkbenchDispatchOptions) {
     if (options?.onLateTerminal && !['thread/resume', 'thread/unsubscribe'].includes(method)) return Promise.reject<T>(new Error('Late observation is limited to thread subscription requests.'));
     const id = crypto.randomUUID();
     return this.request<T>({ type: 'mcp-request', hostId, observeSubscriptionTerminal: Boolean(options?.onLateTerminal), request: { id, method, params } }, id, !readMethods.has(method), false,
@@ -166,9 +173,9 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
         // Emit while the original bridge's reply is being settled, before any
         // caller awaits persistence or navigation and the connection can change.
         if (record(result) && record(result.thread) && typeof result.thread.id === 'string') this.publish({ type: 'thread-created', hostId, result });
-      } : undefined });
+      } : undefined }, options?.assertBeforeSend);
   }
-  host<T = unknown>(endpoint: string, params: Record<string, unknown> = {}): Promise<T> {
+  host<T = unknown>(endpoint: string, params: Record<string, unknown> = {}, options?: Pick<WorkbenchDispatchOptions, 'assertBeforeSend'>): Promise<T> {
     if (endpoint === 'get-persisted-atom' || endpoint === 'set-persisted-atom') {
       return browserAtom(endpoint, params) as Promise<T>;
     }
@@ -180,12 +187,12 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
         });
       });
     }
-    return this.rawHost<T>(endpoint, params);
+    return this.rawHost<T>(endpoint, params, options?.assertBeforeSend);
   }
-  private rawHost<T = unknown>(endpoint: string, params: Record<string, unknown> = {}) {
+  private rawHost<T = unknown>(endpoint: string, params: Record<string, unknown> = {}, assertBeforeSend?: () => void) {
     const requestId = crypto.randomUUID();
     const mutating = hostRequestMutates(endpoint, params);
-    return this.request<T>({ type: 'fetch', requestId, url: 'vscode://codex/' + endpoint, body: JSON.stringify(params) }, requestId, mutating);
+    return this.request<T>({ type: 'fetch', requestId, url: 'vscode://codex/' + endpoint, body: JSON.stringify(params) }, requestId, mutating, false, undefined, assertBeforeSend);
   }
   async reply(ref: ServerRequestRef, response: { result: unknown } | { error: { code: number; message: string } }) {
     if (this.socket?.readyState !== WebSocket.OPEN) throw new WorkbenchError('审批连接已断开，请核对请求状态。', false, undefined, 'before-send');

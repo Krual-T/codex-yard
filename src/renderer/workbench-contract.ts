@@ -12,9 +12,13 @@ export interface ServerRequestEvent extends WorkbenchEvent {
   requestRef: ServerRequestRef;
   request: { id: string | number; method: string; params?: Record<string, unknown> };
 }
+export type WorkbenchDispatchOptions = Pick<RequestOptions, 'onLateTerminal'> & {
+  /** Check the captured original authority after connection waits, immediately before sending. */
+  assertBeforeSend?: () => void;
+};
 export interface WorkbenchClient {
-  rpc<T = unknown>(method: string, params?: Record<string, unknown>, hostId?: string, options?: Pick<RequestOptions, 'onLateTerminal'>): Promise<T>;
-  host<T = unknown>(endpoint: string, params?: Record<string, unknown>): Promise<T>;
+  rpc<T = unknown>(method: string, params?: Record<string, unknown>, hostId?: string, options?: WorkbenchDispatchOptions): Promise<T>;
+  host<T = unknown>(endpoint: string, params?: Record<string, unknown>, options?: Pick<WorkbenchDispatchOptions, 'assertBeforeSend'>): Promise<T>;
   subscribe(listener: (event: WorkbenchEvent) => void): () => void;
   reply(request: ServerRequestRef, response: { result: unknown } | { error: { code: number; message: string } }): Promise<void>;
 }
