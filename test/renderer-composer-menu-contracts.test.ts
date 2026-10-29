@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 import { permissionCatalog } from '../lib/permissions.ts';
+import { publicConfig } from '../src/native/protocol.ts';
 import type { SessionConfig } from '../lib/codex-protocol.ts';
 import { isCyberModel, loadComposerPermissions } from '../src/renderer/composer/composer-permissions.ts';
 import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
@@ -115,12 +116,12 @@ test('project lease, confirmed permissions, file lookup and owner projection use
     import {I18nProvider} from './src/renderer/i18n/index.tsx';
     import {StandaloneComposer} from './src/renderer/composer/StandaloneComposer.tsx';
     const state={calls:[],projects:[],projections:[],requirements:null,deferProject:false,releaseProject:null,goals:0,failStorage:false,
-      config:{model:'model',approval_policy:'on-request',sandbox_mode:'workspace-write',sandbox_workspace_write:null}};
+      config:{model:'model',approval_policy:'on-request',sandbox_mode:'workspace-write',sandbox_workspace_write:{network_access:false}}};
     const originalPut=IDBObjectStore.prototype.put;
     IDBObjectStore.prototype.put=function(...args){if(state.failStorage && this.name==='atoms')throw Error('fixture storage failure');return originalPut.apply(this,args);};
     const client={async rpc(method,params={},hostId){state.calls.push({method,hostId,params:structuredClone(params)});
       if(method==='model/list')return {data:[{id:'model',model:'model',displayName:'Fixture',isDefault:true,defaultReasoningEffort:'high',supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};
-      if(method==='config/read')return {config:structuredClone(state.config),layers:[{name:{type:'user',file:'/fixture/config.toml',profile:null},version:'1'}],yardConfigSource:{hostId,generation:'g1',homeDirectory:'/fixture',codexHome:'/fixture'}};
+      if(method==='config/read')return {...await window.projectConfig(structuredClone(state.config)),yardConfigSource:{hostId,generation:'g1',homeDirectory:'/fixture',codexHome:'/fixture'}};
       if(method==='configRequirements/read')return {requirements:structuredClone(state.requirements)};
       if(method==='permissionProfile/list')return {data:[{id:':workspace',allowed:true},{id:':read-only',allowed:true},{id:':danger-full-access',allowed:true}],nextCursor:null};
       if(method==='thread/queue/list')return {data:[],nextCursor:null};
@@ -141,12 +142,21 @@ test('project lease, confirmed permissions, file lookup and owner projection use
     window.fixture={state,render(changes={}){props={...props,...changes,context:{...props.context,...changes.context}};
       root.render(React.createElement(I18nProvider,{locale:'en-US'},React.createElement(StandaloneComposer,props)));}};
     window.fixture.render();
-  ` }, bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' } });
+  ` }, bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' }, plugins: [{
+    name: 'unreachable-node-util', setup(builder) {
+      builder.onResolve({ filter: /^node:util$/ }, () => ({ path: 'node:util', namespace: 'unreachable-node-util' }));
+      builder.onLoad({ filter: /.*/, namespace: 'unreachable-node-util' }, () => ({
+        contents: "export function isDeepStrictEqual() { throw new Error('Unexpected native-only utility call'); }", loader: 'js',
+      }));
+    },
+  }] });
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
     args: ['--no-sandbox', '--disable-background-networking'] });
   try {
     const page = await browser.newPage();
     page.setDefaultTimeout(8_000);
+    await page.exposeFunction('projectConfig', (config: unknown) => publicConfig({ config,
+      layers: [{ name: { type: 'user', file: '/fixture/config.toml', profile: null }, version: '1' }] }));
     const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
     await page.route('**/*', route => new URL(route.request().url()).origin === 'http://contracts.test'
       ? route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }) : route.abort());
@@ -156,6 +166,8 @@ test('project lease, confirmed permissions, file lookup and owner projection use
     let projected = await page.evaluate(() => (window as any).fixture.state.projections);
     assert.deepEqual(projected[0].owner, { hostId: 'local', threadId: null, draftId: 'home' });
     assert.equal(projected[0].options.approvalPolicy, 'on-request');
+    assert.deepEqual(projected[0].options.sandboxPolicy, { type: 'workspaceWrite', writableRoots: [], networkAccess: false,
+      excludeTmpdirEnvVar: false, excludeSlashTmp: false });
     await page.evaluate(() => (window as any).fixture.render());
     assert.equal(await page.evaluate(() => (window as any).fixture.state.projections.length), 1);
     await page.evaluate(() => (window as any).fixture.render({ initialOptions: { serviceTier: 'fast', sandboxMode: 'workspace-write',
@@ -223,13 +235,13 @@ test('project lease, confirmed permissions, file lookup and owner projection use
     });
     assert.equal(await editor.inputValue(), 'keep this draft');
     if (await accessMenu.evaluate(element => (element as HTMLDetailsElement).open)) await accessMenu.locator(':scope > summary').click();
-    await page.evaluate(() => { delete (window as any).fixture.state.config.sandbox_workspace_write;
+    await page.evaluate(() => { (window as any).fixture.state.config.sandbox_workspace_write = { network_access: 'invalid' };
       (window as any).fixture.render({ initialOptions: { serviceTier: 'fast' }, context: { cwd: '/other' } }); });
     await page.waitForFunction(() => (window as any).fixture.state.calls.some((call: any) => call.method === 'config/read' && call.params.cwd === '/other'));
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     assert.notEqual(await page.evaluate(() => (window as any).fixture.state.projections.at(-1).options.serviceTier), 'fast');
     await accessMenu.locator(':scope > summary').click();
-    await accessMenu.getByRole('alert').filter({ hasText: 'Workspace permission details are unavailable' }).waitFor();
+    await accessMenu.getByRole('alert').filter({ hasText: 'workspace sandbox configuration cannot be safely represented' }).waitFor();
     await page.evaluate(() => { (window as any).fixture.state.config.sandbox_workspace_write = {
       writable_roots: ['/outside'], network_access: true, exclude_tmpdir_env_var: true, exclude_slash_tmp: true,
     }; });

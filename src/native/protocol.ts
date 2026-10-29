@@ -95,10 +95,14 @@ export function publicConfig(result: unknown, agent: AgentConfigProjection = pro
         || keys.slice(1).some(key => Object.hasOwn(policy, key) && typeof policy[key] !== 'boolean')) {
         throw new Error('The workspace sandbox configuration cannot be safely represented.');
       }
-      values.sandbox_workspace_write = Object.fromEntries(keys.filter(key => Object.hasOwn(policy, key))
-        .map(key => [key, key === 'writable_roots' ? [...policy.writable_roots as string[]] : policy[key]]));
+      values.sandbox_workspace_write = {
+        writable_roots: Object.hasOwn(policy, 'writable_roots') ? [...policy.writable_roots as string[]] : [],
+        network_access: Object.hasOwn(policy, 'network_access') ? policy.network_access : false,
+        exclude_tmpdir_env_var: Object.hasOwn(policy, 'exclude_tmpdir_env_var') ? policy.exclude_tmpdir_env_var : false,
+        exclude_slash_tmp: Object.hasOwn(policy, 'exclude_slash_tmp') ? policy.exclude_slash_tmp : false,
+      };
     }
-  }
+  } else if (values.sandbox_mode === 'workspace-write') values.sandbox_workspace_write = null;
   const desktop = record(config.desktop);
   if (config.desktop && typeof config.desktop === 'object') values.desktop = Object.fromEntries(
     ['git-worktree-root', 'worktree-auto-cleanup-enabled', 'worktree-keep-count']
