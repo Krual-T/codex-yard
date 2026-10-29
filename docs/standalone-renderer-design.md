@@ -33,6 +33,8 @@
 
 普通 Markdown 与工具消息链接由 `LinkSettings` 观察现有两项打开目标及 legacy atom，再由 App 的 Main/SideChat 原 owner 和 daemon guard 执行导航。投影仅做只读观察，不写偏好；设置变更立即失效旧值，断线或换页永久撤销原实例。取消导航、无关归档和 child 解冻通过已有导航事实刷新当前页面的新实例，不复活旧授权。Browser 地址栏的 URL 展示偏好在连接恢复和页面恢复后重读。Web 的内嵌浏览器能力来自同一构建中实际注册的 StandaloneBrowser 与 chrome-browser router；设备未配对由该面板处理，与浏览器 agent 的私有 rollout 条件分开。原 Web 的 setAnnotationPresentation 即 no-op，保留真实元素 Quote 和整帧预览及原偏好数据，不增加桌面 region/crop 后端。
 
+普通网页的首次加载外部默认只依据 App 原 `get-settings` 查询是否仍为首次在途；这不是每次 LinkSettings 创建的默认。查询结束后，新 owner 投影的偏好读取尚未确认就保持不可用，不能因取消导航或 child 解冻误用外部目标；点击同步观察当前查询事实，不复制上一实例的偏好或授权。
+
 Summary Outputs 从当前 ConversationSessions 的完整消息、原 thread-projects 输出和可读文件投影产生。资源结果和旧 MCP Google/Figma/Notion 结构按同一事件/别名规则去重；缺失文件不显示为可打开产物，后端不支持或元数据不完整时保留真实 notice/错误和重试。hook 捕获当前 host/thread、导航及连接，打开前复核原 entry 和来源；本地文件交原 workspace-files，HTTP(S) 交既有链接动作，不创建产物后端。四种 Create 入口按原插件 mention 追加到当前 Main 富文档和历史，不能将追加称为已发送或产物已生成。
 
 WorkbenchClient 提供 `rpc(method,params,hostId)`、`host(endpoint,params)`、事件 `subscribe` 和审批 `reply(ref,response)`。它使用 `/native-host` WebSocket，关联请求id、超时及响应错误，建立后发送ready。reply为必需方法，反向请求有必填ServerRequestEvent.requestRef；浏览器验证后才交UI。审批ref由服务端产生，包含hostId、每个请求唯一的generation和原请求id，并在宿主绑定原连接。generation不是host代次，同host的不同请求可有不同值。只向收到请求的原连接发送，禁止回复时自动重连；resolved/取消/断开使原ref失效，同ID新请求不能接受旧ref。服务端发送回执表示已转发，不能声称daemon已完成业务处理；发送不确定时保留未知结果，不能自动再次批准。

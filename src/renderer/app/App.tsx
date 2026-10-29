@@ -121,6 +121,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [sidebarAccount, setSidebarAccount] = useState<{ hostId: string; label: string } | null>(null);
   const status = bridgeStatus === 'connected' ? hostStatuses[current.hostId] ?? 'connecting' : bridgeStatus;
   const connectionReadGeneration = useRef(0);
+  const initialSettingsLoading = useRef(true);
   const transportIdentity = useRef({ bridge: 'connecting', bridgeRevision: 0, hosts: {} as Record<string, { state: string; revision: number }> });
   const mainGrantRevision = useRef(0);
   const mainSubmissionAuthorities = useRef(new WeakMap<() => void, {
@@ -385,7 +386,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
             if (!actual || actual.identity.prepareId !== child.identity.prepareId || !sameComposerOwner(actual.owner, child.owner)
               || frozenChildOwners.current.has(composerOwnerKey(child.owner))) throw new Error('The original side chat changed.');
           }
-        } });
+        } }, () => initialSettingsLoading.current);
       };
       try {
         if (current.threadId) { instances.main = make(null); instances.main.start(); }
@@ -439,7 +440,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const reloadPreferences = useCallback(async () => {
     const generation = ++preferenceGeneration.current;
     const [{ values }, reduced, locales] = await Promise.all([
-      client.host<{ values: Record<string, unknown> }>('get-settings'),
+      client.host<{ values: Record<string, unknown> }>('get-settings').finally(() => { initialSettingsLoading.current = false; }),
       client.host<{ value?: string }>('get-global-state', { key: 'reduced-motion-preference' }).catch(() => null),
       client.host<{ ideLocale?: string; systemLocale?: string }>('locale-info').catch(() => ({ ideLocale: undefined, systemLocale: undefined })),
     ]);

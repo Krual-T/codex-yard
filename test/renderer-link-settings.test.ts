@@ -35,9 +35,37 @@ const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 const missing = { exists: false };
 const value = (saved: unknown) => ({ exists: true, value: saved });
 
-test('read-only link preferences preserve explicit, legacy and proven missing values', async () => {
+test('same-page link reconstruction does not repeat the initial settings fallback', async () => {
   const peer = new Peer();
-  const links = new LinkSettings(peer, { assertCurrent() {} });
+  for (const transition of ['unrelated archive', 'canceled navigation', 'child thaw']) {
+    const links = new LinkSettings(peer, { assertCurrent() {} }, () => false);
+    links.start();
+    assert.deepEqual(links.resolve('https://example.invalid/' + encodeURIComponent(transition), { browserPaneEnabled: true }),
+      { kind: 'unavailable', reason: 'preference' });
+    peer.take(local).resolve(missing); peer.take(legacy).resolve(missing); await flush();
+    assert.equal(links.getSnapshot().webTarget, null, 'A pending web read never becomes an external default');
+    peer.take(web).resolve(value('in-app-browser')); await flush();
+    assert.equal(links.getSnapshot().webTarget, 'in-app-browser');
+    links.close();
+  }
+});
+
+test('genuine initial settings loading ends independently of delayed link reads', async () => {
+  const peer = new Peer(); let loading = true;
+  const links = new LinkSettings(peer, { assertCurrent() {} }, () => loading);
+  links.start();
+  assert.equal(links.getSnapshot().webTarget, 'external-browser');
+  loading = false;
+  assert.deepEqual(links.resolve('https://example.invalid/', { browserPaneEnabled: true }),
+    { kind: 'unavailable', reason: 'preference' });
+  peer.take(web).resolve(value('in-app-browser')); peer.take(local).resolve(missing); peer.take(legacy).resolve(missing); await flush();
+  assert.equal(links.getSnapshot().webTarget, 'in-app-browser');
+  links.close();
+});
+
+test('read-only link preferences preserve explicit, legacy and proven missing values', async () => {
+  const peer = new Peer(); let initialLoading = true;
+  const links = new LinkSettings(peer, { assertCurrent() {} }, () => initialLoading);
   assert.equal(links.getSnapshot().status, 'idle');
   let changes = 0;
   const unsubscribe = links.subscribe(() => { changes++; });
@@ -47,6 +75,7 @@ test('read-only link preferences preserve explicit, legacy and proven missing va
   assert.equal(links.getSnapshot().forceExternal, true);
   assert.deepEqual(links.resolve('https://example.invalid/a?b=1#c', { browserPaneEnabled: null }),
     { kind: 'open', url: 'https://example.invalid/a?b=1#c', local: false, target: 'external-browser' });
+  initialLoading = false;
   peer.take(web).resolve(missing); peer.take(local).resolve(missing); peer.take(legacy).resolve(missing);
   await flush();
   assert.deepEqual({ web: links.getSnapshot().web, local: links.getSnapshot().local, legacy: links.getSnapshot().legacy,
@@ -83,7 +112,7 @@ test('read-only link preferences preserve explicit, legacy and proven missing va
 });
 
 test('failed and malformed values remain distinct from absence and can be retried', async () => {
-  const peer = new Peer(), links = new LinkSettings(peer, { assertCurrent() {} });
+  const peer = new Peer(), links = new LinkSettings(peer, { assertCurrent() {} }, () => false);
   links.start();
   peer.take(web).resolve(value('in-app-browser')); peer.take(local).reject(new Error('host unavailable'));
   peer.take(legacy).resolve({ exists: 'yes', value: 'in-app-browser' });
@@ -125,7 +154,7 @@ test('superseded reads and old owners cannot revive after changes or reconnect',
   const peer = new Peer();
   let generation = 1;
   const captured = generation;
-  const links = new LinkSettings(peer, { assertCurrent() { if (generation !== captured) throw new Error('stale owner'); } });
+  const links = new LinkSettings(peer, { assertCurrent() { if (generation !== captured) throw new Error('stale owner'); } }, () => false);
   links.start();
   const oldWeb = peer.take(web);
   peer.take(local).resolve(missing); peer.take(legacy).resolve(missing);
@@ -149,7 +178,7 @@ test('superseded reads and old owners cannot revive after changes or reconnect',
     { kind: 'unavailable', reason: 'authority' });
   links.retry();
   assert.equal(peer.pending.length, 0);
-  const fresh = new LinkSettings(peer, { assertCurrent() { if (generation !== 2) throw new Error('stale new owner'); } });
+  const fresh = new LinkSettings(peer, { assertCurrent() { if (generation !== 2) throw new Error('stale new owner'); } }, () => false);
   fresh.start();
   peer.take(web).resolve(missing); peer.take(local).resolve(missing); peer.take(legacy).resolve(missing); await flush();
   assert.equal(fresh.getSnapshot().webTarget, 'external-browser');
@@ -159,7 +188,7 @@ test('superseded reads and old owners cannot revive after changes or reconnect',
 
 test('a synchronous scope failure revokes the snapshot before any click, even without an event', async () => {
   const peer = new Peer(); let active = true;
-  const links = new LinkSettings(peer, { assertCurrent() { if (!active) throw new Error('scope changed'); } });
+  const links = new LinkSettings(peer, { assertCurrent() { if (!active) throw new Error('scope changed'); } }, () => false);
   links.start();
   peer.take(web).resolve(value('in-app-browser')); peer.take(local).resolve(missing); peer.take(legacy).resolve(missing); await flush();
   active = false;

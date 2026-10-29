@@ -50,12 +50,12 @@ function affected(event: WorkbenchEvent, key: string): boolean {
 export class LinkSettings {
   private readonly client: WorkbenchClient;
   private readonly authority: LinkSettingsAuthority;
+  private readonly initialSettingsLoading: () => boolean;
   private observations: Record<Source, LinkSettingObservation> = {
     web: { status: 'idle' }, local: { status: 'idle' }, legacy: { status: 'idle' },
   };
   private revisions: Record<Source, number> = { web: 0, local: 0, legacy: 0 };
   private status: LinkSettingsSnapshot['status'] = 'idle';
-  private initialSettings = true;
   private listeners = new Set<() => void>();
   private unsubscribe: (() => void) | undefined;
   private snapshot = this.makeSnapshot();
@@ -64,8 +64,8 @@ export class LinkSettings {
     forceExternal: null, webTarget: null, localTarget: null,
   };
 
-  constructor(client: WorkbenchClient, authority: LinkSettingsAuthority) {
-    this.client = client; this.authority = authority;
+  constructor(client: WorkbenchClient, authority: LinkSettingsAuthority, initialSettingsLoading: () => boolean) {
+    this.client = client; this.authority = authority; this.initialSettingsLoading = initialSettingsLoading;
   }
 
   subscribe = (listener: () => void): (() => void) => {
@@ -75,6 +75,11 @@ export class LinkSettings {
 
   getSnapshot = (): LinkSettingsSnapshot => {
     if (this.status === 'active' && !this.current()) this.retire(false);
+    if (this.status === 'active') {
+      const next = this.makeSnapshot();
+      if (next.forceExternal !== this.snapshot.forceExternal || next.webTarget !== this.snapshot.webTarget
+        || next.localTarget !== this.snapshot.localTarget) this.snapshot = next;
+    }
     return this.status === 'revoked' ? this.revokedSnapshot : this.snapshot;
   };
 
@@ -133,10 +138,9 @@ export class LinkSettings {
     const { web, local, legacy } = this.observations;
     const ready = (entry: LinkSettingObservation) => entry.status === 'value' || entry.status === 'missing';
     const invalid = (entry: LinkSettingObservation) => entry.status === 'error' || entry.status === 'invalid';
-    const settingsPending = web.status === 'loading' || local.status === 'loading';
     let forceExternal: boolean | null = null;
     if (this.status === 'active' && !invalid(web)) {
-      if (this.initialSettings && settingsPending) {
+      if (this.initialSettingsLoading()) {
         if (!invalid(local)) forceExternal = true;
       } else if (ready(web)) forceExternal = false;
     }
@@ -183,7 +187,6 @@ export class LinkSettings {
     if (this.status !== 'active' || this.revisions[source] !== revision) return;
     if (!this.current()) { this.retire(); return; }
     this.observations[source] = result;
-    if (this.observations.web.status !== 'loading' && this.observations.local.status !== 'loading') this.initialSettings = false;
     this.publish();
   }
 }

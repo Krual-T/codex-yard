@@ -41,7 +41,7 @@ test('link projection uses the real browser client, host settings and browser at
       links = new LinkSettings(client, { assertCurrent() {
         if (scope !== originalScope) throw new Error('Original page changed');
         connection.assertOriginal();
-      } });
+      } }, () => false);
       links.start();
     }
     (window as any).linkFixture = {
