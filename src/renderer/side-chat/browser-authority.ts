@@ -23,6 +23,15 @@ export interface SideChatBrowserIdentity extends SideChatDraftIdentity {
   connectionGeneration: string;
   childThreadId: string | null;
 }
+/** The native write fence compares this exact confirmed pair, including its challenge. */
+export interface SideChatChildDispatchProof {
+  readonly identity: Readonly<SideChatBrowserIdentity>;
+  readonly challengeId: string;
+}
+export interface SideChatChildDispatchAuthority {
+  readonly proof: SideChatChildDispatchProof;
+  assertCurrent(): void;
+}
 export interface SideChatDraftAssociation extends SideChatDraftIdentity {
   version: 1;
   operationId: string | null;
@@ -137,6 +146,7 @@ export class SideChatBrowserAuthorityBridge {
   private capture: { token: EphemeralForkCapture; scope: EphemeralForkScope } | null = null;
   private closeLease: { draft: ComposerDraftController | null; draftLease: ComposerDraftLease | null; send: SideChatSendLease } | null = null;
   private invalid = false;
+  private revokeUncertain = false;
   private sealed = false;
   private authorizing = false;
   private revoking = false;
@@ -163,7 +173,7 @@ export class SideChatBrowserAuthorityBridge {
   hasLinkedOperation(operationId: string): boolean { return this.identity?.operationId === operationId; }
   hasLiveChild(childThreadId: string): boolean { return !this.invalid && !this.sealed && this.childLive && this.identity?.childThreadId === childThreadId; }
   private assertCurrent = (): void => {
-    if (this.invalid || this.sealed) throw beforeSend('侧聊原页面或草稿权限已失效。');
+    if (this.invalid || this.revokeUncertain || this.sealed) throw beforeSend('侧聊原页面或草稿权限已失效。');
     this.options.assertCurrent();
   };
   private async verify(expected: SideChatDraftAssociation, guard = this.assertCurrent): Promise<void> {
@@ -302,7 +312,7 @@ export class SideChatBrowserAuthorityBridge {
       if (this.capture) { this.options.sessions.cancelEphemeralFork(this.capture.token); this.capture = null; }
       try {
         await this.request({ action: 'revoke', operationId: identity.operationId, registrationId }, () => this.options.assertCurrent());
-      } catch { this.invalid = true; throw new Error('侧聊确认撤销结果未知；原记录已保留。'); }
+      } catch { this.revokeUncertain = true; throw new Error('侧聊确认撤销结果未知；原记录已保留。'); }
       if (this.registration?.registrationId === registrationId) this.registration = null;
       throw error;
     } finally {
@@ -322,8 +332,11 @@ export class SideChatBrowserAuthorityBridge {
     try {
       if (registration) await this.request({ action: 'revoke', ...registration }, () => this.options.assertCurrent());
       confirmed = true;
-    } catch (error) { this.invalid = true; throw error; }
-    finally { if (confirmed && this.registration === registration) this.registration = null; this.revoking = false; }
+    } catch (error) { this.revokeUncertain = true; throw error; }
+    finally {
+      if (confirmed && this.registration === registration) { this.registration = null; this.revokeUncertain = false; }
+      this.revoking = false;
+    }
   }
 
   /** Advisory browser check; the host repeats the complete check in its dispatch interval. */
@@ -331,6 +344,21 @@ export class SideChatBrowserAuthorityBridge {
     this.assertCurrent();
     if (!this.identity || !this.grant || this.grant.action !== action || !sameIdentity(this.grant.identity, this.identity)
       || action === 'close' && !this.closeLease) throw beforeSend('原侧聊操作尚未取得当前浏览器确认。');
+  }
+
+  /** Capture a confirmed live child grant once, before the user action awaits. */
+  captureChildDispatch(childThreadId: string): SideChatChildDispatchAuthority {
+    const grant = this.grant, identity = this.identity, registration = this.registration, epoch = this.epoch;
+    const check = () => {
+      this.assertCurrent();
+      if (!id(childThreadId) || !identity || !grant || !registration || this.authorizing || this.revoking || this.closeLease
+        || this.epoch !== epoch || this.grant !== grant || this.registration !== registration || !this.childLive
+        || !this.identity || !sameIdentity(this.identity, identity) || !sameIdentity(grant.identity, identity)
+        || identity.childThreadId !== childThreadId || grant.registrationId !== registration.registrationId
+        || !['start', 'retry'].includes(grant.action)) throw beforeSend('原侧聊子会话确认已失效。');
+    };
+    check();
+    return { proof: Object.freeze({ identity: Object.freeze(structuredClone(identity!)), challengeId: grant!.challengeId }), assertCurrent: check };
   }
 
   /** Invoke synchronously from the original close event, before its first await. */

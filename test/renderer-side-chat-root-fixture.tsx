@@ -14,6 +14,8 @@ import { browserDraftOwner, removeBrowserDraftReference } from '../src/renderer/
 import { updateBrowserAtoms } from '../src/renderer/storage/ui-atoms.ts';
 import type { ComposerDraftOwner } from '../src/renderer/composer/StandaloneComposer.tsx';
 import type { ComposerDraftExternalOperation } from '../src/renderer/composer/use-composer-draft.ts';
+import type { WorkbenchDispatchOptions } from '../src/renderer/workbench-contract.ts';
+import type { SideChatChildDispatchProof } from '../src/renderer/side-chat/browser-authority.ts';
 
 declare global { interface Window { fixtureCwd: string; sideChatRootFixture: typeof fixture } }
 const client = new BrowserWorkbenchClient(), sessions = new ConversationSessions(client, async () => undefined);
@@ -27,10 +29,18 @@ let flushPromise: Promise<boolean> | null = null, flushDone = false;
 const removed: ComposerDraftOwner[] = [];
 const observedChildren = new Map<string, SideChatRootChild>();
 const frozenOwners = new Map<string, object>();
+const rpcCaptures: { method: string; proof: SideChatChildDispatchProof; check: () => void }[] = [];
 let ownerWork: Promise<void> | null = null, finishOwnerWork: (() => void) | null = null;
 let cancelGate: Promise<void> | null = null, releaseCancel: (() => void) | null = null, cancelWaiting = false, cancelGuardCalls = 0;
 let collaborationGate: Promise<void> | null = null, releaseCollaboration: (() => void) | null = null, collaborationWaiting = false;
+let visualizationAbort: AbortController | null = null, visualizationResult: string | null = null;
 const host = client.host.bind(client);
+const rpc = client.rpc.bind(client);
+client.rpc = <T,>(method: string, params?: Record<string, unknown>, hostId?: string, options?: WorkbenchDispatchOptions): Promise<T> => {
+  const proof = (options as WorkbenchDispatchOptions & { sideChat?: SideChatChildDispatchProof } | undefined)?.sideChat;
+  if (proof && options?.assertBeforeSend) rpcCaptures.push({ method, proof: structuredClone(proof), check: options.assertBeforeSend });
+  return rpc<T>(method, params, hostId, options);
+};
 const resolvedCollaboration = sends.resolvedCollaboration.bind(sends);
 sends.resolvedCollaboration = async (...args) => {
   if (collaborationGate) { collaborationWaiting = true; await collaborationGate; collaborationWaiting = false; }
@@ -79,7 +89,9 @@ const fixture = {
   open() { return api().open(); },
   listRecoverable() { return api().listRecoverable(); },
   restore(identity: Parameters<SideChatRootController['restore']>[0]) { return api().restore(identity); },
-  show(draftId: string) { api().show(draftId); },
+  show(draftId: string) { return api().show(draftId); },
+  rpcProofs() { return rpcCaptures.map(({ method, proof }) => ({ method, proof })); },
+  capturedGuardValid(index: number) { try { rpcCaptures[index]!.check(); return true; } catch { return false; } },
   child() { const value = api().activeChild(); return value && { identity: value.identity, owner: value.owner, snapshot: value.snapshot,
     hasDraft: !!value.draft, hasNavigation: !!value.navigation, hasEditNavigation: !!value.editNavigation }; },
   history(threadId = 'child-a') { return sessions.view({ hostId: 'local', threadId }).snapshot(); },
@@ -116,6 +128,16 @@ const fixture = {
   holdCollaboration() { collaborationGate = new Promise<void>(resolve => { releaseCollaboration = resolve; }); },
   releaseCollaboration() { releaseCollaboration?.(); releaseCollaboration = null; collaborationGate = null; },
   collaborationWaiting() { return collaborationWaiting; },
+  beginVisualization(text: string) {
+    const owner = current().owner;
+    if (!owner.threadId) throw Error('Missing child thread.');
+    visualizationAbort = new AbortController(); visualizationResult = null;
+    const result = api().submitVisualization({ hostId: owner.hostId, threadId: owner.threadId, path: '/synthetic-widget',
+      draft: { text, images: [], files: [] } }, visualizationAbort.signal);
+    void result.then(() => { visualizationResult = 'sent'; }, error => { visualizationResult = String(error); });
+  },
+  abortVisualization() { visualizationAbort?.abort(); },
+  visualizationResult() { return visualizationResult; },
   flushDraft() { const value = current(); return value.draft.flush(value.owner); },
   holdNative() { nativeGate = new Promise<void>(resolve => { releaseNative = resolve; }); },
   releaseNative() { releaseNative?.(); releaseNative = null; nativeGate = null; },

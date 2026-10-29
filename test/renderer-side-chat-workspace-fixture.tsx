@@ -8,6 +8,7 @@ import { MessageEditRecoveryStore } from '../src/renderer/app/message-edit-recov
 import { ApprovalRequestsController } from '../src/renderer/app/approval-requests.ts';
 import { SideChatWorkspace } from '../src/renderer/app/SideChatWorkspace.tsx';
 import { SideChatWorkspaceRuntime } from '../src/renderer/app/side-chat-workspace-runtime.ts';
+import type { SideChatChildDispatchAuthority } from '../src/renderer/side-chat/browser-authority.ts';
 import type { SideChatWorkspaceNavigationController, SideChatWorkspaceNavigationLease } from '../src/renderer/app/SideChatWorkspace.tsx';
 import { readSideChatDraftAssociation } from '../src/renderer/side-chat/browser-authority.ts';
 import { readBrowserAtoms } from '../src/renderer/storage/ui-atoms.ts';
@@ -15,6 +16,7 @@ import { addBrowserCommentToDraft, readBrowserCommentsSnapshot } from '../src/re
 import { browserDraftOwner, removeBrowserDraftReference } from '../src/renderer/app/browser-draft.ts';
 import type { ComposerDraftController, ComposerDraftOwner, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
 import type { SideChatChildScope } from '../src/renderer/side-chat/SideChatPanel.tsx';
+import type { WorkbenchDispatchOptions } from '../src/renderer/workbench-contract.ts';
 
 declare global { interface Window { fixtureCwd: string; sideChatWorkspaceFixture: typeof fixture } }
 const identity = { hostId: 'local', parentThreadId: 'parent-a', draftId: 'workspace-draft', prepareId: 'workspace-prepare', cwd: window.fixtureCwd };
@@ -30,13 +32,20 @@ const opened: { scope: SideChatChildScope; operationId: string; draftId: string 
 const openAttempts: SideChatChildScope[] = [], removedOwners: ComposerDraftOwner[] = [];
 const queueDispatches: { method: string; hostId: string; threadId: unknown }[] = [], interrupts: { threadId: string; turnId: string }[] = [];
 const originalAuthorities = new WeakSet<() => void>();
+const childAuthorities = new WeakMap<() => void, SideChatChildDispatchAuthority>();
 const authorityDispatches: { method: string; original: boolean }[] = [];
 const root = createRoot(document.getElementById('root')!);
 function assertCurrent() { if (!ownerCurrent || !client.connected) throw Error('Synthetic original owner is unavailable.'); }
-function capture(owner: ComposerDraftOwner) {
+function capture(owner: ComposerDraftOwner, childAuthority?: SideChatChildDispatchAuthority) {
   assertCurrent(); if (frozen || owner.hostId !== identity.hostId || owner.draftId !== identity.draftId) throw Error('Synthetic owner is frozen.');
-  const authority = () => { assertCurrent(); if (frozen) throw Error('Synthetic owner was frozen.'); };
-  originalAuthorities.add(authority); return authority;
+  const authority = () => { assertCurrent(); if (frozen) throw Error('Synthetic owner was frozen.'); childAuthority?.assertCurrent(); };
+  originalAuthorities.add(authority); if (childAuthority) childAuthorities.set(authority, childAuthority); return authority;
+}
+function options(original: (() => void) | null, guard: () => void, onLateTerminal?: WorkbenchDispatchOptions['onLateTerminal']) {
+  const child = original && childAuthorities.get(original);
+  if (!child) throw Error('Synthetic dispatcher did not receive the original child authority.');
+  return { daemonConnectionGeneration: child.proof.identity.connectionGeneration, sideChat: structuredClone(child.proof),
+    assertBeforeSend: () => { child.assertCurrent(); guard(); }, onLateTerminal };
 }
 function render() {
     root.render(<SideChatWorkspace client={client} identity={presentedIdentity} open sessions={sessions} sends={sends} edits={edits} approvals={approvals}
@@ -49,20 +58,20 @@ function render() {
         if (originalAuthority && !originalAuthorities.has(originalAuthority)) throw Error('Synthetic original authority was replaced.');
         if (!originalAuthority && method !== 'thread/queue/start') throw Error('Synthetic original authority is missing.');
         authorityDispatches.push({ method, original: !!originalAuthority });
-        return client.rpc(method, params, hostId, { assertBeforeSend: guard });
+        return client.rpc(method, params, hostId, options(originalAuthority, guard));
       }}
       dispatchQueueMutation={async (method, params, hostId, originalAuthority, guard, onLateTerminal) => {
         if (!originalAuthorities.has(originalAuthority)) throw Error('Synthetic queue authority was replaced.');
         authorityDispatches.push({ method, original: true });
         queueDispatches.push({ method, hostId, threadId: params.threadId }); guard();
         if (dispatchGate) { dispatchWaiting = true; await dispatchGate; dispatchWaiting = false; }
-        guard(); return client.rpc(method, params, hostId, { assertBeforeSend: guard, onLateTerminal });
+        guard(); return client.rpc(method, params, hostId, options(originalAuthority, guard, onLateTerminal));
       }} interruptTurn={async (scope, guard, originalAuthority) => {
         if (!originalAuthorities.has(originalAuthority)) throw Error('Synthetic interrupt authority was replaced.');
         authorityDispatches.push({ method: 'turn/interrupt', original: true });
         interrupts.push({ threadId: scope.childThreadId, turnId: scope.turnId }); guard();
         if (dispatchGate) { dispatchWaiting = true; await dispatchGate; dispatchWaiting = false; }
-        guard(); await client.rpc('turn/interrupt', { threadId: scope.childThreadId, turnId: scope.turnId }, scope.hostId, { assertBeforeSend: guard });
+        guard(); await client.rpc('turn/interrupt', { threadId: scope.childThreadId, turnId: scope.turnId }, scope.hostId, options(originalAuthority, guard));
       }}
       cancelSend={async (intent, guard) => { guard(); await sends.cancel(intent.id); }} cleanupChild={async () => { cleanups++; }}
       onNavigationController={value => { navigation = value; }} onClosed={() => { closed++; }} onExitObservation={() => { exited++; }}

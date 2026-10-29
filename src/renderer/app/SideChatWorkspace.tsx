@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ComposerDraft, MessageEditOrigin, SubmitAction, SubmitOptions, WorkbenchClient, WorkbenchDispatchOptions } from '../workbench-contract.ts';
 import type { ComposerDraftController, ComposerDraftLease, ComposerDraftOwner, ComposerSubmissionDescription, StandaloneComposerRuntimeProps } from '../composer/StandaloneComposer.tsx';
+import { saveComposerDraftConflict } from '../composer/composer-draft-store.ts';
+import { normalizeDraft } from '../composer/standalone-draft.ts';
 import type { MessageEditNavigationController, MessageEditNavigationLease } from '../messages/StandaloneMessages.tsx';
 import { SideChatPanel } from '../side-chat/SideChatPanel.tsx';
 import type { SideChatActiveChildScope, SideChatCloseBarrier, SideChatChildScope, SideChatInterruptScope, SideChatQueueEntry, SideChatQueueMutation } from '../side-chat/SideChatPanel.tsx';
-import type { SideChatBrowserIdentity, SideChatSendLease } from '../side-chat/browser-authority.ts';
+import type { SideChatBrowserIdentity, SideChatChildDispatchAuthority, SideChatSendLease } from '../side-chat/browser-authority.ts';
 import type { SideChatHistory } from '../side-chat/types.ts';
 import { ApprovalDialog } from './ApprovalDialog.tsx';
 import type { ApprovalDialogProps } from './ApprovalDialog.tsx';
@@ -23,6 +25,7 @@ import { isThreadBusy } from './thread-state.ts';
 import { SideChatWorkspaceRuntime } from './side-chat-workspace-runtime.ts';
 import type { SideChatWorkspaceIdentity } from './side-chat-workspace-runtime.ts';
 import type { ApprovalRequestsController } from './approval-requests.ts';
+import type { VisualizationFollowUp } from '../visualizations/index.tsx';
 
 export interface SideChatWorkspaceNavigationLease {
   flush(): Promise<boolean>;
@@ -33,7 +36,13 @@ export interface SideChatWorkspaceNavigationLease {
   /** Cancels navigation; an uncertain revocation must first be resolved. */
   release(): void;
 }
-export interface SideChatWorkspaceNavigationController { freeze(): SideChatWorkspaceNavigationLease | null }
+export interface SideChatWorkspaceNavigationController {
+  freeze(): SideChatWorkspaceNavigationLease | null;
+  /** Reconfirm only this original live child after a completed local switch or cancelled navigation. */
+  activate(): Promise<void>;
+  /** Submit the confirmed widget request through this child's original sender. */
+  submitVisualization(request: VisualizationFollowUp, signal: AbortSignal): Promise<void>;
+}
 export type { SideChatQueueMutation } from '../side-chat/SideChatPanel.tsx';
 export type SideChatWriteDispatch = <T>(method: ConversationWriteMethod, params: Record<string, unknown>, hostId: string,
   assertBeforeSend: () => void, originalAuthority: (() => void) | null) => Promise<T>;
@@ -52,10 +61,10 @@ export interface SideChatWorkspaceProps {
   /** Blocks new same-draft owners and sends across views synchronously; drains their real pending work. */
   freezeSending(owner: ComposerDraftOwner, purpose?: 'cancel'): SideChatSendLease;
   /** Captures the original owner and connection synchronously at the input action. */
-  captureSubmissionAuthority(owner: ComposerDraftOwner): () => void;
+  captureSubmissionAuthority(owner: ComposerDraftOwner, childAuthority?: SideChatChildDispatchAuthority): () => void;
   /** Resolve the same synchronously captured grant, without obtaining a newer connection. */
   nativeInjectionAuthority?(originalAuthority: () => void, owner: ComposerDraftOwner): SendInjectionAuthority;
-  /** A null originalAuthority is allowed only for a legacy queue start on this workspace's fixed original socket. */
+  /** SideChatRoot rejects a null legacy authority; writes require the grant captured at the original action. */
   dispatchSubmission: SideChatWriteDispatch;
   /** Serialize with all writes for this host/thread and guard the original daemon socket at dispatch. */
   dispatchQueueMutation<T>(method: SideChatQueueMutation, params: Record<string, unknown>, hostId: string,
@@ -170,9 +179,11 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
   const closeEdit = useRef<{ lease: MessageEditNavigationLease | null; releaseAcquisition: () => void } | null>(null);
   const closeHostFreeze = useRef<(() => void) | null>(null);
   const closeScope = useRef<SideChatCloseBarrier | null>(null), finishingClose = useRef(false), closedNotified = useRef(false);
+  const authorizationLease = useRef<SideChatWorkspaceNavigationLease | null>(null), authorizing = useRef(false);
   const authorities = useRef(new WeakMap<() => void, () => void>());
   const [error, setError] = useState(''), [sendState, setSendState] = useState<SendRecoverySnapshot | null>(null);
   const [closeCompletionPending, setCloseCompletionPending] = useState(false);
+  const [authorizationRecovery, setAuthorizationRecovery] = useState(false);
   const [edit, setEdit] = useState<{ childId: string; value: StoredMessageEdit | null } | null>(null);
   const [revision, setRevision] = useState(0), [hiddenApproval, setHiddenApproval] = useState<string | null>(null);
   const requests = useSyncExternalStore(approvals.subscribe, approvals.getSnapshot, approvals.getSnapshot);
@@ -211,12 +222,14 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
 
   const currentOwner = (): ComposerDraftOwner => ({ hostId: original.hostId, threadId: controller.getSnapshot().view?.childId ?? null, draftId: original.draftId });
   const assertOriginal = () => { runtime.assertScope(); if (!mounted.current) throw notSent('原侧聊工作区已卸载。'); };
-  const capture = (owner: ComposerDraftOwner): (() => void) => {
+  const capture = (owner: ComposerDraftOwner, write = true): (() => void) => {
     if (locked.current || !sameOwner(owner, currentOwner()) || !owner.threadId) throw notSent('侧聊输入目标已改变。');
     assertOriginal();
-    const parent: unknown = latest.current.captureSubmissionAuthority(structuredClone(owner));
+    const childAuthority = write ? runtime.captureChildDispatch(owner.threadId) : undefined;
+    const parent: unknown = latest.current.captureSubmissionAuthority(structuredClone(owner), childAuthority);
     if (typeof parent !== 'function') { sync(parent); throw notSent('原发送权限尚未确认。'); }
-    const check = () => { assertOriginal(); sync(parent()); if (locked.current || !sameOwner(owner, currentOwner())) throw notSent('侧聊输入权限已改变。'); };
+    const check = () => { assertOriginal(); sync(parent()); childAuthority?.assertCurrent();
+      if (locked.current || !sameOwner(owner, currentOwner())) throw notSent('侧聊输入权限已改变。'); };
     check(); authorities.current.set(check, parent as () => void); return check;
   };
   const guardSession = (owner: ComposerDraftOwner, action: SubmitAction) => {
@@ -256,27 +269,46 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
       if (method !== 'thread/queue/reorder' && method !== 'thread/queue/update' && method !== 'thread/queue/delete') {
         return client.rpc<T>(method, params, hostId, options);
       }
-      const owner = currentOwner();
-      if (!params || !hostId) {
-        throw notSent('原侧聊队列目标已改变。');
-      }
-      return dispatchQueue<T>(method, params, hostId, capture(owner), options?.assertBeforeSend, options?.onLateTerminal);
+      throw notSent('原侧聊队列写入缺少点击时捕获的授权。');
     },
     host: (endpoint, params, options) => client.host(endpoint, params, options),
     subscribe: listener => client.subscribe(listener),
     reply: (request, response) => client.reply(request, response),
   }), [client, controller, original, runtime, sessions]);
   const runSend = async (description: ComposerSubmissionDescription, value: ComposerDraft, options: SubmitOptions, action: SubmitAction,
-    authority: (() => void) | undefined, retry?: SendIntent) => {
+    authority: (() => void) | undefined, retry?: SendIntent, assertSource?: () => void) => {
     if (!authority) throw notSent('缺少原发送权限。');
-    const owner = structuredClone(description.owner); guard(owner, action, authority);
+    const owner = structuredClone(description.owner);
+    const assertSend = () => { sync(assertSource?.()); guard(owner, action, authority); };
+    assertSend();
     const originalAuthority = authorities.current.get(authority)!;
     const capturedNative = latest.current.nativeInjectionAuthority?.(originalAuthority, owner);
     const nativeInjectionAuthority = capturedNative && { daemonConnectionGeneration: capturedNative.daemonConnectionGeneration,
+      ...(capturedNative.sideChat ? { sideChat: structuredClone(capturedNative.sideChat) } : {}),
       assertBeforeSend(threadId: string) {
         if (threadId !== owner.threadId) throw notSent('原侧聊注入目标已改变。');
-        guard(owner, action, authority); sync(capturedNative.assertBeforeSend(threadId));
+        assertSend(); sync(capturedNative.assertBeforeSend(threadId));
       } };
+    // The shared submitDraft copy on this baseline predates sideChat. Keep the original
+    // captured pair on this submission's host call until that shared copy is updated.
+    const submissionClient: WorkbenchClient = {
+      rpc: (method, params, hostId, dispatchOptions) => client.rpc(method, params, hostId, dispatchOptions),
+      host: (endpoint, params, dispatchOptions) => {
+        if (endpoint !== 'send-injection' || !params || !['inject', 'start'].includes(String(params.action))) {
+          return client.host(endpoint, params, dispatchOptions);
+        }
+        if (!nativeInjectionAuthority?.sideChat) throw Object.assign(notSent('原侧聊注入授权尚未接入。'), { sendPhase: 'before-send' });
+        const proof = structuredClone(nativeInjectionAuthority.sideChat), reference = params.reference;
+        if (!reference || typeof reference !== 'object' || !('hostId' in reference) || !('threadId' in reference)
+          || reference.hostId !== owner.hostId || reference.threadId !== owner.threadId) {
+          throw Object.assign(notSent('原侧聊注入目标已改变。'), { sendPhase: 'before-send' });
+        }
+        return client.host(endpoint, { ...params, sideChat: proof }, { assertBeforeSend: () => {
+          nativeInjectionAuthority.assertBeforeSend(owner.threadId!); sync(dispatchOptions?.assertBeforeSend?.());
+        } });
+      },
+      subscribe: listener => client.subscribe(listener), reply: (request, response) => client.reply(request, response),
+    };
     return task(async () => {
       const cleanup = { controller(intent: SendIntent) {
         assertOriginal();
@@ -284,10 +316,10 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
         if (!draft.current) throw new Error('原侧聊输入区未挂载，恢复记录已保留。');
         return draft.current;
       } };
-      await sendConversationDraft({ client, sessions, sends, cleanup,
+      await sendConversationDraft({ client: submissionClient, sessions, sends, cleanup,
         nativeInjectionAuthority,
         dispatch: (method, params, hostId, beforeSend) => latest.current.dispatchSubmission(method, params, hostId, beforeSend, originalAuthority),
-        guard(threadId) { if (threadId !== owner.threadId) throw notSent('原侧聊目标已改变。'); guard(owner, action, authority); },
+        guard(threadId) { if (threadId !== owner.threadId) throw notSent('原侧聊目标已改变。'); assertSend(); },
         prepareCreated: async () => { throw notSent('临时侧聊没有可创建的新会话。'); },
         selectCreated: async () => { throw notSent('临时侧聊没有可移交的新会话。'); },
         assignCreatedProject: async () => { throw notSent('临时侧聊项目归属不可变。'); }, recoveryChanged: changed,
@@ -335,7 +367,60 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
     finally { finishingClose.current = false; }
   };
 
-  const navigation = useMemo<SideChatWorkspaceNavigationController>(() => ({ freeze() {
+  const navigation = useMemo<SideChatWorkspaceNavigationController>(() => ({
+    submitVisualization(request, signal) {
+      const owner = currentOwner(), source = structuredClone(request);
+      if (!owner.threadId || source.hostId !== owner.hostId || source.threadId !== owner.threadId || !source.path || signal.aborted) {
+        throw notSent('可视化来源已改变，未发送新的输入。');
+      }
+      const authority = capture(owner), view = sessions.view({ hostId: owner.hostId, threadId: owner.threadId }).snapshot();
+      const turn = view.thread?.turns.find(item => item.status === 'inProgress');
+      const action: SubmitAction = turn ? { type: 'steer', turnId: turn.id } : { type: 'send' };
+      const options = structuredClone(view.options ?? controller.getSnapshot().view?.child?.options ?? {});
+      const value = normalizeDraft(source.draft), revision = crypto.randomUUID();
+      const checkSource = () => {
+        if (signal.aborted || source.hostId !== owner.hostId || source.threadId !== owner.threadId || !source.path) {
+          throw notSent('可视化来源已改变，未发送新的输入。');
+        }
+      };
+      guard(owner, action, authority); checkSource();
+      const operation = draft.current?.beginExternalOperation(owner);
+      if (!operation) throw notSent('原侧聊草稿正在处理，未发送可视化输入。');
+      return task(async () => {
+        let accepted = false;
+        try {
+          const result = await operation.transaction(async (before, isCurrent) => {
+            guard(owner, action, authority); checkSource();
+            if (!isCurrent()) throw notSent('原侧聊草稿已改变。');
+            await saveComposerDraftConflict(owner, { revision, draft: value, prefills: [] });
+            if (!isCurrent()) throw notSent('原侧聊草稿已改变，可视化输入已保留。');
+            return { after: before, value: undefined };
+          });
+          accepted = result.accepted;
+          if (!accepted) throw notSent('原侧聊草稿无法核对，可视化输入已保留。');
+        } finally { operation.finish(accepted); }
+        await runSend({ owner, revision, overrides: {} }, value, options, action, authority, undefined, checkSource);
+      });
+    },
+    async activate() {
+      if (authorizing.current) throw notSent('原侧聊确认正在处理中。');
+      authorizing.current = true;
+      try {
+        const held = authorizationLease.current;
+        if (held) {
+          if (!await held.flush()) throw new Error('原侧聊尚未排空，确认撤销无法继续。');
+          await held.revoke(); held.release(); authorizationLease.current = null; setAuthorizationRecovery(false);
+        }
+        await runtime.authorizeChild();
+      } catch (cause) {
+        if (runtime.bridge.hasRegistration && !authorizationLease.current && !locked.current) {
+          const lease = navigation.freeze();
+          if (lease) { authorizationLease.current = lease; setAuthorizationRecovery(true); }
+        }
+        report(cause); throw cause;
+      } finally { authorizing.current = false; }
+    },
+    freeze() {
     if (!mounted.current || locked.current) return null;
     setLocked(true);
     let draftLease: ComposerDraftLease | null = null, sendLease: SideChatSendLease | null = null;
@@ -392,7 +477,7 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
     return current;
   };
   const cancelIntent = async (intent: SendIntent) => {
-    const captured = structuredClone(intent), owner = currentOwner(), authority = capture(owner);
+    const captured = structuredClone(intent), owner = currentOwner(), authority = capture(owner, false);
     const originalAuthority = authorities.current.get(authority);
     if (!originalAuthority || !sameOwner(captured.owner, owner) || captured.threadId !== owner.threadId) {
       throw notSent('原发送记录或取消权限已改变。');
@@ -429,9 +514,12 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
   const onEdit = async (value: ComposerDraft, origin: MessageEditOrigin, prepare: () => Promise<void>) => {
     const owner = currentOwner();
     if (!owner.threadId || origin.hostId !== owner.hostId || origin.threadId !== owner.threadId) throw notSent('消息编辑目标已改变。');
-    const authority = capture(owner), access = editAccess.capture(origin);
-    const originalAuthority = authorities.current.get(authority)!;
-    const capturedNative = latest.current.nativeInjectionAuthority?.(originalAuthority, owner);
+    const access = editAccess.capture(origin);
+    let authority: (() => void) | undefined, capturedNative: SendInjectionAuthority | undefined;
+    try {
+      authority = capture(owner);
+      capturedNative = latest.current.nativeInjectionAuthority?.(authorities.current.get(authority)!, owner);
+    } catch { /* An already-issued edit may still be checked without a new write grant. */ }
     await task(async () => {
       await prepare(); await sessions.ready({ hostId: owner.hostId, threadId: owner.threadId! });
       const current = sessions.view({ hostId: owner.hostId, threadId: owner.threadId! }).snapshot();
@@ -439,11 +527,20 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
       const result = await submitDraft(client, { hostId: owner.hostId, threadId: owner.threadId, cwd: original.cwd, readOnly: false,
         activeTurnId: current.thread.turns.find(turn => turn.status === 'inProgress')?.id ?? null, thread: current.thread,
         initialOptions: current.options ?? undefined }, value, {}, { type: 'send' }, async () => {}, origin,
-      (actual, expected, params) => edits.submit(actual, expected, params, () => {
-        access(); guard(owner, { type: 'send' }, authority);
-        if (capturedNative) sync(capturedNative.assertBeforeSend(owner.threadId!));
-        if (!sessions.view({ hostId: owner.hostId, threadId: owner.threadId! }).snapshot().historyComplete) throw notSent('原消息历史已改变。');
-      }, capturedNative?.daemonConnectionGeneration));
+      (actual, expected, params) => {
+        const submit = edits.submit as typeof edits.submit & ((origin: MessageEditOrigin, expectedTurnIds: string[], turnParams: Record<string, unknown>,
+          assertCanDispatch: () => void, daemonConnectionGeneration: string | undefined, childDispatch?: SideChatChildDispatchAuthority)
+          => ReturnType<MessageEditRecoveryStore['submit']>);
+        const assertRead = () => {
+          assertOriginal(); access();
+          if (locked.current || !sameOwner(owner, currentOwner())
+            || !sessions.view({ hostId: owner.hostId, threadId: owner.threadId! }).snapshot().historyComplete) throw notSent('原消息编辑目标或历史已改变。');
+        };
+        const childDispatch = capturedNative?.sideChat && authority ? { proof: structuredClone(capturedNative.sideChat), assertCurrent() {
+          guard(owner, { type: 'send' }, authority!); sync(capturedNative!.assertBeforeSend(owner.threadId!));
+        } } : undefined;
+        return submit.call(edits, actual, expected, params, assertRead, capturedNative?.daemonConnectionGeneration, childDispatch);
+      });
       if (result.turn) sessions.started({ hostId: owner.hostId, threadId: owner.threadId! }, result.turn);
     });
   };
@@ -452,6 +549,7 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
   }, []);
   return <>
     {error && <div role="alert">{error}{closeCompletionPending ? <button type="button" onClick={() => void finishClosed()}>继续完成关闭</button> : null}</div>}
+    {(runtime.needsChildAuthorization || authorizationRecovery) && <button type="button" onClick={() => void navigation.activate().catch(() => {})}>恢复侧聊写入权限</button>}
     {scopedIntents.map(intent => <SendRecoveryNotice key={intent.id} intent={intent} canRetry={!!history?.canSubmit && history.liveReady === true}
       canCheckInjectionReceipt={sends.hasConfirmedInjectionReceipt(intent)}
       onOpen={async () => { assertOriginal(); }} onCheck={() => task(async () => {
@@ -483,7 +581,7 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
         return openNew(captured);
       } : undefined}
       onDraftController={value => { draft.current = value; latest.current.onDraftController?.(value); }}
-      onDraftChange={props.onDraftChange} onRemoveReference={props.onRemoveReference} captureSubmissionAuthority={capture}
+      onDraftChange={props.onDraftChange} onRemoveReference={props.onRemoveReference} captureSubmissionAuthority={owner => capture(owner)}
       dispatchQueueMutation={(method, params, hostId, authority, beforeSend) => dispatchQueue(method, params, hostId, authority, beforeSend)}
       onSubmit={(description, value, options, action, _draft, authority) => runSend(description, value, options, action, authority)}
       onInterrupt={scope => task(async () => {
@@ -545,8 +643,13 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
       onInputEscape={async origin => {
         const owner = currentOwner(), authority = capture(owner);
         if (origin.hostId !== owner.hostId || origin.threadId !== owner.threadId) throw notSent('原审批会话已改变。');
-        await client.host('approval-request-interrupt', { ref: origin.ref, hostId: origin.hostId, threadId: origin.threadId, turnId: origin.turnId },
-          { assertBeforeSend: authority });
+        const originalAuthority = authorities.current.get(authority)!;
+        const capturedNative = latest.current.nativeInjectionAuthority?.(originalAuthority, owner);
+        if (!capturedNative?.sideChat) throw notSent('原侧聊审批停止权限尚未确认。');
+        const sideChat = structuredClone(capturedNative.sideChat);
+        await client.host('approval-request-interrupt', { ref: origin.ref, hostId: origin.hostId, threadId: origin.threadId,
+          turnId: origin.turnId, daemonConnectionGeneration: capturedNative.daemonConnectionGeneration, sideChat },
+        { assertBeforeSend: () => { authority(); sync(capturedNative.assertBeforeSend(owner.threadId!)); } });
       }} /></div>}
   </>;
 }
