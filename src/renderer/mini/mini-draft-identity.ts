@@ -1,8 +1,38 @@
 import { sendThreadKey } from '../app/send-recovery.ts';
 
 const storageKey = 'codex-yard.mini-draft-identities.v1';
+const targetKey = 'codex-yard.mini-target.v1';
 type Storage = Pick<globalThis.Storage, 'getItem' | 'setItem'>;
 const key = (hostId: string, threadId: string | null) => JSON.stringify([hostId, threadId]);
+
+export interface MiniTargetPointer { hostId: string; threadId: string | null; draftId: string; cwd: string; projectId?: string }
+
+export function readMiniTarget(storage: Storage = sessionStorage): MiniTargetPointer | null {
+  const raw = storage.getItem(targetKey);
+  if (!raw) return null;
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { throw new Error('Mini 目标无法读取，原记录已保留。'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Mini 目标无效，原记录已保留。');
+  const target = value as Record<string, unknown>;
+  if (typeof target.hostId !== 'string' || !target.hostId || !(target.threadId === null || typeof target.threadId === 'string' && !!target.threadId)
+    || typeof target.draftId !== 'string' || !target.draftId.startsWith('mini:') || typeof target.cwd !== 'string' || !target.cwd
+    || target.projectId !== undefined && (typeof target.projectId !== 'string' || !target.projectId)) throw new Error('Mini 目标无效，原记录已保留。');
+  return { hostId: target.hostId, threadId: target.threadId as string | null, draftId: target.draftId, cwd: target.cwd,
+    ...(target.projectId ? { projectId: target.projectId as string } : {}) };
+}
+
+/** The pointer contains no draft content or inferred host metadata. */
+export function rememberMiniTarget(target: MiniTargetPointer, storage: Storage = sessionStorage) {
+  if (typeof target.hostId !== 'string' || !target.hostId || !(target.threadId === null || typeof target.threadId === 'string' && !!target.threadId)
+    || typeof target.draftId !== 'string' || !target.draftId.startsWith('mini:') || typeof target.cwd !== 'string' || !target.cwd
+    || target.projectId !== undefined && (typeof target.projectId !== 'string' || !target.projectId)) throw new Error('Mini 目标无效，原记录已保留。');
+  storage.setItem(targetKey, JSON.stringify({ hostId: target.hostId, threadId: target.threadId, draftId: target.draftId,
+    cwd: target.cwd, ...(target.projectId ? { projectId: target.projectId } : {}) }));
+}
+
+export function existingMiniDraftIdentity(hostId: string, threadId: string | null, storage: Storage = sessionStorage) {
+  return read(storage)[key(hostId, threadId)];
+}
 
 function read(storage: Storage): Record<string, string> {
   const raw = storage.getItem(storageKey);

@@ -49,6 +49,8 @@ export interface MiniConversationProps {
   initialTarget: MiniConversationTarget;
   initialOptions?: SubmitOptions;
   hosts?: ComposerHost[];
+  /** False prevents a hidden or not-yet-granted view from acquiring a recovered message edit. */
+  editEnabled?: boolean;
   /** Synchronous projections of the parent's actual connection and exclusive owner state, including created-thread aliases. */
   isConnected(hostId: string): boolean;
   canUseOwner(owner: ComposerDraftOwner): boolean;
@@ -508,7 +510,7 @@ export function MiniConversation(props: MiniConversationProps) {
     await sourceClient.rpc('turn/interrupt', { threadId: identity.threadId, turnId: turn.id }, identity.hostId,
       { assertBeforeSend: assertAuthority });
   };
-  const edit = editState?.key === key && editState.status === 'ready' ? editState.value : null;
+  const edit = usable && props.editEnabled !== false && editState?.key === key && editState.status === 'ready' ? editState.value : null;
   const thread = conversation.thread?.id === target.threadId ? conversation.thread : null;
   return <div className="yard-mini-conversation" inert={frozen}>
     {target.threadId && <button type="button" className="yard-mini-conversation-open" disabled={!usable} onClick={() => props.onOpenThread({ hostId: target.hostId, threadId: target.threadId! })}>
@@ -521,15 +523,16 @@ export function MiniConversation(props: MiniConversationProps) {
     {conversation.error && <p role="status">{conversation.error}</p>}
     {conversation.streamGap && <p role="status">会话内容正在核对。</p>}
     {target.threadId && <div className="yard-mini-conversation-messages" inert={!usable}>
-      {conversation.loading ? <p role="status">Loading conversation...</p> : <StandaloneMessages client={props.client} hostId={target.hostId} thread={thread}
+      {conversation.loading && <p role="status">Loading conversation...</p>}
+      <StandaloneMessages client={props.client} hostId={target.hostId} threadId={target.threadId} thread={thread}
         editAccess={editAccess} editRecovery={edit?.recovery ?? null} editRebase={messageEditRebaseMarker(edit)} editHistory={{ order: 'ascending', tailComplete: conversation.historyComplete }}
         onEditNavigationController={receiveEditor} onEditDraftChange={(value, origin, version, authority) => props.edits.save(value, origin, version, authority)}
         onPrepareEditRebase={(origin, version) => props.edits.prepareRebase(origin, version)} onCommitEditRebase={async candidate => {
           const recovered = await props.edits.commitRebase(candidate); void props.sessions.refresh(recovered.origin).catch(report); return recovered;
-        }} onEdit={target.readOnly || editState?.key !== key || editState.status !== 'ready' ? undefined : onEdit}
+        }} onEdit={!usable || props.editEnabled === false || target.readOnly || editState?.key !== key || editState.status !== 'ready' ? undefined : onEdit}
         onOpenFileAt={location => { if (target.threadId) props.onOpenFile?.({ ...location, threadId: target.threadId }); }}
         onOpenFile={path => { if (target.threadId) props.onOpenFile?.({ hostId: target.hostId, threadId: target.threadId, path, cwd: target.cwd }); }}
-        onOpenVisualization={props.onOpenVisualization} onOpenBrowser={props.onOpenBrowser} />}
+        onOpenVisualization={props.onOpenVisualization} onOpenBrowser={props.onOpenBrowser} />
     </div>}
     {target.readOnly && <p role="status">此会话已归档，原输入已保留。</p>}
     <div inert={target.readOnly === true || !usable}>
