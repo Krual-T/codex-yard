@@ -15,6 +15,8 @@ export interface ServerRequestEvent extends WorkbenchEvent {
 export type WorkbenchDispatchOptions = Pick<RequestOptions, 'onLateTerminal'> & {
   /** Check the captured original authority after connection waits, immediately before sending. */
   assertBeforeSend?: () => void;
+  /** Original page/host daemon socket token, captured before the operation's first await. */
+  daemonConnectionGeneration?: string;
 };
 export interface WorkbenchClient {
   rpc<T = unknown>(method: string, params?: Record<string, unknown>, hostId?: string, options?: WorkbenchDispatchOptions): Promise<T>;

@@ -33,6 +33,7 @@ interface Pending {
   onLateTerminal?: RequestOptions['onLateTerminal'];
   onResult?: (value: unknown) => void;
 }
+interface DaemonConnection { generation: string }
 const readHostEndpoints = new Set(['get-settings', 'get-setting', 'get-global-state', 'os-info', 'locale-info', 'codex-home',
   'home-directory', 'workspace-root-options', 'workspace-directory-entries', 'remote-workspace-directory-entries', 'read-file', 'read-file-metadata', 'read-file-binary',
   'git-diff', 'app-server-connection-state', 'codex-command-keymap-state', 'custom-avatars', 'chrome-status', 'thread-project-state', 'message-send-status', 'workspace-file-save-status']);
@@ -53,6 +54,7 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
   private cancelOpening: ((error: Error) => void) | undefined;
   private pending = new Map<string, Pending>();
   private listeners = new Set<(event: WorkbenchEvent) => void>();
+  private daemonConnections = new Map<string, DaemonConnection>();
   private readonly unsubscribeAtoms: () => void;
   readonly files: BrowserFiles;
   private readonly url: string;
@@ -65,19 +67,42 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
   subscribe(listener: (event: WorkbenchEvent) => void) {
     this.listeners.add(listener); return () => { this.listeners.delete(listener); };
   }
+  captureDaemonConnection(hostId: string): { generation: string; assertOriginal(): void } {
+    const socket = this.socket, connection = this.daemonConnections.get(hostId);
+    const unavailable = () => new WorkbenchError('原页面的主机连接已失效，请重新核对。', false, undefined, 'before-send');
+    if (!socket || socket.readyState !== WebSocket.OPEN || this.stopped || this.suspended || !connection) throw unavailable();
+    return {
+      generation: connection.generation,
+      assertOriginal: () => {
+        if (this.socket !== socket || socket.readyState !== WebSocket.OPEN || this.stopped || this.suspended
+          || this.daemonConnections.get(hostId) !== connection) throw unavailable();
+      },
+    };
+  }
+  private updateDaemonConnection(event: WorkbenchEvent) {
+    if (event.type !== 'codex-app-server-connection-changed' || typeof event.hostId !== 'string' || !event.hostId) return;
+    const generation = event.daemonConnectionGeneration;
+    if (event.state !== 'connected' || typeof generation !== 'string' || !generation) {
+      this.daemonConnections.delete(event.hostId);
+    } else if (this.daemonConnections.get(event.hostId)?.generation !== generation) {
+      this.daemonConnections.set(event.hostId, { generation });
+    }
+  }
   private publish(event: WorkbenchEvent) { for (const listener of this.listeners) listener(event); }
   connect(): Promise<void> {
     if (this.stopped) return Promise.reject(new WorkbenchError('连接已关闭。'));
     if (this.suspended) return Promise.reject(new WorkbenchError('页面连接已挂起。'));
     if (this.socket?.readyState === WebSocket.OPEN) return Promise.resolve();
     if (this.opening) return this.opening;
+    this.daemonConnections.clear();
     this.publish({ type: 'connection-state', state: 'connecting' });
     this.opening = new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(this.url); this.socket = socket;
       this.cancelOpening = reject;
-      let opened = false;
+      let opened = false, failed = false;
       socket.onopen = () => {
         if (this.socket !== socket || this.stopped || this.suspended) { socket.close(); reject(new WorkbenchError('页面连接已挂起。')); return; }
+        if (failed) { socket.close(); reject(new WorkbenchError('无法连接 Yard 宿主。')); return; }
         opened = true; this.opening = null; this.cancelOpening = undefined;
         socket.send(JSON.stringify({ type: 'ready' }));
         this.publish({ type: 'connection-state', state: 'connected' }); resolve();
@@ -88,6 +113,8 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
         try { parsed = JSON.parse(String(event.data)); } catch { return; }
         if (!record(parsed) || typeof parsed.type !== 'string') return;
         const message = parsed as WorkbenchEvent;
+        if (message.type === 'codex-app-server-connection-changed' && (failed || socket.readyState !== WebSocket.OPEN)) return;
+        this.updateDaemonConnection(message);
         if (message.type === 'mcp-request' && !isServerRequestEvent(message)) {
           this.publish({ type: 'protocol-error', error: '宿主请求缺少有效身份，请刷新核对。' }); return;
         }
@@ -102,10 +129,16 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
         }
         this.publish(message);
       };
-      socket.onerror = () => { if (!opened) reject(new WorkbenchError('无法连接 Yard 宿主。')); };
+      socket.onerror = () => {
+        if (this.socket !== socket) return;
+        failed = true;
+        this.daemonConnections.clear();
+        if (!opened) reject(new WorkbenchError('无法连接 Yard 宿主。'));
+      };
       socket.onclose = () => {
         if (this.socket !== socket) return;
         this.opening = null; this.socket = null; this.cancelOpening = undefined;
+        this.daemonConnections.clear();
         if (!opened) reject(new WorkbenchError('Yard 宿主连接已断开。'));
         this.failPending('连接已断开');
         this.publish({ type: 'connection-state', state: 'disconnected' });
@@ -168,7 +201,9 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
   rpc<T = unknown>(method: string, params: Record<string, unknown> = {}, hostId = 'local', options?: WorkbenchDispatchOptions) {
     if (options?.onLateTerminal && !['thread/resume', 'thread/unsubscribe'].includes(method)) return Promise.reject<T>(new Error('Late observation is limited to thread subscription requests.'));
     const id = crypto.randomUUID();
-    return this.request<T>({ type: 'mcp-request', hostId, observeSubscriptionTerminal: Boolean(options?.onLateTerminal), request: { id, method, params } }, id, !readMethods.has(method), false,
+    return this.request<T>({ type: 'mcp-request', hostId, observeSubscriptionTerminal: Boolean(options?.onLateTerminal),
+      ...(options?.daemonConnectionGeneration !== undefined ? { daemonConnectionGeneration: options.daemonConnectionGeneration } : {}),
+      request: { id, method, params } }, id, !readMethods.has(method), false,
       { onLateTerminal: options?.onLateTerminal, onResult: method === 'thread/start' ? result => {
         // Emit while the original bridge's reply is being settled, before any
         // caller awaits persistence or navigation and the connection can change.
@@ -202,7 +237,9 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
   suspend() {
     this.suspended = true; clearTimeout(this.reconnect);
     this.cancelOpening?.(new WorkbenchError('页面连接已挂起。')); this.cancelOpening = undefined; this.opening = null;
-    const socket = this.socket; this.socket = null; socket?.close();
+    const socket = this.socket; this.socket = null;
+    this.daemonConnections.clear();
+    socket?.close();
     this.failPending('页面连接已关闭');
     this.publish({ type: 'connection-state', state: 'disconnected' });
   }
