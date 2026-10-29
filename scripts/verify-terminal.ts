@@ -13,6 +13,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { chromium } from 'playwright-core';
 import type { Browser, Page, WebSocketRoute } from 'playwright-core';
+import { CodexConnection } from '../lib/codex.ts';
+import type { RequestOptions, RpcResult } from '../lib/codex.ts';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { fileMethods } from '../src/native/files.ts';
 import { createSshProxyStream } from '../src/native/ssh.ts';
@@ -62,10 +64,52 @@ let requests: { operation: string; args: unknown[] }[] = [];
 let events: { at: number; event: TerminalEvent }[] = [];
 let connections: { hostId: string; state: string }[] = [];
 let sockets: { page: WebSocketRoute; server: WebSocketRoute; connected: boolean }[] = [];
+type InnerRpc = { connection: number; kind: 'request' | 'event'; method: string; handle?: string;
+  cwd?: string; tty?: boolean; command?: string[]; size?: unknown; bytes?: number; interrupt?: boolean;
+  outcome?: 'pending' | 'success' | 'error'; exitCode?: unknown };
+let innerRpc: InnerRpc[] = [];
+const connectionIds = new WeakMap<CodexConnection, number>();
+let nextConnectionId = 0;
+function connectionId(connection: CodexConnection) {
+  let id = connectionIds.get(connection);
+  if (!id) { id = ++nextConnectionId; connectionIds.set(connection, id); }
+  return id;
+}
+const originalRequest = CodexConnection.prototype.requestWithCursor;
+const originalReceive = CodexConnection.prototype.receive;
+CodexConnection.prototype.requestWithCursor = function (this: CodexConnection, method: string, params?: unknown, options?: RequestOptions): Promise<RpcResult<unknown>> {
+  const pending = originalRequest.call(this, method, params, options);
+  if (this.connectStream && method.startsWith('process/')) {
+    const value = params && typeof params === 'object' ? params as Record<string, unknown> : {};
+    const bytes = typeof value.deltaBase64 === 'string' ? Buffer.from(value.deltaBase64, 'base64') : undefined;
+    const entry: InnerRpc = { connection: connectionId(this), kind: 'request', method, outcome: 'pending',
+      ...(typeof value.processHandle === 'string' ? { handle: value.processHandle } : {}),
+      ...(typeof value.cwd === 'string' ? { cwd: value.cwd } : {}),
+      ...(typeof value.tty === 'boolean' ? { tty: value.tty } : {}),
+      ...(Array.isArray(value.command) && value.command.every(item => typeof item === 'string') ? { command: value.command as string[] } : {}),
+      ...(value.size ? { size: value.size } : {}),
+      ...(bytes ? { bytes: bytes.length, interrupt: bytes.includes(3) } : {}) };
+    innerRpc.push(entry);
+    void pending.then(() => { entry.outcome = 'success'; }, () => { entry.outcome = 'error'; });
+  }
+  return pending;
+} as typeof originalRequest;
+CodexConnection.prototype.receive = function (this: CodexConnection, data, sourceSocket) {
+  if (this.connectStream && (!sourceSocket || sourceSocket === this.socket)) {
+    try {
+      const value = JSON.parse(String(data)) as { id?: unknown; method?: unknown; params?: { processHandle?: unknown; exitCode?: unknown } };
+      if (value.id == null && (value.method === 'process/outputDelta' || value.method === 'process/exited') && typeof value.params?.processHandle === 'string') {
+        innerRpc.push({ connection: connectionId(this), kind: 'event', method: value.method, handle: value.params.processHandle,
+          ...(value.method === 'process/exited' ? { exitCode: value.params.exitCode } : {}) });
+      }
+    } catch { /* Observation must not affect the production connection. */ }
+  }
+  return originalReceive.call(this, data, sourceSocket);
+};
 type ShortcutObservation = { at: number; hostId: string | null; connection: string | null; state: string | null;
   focus: { tag: string; label: string | null; className: string } | null; defaultPrevented?: boolean };
 const results: { hostId: string; projectId: string; cwd: string; checks: string[]; gaps: string[]; errors: string[];
-  requests: typeof requests; events: typeof events; connections: typeof connections; firstShortcut?: ShortcutObservation | null;
+  requests: typeof requests; events: typeof events; connections: typeof connections; innerRpc: InnerRpc[]; firstShortcut?: ShortcutObservation | null;
   unavailableShortcut?: ShortcutObservation | null }[] = [];
 const report: Record<string, unknown> = { renderer: 'owned', localPeer: 'synthetic local RPC with a real disposable local PTY',
   requestedSsh, realDaemonUsed: false, realSshUsed: false, physicalRemoteMachine: false, realInference: false, results };
@@ -157,6 +201,8 @@ try {
     catch (error) { throw new Error('Actual --ssh CLI/sshd setup failed: ' + String(error)); }
     report.cliVersion = sshFixture.version;
     report.daemon = sshFixture.daemon;
+    report.sshIdentity = sshFixture.identity;
+    report.daemonNetworkNamespace = sshFixture.daemonNetworkNamespace;
     process.env.PATH = `${sshFixture.bin}:${fixtureEnv.PATH}`;
   }
   app = await createNativeWorkbench({ port: 0, workspace: root, dataDir: join(root, 'data'), codexHome: join(root, 'codex'),
@@ -181,8 +227,8 @@ try {
     headless: true, env: fixtureEnv, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-proxy-server',
       '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost'] });
   for (const target of targets) {
-    checks = []; gaps = []; errors = []; requests = []; events = []; connections = []; sockets = [];
-    results.push({ hostId: target.hostId, projectId: target.projectId, cwd: target.cwd, checks, gaps, errors, requests, events, connections });
+    checks = []; gaps = []; errors = []; requests = []; events = []; connections = []; sockets = []; innerRpc = [];
+    results.push({ hostId: target.hostId, projectId: target.projectId, cwd: target.cwd, checks, gaps, errors, requests, events, connections, innerRpc });
     const localSpawnCount = localFake.calls('process/spawn').filter(call => call.params.tty === true).length;
     page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     await page.addInitScript(() => {
@@ -296,6 +342,13 @@ try {
     } else {
       assert.ok(sshConnections > 0 && sshPathsVerified, 'Actual SSH proxy must report the disposable remote homes');
       assert.equal(localFake.calls('process/spawn').filter(call => call.params.tty === true).length, localSpawnCount);
+      await until(() => innerRpc.some(call => call.method === 'process/spawn' && call.tty === true && call.cwd === target.cwd && call.outcome === 'success'),
+        'actual SSH PTY spawn RPC');
+      const spawn = innerRpc.find(call => call.method === 'process/spawn' && call.tty === true && call.cwd === target.cwd && call.outcome === 'success')!;
+      assert.match(spawn.handle ?? '', /^workbench-terminal-[0-9a-f-]+$/);
+      assert.deepEqual(spawn.command?.slice(0, 2), ['/bin/sh', '-c']);
+      await until(() => innerRpc.some(call => call.kind === 'event' && call.method === 'process/outputDelta'
+        && call.connection === spawn.connection && call.handle === spawn.handle), 'actual SSH PTY output notification');
       report.realDaemonUsed = true; report.realSshUsed = true;
     }
     await checkTarget('TW');
@@ -318,6 +371,15 @@ try {
     const size = requests.filter(request => request.operation === 'resize').at(-1)!;
     await command(`printf 'TW_SIZE=%s\\n' "$(stty size)"`);
     await waitText(`TW_SIZE=${size.args[2]} ${size.args[1]}`);
+    if (target.hostId !== 'local') {
+      const spawn = innerRpc.find(call => call.method === 'process/spawn' && call.tty === true && call.cwd === target.cwd && call.outcome === 'success')!;
+      await until(() => innerRpc.some(call => call.method === 'process/writeStdin' && call.connection === spawn.connection
+        && call.handle === spawn.handle && call.outcome === 'success' && call.interrupt), 'actual SSH Ctrl+C RPC');
+      await until(() => innerRpc.some(call => call.method === 'process/resizePty' && call.connection === spawn.connection
+        && call.handle === spawn.handle && call.outcome === 'success'
+        && JSON.stringify(call.size) === JSON.stringify({ rows: size.args[2], cols: size.args[1] })), 'actual SSH resize RPC');
+      checks.push('Actual SSH CLI acknowledged PTY spawn, input including Ctrl+C, resize and output notifications on the same handle');
+    }
     checks.push('Real PTY multiline and streaming output, Ctrl+C and kernel dimensions');
     await page.getByRole('button', { name: /^(隐藏面板|Hide panel)$/ }).click();
     await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
@@ -367,6 +429,14 @@ try {
     const backgroundPid = await child('TW_CHILD');
     await page.getByRole('button', { name: 'Close terminal', exact: true }).click();
     await stopped(initialPid); await stopped(backgroundPid);
+    if (target.hostId !== 'local') {
+      const spawn = innerRpc.find(call => call.method === 'process/spawn' && call.tty === true && call.cwd === target.cwd && call.outcome === 'success')!;
+      await until(() => innerRpc.some(call => call.kind === 'event' && call.method === 'process/exited'
+        && call.connection === spawn.connection && call.handle === spawn.handle), 'actual SSH shell exit notification');
+      await until(() => innerRpc.some(call => call.method === 'process/spawn' && call.connection === spawn.connection && call.outcome === 'success'
+        && JSON.stringify(call.command) === JSON.stringify(['/bin/kill', '-HUP', '--', String(initialPid)])), 'actual SSH shell hangup RPC');
+      checks.push('Actual SSH CLI acknowledged the shell hangup and reported the original PTY exit');
+    }
     await open();
     const reopenedPid = await pid('TW_REOPEN');
     assert.notEqual(reopenedPid, initialPid);
@@ -383,6 +453,10 @@ try {
     if (!await projectAction.isVisible()) await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
     await projectAction.click({ timeout: 60000 });
     await stopped(beforeReload); await stopped(reloadChild);
+    await until(async () => await page!.getByRole('combobox', { name: 'Execution host' }).inputValue() === target.hostId
+      && await page!.locator('.yard-connection').getAttribute('data-state') === 'connected'
+      && (await page!.locator('.yard-connection').getAttribute('title'))?.includes('Host: connected') === true,
+    'selected host ready after reload');
     await open();
     const afterReload = await pid('TW_AFTER_RELOAD');
     assert.notEqual(afterReload, beforeReload);
@@ -392,6 +466,7 @@ try {
     const disconnectChild = await child('TW_DISCONNECT_CHILD');
     const createCount = requests.filter(request => request.operation === 'create').length;
     const writeCount = requests.filter(request => request.operation === 'write').length;
+    const innerWriteCount = innerRpc.filter(call => call.method === 'process/writeStdin').length;
     const remoteConnectedCount = connections.filter(connection => connection.hostId === target.hostId && connection.state === 'connected').length;
     const socketCount = sockets.length, socket = sockets.at(-1)!;
     await Promise.all([socket.page.close({ code: 1012, reason: 'isolated terminal reconnect' }), socket.server.close()]);
@@ -399,6 +474,8 @@ try {
     await until(() => sockets.length > socketCount && sockets.at(-1)!.connected, 'host reconnect');
     assert.equal(requests.filter(request => request.operation === 'create').length, createCount);
     assert.equal(requests.filter(request => request.operation === 'write').length, writeCount, 'Reconnect must not replay terminal input');
+    if (target.hostId !== 'local') assert.equal(innerRpc.filter(call => call.method === 'process/writeStdin').length, innerWriteCount,
+      'Reconnect must not replay input to the actual SSH CLI');
     await page.keyboard.press('Control+Backquote');
     await delay(1000);
     const reopenedByShortcut = requests.filter(request => request.operation === 'create').length > createCount;
@@ -480,6 +557,8 @@ try {
   await capture('failure').catch(() => {});
   process.exitCode = 1;
 } finally {
+  CodexConnection.prototype.requestWithCursor = originalRequest;
+  CodexConnection.prototype.receive = originalReceive;
   const cleanupErrors: string[] = [];
   try { await browser?.close(); } catch (error) { cleanupErrors.push('browser: ' + String(error)); }
   try { await app?.close(); } catch (error) { cleanupErrors.push('app: ' + String(error)); }
@@ -491,6 +570,7 @@ try {
     if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await new Promise<void>(resolve => child.once('exit', () => resolve())); }
   }));
   try { await sshFixture?.close(); } catch (error) { cleanupErrors.push('SSH fixture: ' + String(error)); }
+  if (sshFixture) report.sshCleanup = sshFixture.cleanup;
   for (const pid of ownedPids) {
     try {
       if (!await running(pid)) continue;
