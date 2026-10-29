@@ -1,4 +1,7 @@
-.yard-settings { display: flex; min-height: 100%; color: var(--yard-fg, #1a1c1f); background: var(--yard-bg, #fff); font: calc(var(--yard-font-size, 14px) - 1px)/1.43 var(--yard-ui-font, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); font-weight: 430; }
+.yard-settings { --yard-settings-border: var(--yard-border, #e8e8e8); display: flex; min-height: 100%; color: var(--yard-fg, #1a1c1f); background: var(--yard-bg, #fff); font: calc(var(--yard-font-size, 14px) - 1px)/1.43 var(--yard-ui-font, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); font-weight: 430; }
+@supports (color: color-mix(in srgb, black, white)) {
+  .yard-settings { --yard-settings-border: color-mix(in srgb, var(--yard-border, #e8e8e8) 50%, var(--yard-bg, #fff)); }
+}
 .yard-settings * { box-sizing: border-box; }
 .yard-settings button, .yard-settings select, .yard-settings input, .yard-settings textarea { font: inherit; }
 .yard-settings button, .yard-settings select, .yard-settings input[type="text"], .yard-settings input[type="search"], .yard-settings input[type="number"], .yard-settings textarea { border: 1px solid var(--yard-border, #d8dde1); border-radius: 5px; background: var(--yard-surface, var(--yard-bg, #fff)); color: inherit; padding: 6px 9px; }
@@ -25,28 +28,29 @@
 .yard-settings .yard-nav-group button { display: flex; align-items: center; gap: 8px; width: 100%; height: 31px; text-align: left; background: transparent; border: 0; border-radius: 8px; padding: 5px 8px; }
 .yard-settings .yard-nav-group button[aria-current="page"] { background: color-mix(in srgb, var(--yard-fg, #1a1c1f) 6%, var(--yard-bg, #fff)); font-weight: inherit; }
 .yard-settings-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
-.yard-settings-content { width: min(100%, 832px); padding: 64px 32px 60px; margin: 0 auto; font-family: var(--yard-ui-font, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); }
+.yard-settings-content { width: min(100%, 840px); padding: 64px 40px 60px 32px; margin: 0 auto; font-family: var(--yard-ui-font, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); }
 .yard-settings h1 { font-size: 24px; line-height: 1.25; font-weight: 500; margin: 0 0 44px; }
 .yard-settings h2 { font-size: 22px; line-height: 1.25; margin: 0 0 18px; }
 .yard-settings h3 { font-size: 15px; margin: 24px 0 8px; }
 .yard-section-heading h2, .yard-section-heading h3 { margin: 0; }
 .yard-section-heading { margin-bottom: 16px; }
-.yard-setting-group, .yard-appearance-card { border: 1px solid var(--yard-border, #e8e8e8); border-radius: 16px; padding: 0 16px; }
-.yard-setting-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 12px 0; border-bottom: 1px solid var(--yard-border, #e8e8e8); }
+.yard-setting-group, .yard-appearance-card { border: 1px solid var(--yard-settings-border, #e8e8e8); border-radius: 16px; padding: 0 16px; }
+.yard-setting-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 12px 0; border-bottom: 1px solid var(--yard-settings-border, #e8e8e8); }
 .yard-setting-group > .yard-setting-row:last-child, .yard-appearance-card > .yard-setting-row:last-child { border-bottom: 0; }
 .yard-setting-copy { min-width: 0; overflow-wrap: anywhere; }
 .yard-setting-label { font-weight: 430; }
 .yard-setting-description, .yard-settings .yard-muted { color: var(--yard-muted, #717171); font-size: 12px; }
 .yard-setting-control { flex: 0 1 auto; display: flex; gap: 8px; align-items: center; min-width: 0; }
-.yard-setting-control select, .yard-setting-control input[type="text"] { max-width: 240px; width: 100%; }
+.yard-setting-control input[type="text"] { max-width: 240px; width: 100%; }
+.yard-settings .yard-setting-control > select { width: auto; min-width: 0; max-width: min(240px, 100%); field-sizing: content; padding: 4px 9px; border-color: var(--yard-settings-border, #e8e8e8); border-radius: 9px; background: var(--yard-bg, #fff); }
 .yard-setting-control textarea { width: min(360px, 100%); min-width: 180px; resize: vertical; }
 .yard-setting-control input[type="number"] { width: 76px; }
 .yard-setting-control input[type="color"] { width: 36px; height: 30px; padding: 1px; border: 1px solid var(--yard-border, #d8dde1); border-radius: 4px; background: var(--yard-surface, var(--yard-bg, #fff)); }
 .yard-setting-control input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--yard-accent, #1769b0); }
-.yard-setting-control input[role="switch"] { appearance: none; position: relative; width: 36px; height: 20px; flex: 0 0 36px; border: 0; border-radius: 12px; background: color-mix(in srgb, var(--yard-fg, #1a1c1f) 18%, var(--yard-bg, #fff)); cursor: pointer; }
+.yard-setting-control input[role="switch"] { appearance: none; position: relative; width: 32px; height: 20px; flex: 0 0 32px; margin: 0; border: 0; border-radius: 12px; background: color-mix(in srgb, var(--yard-fg, #1a1c1f) 18%, var(--yard-bg, #fff)); cursor: pointer; }
 .yard-setting-control input[role="switch"]::before { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / .2); }
 .yard-setting-control input[role="switch"]:checked { background: var(--yard-fg, #1a1c1f); }
-.yard-setting-control input[role="switch"]:checked::before { transform: translateX(16px); }
+.yard-setting-control input[role="switch"]:checked::before { transform: translateX(12px); }
 .yard-settings code, .yard-settings pre, .yard-color-value { font-family: var(--yard-code-font, monospace); font-size: var(--yard-code-size, 12px); }
 .yard-font-controls { display: grid; gap: 8px; min-width: 0; }
 .yard-font-face, .yard-font-selects, .yard-font-browse { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
@@ -58,7 +62,9 @@
 .yard-segmented { display: flex; margin-top: 28px; gap: 4px; }
 .yard-segmented button[aria-pressed="true"] { background: color-mix(in srgb, var(--yard-accent, #1769b0) 14%, var(--yard-surface, var(--yard-bg, #fff))); border-color: var(--yard-accent, #1769b0); }
 .yard-setting-control .yard-segmented { margin-top: 0; gap: 2px; padding: 2px; border: 1px solid var(--yard-border, #e8e8e8); border-radius: 8px; }
+.yard-setting-row[data-setting-id="terminal-location"] .yard-segmented { padding: 0; border: 0; }
 .yard-settings .yard-setting-control .yard-segmented button { border: 0; background: transparent; padding: 4px 8px; }
+.yard-settings .yard-setting-row[data-setting-id="terminal-location"] .yard-segmented button { border-radius: 999px; }
 .yard-settings .yard-setting-control .yard-segmented button[aria-pressed="true"] { background: color-mix(in srgb, var(--yard-fg, #1a1c1f) 8%, var(--yard-bg, #fff)); }
 .yard-theme-editor { margin-top: 16px; }
 .yard-settings .yard-settings-group-title, .yard-settings .yard-appearance-label { margin: 0 0 16px; font-size: 13px; font-weight: 500; }
@@ -81,18 +87,18 @@
 .yard-mode-dark { background: #222; border-color: #222; }
 .yard-theme-editor .yard-setting-row { min-height: 44px; padding: 8px 0; }
 .yard-settings .yard-icon-button { display: inline-flex; padding: 4px; color: var(--yard-muted, #888); background: transparent; border: 0; }
-.yard-code-theme-select { display: inline-flex; align-items: center; width: 176px; min-width: 0; height: 28px; gap: 5px; padding: 2px 8px 2px 4px; border: 1px solid var(--yard-border, #e8e8e8); border-radius: 16px; }
-.yard-code-theme-select > span { display: grid; place-items: center; width: 20px; height: 20px; flex: 0 0 20px; border: 1px solid var(--yard-border, #e8e8e8); border-radius: 50%; color: var(--yard-accent, #339cff); font-size: 10px; font-weight: 600; }
+.yard-code-theme-select { display: inline-flex; align-items: center; width: 176px; min-width: 0; height: 28px; gap: 5px; padding: 2px 8px 2px 4px; border: 1px solid var(--yard-settings-border, #e8e8e8); border-radius: 16px; }
+.yard-code-theme-select > span { display: grid; place-items: center; width: 20px; height: 20px; flex: 0 0 20px; border: 1px solid var(--yard-settings-border, #e8e8e8); border-radius: 50%; color: var(--yard-accent, #339cff); font-size: 10px; font-weight: 600; }
 .yard-settings .yard-code-theme-select select { width: 100%; min-width: 0; padding: 0; border: 0; appearance: none; background: transparent; }
 .yard-code-theme-select > svg { flex: 0 0 13px; color: var(--yard-muted, #888); pointer-events: none; }
 .yard-theme-menu { position: relative; }
-.yard-theme-menu summary { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 3px 8px; border: 1px solid var(--yard-border, #e8e8e8); border-radius: 16px; cursor: pointer; list-style: none; }
+.yard-theme-menu summary { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 3px 8px; border: 1px solid var(--yard-settings-border, #e8e8e8); border-radius: 16px; cursor: pointer; list-style: none; }
 .yard-theme-menu summary::-webkit-details-marker { display: none; }
 .yard-theme-popover { position: absolute; z-index: 20; right: 0; top: calc(100% + 5px); min-width: 180px; padding: 8px; border: 1px solid var(--yard-border, #e8e8e8); border-radius: 8px; background: var(--yard-surface, #fff); box-shadow: 0 6px 18px rgb(0 0 0 / .12); }
 .yard-theme-popover label { display: flex; align-items: center; gap: 8px; padding: 8px; }
 .yard-font-popover { width: min(420px, 80vw); max-height: 60vh; overflow: auto; }
 .yard-swatch { width: 13px; height: 13px; flex: 0 0 13px; border: 1px solid var(--yard-border, #e8e8e8); border-radius: 50%; }
-.yard-color-control { display: flex; align-items: center; gap: 5px; border: 1px solid var(--yard-border, #e8e8e8); border-radius: 16px; padding: 3px 7px; }
+.yard-color-control { display: flex; align-items: center; gap: 5px; border: 1px solid var(--yard-settings-border, #e8e8e8); border-radius: 16px; padding: 3px 7px; }
 .yard-settings .yard-color-control input[type="color"] { width: 14px; height: 14px; padding: 0; border: 0; border-radius: 50%; background: transparent; }
 .yard-settings .yard-color-control input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
 .yard-settings .yard-color-control input[type="color"]::-webkit-color-swatch { border: 1px solid var(--yard-border, #e8e8e8); border-radius: 50%; }
