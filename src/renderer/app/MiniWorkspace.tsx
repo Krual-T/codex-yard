@@ -161,8 +161,8 @@ export function MiniWorkspace(props: MiniWorkspaceProps) {
           throw new Error('Mini 原目标无法确认，草稿已保留。');
         }
         const selected = { ...metadata, draftId: pointer?.draftId ?? miniDraftIdentity(metadata.hostId, metadata.threadId, value.bindings) };
-        rememberMiniTarget(selected);
         if (active && alive.current) {
+          rememberMiniTarget(selected);
           snapshotRef.current = value; setSnapshot(value); targetRef.current = selected; setTarget(selected); setInitialError('');
         }
       } catch (cause) { if (active && alive.current) { setInitialError(errorText(cause)); report(cause); } }

@@ -37,6 +37,7 @@ let failCreatedPointer = false;
 let failPreSendRead = false;
 let holdPetRead = false, petReadWaiting = false, resolvePetRead: (() => void) | undefined;
 let holdPetAck = false, petAckWaiting = false, resolvePetAck: (() => void) | undefined;
+let holdTargetResolution = false, targetResolutionWaiting = false, resolveTargetResolution: (() => void) | undefined;
 const client: WorkbenchClient = {
   async rpc<T>(method: string, params: Record<string, unknown> = {}, hostId = 'local', options?: WorkbenchDispatchOptions): Promise<T> {
     if (method === 'turn/start' && holdWrite) {
@@ -135,6 +136,7 @@ IDBObjectStore.prototype.put = function (...args: Parameters<IDBObjectStore['put
 
 function Fixture() {
   const [online, setOnline] = useState(true), [revision, setRevision] = useState(0), [enabled, setEnabled] = useState(true);
+  const [showWorkspace, setShowWorkspace] = useState(true);
   const [recovery, setRecovery] = useState<Awaited<ReturnType<MessageEditRecoveryStore['read']>>>(null);
   const [, render] = useState(0);
   const view = useConversationSession(sessions, { hostId: 'local', threadId: 'thread-a' }, false, true, 0);
@@ -142,6 +144,13 @@ function Fixture() {
   useEffect(() => {
     fixture.updateOnline = value => { setOnline(value); if (value) setRevision(revision => revision + 1); };
     fixture.render = () => render(value => value + 1);
+    fixture.leaveMini = async () => {
+      const lease = workspace?.freeze();
+      if (!lease || !await lease.flush()) { lease?.release(); throw new Error('Mini navigation did not flush'); }
+      flushSync(() => setShowWorkspace(false));
+      lease.handoff(); lease.release();
+    };
+    fixture.mountMini = () => { flushSync(() => setShowWorkspace(true)); };
     const read = () => { void edits.read('local', 'thread-a').then(setRecovery); };
     read(); window.addEventListener(messageEditChanged, read);
     return () => window.removeEventListener(messageEditChanged, read);
@@ -179,14 +188,21 @@ function Fixture() {
         busy={false} initialOptions={{ model: 'fixture-model' }} onDraftController={value => { mainController = value; }}
         onSubmit={async () => {}} onInterrupt={async () => {}} />
     </div>
-    <MiniWorkspace client={client} sessions={sessions} sends={sends} edits={edits} approvals={approvals}
+    {showWorkspace && <MiniWorkspace client={client} sessions={sessions} sends={sends} edits={edits} approvals={approvals}
       defaultTarget={{ hostId: 'local', threadId: defaultThread, cwd: '/fixture/local', projectId: defaultProject }}
       activities={[{ hostId: 'remote', threadId: 'thread-b', title: 'Remote fixture', status: 'idle',
         actions: [{ id: 'follow-remote', kind: 'follow-up', label: 'Follow remote' }] }]}
       bridgeState={online ? 'connected' : 'disconnected'} hostConnections={{ local: { state: online ? 'connected' : 'disconnected', fresh: online, revision: String(revision) },
         remote: { state: online ? 'connected' : 'disconnected', fresh: online, revision: String(revision) } }}
-      resolveTarget={async identity => ({ ...identity, cwd: location.search.includes('badcwd=1') ? '/fixture/changed' : '/fixture/' + identity.hostId,
-        ...(identity.hostId === 'local' && defaultProject ? { projectId: defaultProject } : {}) })}
+      resolveTarget={async identity => {
+        const value = { ...identity, cwd: location.search.includes('badcwd=1') ? '/fixture/changed' : '/fixture/' + identity.hostId,
+          ...(identity.hostId === 'local' && defaultProject ? { projectId: defaultProject } : {}) };
+        if (holdTargetResolution) {
+          holdTargetResolution = false; targetResolutionWaiting = true;
+          await new Promise<void>(resolve => { resolveTargetResolution = resolve; }); targetResolutionWaiting = false;
+        }
+        return value;
+      }}
       captureConnection={() => { const captured = generation; if (!connected) throw new Error('Synthetic offline');
         return () => { if (!connected || captured !== generation) throw new Error('Synthetic original connection revoked'); }; }}
       freezeMain={freezeMain} onController={value => { workspace = value; }}
@@ -194,13 +210,14 @@ function Fixture() {
       onExpand={() => {}} onOpenSettings={() => {}} onError={message => { errors.push(message); }}
       onAssignCreatedProject={async (target, created, assert) => { assert(); projects.push({ hostId: target.hostId, projectId: target.projectId,
         threadId: created.id, turnsBefore: calls.filter(call => call.method === 'turn/start').length }); }}
-      initialOptions={{ model: 'fixture-model' }} />
+      initialOptions={{ model: 'fixture-model' }} />}
   </>;
 }
 const root = createRoot(document.getElementById('root')!);
 const fixture = {
   calls, hostCalls, errors, opened, leases, projects, sends, approvals,
   updateOnline: (_value: boolean) => {}, render: () => {},
+  leaveMini: async () => {}, mountMini: () => {},
   ready: () => !!mainController && !!mainEditor,
   mainVisible: () => mainVisible,
   holdMain(value: boolean) { holdMain = value; }, mainWaiting: () => mainWaiting,
@@ -212,6 +229,11 @@ const fixture = {
   holdPetRead() { holdPetRead = true; }, petReadWaiting: () => petReadWaiting,
   holdPetAck() { holdPetAck = true; }, petAckWaiting: () => petAckWaiting,
   releasePetAck(open: boolean) { petOpen = open; resolvePetAck?.(); resolvePetAck = undefined; },
+  holdTargetResolution() { holdTargetResolution = true; }, targetResolutionWaiting: () => targetResolutionWaiting,
+  async releaseTargetResolution() {
+    resolveTargetResolution?.(); resolveTargetResolution = undefined;
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+  },
   invalidatePet() { emit({ type: 'workbench-pet-error', stateUnconfirmed: true, error: 'Synthetic state failure' }); },
   expirePetRead() { const original = Date.now; Date.now = () => original() + 11_000; },
   latePetState() { emit({ type: 'workbench-pet-state', state: { isOpen: true, visibility: 'always-visible', position: null } }); },
