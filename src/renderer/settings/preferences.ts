@@ -49,6 +49,10 @@ export interface PreferenceValues {
   'worktree-auto-cleanup-enabled': boolean;
   'worktree-keep-count': number;
   'external-browser-link-shortcut': 'unassigned' | 'primary' | 'alt' | 'primary-shift';
+  'open-link-in-target-preference': 'in-app-browser' | 'external-browser';
+  'open-local-url-in-target-preference': 'in-app-browser' | 'external-browser';
+  'browser-show-full-url': boolean;
+  'browser-annotation-screenshots-mode': 'always' | 'necessary';
   'primary-number-shortcut-target': 'sidebar' | 'tabs';
   'reduced-motion-preference': 'system' | 'on' | 'off';
   'dock-icon-preference': 'app-default' | 'codex-system' | 'space-system';
@@ -138,6 +142,10 @@ export const preferenceDefinitions: Definitions = {
   'worktree-auto-cleanup-enabled': { source: 'global', defaultValue: true, valid: bool },
   'worktree-keep-count': { source: 'global', defaultValue: 15, valid: numberIn(1, Number.MAX_SAFE_INTEGER) },
   'external-browser-link-shortcut': { source: 'setting', defaultValue: 'primary', valid: oneOf('unassigned', 'primary', 'alt', 'primary-shift') },
+  'open-link-in-target-preference': { source: 'setting', defaultValue: 'in-app-browser', valid: oneOf('in-app-browser', 'external-browser') },
+  'open-local-url-in-target-preference': { source: 'setting', defaultValue: 'in-app-browser', valid: oneOf('in-app-browser', 'external-browser') },
+  'browser-show-full-url': { source: 'setting', defaultValue: false, valid: bool },
+  'browser-annotation-screenshots-mode': { source: 'setting', defaultValue: 'always', valid: oneOf('always', 'necessary') },
   'primary-number-shortcut-target': { source: 'atom', defaultValue: 'tabs', valid: oneOf('sidebar', 'tabs') },
   'reduced-motion-preference': { source: 'global', defaultValue: 'system', valid: oneOf('system', 'on', 'off') },
   'dock-icon-preference': { source: 'global', defaultValue: 'app-default', valid: oneOf('app-default', 'codex-system', 'space-system') },
@@ -356,12 +364,12 @@ export class Preferences {
     const results = await Promise.all(keys.map(key => this.saveKey(key)));
     return results.every(Boolean);
   }
-  async saveOne(key: PreferenceKey): Promise<boolean> {
+  async saveOne(key: PreferenceKey, assertBeforeSend?: () => void): Promise<boolean> {
     const entry = this.snapshot[key];
     if (!entry.available || entry.saving || !entry.editBase || entry.conflict) return false;
-    return this.saveKey(key);
+    return this.saveKey(key, assertBeforeSend);
   }
-  private async saveKey(key: PreferenceKey): Promise<boolean> {
+  private async saveKey(key: PreferenceKey, assertBeforeSend?: () => void): Promise<boolean> {
     const source = preferenceDefinitions[key].source;
     const endpoint = source === 'setting' ? 'set-setting' : source === 'global' ? 'set-global-state' : 'set-persisted-atom';
     const getEndpoint = source === 'setting' ? 'get-setting' : source === 'global' ? 'get-global-state' : 'get-persisted-atom';
@@ -389,7 +397,7 @@ export class Preferences {
     this.revisions.set(key, (this.revisions.get(key) ?? 0) + 1);
     this.update(key, { saving: true, error: null });
     try {
-      const response = await this.client.host<{ success?: boolean }>(endpoint, { key, value, expected });
+      const response = await this.client.host<{ success?: boolean }>(endpoint, { key, value, expected }, { assertBeforeSend });
       if (response?.success !== true) throw new Error('The host did not confirm the write');
       acknowledged = true;
       const read = observation(await this.client.host<unknown>(getEndpoint, { key }));

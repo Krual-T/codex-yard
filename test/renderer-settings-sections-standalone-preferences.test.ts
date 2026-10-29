@@ -18,7 +18,7 @@ class FakeClient implements WorkbenchClient {
   rpc<T>(): Promise<T> { throw new Error('RPC is not used for UI preferences'); }
   async reply(): Promise<void> { throw new Error('Unexpected approval'); }
   subscribe(listener: (event: WorkbenchEvent) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
-  async host<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
+  async host<T>(endpoint: string, params?: Record<string, unknown>, options?: { assertBeforeSend?: () => void }): Promise<T> {
     this.calls.push({ endpoint, params });
     if (endpoint === this.fail) throw new Error('offline');
     const key = String(params?.key);
@@ -31,6 +31,7 @@ class FakeClient implements WorkbenchClient {
     }
     if (endpoint.startsWith('set-')) {
       await this.pauseWrite?.();
+      options?.assertBeforeSend?.();
       assertPreferenceExpectation(target[key], Object.hasOwn(target, key), params?.expected);
       if (params?.value === undefined) delete target[key];
       else target[key] = structuredClone(params.value);
@@ -39,6 +40,71 @@ class FakeClient implements WorkbenchClient {
     throw new Error(`Unknown ${endpoint}`);
   }
 }
+
+test('Browser preferences retain raw defaults and use conditional writes to the original setting source', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  await prefs.load();
+  const values = {
+    'open-link-in-target-preference': 'external-browser',
+    'open-local-url-in-target-preference': 'external-browser',
+    'browser-show-full-url': true,
+    'browser-annotation-screenshots-mode': 'necessary',
+  } as const;
+  const snapshot = prefs.getSnapshot();
+  assert.equal(snapshot['open-link-in-target-preference'].value, 'in-app-browser');
+  assert.equal(snapshot['open-local-url-in-target-preference'].value, 'in-app-browser');
+  assert.equal(snapshot['browser-show-full-url'].value, false);
+  assert.equal(snapshot['browser-annotation-screenshots-mode'].value, 'always');
+  for (const key of Object.keys(values) as (keyof typeof values)[]) {
+    assert.deepEqual(snapshot[key].observation, { exists: false });
+    prefs.edit(key, values[key]);
+    assert.equal(await prefs.saveOne(key), true);
+    assert.equal(client.settings[key], values[key]);
+    const write = client.calls.filter(call => call.endpoint.startsWith('set-')).at(-1);
+    assert.equal(write?.endpoint, 'set-setting');
+    assert.deepEqual(write?.params?.expected, { exists: false });
+  }
+  assert.deepEqual(client.settings.unknownSetting, { keep: true });
+  client.settings['browser-show-full-url'] = 'false';
+  await prefs.reload('browser-show-full-url');
+  assert.equal(prefs.getSnapshot()['browser-show-full-url'].available, false);
+  prefs.edit('browser-show-full-url', false);
+  assert.equal(await prefs.saveOne('browser-show-full-url'), false);
+  assert.equal(client.settings['browser-show-full-url'], 'false');
+});
+
+test('Browser saves recheck the captured authority after dispatch waits and preserve a rejected edit for explicit retry', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  await prefs.load();
+  let release: () => void = () => {};
+  client.pauseWrite = () => new Promise<void>(resolve => { release = resolve; });
+  let current = true, checks = 0;
+  const assertBeforeSend = () => {
+    checks++;
+    if (!current) throw new DOMException('The selected settings page changed.', 'AbortError');
+  };
+  prefs.edit('browser-show-full-url', true);
+  const saving = prefs.saveOne('browser-show-full-url', assertBeforeSend);
+  assert.equal(checks, 0);
+  current = false;
+  release();
+  assert.equal(await saving, false);
+  assert.equal(checks, 1);
+  assert.equal(Object.hasOwn(client.settings, 'browser-show-full-url'), false);
+  const rejected = prefs.getSnapshot()['browser-show-full-url'];
+  assert.equal(rejected.value, true);
+  assert.equal(rejected.saved, false);
+  assert.equal(rejected.saving, false);
+  assert.match(rejected.error ?? '', /selected settings page changed/);
+  assert.equal(prefs.dirty, true);
+  assert.equal(client.calls.filter(call => call.endpoint === 'set-setting').length, 1);
+  current = true;
+  client.pauseWrite = null;
+  assert.equal(await prefs.saveOne('browser-show-full-url', assertBeforeSend), true);
+  assert.equal(checks, 2);
+  assert.equal(client.settings['browser-show-full-url'], true);
+  assert.equal(prefs.dirty, false);
+});
 
 test('the shared preference key list includes every General atom and global preference once', () => {
   for (const key of ['composer-permission-mode-visibility', 'app-shell-bottom-panel-launcher-visible', 'confirm-before-close',
