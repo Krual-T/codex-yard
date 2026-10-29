@@ -119,6 +119,19 @@ function safeBrowserUrl(value: string): boolean {
   } catch { return false; }
 }
 
+function GoogleDocumentLinkIcon({ url }: { url: string }) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== 'docs.google.com' || !/^\/(?:document|spreadsheets|presentation)\/d\/[^/]+(?:\/|$)/.test(parsed.pathname)) return null;
+  } catch { return null; }
+  return <svg className="yard-markdown-file-icon" width="13" height="13" viewBox="0 0 84 72"
+    aria-hidden="true" focusable="false" data-markdown-copy="exclude">
+    <path fill="#0f9d58" d="M28 0 42 24 14 72 0 48Z" />
+    <path fill="#fbbc04" d="M28 0H56L84 48H56Z" />
+    <path fill="#4285f4" d="M14 72 28 48H84L70 72Z" />
+  </svg>;
+}
+
 export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowBasicHtml = false, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage }: StandaloneMarkdownProps) {
   const markdownText = useMemo(() => normalizeFileCitationEscapes(text), [text]);
   const components = useMemo<Components>(() => ({
@@ -141,7 +154,7 @@ export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowB
             || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
           event.preventDefault();
           onOpenBrowser({ hostId, threadId, url: external, source: 'link' });
-        }}>{children}</a>;
+        }}><GoogleDocumentLinkIcon url={external} />{children}</a>;
       if (!onOpenFile && !onOpenFileAt) return <span>{children}</span>;
       return <button type="button" className="yard-file-link yard-markdown-file-link" onClick={() => {
         const location = resolveFileLocation(href, cwd, hostId);
