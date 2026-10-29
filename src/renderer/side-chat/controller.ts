@@ -1,4 +1,4 @@
-import type { SideChatControllerOptions, SideChatHostAction, SideChatHostPort, SideChatHostView, SideChatPhase, SideChatScope, SideChatSnapshot } from './types.ts';
+import type { SideChatControllerOptions, SideChatHostAction, SideChatHostPort, SideChatHostView, SideChatPhase, SideChatReadPurpose, SideChatScope, SideChatSnapshot } from './types.ts';
 
 const requestStatuses = new Set(['waiting', 'inflight', 'not-sent', 'rejected', 'unknown', 'received', 'invalid']);
 const closeStatuses = new Set(['idle', 'preparing', 'prepare-failed', 'inflight', 'not-sent', 'rejected', 'unknown', 'cleanup-pending', 'cleaning', 'closed']);
@@ -63,6 +63,9 @@ export class SideChatController {
   private uncertain = new Map<SideChatHostAction, { error: string }>();
   private persistenceInFlight = false;
   private requestVersion = 0;
+  private reconciling = false;
+  private reconciliation: Promise<void> | null = null;
+  private observationPending = false;
   private disposed = false;
   private listeners = new Set<() => void>();
   private unwatch: () => void;
@@ -77,7 +80,7 @@ export class SideChatController {
     this.value = { hostId, parentThreadId, draftId, view, phase: phase(view, null, false, false, false),
       error: null, pendingClose: false, hasActivity: false };
     this.unwatch = port.subscribe(hint => {
-      if (hint.hostId === this.value.hostId && hint.operationId === this.value.view?.operationId) void this.read();
+      if (hint.hostId === this.value.hostId && hint.operationId === this.value.view?.operationId) void this.observe();
     });
   }
   getSnapshot = (): SideChatSnapshot => this.value;
@@ -112,9 +115,10 @@ export class SideChatController {
     try { return this.canDispatch(this.scope(view), action) === true; } catch { return false; }
   }
   private uncertainError(): string | null { return [...this.uncertain.values()].at(-1)?.error ?? null; }
-  private accept(view: SideChatHostView, version: number, readUncertain?: Map<SideChatHostAction, { error: string }>): void {
+  private accept(view: SideChatHostView, version: number, readUncertain?: Map<SideChatHostAction, { error: string }>, observe = false): void {
     if (this.disposed || version !== this.requestVersion) return;
     const next = validate(view, this.value.hostId, this.value.parentThreadId, this.value.view);
+    if (observe) delete next.settledCalls;
     for (const [action, pending] of readUncertain ?? []) {
       if (this.uncertain.get(action) !== pending || next.settledCalls?.[action] !== true) continue;
       this.uncertain.delete(action);
@@ -122,15 +126,15 @@ export class SideChatController {
     }
     this.set({ view: next, error: this.uncertainError() });
   }
-  private async call(method: 'start' | 'read' | 'retry' | 'close' | 'retryPersistence'): Promise<void> {
+  private async call(method: 'start' | 'read' | 'retry' | 'close' | 'retryPersistence', purpose?: SideChatReadPurpose): Promise<void> {
     const view = this.value.view;
     if (!view || this.disposed) return;
     const version = ++this.requestVersion;
-    const readUncertain = method === 'read' ? new Map(this.uncertain) : undefined;
+    const readUncertain = method === 'read' && purpose === 'reconcile' ? new Map(this.uncertain) : undefined;
     try {
-      const result = await this.port[method](view.operationId);
-      this.accept(result, version, readUncertain);
-      if (method !== 'read' && version !== this.requestVersion && !this.disposed) void this.read();
+      const result = method === 'read' ? await this.port.read(view.operationId, purpose ?? 'observe') : await this.port[method](view.operationId);
+      this.accept(result, version, readUncertain, method === 'read' && purpose !== 'reconcile');
+      if (method !== 'read' && version !== this.requestVersion && !this.disposed) void this.observe();
     } catch (error) {
       if (!this.disposed) {
         const unsent = method !== 'read' && notDispatched(error);
@@ -139,10 +143,26 @@ export class SideChatController {
         if (!unsent && method !== 'read') this.uncertain.set(method, { error: text });
         if (version === this.requestVersion || this.uncertain.size) this.set({ error: this.uncertainError() ?? text });
       }
-      if (method !== 'read' && version !== this.requestVersion && !this.disposed) void this.read();
+      if (method !== 'read' && version !== this.requestVersion && !this.disposed) void this.observe();
     }
   }
-  async read(): Promise<void> { await this.call('read'); }
+  private async observe(): Promise<void> {
+    if (this.reconciling) { this.observationPending = true; return; }
+    await this.call('read', 'observe');
+  }
+  /** User-requested reconciliation; notifications and stale replies only observe. */
+  read(): Promise<void> {
+    if (this.reconciling) return this.reconciliation ?? Promise.resolve();
+    this.reconciling = true;
+    const pending = this.call('read', 'reconcile');
+    this.reconciliation = pending.finally(() => {
+      this.reconciling = false; this.reconciliation = null;
+      if (this.observationPending && !this.disposed) {
+        this.observationPending = false; void this.observe();
+      }
+    });
+    return this.reconciliation;
+  }
   private link(): Promise<boolean> {
     const view = this.value.view;
     if (!view || this.linked) return Promise.resolve(!!view);

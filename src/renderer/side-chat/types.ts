@@ -5,6 +5,7 @@ export type SideChatRequestStatus = 'waiting' | 'inflight' | 'not-sent' | 'rejec
 export type SideChatCloseStatus = 'idle' | 'preparing' | 'prepare-failed' | 'inflight' | 'not-sent' | 'rejected' | 'unknown'
   | 'cleanup-pending' | 'cleaning' | 'closed';
 export type SideChatHostAction = 'start' | 'retry' | 'close' | 'retryPersistence';
+export type SideChatReadPurpose = 'observe' | 'reconcile';
 
 export interface SideChatForkChild {
   thread: ThreadSummary & { ephemeral: true; forkedFromId: string };
@@ -40,7 +41,8 @@ export interface SideChatHostPort {
   prepare(hostId: string, parentThreadId: string): Promise<SideChatHostView>;
   /** An endpoint rejection may carry uncertain: false only when this exact call was not dispatched. */
   start(operationId: string): Promise<SideChatHostView>;
-  read(operationId: string): Promise<SideChatHostView>;
+  /** Unmarked reads are observations; only an explicit reconcile can return settled proof. */
+  read(operationId: string, purpose?: SideChatReadPurpose): Promise<SideChatHostView>;
   retry(operationId: string): Promise<SideChatHostView>;
   close(operationId: string): Promise<SideChatHostView>;
   retryPersistence(operationId: string): Promise<SideChatHostView>;
