@@ -41,11 +41,15 @@ test('composer leases drain real attachment, reference and queue edits before th
       if (String(url).startsWith('/api/files/upload?')) return new Response(JSON.stringify({fsPath:'/synthetic/upload.png'}),{status:200});
       throw Error('Unexpected fetch');
     };
-    const client={async rpc(method,params) {
+    const client={async rpc(method,params,host='local') {
       if(method==='model/list')return {data:[],nextCursor:null};
       if(method==='config/read')return {config:{}};
       if(method==='thread/queue/list'){state.queueChecks++;if(state.failNextList){state.failNextList=false;throw Error('synthetic list failure')}
         return {data:structuredClone(state.queued),nextCursor:null};}
+      if(method==='thread/queue/delete'){
+        if(host!=='local'||params.threadId!=='queue-thread')throw Error('wrong queue owner');
+        const index=state.queued.findIndex(item=>item.id===params.queuedSubmissionId);
+        if(index<0)return {deleted:false};state.queued.splice(index,1);return {deleted:true};}
       if(method==='thread/items/list')return {data:[{item:{type:'userMessage',clientId:'client-1'}}],nextCursor:null};
       throw Error('Unexpected RPC '+method);
     },async host(method,params,options={}) {
@@ -58,10 +62,13 @@ test('composer leases drain real attachment, reference and queue edits before th
           resolveQueue=resolve;rejectQueue=()=>reject(Object.assign(Error('synthetic queue failure'),before?{sendPhase:'before-send'}:{}));
         })}finally{state.queueWaiting=false}};
         if(mode==='hold-before')await wait(true);
+        options.assertBeforeSend();
+        const page=await client.rpc('thread/queue/list',{threadId:params.threadId},params.hostId);
+        const entry=page.data.find(item=>item.id===params.entry.id);
+        if(!entry||JSON.stringify(entry)!==JSON.stringify(params.entry))return 'changed';
         options.assertBeforeSend();state.queueDispatches.push(structuredClone(params));
-        const index=state.queued.findIndex(item=>item.id===params.entry.id);
-        if(index<0||JSON.stringify(state.queued[index])!==JSON.stringify(params.entry))return 'changed';
-        state.queued.splice(index,1);
+        const result=await client.rpc('thread/queue/delete',{threadId:params.threadId,queuedSubmissionId:entry.id},params.hostId);
+        if(!result.deleted)return 'changed';
         if(mode==='hold-after')await wait(false);
         return 'deleted';
       }
