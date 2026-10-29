@@ -9,7 +9,8 @@ import type { QueueReleaseIntent, UnknownQueueStart } from './standalone-queue-s
 import type { FinishComposerOperation } from './use-composer-draft.ts';
 
 interface QueueEntry { id: string; clientUserMessageId: string; input: Record<string, unknown>[] }
-interface QueueProps { client: WorkbenchClient; hostId: string; threadId: string; busy: boolean; refreshVersion: number; onStartQueued?: (id: string) => Promise<void>;
+interface QueueProps { client: WorkbenchClient; hostId: string; threadId: string; busy: boolean; refreshVersion: number; onStartQueued?: (id: string, assertAuthority?: () => void) => Promise<void>;
+  captureAuthority?: () => () => void;
   beginOperation?: () => FinishComposerOperation | null; onEditStateChange?: (editing: boolean, pending: boolean) => void;
   onCompositionChange?: (composing: boolean) => void; frozen?: boolean }
 function record(value: unknown): Record<string, unknown> {
@@ -65,10 +66,10 @@ async function historyClientIds(client: WorkbenchClient, hostId: string, threadI
   }
   return found;
 }
-export function StandaloneQueue({ client, hostId, threadId, busy, refreshVersion, onStartQueued, beginOperation, onEditStateChange, onCompositionChange, frozen }: QueueProps) {
-  return <QueueSession key={JSON.stringify([hostId, threadId])} {...{ client, hostId, threadId, busy, refreshVersion, onStartQueued, beginOperation, onEditStateChange, onCompositionChange, frozen }} />;
+export function StandaloneQueue({ client, hostId, threadId, busy, refreshVersion, onStartQueued, captureAuthority, beginOperation, onEditStateChange, onCompositionChange, frozen }: QueueProps) {
+  return <QueueSession key={JSON.stringify([hostId, threadId])} {...{ client, hostId, threadId, busy, refreshVersion, onStartQueued, captureAuthority, beginOperation, onEditStateChange, onCompositionChange, frozen }} />;
 }
-function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQueued, beginOperation, onEditStateChange, onCompositionChange, frozen }: QueueProps) {
+function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQueued, captureAuthority, beginOperation, onEditStateChange, onCompositionChange, frozen }: QueueProps) {
   const { t, locale } = useI18n('zh-CN');
   const [unknown, setUnknown] = useState<UnknownQueueStart[]>([]);
   const unknownRef = useRef<UnknownQueueStart[]>([]);
@@ -221,6 +222,12 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
   };
   const start = (entry: QueueEntry) => run(async () => {
     if (!onStartQueued) throw new Error('会话控制器尚未提供队列发送');
+    const captured = captureAuthority?.();
+    const assertAuthority = () => {
+      try { captured?.(); }
+      catch (cause) { throw Object.assign(new Error('原队列点击的连接或权限已改变，未启动消息。', { cause }), { uncertain: false }); }
+    };
+    assertAuthority();
     if (!storageReady.current || unknownRef.current.some(item => item.id === entry.id)) throw new Error('无法确认先前的发送结果');
     const request = { hostId, conversationId: threadId, messageId: entry.id, lockId: createId() };
     const result = await client.host<{ acquired: boolean }>('queued-follow-up-send-lock-acquire', request);
@@ -244,7 +251,8 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
     }
     let sent = false, release = false;
     try {
-      await onStartQueued(entry.id);
+      assertAuthority();
+      await onStartQueued(entry.id, assertAuthority);
       sent = true; release = true;
     } catch (reason) {
       const error = record(reason), data = record(error.data);

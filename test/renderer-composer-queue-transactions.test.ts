@@ -16,7 +16,7 @@ test('queue marker migration, concurrent pages and UI recovery use one transacti
     const state={queue:[
       {id:'q1',clientUserMessageId:'client1',input:[{type:'text',text:'first',text_elements:[]},{type:'image',url:'fixture'}]},
       {id:'q2',clientUserMessageId:'client2',input:[{type:'text',text:'second',text_elements:[]}]}
-    ],history:[],calls:[],starts:[],listeners:new Set()};
+    ],history:[],calls:[],starts:[],listeners:new Set(),authority:0,holdAcquire:false,releaseAcquire:null};
     const client={
       async rpc(method,params,hostId){
         state.calls.push({method,params:structuredClone(params),hostId});
@@ -31,7 +31,9 @@ test('queue marker migration, concurrent pages and UI recovery use one transacti
         }
         throw Error('unexpected RPC '+method);
       },
-      async host(endpoint,params){state.calls.push({endpoint,params:structuredClone(params)});return endpoint.endsWith('acquire')?{acquired:true}:{};},
+      async host(endpoint,params){state.calls.push({endpoint,params:structuredClone(params)});
+        if(endpoint.endsWith('acquire')&&state.holdAcquire)await new Promise(resolve=>state.releaseAcquire=resolve);
+        return endpoint.endsWith('acquire')?{acquired:true}:{};},
       subscribe(listener){state.listeners.add(listener);return ()=>state.listeners.delete(listener);},
       async reply(){throw Error('unexpected approval');}
     };
@@ -39,7 +41,8 @@ test('queue marker migration, concurrent pages and UI recovery use one transacti
     window.fixture={state,store:{add:addUnknownQueueStart,read:readUnknownQueueStarts,remove:removeUnknownQueueStart,atom:queueUnknownAtomKey,readAtom:readBrowserAtom},
       notify(){for(const f of state.listeners)f({type:'mcp-notification',hostId:'local',method:'thread/queue/changed',params:{threadId:'thread'}});},
       render(){root.render(React.createElement(StandaloneQueue,{client,hostId:'local',threadId:'thread',busy:false,refreshVersion:0,
-        async onStartQueued(id){state.starts.push(id);throw Error('fixture response lost');}}));},
+        captureAuthority(){const generation=state.authority;return()=>{if(generation!==state.authority)throw Error('fixture authority changed')}},
+        async onStartQueued(id,assertAuthority){assertAuthority?.();state.starts.push(id);throw Error('fixture response lost');}}));},
       async hold(){
         const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('codex-yard.ui-atoms.v1',1);req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});
         const tx=db.transaction('atoms','readwrite'),store=tx.objectStore('atoms');let released=false;
@@ -51,8 +54,8 @@ test('queue marker migration, concurrent pages and UI recovery use one transacti
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--process-per-tab'] });
   const context = await browser.newContext();
   try {
-    const open = async () => {
-      const page = await context.newPage(); page.setDefaultTimeout(8_000);
+    const open = async (targetContext = context) => {
+      const page = await targetContext.newPage(); page.setDefaultTimeout(8_000);
       await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }));
       await page.goto('http://localhost/'); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
       return page;
@@ -186,5 +189,18 @@ test('queue marker migration, concurrent pages and UI recovery use one transacti
     await a.getByRole('status').filter({hasText:'队列消息已不在列表中'}).waitFor();
     assert.equal(await a.getByRole('textbox', {name:'编辑待发送消息'}).inputValue(), 'unfinished edit');
     assert.equal(await a.evaluate(() => (window as any).fixture.state.starts.length), 0);
+    const isolated = await browser.newContext();
+    try {
+      const c = await open(isolated);
+      await c.evaluate(() => { const f = (window as any).fixture; f.state.holdAcquire = true; f.render(); });
+      const send = c.getByRole('button', { name: '立即发送待发送消息' }).first();
+      await send.click();
+      await c.waitForFunction(() => typeof (window as any).fixture.state.releaseAcquire === 'function');
+      await c.evaluate(() => { const f = (window as any).fixture; f.state.authority += 2; f.state.releaseAcquire(); });
+      await c.getByRole('alert').filter({ hasText: '原队列点击的连接或权限已改变' }).waitFor();
+      assert.equal(await c.evaluate(() => (window as any).fixture.state.starts.length), 0);
+      assert.deepEqual(await c.evaluate(() => (window as any).fixture.store.read('local', 'thread')), []);
+      assert.equal(await c.evaluate(() => (window as any).fixture.state.calls.filter((v: any) => v.endpoint?.endsWith('release') && v.params.sent === false).length), 1);
+    } finally { await isolated.close(); }
   } finally { await context.close(); await browser.close(); }
 });
