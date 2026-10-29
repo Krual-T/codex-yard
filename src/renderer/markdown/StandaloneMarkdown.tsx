@@ -107,10 +107,18 @@ export type StandaloneMarkdownProps = {
   onOpenFile?: (path: string) => void;
   onOpenFileAt?: StandaloneMessagesProps['onOpenFileAt'];
   onOpenVisualization?: StandaloneMessagesProps['onOpenVisualization'];
+  onOpenBrowser?: StandaloneMessagesProps['onOpenBrowser'];
   onOpenImage?: (image: ImageSource) => void;
 };
 
-export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowBasicHtml = false, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenImage }: StandaloneMarkdownProps) {
+function safeBrowserUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
+  } catch { return false; }
+}
+
+export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowBasicHtml = false, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage }: StandaloneMarkdownProps) {
   const components = useMemo<Components>(() => ({
     pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
     a: ({ href, children, node }) => {
@@ -125,7 +133,12 @@ export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowB
       }
       const external = safeExternalUrl(href);
       if (external) return <a href={external} target={external.startsWith('#') ? undefined : '_blank'}
-        rel={external.startsWith('#') ? undefined : 'noreferrer noopener'}>{children}</a>;
+        rel={external.startsWith('#') ? undefined : 'noreferrer noopener'} onClick={event => {
+          if (!threadId?.trim() || !onOpenBrowser || !safeBrowserUrl(external) || event.defaultPrevented || event.button !== 0
+            || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          onOpenBrowser({ hostId, threadId, url: external });
+        }}>{children}</a>;
       if (!onOpenFile && !onOpenFileAt) return <span>{children}</span>;
       return <button type="button" className="yard-file-link" onClick={() => {
         const location = resolveFileLocation(href, cwd, hostId);
@@ -137,7 +150,7 @@ export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowB
       const source: ImageSource = { kind: /^(?:https?:|data:)/i.test(src) ? 'url' : 'path', value: src, label: alt || 'Image' };
       return <MessageImage source={source} client={client} hostId={hostId} cwd={cwd} onOpen={onOpenImage ? () => onOpenImage(source) : undefined} />;
     },
-  }), [client, cwd, hostId, threadId, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenImage]);
+  }), [client, cwd, hostId, threadId, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage]);
   const transformUrl: UrlTransform = (value, _key) => {
     const trimmed = value.trim();
     if (_key === 'href' && trimmed.startsWith('yard-visualization:')) return trimmed;

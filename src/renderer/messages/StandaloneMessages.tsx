@@ -148,7 +148,7 @@ function UserMessageEditor({ item, editing, restriction, onEdit, onUpdateEdit, o
   </form>;
 }
 
-function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenImages,
+function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenBrowser, onOpenImages,
   editRestriction, editing, identity, turnIndex, itemIndex, onStartEdit, onUpdateEdit, onEndEdit, onSubmitEdit, recoveryNote, searchMatch,
   rebaseRequired, canRebase, onStartRebase, onCancelRebase }: RenderItemProps) {
   const [expanded, setExpanded] = useState(false);
@@ -190,14 +190,14 @@ function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFo
   const renderedParts = parts.map((part, index) => {
     if (part.kind === 'text') return <div key={index}>{part.context && renderContext(part.context)}
       <div data-user-copy-part className={long && !expanded && !searchMatch ? 'yard-user-text is-collapsed' : 'yard-user-text'}>
-        <StandaloneMarkdown text={part.text} client={client} hostId={hostId} threadId={threadId} cwd={cwd} onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenImage={openSingleImage} /></div>
+        <StandaloneMarkdown text={part.text} client={client} hostId={hostId} threadId={threadId} cwd={cwd} onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenBrowser={onOpenBrowser} onOpenImage={openSingleImage} /></div>
       {part.hasElements && <details className="yard-unsupported-input"><summary>Message references</summary><pre>{displayJson(part.textElements)}</pre></details>}
     </div>;
     if (part.kind === 'appMessage') {
       const first = imageIndex;
       imageIndex += part.images.length;
       return <div key={index}>
-        <div data-user-copy-part><StandaloneMarkdown text={part.text} client={client} hostId={hostId} threadId={threadId} cwd={cwd} onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenImage={openSingleImage} /></div>
+        <div data-user-copy-part><StandaloneMarkdown text={part.text} client={client} hostId={hostId} threadId={threadId} cwd={cwd} onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenBrowser={onOpenBrowser} onOpenImage={openSingleImage} /></div>
         {part.images.map((image, offset) => <MessageImage key={offset} source={image} client={client} hostId={hostId} cwd={cwd}
           onOpen={() => onOpenImages(images, first + offset)} />)}
         <details className="yard-unsupported-input"><summary>App message data</summary><pre>{displayJson(part.original)}</pre></details>
@@ -274,7 +274,7 @@ function MessageItem(props: RenderItemProps) {
   const { item, turnId, threadId, client, hostId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImages, onFork } = props;
   const [actionError, setActionError] = useState('');
   const openSingleImage = useCallback((image: ImageSource) => onOpenImages([image], 0), [onOpenImages]);
-  const markdownProps = { client, hostId, threadId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenImage: openSingleImage };
+  const markdownProps = { client, hostId, threadId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage: openSingleImage };
   if (item.type === 'userMessage') return <UserMessage {...props} />;
   if (item.type === 'agentMessage' || item.type === 'plan') {
     const text = asString(item.text);
