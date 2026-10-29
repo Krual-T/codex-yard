@@ -271,6 +271,8 @@ try {
   await coldArchived.reload();
   await coldArchived.getByRole('button', { name: 'Restore conversation', exact: true }).waitFor();
   const coldDraft = coldArchived.getByRole('textbox', { name: 'Work with Codex', exact: true });
+  await coldArchived.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value
+    === 'UNPERSISTED_COMPOSER_BEFORE_EXTERNAL_ARCHIVE');
   assert.equal(await coldDraft.evaluate(element => element.closest('[inert]') !== null), true);
   assert.equal(await coldDraft.inputValue(), 'UNPERSISTED_COMPOSER_BEFORE_EXTERNAL_ARCHIVE');
   await coldArchived.close();
@@ -588,7 +590,7 @@ try {
   await page.goto(app.url + '/');
   await input.fill('FRESH_HOME_UNSENT_AFTER_CREATION');
   await page.getByText('Saving draft...', { exact: true }).waitFor({ state: 'hidden' });
-  await page.getByRole('button', { name: 'Created ' + id, exact: true }).click();
+  await page.getByRole('button', { name: 'Created ' + id, exact: true }).first().click();
   await page.waitForURL('**/local/' + id);
   await input.waitFor(); assert.equal(await input.inputValue(), '', 'A fresh home must not alias the thread that consumed its old identity.');
   await page.goto(app.url + '/');
@@ -596,7 +598,7 @@ try {
   await page.reload();
   await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Work with Codex"]')?.value === 'FRESH_HOME_UNSENT_AFTER_CREATION');
   assert.equal(fake.calls('turn/start').length, beforeHomeReturn);
-  await page.getByRole('button', { name: 'Created ' + id, exact: true }).click();
+  await page.getByRole('button', { name: 'Created ' + id, exact: true }).first().click();
   await page.waitForURL('**/local/' + id); await input.waitFor(); assert.equal(await input.inputValue(), '');
   checks.push('direct home navigation after first send gets a distinct stable draft; sidebar return and complete reload preserve it without an extra turn');
   await installClientProbe(page);
@@ -836,6 +838,7 @@ try {
   await page.getByRole('button', { name: 'Back to app', exact: true }).click();
   await page.waitForURL(sourceBeforeSettings.href);
   assert(fake.calls('thread/read').slice(sourceReads).some(call => record(call.params).threadId === expectedSettingsSource.source.threadId));
+  await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).click();
   await page.keyboard.press('Control+,');
   await page.getByRole('heading', { name: 'General', exact: true, level: 1 }).waitFor();
   checks.push('settings keep exact source and return route in copied URLs/reload and resolve changed project membership from a second actual page');
@@ -863,10 +866,11 @@ try {
   await page.waitForFunction(() => document.documentElement.lang === 'zh-CN');
   await page.getByRole('heading', { name: '通用', exact: true, level: 1 }).waitFor();
   await page.locator('button.yard-settings-back').click();
-  if (!await page.getByRole('button', { name: '新建对话', exact: true }).isVisible()) {
-    await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
+  if (!await page.getByRole('button', { name: '新建对话', exact: true }).first().isVisible()) {
+    await page.getByRole('button', { name: '切换侧边栏', exact: true }).click();
   }
-  await page.getByRole('button', { name: '新建对话', exact: true }).waitFor();
+  await page.getByRole('button', { name: '新建对话', exact: true }).first().waitFor();
+  await page.getByRole('textbox', { name: '与 Codex 协作', exact: true }).click();
   await page.keyboard.press('Control+,');
   await page.getByRole('heading', { name: '通用', exact: true, level: 1 }).waitFor();
   await page.reload();
@@ -882,8 +886,10 @@ try {
   assert(await workspaceTabs.count() >= 2);
   await workspaceTabs.nth(1).click();
   await page.waitForFunction(() => document.querySelectorAll('.yard-tab-strip [role="tab"]')[1]?.getAttribute('aria-selected') === 'true');
+  await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).click();
   await page.keyboard.press('Control+1');
   await page.waitForFunction(() => document.querySelector('.yard-tab-strip [role="tab"]')?.getAttribute('aria-selected') === 'true');
+  await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).click();
   await page.keyboard.down('Control');
   await workspaceTabs.first().getByText('Ctrl+1', { exact: true }).waitFor();
   await page.keyboard.up('Control');
