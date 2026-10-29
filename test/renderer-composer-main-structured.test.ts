@@ -231,6 +231,19 @@ test('the main composer edits ordered input, retains attachments and survives re
     assert.equal(singleSent.input[0].text, singleSaved.text);
     assert.deepEqual(singleSent.input[1], single.input[1]);
 
+    await page.evaluate(() => (window as any).fixture.render({ context: { draftId: 'single-middle' } }));
+    await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.owner.draftId === 'single-middle');
+    const singleMiddle = { text: 'X @foobar tail', images: [], files: [], input: [
+      { type: 'text', text: 'X @foobar tail', text_elements: [] }, single.input[1],
+    ] };
+    assert.equal(await page.evaluate(value => (window as any).fixture.setDraft(value), singleMiddle), true);
+    await singleEditor.waitFor(); await singleEditor.focus(); await singleEditor.press('Home');
+    for (let index = 0; index < 'X @fo'.length; index++) await singleEditor.press('ArrowRight');
+    await page.getByRole('option', { name: /foo\.ts/ }).waitFor(); await page.keyboard.press('Enter');
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.text === 'X `/workspace/foo.ts`  tail');
+    await singleEditor.press('Control+z');
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.text === 'X @foobar tail');
+
     await page.evaluate(() => (window as any).fixture.render({ context: { draftId: 'rich-link' } }));
     await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.owner.draftId === 'rich-link');
     const literal = '[Documentation](<https://example.test/docs>)';
@@ -284,6 +297,156 @@ test('the main composer edits ordered input, retains attachments and survives re
     assert.equal(linkSent.input[0].text, linkDraft.text + '!');
     assert.deepEqual(linkSent.draft.document.content[0].content[1].attrs, linkAttrs);
     assert.deepEqual(linkSent.draft.document.content[0].content[3].attrs, loadingAttrs);
+
+    await page.evaluate(() => (window as any).fixture.render({ context: { draftId: 'skill-history' } }));
+    await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.owner.draftId === 'skill-history');
+    const skillDraft = { text: 'X \nKeep', images: [{ id: 'image-0', src: '', fileId: 'picture', name: 'picture.png' }], files: [], input: [
+      { type: 'image', fileId: 'picture' }, { type: 'text', text: 'X ', text_elements: [] },
+      { type: 'text', text: 'Keep', text_elements: [] }, { type: 'skill', name: 'independent', path: '/skills/independent' },
+    ] };
+    assert.equal(await page.evaluate(value => (window as any).fixture.setDraft(value), skillDraft), true);
+    await first.waitFor(); await first.focus(); await first.press('End');
+    const chooseSkill = async () => {
+      await page.keyboard.type('$rev');
+      await page.getByRole('option', { name: /review-helper/ }).waitFor();
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.skills.some((skill: any) => skill.name === 'review-helper'));
+    };
+    await chooseSkill(); await chooseSkill();
+    await first.press('Control+z');
+    await page.waitForFunction(() => {
+      const draft = (window as any).fixture.state.controller.snapshot().draft;
+      return draft.input[1].text === 'X $rev' && draft.skills.some((skill: any) => skill.name === 'review-helper');
+    });
+    await first.press('Control+Shift+z');
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.input[1].text === 'X ');
+    await page.getByRole('button', { name: '移除图片 picture.png' }).click();
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.input[0].type === 'text');
+    await first.focus();
+    await first.evaluate(element => {
+      (window as any).undoEvents = [];
+      for (const type of ['beforeinput', 'input']) element.addEventListener(type, event => {
+        (window as any).undoEvents.push({ type, inputType: (event as InputEvent).inputType, cancelable: event.cancelable,
+          value: (element as HTMLTextAreaElement).value });
+      });
+    });
+    assert.equal(await first.evaluate(() => document.execCommand('undo')), true);
+    try { await page.waitForFunction(() => {
+      const draft = (window as any).fixture.state.controller.snapshot().draft;
+      return draft.input[0].text === 'X $rev' && draft.skills.some((skill: any) => skill.name === 'review-helper');
+    }); } catch (cause) {
+      throw new Error('Native undo state: ' + JSON.stringify(await page.evaluate(() => ({ events: (window as any).undoEvents,
+        draft: (window as any).fixture.state.controller.snapshot().draft }))), { cause });
+    }
+    assert.equal(await first.evaluate(() => document.execCommand('redo')), true);
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.input[0].text === 'X ');
+    assert.equal(await first.evaluate(() => document.execCommand('undo')), true);
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.input[0].text === 'X $rev');
+    await first.press('Control+z');
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.input[0].text === 'X ');
+    await first.press('Control+z');
+    await page.waitForFunction(() => {
+      const draft = (window as any).fixture.state.controller.snapshot().draft;
+      return draft.input[0].text === 'X $rev' && !draft.skills.some((skill: any) => skill.name === 'review-helper');
+    });
+    await first.press('Control+Shift+z');
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.skills.some((skill: any) => skill.name === 'review-helper'));
+    await first.press('End'); await page.keyboard.type('$rev'); await first.press('Control+z');
+    await page.waitForFunction(() => {
+      const draft = (window as any).fixture.state.controller.snapshot().draft;
+      return draft.input[0].text === 'X ' && draft.skills.some((skill: any) => skill.name === 'review-helper');
+    });
+    assert.equal(await first.evaluate(element => element.dispatchEvent(new InputEvent('beforeinput', {
+      inputType: 'historyUndo', bubbles: true, cancelable: true,
+    }))), false);
+    await page.waitForFunction(() => {
+      const draft = (window as any).fixture.state.controller.snapshot().draft;
+      return draft.input[0].text === 'X $rev' && !draft.skills.some((skill: any) => skill.name === 'review-helper');
+    });
+    await first.press('Control+Shift+z');
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.skills.some((skill: any) => skill.name === 'review-helper'));
+    assert.equal(await page.evaluate(() => {
+      const controller = (window as any).fixture.state.controller; return controller.flush(controller.snapshot().owner);
+    }), true);
+    await page.reload(); await mount();
+    await page.evaluate(() => (window as any).fixture.render({ context: { draftId: 'skill-history' } }));
+    await first.waitFor();
+    const reloadedSkills = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+    assert.equal(reloadedSkills.input[0].text, 'X ');
+    assert.equal(reloadedSkills.skills.filter((skill: any) => skill.name === 'review-helper').length, 1);
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);
+    const skillSent = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
+    assert.deepEqual(skillSent.input.slice(0, 3), [
+      { type: 'text', text: 'X ', text_elements: [] }, { type: 'text', text: 'Keep', text_elements: [] }, skillDraft.input[3],
+    ]);
+    assert.equal(skillSent.input.filter((item: any) => item.type === 'skill' && item.name === 'review-helper').length, 1);
+
+    await page.evaluate(() => (window as any).fixture.render({ context: { draftId: 'independent-skill' } }));
+    await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.owner.draftId === 'independent-skill');
+    const independentSkill = { type: 'skill', name: 'review-helper', path: '/skills/review/SKILL.md', metadata: 'keep' };
+    const independentDraft = { text: 'X \nKeep', images: [], files: [], input: [
+      { type: 'text', text: 'X ', text_elements: [] }, independentSkill, { type: 'text', text: 'Keep', text_elements: [] },
+    ] };
+    assert.equal(await page.evaluate(value => (window as any).fixture.setDraft(value), independentDraft), true);
+    await first.waitFor(); await first.focus(); await first.press('End'); await page.keyboard.type('$rev');
+    await page.getByRole('option', { name: /review-helper/ }).waitFor(); await page.keyboard.press('Enter');
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.input[0].text === 'X ');
+    await first.press('Control+z');
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.input[0].text === 'X $rev');
+    const independentSaved = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+    assert.deepEqual(independentSaved.input[1], independentSkill);
+    assert.equal(independentSaved.skills.some((skill: any) => skill.name === 'review-helper'), false);
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 2);
+    const independentSent = await page.evaluate(() => (window as any).fixture.state.submissions[1]);
+    assert.deepEqual(independentSent.input[1], independentSkill);
+
+    await page.evaluate(() => (window as any).fixture.render({ context: { draftId: 'middle-completion' } }));
+    await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.owner.draftId === 'middle-completion');
+    const middleText = '前😀 @foobar tail';
+    const middleDraft = { text: middleText + '\nKeep', images: [], files: [], input: [
+      { type: 'text', text: middleText, text_elements: [{ byteRange: { start: Buffer.byteLength('前😀 @foobar '), end: Buffer.byteLength(middleText) }, placeholder: 'tail' }] },
+      { type: 'text', text: 'Keep', text_elements: [] },
+    ] };
+    assert.equal(await page.evaluate(value => (window as any).fixture.setDraft(value), middleDraft), true);
+    await first.waitFor(); await first.focus();
+    await first.press('Home');
+    for (let index = 0; index < Array.from('前😀 @fo').length; index++) await first.press('ArrowRight');
+    await page.getByRole('option', { name: /foo\.ts/ }).waitFor(); await page.keyboard.press('Enter');
+    const expectedMiddle = '前😀 `/workspace/foo.ts`  tail';
+    await page.waitForFunction(value => (window as any).fixture.state.controller.snapshot().draft.input[0].text === value, expectedMiddle);
+    const middleSaved = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+    assert.deepEqual(middleSaved.input[0].text_elements[0].byteRange,
+      { start: Buffer.byteLength(expectedMiddle.slice(0, -4)), end: Buffer.byteLength(expectedMiddle) });
+    assert.deepEqual(middleSaved.input[1], middleDraft.input[1]);
+    await first.press('Control+z');
+    await page.waitForFunction(value => (window as any).fixture.state.controller.snapshot().draft.input[0].text === value, middleText);
+    await first.press('Control+Shift+z');
+    await page.waitForFunction(value => (window as any).fixture.state.controller.snapshot().draft.input[0].text === value, expectedMiddle);
+
+    await page.evaluate(() => (window as any).fixture.render({ context: { draftId: 'composition-owner' } }));
+    await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.owner.draftId === 'composition-owner');
+    const compositionDraft = { text: '$rev\n$rev', images: [{ id: 'image-0', src: '', fileId: 'ime-image', name: 'ime.png' }], files: [], input: [
+      { type: 'image', fileId: 'ime-image' }, { type: 'text', text: '$rev', text_elements: [] }, { type: 'text', text: '$rev', text_elements: [] },
+    ] };
+    assert.equal(await page.evaluate(value => (window as any).fixture.setDraft(value), compositionDraft), true);
+    await first.waitFor(); await first.focus();
+    await page.evaluate(() => {
+      const input = document.querySelector('textarea[aria-label="和 Codex 一起工作 1"]') as HTMLTextAreaElement;
+      const remove = document.querySelector('button[aria-label="移除图片 ime.png"]') as HTMLButtonElement;
+      input.setSelectionRange(4, 4);
+      input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      remove.focus(); input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })); remove.click();
+    });
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.input[0].type === 'text');
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    assert.equal(await page.getByRole('listbox').count(), 0);
+    await first.focus(); await first.press('End');
+    await page.getByRole('option', { name: /review-helper/ }).waitFor(); await page.keyboard.press('Enter');
+    await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().draft.skills.some((skill: any) => skill.name === 'review-helper'));
+    const compositionSaved = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+    assert.equal(compositionSaved.input[0].text, ''); assert.equal(compositionSaved.input[1].text, '$rev');
     assert.deepEqual(errors, []);
   } finally { await context.close(); await browser.close(); }
 });

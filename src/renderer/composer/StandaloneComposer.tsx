@@ -18,8 +18,8 @@ import { usePlainTextSetting } from './standalone-plain-text-setting.ts';
 import type { FollowUpAction } from './standalone-follow-up.ts';
 import { StandaloneTarget } from './standalone-target.tsx';
 import type { ComposerHost, ComposerTarget } from './standalone-target.tsx';
-import { StandaloneRichEditor, StandaloneStructuredInputEditor } from './StandaloneRichEditor.tsx';
-import type { RichEditorHandle, StructuredInputEditorHandle } from './StandaloneRichEditor.tsx';
+import { StandalonePlainInputEditor, StandaloneRichEditor, StandaloneStructuredInputEditor } from './StandaloneRichEditor.tsx';
+import type { RichEditorHandle, StructuredInputEditorHandle, TextSkillChange } from './StandaloneRichEditor.tsx';
 import type { RichCompletionContext } from './rich-editor-actions.ts';
 import { FilePenLine } from 'lucide-react';
 import './standalone-composer.css';
@@ -45,6 +45,10 @@ export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSu
 };
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function completionEnd(text: string, end: number, token: string): number {
+  const suffix = text.slice(end).match(token.startsWith('@') ? /^[^\s@$\ufffc]*/ : /^[^\s@$\/\ufffc]*/)?.[0] ?? '';
+  return end + suffix.length;
+}
 function referenceLabel(reference: ComposerReference): string {
   const browser = reference.context?.localBrowserContext;
   if (reference.kind === 'browser' && browser && typeof browser === 'object' && !Array.isArray(browser)) {
@@ -93,7 +97,6 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const [queueVersion, setQueueVersion] = useState(0);
   const [cursor, setCursor] = useState(0);
   const [segmentSelection, setSegmentSelection] = useState<{ index: number; cursor: number } | null>(null);
-  const segmentSkillHistory = useRef<{ index: number; before: string; after: string; skill: { name: string; path: string }; applied: boolean }[]>([]);
   const [richContext, setRichContext] = useState<RichCompletionContext | null>(null);
   const enterSetting = useEnterSetting(client);
   const followUpSetting = useFollowUpSetting(client);
@@ -118,7 +121,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const queueEditState = useRef({ editing: false, pending: false });
   const defaultPendingRef = useRef(false);
   const notifyDefaultPending = useCallback((value: boolean) => { defaultPendingRef.current = value; setDefaultPending(value); }, []);
-  const editor = useRef<HTMLTextAreaElement>(null);
+  const editor = useRef<StructuredInputEditorHandle>(null);
   const richEditor = useRef<RichEditorHandle>(null);
   const structuredEditor = useRef<StructuredInputEditorHandle>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -346,40 +349,43 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       }
     } finally { submitInFlight.current = false; if (mounted.current) setSending(false); }
   };
-  const restoreCompletionSkill = (next: typeof draft, index: number, expected: string, text: string, inputType?: string) => {
-    const history = segmentSkillHistory.current.slice().reverse().find(item => item.index === index
-      && (inputType === 'historyUndo' && item.applied && item.after === expected && item.before === text
-        || inputType === 'historyRedo' && !item.applied && item.before === expected && item.after === text));
-    if (history) {
-      history.applied = inputType === 'historyRedo';
-      return { ...next, skills: history.applied
-        ? next.skills.some(skill => skill.path === history.skill.path) ? next.skills : [...next.skills, history.skill]
-        : next.skills.filter(skill => skill.name !== history.skill.name || skill.path !== history.skill.path) };
+  const projectCompletionSkills = (next: typeof draft, change?: TextSkillChange) => {
+    if (!change) return next;
+    const identity = (skill: { name: string; path: string }) => JSON.stringify([skill.name, skill.path]);
+    const managed = new Set([...change.before, ...change.after].filter(skill => skill.managed).map(identity));
+    const skills = next.skills.filter(skill => !managed.has(identity(skill)) || change.after.some(item => item.managed && identity(item) === identity(skill)));
+    for (const skill of change.after) if (skill.managed && !skills.some(item => identity(item) === identity(skill))) {
+      skills.push({ name: skill.name, path: skill.path });
     }
-    return next;
+    return { ...next, skills };
   };
-  const editSegment = (index: number, expected: string, text: string, inputType?: string) => {
-    if (frozenRef.current) return;
-    if (inputType === 'historyUndo' || inputType === 'historyRedo') completions.show();
+  const editSegment = (index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange) => {
+    if (frozenRef.current) return false;
+    if (expected !== text || inputType === 'historyUndo' || inputType === 'historyRedo') completions.show();
     const before = current.current.draft, result = editStructuredDraftText(before, index, expected, text);
-    if (!result.draft) { setError(translateKnown(t, result.error)); return; }
-    const next = restoreCompletionSkill(result.draft, index, expected, text, inputType);
+    if (!result.draft) { setError(translateKnown(t, result.error)); return false; }
+    const next = projectCompletionSkills(result.draft, skills);
     setError('');
     void changeDraft(value => value === before ? next : value);
+    return current.current.draft === next;
   };
   const removeImage = (id: string) => {
     const before = current.current.draft;
     const result = before.input ? removeStructuredImage(before, id)
       : { draft: { ...before, images: before.images.filter(image => image.id !== id) } };
     if (!result.draft) { setError(translateKnown(t, result.error)); return; }
-    setError(''); setSegmentSelection(null); segmentSkillHistory.current = []; void changeDraft(value => value === before ? result.draft : value);
+    setError(''); setSegmentSelection(null); void changeDraft(value => value === before ? result.draft : value);
   };
   const removeSkill = (name: string, path: string) => {
+    if (frozenRef.current) return;
+    const original = current.current.draft;
+    const checked = original.input ? removeStructuredSkill(original, name, path) : { draft: original };
+    if (!checked.draft) { setError(translateKnown(t, checked.error)); return; }
+    structuredEditor.current?.removeSkill(name, path);
+    editor.current?.removeSkill(name, path);
     const before = current.current.draft;
-    const result = before.input ? removeStructuredSkill(before, name, path)
-      : { draft: { ...before, skills: before.skills.filter(skill => skill.name !== name || skill.path !== path) } };
-    if (!result.draft) { setError(translateKnown(t, result.error)); return; }
-    setError(''); setSegmentSelection(null); segmentSkillHistory.current = []; void changeDraft(value => value === before ? result.draft : value);
+    const next = { ...checked.draft, skills: before.skills.filter(skill => skill.name !== name || skill.path !== path) };
+    setError(''); setSegmentSelection(null); void changeDraft(value => value === before ? next : value);
   };
   const chooseCompletion = (item: Completion) => {
     const query = completions.query;
@@ -406,47 +412,43 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       const entry = index === undefined ? undefined : before.input?.[index];
       if (index === undefined || entry?.type !== 'text' || typeof entry.text !== 'string'
         || entry.text.slice(query.start, query.end) !== query.token) { completions.dismiss(); return; }
+      const end = completionEnd(entry.text, query.end, query.token);
       const result = editStructuredDraftText(before, index, entry.text,
-        entry.text.slice(0, query.start) + replacement + entry.text.slice(query.end));
+        entry.text.slice(0, query.start) + replacement + entry.text.slice(end));
       if (!result.draft) { setError(translateKnown(t, result.error)); completions.dismiss(); return; }
-      const after = entry.text.slice(0, query.start) + replacement + entry.text.slice(query.end);
-      if (!structuredEditor.current?.replace(index, query.start, query.end, replacement)
+      const after = entry.text.slice(0, query.start) + replacement + entry.text.slice(end);
+      const existing = structuredEditor.current?.skills() ?? [];
+      const skill = item.kind === 'skill' ? { name: item.name, path: item.path,
+        managed: existing.some(value => value.managed && value.name === item.name && value.path === item.path)
+          || !before.skills.some(value => value.name === item.name && value.path === item.path)
+          && !before.input?.some(value => value.type === 'skill' && value.name === item.name && value.path === item.path) } : undefined;
+      if (!structuredEditor.current?.replace(index, query.start, end, replacement, skill)
         || current.current.draft.input?.[index]?.text !== after) {
         setError(t('Could not insert completion.')); completions.dismiss(); return;
       }
-      const next = current.current.draft;
-      if (item.kind === 'skill' && !next.skills.some(skill => skill.path === item.path)) {
-        const skill = { name: item.name, path: item.path };
-        segmentSkillHistory.current.push({ index, before: entry.text, after, skill, applied: true });
-        void changeDraft(value => value === next ? { ...value, skills: [...value.skills, skill] } : value);
-      }
       setSegmentSelection({ index, cursor: caret });
       if (item.kind === 'directory') completions.show(); else completions.dismiss();
-      requestAnimationFrame(() => { if (item.kind === 'command') modelPicker.current?.focus(); else structuredEditor.current?.focus(index, caret); });
+      if (item.kind === 'command') modelPicker.current?.focus(); else structuredEditor.current?.focus(index, caret);
       return;
     }
     const before = current.current.draft;
     if (before.text.slice(query.start, query.end) !== query.token) { completions.dismiss(); return; }
-    const after = before.text.slice(0, query.start) + replacement + before.text.slice(query.end);
+    const end = completionEnd(before.text, query.end, query.token);
+    const after = before.text.slice(0, query.start) + replacement + before.text.slice(end);
     const control = editor.current;
     if (!control || updateDraftText(before, after).text !== after) { completions.dismiss(); return; }
-    control.focus(); control.setSelectionRange(query.start, query.end);
-    const inserted = replacement ? document.execCommand('insertText', false, replacement) : document.execCommand('delete');
-    if (!inserted || current.current.draft.text !== after) {
+    const existing = control.skills();
+    const skill = item.kind === 'skill' ? { name: item.name, path: item.path,
+      managed: existing.some(value => value.managed && value.name === item.name && value.path === item.path)
+        || !before.skills.some(value => value.name === item.name && value.path === item.path)
+        && !before.input?.some(value => value.type === 'skill' && value.name === item.name && value.path === item.path) } : undefined;
+    if (!control.replace(-1, query.start, end, replacement, skill) || current.current.draft.text !== after) {
       setError(t('Could not insert completion.')); completions.dismiss(); return;
-    }
-    const next = current.current.draft;
-    if (item.kind === 'skill' && !next.skills.some(skill => skill.path === item.path)) {
-      const skill = { name: item.name, path: item.path };
-      segmentSkillHistory.current.push({ index: -1, before: before.text, after, skill, applied: true });
-      void changeDraft(value => value === next ? { ...value, skills: [...value.skills, skill] } : value);
     }
     setCursor(caret);
     if (item.kind === 'directory') completions.show(); else completions.dismiss();
-    requestAnimationFrame(() => {
-      if (item.kind === 'command') modelPicker.current?.focus();
-      else { editor.current?.focus(); editor.current?.setSelectionRange(caret, caret); }
-    });
+    if (item.kind === 'command') modelPicker.current?.focus();
+    else editor.current?.focus(-1, caret);
   };
   const keyDown = (event: globalThis.KeyboardEvent): boolean => {
     if (frozenRef.current) { event.preventDefault(); return true; }
@@ -535,21 +537,21 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         <details className="standalone-composer__retained"><summary>{t('View retained content')}</summary>
           <pre>{JSON.stringify({ input: draft.input, document: draft.document, hints: draft.hints, preserved: draft.preserved }, null, 2)}</pre></details>
       </> :
-      <textarea ref={editor} aria-label={t('Work with Codex')} placeholder={t('Message')} value={draft.text} readOnly={!!editIssue}
-        aria-autocomplete="list" aria-controls={completions.query ? completions.listId : undefined}
-        aria-activedescendant={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
-        onChange={event => {
-          const text = event.currentTarget.value, inputType = (event.nativeEvent as InputEvent).inputType;
-          if (inputType === 'historyUndo' || inputType === 'historyRedo') completions.show();
-          setCursor(event.currentTarget.selectionStart);
-          void changeDraft(value => {
-            const next = updateDraftText(value, text);
-            return next.text === text ? restoreCompletionSkill(next, -1, value.text, text, inputType) : next;
-          });
-        }}
-        onCompositionStart={() => setComposition('editor', true)}
-        onCompositionEnd={() => { requestAnimationFrame(() => { if (mounted.current) setComposition('editor', false); }); }}
-        onSelect={event => setCursor(event.currentTarget.selectionStart)} onKeyDown={event => { keyDown(event.nativeEvent); }} onPaste={paste} />}
+      <StandalonePlainInputEditor ref={editor} label={t('Work with Codex')} placeholder={t('Message')} text={draft.text} readOnly={!!editIssue}
+        canEdit={() => !frozenRef.current} completionListId={completions.query ? completions.listId : undefined}
+        completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
+        onEdit={(_index, expected, text, inputType, skills) => {
+          if (frozenRef.current) return false;
+          if (expected !== text || inputType === 'historyUndo' || inputType === 'historyRedo') completions.show();
+          const before = current.current.draft;
+          if (before.text !== expected) return false;
+          const next = updateDraftText(before, text);
+          if (next.text !== text) return false;
+          const projected = projectCompletionSkills(next, skills);
+          void changeDraft(value => value === before ? projected : value);
+          return current.current.draft === projected;
+        }} onSelection={(_index, position) => setCursor(position)} onKeyDown={keyDown} onPaste={paste}
+        onCompositionChange={value => setComposition('editor', value)} />}
       {completions.query ? <div className="standalone-composer__completions" id={completions.listId} role="listbox" aria-label={t(completions.query.kind === 'file' ? 'Workspace files' : 'Skill')}>
         {completions.items.map((item, index) => <button type="button" role="option" id={completions.listId + '-' + index} key={item.kind + ':' + (item.kind === 'command' ? item.name : item.path)}
           aria-selected={index === completions.selected} onMouseDown={event => event.preventDefault()} onClick={() => chooseCompletion(item)}>

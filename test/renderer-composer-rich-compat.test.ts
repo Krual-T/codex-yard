@@ -265,8 +265,8 @@ test('segmented editor uses the original draft controller for editing, undo, ref
       const draft=stored.draft;
       const edit=(index,expected,text)=>{
         const before=current.current.draft,result=editStructuredDraftText(before,index,expected,text);
-        if(result.error){state.error=result.error;return}
-        state.error='';void changeDraft(value=>value===before?result.draft:value);
+        if(result.error){state.error=result.error;return false}
+        state.error='';void changeDraft(value=>value===before?result.draft:value);return current.current.draft===result.draft;
       };
       return React.createElement('div',{className:'standalone-composer'},
         React.createElement('div',{className:'standalone-composer__editor'},loaded&&canEditStructuredDraft(draft)
