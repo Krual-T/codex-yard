@@ -80,6 +80,45 @@ test('RPC errors preserve daemon code and data; read/write timeouts have distinc
   assert.equal(connection.pending.size, 0);
 });
 
+test('an awaiting request ignores malformed or conflicting terminals without losing its original valid reply', async t => {
+  const { peer, connection } = await fixture(t);
+  peer.handlers.set('fixture/terminal', () => NO_REPLY);
+  let count = 0;
+  for (const terminal of [{ result: { accepted: true } }, { error: { code: -32602, message: 'original rejection' } }]) {
+    const call = connection.request('fixture/terminal', {}, { mutating: true, timeoutMs: 1000 });
+    const request = await peer.waitForCall('fixture/terminal', ++count);
+    assert(request && request.id !== undefined);
+    for (const malformed of [{}, { error: null }, { error: {} }, { error: { code: -32602 } },
+      { error: { message: 'missing code' } }, { result: {}, error: null },
+      { result: {}, error: { code: -32602, message: 'conflicting rejection' } }]) {
+      connection.receive(Buffer.from(JSON.stringify({ id: request.id, ...malformed })));
+      assert.equal(connection.pending.has(request.id), true);
+    }
+    peer.send({ id: request.id, ...terminal });
+    if ('error' in terminal) await assert.rejects(call, { code: -32602, message: 'original rejection' });
+    else assert.deepEqual(await call, { accepted: true });
+    assert.equal(connection.pending.size, 0);
+  }
+});
+
+test('a malformed timely write response remains unknown at timeout and accepts only the original late terminal', async t => {
+  const { peer, connection } = await fixture(t);
+  peer.handlers.set('fixture/invalid-write', () => NO_REPLY);
+  let observe!: (value: unknown) => void;
+  const observed = new Promise<unknown>(resolve => { observe = resolve; });
+  const call = connection.request('fixture/invalid-write', {}, { mutating: true, timeoutMs: 30,
+    retainLateUntilDisconnect: true, onLateTerminal: observe });
+  const rejected = assert.rejects(call, { code: 'TIMEOUT', uncertain: true });
+  const request = await peer.waitForCall('fixture/invalid-write'); assert(request && request.id !== undefined);
+  connection.receive(Buffer.from(JSON.stringify({ id: request.id, result: {}, error: { message: 'invalid' } })));
+  assert.equal(connection.pending.has(request.id), true);
+  await rejected;
+  assert.equal(connection.pending.has(request.id), true);
+  peer.send({ id: request.id, result: { accepted: true } });
+  assert.deepEqual(await observed, { outcome: 'success', result: { accepted: true }, eventCursor: 0 });
+  assert.equal(connection.pending.size, 0);
+});
+
 test('only the original live connection delivers a bounded late terminal after the waiting timeout', async t => {
   const { peer, connection } = await fixture(t);
   peer.handlers.set('fixture/late', () => NO_REPLY);

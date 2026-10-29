@@ -174,12 +174,12 @@ export class CodexConnection extends EventEmitter<{ message: [RpcMessage, WebSoc
     if (!message.method && (typeof message.id === 'string' || typeof message.id === 'number')) {
       const pending = this.pending.get(message.id);
       if (!pending) return;
-      if (pending.timedOut) {
-        const hasResult = Object.hasOwn(message, 'result');
-        const validError = isRecord(message.error) && typeof message.error.message === 'string'
-          && (typeof message.error.code === 'string' || typeof message.error.code === 'number');
-        if (hasResult === validError || Object.hasOwn(message, 'error') && !validError) return;
-      }
+      const hasResult = Object.hasOwn(message, 'result');
+      const validError = isRecord(message.error) && typeof message.error.message === 'string'
+        && (typeof message.error.code === 'string' || typeof message.error.code === 'number');
+      // An ambiguous frame cannot settle either an awaiting or a timed-out
+      // write. Keep the original request for its valid terminal or timeout.
+      if (hasResult === validError || Object.hasOwn(message, 'error') && !validError) return;
       this.pending.delete(message.id);
       clearTimeout(pending.timer);
       if (pending.timedOut) {
