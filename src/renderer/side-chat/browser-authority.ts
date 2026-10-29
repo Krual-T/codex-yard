@@ -46,7 +46,7 @@ export interface SideChatAuthorityRequest {
   view?: SideChatHostView;
 }
 
-/** The parent's one shared sender must synchronously block new sends before draining. */
+/** The parent synchronously blocks new sends and owner attachment before draining. */
 export interface SideChatSendLease {
   drain(): Promise<void>;
   assertCurrent(): void;
@@ -134,7 +134,7 @@ export class SideChatBrowserAuthorityBridge {
   private identity: SideChatBrowserIdentity | null = null;
   private grant: SideChatAuthorityChallenge | null = null;
   private capture: { token: EphemeralForkCapture; scope: EphemeralForkScope } | null = null;
-  private closeLease: { draft: ComposerDraftController; draftLease: ComposerDraftLease; send: SideChatSendLease } | null = null;
+  private closeLease: { draft: ComposerDraftController | null; draftLease: ComposerDraftLease | null; send: SideChatSendLease } | null = null;
   private invalid = false;
   private sealed = false;
   private authorizing = false;
@@ -304,38 +304,40 @@ export class SideChatBrowserAuthorityBridge {
   async freezeClose(): Promise<void> {
     this.assertCurrent();
     const identity = this.identity, draft = this.options.draftController();
-    if (!identity?.childThreadId || !draft || this.closeLease) throw beforeSend('侧聊草稿尚未就绪或正在关闭。');
-    const owner = ownerOf(identity, identity.childThreadId), draftLease = draft.freeze(owner);
-    if (!draftLease) throw beforeSend('侧聊草稿无法冻结，原内容已保留。');
+    if (!identity || this.closeLease) throw beforeSend('侧聊草稿尚未就绪或正在关闭。');
+    const owner = ownerOf(identity, identity.childThreadId), draftLease = draft?.freeze(owner) ?? null;
+    if (draft && !draftLease) throw beforeSend('侧聊草稿无法冻结，原内容已保留。');
     let send: SideChatSendLease;
     try { send = this.options.freezeSending(owner); }
-    catch (error) { draftLease.release(); throw error; }
+    catch (error) { draftLease?.release(); throw error; }
     this.closeLease = { draft, draftLease, send };
     try { await this.checkClose(identity); }
-    catch (error) { this.closeLease = null; send.release(); draftLease.release(); throw error; }
+    catch (error) { this.closeLease = null; send.release(); draftLease?.release(); throw error; }
   }
   private async checkClose(identity: SideChatBrowserIdentity, guard = this.assertCurrent): Promise<void> {
     const lease = this.closeLease, owner = ownerOf(identity, identity.childThreadId);
-    if (!identity.childThreadId || !lease || lease.draft !== this.options.draftController()) throw new Error('原侧聊草稿租约已改变。');
+    if (!lease || lease.draft !== this.options.draftController()) throw new Error('原侧聊草稿租约已改变。');
     guard(); lease.send.assertCurrent();
-    if (!await lease.draftLease.flush()) throw new Error('侧聊草稿未能排空。');
+    if (lease.draftLease && !await lease.draftLease.flush()) throw new Error('侧聊草稿未能排空。');
     await lease.send.drain();
     guard(); lease.send.assertCurrent();
-    const snapshot = lease.draft.snapshot();
-    if (!snapshot || snapshot.owner.hostId !== owner.hostId || snapshot.owner.threadId !== owner.threadId
-      || snapshot.owner.draftId !== owner.draftId) throw new Error('原侧聊草稿身份已改变。');
-    const stored = await readComposerDraft(owner, snapshot.revision), sends = await this.options.sendStore.read();
-    if (!stored || !sameComposerDraftValue(stored.draft, snapshot.draft)
+    const snapshot = lease.draft?.snapshot() ?? null;
+    if (lease.draft && (!snapshot || snapshot.owner.hostId !== owner.hostId || snapshot.owner.threadId !== owner.threadId
+      || snapshot.owner.draftId !== owner.draftId)) throw new Error('原侧聊草稿身份已改变。');
+    const stored = snapshot ? await readComposerDraft(owner, snapshot.revision) : null, sends = await this.options.sendStore.read();
+    if (snapshot && (!stored || !sameComposerDraftValue(stored.draft, snapshot.draft))
       || Object.values(sends.requests).some(intent => intent.owner.hostId === owner.hostId && intent.owner.draftId === owner.draftId)) {
       throw new Error('侧聊草稿或发送结果尚未确认。');
     }
     await updateBrowserAtoms(atoms => {
       guard();
       assertAssociation(atoms[composerDraftAtomKey], asAssociation(identity));
-      const versions = readComposerDraftVersionsInRoot(atoms[composerDraftAtomKey], owner).versions
-        .filter(value => value.revision === snapshot.revision);
-      if (versions.length !== 1 || !sameComposerDraftValue(versions[0]!.draft, snapshot.draft)) {
-        throw new Error('原侧聊活动草稿版本已改变。');
+      if (snapshot) {
+        const versions = readComposerDraftVersionsInRoot(atoms[composerDraftAtomKey], owner).versions
+          .filter(value => value.revision === snapshot.revision);
+        if (versions.length !== 1 || !sameComposerDraftValue(versions[0]!.draft, snapshot.draft)) {
+          throw new Error('原侧聊活动草稿版本已改变。');
+        }
       }
       const raw = atoms[sendsAtom];
       if (raw !== undefined) {
@@ -348,11 +350,11 @@ export class SideChatBrowserAuthorityBridge {
       }
       return { value: undefined };
     });
-    if (!await lease.draftLease.flush()) throw new Error('侧聊草稿未能排空。');
+    if (lease.draftLease && !await lease.draftLease.flush()) throw new Error('侧聊草稿未能排空。');
     guard(); lease.send.assertCurrent();
-    const latest = lease.draft.snapshot();
-    if (lease !== this.closeLease || lease.draft !== this.options.draftController() || !latest
-      || latest.revision !== snapshot.revision || !sameComposerDraftValue(latest, snapshot)) throw new Error('侧聊草稿在关闭时发生变化。');
+    const latest = lease.draft?.snapshot() ?? null;
+    if (lease !== this.closeLease || lease.draft !== this.options.draftController() || snapshot && (!latest
+      || latest.revision !== snapshot.revision || !sameComposerDraftValue(latest, snapshot))) throw new Error('侧聊草稿在关闭时发生变化。');
   }
 
   /** The parent must prove that the original close call cannot still unsubscribe. */
@@ -362,7 +364,21 @@ export class SideChatBrowserAuthorityBridge {
     assertSettledWithoutUnsubscribe();
     const lease = this.closeLease;
     this.closeLease = null;
-    lease?.send.release(); lease?.draftLease.release();
+    lease?.send.release(); lease?.draftLease?.release();
+  }
+
+  /** An operation closed before fork has no child cleanup event to release its lease. */
+  async completeEmptyClose(assertClosedWithoutChild: () => void): Promise<void> {
+    const lease = this.closeLease, identity = this.identity;
+    if (!lease || !identity || identity.childThreadId !== null) throw beforeSend('原侧聊不是已确认的无子会话关闭。');
+    assertClosedWithoutChild();
+    await this.revoke();
+    assertClosedWithoutChild();
+    if (lease !== this.closeLease || this.identity !== identity || identity.childThreadId !== null) {
+      throw beforeSend('原侧聊关闭身份已改变。');
+    }
+    this.sealed = true; this.closeLease = null;
+    lease.send.release(); lease.draftLease?.release();
   }
 
   private async child(request: SideChatAuthorityRequest, guard: () => void): Promise<void> {
@@ -426,7 +442,7 @@ export class SideChatBrowserAuthorityBridge {
       if (request.kind === 'cleanup') {
         this.sealed = true;
         const lease = this.closeLease; this.closeLease = null;
-        lease?.send.release(); lease?.draftLease.release();
+        lease?.send.release(); lease?.draftLease?.release();
       }
     } catch {
       try { await this.request({ action: 'respond', requestId: request.requestId, challengeId: request.challengeId, outcome: 'failed' }, guard); }

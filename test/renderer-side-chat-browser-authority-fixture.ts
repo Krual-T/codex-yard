@@ -4,6 +4,7 @@ import { BrowserWorkbenchClient } from '../src/renderer/app/client.ts';
 import { ConversationSessions } from '../src/renderer/app/conversation-sessions.ts';
 import { SendRecoveryStore } from '../src/renderer/app/send-recovery.ts';
 import { StandaloneComposer } from '../src/renderer/composer/StandaloneComposer.tsx';
+import { composerDraftAtomKey, readComposerDraftVersionsInRoot } from '../src/renderer/composer/composer-draft-store.ts';
 import type { ComposerDraftController } from '../src/renderer/composer/use-composer-draft.ts';
 import { SideChatBrowserAuthorityBridge, readSideChatDraftAssociation } from '../src/renderer/side-chat/browser-authority.ts';
 import { SideChatController } from '../src/renderer/side-chat/controller.ts';
@@ -20,7 +21,8 @@ client.subscribe(event => { if (event.type === 'side-chat-browser-authority' && 
 const bridge = new SideChatBrowserAuthorityBridge({ client, identity, cwd: '/fixture/a', sessions, sendStore,
   assertCurrent() { if (!current || !client.connected) throw new Error('Original page or connection changed.'); },
   freezeSending(owner) {
-    if (senderFrozen || owner.hostId !== identity.hostId || owner.draftId !== identity.draftId || owner.threadId !== 'child-a') {
+    if (senderFrozen || owner.hostId !== identity.hostId || owner.draftId !== identity.draftId
+      || ![null, 'child-a'].includes(owner.threadId)) {
       throw new Error('Sender owner changed.');
     }
     senderFrozen = true;
@@ -90,6 +92,12 @@ const fixture = {
   association() { return readSideChatDraftAssociation(identity); },
   async freeze() { await bridge.freezeClose(); },
   async close() { await controller.close(); },
+  async completeEmptyClose() { await bridge.completeEmptyClose(() => {
+    const current = controller.getSnapshot();
+    if (current.phase !== 'closed' || current.view?.childId !== null || current.view.fork.status !== 'waiting') {
+      throw new Error('The original empty close has not settled.');
+    }
+  }); },
   async revoke() { await bridge.revoke(); },
   disposeBridge() { bridge.dispose(); },
   async authorize() { await bridge.authorize('start', { forkDispatchId: 'attempt-a', isForkUnsent: () => true }); },
@@ -103,6 +111,12 @@ const fixture = {
     const snapshot = draft?.snapshot();
     if (!snapshot) throw new Error('Draft not mounted.');
     return sendStore.prepare({ owner: snapshot.owner, revision: snapshot.revision }, '/fixture/a', snapshot.draft, {}, {});
+  },
+  async pendingUnmountedSend() {
+    const owner = { hostId: identity.hostId, threadId: null, draftId: identity.draftId };
+    const atoms = await readBrowserAtoms(), versions = readComposerDraftVersionsInRoot(atoms[composerDraftAtomKey], owner).versions;
+    if (versions.length !== 1) throw new Error('Original unmounted draft is unavailable.');
+    return sendStore.prepare({ owner, revision: versions[0]!.revision }, '/fixture/a', versions[0]!.draft, {}, {});
   },
   async cancelSend(id: string) { await sendStore.cancel(id); },
   senderFrozen() { return senderFrozen; },

@@ -106,11 +106,14 @@ async function peer() {
             calls.inject++; view.inject = { status: 'received', error: null }; result = view;
           } else if (body.action === 'close') {
             authority.assertCurrent({ ...scoped(page, 'close'), phase: 'claim' });
-            await authority.prepareClose({ ...scoped(page, 'close'), childThreadId: 'child-a' });
-            authority.assertCurrent({ ...scoped(page, 'close'), phase: 'unsubscribe', attemptId: 'close-a' });
-            calls.unsubscribe++;
-            await authority.cleanup({ ...scoped(page, 'close'), childThreadId: 'child-a' });
-            calls.cleanup++; view.close = { requested: true, status: 'closed', error: null }; result = view;
+            if (view.childId) {
+              await authority.prepareClose({ ...scoped(page, 'close'), childThreadId: 'child-a' });
+              authority.assertCurrent({ ...scoped(page, 'close'), phase: 'unsubscribe', attemptId: 'close-a' });
+              calls.unsubscribe++;
+              await authority.cleanup({ ...scoped(page, 'close'), childThreadId: 'child-a' });
+              calls.cleanup++;
+            }
+            view.close = { requested: true, status: 'closed', error: null }; result = view;
           } else throw Error('Unexpected side-chat fixture action.');
         } else if (endpoint === 'get-setting') result = { value: body.key === 'composerPlainTextMode' ? false : 'queue', exists: true };
         else throw Error('Unexpected host endpoint ' + endpoint);
@@ -163,6 +166,41 @@ test('actual browser IDB, controller and composer consume the native authority b
     headless: true, args: ['--no-sandbox', '--disable-background-networking'] });
   const script = bundle.outputFiles[0]!.text;
   try {
+    await t.test('close before a fork has no composer, preserves its IDB draft and fences the delayed start', async () => {
+      const p = await peer(), { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.evaluate(() => { const f = (window as any).sideChatAuthorityFixture;
+          f.setPauseStart(true); (window as any).startPromise = f.start(); });
+        await page.waitForFunction(() => (window as any).sideChatAuthorityFixture.startWaiting);
+        const pending = await page.evaluate(async () => (window as any).sideChatAuthorityFixture.pendingUnmountedSend());
+        await assert.rejects(page.evaluate(async () => (window as any).sideChatAuthorityFixture.freeze()), /发送结果|尚未确认/);
+        assert.equal(await page.evaluate(() => (window as any).sideChatAuthorityFixture.senderFrozen()), false);
+        await page.evaluate(async id => (window as any).sideChatAuthorityFixture.cancelSend(id), pending.id);
+        await page.evaluate(async () => (window as any).sideChatAuthorityFixture.freeze());
+        await assert.rejects(page.evaluate(async () => (window as any).sideChatAuthorityFixture.completeEmptyClose()), /has not settled/);
+        assert.equal(await page.evaluate(() => (window as any).sideChatAuthorityFixture.senderFrozen()), true);
+        await page.evaluate(async () => (window as any).sideChatAuthorityFixture.close());
+        assert.equal(await page.evaluate(() => (window as any).sideChatAuthorityFixture.controller.getSnapshot().phase), 'closed');
+        await page.evaluate(async () => (window as any).sideChatAuthorityFixture.completeEmptyClose());
+        assert.equal(await page.evaluate(() => (window as any).sideChatAuthorityFixture.senderFrozen()), false);
+        await page.evaluate(async () => { const f = (window as any).sideChatAuthorityFixture;
+          f.releaseStart(); await (window as any).startPromise; });
+        assert.equal((await page.evaluate(async () => (window as any).sideChatAuthorityFixture.association())).childThreadId, null);
+        assert.deepEqual(p.calls, { fork: 0, inject: 0, unsubscribe: 0, cleanup: 0 });
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('close after child creation works before the composer mounts', async () => {
+      const p = await peer(), { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.evaluate(async () => (window as any).sideChatAuthorityFixture.start());
+        assert.equal(await page.evaluate(() => (window as any).sideChatAuthorityFixture.snapshot()), null);
+        await page.evaluate(async () => (window as any).sideChatAuthorityFixture.freeze());
+        await page.evaluate(async () => (window as any).sideChatAuthorityFixture.close());
+        assert.equal(await page.evaluate(() => (window as any).sideChatAuthorityFixture.controller.getSnapshot().phase), 'closed');
+        assert.equal((await page.evaluate(async () => (window as any).sideChatAuthorityFixture.association())).childThreadId, 'child-a');
+        assert.deepEqual(p.calls, { fork: 1, inject: 1, unsubscribe: 1, cleanup: 1 });
+      } finally { await context.close(); await p.close(); }
+    });
     await t.test('two actual pages observe on both sides of the original claim without rotating its token', async () => {
       const p = await peer(), { context, page } = await setup(browser, script, p.url);
       try {
