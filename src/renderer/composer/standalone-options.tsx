@@ -20,6 +20,7 @@ interface OptionsProps {
   modelRef: Ref<HTMLButtonElement>;
   value: SubmitOptions;
   inherited?: SubmitOptions;
+  fullAccessVisible?: boolean;
   onChange(patch: Partial<SubmitOptions>): void;
   onDefaultPendingChange(pending: boolean): void;
   onEffectiveOptionsChange?(options: SubmitOptions): void;
@@ -66,7 +67,7 @@ async function models(client: WorkbenchClient, hostId: string): Promise<Model[]>
   return result;
 }
 
-export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, busy, modelRef, value, inherited, onChange, onDefaultPendingChange, onEffectiveOptionsChange }: OptionsProps) {
+export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, busy, modelRef, value, inherited, fullAccessVisible = true, onChange, onDefaultPendingChange, onEffectiveOptionsChange }: OptionsProps) {
   const { t, locale } = useI18n('zh-CN');
   const [available, setAvailable] = useState<Model[]>([]);
   const [defaults, setDefaults] = useState<SubmitOptions>({});
@@ -165,9 +166,9 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, 
     setDefaultWritePending(true);
     void modelSettings.save().finally(() => { if (permissionMounted.current) setDefaultWritePending(false); });
   };
-  const permissionSourceKey = JSON.stringify([hostId, cwd, threadId, projectless, effective, inherited, busy, defaultUnavailable]);
-  const permissionSource = useRef({ key: permissionSourceKey, client, hostId, cwd, model: effective.model, effective, projectless, inherited: isHome ? undefined : inherited ?? {} });
-  permissionSource.current = { key: permissionSourceKey, client, hostId, cwd, model: effective.model, effective, projectless, inherited: isHome ? undefined : inherited ?? {} };
+  const permissionSourceKey = JSON.stringify([hostId, cwd, threadId, projectless, effective, inherited, fullAccessVisible, busy, defaultUnavailable]);
+  const permissionSource = useRef({ key: permissionSourceKey, client, hostId, cwd, model: effective.model, effective, projectless, fullAccessVisible, inherited: isHome ? undefined : inherited ?? {} });
+  permissionSource.current = { key: permissionSourceKey, client, hostId, cwd, model: effective.model, effective, projectless, fullAccessVisible, inherited: isHome ? undefined : inherited ?? {} };
   useEffect(() => {
     permissionMounted.current = true;
     return () => { permissionMounted.current = false; permissionSequence.current++; };
@@ -177,7 +178,8 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, 
     setConfirmFullAccess(null);
     requestAnimationFrame(() => accessMenu.current?.querySelector<HTMLElement>(':scope > summary')?.focus());
   };
-  useLayoutEffect(() => { if (accessMenu.current?.open) positionComposerMenu(accessMenu.current); }, [permissionChoices, permissionLoading, permissionError]);
+  useEffect(() => { if (!fullAccessVisible && confirmFullAccess) closeConfirmation(); }, [fullAccessVisible, confirmFullAccess]);
+  useLayoutEffect(() => { if (accessMenu.current?.open) positionComposerMenu(accessMenu.current); }, [permissionChoices, permissionLoading, permissionError, fullAccessVisible]);
   const readPermissions = async (choice?: ComposerPermissionChoice) => {
     const source = permissionSource.current;
     const sequence = ++permissionSequence.current;
@@ -189,6 +191,7 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, 
       setPermissionChoices(choices);
       if (choice) {
         const current = choices.find(item => item.id === choice.id);
+        if (choice.fullAccess && !source.fullAccessVisible) throw new Error('Full access is not available in this menu.');
         if (choice.fullAccess && !source.model) throw new Error('The current model is not confirmed; reload the conversation before changing access.');
         if (!current?.allowed || current.fullAccess !== choice.fullAccess || current.resolved !== choice.resolved
           || JSON.stringify(current.patch) !== JSON.stringify(choice.patch)) throw new Error('This permission choice changed or is no longer allowed.');
@@ -250,7 +253,7 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, 
       </summary>
       <div className="standalone-composer__menu-panel">
         <strong>{locale.toLowerCase().startsWith('zh') ? '如何批准 Codex 操作？' : 'How should Codex actions be approved?'}</strong>
-        {permissionChoices.filter(choice => !choice.id.startsWith('sandbox:') && !choice.id.startsWith('policy:')).map(choice => <button type="button" className="standalone-composer__permission-choice" key={choice.id}
+        {permissionChoices.filter(choice => !choice.id.startsWith('sandbox:') && !choice.id.startsWith('policy:') && (fullAccessVisible || !choice.fullAccess)).map(choice => <button type="button" className="standalone-composer__permission-choice" key={choice.id}
           disabled={busy || defaultUnavailable || !choice.allowed || choice.fullAccess && !effective.model} aria-disabled={permissionLoading || undefined}
           title={choice.fullAccess && !effective.model ? 'The current model is not confirmed.' : choice.reason}
           onClick={() => { if (!permissionLoading) choice.fullAccess ? setConfirmFullAccess(choice) : void readPermissions(choice); }}>
@@ -272,25 +275,27 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, 
             value={typeof value.approvalPolicy === 'object' ? '__granular__' : value.approvalPolicy ?? ''} onChange={event => {
               if (permissionLoading) return;
               const choice = permissionChoices.find(item => item.id === 'policy:' + (event.currentTarget.value || 'default'));
-              if (choice?.allowed) choice.fullAccess ? setConfirmFullAccess(choice) : void readPermissions(choice);
+              if (choice?.allowed && (fullAccessVisible || !choice.fullAccess)) choice.fullAccess ? setConfirmFullAccess(choice) : void readPermissions(choice);
             }}>
             {typeof value.approvalPolicy === 'object' ? <option value="__granular__">{t('Custom approval')}</option> : null}
-            <option value="" disabled={!permissionChoices.find(choice => choice.id === 'policy:default')?.allowed || !!permissionChoices.find(choice => choice.id === 'policy:default')?.fullAccess && !effective.model}>{configuredLabel(approvalLabel(configured.approvalPolicy))}</option>
-            {permissionChoices.filter(choice => choice.id.startsWith('policy:') && choice.id !== 'policy:default').map(choice => <option key={choice.id} value={choice.label} disabled={!choice.allowed || choice.fullAccess && !effective.model}>{choice.label}</option>)}
+            <option value="" hidden={!fullAccessVisible && permissionChoices.find(choice => choice.id === 'policy:default')?.fullAccess} disabled={!permissionChoices.find(choice => choice.id === 'policy:default')?.allowed || !!permissionChoices.find(choice => choice.id === 'policy:default')?.fullAccess && !effective.model}>{configuredLabel(approvalLabel(configured.approvalPolicy))}</option>
+            {!fullAccessVisible && value.approvalPolicy === 'never' && permissionChoices.find(choice => choice.id === 'policy:never')?.fullAccess ? <option value="never" hidden disabled>never</option> : null}
+            {permissionChoices.filter(choice => choice.id.startsWith('policy:') && choice.id !== 'policy:default' && (fullAccessVisible || !choice.fullAccess)).map(choice => <option key={choice.id} value={choice.label} disabled={!choice.allowed || choice.fullAccess && !effective.model}>{choice.label}</option>)}
           </select></label>
           <label>{t('Sandbox')} <select aria-label={t('Sandbox permissions')} disabled={busy || defaultUnavailable} aria-busy={permissionLoading || undefined}
             value={value.sandboxMode ?? ''} onChange={event => {
               if (permissionLoading) return;
               const choice = permissionChoices.find(item => item.id === 'sandbox:' + (event.currentTarget.value || 'default'));
-              if (choice?.allowed) choice.fullAccess ? setConfirmFullAccess(choice) : void readPermissions(choice);
+              if (choice?.allowed && (fullAccessVisible || !choice.fullAccess)) choice.fullAccess ? setConfirmFullAccess(choice) : void readPermissions(choice);
             }}>
-            <option value="" disabled={!permissionChoices.find(choice => choice.id === 'sandbox:default')?.allowed || !!permissionChoices.find(choice => choice.id === 'sandbox:default')?.fullAccess && !effective.model}>{configuredLabel(configured.sandboxMode)}</option>
-            {permissionChoices.filter(choice => choice.id.startsWith('sandbox:') && choice.id !== 'sandbox:default').map(choice => <option key={choice.id} value={choice.label} disabled={!choice.allowed || choice.fullAccess && !effective.model}>{choice.label}</option>)}
+            <option value="" hidden={!fullAccessVisible && permissionChoices.find(choice => choice.id === 'sandbox:default')?.fullAccess} disabled={!permissionChoices.find(choice => choice.id === 'sandbox:default')?.allowed || !!permissionChoices.find(choice => choice.id === 'sandbox:default')?.fullAccess && !effective.model}>{configuredLabel(configured.sandboxMode)}</option>
+            {!fullAccessVisible && value.sandboxMode === 'danger-full-access' ? <option value="danger-full-access" hidden disabled>danger-full-access</option> : null}
+            {permissionChoices.filter(choice => choice.id.startsWith('sandbox:') && choice.id !== 'sandbox:default' && (fullAccessVisible || !choice.fullAccess)).map(choice => <option key={choice.id} value={choice.label} disabled={!choice.allowed || choice.fullAccess && !effective.model}>{choice.label}</option>)}
           </select></label>
         </details> : null}
       </div>
     </details>
-    {confirmFullAccess ? <div className="standalone-composer__confirm-backdrop" role="presentation">
+    {confirmFullAccess && fullAccessVisible ? <div className="standalone-composer__confirm-backdrop" role="presentation">
       <div className="standalone-composer__confirm" role="dialog" aria-modal="true" aria-labelledby={confirmationId}
         onKeyDown={event => {
           if (event.key === 'Escape' && !event.nativeEvent.isComposing && !permissionLoading) { event.stopPropagation(); closeConfirmation(); }

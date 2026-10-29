@@ -56,6 +56,7 @@ export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSu
   selectedProjectId?: string | null;
   onProjectChange?: (project: ComposerProjectChoice | null, lease: ComposerDraftLease) => Promise<void>;
   onOpenGoal?: () => void;
+  fullAccessVisible?: boolean;
   onEffectiveOptionsChange?: (owner: ComposerDraftOwner, options: SubmitOptions) => void;
   /** Reuse the borrowed lease in navigation guards; resolve after committing the requested owner. */
   onTargetChange?: (target: ComposerTarget, lease: ComposerDraftLease) => Promise<void>;
@@ -89,7 +90,7 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
   }}><summary>{name}</summary>{preview == null ? t('Reading...') : <pre>{preview}</pre>}</details>;
 }
 
-function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, removeQueuedOriginal, dispatchQueueMutation, prefill, activeTurnId, initialOptions, hosts, projectDisplay, projectChoices, selectedProjectId, onProjectChange, onOpenGoal, onEffectiveOptionsChange, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
+function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, removeQueuedOriginal, dispatchQueueMutation, prefill, activeTurnId, initialOptions, hosts, projectDisplay, projectChoices, selectedProjectId, onProjectChange, onOpenGoal, fullAccessVisible, onEffectiveOptionsChange, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
   const { t, locale } = useI18n('zh-CN');
   const inputRoot = useRef<HTMLDivElement>(null);
   const projectSource = useRef({ context, projectChoices, selectedProjectId, onProjectChange });
@@ -792,7 +793,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
             }}><option value="enter">Enter</option><option value="cmdIfMultiline">{t('Ctrl/Command + Enter for multiline')}</option><option value="cmdAlways">Ctrl/⌘ + Enter</option></select></label>
           </div>
         </details>
-        <StandaloneOptions client={client} hostId={context.hostId} cwd={context.cwd} threadId={context.threadId} projectless={selectedProjectId === null} busy={busy} modelRef={modelPicker} value={options} inherited={initialOptions}
+        <StandaloneOptions client={client} hostId={context.hostId} cwd={context.cwd} threadId={context.threadId} projectless={selectedProjectId === null} busy={busy} modelRef={modelPicker} value={options} inherited={initialOptions} fullAccessVisible={fullAccessVisible}
           onDefaultPendingChange={notifyDefaultPending}
           onEffectiveOptionsChange={onEffectiveOptionsChange ? notifyEffectiveOptions : undefined}
           onChange={patch => setOverrides(previous => ({ ...previous, ...patch }))} />
