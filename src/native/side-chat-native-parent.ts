@@ -292,6 +292,14 @@ export function createNativeSideChatParent(options: Options) {
       current.claimed = claim.value;
       return result;
     },
+    canReconcile(scope) {
+      try {
+        const current = context.getStore(), binding = bindingFor(scope);
+        if (!current || current.page !== binding.page) return false;
+        assertConnection(binding);
+        return true;
+      } catch { return false; }
+    },
     async request(scope, method, params, mutating, late) {
       if (method === 'config/read' && !('operationId' in scope) && !mutating) {
         const binding = context.getStore()?.binding;
@@ -397,7 +405,12 @@ export function createNativeSideChatParent(options: Options) {
     const input = { hostId, parentThreadId, operationId: params.operationId };
     const call: Context = { page };
     return context.run(call, async () => {
-      if (action === 'read') return endpoint.read(input);
+      if (action === 'read') {
+        if (params.purpose !== undefined && params.purpose !== 'observe' && params.purpose !== 'reconcile') {
+          throw new BeforeSend('侧聊读取用途无效。');
+        }
+        return endpoint.read({ ...input, ...(params.purpose ? { purpose: params.purpose } : {}) });
+      }
       if (!['start', 'retry', 'close', 'retryPersistence'].includes(action)
         || action === 'retryPersistence' && !id(params.connectionGeneration)
         || action !== 'retryPersistence' && !id(params.token)

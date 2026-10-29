@@ -217,6 +217,7 @@ test('file reconciliation does not replay a late fork or send its boundary until
       assert.equal(scope.hostId, parent.hostId); assert.equal(scope.parentThreadId, parent.threadId);
       assert.equal(scope.connectionGeneration, parent.connectionGeneration); return run();
     },
+    canReconcile: () => true,
     async request(scope, method, _params, _mutating, late) {
       assert.equal(scope.connectionGeneration, parent.connectionGeneration);
       calls.push(method);
@@ -243,10 +244,10 @@ test('file reconciliation does not replay a late fork or send its boundary until
   });
   assert.ok(lateFork);
   await lateFork({ outcome: 'success', result: forkReceipt, eventCursor: 7 });
-  let view = await host.read({ ...scope, operationId: prepared.view.operationId });
+  let view = await host.read({ ...scope, operationId: prepared.view.operationId, purpose: 'reconcile' });
   for (let attempt = 0; attempt < 100 && !view.view.recoveryError; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 5));
-    view = await host.read({ ...scope, operationId: prepared.view.operationId });
+    view = await host.read({ ...scope, operationId: prepared.view.operationId, purpose: 'reconcile' });
   }
   assert.equal(loseConfirmation, false);
   assert.notEqual(view.view.recoveryError, null);

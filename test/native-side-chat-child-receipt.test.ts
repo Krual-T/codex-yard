@@ -89,6 +89,7 @@ async function fixture(t: TestContext, changeParent: Partial<SideChatParent> = {
       return run();
     },
     async withScope(scope, access, run) { if (access.kind === 'dispatch') assertSocket(scope); return run(); },
+    canReconcile(scope) { try { assertSocket(scope); return true; } catch { return false; } },
     request(scope, method, params, mutating, onLateTerminal) {
       assertSocket(scope);
       return connection.request(method, params, { mutating, onLateTerminal, retainLateUntilDisconnect: true });
@@ -111,7 +112,7 @@ async function fixture(t: TestContext, changeParent: Partial<SideChatParent> = {
   const scope = { hostId: parent.hostId, parentThreadId: parent.threadId };
   let nextPrepare = 0, nextForkDispatch = 0;
   const prepare = () => host.prepare({ ...scope, prepareId: 'prepare-' + ++nextPrepare });
-  const input = (reply: SideChatEndpointReply) => ({ ...scope, operationId: reply.view.operationId });
+  const input = (reply: SideChatEndpointReply) => ({ ...scope, operationId: reply.view.operationId, purpose: 'reconcile' as const });
   const action = (reply: SideChatEndpointReply) => ({ ...input(reply), token: reply.token!, forkDispatchId: 'dispatch-' + ++nextForkDispatch });
   function receipt() {
     return {

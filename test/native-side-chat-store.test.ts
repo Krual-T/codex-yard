@@ -340,6 +340,7 @@ test('real endpoint and E lifecycle recover a late receipt through the file-back
       assert.equal(scope.hostId, original.hostId); assert.equal(scope.parentThreadId, original.threadId);
       assert.equal(scope.connectionGeneration, original.connectionGeneration); return run();
     },
+    canReconcile: () => true,
     async request(scope, method, _params, _mutating, late) {
       assert.equal(scope.connectionGeneration, original.connectionGeneration);
       calls.push(method);
@@ -390,18 +391,18 @@ test('real endpoint and E lifecycle recover a late receipt through the file-back
   });
   assert.ok(lateFork);
   await lateFork({ outcome: 'success', result: forkReceipt, eventCursor: 7 });
-  let observed = await host.read({ ...scope, operationId: pending.view.operationId });
+  let observed = await host.read({ ...scope, operationId: pending.view.operationId, purpose: 'reconcile' });
   for (let attempt = 0; attempt < 100 && !observed.view.recoveryError; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 5));
-    observed = await host.read({ ...scope, operationId: pending.view.operationId });
+    observed = await host.read({ ...scope, operationId: pending.view.operationId, purpose: 'reconcile' });
   }
   assert.notEqual(observed.view.recoveryError, null);
   assert.equal(observed.view.fork.status, 'unknown');
   for (let attempt = 0; attempt < 2; attempt++) {
     assert.ok(observed.token);
     await assert.rejects(host.retryPersistence({ ...scope, operationId: pending.view.operationId, token: observed.token }));
-    observed = await host.read({ ...scope, operationId: pending.view.operationId });
-    assert.equal(observed.view.settledCalls?.retryPersistence, true);
+    observed = await host.read({ ...scope, operationId: pending.view.operationId, purpose: 'reconcile' });
+    assert.equal(observed.view.settledCalls?.retryPersistence, undefined);
     assert.equal(observed.view.fork.status, 'unknown');
   }
   failReceipt = false;

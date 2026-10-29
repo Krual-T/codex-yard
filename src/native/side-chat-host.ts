@@ -18,7 +18,8 @@ export interface SideChatEndpointScope {
   childThreadId: string | null;
 }
 
-export interface SideChatEndpointInput { hostId: string; parentThreadId: string; operationId: string }
+export interface SideChatEndpointInput { hostId: string; parentThreadId: string; operationId: string;
+  purpose?: 'observe' | 'reconcile' }
 export interface SideChatEndpointActionInput extends SideChatEndpointInput { token: string; forkDispatchId?: string }
 export interface SideChatEndpointReply { view: SideChatHostView; token: string | null }
 export type SideChatEndpointAccess = { kind: 'read' }
@@ -40,6 +41,8 @@ export interface SideChatEndpointDependencies {
   withParent<T>(hostId: string, parentThreadId: string, run: () => Promise<T>): Promise<T>;
   /** Dispatch guards the original connection, draft association and applicable close barrier through the claim. */
   withScope<T>(scope: SideChatEndpointScope, access: SideChatEndpointAccess, run: () => Promise<T>): Promise<T>;
+  /** Called synchronously inside the store transaction for an explicit original-page reconciliation. */
+  canReconcile(scope: SideChatEndpointScope): boolean;
   /** Atomically recheck the original socket and scope at each actual send, including late continuations. */
   request(scope: SideChatEndpointScope | Omit<SideChatEndpointScope, 'operationId' | 'childThreadId'>,
     method: string, params: Value, mutating: boolean,
@@ -81,6 +84,7 @@ export class SideChatEndpointError extends Error {
 }
 
 class BeforeDispatchError extends Error {}
+class ObserveOnly extends Error {}
 
 function fenceOf(operation: SideChatOperation): EndpointFence | null {
   const value = (operation as FencedOperation).endpointFence;
@@ -439,35 +443,48 @@ export function createSideChatEndpointHost(deps: SideChatEndpointDependencies) {
 
   async function read(input: SideChatEndpointInput): Promise<SideChatEndpointReply> {
     try {
-      const before = await original(input);
+      if (input.purpose !== undefined && input.purpose !== 'observe' && input.purpose !== 'reconcile') throw new Error('invalid read purpose');
+      let before = await original(input);
       const scope = scopeOf(before, input);
-      let settled: Partial<Record<SideChatHostAction, boolean>> | undefined;
+      const observedFence = fenceOf(before);
+      if (observedFence && (observedFence.ownerId === ownerId && observedFence.recovering
+        || observedFence.ownerId !== ownerId && deps.ownerStopped(observedFence.ownerId))) {
+        let recover = false;
+        await deps.withScope(scope, { kind: 'read' }, async () => {
+          await deps.store.update(input.operationId, operation => {
+            sameScope(operation, scope);
+            const fence = fenceOf(operation);
+            if (!fence) return operation;
+            if (fence.ownerId !== ownerId && deps.ownerStopped(fence.ownerId)) {
+              recover = true;
+              return setFence(operation, { ...fence, ownerId, token: randomUUID(), recovering: true, active: null });
+            }
+            if (fence.ownerId === ownerId && fence.recovering) recover = true;
+            return operation;
+          });
+        });
+        if (recover) await recoverStoppedOwner(scope);
+        before = await original(input);
+      }
+      if (input.purpose !== 'reconcile') return { view: reply(before).view, token: null };
       let completedId: string | undefined;
-      let recover = false;
-      await deps.withScope(scope, { kind: 'read' }, async () => {
-        await deps.store.update(input.operationId, operation => {
+      try {
+        const saved = await deps.withScope(scope, { kind: 'read' }, () => deps.store.update(input.operationId, operation => {
           sameScope(operation, scope);
           const fence = fenceOf(operation);
-          if (!fence) return operation;
-          if (fence.ownerId !== ownerId) {
-            if (!deps.ownerStopped(fence.ownerId)) return operation;
-            recover = true;
-            return setFence(operation, { ...fence, ownerId, token: randomUUID(), recovering: true, active: null });
-          }
-          if (fence.recovering) { recover = true; return operation; }
-          let active = fence.active;
-          if (active && completed.has(active.callId)) {
-            completedId = active.callId;
-            active = null;
-          }
-          settled = Object.fromEntries(actions.filter(action => active?.action !== action).map(action => [action, true]));
-          return setFence(operation, { ...fence, token: randomUUID(), active });
-        });
-      });
-      if (completedId) completed.delete(completedId);
-      if (recover) { await recoverStoppedOwner(scope); return read(input); }
-      const after = await original(input);
-      return reply(after, settled);
+          if (!deps.canReconcile(scope) || !fence || fence.ownerId !== ownerId || fence.recovering
+            || fence.active && !completed.has(fence.active.callId)) throw new ObserveOnly();
+          completedId = fence.active?.callId;
+          return setFence(operation, { ...fence, token: randomUUID(), active: null });
+        }));
+        if (completedId) completed.delete(completedId);
+        // The token does not fence the tokenless, idempotent receipt-save endpoint.
+        const settled = Object.fromEntries(actions.filter(action => action !== 'retryPersistence').map(action => [action, true]));
+        return reply(saved, settled);
+      } catch (error) {
+        if (!(error instanceof ObserveOnly)) throw error;
+        return { view: reply(await original(input)).view, token: null };
+      }
     } catch { throw new SideChatEndpointError('无法读取原侧聊记录，请检查原主机和会话。'); }
   }
 

@@ -105,6 +105,7 @@ function fixture() {
         || closeBlocked && (access.action === 'close' || access.closeRequested))) throw new Error('PRIVATE_FENCE');
       return run();
     },
+    canReconcile(scope) { return available && scope.connectionGeneration === generation; },
     async request(scope, method, params, _mutating, late) {
       if (!available || scope.hostId !== parent.hostId || scope.parentThreadId !== parent.threadId
         || scope.connectionGeneration !== generation) throw Object.assign(new Error('PRIVATE_SOCKET'), { delivery: 'not-sent' });
@@ -152,7 +153,7 @@ function fixture() {
 }
 
 const parent = { hostId: 'host-a', parentThreadId: 'parent-a' };
-const input = (reply: SideChatEndpointReply) => ({ ...parent, operationId: reply.view.operationId });
+const input = (reply: SideChatEndpointReply) => ({ ...parent, operationId: reply.view.operationId, purpose: 'reconcile' as const });
 let nextForkDispatch = 0;
 function action(reply: SideChatEndpointReply) {
   assert.ok(reply.token);
@@ -238,8 +239,8 @@ test('cross-page old tokens and late requests cannot pass the atomic read fence'
   await eventually(() => f.calls.some(call => call.method === 'thread/fork'));
   const mid = await f.host.read(input(prepared));
   assert.equal(mid.view.settledCalls?.start, undefined);
-  assert.equal(mid.view.settledCalls?.close, true);
-  await assert.rejects(f.host.close(action(mid)), unsent);
+  assert.equal(mid.view.settledCalls, undefined); assert.equal(mid.token, null);
+  await assert.rejects(f.host.close({ ...input(mid), token: latest.token! }), unsent);
   await assert.rejects(f.host.start(action(latest)), unsent);
   pending.resolve(f.result(f.calls.find(call => call.method === 'thread/fork')!));
   const finished = await running;
@@ -260,9 +261,10 @@ test('host, parent, operation, draft linkage and original generation are checked
   await assert.rejects(f.host.start(action(prepared)), unsent);
   f.setLinked(true); f.setAvailable(false);
   const readable = await f.host.read(input(prepared));
-  await assert.rejects(f.host.start(action(readable)), unsent);
+  assert.equal(readable.token, null);
+  await assert.rejects(f.host.start(action(prepared)), unsent);
   f.setAvailable(true); f.setGeneration('socket-2');
-  await assert.rejects(f.host.start(action(readable)), unsent);
+  await assert.rejects(f.host.start(action(prepared)), unsent);
   assert.deepEqual(f.calls.map(call => call.method), ['config/read']);
   assert.equal((await f.host.read(input(prepared))).view.fork.status, 'waiting');
 });
@@ -281,7 +283,8 @@ test('generation changes after the claim are fenced again at the actual send', a
   assert.doesNotMatch(JSON.stringify(result.view), /PRIVATE_SOCKET/);
   assert.deepEqual(f.calls.map(call => call.method), ['config/read']);
   const after = await f.host.read(input(prepared));
-  await assert.rejects(f.host.retry(action(after)), unsent);
+  assert.equal(after.token, null);
+  await assert.rejects(f.host.retry(action(prepared)), unsent);
   assert.equal((await f.host.read(input(prepared))).view.childId, null);
 });
 
@@ -345,8 +348,9 @@ test('a late original fork cannot inject on a replacement connection', async () 
   const view = await f.host.read(input(prepared));
   assert.equal(view.view.childId, 'child-a');
   assert.equal(view.view.inject.status, 'not-sent');
+  assert.equal(view.token, null);
   assert.equal(f.calls.filter(call => call.method === 'thread/inject_items').length, 0);
-  await assert.rejects(f.host.retry(action(view)), unsent);
+  await assert.rejects(f.host.retry({ ...input(view), token: unknown.token! }), unsent);
 });
 
 test('a changed stored generation invalidates the frozen origin before a late continuation', async () => {
@@ -378,7 +382,7 @@ test('the accepted H controller resolves a lost response through the actual scop
   let token: string | null = null;
   let operationId = '';
   let linked = false;
-  const scoped = () => ({ ...parent, operationId });
+  const scoped = () => ({ ...parent, operationId, purpose: 'reconcile' as const });
   const accept = (reply: SideChatEndpointReply) => { token = reply.token; return reply.view; };
   const dispatch = async (actionName: 'start' | 'retry' | 'close' | 'retryPersistence') => {
     assert.ok(token);
@@ -454,7 +458,7 @@ test('unknown original fork is never replayed and a late persistence failure rec
     assert.equal(current.view.fork.status, 'unknown');
     await assert.rejects(f.host.retryPersistence(action(current)), error => error instanceof Error && !error.message.includes('PRIVATE'));
     current = await f.host.read(input(prepared));
-    assert.equal(current.view.settledCalls?.retryPersistence, true);
+    assert.equal(current.view.settledCalls?.retryPersistence, undefined);
     assert.notEqual(current.view.recoveryError, null);
   }
   failReceipt = false;

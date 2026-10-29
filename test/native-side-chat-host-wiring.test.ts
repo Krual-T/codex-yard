@@ -55,6 +55,7 @@ async function fixture(t: import('node:test').TestContext, enabled = true, timeo
   await mkdir(dataDir);
   await writeFile(join(dataDir, 'native-state.json'), JSON.stringify({ globals: {}, settings: {}, otherOwner: { preserved: true } }));
   let permitted = true, frozen = false, failDirectorySync = false, failFileSync = false, asynchronousGuard = false;
+  let failFinalization = 0;
   let closeGate: Promise<void> | undefined;
   let commitGate: { entered(): void; wait: Promise<void> } | undefined;
   let blockedPhase: SideChatBrowserCheck['phase'] | null = null;
@@ -78,9 +79,16 @@ async function fixture(t: import('node:test').TestContext, enabled = true, timeo
   const app = await createNativeWorkbench({ port: 0, socketPath: fake.socketPath, codexHome: join(root, 'codex'), dataDir,
     workspace: root, renderer, adapterPath, hostCatalog: { hosts: [remote], projects: [], assignments: {} }, sshStream,
     ...(enabled ? { sideChatBrowserAuthority: authority } : {}), ...(timeout ? { sideChatParentReceipts: new ShortTimeoutReceipts() } : {}),
-    nativeStateCheckpoint(step) {
+    async nativeStateCheckpoint(step) {
       if (step === 'directory-sync' && failDirectorySync) { failDirectorySync = false; throw new Error('fixture confirmation failure'); }
       if (step === 'file-sync' && failFileSync) { failFileSync = false; throw new Error('fixture receipt persistence failure'); }
+      if (step === 'file-sync' && failFinalization) {
+        const root = JSON.parse(await readFile(join(dataDir, 'native-state.json'), 'utf8'));
+        if (Object.values(root.sideChats?.operations ?? {}).some((value: any) => value.inject?.status === 'received'
+          && value.endpointFence?.active?.action === 'start')) {
+          failFinalization--; throw new Error('fixture active call finalization failure');
+        }
+      }
       if (step === 'directory-sync' && commitGate) { const gate = commitGate; commitGate = undefined; gate.entered(); return gate.wait; }
     } });
   const pages: WebSocket[] = [];
@@ -97,6 +105,7 @@ async function fixture(t: import('node:test').TestContext, enabled = true, timeo
   return { root, dataDir, fake, connect, response, checks, closeCalls,
     permit(value: boolean) { permitted = value; }, block(phase: SideChatBrowserCheck['phase'] | null) { blockedPhase = phase; },
     failNextCommit() { failDirectorySync = true; }, failNextFileCommit() { failFileSync = true; },
+    failFinalization(count: number) { failFinalization = count; },
     gateNextCommit(value: { entered(): void; wait: Promise<void> }) { commitGate = value; },
     setCloseGate(value: Promise<void> | undefined) { closeGate = value; }, asynchronous(value: boolean) { asynchronousGuard = value; } };
 }
@@ -266,10 +275,11 @@ test('real endpoint checks page, draft and fork identity at dispatch and closes 
   const first = await a.host('side-chat', prepared);
   assert.equal(first.responseType, 'success');
   const otherRead = await b.host('side-chat', { ...identity, action: 'read', operationId: first.body.view.operationId });
-  const otherStart = await b.host('side-chat', action(otherRead.body, 'start', { forkDispatchId: 'dispatch-b' }));
+  assert.equal(otherRead.body.token, null);
+  const otherStart = await b.host('side-chat', action({ ...otherRead.body, token: first.body.token }, 'start', { forkDispatchId: 'dispatch-b' }));
   assert.equal(otherStart.responseType, 'error'); assert.equal(otherStart.uncertain, false);
   assert.equal(f.fake.calls('thread/fork').length, 0);
-  const fresh = await a.host('side-chat', { ...identity, action: 'read', operationId: first.body.view.operationId });
+  const fresh = await a.host('side-chat', { ...identity, action: 'read', purpose: 'reconcile', operationId: first.body.view.operationId });
   f.fake.handlers.set('thread/fork', (_params, context) => {
     context.send({ method: 'fixture/before-fork', params: {} });
     context.send({ id: context.message.id, result: f.response(true) });
@@ -301,7 +311,7 @@ test('real endpoint checks page, draft and fork identity at dispatch and closes 
   assert.equal(f.fake.calls('turn/start').length, 0);
 });
 
-test('a concurrent page read rotates the token and prevents the old call from injecting', async t => {
+test('observations and reconciliation during an active call cannot invalidate its claim', async t => {
   const f = await fixture(t), a = await f.connect(), b = await f.connect();
   await a.rpc('thread/start', { cwd: f.root });
   const first = await a.host('side-chat', prepared);
@@ -314,19 +324,85 @@ test('a concurrent page read rotates the token and prevents the old call from in
   assert.ok(delayed);
   const other = await b.host('side-chat', { ...identity, action: 'read', operationId: first.body.view.operationId });
   assert.equal(other.responseType, 'success');
+  assert.equal(other.body.token, null); assert.equal(other.body.view.settledCalls, undefined);
+  const otherReconcile = await b.host('side-chat', { ...identity, action: 'read', purpose: 'reconcile', operationId: first.body.view.operationId });
+  assert.equal(otherReconcile.body.token, null); assert.equal(otherReconcile.body.view.settledCalls, undefined);
+  const activeReconcile = await a.host('side-chat', { ...identity, action: 'read', purpose: 'reconcile', operationId: first.body.view.operationId });
+  assert.equal(activeReconcile.body.token, null); assert.equal(activeReconcile.body.view.settledCalls, undefined);
   delayed.send({ id: delayed.id, result: f.response(true) });
   const received = await starting;
   assert.equal(received.body.view.fork.status, 'received');
-  assert.equal(received.body.view.inject.status, 'not-sent');
-  assert.equal(f.fake.calls('thread/inject_items').length, 0);
-  const fresh = await a.host('side-chat', { ...identity, action: 'read', operationId: first.body.view.operationId });
-  const retried = await a.host('side-chat', action(fresh.body, 'retry'));
-  assert.equal(retried.body.view.inject.status, 'received');
+  assert.equal(received.body.view.inject.status, 'received');
   assert.equal(f.fake.calls('thread/fork').length, 1);
   assert.equal(f.fake.calls('thread/inject_items').length, 1);
 });
 
-test('a real controller does not read its own hints during fork or close, while another page receives them', async t => {
+test('idle reconciliation fences a captured but not yet claimed token', async t => {
+  const f = await fixture(t), a = await f.connect(), b = await f.connect();
+  await a.rpc('thread/start', { cwd: f.root });
+  const first = await a.host('side-chat', prepared);
+  const oldAction = action(first.body, 'start', { forkDispatchId: 'old-unclaimed' });
+  const observed = await b.host('side-chat', { ...identity, action: 'read', operationId: first.body.view.operationId });
+  assert.equal(observed.body.token, null); assert.equal(observed.body.view.settledCalls, undefined);
+  const reconciled = await a.host('side-chat', { ...identity, action: 'read', purpose: 'reconcile', operationId: first.body.view.operationId });
+  assert.equal(reconciled.responseType, 'success'); assert.ok(reconciled.body.token);
+  assert.notEqual(reconciled.body.token, first.body.token);
+  assert.equal(reconciled.body.view.settledCalls.start, true);
+  assert.equal(reconciled.body.view.settledCalls.retryPersistence, undefined);
+  const old = await a.host('side-chat', oldAction);
+  assert.equal(old.responseType, 'error'); assert.equal(old.uncertain, false);
+  assert.equal(f.fake.calls('thread/fork').length, 0);
+  f.fake.handlers.set('thread/fork', () => f.response(true));
+  const started = await a.host('side-chat', action(reconciled.body, 'start', { forkDispatchId: 'new-explicit' }));
+  assert.equal(started.body.view.inject.status, 'received');
+  assert.equal(f.fake.calls('thread/fork').length, 1);
+});
+
+test('only the original page can persist a completed call fence after finalization failures', async t => {
+  const f = await fixture(t), a = await f.connect(), b = await f.connect();
+  await a.rpc('thread/start', { cwd: f.root });
+  const first = await a.host('side-chat', prepared);
+  f.fake.handlers.set('thread/fork', () => f.response(true));
+  f.failFinalization(2);
+  const result = await a.host('side-chat', action(first.body, 'start', { forkDispatchId: 'completed-original' }));
+  assert.equal(result.responseType, 'error'); assert.equal(result.uncertain, true);
+  const input = { ...identity, action: 'read', operationId: first.body.view.operationId };
+  const observation = await a.host('side-chat', input);
+  assert.equal(observation.body.token, null); assert.equal(observation.body.view.settledCalls, undefined);
+  assert.equal(observation.body.view.inject.status, 'received');
+  const other = await b.host('side-chat', { ...input, purpose: 'reconcile' });
+  assert.equal(other.body.token, null); assert.equal(other.body.view.settledCalls, undefined);
+  f.failNextFileCommit();
+  const failed = await a.host('side-chat', { ...input, purpose: 'reconcile' });
+  assert.equal(failed.responseType, 'error'); assert.equal(failed.uncertain, true);
+  const afterFailure = await a.host('side-chat', input);
+  assert.equal(afterFailure.body.token, null); assert.equal(afterFailure.body.view.settledCalls, undefined);
+  const reconciled = await a.host('side-chat', { ...input, purpose: 'reconcile' });
+  assert.equal(reconciled.responseType, 'success'); assert.ok(reconciled.body.token);
+  assert.equal(reconciled.body.view.settledCalls.start, true);
+  assert.equal(reconciled.body.view.inject.status, 'received');
+  assert.equal(f.fake.calls('thread/fork').length, 1); assert.equal(f.fake.calls('thread/inject_items').length, 1);
+});
+
+test('an unconfirmed reconciliation never returns a proof before native-state recovery', async t => {
+  const f = await fixture(t), a = await f.connect();
+  await a.rpc('thread/start', { cwd: f.root });
+  const first = await a.host('side-chat', prepared);
+  const input = { ...identity, action: 'read', operationId: first.body.view.operationId };
+  f.failNextCommit();
+  const failed = await a.host('side-chat', { ...input, purpose: 'reconcile' });
+  assert.equal(failed.responseType, 'error'); assert.equal(failed.uncertain, true);
+  const observed = await a.host('side-chat', input);
+  assert.equal(observed.body.token, null); assert.equal(observed.body.view.settledCalls, undefined);
+  const reconciled = await a.host('side-chat', { ...input, purpose: 'reconcile' });
+  assert.equal(reconciled.responseType, 'success'); assert.ok(reconciled.body.token);
+  assert.equal(reconciled.body.view.settledCalls.start, true);
+  const stale = await a.host('side-chat', action(first.body, 'start', { forkDispatchId: 'failed-fence-old' }));
+  assert.equal(stale.responseType, 'error'); assert.equal(stale.uncertain, false);
+  assert.equal(f.fake.calls('thread/fork').length, 0);
+});
+
+test('two real controllers observe updates without invalidating the original fork or close', async t => {
   const f = await fixture(t), a = await f.connect(), b = await f.connect();
   await a.rpc('thread/start', { cwd: f.root });
   let delayed: { id: string | number; send(value: unknown): void } | undefined;
@@ -334,7 +410,8 @@ test('a real controller does not read its own hints during fork or close, while 
     delayed = { id: context.message.id!, send: context.send }; return NO_REPLY;
   });
   let token = '', generation = '', pendingReads = 0, startFromA = 0, startFromB = 0, hints = 0;
-  let startResponseId = '', closeResponseId = '';
+  let startResponseId = '', closeResponseId = '', observations = 0;
+  let observer: SideChatController | undefined;
   async function call(name: string, operationId: string, extra: Record<string, unknown> = {}): Promise<SideChatHostView> {
     const reply = await a.host('side-chat', { ...identity, action: name, operationId, token, ...extra });
     if (reply.responseType !== 'success') throw Object.assign(new Error(reply.error), { uncertain: reply.uncertain });
@@ -363,12 +440,39 @@ test('a real controller does not read its own hints during fork or close, while 
       a.socket.on('message', receive); return () => a.socket.off('message', receive);
     },
   };
+  const observerPort: SideChatHostPort = {
+    async prepare() { throw new Error('unexpected observer prepare'); },
+    async start() { throw new Error('unexpected observer start'); },
+    async retry() { throw new Error('unexpected observer retry'); },
+    async close() { throw new Error('unexpected observer close'); },
+    async retryPersistence() { throw new Error('unexpected observer recovery'); },
+    async read(operationId) {
+      const reply = await b.host('side-chat', { ...identity, action: 'read', purpose: 'observe', operationId });
+      assert.equal(reply.responseType, 'success'); assert.equal(reply.body.token, null);
+      assert.equal(reply.body.view.settledCalls, undefined); observations++;
+      return reply.body.view;
+    },
+    subscribe(listener) {
+      const receive = (bytes: WebSocket.RawData) => {
+        const message = JSON.parse(String(bytes));
+        if (message.type === 'side-chat-updated') listener(message);
+      };
+      b.socket.on('message', receive); return () => b.socket.off('message', receive);
+    },
+  };
   const controller = new SideChatController({ ...identity, draftId: 'draft-a', port,
-    onPrepared: async () => {}, canDispatch: () => true });
-  t.after(() => controller.dispose());
+    async onPrepared(scope) {
+      const observed = await observerPort.read(scope.operationId);
+      observer = new SideChatController({ ...identity, draftId: 'draft-a', port: observerPort,
+        onPrepared: async () => {}, canDispatch: () => false, restored: observed });
+      await observer.read();
+    },
+    canDispatch: () => true });
+  t.after(() => { controller.dispose(); observer?.dispose(); });
   const starting = controller.start();
   await f.fake.waitForCall('thread/fork');
   await b.until(item => item.type === 'side-chat-updated', startFromB);
+  await eventually(() => observations > 2);
   assert.equal(a.messages.slice(startFromA).filter(item => item.type === 'side-chat-updated').length, 0);
   assert.ok(delayed); delayed.send({ id: delayed.id, result: f.response(true) });
   await starting;
@@ -409,7 +513,11 @@ test('unrelated project changes do not revoke dispatch and an existing child can
     assignment: { projectKind: 'local', projectId: f.root }, projectless: false } })).responseType, 'success');
   f.fake.handlers.set('thread/settings/update', () => ({}));
   assert.ok((await a.rpc('thread/settings/update', { threadId: 'parent-a', approvalPolicy: 'never' })).message.result);
-  const closed = await a.host('side-chat', action(started.body, 'close'));
+  const reconciled = await a.host('side-chat', { ...identity, action: 'read', purpose: 'reconcile', operationId: first.body.view.operationId });
+  assert.ok(reconciled.body.token);
+  const denied = await a.host('side-chat', action(reconciled.body, 'retry'));
+  assert.equal(denied.responseType, 'error'); assert.equal(denied.uncertain, false);
+  const closed = await a.host('side-chat', action(reconciled.body, 'close'));
   assert.equal(closed.responseType, 'success'); assert.equal(closed.body.view.close.status, 'closed');
   assert.deepEqual(f.closeCalls, ['freeze', 'cleanup']);
   assert.equal(f.fake.calls('thread/unsubscribe').length, 1);
@@ -452,6 +560,8 @@ test('another page can persist the captured late fork terminal without acquiring
   const found = await b.host('side-chat', { ...identity, action: 'readPrepared', prepareId: prepared.prepareId });
   assert.equal(found.body.view.operationId, first.body.view.operationId);
   assert.equal(found.body.connectionGeneration, first.body.connectionGeneration);
+  const otherReconcile = await b.host('side-chat', { ...identity, action: 'read', purpose: 'reconcile', operationId: first.body.view.operationId });
+  assert.equal(otherReconcile.body.token, null); assert.equal(otherReconcile.body.view.settledCalls, undefined);
   const original = await b.host('side-chat', { ...identity, action: 'read', operationId: first.body.view.operationId });
   assert.equal(original.body.view.fork.status, 'unknown'); assert.ok(original.body.view.recoveryError);
   const wrong = await b.host('side-chat', { ...recovery, connectionGeneration: 'different-connection' });
@@ -461,6 +571,8 @@ test('another page can persist the captured late fork terminal without acquiring
   assert.equal(saved.body.view.fork.status, 'received'); assert.equal(saved.body.view.inject.status, 'waiting');
   assert.equal(saved.body.view.fork.receipt.attemptId, 'late-terminal');
   assert.equal(saved.body.view.recoveryError, null);
+  const repeatedSave = await b.host('side-chat', recovery);
+  assert.equal(repeatedSave.responseType, 'success'); assert.equal(repeatedSave.body.view.fork.status, 'received');
   assert.equal(f.fake.calls('thread/fork').length, 1); assert.equal(f.fake.calls('thread/inject_items').length, 0);
   assert.equal(f.fake.calls('thread/unsubscribe').length, 0);
   const read = await b.host('side-chat', { ...identity, action: 'read', operationId: first.body.view.operationId });
@@ -567,7 +679,7 @@ test('a revoked dispatch is not sent and a late fork preserves its original rece
   f.fake.handlers.set('thread/fork', (_params, context) => {
     delayed = { id: context.message.id!, send: context.send }; return NO_REPLY;
   });
-  const fresh = await a.host('side-chat', { ...identity, action: 'read', operationId: first.body.view.operationId });
+  const fresh = await a.host('side-chat', { ...identity, action: 'read', purpose: 'reconcile', operationId: first.body.view.operationId });
   const waiting = await a.host('side-chat', action(fresh.body, 'start', { forkDispatchId: 'dispatch-original' }));
   assert.equal(waiting.responseType, 'success'); assert.equal(waiting.body.view.fork.status, 'unknown');
   assert.ok(delayed);
@@ -578,7 +690,7 @@ test('a revoked dispatch is not sent and a late fork preserves its original rece
   const later = await a.until(item => item.type === 'mcp-notification' && item.method === 'fixture/after-late-fork', from);
   let read: Message | undefined;
   for (let attempt = 0; attempt < 50; attempt++) {
-    read = await a.host('side-chat', { ...identity, action: 'read', operationId: first.body.view.operationId });
+    read = await a.host('side-chat', { ...identity, action: 'read', purpose: 'reconcile', operationId: first.body.view.operationId });
     if (read.body?.view.inject.status === 'not-sent') break;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
