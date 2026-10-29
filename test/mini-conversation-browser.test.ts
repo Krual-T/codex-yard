@@ -183,6 +183,92 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
       } finally { await context.close(); }
     });
 
+    await t.test('Mini and a real peer message view transfer one saved editor only after committed navigation', async () => {
+      const { context, page, errors } = await open();
+      try {
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', 'thread-b')), true);
+        const mini = page.locator('.yard-mini-conversation'), item = mini.locator('[data-message-id="original-item"]');
+        await item.getByRole('button', { name: 'Edit message' }).click();
+        const input = item.getByRole('textbox', { name: 'Edit message text' });
+        await input.fill('owned by Mini');
+        await waitForBrowser(page, async () => (await (window as any).miniFixture.editState('remote', 'thread-b'))
+          ?.recovery.editor.edits[0]?.text === 'owned by Mini');
+        const first = await page.evaluate(() => (window as any).miniFixture.editState('remote', 'thread-b'));
+        await page.evaluate(() => (window as any).miniFixture.showPeer());
+        const peer = page.locator('#peer-messages [data-message-id="original-item"]');
+        await peer.getByText('remote original').waitFor();
+        assert.equal(await peer.getByRole('textbox', { name: 'Edit message text' }).count(), 0);
+        assert.equal(await peer.getByRole('button', { name: 'Edit message' }).isDisabled(), true);
+        await page.evaluate(() => (window as any).miniFixture.setFailure(true));
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('local', 'thread-a')), false);
+        assert.equal(await input.inputValue(), 'owned by Mini');
+        assert.equal(await peer.getByRole('textbox', { name: 'Edit message text' }).count(), 0);
+        await page.evaluate(() => (window as any).miniFixture.setFailure(false));
+        await page.evaluate(() => (window as any).miniFixture.setTargetFailure(true));
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('local', 'thread-a')), false);
+        assert.equal(await input.inputValue(), 'owned by Mini');
+        assert.equal(await peer.getByRole('textbox', { name: 'Edit message text' }).count(), 0);
+        await page.evaluate(() => (window as any).miniFixture.setTargetFailure(false));
+        await page.evaluate(() => (window as any).miniFixture.revokeDuringTarget());
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('local', 'thread-a')), false);
+        assert.equal(await page.evaluate(() => JSON.parse(sessionStorage.getItem('fixture-mini-target')!).threadId), 'thread-b');
+        assert.equal(await peer.getByRole('textbox', { name: 'Edit message text' }).count(), 0);
+        await page.evaluate(() => (window as any).miniFixture.restoreAuthority());
+        assert.equal(await input.inputValue(), 'owned by Mini');
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('local', 'thread-a')), true);
+        const peerInput = peer.getByRole('textbox', { name: 'Edit message text' }); await peerInput.waitFor();
+        assert.equal(await peerInput.inputValue(), 'owned by Mini');
+        await peerInput.fill('owned by peer');
+        await waitForBrowser(page, async () => (await (window as any).miniFixture.editState('remote', 'thread-b'))
+          ?.recovery.editor.edits[0]?.text === 'owned by peer');
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', 'thread-b')), true);
+        await item.getByText('remote original').waitFor();
+        assert.equal(await item.getByRole('textbox', { name: 'Edit message text' }).count(), 0);
+        assert.equal(await item.getByRole('button', { name: 'Edit message' }).isDisabled(), true);
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.freezePeer()), true);
+        await page.evaluate(async () => { await (window as any).miniFixture.flushPeer(); (window as any).miniFixture.handoffPeer(); });
+        await input.waitFor(); assert.equal(await input.inputValue(), 'owned by peer');
+        const restored = await page.evaluate(() => (window as any).miniFixture.editState('remote', 'thread-b'));
+        assert.equal(restored.recovery.editor.sessionId, first.recovery.editor.sessionId);
+        assert.ok(restored.recovery.editor.revision > first.recovery.editor.revision);
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+
+    await t.test('revoked and regranted parent authority cannot dispatch a prepared message edit', async () => {
+      const { context, page, errors } = await open();
+      try {
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', 'thread-b')), true);
+        const item = page.locator('.yard-mini-conversation [data-message-id="original-item"]');
+        await item.getByRole('button', { name: 'Edit message' }).click();
+        const input = item.getByRole('textbox', { name: 'Edit message text' }); await input.fill('do not lose this edit');
+        await waitForBrowser(page, async () => (await (window as any).miniFixture.editState('remote', 'thread-b'))
+          ?.recovery.editor.edits[0]?.text === 'do not lose this edit');
+        await page.evaluate(() => (window as any).miniFixture.holdEditPreparation());
+        await item.getByRole('button', { name: 'Send', exact: true }).click();
+        await page.waitForFunction(() => (window as any).miniFixture.editPreparing());
+        const pending = await page.evaluate(() => (window as any).miniFixture.editState('remote', 'thread-b'));
+        assert.equal(pending.submission.stage, 'revertUnknown');
+        await page.evaluate(() => { (window as any).miniFixture.revokeEditGrant(); (window as any).miniFixture.restoreAuthority();
+          (window as any).miniFixture.releaseEditPreparation(); });
+        await item.getByRole('alert').filter({ hasText: 'Synthetic edit grant revoked' }).waitFor();
+        const retained = await page.evaluate(() => (window as any).miniFixture.editState('remote', 'thread-b'));
+        assert.equal(retained.submission, undefined);
+        assert.equal(await input.inputValue(), 'do not lose this edit');
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.hostCalls.filter((call: any) => call.endpoint === 'message-edit').length), 0);
+        await page.evaluate(() => (window as any).miniFixture.setAsyncEditAssertion(true));
+        await item.getByRole('button', { name: 'Send', exact: true }).click();
+        await item.getByRole('alert').filter({ hasText: '权限检查必须同步完成' }).waitFor();
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.hostCalls.filter((call: any) => call.endpoint === 'message-edit').length), 0);
+        assert.equal((await page.evaluate(() => (window as any).miniFixture.editState('remote', 'thread-b'))).submission, undefined);
+        await page.evaluate(() => (window as any).miniFixture.setAsyncEditAssertion(false));
+        await item.getByRole('button', { name: 'Send', exact: true }).click();
+        await page.waitForFunction(() => (window as any).miniFixture.hostCalls.some((call: any) => call.endpoint === 'message-edit'));
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.hostCalls.filter((call: any) => call.endpoint === 'message-edit').length), 1);
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+
     await t.test('new thread binds its own draft and unknown send never replays on reconnect', async () => {
       const { context, page, errors } = await open();
       try {
@@ -299,6 +385,11 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         assert.equal(failed.calls.filter((value: any) => value.method === 'turn/start').length, 0);
         assert.equal(await page.evaluate(() => (window as any).miniFixture.canDrain()), true);
         await page.evaluate(() => (window as any).miniFixture.setTargetFailure(false));
+        await page.evaluate(() => (window as any).miniFixture.setAsyncTarget(true));
+        await assert.rejects(page.evaluate((id: string) => (window as any).miniFixture.controller().retry(id), intent.id), /必须同步持久化/);
+        assert.equal(await input.inputValue(), 'original home text');
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((value: any) => value.method === 'turn/start').length), 0);
+        await page.evaluate(() => (window as any).miniFixture.setAsyncTarget(false));
         await page.evaluate((id: string) => (window as any).miniFixture.controller().retry(id), intent.id);
         const final = await page.evaluate(async () => ({ target: (window as any).miniFixture.controller().target(),
           state: await (window as any).miniFixture.records(), calls: (window as any).miniFixture.calls }));

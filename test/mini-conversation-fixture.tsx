@@ -8,11 +8,14 @@ import { readComposerDraft, readComposerDraftVersions } from '../src/renderer/co
 import type { ComposerDraftController, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
 import { removeBrowserDraftReference } from '../src/renderer/app/browser-draft.ts';
 import { addBrowserComment } from './browser-comment-fixture.ts';
-import { updateBrowserAtom } from '../src/renderer/storage/ui-atoms.ts';
+import { readBrowserAtom, updateBrowserAtom } from '../src/renderer/storage/ui-atoms.ts';
 import { readUnknownQueueRecovery } from '../src/renderer/composer/standalone-queue-storage.ts';
 import { ConversationSessions, useConversationSession } from '../src/renderer/app/conversation-sessions.ts';
 import { SendRecoveryStore, sendsAtom, sendThreadKey } from '../src/renderer/app/send-recovery.ts';
-import { MessageEditRecoveryStore } from '../src/renderer/app/message-edit-recovery.ts';
+import { MessageEditRecoveryStore, messageEditChanged, messageEditsAtom } from '../src/renderer/app/message-edit-recovery.ts';
+import type { EditRecoveryStorage, StoredMessageEdit } from '../src/renderer/app/message-edit-recovery.ts';
+import { StandaloneMessages } from '../src/renderer/messages/StandaloneMessages.tsx';
+import type { MessageEditNavigationController, MessageEditNavigationLease } from '../src/renderer/messages/StandaloneMessages.tsx';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import type { ThreadSummary, TurnSummary } from '../lib/codex-protocol.ts';
 
@@ -37,6 +40,8 @@ const thread = (hostId: string, id: string) => threads[threadKey(hostId, id)] ??
 let connected = true, unknownNext = false, holdNext = false, rejectTarget = false, resolveHeld: (() => void) | undefined;
 let rejectProject = false, rejectReady = false, unknownQueue = false, throwRecovery = false, throwError = false;
 let rejectSendRead = false, rejectEditThread = '', rejectSendOnTarget = '';
+let authorityEpoch = 0, holdEditPreparation = false, editPreparing = false, releaseEditPreparation: (() => void) | undefined;
+let revokeOnTarget = false, asyncEditAssertion = false, asyncTarget = false;
 let controller: MiniConversationController | null = null, mainController: ComposerDraftController | null = null;
 let miniController: ComposerDraftController | null = null;
 let miniSnapshot: ComposerDraftSnapshot | null = null;
@@ -45,6 +50,7 @@ let failAcceptance = false, acceptanceFailureStack = '';
 let authorityGranted = true, revokeAtClear = false, revocationStack = '';
 let switchAtClear: (() => void) | null = null, switching: Promise<boolean> | null = null;
 let barrierLease: MiniConversationLease | null = null;
+let peerController: MessageEditNavigationController | null = null, peerLease: MessageEditNavigationLease | null = null;
 let mainRelease: (() => void) | undefined;
 const client: WorkbenchClient & { connected: boolean } = {
   get connected() { return connected; },
@@ -111,7 +117,22 @@ const client: WorkbenchClient & { connected: boolean } = {
 };
 const sends = new SendRecoveryStore(client);
 const sessions = new ConversationSessions(client, async identity => (await sends.read()).creations[sendThreadKey(identity.hostId, identity.threadId)]);
-const edits = new MessageEditRecoveryStore(client, undefined, { hostChecksRebasedSourceBeforeRevert: true });
+const editStorage: EditRecoveryStorage = {
+  read: () => readBrowserAtom(messageEditsAtom),
+  update: async change => {
+    const result = await updateBrowserAtom(messageEditsAtom, change);
+    const entries = result as Record<string, StoredMessageEdit>;
+    if (holdEditPreparation && Object.values(entries).some(value => value.submission?.stage === 'revertUnknown')) {
+      holdEditPreparation = false; editPreparing = true;
+      await new Promise<void>(resolve => { releaseEditPreparation = resolve; });
+      editPreparing = false;
+    }
+    return result;
+  },
+  changed: () => window.dispatchEvent(new Event(messageEditChanged)),
+};
+const edits = new MessageEditRecoveryStore(client, editStorage, { hostChecksRebasedSourceBeforeRevert: true });
+const peerAccess = edits.createAccess();
 const realReadSends = sends.read.bind(sends), realReadEdits = edits.read.bind(edits), realReady = sessions.ready.bind(sessions);
 sends.read = async () => { if (rejectSendRead) { rejectSendRead = false; throw new Error('Synthetic send recovery read failure'); } return realReadSends(); };
 edits.read = async (hostId, threadId) => { if (rejectEditThread === threadId) throw new Error('Synthetic edit recovery read failure'); return realReadEdits(hostId, threadId); };
@@ -129,21 +150,43 @@ function initialTarget(): MiniConversationTarget {
     hostId: 'local', threadId: 'thread-a', draftId: miniDraftIdentity('local', 'thread-a'), cwd: '/fixture/local',
   };
 }
+function PeerMessages({ visible }: { visible: boolean }) {
+  const view = useConversationSession(sessions, { hostId: 'remote', threadId: 'thread-b' }, false, visible, 0);
+  const [recovery, setRecovery] = useState<StoredMessageEdit | null>(null);
+  useEffect(() => {
+    if (!visible) return;
+    let active = true;
+    const read = () => { void edits.read('remote', 'thread-b').then(value => { if (active) setRecovery(value); }); };
+    read(); window.addEventListener(messageEditChanged, read);
+    return () => { active = false; window.removeEventListener(messageEditChanged, read); };
+  }, [visible]);
+  if (!visible) return null;
+  return <section id="peer-messages"><StandaloneMessages client={client} hostId="remote" thread={view.thread}
+    editAccess={peerAccess} editRecovery={recovery?.recovery ?? null} editHistory={{ order: 'ascending', tailComplete: view.historyComplete }}
+    onEditNavigationController={value => { peerController = value; }}
+    onEditDraftChange={(value, origin, version) => edits.save(value, origin, version)} onEdit={async (_draft, origin) => {
+      const assertAccess = peerAccess.capture(origin);
+      await edits.submit(origin, ['original-turn'], {}, assertAccess);
+    }} /></section>;
+}
 function Fixture() {
   const [target, setTarget] = useState(initialTarget);
   const [online, setOnline] = useState(true);
   const [ownerAvailable, setOwnerAvailable] = useState(true);
   const [connectionRevision, setConnectionRevision] = useState(0);
+  const [peerVisible, setPeerVisible] = useState(false);
   const main = useConversationSession(sessions, { hostId: 'local', threadId: 'thread-a' }, false, true, 0);
   const targetRef = useRef(target); targetRef.current = target;
   useEffect(() => {
     fixture.renderConnection = value => { setOnline(value); if (value) setConnectionRevision(revision => revision + 1); };
-    fixture.renderOwner = setOwnerAvailable;
+    fixture.renderOwner = value => { authorityEpoch++; setOwnerAvailable(value); };
+    fixture.renderPeer = setPeerVisible;
   }, []);
   return <>
     <div id="main"><StandaloneComposer client={client} context={{ hostId: 'local', threadId: 'thread-a', draftId: 'main-draft', cwd: '/fixture/local' }}
       busy={false} initialOptions={main.options ?? undefined} onDraftController={value => { mainController = value; }}
       onSubmit={async () => {}} onInterrupt={async () => {}} /></div>
+    <PeerMessages visible={peerVisible} />
     <StandaloneMini client={client} send={async command => {
       if (command.type === 'avatar-overlay-open-state-request' || command.type === 'avatar-overlay-open') {
         emit({ type: 'workbench-pet-state', state: { isOpen: true, visibility: 'always-visible', position: null } });
@@ -159,7 +202,15 @@ function Fixture() {
       try { return await lease.flush(); } finally { lease.release(); } }}>
       <MiniConversation client={client} sessions={sessions} sends={sends} edits={edits} initialTarget={target}
         initialOptions={{ model: 'fixture-model', approvalPolicy: 'on-request', sandboxMode: 'workspace-write' }}
-        isConnected={() => connected} canUseOwner={owner => ownerAvailable && authorityGranted && owner.draftId !== 'main-draft'} onController={value => { controller = value; }}
+        isConnected={() => connected} canUseOwner={owner => ownerAvailable && authorityGranted && owner.draftId !== 'main-draft'}
+        captureEditAuthority={owner => {
+          if (!connected || !ownerAvailable || !authorityGranted || owner.draftId === 'main-draft') throw new Error('Synthetic edit grant unavailable');
+          const captured = authorityEpoch;
+          return () => {
+            if (captured !== authorityEpoch || !connected || !authorityGranted) throw new Error('Synthetic edit grant revoked');
+            if (asyncEditAssertion) return Promise.resolve() as unknown as void;
+          };
+        }} onController={value => { controller = value; }}
         onDraftController={value => { miniController = value; }}
         onDraftChange={value => { miniSnapshot = structuredClone(value); }}
         onRemoveReference={(owner, reference, operation) => removeBrowserDraftReference(owner, reference, operation, (before, after) => {
@@ -176,8 +227,10 @@ function Fixture() {
           };
         }, () => { browserReceipt = null; })}
         onTargetChanged={value => { if (rejectTarget) throw new Error('Synthetic target persistence failure');
+          if (asyncTarget) return Promise.resolve();
           if (value.threadId === rejectSendOnTarget) { rejectSendRead = true; rejectSendOnTarget = ''; }
-          targets.push(value); sessionStorage.setItem('fixture-mini-target', JSON.stringify(value)); setTarget(value); }}
+          targets.push(value); sessionStorage.setItem('fixture-mini-target', JSON.stringify(value)); setTarget(value);
+          if (revokeOnTarget) { revokeOnTarget = false; authorityGranted = false; authorityEpoch++; } }}
         onRecoveryChanged={() => { if (throwRecovery) throw new Error('Synthetic recovery notification failure'); }}
         onError={error => { errors.push(error); if (throwError) throw new Error('Synthetic error notification failure'); }}
         onAssignCreatedProject={async (owner, created) => {
@@ -200,7 +253,7 @@ IDBObjectStore.prototype.put = function (...args: Parameters<IDBObjectStore['put
 IDBObjectStore.prototype.get = function (key) {
   const stack = revokeAtClear || switchAtClear ? new Error('Synthetic cleanup race').stack ?? '' : '';
   if (this.name === 'atoms' && key === 'native-atoms' && stack.includes('clearComposerDraftRevision')) {
-    if (revokeAtClear) { revokeAtClear = false; authorityGranted = false; revocationStack = stack; }
+    if (revokeAtClear) { revokeAtClear = false; authorityGranted = false; authorityEpoch++; revocationStack = stack; }
     const startSwitch = switchAtClear; switchAtClear = null; startSwitch?.();
   }
   return nativeGet.call(this, key);
@@ -208,7 +261,7 @@ IDBObjectStore.prototype.get = function (key) {
 const root = createRoot(document.getElementById('root')!);
 const fixture = {
   calls, hostCalls, opened, errors, targets, projectChecks, projectMembership, sends, sessions,
-  renderConnection: (_value: boolean) => {}, renderOwner: (_value: boolean) => {},
+  renderConnection: (_value: boolean) => {}, renderOwner: (_value: boolean) => {}, renderPeer: (_value: boolean) => {},
   controller: () => controller, main: () => mainController?.snapshot(),
   draftController: () => miniController,
   receipt: () => structuredClone(browserReceipt),
@@ -216,7 +269,18 @@ const fixture = {
   failNextAcceptance() { failAcceptance = true; acceptanceFailureStack = ''; },
   revokeDuringClear() { revokeAtClear = true; revocationStack = ''; },
   revocationStack: () => revocationStack,
-  restoreAuthority() { authorityGranted = true; },
+  restoreAuthority() { authorityGranted = true; authorityEpoch++; },
+  showPeer() { fixture.renderPeer(true); },
+  freezePeer() { peerLease = peerController?.freeze() ?? null; return !!peerLease; },
+  async flushPeer() { await peerLease?.flush(); },
+  handoffPeer() { if (!peerLease) throw new Error('Missing peer lease'); peerLease.handoff(); peerLease.release(); peerLease = null; },
+  holdEditPreparation() { holdEditPreparation = true; },
+  editPreparing() { return editPreparing; },
+  revokeEditGrant() { authorityGranted = false; authorityEpoch++; },
+  revokeDuringTarget() { revokeOnTarget = true; },
+  setAsyncEditAssertion(value: boolean) { asyncEditAssertion = value; },
+  setAsyncTarget(value: boolean) { asyncTarget = value; },
+  releaseEditPreparation() { releaseEditPreparation?.(); releaseEditPreparation = undefined; },
   switchDuringClear() {
     switchAtClear = () => { switching = controller?.switchTarget({ hostId: 'remote', threadId: 'thread-b',
       draftId: miniDraftIdentity('remote', 'thread-b'), cwd: '/fixture/remote' }) ?? Promise.resolve(false); };
@@ -290,8 +354,8 @@ const fixture = {
   show() { emit({ type: 'workbench-pet-state', state: { isOpen: true, visibility: 'always-visible', position: null } }); },
   setFailure(value: boolean) { failWrites = value; },
   setTargetFailure(value: boolean) { rejectTarget = value; },
-  disconnect() { connected = false; fixture.renderConnection(false); emit({ type: 'connection-state', state: 'disconnected' }); },
-  reconnect() { connected = true; fixture.renderConnection(true); emit({ type: 'connection-state', state: 'connected' }); },
+  disconnect() { connected = false; authorityEpoch++; fixture.renderConnection(false); emit({ type: 'connection-state', state: 'disconnected' }); },
+  reconnect() { connected = true; authorityEpoch++; fixture.renderConnection(true); emit({ type: 'connection-state', state: 'connected' }); },
   unknown() { unknownNext = true; }, hold() { holdNext = true; }, release() { resolveHeld?.(); resolveHeld = undefined; }, complete,
   dispose() { root.unmount(); mainRelease?.(); sessions.dispose(); IDBObjectStore.prototype.put = nativePut; IDBObjectStore.prototype.get = nativeGet; },
 };

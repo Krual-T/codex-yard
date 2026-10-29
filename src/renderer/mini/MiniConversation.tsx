@@ -29,6 +29,8 @@ export interface MiniConversationTarget extends ComposerDraftOwner {
 }
 export interface MiniConversationLease {
   flush(): Promise<boolean>;
+  /** Immediately before a committed unmount/navigation, after all barriers have flushed. */
+  handoff(): void;
   release(): void;
 }
 export interface MiniConversationController {
@@ -50,6 +52,8 @@ export interface MiniConversationProps {
   /** Synchronous projections of the parent's actual connection and exclusive owner state, including created-thread aliases. */
   isConnected(hostId: string): boolean;
   canUseOwner(owner: ComposerDraftOwner): boolean;
+  /** Capture this view's current connection and owner grant, including their generations. */
+  captureEditAuthority(owner: ComposerDraftOwner): () => void;
   onController(controller: MiniConversationController | null): void;
   onTargetChanged(target: MiniConversationTarget): void;
   onRecoveryChanged(): void;
@@ -70,6 +74,13 @@ const targetKey = (target: MiniConversationTarget) => JSON.stringify(target);
 const ownerOf = (target: MiniConversationTarget): ComposerDraftOwner => ({ hostId: target.hostId, threadId: target.threadId, draftId: target.draftId });
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const notSent = (message: string) => Object.assign(new Error(message), { uncertain: false });
+function requireSynchronous(value: unknown, message: string) {
+  if (value && (typeof value === 'object' || typeof value === 'function') && 'then' in value
+    && typeof value.then === 'function') {
+    void Promise.resolve(value).catch(() => {});
+    throw notSent(message);
+  }
+}
 function validTarget(target: MiniConversationTarget) {
   return !!target.hostId && target.threadId !== '' && target.draftId.startsWith('mini:') && !!target.cwd;
 }
@@ -78,6 +89,7 @@ export function MiniConversation(props: MiniConversationProps) {
   const latest = useRef(props); latest.current = props;
   const [target, setTarget] = useState(() => structuredClone(props.initialTarget));
   const targetRef = useRef(target); targetRef.current = target;
+  const targetGeneration = useRef(0);
   const [readyKey, setReadyKey] = useState('');
   const [error, setError] = useState('');
   const [working, setWorking] = useState(false);
@@ -89,6 +101,7 @@ export function MiniConversation(props: MiniConversationProps) {
   const composer = useRef<ComposerDraftController | null>(null);
   const mountedComposerKey = useRef<string | null>(null);
   const messageEditor = useRef<MessageEditNavigationController | null>(null);
+  const editAccess = useMemo(() => props.edits.createAccess(), [props.edits]);
   const locked = useRef(false), inFlight = useRef(false), mounted = useRef(false);
   const provisionalRelease = useRef<(() => void) | null>(null);
   const key = targetKey(target), usable = validTarget(target) && props.canUseOwner(ownerOf(target));
@@ -171,31 +184,52 @@ export function MiniConversation(props: MiniConversationProps) {
       locked.current = false;
       report(cause); return null;
     }
-    let active = true;
+    let active = true, flushed = false, handedOff = false;
     return {
       async flush() {
         if (!active || !mounted.current) return false;
+        flushed = false;
         try {
           await editLease?.flush();
           if (draftLease && !await draftLease.flush()) return false;
           await editLease?.flush();
-          return active && mounted.current && (!draftLease || await draftLease.flush());
+          flushed = active && mounted.current && (!draftLease || await draftLease.flush());
+          return flushed;
         } catch (cause) { report(cause); return false; }
+      },
+      handoff() {
+        if (!active || !flushed || handedOff) throw new Error('Mini 编辑尚未完成保存，不能移交。');
+        editLease?.handoff(); handedOff = true;
       },
       release() {
         if (!active) return;
         active = false;
         try { draftLease?.release(); } catch (cause) { report(cause); }
-        try { editLease?.release(); } catch (cause) { report(cause); }
+        if (!handedOff) try { editLease?.release(); } catch (cause) { report(cause); }
         locked.current = false; if (mounted.current) flushSync(() => setFrozen(false));
       },
     };
   }, [report]);
 
-  const commitTarget = useCallback((next: MiniConversationTarget) => {
+  const commitTarget = useCallback((next: MiniConversationTarget, handoff?: () => void) => {
     if (!validTarget(next) || !latest.current.canUseOwner(ownerOf(next))) throw new Error('Mini 目标或草稿 owner 不可用，原输入已保留。');
-    const value = structuredClone(next);
-    latest.current.onTargetChanged(structuredClone(value));
+    const value = structuredClone(next), previous = structuredClone(targetRef.current);
+    if (!latest.current.canUseOwner(ownerOf(previous))) throw new Error('Mini 原草稿的所有权已改变，未切换目标。');
+    const persist = (target: MiniConversationTarget) => requireSynchronous(latest.current.onTargetChanged(structuredClone(target)),
+      'Mini 目标必须同步持久化，未切换或发送。');
+    persist(value);
+    try {
+      if (!mounted.current || targetKey(targetRef.current) !== targetKey(previous)
+        || !latest.current.canUseOwner(ownerOf(previous)) || !latest.current.canUseOwner(ownerOf(value))) {
+        throw new Error('Mini 草稿的所有权已改变，未切换目标。');
+      }
+      handoff?.();
+    } catch (cause) {
+      try { persist(previous); }
+      catch (restoreError) { throw new AggregateError([cause, restoreError], 'Mini 目标移交失败且原目标未能恢复，请核对保留的编辑。'); }
+      throw cause;
+    }
+    targetGeneration.current++;
     targetRef.current = value;
     flushSync(() => { setTarget(value); setError(''); });
   }, []);
@@ -205,7 +239,7 @@ export function MiniConversation(props: MiniConversationProps) {
     if (!lease) { report('Mini 正在处理输入，请稍后再切换。'); return false; }
     try {
       if (!await lease.flush()) throw new Error('Mini 草稿未能保存，当前输入已保留。');
-      commitTarget(next); return true;
+      commitTarget(next, () => lease.handoff()); return true;
     } catch (cause) { report(cause); return false; }
     finally { lease.release(); }
   }, [freeze, commitTarget, report]);
@@ -310,6 +344,12 @@ export function MiniConversation(props: MiniConversationProps) {
     if (!identity || origin.hostId !== identity.hostId || origin.threadId !== identity.threadId || current.readOnly || inFlight.current || locked.current) {
       throw notSent('消息编辑目标已改变，原输入已保留。');
     }
+    const generation = targetGeneration.current, source = structuredClone(origin), assertAccess = editAccess.capture(source);
+    const assertParent: unknown = latest.current.captureEditAuthority(ownerOf(current));
+    if (typeof assertParent !== 'function') {
+      requireSynchronous(assertParent, '消息编辑权限必须同步捕获，未修改会话。');
+      throw notSent('消息编辑权限尚未同步确认，原输入已保留。');
+    }
     inFlight.current = true; setWorking(true);
     try {
       while (mounted.current && editRead.current?.key === targetKey(current) && editRead.current.status === 'loading') {
@@ -326,7 +366,17 @@ export function MiniConversation(props: MiniConversationProps) {
       const result = await submitDraft(props.client, { ...identity, cwd: view.thread?.cwd || current.cwd, readOnly: false,
         activeTurnId: view.thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null, thread: view.thread,
         initialOptions: view.options ?? undefined }, draft, view.options ?? {}, { type: 'send' }, async () => {}, origin,
-      (source, expected, params) => props.edits.submit(source, expected, params));
+      (actual, expected, params) => props.edits.submit(actual, expected, params, () => {
+        assertAccess();
+        requireSynchronous(assertParent(), '消息编辑权限检查必须同步完成，未修改会话。');
+        const view = latest.current.sessions.view(identity).snapshot();
+        if (!mounted.current || targetGeneration.current !== generation || targetKey(targetRef.current) !== targetKey(current)
+          || actual.hostId !== source.hostId || actual.threadId !== source.threadId || actual.turnId !== source.turnId || actual.itemId !== source.itemId
+          || latest.current.client !== props.client || latest.current.sessions !== props.sessions || latest.current.edits !== props.edits
+          || !latest.current.isConnected(identity.hostId) || !latest.current.canUseOwner(ownerOf(current)) || !view.canSubmit || locked.current) {
+          throw notSent('消息编辑来源或权限已改变，未修改会话。');
+        }
+      }));
       if (result.turn) props.sessions.started(identity, result.turn);
     } catch (cause) { report(cause); throw cause; }
     finally { inFlight.current = false; if (mounted.current) setWorking(false); }
@@ -372,7 +422,7 @@ export function MiniConversation(props: MiniConversationProps) {
     {conversation.streamGap && <p role="status">会话内容正在核对。</p>}
     {target.threadId && <div className="yard-mini-conversation-messages" inert={!usable}>
       {conversation.loading ? <p role="status">Loading conversation...</p> : <StandaloneMessages client={props.client} hostId={target.hostId} thread={thread}
-        editRecovery={edit?.recovery ?? null} editRebase={messageEditRebaseMarker(edit)} editHistory={{ order: 'ascending', tailComplete: conversation.historyComplete }}
+        editAccess={editAccess} editRecovery={edit?.recovery ?? null} editRebase={messageEditRebaseMarker(edit)} editHistory={{ order: 'ascending', tailComplete: conversation.historyComplete }}
         onEditNavigationController={receiveEditor} onEditDraftChange={(value, origin, version) => props.edits.save(value, origin, version)}
         onPrepareEditRebase={(origin, version) => props.edits.prepareRebase(origin, version)} onCommitEditRebase={async candidate => {
           const recovered = await props.edits.commitRebase(candidate); void props.sessions.refresh(recovered.origin).catch(report); return recovered;
