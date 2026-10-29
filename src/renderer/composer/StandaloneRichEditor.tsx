@@ -1,5 +1,5 @@
 import { Fragment as ReactFragment, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
-import { Bold, Code2, FileText, Italic, Link as LinkIcon, X } from 'lucide-react';
+import { Bold, Code2, FileText, Italic, Link as LinkIcon, MessageSquare, X } from 'lucide-react';
 import { toggleMark } from 'prosemirror-commands';
 import { closeHistory, history, redo, undo } from 'prosemirror-history';
 import { DOMSerializer, Fragment, Schema, Slice } from 'prosemirror-model';
@@ -11,9 +11,9 @@ import type { ClipboardEvent } from 'react';
 import type { ComposerDocument } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
 import { documentChanges } from '../messages/message-edit.ts';
-import { composerSchema, httpAutolinkHref, linkOccurrenceAllocator, readRichDocument, safeRichLinkHref } from './rich-document.ts';
-import { insertRichCompletion, richCompletionContext, richEditorPlugins, syncRichSelection } from './rich-editor-actions.ts';
-import type { RichCompletionContext, RichCompletionQuery } from './rich-editor-actions.ts';
+import { composerSchema, httpAutolinkHref, linkOccurrenceAllocator, parseAgentThreadPath, readRichDocument, safeRichLinkHref } from './rich-document.ts';
+import { captureAgentMentionTarget, insertAgentMention, insertRichCompletion, richCompletionContext, richEditorPlugins, syncRichSelection } from './rich-editor-actions.ts';
+import type { AgentMentionChoice, AgentMentionCurrent, AgentMentionTarget, RichCompletionContext, RichCompletionQuery } from './rich-editor-actions.ts';
 import type { Completion } from './standalone-completions.tsx';
 import { isStructuredAppInput } from './standalone-draft.ts';
 import type { Draft } from './standalone-draft.ts';
@@ -21,7 +21,10 @@ import type { Draft } from './standalone-draft.ts';
 export interface RichEditorHandle {
   focus(): void;
   insertCompletion(context: RichCompletionContext, query: RichCompletionQuery, item: Completion, cwd: string): boolean;
+  captureAgentMentionTarget(readCurrent: () => AgentMentionCurrent | null, query?: RichCompletionQuery): AgentMentionTarget | null;
+  insertAgentMention(target: AgentMentionTarget, choice: AgentMentionChoice): boolean;
 }
+export type { AgentMentionChoice, AgentMentionCurrent, AgentMentionTarget } from './rich-editor-actions.ts';
 export interface StructuredInputEditorHandle {
   focus(index?: number, position?: number): void;
   replace(index: number, start: number, end: number, text: string, skill?: TextCompletionSkill): boolean;
@@ -412,23 +415,46 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
   const attributes = new Set(['class', 'dir', 'href', 'title', 'start', 'contenteditable', 'spellcheck', 'role', 'tabindex',
     'aria-busy', 'aria-expanded', 'aria-haspopup',
     'data-pm-slice', 'data-mention', 'data-composer-attrs', 'data-composer-autolink', 'data-system-hint-type', 'data-system-hint-label', 'data-saved-loading',
-    'page-reference-mention-path', 'page-reference-mention-project-id', 'page-reference-mention-space-id', 'page-reference-mention-title', 'aria-label']);
+    'page-reference-mention-path', 'page-reference-mention-project-id', 'page-reference-mention-space-id', 'page-reference-mention-title',
+    'agent-mention-name', 'agent-mention-display-name', 'agent-mention-conversation-id', 'agent-mention-path', 'data-interactive', 'aria-label']);
+  const originalMentionPresentation = new Set(['data-appearance', 'data-layout', 'data-font-weight', 'data-tone', 'data-underline-on-hover']);
   if (document.querySelector('style, link, script')) return false;
   return Array.from(document.body.querySelectorAll('*')).every(element => {
     const icon = element.localName === 'svg' ? element : element.closest('svg');
     if (icon) {
-      const mention = icon.closest('span[data-mention="page-reference"], span[data-mention="rich-link"], span[page-reference-mention-path][page-reference-mention-title]');
+      const mention = icon.closest('span[data-mention="page-reference"], span[data-mention="rich-link"], span[data-mention="agent"], span[page-reference-mention-path][page-reference-mention-title], span[agent-mention-name][agent-mention-path]');
       const allowed = element.localName === 'svg'
         ? new Set(['xmlns', 'width', 'height', 'viewbox', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'class', 'aria-hidden', 'focusable'])
         : new Set(['d', 'class', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'fill-rule', 'clip-rule', 'transform']);
       return !!mention && (element === icon || element.localName === 'path' || element.localName === 'g')
         && !element.textContent && Array.from(element.attributes).every(attribute => allowed.has(attribute.name.toLowerCase()));
     }
-    if (!tags.has(element.localName) || !Array.from(element.attributes).every(attribute => attributes.has(attribute.name))) return false;
+    const originalAgent = element.closest('span[agent-mention-name][agent-mention-path]');
+    if (!tags.has(element.localName) || !Array.from(element.attributes).every(attribute => attributes.has(attribute.name)
+      || !!originalAgent && originalMentionPresentation.has(attribute.name))) return false;
     const mention = element.getAttribute('data-mention');
     if (mention !== null && !allowMentions) return false;
     if (mention !== null && (element.localName !== 'span' || mention !== 'file' && mention !== 'skill'
-      && mention !== 'rich-link' && mention !== 'page-reference')) return false;
+      && mention !== 'rich-link' && mention !== 'page-reference' && mention !== 'agent')) return false;
+    if (element.hasAttribute('agent-mention-name') || element.hasAttribute('agent-mention-path')
+      || element.hasAttribute('agent-mention-display-name') || element.hasAttribute('agent-mention-conversation-id')) {
+      if (!allowMentions || element.localName !== 'span' || mention !== null && mention !== 'agent'
+        || !element.hasAttribute('agent-mention-name') || !element.hasAttribute('agent-mention-path')) return false;
+      const name = element.getAttribute('agent-mention-name'), path = element.getAttribute('agent-mention-path');
+      const displayName = element.getAttribute('agent-mention-display-name') ?? name;
+      const conversationId = element.getAttribute('agent-mention-conversation-id');
+      if (!readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [
+        { type: 'agentMention', attrs: { name, path, displayName, conversationId } },
+      ] }] })) return false;
+      if (!element.hasAttribute('data-composer-attrs')) return mention === null;
+      try {
+        const value: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+        const attrs = value as Record<string, unknown>;
+        if (attrs.name !== name || attrs.path !== path || (attrs.displayName || attrs.name) !== displayName
+          || (attrs.conversationId ?? null) !== conversationId) return false;
+      } catch { return false; }
+    }
     if (element.hasAttribute('page-reference-mention-path')) {
       if (!allowMentions || element.localName !== 'span' || mention !== null) return false;
       return !!readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'pageReferenceMention', attrs: {
@@ -446,6 +472,7 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
     ] }] })) return false;
     if (!element.hasAttribute('data-composer-attrs')) return mention === null;
     const spec = mention === 'file' ? composerSchema.nodes.atMention?.spec : mention === 'skill' ? composerSchema.nodes.skillMention?.spec
+      : mention === 'agent' ? composerSchema.nodes.agentMention?.spec
       : mention === 'rich-link' ? composerSchema.nodes.richLink?.spec : mention === 'page-reference' ? composerSchema.nodes.pageReferenceMention?.spec
       : element.localName === 'pre' ? composerSchema.nodes.code_block?.spec
       : element.localName === 'a' || element.hasAttribute('data-composer-autolink') ? composerSchema.marks.link?.spec : null;
@@ -454,8 +481,8 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
       const value: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
       return !!value && typeof value === 'object' && !Array.isArray(value)
         && Object.keys(value).every(key => Object.hasOwn(spec.attrs ?? {}, key))
-        && (mention !== 'rich-link' && mention !== 'page-reference' || !!readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [
-          { type: mention === 'rich-link' ? 'richLink' : 'pageReferenceMention', attrs: value as Record<string, unknown> },
+        && (mention !== 'rich-link' && mention !== 'page-reference' && mention !== 'agent' || !!readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [
+          { type: mention === 'rich-link' ? 'richLink' : mention === 'agent' ? 'agentMention' : 'pageReferenceMention', attrs: value as Record<string, unknown> },
         ] }] }));
     } catch { return false; }
   });
@@ -466,6 +493,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
   const host = useRef<HTMLDivElement>(null);
   const pageIcon = useRef<SVGSVGElement>(null);
   const linkIcon = useRef<SVGSVGElement>(null);
+  const agentIcon = useRef<SVGSVGElement>(null);
   const view = useRef<EditorView | null>(null);
   const composing = useRef(false);
   const latest = useRef(props);
@@ -546,6 +574,16 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
       if (editor && !composing.current) syncRichSelection(editor);
       return !!editor && !composing.current && insertRichCompletion(editor, context, query, item, cwd);
     },
+    captureAgentMentionTarget: (readCurrent, query) => {
+      const editor = view.current;
+      return editor && !composing.current && editable() && latest.current.allowMentions !== false
+        ? captureAgentMentionTarget(editor, latest.current.currentDocument(), readCurrent, query) : null;
+    },
+    insertAgentMention: (target, choice) => {
+      const editor = view.current;
+      return !!editor && !composing.current && editable() && latest.current.allowMentions !== false
+        && insertAgentMention(editor, target, choice, () => latest.current.currentDocument());
+    },
   }), []);
 
   useLayoutEffect(() => {
@@ -577,7 +615,8 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     };
     const editor = new EditorView(host.current, {
       state: EditorState.create({ doc, plugins: latest.current.plainTextMode ? plugins.plain : plugins.rich }),
-      nodeViews: { pageReferenceMention: inlineNode(pageIcon.current), richLink: inlineNode(linkIcon.current) },
+      nodeViews: { pageReferenceMention: inlineNode(pageIcon.current), richLink: inlineNode(linkIcon.current),
+        agentMention: node => inlineNode(parseAgentThreadPath(node.attrs.path) ? agentIcon.current : null)(node) },
       editable: () => !latest.current.readOnly,
       attributes: { role: 'textbox', 'aria-label': latest.current.ariaLabel ?? latestTranslation.current('Work with Codex'), 'aria-multiline': 'true',
         ...(latest.current.enableCompletions === false ? {} : { 'aria-autocomplete': 'list' }) },
@@ -705,6 +744,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
   };
   return <>
     <span hidden aria-hidden="true"><FileText ref={pageIcon} size={14} aria-hidden="true" focusable="false" />
+      <MessageSquare ref={agentIcon} size={14} aria-hidden="true" focusable="false" />
       <LinkIcon ref={linkIcon} size={14} aria-hidden="true" focusable="false" /></span>
     {(!props.plainTextMode || linkOpen) && <div className="standalone-composer__rich-toolbar" role="toolbar" aria-label={t('Text formatting')}>
       {!props.plainTextMode && <>

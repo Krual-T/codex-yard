@@ -2,16 +2,98 @@ import { baseKeymap } from 'prosemirror-commands';
 import { closeHistory, history, redo, undo } from 'prosemirror-history';
 import { inputRules, textblockTypeInputRule, undoInputRule, wrappingInputRule } from 'prosemirror-inputrules';
 import { keymap } from 'prosemirror-keymap';
-import { Fragment } from 'prosemirror-model';
+import { Fragment, Mark } from 'prosemirror-model';
+import type { Node as ProseMirrorNode } from 'prosemirror-model';
 import { liftListItem, sinkListItem, splitListItem } from 'prosemirror-schema-list';
 import { TextSelection } from 'prosemirror-state';
-import type { Command } from 'prosemirror-state';
+import type { Command, Selection } from 'prosemirror-state';
 import type { EditorView } from 'prosemirror-view';
+import type { ComposerDocument } from '../workbench-contract.ts';
+import type { ComposerDraftOwner } from './composer-draft-store.ts';
 import type { Completion } from './standalone-completions.tsx';
-import { composerSchema } from './rich-document.ts';
+import { composerSchema, parseAgentThreadPath, readRichDocument } from './rich-document.ts';
 
 export interface RichCompletionContext { text: string; cursor: number; blockStart: number }
 export interface RichCompletionQuery { start: number; end: number; token: string }
+export interface AgentMentionChoice { threadId: string; hostId: string; title: string }
+export interface AgentMentionCurrent { owner: ComposerDraftOwner; revision: string }
+const agentMentionTarget = Symbol('agentMentionTarget');
+export interface AgentMentionTarget {
+  readonly [agentMentionTarget]: {
+    editor: EditorView;
+    source: ComposerDocument;
+    document: ProseMirrorNode;
+    selection: Selection;
+    marks: readonly Mark[] | null;
+    current: AgentMentionCurrent;
+    readCurrent: () => AgentMentionCurrent | null;
+    from: number;
+    to: number;
+    used: boolean;
+  };
+}
+
+function sameAgentMentionCurrent(a: AgentMentionCurrent | null, b: AgentMentionCurrent): boolean {
+  return !!a && a.revision === b.revision && a.owner.hostId === b.owner.hostId
+    && a.owner.threadId === b.owner.threadId && a.owner.draftId === b.owner.draftId;
+}
+
+/** Capture before opening the picker; the callback must read the live draft controller. */
+export function captureAgentMentionTarget(editor: EditorView, source: ComposerDocument | undefined,
+  readCurrent: () => AgentMentionCurrent | null, query?: RichCompletionQuery): AgentMentionTarget | null {
+  if (editor.isDestroyed || editor.composing || !editor.editable || !editor.hasFocus() || !source) return null;
+  syncRichSelection(editor);
+  const current = readCurrent(), { selection, doc, storedMarks } = editor.state;
+  if (!current || !current.revision || !current.owner.draftId || !readRichDocument(source)?.eq(doc)
+    || !(selection instanceof TextSelection) || selection.$from.parent !== selection.$to.parent
+    || !selection.$from.parent.isTextblock || selection.$from.parent.type.spec.code) return null;
+  let { from, to } = selection;
+  if (query) {
+    const context = richCompletionContext(editor);
+    if (!context || !query.token.startsWith('@') || !Number.isSafeInteger(query.start) || !Number.isSafeInteger(query.end)
+      || query.end !== context.cursor || query.start < 0 || query.start > query.end
+      || context.text.slice(query.start, query.end) !== query.token) return null;
+    const suffix = context.text.slice(query.end).match(/^[^\s@$\ufffc]*/)?.[0] ?? '';
+    from = context.blockStart + query.start;
+    to = context.blockStart + query.end + suffix.length;
+  }
+  return { [agentMentionTarget]: { editor, source, document: doc, selection, marks: storedMarks,
+    current: { owner: { ...current.owner }, revision: current.revision }, readCurrent, from, to, used: false } };
+}
+
+/** Insert the selected thread only into the still-current editor, draft and selection. */
+export function insertAgentMention(editor: EditorView, target: AgentMentionTarget, choice: AgentMentionChoice,
+  readDocument: () => ComposerDocument | undefined): boolean {
+  const captured = target?.[agentMentionTarget];
+  if (!captured || captured.used || captured.editor !== editor || editor.isDestroyed || editor.composing || !editor.editable) return false;
+  syncRichSelection(editor);
+  const current = captured.readCurrent();
+  if (!sameAgentMentionCurrent(current, captured.current) || readDocument() !== captured.source
+    || !readRichDocument(captured.source)?.eq(captured.document) || editor.state.doc !== captured.document
+    || !editor.state.selection.eq(captured.selection)
+    || (editor.state.storedMarks === null) !== (captured.marks === null)
+    || !Mark.sameSet(editor.state.storedMarks ?? [], captured.marks ?? [])) return false;
+  const threadId = choice.threadId.trim(), hostId = choice.hostId;
+  if (typeof hostId !== 'string' || !/^[A-Za-z0-9._:-]+$/.test(hostId)) return false;
+  const path = 'thread://' + threadId + '?hostId=' + encodeURIComponent(hostId);
+  if (!parseAgentThreadPath(path)) return false;
+  const name = choice.title.trim() || threadId;
+  const { selection, storedMarks } = editor.state;
+  const marks = storedMarks ?? (selection.empty ? selection.$from.marks() : selection.$from.marksAcross(selection.$to) ?? []);
+  if (marks.some(mark => mark.type.name === 'code' || mark.type.name === 'link')) return false;
+  const node = composerSchema.nodes.agentMention!.create({ name, displayName: name, conversationId: null, path }, null, marks);
+  let transaction = editor.state.tr.replaceWith(captured.from, captured.to, node);
+  const after = captured.from + node.nodeSize;
+  const next = transaction.doc.resolve(after).nodeAfter;
+  const needsSpace = !next?.isText || !/^\s/u.test(next.text ?? '');
+  if (needsSpace) transaction = transaction.insertText(' ', after);
+  transaction = transaction.setSelection(TextSelection.create(transaction.doc, after + (needsSpace ? 1 : 0))).scrollIntoView();
+  captured.used = true;
+  editor.dispatch(closeHistory(transaction));
+  editor.dispatch(closeHistory(editor.state.tr));
+  editor.focus();
+  return true;
+}
 
 export function syncRichSelection(editor: EditorView): void {
   if (!editor.hasFocus() || editor.composing) return;
