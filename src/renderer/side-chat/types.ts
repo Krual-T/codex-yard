@@ -33,7 +33,7 @@ export interface SideChatHostView {
   close: { requested: boolean; status: SideChatCloseStatus; error: string | null };
   /** Sanitized host recovery callback error for this operation, if any. */
   recoveryError: string | null;
-  /** On read only: the parent's scoped endpoint fence proves all prior calls of this action terminated. */
+  /** Reconciliation proves only prior business calls; tokenless persistence has no such fence. */
   settledCalls?: Partial<Record<SideChatHostAction, boolean>>;
 }
 
@@ -45,6 +45,7 @@ export interface SideChatHostPort {
   read(operationId: string, purpose?: SideChatReadPurpose): Promise<SideChatHostView>;
   retry(operationId: string): Promise<SideChatHostView>;
   close(operationId: string): Promise<SideChatHostView>;
+  /** Idempotently save captured local receipts only; never advance a business RPC. */
   retryPersistence(operationId: string): Promise<SideChatHostView>;
   subscribe(listener: (hint: { hostId: string; operationId: string }) => void): () => void;
 }
@@ -86,6 +87,8 @@ export interface SideChatHistory {
   options: SubmitOptions;
   loading: boolean;
   historyComplete: boolean;
+  /** The original ephemeral event subscription is still current. */
+  liveReady?: boolean;
   streamGap: boolean;
   error: string | null;
   canSubmit: boolean;

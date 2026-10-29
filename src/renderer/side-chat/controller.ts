@@ -97,7 +97,7 @@ export class SideChatController {
   }
   get canRetryPersistence(): boolean {
     const view = this.value.view;
-    return !!view && this.linked && !this.persistenceInFlight && !this.uncertain.has('retryPersistence')
+    return !!view && this.linked && !this.persistenceInFlight
       && this.permitted(view, 'persistence');
   }
   dispose(): void { this.disposed = true; this.unwatch(); this.listeners.clear(); }
@@ -120,7 +120,7 @@ export class SideChatController {
     const next = validate(view, this.value.hostId, this.value.parentThreadId, this.value.view);
     if (observe) delete next.settledCalls;
     for (const [action, pending] of readUncertain ?? []) {
-      if (this.uncertain.get(action) !== pending || next.settledCalls?.[action] !== true) continue;
+      if (action === 'retryPersistence' || this.uncertain.get(action) !== pending || next.settledCalls?.[action] !== true) continue;
       this.uncertain.delete(action);
       if (action === 'close' && !next.close.requested) this.closeDispatched = false;
     }
@@ -131,8 +131,13 @@ export class SideChatController {
     if (!view || this.disposed) return;
     const version = ++this.requestVersion;
     const readUncertain = method === 'read' && purpose === 'reconcile' ? new Map(this.uncertain) : undefined;
+    const previousPersistence = method === 'retryPersistence' ? this.uncertain.get(method) : undefined;
     try {
       const result = method === 'read' ? await this.port.read(view.operationId, purpose ?? 'observe') : await this.port[method](view.operationId);
+      if (method === 'retryPersistence' && previousPersistence && this.uncertain.get(method) === previousPersistence) {
+        validate(result, this.value.hostId, this.value.parentThreadId, this.value.view);
+        this.uncertain.delete(method);
+      }
       this.accept(result, version, readUncertain, method === 'read' && purpose !== 'reconcile');
       if (method !== 'read' && version !== this.requestVersion && !this.disposed) void this.observe();
     } catch (error) {

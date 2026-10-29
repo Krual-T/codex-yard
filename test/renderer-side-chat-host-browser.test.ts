@@ -116,7 +116,7 @@ test('the React panel consumes actual E host operations over an isolated synthet
         const op = action === 'prepare' ? await host.prepare({ hostId: body.hostId!, threadId: body.parentThreadId! })
           : action === 'start' ? await host.start(body.id!) : action === 'read' ? (reads++, await host.read(body.id!))
             : action === 'retry' ? await host.retry(body.id!) : action === 'close' ? await host.close(body.id!)
-              : action === 'retryPersistence' ? await host.retryPersistence(body.id!) : (() => { throw Error('unknown operation'); })();
+              : action === 'retryPersistence' ? await host.saveCaptured(body.id!) : (() => { throw Error('unknown operation'); })();
         if (action === 'retryPersistence') recoveryError = null;
         const view = projection(op); projections.push(view);
         return route.fulfill({ json: view });
@@ -148,12 +148,13 @@ test('the React panel consumes actual E host operations over an isolated synthet
     const persist = page.getByRole('button', { name: '重试保存回执' });
     for (let attempt = 0; attempt < 2; attempt++) {
       persistenceSettled = false;
-      await persist.click();
-      await page.waitForFunction(() => (window as any).peer.controller.getSnapshot().error?.includes('结果未确认'));
-      assert.equal(await persist.isDisabled(), true);
+      await Promise.all([page.waitForResponse(response => response.url().endsWith('/side/retryPersistence')), persist.click()]);
+      await page.waitForFunction(() => (window as any).peer.controller.canRetryPersistence);
+      assert.match(await page.evaluate(() => (window as any).peer.controller.getSnapshot().error), /synthetic late receipt persistence failure/);
+      assert.equal(await persist.isDisabled(), false);
       await Promise.all([page.waitForResponse(response => response.url().endsWith('/side/read')),
         page.getByRole('button', { name: '核对结果' }).click()]);
-      assert.equal(await persist.isDisabled(), true);
+      assert.equal(await persist.isDisabled(), false);
       persistenceSettled = true;
       await Promise.all([page.waitForResponse(response => response.url().endsWith('/side/read')),
         page.getByRole('button', { name: '核对结果' }).click()]);

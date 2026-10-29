@@ -231,18 +231,19 @@ test('a read begun before an endpoint becomes unknown cannot use an old settled 
 });
 
 test('read proof resolves only its action and cannot clear a concurrent persistence outcome', async () => {
-  const f = fixture(); let persistenceCalls = 0;
+  const f = fixture(); let persistenceCalls = 0, saving = false;
   const port = { ...f.port,
     async start(): Promise<SideChatHostView> { throw Error('start outcome unknown'); },
-    async retryPersistence(): Promise<SideChatHostView> { persistenceCalls++; throw Error('persistence outcome unknown'); },
+    async retryPersistence(id: string): Promise<SideChatHostView> { persistenceCalls++; if (!saving) throw Error('persistence outcome unknown'); return f.port.read(id); },
   };
   const c = new SideChatController({ hostId: 'host-a', parentThreadId: 'parent-a', draftId: 'draft', port,
     onPrepared: async () => {}, canDispatch: () => true });
   await c.start(); await c.retryPersistence(); assert.equal(persistenceCalls, 1);
   f.settle('retryPersistence', true); await c.read();
-  assert.match(c.getSnapshot().error!, /start outcome unknown/); assert.equal(c.canRetry, false);
+  assert.match(c.getSnapshot().error!, /persistence outcome unknown/); assert.equal(c.canRetry, false);
   assert.equal(c.canRetryPersistence, true);
-  f.settle('retryPersistence', false); f.settle('start', true); await c.read();
+  saving = true; await c.retryPersistence(); assert.match(c.getSnapshot().error!, /start outcome unknown/);
+  f.settle('start', true); await c.read();
   assert.equal(c.getSnapshot().error, null); assert.equal(c.canRetry, true);
 });
 
@@ -260,8 +261,8 @@ test('late receipt survives repeated persistence failures and fenced reads witho
   for (let attempt = 0; attempt < 2; attempt++) {
     f.settle('retryPersistence', false);
     await f.controller.retryPersistence();
-    assert.equal(f.controller.canRetryPersistence, false);
-    await f.controller.read(); assert.equal(f.controller.canRetryPersistence, false);
+    assert.equal(f.controller.canRetryPersistence, true);
+    await f.controller.read(); assert.equal(f.controller.canRetryPersistence, true);
     assert.equal((await f.host.read(id)).inject.status, 'inflight');
     f.settle('retryPersistence', true); await f.controller.read();
     assert.equal(f.controller.canRetryPersistence, true);

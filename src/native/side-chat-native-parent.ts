@@ -15,6 +15,8 @@ import type { ThreadProjectCompatibility } from './thread-projects.ts';
 import type { SideChatParentReceipts } from './side-chat-parent-receipts.ts';
 import type { StateMutations } from './state-mutations.ts';
 import type { SideChatHostAction } from '../renderer/side-chat/types.ts';
+import type { SideChatHostView } from '../renderer/side-chat/types.ts';
+import type { SideChatBrowserOrigin } from './side-chat-browser-authority.ts';
 
 type Value = Record<string, unknown>;
 export interface SideChatBrowserScope extends SideChatEndpointScope {
@@ -30,6 +32,7 @@ export interface SideChatBrowserCheck extends SideChatBrowserScope {
 /** The real browser owner supplies this after its own IDB and close barriers. */
 export interface SideChatBrowserAuthority {
   assertCurrent(scope: SideChatBrowserCheck): void;
+  prepareChild(scope: SideChatBrowserScope & { childThreadId: string }, view: SideChatHostView): Promise<void>;
   prepareClose(scope: SideChatBrowserScope & { childThreadId: string }): Promise<void>;
   cleanup(scope: SideChatBrowserScope & { childThreadId: string }): Promise<void>;
   ownerStopped(ownerId: string): boolean;
@@ -232,6 +235,29 @@ export function createNativeSideChatParent(options: Options) {
     params: Value, late: ((terminal: LateRpcTerminal) => void | Promise<void>) | undefined, forkAttempt?: string) {
     let dispatched: { reply: ReturnType<CodexConnection['requestWithCursor']> };
     try {
+      let childAttempt: { action: SideChatHostAction; attemptId: string; callId: string; token: string; receipt: unknown } | undefined;
+      if (method === 'thread/inject_items') {
+        if (!scope.childThreadId || !options.authority) throw new BeforeSend('原侧聊子会话尚未确认。');
+        // Observation supplies the existing sanitized projection without rotating the active token.
+        const observed = await endpoint.read({ ...scope, purpose: 'observe' });
+        childAttempt = await options.mutations.run(() => {
+          options.assertStateAvailable();
+          const binding = bindingFor(scope); assertBinding(binding);
+          const op = operation(scope), fork = record(op.fork), origin = record(fork.receiptOrigin), inject = record(op.inject);
+          const fence = record(op.endpointFence), active = record(fence.active);
+          const receipt = observed.view.fork.receipt;
+          if (observed.token !== null || observed.view.operationId !== scope.operationId
+            || observed.view.childId !== scope.childThreadId || observed.view.child?.thread.id !== scope.childThreadId
+            || fork.status !== 'received' || inject.status !== 'inflight' || !id(inject.attemptId)
+            || !id(active.callId) || !id(fence.token)
+            || !receipt || receipt.connectionGeneration !== scope.connectionGeneration
+            || !isDeepStrictEqual(receipt, origin)) throw new BeforeSend('原侧聊子会话回执已改变。');
+          return { action: active.action as SideChatHostAction, attemptId: inject.attemptId, callId: active.callId,
+            token: fence.token, receipt: structuredClone(origin) };
+        });
+        const binding = bindingFor(scope);
+        await options.authority.prepareChild({ ...browserScope(binding, scope, childAttempt.action), childThreadId: scope.childThreadId }, observed.view);
+      }
       dispatched = await options.mutations.run(() => {
         const binding = bindingFor(scope);
         if (method === 'thread/unsubscribe') assertConnection(binding); else assertBinding(binding);
@@ -242,7 +268,10 @@ export function createNativeSideChatParent(options: Options) {
         if (!id(step.attemptId) || step.status !== 'inflight'
           || method === 'thread/fork' && (forkAttempt !== step.attemptId || !['start', 'retry'].includes(action)
             || !isDeepStrictEqual(params, op.forkParams))
-          || method === 'thread/inject_items' && (!['start', 'retry', 'retryPersistence'].includes(action)
+          || method === 'thread/inject_items' && (!childAttempt || childAttempt.action !== action || childAttempt.attemptId !== step.attemptId
+            || childAttempt.callId !== active.callId || childAttempt.token !== record(op.endpointFence).token
+            || !isDeepStrictEqual(childAttempt.receipt, record(op.fork).receiptOrigin)
+            || !['start', 'retry', 'retryPersistence'].includes(action)
             || record(op.close).requested !== false || params.threadId !== scope.childThreadId
             || !isDeepStrictEqual(params.items, op.boundaryItems))
           || method === 'thread/unsubscribe' && (!['close', 'retry', 'retryPersistence'].includes(action)
@@ -440,6 +469,33 @@ export function createNativeSideChatParent(options: Options) {
     }
   }
 
+  /** Synchronous provider callback; the actual send also rechecks this scope under StateMutations. */
+  function assertBrowserOrigin(origin: SideChatBrowserOrigin): void {
+    options.assertStateAvailable();
+    const identity = origin.identity, binding = bindings.get(identity.operationId);
+    const prepared = prepareBindings.get(identity.prepareId), section = record(options.readSection());
+    const op = record(record(section.operations)[identity.operationId]), parent = record(op.parent);
+    if (!binding || binding !== prepared || binding.page !== origin.page || binding.hostId !== identity.hostId
+      || binding.parentThreadId !== identity.parentThreadId || binding.draftId !== identity.draftId
+      || binding.connectionGeneration !== identity.connectionGeneration || parent.cwd !== identity.parentCwd
+      || section.version !== 1 || record(section.prepared)[identity.prepareId] !== identity.operationId
+      || op.operationId !== identity.operationId || parent.hostId !== identity.hostId
+      || parent.threadId !== identity.parentThreadId || parent.connectionGeneration !== identity.connectionGeneration
+      || (op.childId ?? null) !== identity.childThreadId) throw new BeforeSend('原侧聊浏览器身份已改变。');
+    const closing = origin.action === 'close' || origin.action === 'retry' && record(op.close).requested === true;
+    (closing ? assertConnection : assertBinding)(binding);
+    if (origin.phase === 'challenge' || origin.phase === 'confirm' || origin.phase === 'claim') return;
+    const scope: SideChatEndpointScope = { hostId: identity.hostId, parentThreadId: identity.parentThreadId,
+      operationId: identity.operationId, connectionGeneration: identity.connectionGeneration, childThreadId: identity.childThreadId };
+    const current = operation(scope), active = record(record(current.endpointFence).active);
+    if (active.action !== origin.action) throw new BeforeSend('原侧聊调用已改变。');
+    if (origin.phase === 'child') {
+      const fork = record(current.fork), receipt = record(fork.receiptOrigin);
+      if (fork.status !== 'received' || !id(receipt.attemptId) || origin.attemptId && receipt.attemptId !== origin.attemptId
+        || receipt.connectionGeneration !== identity.connectionGeneration) throw new BeforeSend('原侧聊子会话回执已改变。');
+    }
+  }
+
   async function ownsChild(hostId: string, threadId: string): Promise<boolean> {
     return options.mutations.run(() => {
       options.assertStateAvailable();
@@ -458,5 +514,5 @@ export function createNativeSideChatParent(options: Options) {
       });
     });
   }
-  return { handle, forgetPage, ownsChild, projectsChanged, flushNotifications };
+  return { handle, forgetPage, ownsChild, projectsChanged, flushNotifications, assertBrowserOrigin };
 }

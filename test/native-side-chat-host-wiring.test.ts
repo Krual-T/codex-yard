@@ -68,6 +68,7 @@ async function fixture(t: import('node:test').TestContext, enabled = true, timeo
       }
       if (asynchronousGuard) return Promise.resolve();
     },
+    async prepareChild(scope) { if (!permitted || scope.draftId !== 'draft-a') throw new Error('fixture child blocked'); },
     async prepareClose(scope) { if (!permitted || scope.draftId !== 'draft-a') throw new Error('fixture close blocked');
       closeCalls.push('freeze'); await closeGate; frozen = true; },
     async cleanup() { if (!permitted || !frozen) throw new Error('fixture cleanup blocked'); closeCalls.push('cleanup'); frozen = false; },

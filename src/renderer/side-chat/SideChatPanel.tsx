@@ -1,10 +1,11 @@
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
 import { X } from 'lucide-react';
 import { StandaloneComposer } from '../composer/StandaloneComposer.tsx';
 import type { ComposerDraftController, ComposerSubmissionDescription, StandaloneComposerRuntimeProps } from '../composer/StandaloneComposer.tsx';
 import { readComposerDraftVersions } from '../composer/composer-draft-store.ts';
 import type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerDraftVersions } from '../composer/composer-draft-store.ts';
 import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
+import type { MessageEditHistory, StandaloneMessagesRecoveryProps } from '../messages/StandaloneMessages.tsx';
 import { isThreadBusy } from '../app/thread-state.ts';
 import type { ComposerDraft, StandaloneMessagesProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import type { SideChatController } from './controller.ts';
@@ -22,6 +23,8 @@ export interface SideChatCloseBarrier {
 export interface SideChatChildScope extends SideChatScope { childThreadId: string | null }
 export interface SideChatActiveChildScope extends SideChatChildScope { childThreadId: string }
 export interface SideChatInterruptScope extends SideChatActiveChildScope { turnId: string }
+export interface SideChatQueueEntry { id: string; clientUserMessageId: string; input: Record<string, unknown>[] }
+export type SideChatQueueMutation = 'thread/queue/reorder' | 'thread/queue/update' | 'thread/queue/delete';
 export interface SideChatPanelProps {
   client: WorkbenchClient;
   controller: SideChatController;
@@ -30,14 +33,23 @@ export interface SideChatPanelProps {
   onClose(): void;
   /** Check the shared send ledger and guarantee that pending composer edits have quiesced. */
   onBeforeClose(scope: SideChatCloseBarrier): Promise<void>;
+  /** Release a successful barrier only if the parent proves close was not dispatched. */
+  onCloseBarrierAborted?(scope: SideChatCloseBarrier): void;
   onSubmit(description: ComposerSubmissionDescription, draft: ComposerDraft, options: SubmitOptions,
-    action: SubmitAction, controller: ComposerDraftController): Promise<void>;
+    action: SubmitAction, controller: ComposerDraftController, assertAuthority?: () => void): Promise<void>;
+  /** Capture the real shared owner and connection at the original input action. */
+  captureSubmissionAuthority?: StandaloneComposerRuntimeProps['captureSubmissionAuthority'];
+  onDraftController?: StandaloneComposerRuntimeProps['onDraftController'];
   /** Parent verifies the original connection generation and the current child turn atomically. */
   onInterrupt(scope: SideChatInterruptScope): Promise<void>;
   /** Preserve this mounted instance; create a separate operation and draft without replaying it. */
   onOpenNew?(scope: SideChatChildScope): void | Promise<void>;
-  onStartQueued?(id: string, scope: SideChatActiveChildScope): Promise<void>;
-  messages?: Omit<StandaloneMessagesProps, 'client' | 'hostId' | 'thread'>;
+  onStartQueued?(id: string, scope: SideChatActiveChildScope, assertAuthority?: () => void, originalAuthority?: () => void): Promise<void>;
+  removeQueuedOriginal?(entry: SideChatQueueEntry, scope: SideChatActiveChildScope, originalAuthority: () => void,
+    assertBeforeSend: () => void): Promise<'deleted' | 'changed'>;
+  dispatchQueueMutation?<T>(method: SideChatQueueMutation, params: Record<string, unknown>, hostId: string,
+    originalAuthority: () => void, assertBeforeSend: () => void): Promise<T>;
+  messages?: Omit<StandaloneMessagesProps, 'client' | 'hostId' | 'thread'> & StandaloneMessagesRecoveryProps & { editHistory?: MessageEditHistory };
   prefill?: StandaloneComposerRuntimeProps['prefill'];
   onPrefillConsumed?: StandaloneComposerRuntimeProps['onPrefillConsumed'];
   onDraftChange?: StandaloneComposerRuntimeProps['onDraftChange'];
@@ -84,8 +96,8 @@ export function SideChatPanel(props: SideChatPanelProps) {
   return <SideChatSession key={JSON.stringify([hostId, parentThreadId, draftId])} {...props} />;
 }
 
-function SideChatSession({ client, controller, open, history, onClose, onBeforeClose, onSubmit, onInterrupt, onOpenNew, onStartQueued, messages, prefill,
-  onPrefillConsumed, onDraftChange, onRemoveReference, confirmBeforeClose = true }: SideChatPanelProps) {
+function SideChatSession({ client, controller, open, history, onClose, onBeforeClose, onCloseBarrierAborted, onSubmit, onInterrupt, onOpenNew, onStartQueued, removeQueuedOriginal, dispatchQueueMutation, messages, prefill,
+  onPrefillConsumed, onDraftChange, onRemoveReference, captureSubmissionAuthority, onDraftController, confirmBeforeClose = true }: SideChatPanelProps) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const [confirm, setConfirm] = useState(false), [frozen, setFrozen] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null), [newStarted, setNewStarted] = useState(false);
@@ -93,6 +105,10 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
   const titleId = useId(), dialog = useRef<HTMLDialogElement>(null), composer = useRef<HTMLDivElement>(null);
   const draftController = useRef<ComposerDraftController | null>(null), freezing = useRef(false), gatePassed = useRef(false), openingNew = useRef(false);
   const closed = useRef(false), mountedComposer = useRef(false), historyRef = useRef(history);
+  const draftCallback = useRef(onDraftController); draftCallback.current = onDraftController;
+  const receiveDraft = useCallback((value: ComposerDraftController | null) => {
+    draftController.current = value; draftCallback.current?.(value);
+  }, []);
   historyRef.current = history;
   const view = state.view, child = view?.child ?? null, childId = view?.childId ?? null;
   const ownedHistory = childId && history?.hostId === state.hostId && history.threadId === childId
@@ -142,16 +158,20 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
     const scope: SideChatCloseBarrier = { hostId: current.hostId, parentThreadId: current.parentThreadId,
       childThreadId: currentView?.childId ?? null, operationId: currentView?.operationId ?? null, draftId: current.draftId, draftController: draft };
     try {
-      if (mountedComposer.current) {
-        if (!draft || !draft.snapshot() || !await draft.flush(owner)) throw new Error('侧聊草稿身份尚未就绪。');
-      }
+      // The parent's lease must freeze all owners before the first asynchronous drain.
       await onBeforeClose(scope);
       if (mountedComposer.current) {
-        if (draftController.current !== draft || !draft || !await draft.flush(owner)) throw new Error('侧聊草稿身份已改变。');
+        const snapshot = draft?.snapshot();
+        if (!snapshot || snapshot.owner.hostId !== owner.hostId || snapshot.owner.threadId !== owner.threadId
+          || snapshot.owner.draftId !== owner.draftId) throw new Error('侧聊草稿身份尚未就绪。');
+        if (!await draft!.flush(owner)) throw new Error('侧聊草稿未能保存。');
       }
+      if (mountedComposer.current && draftController.current !== draft) throw new Error('侧聊草稿身份已改变。');
       gatePassed.current = true;
       return scope;
     } catch (error) {
+      try { onCloseBarrierAborted?.(scope); }
+      catch { throw new Error('关闭屏障尚未解除；原侧聊和草稿已保留。', { cause: error }); }
       freezing.current = false; restoreInputState(); setFrozen(false);
       throw error;
     }
@@ -239,16 +259,26 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
       <StandaloneComposer client={client}
         context={{ hostId: state.hostId, threadId: child.thread.id, cwd: view!.parent.cwd, draftId: state.draftId, placement: 'side-chat' }}
         busy={busy} activeTurnId={activeTurn} initialOptions={ownedHistory?.options ?? child.options}
-        onDraftController={value => { draftController.current = value; }} onDraftChange={value => { refreshDraft(revision => revision + 1); onDraftChange?.(value); }}
+        onDraftController={receiveDraft} onDraftChange={value => { refreshDraft(revision => revision + 1); onDraftChange?.(value); }}
+        captureSubmissionAuthority={captureSubmissionAuthority}
         onRemoveReference={onRemoveReference} prefill={prefill} onPrefillConsumed={onPrefillConsumed}
-        onStartQueued={onStartQueued ? async id => {
+        {...(dispatchQueueMutation ? { dispatchQueueMutation } : {})}
+        {...(removeQueuedOriginal ? { removeQueuedOriginal: (entry: SideChatQueueEntry, authority: () => void, beforeSend: () => void) => {
+          const current = controller.getSnapshot();
+          if (current.phase !== 'ready' || current.pendingClose || current.view?.childId !== child.thread.id)
+            throw localRejection('侧聊队列目标已改变。');
+          return removeQueuedOriginal(entry, { hostId: current.hostId, parentThreadId: current.parentThreadId,
+            operationId: current.view.operationId, draftId: current.draftId, childThreadId: child.thread.id }, authority, beforeSend);
+        } } : {})}
+        onStartQueued={onStartQueued ? async (id, authority, originalAuthority?: () => void) => {
           const latest = controller.getSnapshot(), currentHistory = historyRef.current;
           if (freezing.current || latest.phase !== 'ready' || latest.pendingClose || latest.view?.childId !== child.thread.id
             || currentHistory?.hostId !== state.hostId || currentHistory.threadId !== child.thread.id || !currentHistory.canSubmit
             || currentHistory.thread?.id !== child.thread.id || currentHistory.error || currentHistory.loading
-            || !currentHistory.historyComplete || isThreadBusy(currentHistory.thread)) throw localRejection('侧聊尚未就绪或正在运行。');
+            || !(currentHistory.liveReady ?? currentHistory.historyComplete) || currentHistory.streamGap
+            || currentHistory.thread.status?.type !== 'idle' || isThreadBusy(currentHistory.thread)) throw localRejection('侧聊尚未就绪或正在运行。');
           await onStartQueued(id, { hostId: latest.hostId, parentThreadId: latest.parentThreadId,
-            operationId: latest.view.operationId, draftId: latest.draftId, childThreadId: child.thread.id });
+            operationId: latest.view.operationId, draftId: latest.draftId, childThreadId: child.thread.id }, authority, originalAuthority);
         } : undefined}
         onInterrupt={async () => { const latest = historyRef.current, current = controller.getSnapshot();
           if (!activeTurn || freezing.current || current.phase !== 'ready' || current.pendingClose || current.view?.childId !== child.thread.id
@@ -258,19 +288,19 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
             throw localRejection('当前连接没有可确认的运行任务。');
           await onInterrupt({ hostId: current.hostId, parentThreadId: current.parentThreadId, operationId: current.view.operationId,
             draftId: current.draftId, childThreadId: child.thread.id, turnId: activeTurn }); }}
-        onSubmit={async (draft, options, action, description) => {
+        onSubmit={async (draft, options, action, description, authority) => {
           const current = controller.getSnapshot(), latestHistory = historyRef.current, owner = description?.owner, draftSession = draftController.current;
           if (freezing.current || current.phase !== 'ready' || current.pendingClose || current.view?.childId !== child.thread.id
             || !latestHistory || latestHistory.hostId !== current.hostId || latestHistory.threadId !== child.thread.id
             || latestHistory.thread?.id !== child.thread.id || !latestHistory.canSubmit || latestHistory.error || latestHistory.loading
-            || !latestHistory.historyComplete && !isThreadBusy(latestHistory.thread)
-            || action.type === 'send' && (isThreadBusy(latestHistory.thread) || !latestHistory.historyComplete)
+            || !(latestHistory.liveReady ?? (latestHistory.historyComplete || isThreadBusy(latestHistory.thread))) || latestHistory.streamGap
+            || action.type === 'send' && (isThreadBusy(latestHistory.thread) || latestHistory.thread.status?.type !== 'idle')
             || action.type === 'steer' && !latestHistory.thread.turns.some(turn => turn.id === action.turnId && turn.status === 'inProgress')
             || action.type === 'queue' && !isThreadBusy(latestHistory.thread)) throw localRejection('侧聊尚未就绪或正在关闭，草稿已保留。');
           if (!description || !draftSession || owner?.hostId !== current.hostId || owner.threadId !== child.thread.id || owner.draftId !== current.draftId)
             throw localRejection('侧聊草稿身份尚未就绪。');
           controller.markActivity();
-          await onSubmit(description, draft, options, action, draftSession);
+          await onSubmit(description, draft, options, action, draftSession, authority);
         }} />
     </div> : null}
     {confirm ? <dialog className="yard-side-chat__dialog" ref={dialog} onCancel={event => { event.preventDefault(); setConfirm(false); }}

@@ -64,6 +64,7 @@ export interface SideChatBrowserAuthorityOptions {
   draftController(): ComposerDraftController | null;
   /** Idempotent local/voice cleanup; never calls thread/unsubscribe. */
   cleanupChild(identity: SideChatBrowserIdentity): Promise<void>;
+  onChildInstalled?(): void;
 }
 
 type Value = Record<string, unknown>;
@@ -147,6 +148,7 @@ export class SideChatBrowserAuthorityBridge {
   private hostConnected = false;
   private readonly unwatch: () => void;
   private readonly options: SideChatBrowserAuthorityOptions;
+  private initialized = false;
 
   constructor(options: SideChatBrowserAuthorityOptions) {
     if (!validDraftIdentity(options.identity) || !id(options.cwd) || !(options.sessions instanceof ConversationSessions)
@@ -155,6 +157,11 @@ export class SideChatBrowserAuthorityBridge {
     this.bridgeConnected = 'connected' in options.client && options.client.connected === true;
     this.unwatch = options.client.subscribe(event => this.event(event));
   }
+  get hasRegistration(): boolean { return !!this.registration; }
+  get hasPendingChildCapture(): boolean { return !!this.capture; }
+  get hasCloseLease(): boolean { return !!this.closeLease; }
+  hasLinkedOperation(operationId: string): boolean { return this.identity?.operationId === operationId; }
+  hasLiveChild(childThreadId: string): boolean { return !this.invalid && !this.sealed && this.childLive && this.identity?.childThreadId === childThreadId; }
   private assertCurrent = (): void => {
     if (this.invalid || this.sealed) throw beforeSend('侧聊原页面或草稿权限已失效。');
     this.options.assertCurrent();
@@ -172,7 +179,22 @@ export class SideChatBrowserAuthorityBridge {
     this.assertCurrent();
     const identity = this.options.identity, prior = await readSideChatDraftAssociation(identity);
     this.assertCurrent();
-    if (prior) return;
+    if (prior) {
+      if (this.initialized) return;
+      if (!this.bootstrap || !sameDraft(prior, identity) || prior.operationId !== null) {
+        throw new Error('此草稿已有侧聊关联，请按原身份恢复。');
+      }
+      await updateBrowserAtoms(atoms => {
+        this.assertCurrent(); assertAssociation(atoms[composerDraftAtomKey], prior);
+        const versions = readComposerDraftVersionsInRoot(atoms[composerDraftAtomKey], ownerOf(identity, null));
+        if (!this.bootstrap || versions.versions.length !== 1 || versions.retained.length
+          || versions.versions[0]!.revision !== this.bootstrap.revision
+          || !sameComposerDraftValue(versions.versions[0], this.bootstrap)) throw new Error('原草稿初始化结果无法确认。');
+        return { value: undefined };
+      });
+      this.assertCurrent(); this.bootstrap = null; this.initialized = true;
+      return;
+    }
     const existing = await readBrowserAtoms();
     const raw = existing[composerDraftAtomKey];
     const exists = object(raw) && object(raw.entries) && Object.hasOwn(raw.entries, keyOf(identity));
@@ -204,6 +226,7 @@ export class SideChatBrowserAuthorityBridge {
     });
     this.assertCurrent();
     this.bootstrap = null;
+    this.initialized = true;
   }
 
   /** Use from Controller.onPrepared, with the generation and cwd from the original host reply. */
@@ -225,6 +248,16 @@ export class SideChatBrowserAuthorityBridge {
       } } } };
     });
     this.assertCurrent();
+    await this.verify(asAssociation(next));
+    this.identity = next;
+  }
+
+  /** Recover the persisted identity without granting a restored page any dispatch authority. */
+  async restoreLinked(saved: SideChatDraftAssociation): Promise<void> {
+    if (!sameDraft(saved, this.options.identity) || !id(saved.operationId) || !id(saved.connectionGeneration)
+      || saved.parentCwd !== this.options.cwd) throw new Error('原侧聊草稿关联不完整。');
+    const next: SideChatBrowserIdentity = { ...this.options.identity, operationId: saved.operationId,
+      connectionGeneration: saved.connectionGeneration, parentCwd: saved.parentCwd, childThreadId: saved.childThreadId };
     await this.verify(asAssociation(next));
     this.identity = next;
   }
@@ -304,17 +337,19 @@ export class SideChatBrowserAuthorityBridge {
   async freezeClose(): Promise<void> {
     this.assertCurrent();
     const identity = this.identity, draft = this.options.draftController();
-    if (!identity || this.closeLease) throw beforeSend('侧聊草稿尚未就绪或正在关闭。');
-    const owner = ownerOf(identity, identity.childThreadId), draftLease = draft?.freeze(owner) ?? null;
+    if (this.closeLease) throw beforeSend('侧聊草稿正在关闭。');
+    const saved: SideChatDraftAssociation = identity ? asAssociation(identity) : { version: 1, ...this.options.identity,
+      operationId: null, parentCwd: null, connectionGeneration: null, childThreadId: null };
+    const owner = ownerOf(saved, saved.childThreadId), draftLease = draft?.freeze(owner) ?? null;
     if (draft && !draftLease) throw beforeSend('侧聊草稿无法冻结，原内容已保留。');
     let send: SideChatSendLease;
     try { send = this.options.freezeSending(owner); }
     catch (error) { draftLease?.release(); throw error; }
     this.closeLease = { draft, draftLease, send };
-    try { await this.checkClose(identity); }
+    try { await this.checkClose(saved); }
     catch (error) { this.closeLease = null; send.release(); draftLease?.release(); throw error; }
   }
-  private async checkClose(identity: SideChatBrowserIdentity, guard = this.assertCurrent): Promise<void> {
+  private async checkClose(identity: SideChatDraftAssociation, guard = this.assertCurrent): Promise<void> {
     const lease = this.closeLease, owner = ownerOf(identity, identity.childThreadId);
     if (!lease || lease.draft !== this.options.draftController()) throw new Error('原侧聊草稿租约已改变。');
     guard(); lease.send.assertCurrent();
@@ -331,7 +366,7 @@ export class SideChatBrowserAuthorityBridge {
     }
     await updateBrowserAtoms(atoms => {
       guard();
-      assertAssociation(atoms[composerDraftAtomKey], asAssociation(identity));
+      assertAssociation(atoms[composerDraftAtomKey], identity);
       if (snapshot) {
         const versions = readComposerDraftVersionsInRoot(atoms[composerDraftAtomKey], owner).versions
           .filter(value => value.revision === snapshot.revision);
@@ -362,6 +397,14 @@ export class SideChatBrowserAuthorityBridge {
     assertSettledWithoutUnsubscribe();
     await this.revoke();
     assertSettledWithoutUnsubscribe();
+    const lease = this.closeLease;
+    this.closeLease = null;
+    lease?.send.release(); lease?.draftLease?.release();
+  }
+
+  /** Only before a close request is dispatched; this does not revoke an earlier grant. */
+  releaseUndispatchedClose(assertUndispatched: () => void): void {
+    assertUndispatched();
     const lease = this.closeLease;
     this.closeLease = null;
     lease?.send.release(); lease?.draftLease?.release();
@@ -409,6 +452,7 @@ export class SideChatBrowserAuthorityBridge {
     if (!installed) throw new Error('无法确认原连接上的侧聊事件流。');
     this.childLive = true;
     this.identity = structuredClone(next);
+    this.options.onChildInstalled?.();
   }
   /** Recover an interrupted child handshake only after the parent proves the original call settled. */
   async recoverChild(view: SideChatHostView, assertSettled: () => void): Promise<void> {
@@ -431,7 +475,7 @@ export class SideChatBrowserAuthorityBridge {
         grant.identity = structuredClone(request.identity);
       } else {
         if (!this.identity || !sameIdentity(request.identity, this.identity)) throw new Error('侧聊关闭身份已改变。');
-        if (request.kind === 'close') await this.checkClose(this.identity, guard);
+        if (request.kind === 'close') await this.checkClose(asAssociation(this.identity), guard);
         else {
           if (!this.closeLease) throw new Error('原侧聊关闭租约不存在。');
           await this.options.cleanupChild(this.identity);
