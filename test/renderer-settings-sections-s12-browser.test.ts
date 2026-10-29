@@ -7,6 +7,9 @@ import { chromium } from 'playwright-core';
 declare global {
   interface Window { s12SettingsHarness: {
     snapshot(): Promise<{ drafts: { editorId: string; revision: number; draft: { model: string; effort: string } }[]; records: unknown[] }>;
+    current(): { drafts: { editorId: string; revision: number; draft: { model: string; effort: string } }[]; records: unknown[] };
+    durable(): Promise<{ drafts: { editorId: string; revision: number; draft: { model: string; effort: string } }[]; operations: unknown[] }>;
+    isSaving(): boolean;
     release(): void; calls: Record<string, unknown>[];
   }; s12NotSentHarness: { submit(): Promise<string>; calls: Record<string, unknown>[]; drafts(): Promise<number> } }
 }
@@ -20,9 +23,10 @@ test('two settings pages keep independent edits through an original receipt and 
     import {I18nProvider} from './src/renderer/i18n/index.tsx';
     import {ModelSection} from './src/renderer/settings/ModelSection.tsx';
     import {settingsConfigOperations} from './src/renderer/settings/config-operations.ts';
+    import {readBrowserAtom} from './src/renderer/storage/ui-atoms.ts';
     const calls = [], source = {hostId:'local',generation:'fixture-generation',homeDirectory:'/fixture',codexHome:'/fixture/codex'};
     const current = () => JSON.parse(localStorage.getItem('synthetic-config') || '{"model":"alpha","effort":"high","version":"v1"}');
-    let release;
+    let release, saving = false;
     const client = {subscribe:() => () => {}, reply:async () => {},
       rpc:async (method) => {
         const config = current();
@@ -44,9 +48,11 @@ test('two settings pages keep independent edits through an original receipt and 
           method:input.method,state:'succeeded',terminal:{kind:'ok'}}};
       }};
     const ops = settingsConfigOperations(client);
-    window.s12SettingsHarness={calls,release:() => release(),snapshot:async () => {await ops.refresh();return ops.getSnapshot();}};
+    window.s12SettingsHarness={calls,release:() => release(),isSaving:() => saving,current:() => ops.getSnapshot(),
+      snapshot:async () => {await ops.refresh();return ops.getSnapshot();},
+      durable:() => readBrowserAtom('codex-yard.settings-config-writes.v1')};
     createRoot(document.getElementById('root')).render(<I18nProvider locale="en-US"><ModelSection client={client} hostId="local"
-      onDirtyChange={() => {}} onSavingChange={() => {}} /></I18nProvider>);
+      onDirtyChange={() => {}} onSavingChange={value => {saving=value}} /></I18nProvider>);
   ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic' });
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
     args: ['--no-sandbox', '--disable-background-networking'] });
@@ -60,20 +66,33 @@ test('two settings pages keep independent edits through an original receipt and 
     }
     await first.getByRole('combobox', { name: 'Model', exact: true }).selectOption('beta');
     await second.getByRole('combobox', { name: 'Reasoning effort' }).selectOption('low');
-    await second.waitForFunction(async () => (await window.s12SettingsHarness.snapshot()).drafts.length === 2);
+    await second.waitForFunction(() => window.s12SettingsHarness.current().drafts.length === 2);
     const before = await second.evaluate(() => window.s12SettingsHarness.snapshot());
     const other = before.drafts.find(draft => draft.draft.effort === 'low'); assert.ok(other);
+    const original = before.drafts.find(draft => draft.editorId !== other.editorId); assert.ok(original);
     await first.locator('.yard-inline-save').getByRole('button', { name: 'Save' }).click();
-    await first.waitForFunction(() => window.s12SettingsHarness.calls.length === 1);
+    await first.waitForFunction(() => window.s12SettingsHarness.calls.length === 1 && window.s12SettingsHarness.isSaving());
     await second.getByRole('combobox', { name: 'Model', exact: true }).selectOption('beta');
-    await second.waitForFunction(async id => (await window.s12SettingsHarness.snapshot()).drafts.some(draft =>
+    await second.waitForFunction(id => window.s12SettingsHarness.current().drafts.some(draft =>
       draft.editorId === id && draft.draft.model === 'beta'), other.editorId);
     await first.evaluate(() => window.s12SettingsHarness.release());
-    await first.waitForFunction(async () => !document.querySelector('.yard-inline-save') && (await window.s12SettingsHarness.snapshot()).records.length === 0);
+    await first.waitForFunction(() => !window.s12SettingsHarness.isSaving() && !document.querySelector('.yard-inline-save')
+      && window.s12SettingsHarness.current().records.length === 0);
+    const durable = await second.evaluate(() => window.s12SettingsHarness.durable());
+    assert.equal(durable.operations.length, 0, JSON.stringify(durable));
+    assert.equal(durable.drafts.length, 1, JSON.stringify(durable));
+    assert.equal(durable.drafts[0]?.editorId, other.editorId);
+    assert.notEqual(durable.drafts[0]?.editorId, original.editorId);
+    assert.ok(durable.drafts[0]!.revision > other.revision);
+    assert.deepEqual({ model: durable.drafts[0]!.draft.model, effort: durable.drafts[0]!.draft.effort }, { model: 'beta', effort: 'low' });
+    await second.waitForFunction(() => window.s12SettingsHarness.current().records.length === 0
+      && window.s12SettingsHarness.current().drafts.length === 1);
     const after = await second.evaluate(() => window.s12SettingsHarness.snapshot());
+    assert.equal(after.records.length, 0, JSON.stringify(after));
     assert.equal(after.drafts.length, 1, JSON.stringify(after));
     assert.equal(after.drafts[0]?.editorId, other.editorId);
     assert.ok(after.drafts[0]!.revision > other.revision);
+    assert.deepEqual({ model: after.drafts[0]!.draft.model, effort: after.drafts[0]!.draft.effort }, { model: 'beta', effort: 'low' });
     await second.reload(); await second.addScriptTag({ content: bundle.outputFiles[0]!.text });
     const saved = second.getByRole('region', { name: 'Saved configuration edits' });
     await saved.getByText(other.editorId, { exact: true }).waitFor();

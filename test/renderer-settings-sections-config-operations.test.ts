@@ -59,6 +59,62 @@ function fixture() {
 const origin = { section: 'models' as const, source: fixtureSource(), draft: { model: 'beta' } };
 const params = { edits: [{ keyPath: 'model', value: 'beta' }] };
 
+test('a confirmed original receipt consumes only its own submitted editor revision', async () => {
+  const f = fixture(), ops = f.make();
+  const revision = await ops.saveDraft('local', 'models', undefined, 'first', { model: 'beta' });
+  assert.ok(revision);
+  const submitted = await ops.submit('local', 'config/batchWrite', params, { ...origin, editorId: 'first', revision });
+  assert.equal((submitted.result as { status: string }).status, 'okOverridden');
+  const secondRevision = await ops.saveDraft('local', 'models', undefined, 'second', { model: 'beta', effort: 'low' });
+  assert.ok(secondRevision && secondRevision > revision);
+  await ops.finish(submitted.operationId, { consumeSubmittedDraft: true });
+  assert.deepEqual(f.store.list, []);
+  assert.deepEqual(f.store.drafts, [{ hostId: 'local', section: 'models', scope: undefined, editorId: 'second', revision: secondRevision,
+    draft: { model: 'beta', effort: 'low' } }]);
+  assert.equal(f.calls.filter(call => call.action === 'submit').length, 1);
+});
+
+test('a confirmed receipt preserves the same editor ID in another host or scope', async () => {
+  const f = fixture(), ops = f.make();
+  const revision = await ops.saveDraft('local', 'models', undefined, 'editor', { model: 'beta' });
+  assert.ok(revision);
+  const submitted = await ops.submit('local', 'config/batchWrite', params, { ...origin, editorId: 'editor', revision });
+  const remote = await ops.saveDraft('ssh:other', 'models', undefined, 'editor', { model: 'remote' });
+  const scoped = await ops.saveDraft('local', 'models', ['/other'], 'editor', { model: 'scoped' });
+  await ops.finish(submitted.operationId, { consumeSubmittedDraft: true });
+  assert.deepEqual(f.store.list, []);
+  assert.deepEqual(f.store.drafts, [
+    { hostId: 'ssh:other', section: 'models', scope: undefined, editorId: 'editor', revision: remote, draft: { model: 'remote' } },
+    { hostId: 'local', section: 'models', scope: ['/other'], editorId: 'editor', revision: scoped, draft: { model: 'scoped' } },
+  ]);
+});
+
+test('a confirmed old receipt cannot consume a newer revision of the same editor', async () => {
+  const f = fixture(), ops = f.make();
+  const revision = await ops.saveDraft('local', 'models', undefined, 'editor', { model: 'beta' });
+  assert.ok(revision);
+  const submitted = await ops.submit('local', 'config/batchWrite', params, { ...origin, editorId: 'editor', revision });
+  const newer = await ops.saveDraft('local', 'models', undefined, 'editor', { model: 'beta', effort: 'low' });
+  assert.ok(newer && newer > revision);
+  await ops.finish(submitted.operationId, { consumeSubmittedDraft: true });
+  assert.deepEqual(f.store.list, []);
+  assert.deepEqual(f.store.drafts, [{ hostId: 'local', section: 'models', scope: undefined, editorId: 'editor', revision: newer,
+    draft: { model: 'beta', effort: 'low' } }]);
+});
+
+test('unknown and rejected writes do not consume their submitted draft', async () => {
+  for (const behavior of ['lost', 'rejected'] as const) {
+    const f = fixture(), ops = f.make(); f.behavior(behavior);
+    const revision = await ops.saveDraft('local', 'models', undefined, 'editor', { model: 'beta' });
+    assert.ok(revision);
+    await assert.rejects(ops.submit('local', 'config/batchWrite', params, { ...origin, editorId: 'editor', revision }));
+    if (behavior === 'lost') await assert.rejects(ops.finish('fixture-1', { consumeSubmittedDraft: true }), /not ready/);
+    else await ops.finish('fixture-1', { consumeSubmittedDraft: true });
+    assert.deepEqual(f.store.drafts, [{ hostId: 'local', section: 'models', scope: undefined, editorId: 'editor', revision, draft: { model: 'beta' } }]);
+    assert.equal(f.calls.filter(call => call.action === 'submit').length, 1);
+  }
+});
+
 test('lost reply survives reload and only checks the original ID', async () => {
   const f = fixture(), first = f.make(); f.behavior('lost');
   await assert.rejects(first.submit('local', 'config/batchWrite', params, origin), (error: unknown) => error instanceof SettingsWriteError && error.uncertain);
