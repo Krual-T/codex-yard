@@ -21,12 +21,15 @@ export function readSettingsRoute(location: SettingsLocation, fallbackHost: stri
   const match = /^\/settings(?:\/(.*?))?\/?$/.exec(pathname);
   let slug = match?.[1] || 'general';
   try { slug = decodeURIComponent(slug); } catch { /* Keep malformed paths visible as unknown routes. */ }
+  if (slug === 'general' && params.get('initialRoute') === '/settings/agent') slug = 'configuration';
   const section = slug === 'general' ? 'general-settings' : slug.split('/')[0] || 'general-settings';
   const redirect = match && !match[1] ? `/settings/general${search}${hash}` : null;
   return { pathname, search, hash, state, section, hostId, baseHost, path: pathname + search + hash, redirect };
 }
 export function sectionPath(section: string, current: SettingsRoute): string {
   const params = new URLSearchParams(current.search);
+  params.delete('initialRoute');
+  if (section === 'configuration') params.set('initialRoute', '/settings/agent');
   if (section !== current.section) {
     params.delete('tab');
     if (current.section === 'plugins-settings') for (const key of pluginParams) params.delete(key);
@@ -36,7 +39,7 @@ export function sectionPath(section: string, current: SettingsRoute): string {
     }
   }
   const search = params.toString();
-  const path = section === 'general-settings' ? 'general' : section.split('/').map(encodeURIComponent).join('/');
+  const path = section === 'general-settings' || section === 'configuration' ? 'general' : section.split('/').map(encodeURIComponent).join('/');
   return `/settings/${path}${search ? `?${search}` : ''}`;
 }
 export function hostPath(hostId: string, current: SettingsRoute): string {

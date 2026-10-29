@@ -9,13 +9,17 @@ const chromePath = process.env.AGENTS_TEST_CHROMIUM || '/usr/bin/google-chrome';
 test('History API failures release leave guards without committing or consuming a history index', { skip: !existsSync(chromePath) }, async () => {
   const bundle = await build({ stdin: { resolveDir: process.cwd(), contents: `
     import {createRouteNavigation} from './src/renderer/app/route-navigation.ts';
-    let frozen=false, commits=0, outcomes=[], historyErrors=[], controller;
-    const install=()=>controller=createRouteNavigation(()=>commits++, async()=>{frozen=true;return true},
+    let frozen=false, commits=0, outcomes=[], historyErrors=[], controller, leave, original=true, delayedGo;
+    const install=()=>controller=createRouteNavigation(()=>commits++, async()=>{frozen=true;return leave?new Promise(resolve=>leave=resolve):true},
       (committed,error)=>{frozen=false;outcomes.push({committed,error:error instanceof Error?error.message:null})},
       error=>historyErrors.push(error instanceof Error?error.message:String(error)));
     install();
     window.navigationHarness={
-      navigate:(path,options)=>controller.navigate(path,options),
+      navigate:(path,options,guarded=false)=>controller.navigate(path,options,guarded?()=>{if(!original)throw Error('original owner changed')}:undefined),
+      holdLeave(){leave=true}, finishLeave(){const finish=leave;leave=null;finish(true)},
+      owner(value){original=value},
+      holdHistory(){const go=history.go.bind(history);history.go=delta=>{delayedGo=()=>{history.go=go;go(delta)}}},
+      finishHistory(){delayedGo()},
       replace:path=>controller.replaceCurrentURL(path),
       historyErrors:()=>historyErrors,
       state:()=>({frozen,commits,outcomes,index:history.state?.__yardIndex??null,path:location.pathname}),
@@ -62,6 +66,23 @@ test('History API failures release leave guards without committing or consuming 
     assert.equal(await run('location.search + location.hash'), '?recovered=1#retained');
     assert.equal((await run('navigationHarness.state()') as { commits: number }).commits, 0);
     assert.equal(await run("navigationHarness.navigate('/local/recovered')"), true);
+    await run('navigationHarness.restart();navigationHarness.holdLeave();void(window.pendingNavigation=navigationHarness.navigate("/local/stale",{},true))');
+    await run('navigationHarness.owner(false);navigationHarness.finishLeave()');
+    assert.equal(await run('window.pendingNavigation'), false);
+    assert.deepEqual(await run('navigationHarness.state()'), { frozen: false, commits: 0,
+      outcomes: [{ committed: false, error: 'original owner changed' }], index: 0, path: '/settings/browser-use/downloads' });
+    await run('navigationHarness.owner(true)');
+    assert.equal(await run("navigationHarness.navigate('/local/retained')"), true);
+    assert.equal(await run("navigationHarness.navigate('/local/newer')"), true);
+    await run('navigationHarness.holdHistory()');
+    assert.equal(await run("navigationHarness.navigate('/local/retained',{delta:-1},true)"), true);
+    assert.equal((await run('navigationHarness.state()') as { frozen: boolean }).frozen, true);
+    await run('navigationHarness.owner(false);navigationHarness.finishHistory()');
+    await page.waitForFunction(() => !(window as any).navigationHarness.state().frozen);
+    assert.deepEqual(await run('navigationHarness.state()'), { frozen: false, commits: 2,
+      outcomes: [{ committed: false, error: 'original owner changed' }, { committed: true, error: null },
+        { committed: true, error: null }, { committed: false, error: 'original owner changed' }],
+      index: 2, path: '/local/newer' });
     assert.deepEqual(errors, []);
   } finally { await browser.close(); }
 });

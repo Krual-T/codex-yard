@@ -215,7 +215,7 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
   }
   host<T = unknown>(endpoint: string, params: Record<string, unknown> = {}, options?: Pick<WorkbenchDispatchOptions, 'assertBeforeSend'>): Promise<T> {
     if (endpoint === 'get-persisted-atom' || endpoint === 'set-persisted-atom') {
-      return browserAtom(endpoint, params) as Promise<T>;
+      return browserAtom(endpoint, params, options?.assertBeforeSend) as Promise<T>;
     }
     if (['pick-file', 'pick-files', 'save-file'].includes(endpoint)) {
       return new Promise<T>((resolve, reject) => {

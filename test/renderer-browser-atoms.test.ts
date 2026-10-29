@@ -10,7 +10,8 @@ import { chromium } from 'playwright-core';
 test('transactional atom import, concurrent writes, rollback and malformed data survive fresh renderers', {
   skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable',
 }, async () => {
-  const built = await build({ stdin: { contents: `export { browserAtom } from './src/renderer/app/browser-atoms.ts';
+  const built = await build({ stdin: { contents: `export { BrowserWorkbenchClient } from './src/renderer/app/client.ts';
+    export { browserAtom } from './src/renderer/app/browser-atoms.ts';
     export { readBrowserAtoms, subscribeBrowserAtoms, updateBrowserAtoms } from './src/renderer/storage/ui-atoms.ts';`, resolveDir: process.cwd() },
     bundle: true, format: 'esm', write: false });
   const root = await mkdtemp('/tmp/yard-atoms-test-');
@@ -124,6 +125,18 @@ test('transactional atom import, concurrent writes, rollback and malformed data 
       return { unchanged, result, fileA: after.fileA, fileB: after.fileB, records: Object.keys(after.records).length, unknown: after.unknown };
     });
     assert.deepEqual(batch, { unchanged: true, result: 'discarded-together', fileA: null, fileB: null, records: 400, unknown: { retain: true } });
+    const revoked = await fresh.evaluate(async () => {
+      const modulePath = '/atoms.js';
+      const { BrowserWorkbenchClient, readBrowserAtoms } = await import(modulePath);
+      const before = JSON.stringify(await readBrowserAtoms());
+      let current = true, rejected = false;
+      const write = new BrowserWorkbenchClient().host('set-persisted-atom', { key: 'stale-owner', value: 'must not commit' },
+        { assertBeforeSend() { if (!current) throw Error('original page changed'); } });
+      current = false;
+      try { await write; } catch { rejected = true; }
+      return rejected && before === JSON.stringify(await readBrowserAtoms());
+    });
+    assert(revoked, 'The public host API checks the original owner inside the actual atom transaction.');
     await fresh.evaluate(() => localStorage.setItem('native-atoms', '{later legacy corruption'));
     assert.equal(await fresh.evaluate(async () => {
       const modulePath = '/atoms.js'; return Object.keys((await (await import(modulePath)).readBrowserAtoms()).records).length;

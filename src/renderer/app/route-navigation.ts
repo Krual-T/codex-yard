@@ -6,6 +6,7 @@ export function createRouteNavigation(changed: () => void, requestLeave: () => P
   let index = Number(history.state?.__yardIndex ?? 0), position = index;
   let committed = { url: location.href, state: history.state };
   let pending = false, approvedPop = false, disposed = false;
+  let approvedGuard: (() => void) | undefined;
   let moving: Promise<void> | null = null, arrived: (() => void) | null = null;
   if (!Object.hasOwn(history.state ?? {}, '__yardIndex')) {
     try {
@@ -31,7 +32,16 @@ export function createRouteNavigation(changed: () => void, requestLeave: () => P
     if (arrived) { const resolve = arrived; arrived = null; resolve(); return; }
     if (approvedPop) {
       approvedPop = false;
-      try { commit(); } finally { settled?.(true); }
+      try {
+        approvedGuard?.(); approvedGuard = undefined;
+        commit(); settled?.(true);
+      } catch (error) {
+        approvedGuard = undefined; pending = true;
+        void moveTo(index).then(() => {
+          if (!disposed) history.replaceState(committed.state, '', committed.url);
+        }).catch(restoreError => reportHistoryError?.(restoreError))
+          .finally(() => { pending = false; settled?.(false, error); });
+      }
       return;
     }
     if (pending) { void moveTo(index); return; }
@@ -67,20 +77,21 @@ export function createRouteNavigation(changed: () => void, requestLeave: () => P
         return true;
       } catch (error) { reportHistoryError?.(error); return false; }
     },
-    async navigate(path: string, options: NavigationOptions = {}): Promise<boolean> {
+    async navigate(path: string, options: NavigationOptions = {}, assertBeforeCommit?: () => void): Promise<boolean> {
       if (pending || disposed) return false;
       pending = true;
       let didCommit = false, failure: unknown;
       try {
         if (!await requestLeave() || disposed) return false;
-        if (options.delta && index + options.delta >= 0) { approvedPop = true; history.go(options.delta); return true; }
+        assertBeforeCommit?.();
+        if (options.delta && index + options.delta >= 0) { approvedGuard = assertBeforeCommit; approvedPop = true; history.go(options.delta); return true; }
         // A directly opened nested settings page has no earlier Yard entry.
         const replace = options.replace || !!options.delta;
         const nextIndex = replace ? index : index + 1;
         const state = { __yardIndex: nextIndex, __yardState: options.state ?? null };
         if (replace) history.replaceState(state, '', path); else history.pushState(state, '', path);
         position = nextIndex; commit(); didCommit = true; return true;
-      } catch (error) { approvedPop = false; failure = error; return false; }
+      } catch (error) { approvedPop = false; approvedGuard = undefined; failure = error; return false; }
       finally { pending = false; if (!approvedPop) settled?.(didCommit, failure); }
     },
     dispose() { disposed = true; arrived?.(); arrived = null; window.removeEventListener('popstate', pop); },
