@@ -19,7 +19,7 @@ test('Mini replies with native-host request references from the disposable daemo
     import { StandaloneMini } from './src/renderer/mini/index.tsx';
     const client=new BrowserWorkbenchClient(), root=createRoot(document.getElementById('root'));
     const records=[], replies=[], resolutions=[];
-    let bridge='connecting', host={state:'connecting',fresh:false,revision:'0'}, pending=[], revision=0;
+    let bridge='connecting', host={state:'connecting',fresh:false,revision:'0'}, pending=[], revision=0, petOpen=null;
     const same=(a,b)=>a.hostId===b.hostId&&a.id===b.id&&a.generation===b.generation;
     const send=async message=>{await client.connect();client.socket.send(JSON.stringify(message))};
     function render(){root.render(React.createElement(StandaloneMini,{client,send,bridgeState:bridge,
@@ -33,9 +33,11 @@ test('Mini replies with native-host request references from the disposable daemo
         catch(error){item.request.outcome=error.uncertain?'unknown':'expired';item.request.error=error.message}render()}
     }))}
     client.subscribe(event=>{
+      if(event.type==='avatar-overlay-open-state-changed'&&typeof event.isOpen==='boolean')petOpen=event.isOpen;
+      if(event.type==='workbench-pet-state'&&typeof event.state?.isOpen==='boolean')petOpen=event.state.isOpen;
       if(event.method==='serverRequest/resolved'&&event.requestRef)resolutions.push(event.requestRef);
       if(event.type==='connection-state'){bridge=event.state;
-        if(event.state!=='connected'){pending=[];host={...host,fresh:false}}render()}
+        if(event.state!=='connected'){pending=[];petOpen=null;host={...host,fresh:false}}render()}
       if(event.type==='codex-app-server-connection-changed'&&event.hostId==='local'){
         host={...host,state:event.state,fresh:false};
         if(event.state!=='connected')pending=pending.filter(ref=>ref.hostId!=='local');render()}
@@ -45,10 +47,11 @@ test('Mini replies with native-host request references from the disposable daemo
           outcome:'ready',choices:[{label:'Reply '+ref.id+' '+count,result:{decision:'accept'}}]}});render()}
     });
     window.nativeMiniHarness={records,replies,resolutions,ready:()=>bridge==='connected'&&host.state==='connected',
-      hostState:()=>host.state,bridgeState:()=>bridge,
+      hostState:()=>host.state,bridgeState:()=>bridge,petReady:()=>typeof petOpen==='boolean',
       refresh(){host={...host,fresh:true,revision:String(++revision)};render()},
       async reconnectHost(){await client.rpc('model/list')},suspend(){client.suspend()},async resume(){await client.resume()},
-      async open(){await send({type:'avatar-overlay-open',isOpen:false})},close(){client.close();root.unmount()}};
+      async open(){if(typeof petOpen!=='boolean')throw Error('Pet state is not confirmed');
+        await send({type:'avatar-overlay-open',isOpen:petOpen})},close(){client.close();root.unmount()}};
     render();void client.connect();
   ` }, bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' } });
   const root = await mkdtemp('/tmp/yard-mini-daemon-');
@@ -73,6 +76,7 @@ test('Mini replies with native-host request references from the disposable daemo
   await page.addStyleTag({ content: readFileSync('src/renderer/mini/mini.css', 'utf8') });
   await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
   await page.waitForFunction(() => (window as any).nativeMiniHarness.ready());
+  await page.waitForFunction(() => (window as any).nativeMiniHarness.petReady());
   await page.evaluate(() => (window as any).nativeMiniHarness.open());
   for (const id of ['first', 'second']) fake.send({ id, method: 'item/commandExecution/requestApproval', params: { threadId: 'fixture-thread' } });
   await page.getByRole('button', { name: 'Reply second 1' }).waitFor();

@@ -11,7 +11,8 @@ import type { MiniActionRunner, MiniIdentity, MiniInputDraft, MiniNotificationAc
 import './mini.css';
 
 export type MiniCommand =
-  | { type: 'avatar-overlay-open-state-request' | 'avatar-overlay-open' | 'avatar-overlay-close' | 'avatar-overlay-hide' }
+  | { type: 'avatar-overlay-open-state-request' | 'avatar-overlay-close' | 'avatar-overlay-hide' }
+  | { type: 'avatar-overlay-open'; isOpen: boolean }
   | { type: 'workbench-pet-position'; position: PetPosition };
 
 /** Revision changes only when the parent's host projection has been refreshed. */
@@ -81,6 +82,8 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
   onInputDraftChange, onNotificationAction, onOpenSettings, children, quickChatTarget, onBeforeQuickChatClose,
   onQuickChatTarget, shortcut = true }: StandaloneMiniProps) {
   const [state, setState] = useState<WebPetState | null>(null);
+  const [petStateConfirmed, setPetStateConfirmed] = useState(false);
+  const [petError, setPetError] = useState('');
   const [settings, setSettings] = useState<Record<string, unknown>>(emptySettings);
   const [custom, setCustom] = useState<unknown>(null);
   const [error, setError] = useState('');
@@ -109,6 +112,10 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
   const pickerClose = useRef<HTMLButtonElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
   const stateRef = useRef<WebPetState | null>(null);
+  const confirmedOpen = useRef<boolean | null>(null);
+  const petEpoch = useRef(0);
+  const petRead = useRef<{ id: number; timer: number } | null>(null);
+  const petReadId = useRef(0);
   const settingRevisions = useRef<Record<string, number>>({});
   const mounted = useRef(false);
   const lifecycle = useRef(0);
@@ -131,17 +138,20 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
   const observedBridge = useRef<string | null>(null);
   const requestsRef = useRef(pendingRequests);
   const quickChatHost = quickChatTarget?.hostId;
+  const visibleState = petStateConfirmed ? state : state?.isOpen ? state : null;
+  const visibleError = petError || error;
   const quickChatHostRef = useRef(quickChatHost);
   const barriers = useRef(new Map<string, string | null>());
   const observedConnections = useRef(new Map<string, string>());
   const localEpoch = useRef(0);
+  const petBridgeConnected = useRef(bridgeState === 'connected');
   connectionsRef.current = hostConnections;
   bridgeRef.current = bridgeState;
+  sendRef.current = send;
   requestsRef.current = pendingRequests;
   beforeCloseRef.current = onBeforeQuickChatClose;
   composerMountedRef.current = composerMounted;
   quickChatHostRef.current = quickChatHost;
-  useEffect(() => { sendRef.current = send; }, [send]);
 
   const hostReady = useCallback((hostId: string) => {
     const current = connectionsRef.current[hostId];
@@ -155,6 +165,39 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
 
   const requestReady = useCallback((ref: ServerRequestRef, hostId: string) =>
     ref.hostId === hostId && usable(hostId) && requestsRef.current.some(pending => sameRequestRef(pending, ref)), [usable]);
+
+  const clearPetRead = useCallback(() => {
+    if (petRead.current) window.clearTimeout(petRead.current.timer);
+    petRead.current = null;
+    petReadId.current++;
+  }, []);
+
+  const invalidatePetState = useCallback((message: string) => {
+    clearPetRead();
+    petEpoch.current++;
+    confirmedOpen.current = null;
+    setPetStateConfirmed(false);
+    setPetError(`${message} Mini state is unconfirmed.`);
+    if (composerMountedRef.current) { setRecoveryAvailable(true); setRecovering(true); }
+  }, [clearPetRead]);
+
+  const requestPetState = useCallback((force = false) => {
+    if (bridgeRef.current !== 'connected' || observedBridge.current === 'disconnected' || observedBridge.current === 'connecting') {
+      if (mounted.current) setPetError('Mini connection is unavailable. Mini state is unconfirmed.');
+      return;
+    }
+    if (petRead.current && !force) return;
+    clearPetRead();
+    const id = petReadId.current;
+    const fail = () => {
+      if (!mounted.current || petRead.current?.id !== id) return;
+      invalidatePetState('Mini state could not be confirmed. Please retry.');
+    };
+    petRead.current = { id, timer: window.setTimeout(fail, 10_000) };
+    if (confirmedOpen.current === null) setPetError(previous => previous || 'Mini state is being checked.');
+    try { void Promise.resolve(sendRef.current({ type: 'avatar-overlay-open-state-request' })).catch(fail); }
+    catch { fail(); }
+  }, [clearPetRead, invalidatePetState]);
 
   const invalidate = useCallback((hostId: string | null) => {
     const targets = hostId === null ? new Set(['local', ...Object.keys(connectionsRef.current),
@@ -178,8 +221,9 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
       if (mounted.current) setError('Mini connection is unavailable.');
       throw new Error('Mini connection is unavailable');
     }
+    const epoch = petEpoch.current;
     try { await sendRef.current(message); }
-    catch { if (mounted.current) setError('Mini could not reach the host.'); throw new Error('Mini host request failed'); }
+    catch { if (mounted.current && epoch === petEpoch.current) setError('Mini could not reach the host.'); throw new Error('Mini host request failed'); }
   }, [usable]);
 
   const loadSettings = useCallback(async () => {
@@ -208,6 +252,7 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
   const closeQuickChat = useCallback(async (mode: 'chat' | 'close' | 'hide') => {
     if (transitionRef.current) return false;
     transitionRef.current = true;
+    const epoch = petEpoch.current;
     const input = composerFreezeElement.current;
     if (input) input.inert = true;
     setTransition(true);
@@ -215,6 +260,7 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
     try {
       if (composerMountedRef.current && !await beforeCloseRef.current()) throw new Error('The draft could not be saved.');
       if (mode !== 'chat') {
+        if (epoch !== petEpoch.current) throw new Error('Mini state changed while saving. Your draft is still here.');
         ownHide.current = true;
         const confirmed = new Promise<boolean>(resolve => {
           const timer = window.setTimeout(() => hideConfirmation.current?.(false), 10_000);
@@ -250,10 +296,20 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
   useEffect(() => {
     mounted.current = true;
     lifecycle.current++;
+    if (confirmedOpen.current !== null) invalidatePetState('Mini state is being checked.');
     const unsubscribe = client.subscribe(event => {
-      if (event.type === 'workbench-pet-state') {
-        const next = readPetState(event.state);
+      if (event.type === 'workbench-pet-state' || event.type === 'avatar-overlay-open-state-changed') {
+        if (bridgeRef.current !== 'connected' || observedBridge.current === 'disconnected' || observedBridge.current === 'connecting') return;
+        const full = event.type === 'workbench-pet-state' ? readPetState(event.state) : null;
+        const isOpen = full?.isOpen ?? (event.type === 'avatar-overlay-open-state-changed' && typeof event.isOpen === 'boolean' ? event.isOpen : null);
+        if (isOpen === null || confirmedOpen.current === null && !petRead.current) return;
+        clearPetRead();
+        petEpoch.current++;
+        confirmedOpen.current = isOpen;
+        setPetError('');
+        const next = full ?? (stateRef.current ? { ...stateRef.current, isOpen } : null);
         if (!next) return;
+        setPetStateConfirmed(true);
         const wasOpen = stateRef.current?.isOpen;
         if (!next.isOpen && container.current?.contains(document.activeElement)) previousFocus.current?.focus();
         stateRef.current = next;
@@ -273,27 +329,47 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
         hiding.current = false;
         ownHide.current = false;
         hideConfirmation.current?.(false);
-        setError(typeof event.error === 'string' ? event.error : 'Mini settings could not be saved.');
+        const message = typeof event.error === 'string' ? event.error : 'Mini settings could not be saved.';
+        if (event.stateUnconfirmed === true) {
+          const reading = !!petRead.current;
+          invalidatePetState(message);
+          if (!reading) requestPetState();
+        } else setError(message);
       } else if (event.type === 'connection-state' && typeof event.state === 'string') {
         observedBridge.current = event.state;
-        if (event.state === 'disconnected' || event.state === 'connecting') invalidate(null);
-        else setConnectionVersion(version => version + 1);
+        if (event.state === 'disconnected' || event.state === 'connecting') {
+          invalidate(null);
+          invalidatePetState('Mini connection is unavailable. Retry when the browser reconnects.');
+        } else {
+          setConnectionVersion(version => version + 1);
+          if (event.state === 'connected') requestPetState();
+        }
       } else if (event.type === 'codex-app-server-connection-changed' && typeof event.hostId === 'string') {
         if (typeof event.state === 'string') observedConnections.current.set(event.hostId, event.state);
         if (event.state === 'disconnected' || event.state === 'connecting') invalidate(event.hostId);
         if (event.hostId === 'local' && event.state === 'connected') {
           setConnectionVersion(version => version + 1);
-          void sendCommand({ type: 'avatar-overlay-open-state-request' }).catch(() => {});
+          requestPetState();
           void loadSettings();
           void loadCustom();
         } else if (event.state === 'connected') setConnectionVersion(version => version + 1);
       }
     });
-    void sendCommand({ type: 'avatar-overlay-open-state-request' }).catch(() => {});
+    requestPetState();
     void loadSettings();
     void loadCustom();
-    return () => { mounted.current = false; lifecycle.current++; hideConfirmation.current?.(false); unsubscribe(); };
-  }, [client, invalidate, loadCustom, loadSettings, sendCommand]);
+    return () => { mounted.current = false; lifecycle.current++; clearPetRead(); hideConfirmation.current?.(false); unsubscribe(); };
+  }, [client, clearPetRead, invalidate, invalidatePetState, loadCustom, loadSettings, requestPetState]);
+
+  useEffect(() => {
+    const wasConnected = petBridgeConnected.current;
+    petBridgeConnected.current = bridgeState === 'connected';
+    if (bridgeState !== 'connected') {
+      if (wasConnected || confirmedOpen.current !== null || petRead.current) {
+        invalidatePetState('Mini connection is unavailable. Retry when the browser reconnects.');
+      }
+    } else if (!wasConnected) requestPetState();
+  }, [bridgeState, invalidatePetState, requestPetState]);
 
   useEffect(() => {
     const resize = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
@@ -306,12 +382,19 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
     const listener = (event: KeyboardEvent) => {
       if (!miniShortcut(event, /Mac|iPhone|iPad/.test(navigator.platform))) return;
       event.preventDefault();
-      if (stateRef.current?.isOpen) void closeQuickChat('close');
-      else void sendCommand({ type: 'avatar-overlay-open' }).catch(() => {});
+      const isOpen = confirmedOpen.current;
+      if (isOpen === null) { requestPetState(true); return; }
+      if (isOpen) { void closeQuickChat('close'); return; }
+      const epoch = petEpoch.current;
+      void sendCommand({ type: 'avatar-overlay-open', isOpen }).catch(() => {
+        if (!mounted.current || epoch !== petEpoch.current) return;
+        invalidatePetState('Mini state could not be confirmed. Please retry.');
+        requestPetState();
+      });
     };
     window.addEventListener('keydown', listener);
     return () => window.removeEventListener('keydown', listener);
-  }, [closeQuickChat, sendCommand, shortcut]);
+  }, [closeQuickChat, invalidatePetState, requestPetState, sendCommand, shortcut]);
 
   useEffect(() => {
     if (menu) menuElement.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
@@ -331,10 +414,10 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
   }, [menu]);
 
   useEffect(() => {
-    if (!state?.isOpen) return;
+    if (!petStateConfirmed || !visibleState?.isOpen) return;
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const outside = (event: PointerEvent) => {
-      if (state.visibility !== 'on-demand' || hiding.current || transitionRef.current || !(event.target instanceof Node) || container.current?.contains(event.target)) return;
+      if (visibleState.visibility !== 'on-demand' || hiding.current || transitionRef.current || !(event.target instanceof Node) || container.current?.contains(event.target)) return;
       hiding.current = true;
       void closeQuickChat('hide');
     };
@@ -343,7 +426,7 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
       document.removeEventListener('pointerdown', outside);
       if (container.current?.contains(document.activeElement)) previousFocus.current?.focus();
     };
-  }, [state?.isOpen, state?.visibility, closeQuickChat]);
+  }, [petStateConfirmed, visibleState?.isOpen, visibleState?.visibility, closeQuickChat]);
 
   async function writeSetting(key: typeof settingKeys[number], value: unknown, epoch: number, revision: string) {
     if (epoch !== localEpoch.current || !usable('local') || connectionsRef.current.local?.revision !== revision) throw new Error('Mini connection is unavailable');
@@ -435,7 +518,7 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
   const style = { left, top, width, height, '--yard-pet-width': `${sizeDraft ?? petSize(settings['avatar-overlay-mascot-width-px'])}px` } as CSSProperties;
 
   function pointerDown(event: React.PointerEvent<HTMLButtonElement>) {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || !petStateConfirmed) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     drag.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left, top, moved: false, position: null };
   }
@@ -463,9 +546,9 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
     }
   }
 
-  if (!state?.isOpen && !error && !composerMounted) return null;
+  if (!visibleState?.isOpen && !visibleError && !composerMounted) return null;
   return <aside ref={container} className="yard-mini" data-workbench-mini="" aria-label="Codex Mini" style={style}
-    hidden={!state?.isOpen && !recoveryAvailable && !error} onKeyDown={event => {
+    hidden={!visibleState?.isOpen && !recoveryAvailable && !visibleError} onKeyDown={event => {
       if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.defaultPrevented || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
       if (!menu && !picker && !composer) return;
       event.preventDefault(); event.stopPropagation();
@@ -474,19 +557,19 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
       else void closeQuickChat('chat');
     }}>
     <div className="yard-mini-content">
-      {!state?.isOpen && recoveryAvailable && <div className="yard-mini-error" role="status">
-        Quick chat was hidden. Your draft is available on this page.
+      {!visibleState?.isOpen && recoveryAvailable && <div className="yard-mini-error" role="status">
+        {petStateConfirmed ? 'Quick chat was hidden. Your draft is available on this page.' : 'Mini state is unconfirmed. Your draft is available on this page.'}
         <div><button type="button" onClick={() => { setRecovering(true); setComposer(true); }}>Show Quick chat</button></div>
       </div>}
       {composerMounted && children && <section ref={composerElement} className="yard-mini-composer" aria-label="Mini conversation"
-        hidden={!composer || !state?.isOpen && !recovering}>
+        hidden={!composer || !visibleState?.isOpen && !recovering}>
         <div className="yard-mini-composer-heading"><strong>Quick chat</strong><button type="button" title="Close Quick chat" aria-label="Close Quick chat"
           disabled={transition} onClick={() => { void closeQuickChat('chat'); }}><X size={15} /></button></div>
         {!quickReady && <p className="yard-mini-composer-status" role="status">{!targetReady ? 'Opening conversation...' : quickChatHost ? `${connectionMessage(quickChatHost)}. Quick chat is paused.` : 'Select a conversation to use Quick chat.'}</p>}
         {draftError && <p className="yard-mini-composer-status" role="alert">{draftError}</p>}
         <div ref={composerFreezeElement}><div data-mini-composer-content="" inert={!quickReady || transition}>{children}</div></div>
       </section>}
-      {state?.isOpen && <>
+      {visibleState?.isOpen && <>
         {!localReady && <div className="yard-mini-connection" role="status">{connectionMessage('local')}. Mini host is unavailable.</div>}
         {activities.length > 0 && <div className="yard-mini-activities" aria-label="Recent activity">
           {activities.map(activity => {
@@ -555,8 +638,8 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
           </div>}
         </div>
       </>}
-      {error && <div className="yard-mini-error" role="alert">{error}<div><button type="button" onClick={() => {
-        setError(''); void sendCommand({ type: 'avatar-overlay-open-state-request' }).catch(() => {}); void loadSettings(); void loadCustom();
+      {visibleError && <div className="yard-mini-error" role="alert">{visibleError}<div><button type="button" onClick={() => {
+        setError(''); requestPetState(true); void loadSettings(); void loadCustom();
       }}>Retry</button><button type="button" onClick={() => { void closeQuickChat('close').then(closed => { if (closed) setError(''); }); }}>Hide Mini</button></div></div>}
     </div>
   </aside>;

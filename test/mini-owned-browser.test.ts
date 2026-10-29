@@ -19,7 +19,7 @@ test('Mini preserves the actual composer after failed close, target switch and e
     let pet = {isOpen:true,visibility:'always-visible',position:null};
     const settings={'selected-avatar-id':'codex','avatar-overlay-mascot-width-px':112,'avatar-overlay-pet-visible':true};
     let context = {hostId:'local',threadId:'thread-a',draftId:'draft-a',cwd:'/fixture',placement:'mini'};
-    let controller = null, releaseGate = null, gate = false, holdHide = false;
+    let controller = null, releaseGate = null, gate = false, holdHide = false, holdRead = false;
     const client = {
       subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener)},
       async host(endpoint,params={}) {
@@ -36,9 +36,10 @@ test('Mini preserves the actual composer after failed close, target switch and e
       async reply(){throw Error('Unexpected reply')}
     };
     const send = async message => {calls.messages.push(message);
+      if(message.type==='avatar-overlay-open-state-request'&&holdRead)return;
       if((message.type==='avatar-overlay-close'||message.type==='avatar-overlay-hide')&&holdHide)return;
       if(message.type==='avatar-overlay-close'||message.type==='avatar-overlay-hide')pet={...pet,isOpen:false};
-      if(message.type==='avatar-overlay-open')pet={...pet,isOpen:!pet.isOpen};
+      if(message.type==='avatar-overlay-open'&&message.isOpen===pet.isOpen)pet={...pet,isOpen:!pet.isOpen};
       if(message.type==='workbench-pet-position')pet={...pet,position:message.position};
       emit({type:'workbench-pet-state',state:pet});};
     const connections={local:{state:'connected',fresh:true,revision:'local-1'},'ssh-a':{state:'connected',fresh:true,revision:'remote-1'}};
@@ -64,6 +65,8 @@ test('Mini preserves the actual composer after failed close, target switch and e
       reopen(){pet={...pet,isOpen:true};emit({type:'workbench-pet-state',state:pet})},
       holdHide(){holdHide=true},settleHide(success){holdHide=false;if(success)pet={...pet,isOpen:false};
         emit({type:'workbench-pet-state',state:pet});if(!success)emit({type:'workbench-pet-error',error:'fixture persistence failed'})},
+      unconfirm(){holdRead=true;emit({type:'workbench-pet-error',error:'fixture unconfirmed',stateUnconfirmed:true})},
+      resumeRead(){holdRead=false},
       gate(){gate=true},release(){gate=false;releaseGate?.()},
       remember(){this.input=document.querySelector('.yard-mini-composer textarea')},
       sameInput(){return this.input===document.querySelector('.yard-mini-composer textarea')},
@@ -102,6 +105,26 @@ test('Mini preserves the actual composer after failed close, target switch and e
     await page.locator('.yard-mini-composer-status[role="alert"]').filter({ hasText: '草稿未能保存' }).waitFor();
     assert.equal(await editor.inputValue(), 'unsaved only in the actual composer');
     assert.equal(await page.evaluate(() => (window as any).miniDraftHarness.sameInput()), true);
+
+    await page.evaluate(() => (window as any).miniDraftHarness.unconfirm());
+    await page.getByRole('alert').filter({ hasText: 'fixture unconfirmed' }).waitFor();
+    assert.equal(await editor.inputValue(), 'unsaved only in the actual composer');
+    const beforeUnconfirmed = await page.evaluate(() => (window as any).miniDraftHarness.calls.messages.length);
+    await page.keyboard.press('Meta+Alt+p');
+    await page.waitForFunction((before: number) => (window as any).miniDraftHarness.calls.messages.length > before, beforeUnconfirmed);
+    assert.equal((await page.evaluate(() => (window as any).miniDraftHarness.calls.messages)).slice(beforeUnconfirmed)
+      .some((message: any) => message.type === 'avatar-overlay-open'), false);
+    await page.getByRole('button', { name: 'Hide Mini' }).click();
+    await page.locator('.yard-mini-composer-status[role="alert"]').filter({ hasText: '草稿未能保存' }).waitFor();
+    assert.equal(await editor.inputValue(), 'unsaved only in the actual composer');
+    assert.equal(await page.evaluate(() => (window as any).miniDraftHarness.sameInput()), true);
+    assert.equal((await page.evaluate(() => (window as any).miniDraftHarness.calls.messages))
+      .some((message: any) => message.type === 'avatar-overlay-close'), false);
+    await page.evaluate(() => (window as any).miniDraftHarness.resumeRead());
+    await page.getByRole('button', { name: 'Retry', exact: true }).click();
+    await page.getByRole('button', { name: 'Mini menu' }).waitFor();
+    assert.equal(await editor.inputValue(), 'unsaved only in the actual composer');
+
     await page.getByRole('button', { name: 'Follow B' }).click();
     await page.waitForFunction(() => (window as any).miniDraftHarness.calls.targets.length === 1 &&
       !(document.querySelector('[data-mini-composer-content]')?.parentElement as HTMLElement)?.inert &&
@@ -149,6 +172,23 @@ test('Mini preserves the actual composer after failed close, target switch and e
     assert.equal(await editor.inputValue(), 'unsaved only in the actual composer');
     assert.equal(await page.evaluate(() => (window as any).miniDraftHarness.sameInput()), true);
     await page.getByRole('button', { name: 'Retry', exact: true }).click();
+
+    const hidesBefore = (await page.evaluate(() => (window as any).miniDraftHarness.calls.messages))
+      .filter((message: any) => message.type === 'avatar-overlay-close' || message.type === 'avatar-overlay-hide').length;
+    await page.evaluate(() => (window as any).miniDraftHarness.gate());
+    await page.getByRole('button', { name: 'Mini menu' }).click();
+    await page.getByRole('menuitem', { name: 'Hide Mini' }).click();
+    await page.waitForFunction(() => !!document.querySelector('[data-mini-composer-content]')?.parentElement?.inert);
+    await page.evaluate(() => { (window as any).miniDraftHarness.unconfirm(); (window as any).miniDraftHarness.release(); });
+    await page.locator('.yard-mini-composer-status[role="alert"]').filter({ hasText: 'Mini state changed while saving' }).waitFor();
+    assert.equal((await page.evaluate(() => (window as any).miniDraftHarness.calls.messages))
+      .filter((message: any) => message.type === 'avatar-overlay-close' || message.type === 'avatar-overlay-hide').length, hidesBefore);
+    assert.equal(await editor.inputValue(), 'unsaved only in the actual composer');
+    assert.equal(await page.evaluate(() => (window as any).miniDraftHarness.sameInput()), true);
+    await page.evaluate(() => (window as any).miniDraftHarness.resumeRead());
+    await page.getByRole('button', { name: 'Retry', exact: true }).click();
+    await page.getByRole('button', { name: 'Mini menu' }).waitFor();
+
     await page.evaluate(() => (window as any).miniDraftHarness.gate());
     await page.getByRole('button', { name: 'Close Quick chat' }).click();
     await page.waitForFunction(() => !!document.querySelector('[data-mini-composer-content]')?.parentElement?.inert);
