@@ -8,6 +8,7 @@
 .yard-output-icon { display: grid; place-items: center; width: 40px; height: 40px; flex: none; border-radius: 8px;
   color: var(--yard-muted, #626c69); background: var(--yard-surface, #f3f3f3); }
 .yard-output-icon--website { color: #00aeef; }
+.yard-output-icon--appgen { color: #1683ff; }
 .yard-output-icon--google-document, .yard-output-icon--google-drive { color: #4285f4; }
 .yard-output-icon--google-spreadsheet { color: #188038; }
 .yard-output-icon--google-presentation { color: #e6a000; }

@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, File, FileImage, FileText, Globe, PanelTop, Presentation, Table2 } from 'lucide-react';
+import { ChevronDown, File, FileImage, FileText, Globe, LayoutGrid, PanelTop, Presentation, Table2 } from 'lucide-react';
 import { parse } from 'node-html-parser';
 import type { ThreadSummary, TurnSummary } from '../../../lib/codex-protocol.ts';
 import type { StandaloneMessagesProps, WorkbenchClient } from '../workbench-contract.ts';
 import { projectMessageTurnPreviews } from './message-output-previews.ts';
-import type { MessageArtifactPreview, MessageGooglePreview, MessageOutputDirectory, MessageOutputPreview, MessageWebsitePreview } from './message-output-previews.ts';
+import type { MessageAppgenPreview, MessageArtifactPreview, MessageGooglePreview, MessageOutputDirectory, MessageOutputPreview, MessageWebsitePreview } from './message-output-previews.ts';
 import './message-output-previews.css';
 
 export type MessageArtifactSessionOpen = (value: { hostId: string; threadId: string; artifactRef: string;
@@ -21,9 +21,11 @@ export interface MessageOutputPreviewAuthority {
   canOpenArtifactPage?: boolean;
   /** The current local/SSH transcript is non-shared; shared callers must supply this fact. */
   isSharedConversation?: boolean;
+  /** The actual current 637432221 evaluation; undefined remains unverified. */
+  appgenEnabled?: boolean;
 }
 
-function OutputCard({ entry, open, canOpen, websiteTitle }: { entry: MessageOutputPreview | MessageWebsitePreview | MessageGooglePreview;
+function OutputCard({ entry, open, canOpen, websiteTitle }: { entry: MessageOutputPreview | MessageWebsitePreview | MessageGooglePreview | MessageAppgenPreview;
   open(): void; canOpen: boolean; websiteTitle?: string }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menu = useRef<HTMLDivElement>(null);
@@ -38,18 +40,19 @@ function OutputCard({ entry, open, canOpen, websiteTitle }: { entry: MessageOutp
     document.addEventListener('keydown', escape);
     return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape); };
   }, [menuOpen]);
-  const Icon = entry.kind === 'website' ? Globe : entry.kind === 'spreadsheet' || entry.kind === 'google-drive' && entry.resourceKind === 'spreadsheet' ? Table2
+  const Icon = entry.kind === 'website' ? Globe : entry.kind === 'appgen' ? LayoutGrid : entry.kind === 'spreadsheet' || entry.kind === 'google-drive' && entry.resourceKind === 'spreadsheet' ? Table2
     : entry.kind === 'presentation' || entry.kind === 'google-drive' && entry.resourceKind === 'presentation' ? Presentation
       : entry.kind === 'google-drive' && entry.resourceKind === 'document' ? FileText : entry.kind === 'image' ? FileImage : File;
-  const label = entry.kind === 'website' ? 'Website' : entry.kind === 'google-drive'
+  const label = entry.kind === 'website' ? 'Website' : entry.kind === 'appgen' ? 'Metadata unavailable' : entry.kind === 'google-drive'
     ? ({document:'Google Docs', spreadsheet:'Google Sheets', presentation:'Google Slides', drive:'Google Drive'} as const)[entry.resourceKind]
     : entry.kind === 'spreadsheet' ? 'Spreadsheet' : entry.kind === 'presentation' ? 'Presentation' : entry.kind === 'image' ? 'Image' : 'Document';
-  const name = entry.kind === 'website' ? websiteTitle || 'Web preview' : entry.kind === 'google-drive' ? entry.title : entry.name;
+  const name = entry.kind === 'website' ? websiteTitle || 'Web preview' : entry.kind === 'google-drive' || entry.kind === 'appgen' ? entry.title : entry.name;
   return <div className="yard-output-card">
     <button type="button" className="yard-output-open" aria-label={`Open ${name}`} disabled={!canOpen} onClick={open} />
     <div className="yard-output-description" aria-hidden="true">
-      <span className={`yard-output-icon${entry.kind === 'website' ? ' yard-output-icon--website' : entry.kind === 'google-drive' ? ` yard-output-icon--google-${entry.resourceKind}` : ''}`}>
-        <Icon size={20} strokeWidth={1.5} {...entry.kind === 'google-drive' && entry.resourceKind === 'document' ? {fill:'currentColor', stroke:'white'} : {}} />
+      <span className={`yard-output-icon${entry.kind === 'website' ? ' yard-output-icon--website' : entry.kind === 'appgen' ? ' yard-output-icon--appgen' : entry.kind === 'google-drive' ? ` yard-output-icon--google-${entry.resourceKind}` : ''}`}>
+        <Icon size={20} strokeWidth={entry.kind === 'appgen' ? 0 : 1.5} {...entry.kind === 'appgen' ? {fill:'currentColor'}
+          : entry.kind === 'google-drive' && entry.resourceKind === 'document' ? {fill:'currentColor', stroke:'white'} : {}} />
       </span>
       <span className="yard-output-title"><span title={name}>{name}</span><small>{label}</small></span>
     </div>
@@ -83,16 +86,16 @@ export function MessageOutputPreviews({ client, hostId, thread, turn, authority,
   const threadId = thread.id, cwd = thread.cwd;
   const directory = authority?.outputDirectory;
   const directoryPath = directory?.status === 'known' ? directory.path : undefined;
-  const projection = useMemo(() => projectMessageTurnPreviews(hostId, thread, turn, directory),
-    [hostId, threadId, cwd, turn, directory?.status, directoryPath]);
+  const projection = useMemo(() => projectMessageTurnPreviews(hostId, thread, turn, directory, authority?.appgenEnabled),
+    [hostId, threadId, cwd, turn, directory?.status, directoryPath, authority?.appgenEnabled]);
   const candidates = projection.entries;
   const candidateKey = JSON.stringify(projection);
   const [connectionRevision, setConnectionRevision] = useState(0);
   const [attempt, setAttempt] = useState(0);
   const scope = useMemo(() => ({ client, hostId, threadId, cwd, turnId: turn.id, candidates, website: projection.website,
-    google: projection.google, artifacts: projection.artifacts, connectionRevision, attempt, authority }),
+    google: projection.google, artifacts: projection.artifacts, appgen: projection.appgen, connectionRevision, attempt, authority }),
     [client, hostId, threadId, cwd, turn.id, candidateKey, connectionRevision, attempt, Boolean(authority), authority?.sourceKey,
-      authority?.canOpenArtifactPage, authority?.isSharedConversation]);
+      authority?.canOpenArtifactPage, authority?.isSharedConversation, authority?.appgenEnabled]);
   const current = useRef<typeof scope | null>(scope);
   const [result, setResult] = useState<{ scope: typeof scope; entries: MessageOutputPreview[]; error: string | null } | null>(null);
   const [actionError, setActionError] = useState<{ scope: typeof scope; message: string } | null>(null);
@@ -170,8 +173,8 @@ export function MessageOutputPreviews({ client, hostId, thread, turn, authority,
 
   const visible = result?.scope === scope ? result : null;
   const website = scope.website;
-  if (!visible && !website && !scope.google.length && !scope.artifacts.length && !projection.unavailable && !projection.resourceUncertain && !projection.incomplete) return null;
-  const open = (entry: MessageOutputPreview | MessageWebsitePreview | MessageGooglePreview | MessageArtifactPreview) => {
+  if (!visible && !website && !scope.google.length && !scope.artifacts.length && !scope.appgen.length && !projection.unavailable && !projection.resourceUncertain && !projection.incomplete) return null;
+  const open = (entry: MessageOutputPreview | MessageWebsitePreview | MessageGooglePreview | MessageArtifactPreview | MessageAppgenPreview) => {
     try {
       check(scope);
       if (entry.kind === 'artifact-session') {
@@ -180,8 +183,8 @@ export function MessageOutputPreviews({ client, hostId, thread, turn, authority,
         onOpenArtifactSession({ hostId: scope.hostId, threadId: scope.threadId, artifactRef: entry.artifactRef,
           kind: entry.resourceKind, title: entry.title, ...(entry.pageId ? { pageId: entry.pageId } : {}),
           assertCurrent: () => check(scope) });
-      } else if (entry.kind === 'google-drive') {
-        if (!scope.google.includes(entry)) throw new Error('The original output source changed.');
+      } else if (entry.kind === 'google-drive' || entry.kind === 'appgen') {
+        if (entry.kind === 'google-drive' ? !scope.google.includes(entry) : !scope.appgen.includes(entry)) throw new Error('The original output source changed.');
         if (!onOpenBrowser) throw new Error('Browser preview is unavailable.');
         onOpenBrowser({hostId:scope.hostId, threadId:scope.threadId, url:entry.url, source:'link'});
       } else if (entry.kind === 'website' && entry.target.type === 'url') {
@@ -206,6 +209,8 @@ export function MessageOutputPreviews({ client, hostId, thread, turn, authority,
       canOpen={Boolean(onOpenFileAt || onOpenFile)} open={() => open(entry)} />),
     ...scope.google.map(entry => <OutputCard key={`${connectionRevision}:${attempt}:${entry.url}`} entry={entry}
       canOpen open={() => open(entry)} />),
+    ...scope.appgen.map(entry => <OutputCard key={`${connectionRevision}:${attempt}:site:${entry.projectId}`} entry={entry}
+      canOpen open={() => open(entry)} />),
     ...scope.artifacts.map(entry => <ArtifactCard key={`${connectionRevision}:${attempt}:${entry.pageId ? `page:${entry.pageId}` : `artifact:${entry.artifactRef}`}`}
       entry={entry} canOpen={entry.pageId ? authority?.canOpenArtifactPage === true
         : scope.hostId === 'local' && Boolean(scope.threadId) && !authority?.isSharedConversation} open={() => open(entry)} />),
@@ -213,12 +218,12 @@ export function MessageOutputPreviews({ client, hostId, thread, turn, authority,
       websiteTitle={websiteTitle?.scope === scope ? websiteTitle.title : undefined}
       canOpen={website.target.type === 'url' || Boolean(onOpenFileAt || onOpenFile)} open={() => open(website)} />] : []),
   ];
-  const collapsed = scope.artifacts.length > 0 && cards.length > 4 && expandedScope !== scope;
+  const collapsed = (scope.artifacts.length > 0 || scope.appgen.length > 0) && cards.length > 4 && expandedScope !== scope;
   return <div className="yard-output-previews" data-markdown-copy="exclude">
     {collapsed ? cards.slice(0, 3) : cards}
     {collapsed && <button type="button" className="yard-output-more" onClick={() => setExpandedScope(scope)}>Show {cards.length - 3} more</button>}
     {projection.unavailable && <div className="yard-output-error" role="status">Could not verify the output directory.</div>}
-    {projection.resourceUncertain && <div className="yard-output-error" role="status">Could not verify app-generated output precedence for this website.</div>}
+    {projection.resourceUncertain && <div className="yard-output-error" role="status">Could not verify app-generated output availability or website precedence.</div>}
     {projection.incomplete && <div className="yard-output-error" role="status">The output cannot be verified until the turn history is complete.</div>}
     {visible?.error && <div className="yard-output-error" role="alert">Could not check output files: {visible.error}{' '}
       <button type="button" onClick={() => { current.current = null; setAttempt(value => value + 1); }}>Retry</button></div>}

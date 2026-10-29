@@ -2,7 +2,7 @@ import type { ThreadSummary, TurnSummary } from '../../../lib/codex-protocol.ts'
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { directiveFromMarkdown } from 'mdast-util-directive';
 import { directive } from 'micromark-extension-directive';
-import { projectThreadSummaryFileOutputs } from '../app/thread-summary-file-outputs.ts';
+import { projectThreadSummaryFileOutputs, projectTurnAppgenResources } from '../app/thread-summary-file-outputs.ts';
 import { normalizeFileCitationEscapes, outputFileCitationReferences } from '../markdown/file-citations.ts';
 
 const extensions = new Set(['avif', 'csv', 'doc', 'docx', 'gif', 'jpeg', 'jpg', 'md', 'mdx', 'pdf', 'png',
@@ -15,6 +15,7 @@ type GoogleKind = 'document' | 'spreadsheet' | 'presentation' | 'drive';
 export type MessageGooglePreview = { kind: 'google-drive'; resourceKind: GoogleKind; url: string; title: string };
 export type MessageArtifactPreview = { kind: 'artifact-session'; resourceKind: 'spreadsheet' | 'presentation';
   artifactRef: string; title: string; pageId?: string };
+export type MessageAppgenPreview = { kind: 'appgen'; projectId: string; url: string; title: string };
 
 interface MarkdownNode {
   type: string; name?: string; url?: string; value?: string; alt?: string | null;
@@ -247,12 +248,12 @@ export function projectMessageOutputPreviews(turn: TurnSummary, cwd: string): Me
 
 /** Reuse the existing single-turn output projection for website and Markdown-link precedence. */
 export function projectMessageTurnPreviews(hostId: string, thread: ThreadSummary, turn: TurnSummary,
-  directory?: MessageOutputDirectory): { entries: MessageOutputPreview[]; website: MessageWebsitePreview | null; google: MessageGooglePreview[];
-    artifacts: MessageArtifactPreview[]; unavailable: boolean;
+  directory?: MessageOutputDirectory, appgenEnabled?: boolean): { entries: MessageOutputPreview[]; website: MessageWebsitePreview | null; google: MessageGooglePreview[];
+    artifacts: MessageArtifactPreview[]; appgen: MessageAppgenPreview[]; unavailable: boolean;
     resourceUncertain: boolean; incomplete: boolean } {
   const all = projectMessageOutputPreviews(turn, thread.cwd);
   const restricted = restrictMessageOutputDirectory(all, thread.cwd, directory);
-  if (turn.status !== 'completed' && turn.status !== 'failed') return { ...restricted, website: null, google: [], artifacts: [], resourceUncertain: false, incomplete: false };
+  if (turn.status !== 'completed' && turn.status !== 'failed') return { ...restricted, website: null, google: [], artifacts: [], appgen: [], resourceUncertain: false, incomplete: false };
   const normalizedTurn = turn.status === 'failed' ? { ...turn, status: 'completed' as const } : turn;
   // The original edited-path collector includes delete paths; the Summary
   // projector otherwise omits them, so preserve them for website selection.
@@ -264,10 +265,13 @@ export function projectMessageTurnPreviews(hostId: string, thread: ThreadSummary
         ? { ...change, kind: { ...kind, type: 'add' } } : change;
     }) }) };
   const project = (outputDirectory: MessageOutputDirectory, value = websiteTurn) => projectThreadSummaryFileOutputs({ hostId,
-    thread: { ...thread, turns: [value] }, historyComplete: value.itemsView === 'full', streamGap: false, outputDirectory });
+    thread: { ...thread, turns: [value] }, historyComplete: value.itemsView === 'full', streamGap: false, outputDirectory, appgenEnabled });
   const unrestricted = project({ status: 'none' });
   const selected = directory && directory.status !== 'none' ? project(directory) : unrestricted;
   const artifacts = unrestricted.gaps.includes('assistant-envelope-unsupported') ? [] : artifactPreviews(normalizedTurn);
+  const appgenCandidates = unrestricted.gaps.includes('assistant-envelope-unsupported') ? [] : projectTurnAppgenResources(normalizedTurn.items);
+  const appgen: MessageAppgenPreview[] = normalizedTurn.itemsView === 'full' && appgenEnabled === true
+    ? appgenCandidates.filter(entry => entry.hasMcp !== true).map(({projectId, url, title}) => ({kind:'appgen', projectId, url, title})) : [];
   const unknownDirectory = directory?.status === 'unknown'
     || directory?.status === 'known' && selected.gaps.includes('invalid-output-directory');
   const unrestrictedFileWebsite = unrestricted.websites.some(site => site.target.type === 'file');
@@ -283,16 +287,17 @@ export function projectMessageTurnPreviews(hostId: string, thread: ThreadSummary
   const website = !entries.length && !artifacts.length && !unavailable && site
     ? { kind: 'website' as const, target: site.target.type === 'url'
       ? { type: 'url' as const, url: site.target.url } : { type: 'file' as const, path: site.target.path } } : null;
-  const resourceUncertain = !entries.length && (unknownDirectory && !unavailable ? unrestricted : selected).gaps.includes('website-appgen-unknown');
+  const resourceUncertain = appgenEnabled === undefined && (appgenCandidates.length > 0
+    || !entries.length && (unknownDirectory && !unavailable ? unrestricted : selected).gaps.includes('website-appgen-unknown'));
   // A partial turn may be missing a higher-priority output. This projection is
   // only used to explain why the candidate is not actionable.
   const partial = normalizedTurn.itemsView !== 'full' && !entries.length && !unavailable
     ? project(directory?.status === 'known' ? directory : { status: 'none' }, { ...websiteTurn, itemsView: 'full' }) : null;
   const incomplete = Boolean(partial && (partial.websites.length || partial.gaps.includes('website-appgen-unknown')
     || googlePreviews({ ...normalizedTurn, itemsView: 'full' }).length
-    || artifactPreviews({ ...normalizedTurn, itemsView: 'full' }).length));
+    || artifactPreviews({ ...normalizedTurn, itemsView: 'full' }).length || appgenEnabled === true && appgenCandidates.length));
   const google = unrestricted.gaps.includes('assistant-envelope-unsupported') ? [] : googlePreviews(normalizedTurn);
-  return { entries, website, google, artifacts, unavailable, resourceUncertain, incomplete };
+  return { entries, website, google, artifacts, appgen, unavailable, resourceUncertain, incomplete };
 }
 
 /** Apply the projectless output-directory fact supplied by the original parent. */

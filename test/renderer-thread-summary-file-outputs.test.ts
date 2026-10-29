@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ThreadItemSummary, ThreadSummary, TurnSummary } from '../lib/codex-protocol.ts';
-import { projectThreadSummaryFileOutputs } from '../src/renderer/app/thread-summary-file-outputs.ts';
+import { projectThreadSummaryFileOutputs, projectTurnAppgenResources } from '../src/renderer/app/thread-summary-file-outputs.ts';
 import type { SummaryOutputDirectory } from '../src/renderer/app/thread-summary-file-outputs.ts';
 
 const message = (id: string, text: string): ThreadItemSummary => ({ id, type: 'agentMessage', text });
@@ -11,6 +11,43 @@ const thread = (turns: TurnSummary[], cwd = '/workspace'): ThreadSummary =>
   ({ id: 'thread-1', name: null, cwd, turns, status: { type: 'idle' } });
 const output = (value: ThreadSummary | null, outputDirectory: SummaryOutputDirectory = { status: 'none' }, hostId = 'ssh-a') =>
   projectThreadSummaryFileOutputs({ hostId, thread: value, historyComplete: true, streamGap: false, outputDirectory });
+
+test('Sites receipt projection follows identity, URL order, deduplication and verified gate precedence', () => {
+  const site = (id: string, content: Record<string, unknown>, extra: Record<string, unknown> = {}): ThreadItemSummary =>
+    ({id, type:'mcpToolCall', server:'codex_apps', tool:'sites.get_site', status:'completed', error:null,
+      arguments:{}, result:{content:[], structuredContent:content}, ...extra});
+  const items = [
+    site('old', {project_id:'one',current_live_url:'https://old.invalid/',status:'succeeded',has_mcp:false}),
+    site('other', {project_id:'two',current_preview_url:'https://preview.invalid/two',title:'Two'}),
+    site('new', {project_id:'one',current_live_url:'https://new.invalid/one',current_preview_url:'https://preview.invalid/one',title:' One '}),
+    site('fallback', {id:'three',slug:'new',url:'https://site.invalid/three'}),
+    site('nested', {result:{structured_content:{url:'https://site.invalid/four',title:'Four'}}}, {arguments:{project_id:'four'}}),
+    site('context', {project_id:'context',url:'https://site.invalid/context'},
+      {server:'other',tool:'invoke',appContext:{resourceUri:'connectors://sites/a/sites_get_site'}}),
+    site('local', {project_id:'local',url:'http://localhost:4000/'}),
+    site('missing-id', {url:'https://site.invalid/no-id'}),
+    site('failed', {project_id:'failed',url:'https://site.invalid/failed'}, {status:'failed'}),
+    site('error', {project_id:'error',url:'https://site.invalid/error'}, {error:{message:'failed'}}),
+    site('wrong-tool', {project_id:'wrong',url:'https://site.invalid/wrong'}, {server:'other',tool:'create'}),
+    site('hidden', {project_id:'hidden',url:'https://site.invalid/hidden',mcp_connection:{}}),
+    site('hidden-latest', {project_id:'hidden',url:'https://site.invalid/latest'}),
+  ];
+  assert.deepEqual(projectTurnAppgenResources(items), [
+    {projectId:'two',url:'https://preview.invalid/two',title:'Two'},
+    {projectId:'one',url:'https://new.invalid/one',title:'One',hasMcp:false},
+    {projectId:'three',url:'https://site.invalid/three',title:'Site'},
+    {projectId:'four',url:'https://site.invalid/four',title:'Four'},
+    {projectId:'context',url:'https://site.invalid/context',title:'Site'},
+    {projectId:'hidden',url:'https://site.invalid/latest',title:'Site',hasMcp:true},
+  ]);
+  const value = thread([turn('site', [site('hidden', {project_id:'hidden',url:'https://site.invalid/',mcp_connection:{},
+    schedule_suggestion:{title:'Run',prompt:'Do it'}}), message('answer', 'http://localhost:5000/')])]);
+  const projection = (appgenEnabled?: boolean) => projectThreadSummaryFileOutputs({hostId:'local',thread:value,
+    historyComplete:true,streamGap:false,outputDirectory:{status:'none'},appgenEnabled});
+  assert.ok(projection().gaps.includes('website-appgen-unknown'));
+  assert.equal(projection(true).websites.length, 0);
+  assert.equal(projection(false).websites.length, 1);
+});
 
 test('completed turn citations and final document links preserve original identities, order and exclusions', () => {
   const value = thread([

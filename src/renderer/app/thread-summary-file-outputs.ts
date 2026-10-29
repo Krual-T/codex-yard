@@ -168,12 +168,66 @@ function scanMessage(text: string, itemId: string, last: boolean, scan: Scan, ga
 
 function possibleAppgen(item: ThreadItemSummary): boolean {
   if (item.type !== 'mcpToolCall' || item.status === 'failed' || item.error != null) return false;
+  const appContext = record(item.appContext);
   const uri = typeof item.invocationResourceUri === 'string' ? item.invocationResourceUri
+    : typeof appContext?.resourceUri === 'string' ? appContext.resourceUri
     : typeof item.mcpAppResourceUri === 'string' ? item.mcpAppResourceUri : '';
   return item.server === 'codex_apps' && typeof item.tool === 'string' && /^sites[._]/u.test(item.tool)
     || uri.startsWith('connectors://sites/') || uri.startsWith('/sites/')
     || Array.isArray(item.toolIcons) && item.toolIcons.includes('/images/ecosystem/apps/appgarden/icon.png')
       && /^\/(connector_[^/]+)\/implicit_link::\1\/[^/]+$/u.test(uri);
+}
+
+export type SummaryAppgenResource = { projectId: string; url: string; title: string; hasMcp?: boolean };
+
+/** Project successful Sites receipts from a finished turn with the original identity and URL priority. */
+export function projectTurnAppgenResources(items: readonly ThreadItemSummary[]): SummaryAppgenResource[] {
+  const results: SummaryAppgenResource[] = [];
+  const seen = new Map<string, SummaryAppgenResource>();
+  for (let index = items.length - 1; index >= 0; index--) {
+    const item = items[index];
+    if (!item || !possibleAppgen(item)) continue;
+    const result = record(item.result);
+    if (!result || item.error != null) continue;
+    const structured = result.structuredContent;
+    const wrapper = record(structured), nested = record(wrapper?.result);
+    const content = record(wrapper?.structuredContent ?? wrapper?.structured_content
+      ?? nested?.structuredContent ?? nested?.structured_content ?? wrapper?.result ?? structured);
+    if (!content) continue;
+    const urls = [content.current_live_url, content.current_preview_url, content.deployment_url, content.url];
+    let selected: string | undefined;
+    for (const value of urls) {
+      if (typeof value !== 'string') continue;
+      try {
+        const url = new URL(value), host = url.hostname.toLowerCase();
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || host === 'localhost'
+          || host.endsWith('.localhost') || host === '127.0.0.1' || host === '0.0.0.0' || host === '[::1]') continue;
+        selected = url.href; break;
+      } catch { /* Ignore invalid receipt URLs. */ }
+    }
+    if (!selected) continue;
+    const args = record(item.arguments);
+    const projectId = typeof content.project_id === 'string' ? content.project_id
+      : typeof args?.project_id === 'string' ? args.project_id
+        : (typeof content.current_live_url === 'string' || typeof content.current_preview_url === 'string' || typeof content.slug === 'string')
+          && typeof content.id === 'string' ? content.id : undefined;
+    if (projectId === undefined) continue;
+    const connection = record(content.mcp_connection);
+    const hasConnection = connection != null && (connection.plugin_id == null
+      || typeof connection.plugin_id === 'string' && connection.plugin_id.length > 0);
+    const hasMcp = hasConnection ? true : content.status === 'succeeded' && typeof content.has_mcp === 'boolean'
+      ? content.has_mcp : undefined;
+    const existing = seen.get(projectId);
+    if (existing) {
+      if (existing.hasMcp === undefined && hasMcp !== undefined) existing.hasMcp = hasMcp;
+      continue;
+    }
+    const resource: SummaryAppgenResource = { projectId, url: selected,
+      title: typeof content.title === 'string' && content.title.trim() || 'Site', ...(hasMcp === undefined ? {} : { hasMcp }) };
+    seen.set(projectId, resource);
+    results.push(resource);
+  }
+  return results.reverse();
 }
 
 function requiresAssistantPreprocessing(text: string): boolean {
@@ -199,8 +253,9 @@ function localWebsite(text: string): string | null {
 }
 
 /** Project known original local-output syntax. Callers verify existence and retain all other sources. */
-export function projectThreadSummaryFileOutputs({ hostId, thread, historyComplete, streamGap, outputDirectory }: {
+export function projectThreadSummaryFileOutputs({ hostId, thread, historyComplete, streamGap, outputDirectory, appgenEnabled }: {
   hostId: string; thread: ThreadSummary | null; historyComplete: boolean; streamGap: boolean; outputDirectory: SummaryOutputDirectory;
+  appgenEnabled?: boolean;
 }): SummaryFileOutputProjection {
   const gaps = new Set<SummaryFileOutputGap>();
   const result: SummaryFileOutputProjection = { scope: 'local-file-candidates', ordered: [], entries: [], websites: [], gaps: [] };
@@ -283,7 +338,8 @@ export function projectThreadSummaryFileOutputs({ hostId, thread, historyComplet
     }
     const html = !invalidChange && changes.size === 1 ? [...changes.values()][0] : undefined;
     if (!url && !html) continue;
-    if (items.some(possibleAppgen)) { gaps.add('website-appgen-unknown'); continue; }
+    if (appgenEnabled === undefined && items.some(possibleAppgen)) { gaps.add('website-appgen-unknown'); continue; }
+    if (appgenEnabled === true && projectTurnAppgenResources(items).length > 0) continue;
     if (url && finalMessage && !seen.has(`url:${url}`)) {
       seen.add(`url:${url}`);
       const site: SummaryWebsiteCandidate = { kind: 'website', target: { type: 'url', url }, source: source(turn.id, finalMessage.id) };

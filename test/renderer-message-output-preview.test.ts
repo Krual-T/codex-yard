@@ -181,6 +181,31 @@ test('live artifact output coexists with file and Google resources and suppresse
   assert.equal(withFile.website, null);
 });
 
+test('Sites output honors the verified gate, completion, hidden MCP and other output families', () => {
+  const site = {id:'site',type:'mcpToolCall',server:'codex_apps',tool:'sites.get_site',status:'completed',error:null,
+    arguments:{},result:{content:[],structuredContent:{project_id:'project',current_live_url:'https://site.invalid/path',title:'Site title'}}};
+  const base = turn('completed', [`${citation('report.pdf')} ${liveCitation('sheet')} http://localhost:19876/`]);
+  const value = {...base,items:[site,...base.items]};
+  const run = (candidate: TurnSummary, enabled?: boolean) => projectMessageTurnPreviews('local', thread(candidate), candidate, undefined, enabled);
+  assert.deepEqual(run(value, true).appgen, [{kind:'appgen',projectId:'project',url:'https://site.invalid/path',title:'Site title'}]);
+  assert.equal(run(value, true).entries.length, 1);
+  assert.equal(run(value, true).artifacts.length, 1);
+  assert.equal(run(value, true).website, null);
+  assert.equal(run(value, false).appgen.length, 0);
+  assert.equal(run(value).resourceUncertain, true);
+  assert.equal(run({...value,status:'inProgress'}, true).appgen.length, 0);
+  assert.equal(run({...value,status:'failed'}, true).appgen.length, 1);
+  assert.equal(run({...value,items:[{...site,status:'inProgress'},...base.items]}, true).appgen.length, 1);
+  assert.equal(run({...value,itemsView:'summary'}, true).appgen.length, 0);
+  const hidden = {...site,result:{content:[],structuredContent:{project_id:'project',url:'https://site.invalid/',
+    status:'succeeded',has_mcp:true,schedule_suggestion:{title:'Run',prompt:'Run a check'}}}};
+  const websiteTurn = turn('completed', ['http://localhost:19876/']);
+  const hiddenTurn = {...websiteTurn,items:[hidden,...websiteTurn.items]};
+  assert.equal(run(hiddenTurn, true).appgen.length, 0);
+  assert.equal(run(hiddenTurn, true).website, null);
+  assert.ok(run(hiddenTurn, false).website);
+});
+
 type Pending = { endpoint: string; params: { hostId: string; paths?: string[]; path?: string }; dispatched: boolean; denied: boolean };
 declare global {
   interface Window {
@@ -189,7 +214,7 @@ declare global {
       render: (options: { host?: string; threadId?: string; actualThreadId?: string; cwd?: string; status?: string; texts?: string[];
         onOpen?: 'at' | 'plain' | 'throw' | 'none'; authority?: 'sync' | 'thenable'; sourceKey?: string;
         onBrowser?: 'normal' | 'throw' | 'none'; items?: Record<string, unknown>[]; itemsView?: string;
-        onArtifact?: 'normal' | 'throw' | 'none'; canOpenArtifactPage?: boolean; isSharedConversation?: boolean;
+        onArtifact?: 'normal' | 'throw' | 'none'; canOpenArtifactPage?: boolean; isSharedConversation?: boolean; appgenEnabled?: boolean;
         directory?: {status:'none'} | {status:'known';path:string} | {status:'unknown'} }) => void;
       renderBasicHtml: (text: string) => void;
       renderStandaloneMarkdown: (text: string) => void;
@@ -229,7 +254,7 @@ before(async () => {
       render(options={}) {
         const {host='ssh-one',threadId='thread-one',actualThreadId=threadId,cwd='/work',status='completed',
           texts=[':codex-file-citation{path="report.md" purpose="output"}'],onOpen='at',onBrowser='normal',authority,sourceKey='one',directory,
-          items,itemsView='full',onArtifact='normal',canOpenArtifactPage,isSharedConversation} = options;
+          items,itemsView='full',onArtifact='normal',canOpenArtifactPage,isSharedConversation,appgenEnabled} = options;
         const thread = {id:actualThreadId,cwd,name:null,status:{type:'idle'},turns:[{id:'turn-one',status,itemsView,
           items:items ?? texts.map((text,i) => ({id:'assistant-'+i,type:'agentMessage',text}))}]};
         const onOpenFileAt = onOpen === 'none' || onOpen === 'plain' ? undefined : location => {
@@ -243,7 +268,7 @@ before(async () => {
           if (onArtifact === 'throw') throw Error('Original artifact action rejected');
           const {assertCurrent, ...target} = location; artifactChecks.push(assertCurrent); calls.artifacts.push(target);
         };
-        const outputPreviewAuthority = authority ? {sourceKey, outputDirectory:directory, canOpenArtifactPage, isSharedConversation, assertCurrent:() => {
+        const outputPreviewAuthority = authority ? {sourceKey, outputDirectory:directory, canOpenArtifactPage, isSharedConversation, appgenEnabled, assertCurrent:() => {
           if (!authorityValid) throw Error('Original page authority revoked');
           if (authority === 'thenable') return Promise.resolve();
         }} : undefined;
@@ -297,6 +322,49 @@ async function newPage(width = 1280): Promise<{ page: Page; errors: string[] }> 
 async function pending(page: Page, count: number) {
   await page.waitForFunction(n => window.outputHarness.calls.pending.length === n, count);
 }
+
+test('Sites card requires the verified gate and opens the original URL under its source authority',
+  { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
+    const { page, errors } = await newPage(390);
+    try {
+      const site = {id:'site',type:'mcpToolCall',server:'codex_apps',tool:'sites.get_site',status:'completed',error:null,
+        arguments:{},result:{content:[],structuredContent:{project_id:'fixture-project',current_live_url:'https://example.invalid/fixture?q=1',title:'Fixture site'}}};
+      const answer = {id:'answer',type:'agentMessage',text:'Done. http://localhost:19876/'};
+      await page.evaluate(items => window.outputHarness.render({host:'local',authority:'sync',items}), [site,answer]);
+      await page.getByRole('status').filter({hasText:'Could not verify app-generated'}).waitFor();
+      assert.equal(await page.getByRole('button', {name:'Open Fixture site'}).count(), 0);
+      await page.evaluate(items => window.outputHarness.render({host:'local',authority:'sync',appgenEnabled:true,items}), [site,answer]);
+      const card = page.locator('.yard-output-card').filter({hasText:'Fixture site'});
+      const open = card.getByRole('button', {name:'Open Fixture site'});
+      await open.waitFor();
+      assert.match(await card.innerText(), /Metadata unavailable/);
+      assert.equal(await card.locator('.yard-output-icon--appgen svg').count(), 1);
+      assert.equal(await card.locator('.yard-output-icon--appgen svg rect').count(), 4);
+      assert.equal(await card.getByRole('button', {name:'Open in'}).count(), 1);
+      assert.equal(await page.getByRole('button', {name:'Open Web preview'}).count(), 0);
+      await open.click();
+      assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.browsers), [
+        {hostId:'local',threadId:'thread-one',url:'https://example.invalid/fixture?q=1',source:'link'},
+      ]);
+      await page.evaluate(() => window.outputHarness.setAuthority(false));
+      await open.click();
+      await page.getByRole('alert').filter({hasText:'Original page authority revoked'}).waitFor();
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.browsers)).length, 1);
+      await page.evaluate(items => {window.outputHarness.setAuthority(true);
+        window.outputHarness.render({host:'local',authority:'sync',appgenEnabled:false,items});}, [site,answer]);
+      await page.getByRole('button', {name:'Open Web preview'}).waitFor();
+      assert.equal(await page.getByRole('button', {name:'Open Fixture site'}).count(), 0);
+      await page.evaluate(items => window.outputHarness.render({host:'local',authority:'sync',appgenEnabled:true,items}), [site,answer]);
+      await open.waitFor();
+      await page.evaluate(() => {
+        window.outputHarness.emit('codex-app-server-connection-changed', 'local');
+        (document.querySelector('[aria-label="Open Fixture site"]') as HTMLButtonElement).click();
+      });
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.browsers)).length, 1);
+      assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.pending), []);
+      assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+  });
 
 test('inline live citations capture the original message and connection authority',
   { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
