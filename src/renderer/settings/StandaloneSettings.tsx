@@ -58,7 +58,6 @@ export const settingsSections: SettingsSection[] = [
   { id: 'billing', title: 'Billing', group: 'Data' },
   { id: 'time-management', title: 'Time management', group: 'Data' },
   { id: 'extension', title: 'Extension', group: 'Data' },
-  { id: 'pets', title: 'Pets', group: 'Data' },
   { id: 'open-source-licenses', title: 'Open source licenses', group: 'Data' },
 ];
 
@@ -79,7 +78,6 @@ const remainingSections: Record<string, string> = {
   'billing': 'Billing information cannot be managed from this page yet.',
   'time-management': 'Time management controls cannot be managed from this page yet.',
   'extension': 'Extension settings cannot be managed from this page yet.',
-  'pets': 'Pet selection and appearance cannot be managed from this page yet.',
   'open-source-licenses': 'Third-party notices cannot be loaded from this page yet.',
 };
 
