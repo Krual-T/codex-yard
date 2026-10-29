@@ -995,13 +995,6 @@ export async function createNativeWorkbench(options: Options = {}) {
         }
         result = { ...record(result), yardConfigSource: readSource };
       }
-      // The renderer's browser.in-app capability reads experimentalFeature/list.
-      // Manual Chrome transport includes pairing an access computer, even when
-      // the optional service-machine Chrome is not configured.
-      if (method === 'experimentalFeature/list') {
-        const features = Array.isArray(record(result).data) ? record(result).data as ObjectValue[] : [];
-        result = { ...record(result), data: features.map(feature => feature.name === 'in_app_browser' ? { ...feature, enabled: true } : feature) };
-      }
       if (method === 'getAuthStatus') result = { ...record(result), authToken: null };
       send(client, { type: 'mcp-response', hostId, message: { id, result }, eventCursor: response.eventCursor });
       return;
