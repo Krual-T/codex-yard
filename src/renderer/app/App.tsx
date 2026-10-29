@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import type { ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { ComposerDraft, MessageEditOrigin, ServerRequestRef, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
 import { StandaloneComposer, bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from '../composer/StandaloneComposer.tsx';
-import type { ComposerDraftController, ComposerDraftLease, ComposerDraftSnapshot, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
+import type { ComposerDraftController, ComposerDraftLease, ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
 import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
 import type { MessageEditNavigationController, MessageEditNavigationLease } from '../messages/use-message-editing.ts';
 import { StandaloneGoal } from '../composer/StandaloneGoal.tsx';
@@ -86,6 +86,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [hostStatuses, setHostStatuses] = useState<Record<string, string>>({});
   const status = bridgeStatus === 'connected' ? hostStatuses[current.hostId] ?? 'connecting' : bridgeStatus;
   const connectionReadGeneration = useRef(0);
+  const transportIdentity = useRef({ bridge: 'connecting', bridgeRevision: 0, hosts: {} as Record<string, { state: string; revision: number }> });
+  const mainGrantRevision = useRef(0);
+  const mainSubmissionAuthorities = useRef(new WeakMap<() => void, { acceptCreated(threadId: string, navigation: number): void }>());
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);
   const [workspace, setWorkspace] = useState('');
@@ -352,6 +355,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     setNavigationFactsEpoch(value => value + 1);
     const unsubscribe = client.subscribe(event => {
       if (event.type === 'connection-state') {
+        transportIdentity.current.bridge = String(event.state); transportIdentity.current.bridgeRevision++;
         connectionReadGeneration.current++;
         setBridgeStatus(String(event.state)); setSettingsSourceEpoch(value => value + 1);
         hostCatalogRead.current++; hostCatalogConfirmed.current = false; setHostCatalogReady(false);
@@ -367,6 +371,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       if (event.type === 'codex-app-server-connection-changed' && typeof event.hostId === 'string') {
         connectionReadGeneration.current++;
         const hostId = event.hostId, state = String(event.state);
+        transportIdentity.current.hosts[hostId] = { state, revision: (transportIdentity.current.hosts[hostId]?.revision ?? 0) + 1 };
         setHostStatuses(previous => previous[hostId] === state ? previous : { ...previous, [hostId]: state });
         if (hostId === routeRef.current.hostId) {
           setSettingsSourceEpoch(value => value + 1);
@@ -424,6 +429,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     let active = true;
     void client.host<{ state: string }>('app-server-connection-state', { hostId }).then(value => {
       if (active && generation === connectionReadGeneration.current) {
+        const previous = transportIdentity.current.hosts[hostId];
+        transportIdentity.current.hosts[hostId] = { state: value.state, revision: previous?.revision ?? 0 };
         setHostStatuses(previous => ({ ...previous, [hostId]: value.state }));
       }
     }).catch(cause => { if (active && generation === connectionReadGeneration.current) setError(String(cause)); });
@@ -544,9 +551,24 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   };
   const submit = async (draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, origin?: MessageEditOrigin,
     description?: ComposerSubmissionDescription, retry?: SendIntent,
-    visualizationSubmission?: { hostId: string; threadId: string; path: string; signal: AbortSignal }, prepareEdit?: () => Promise<void>) => {
+    visualizationSubmission?: { hostId: string; threadId: string; path: string; signal: AbortSignal }, prepareEdit?: () => Promise<void>,
+    earlyAuthority?: () => void) => {
     if (inFlight.current) throw new Error('正在提交，请稍候。');
     if (loading) throw new Error('会话仍在加载，请稍候。');
+    if (!origin) {
+      if (!description || !earlyAuthority && !retry && !visualizationSubmission) throw new Error('原提交权限尚未捕获，未发送。');
+      if (!earlyAuthority) {
+        let owner = description.owner;
+        if (retry?.owner.threadId === null && retry.threadId && retry.threadId === current.threadId && retry.created?.thread.id === current.threadId) {
+          const actual = composerController.current?.snapshot()?.owner;
+          if (!actual || actual.hostId !== retry.owner.hostId || actual.threadId !== retry.threadId || actual.draftId !== retry.owner.draftId
+            || sendBindings.current[sendThreadKey(actual.hostId, retry.threadId)] !== actual.draftId) throw new Error('原新会话的草稿绑定无法核对，未发送。');
+          owner = actual;
+        }
+        earlyAuthority = captureMainSubmissionAuthority(owner);
+      }
+      earlyAuthority();
+    }
     origin = origin && structuredClone(origin);
     const assertEditAuthority = origin && editAccess.capture(origin);
     const editConnectionRevision = origin && sessions.view(origin).connectionRevision;
@@ -556,9 +578,16 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     let intent: SendIntent | undefined;
     let expectedNavigation = navigationGeneration.current;
     const hostId = current.hostId;
+    const originalBridge = transportIdentity.current.bridgeRevision, originalHost = transportIdentity.current.hosts[hostId]?.revision;
+    const originalGrant = mainGrantRevision.current;
     const allowFirstTurn = !origin && action.type === 'send';
     const activeCwd = retry?.cwd ?? (thread?.cwd || cwd || workspace);
     const requireCurrent = (threadId: string | null) => {
+      earlyAuthority?.();
+      const connection = transportIdentity.current;
+      if (connection.bridge !== 'connected' || connection.bridgeRevision !== originalBridge
+        || connection.hosts[hostId]?.state !== 'connected' || connection.hosts[hostId]?.revision !== originalHost
+        || mainGrantRevision.current !== originalGrant) throw Object.assign(new Error('原连接或输入使用权已改变，原稿已保留，未发送。'), { uncertain: false });
       if (origin && sessions.view(origin).connectionRevision !== editConnectionRevision) {
         throw Object.assign(new Error('消息编辑的原连接已改变，编辑稿已保留，未发送。'), { uncertain: false });
       }
@@ -606,14 +635,22 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         if (!intent?.projectId) return;
         const state = await client.host<ProjectState>('thread-project-state');
         if (!projectsForHost(state, hostId).some(project => project.id === intent!.projectId)) throw new Error('原选择的项目已改变，输入已保留，请核对项目。');
+        requireCurrent(current.threadId);
         await client.host('thread-projects', { operation: 'setMembership', value: { hostId, threadId, projectless: false,
           assignment: hostId === 'local' ? { projectKind: 'local', projectId: intent.projectId }
-            : { projectKind: 'remote', projectId: intent.projectId, hostId } } });
+            : { projectKind: 'remote', projectId: intent.projectId, hostId } } }, { assertBeforeSend: () => requireCurrent(current.threadId) });
         await reloadProjects();
       };
       if (retry?.created && retry.threadId) await assignCreatedProject(retry.threadId);
       const active = current.threadId ? sessions.view({ hostId, threadId: current.threadId }).snapshot() : conversation;
-      const result = await submitDraft(client, { hostId, threadId: current.threadId, cwd: activeCwd, initialOptions: active.options ?? undefined,
+      const sendClient = { rpc: <T,>(method: string, params: Record<string, unknown> = {}, targetHost = hostId, dispatchOptions?: Parameters<BrowserWorkbenchClient['rpc']>[3]) => {
+        if (!['thread/start', 'turn/start', 'turn/steer', 'thread/queue/add', 'thread/queue/start'].includes(method)) return client.rpc<T>(method, params, targetHost, dispatchOptions);
+        return client.rpc<T>(method, params, targetHost, { ...dispatchOptions, assertBeforeSend: () => {
+          if (targetHost !== hostId) throw new Error('发送主机已改变，未发送。');
+          requireCurrent(method === 'thread/start' ? null : typeof params.threadId === 'string' ? params.threadId : current.threadId);
+          dispatchOptions?.assertBeforeSend?.();
+        } }); }, host: client.host.bind(client), subscribe: client.subscribe.bind(client), reply: client.reply.bind(client) };
+      const result = await submitDraft(sendClient, { hostId, threadId: current.threadId, cwd: activeCwd, initialOptions: active.options ?? undefined,
         documentPlainTextMode: intent ? intent.documentPlainTextMode : description?.documentPlainTextMode,
         overrides: origin ? {} : description?.overrides, additionalContext: intent ? intent.additionalContext : additionalContext,
         collaborationMode: intent?.collaborationMode, createdOptions: intent?.created?.settings,
@@ -640,6 +677,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       draft, options, action, async created => {
         await assignCreatedProject(created.id);
         requireCurrent(null);
+        const requestedNavigation = navigationGeneration.current + 1;
         await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('会话加载超时，输入未发送，草稿已保留。')), 60_000);
         selectionReady.current = { key: JSON.stringify([hostId, created.id]), resolve: () => { clearTimeout(timeout); resolve(); },
@@ -650,6 +688,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           }
         });
         });
+        if (navigationGeneration.current !== requestedNavigation + 1) throw new Error('新会话移交期间导航已改变，原稿和创建回执已保留。');
+        if (earlyAuthority) mainSubmissionAuthorities.current.get(earlyAuthority)?.acceptCreated(created.id, navigationGeneration.current);
         expectedNavigation = navigationGeneration.current;
         await reloadSends();
       }, origin, (target, expected, params) => editStore.submit(target, expected, params, () => {
@@ -675,7 +715,13 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const interrupt = async () => {
     const active = threadRef.current?.turns?.find(turn => turn.status === 'inProgress');
     if (!current.threadId || !active) return;
-    await client.rpc('turn/interrupt', { threadId: current.threadId, turnId: active.id }, current.hostId);
+    const owner = composerController.current?.snapshot()?.owner;
+    if (!owner) throw new Error('原输入目标尚未确认，未停止任务。');
+    const assertAuthority = captureMainSubmissionAuthority(owner);
+    await client.rpc('turn/interrupt', { threadId: current.threadId, turnId: active.id }, current.hostId, { assertBeforeSend: () => {
+      assertAuthority();
+      if (!threadRef.current?.turns.some(turn => turn.id === active.id && turn.status === 'inProgress')) throw new Error('原任务已改变，未停止其他任务。');
+    } });
   };
   const action = async (name: string, lastTurnId?: string) => {
     setMenu(false); if (!current.threadId) return;
@@ -717,6 +763,40 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const browserOwner = browserDraftOwner(composerOwner, sendState?.bindings ?? {});
   const activeBrowserOwner = useRef(browserOwner); activeBrowserOwner.current = browserOwner;
   const sendBindings = useRef(sendState?.bindings ?? {}); sendBindings.current = sendState?.bindings ?? {};
+  const captureMainSubmissionAuthority = useCallback((owner: ComposerDraftOwner) => {
+    const original = structuredClone(owner), connection = transportIdentity.current;
+    const bridgeRevision = connection.bridgeRevision, hostRevision = connection.hosts[owner.hostId]?.revision;
+    const grant = mainGrantRevision.current;
+    let expected = original, generation = navigationGeneration.current, controller = composerController.current;
+    const checkConnection = () => {
+      const connection = transportIdentity.current;
+      if (connection.bridge !== 'connected' || connection.bridgeRevision !== bridgeRevision
+        || connection.hosts[original.hostId]?.state !== 'connected' || connection.hosts[original.hostId]?.revision !== hostRevision
+        || mainGrantRevision.current !== grant) throw Object.assign(new Error('原页面连接或输入使用权已改变，未发送。'), { uncertain: false });
+    };
+    const assert = () => {
+      checkConnection();
+      const route = routeRef.current, actual = composerController.current?.snapshot()?.owner;
+      if (navigationLocked.current || generation !== navigationGeneration.current || route.section || route.readOnly
+        || route.hostId !== expected.hostId || route.threadId !== expected.threadId || !controller || composerController.current !== controller
+        || !actual || actual.hostId !== expected.hostId || actual.threadId !== expected.threadId || actual.draftId !== expected.draftId) {
+        throw Object.assign(new Error('原输入目标或使用权已改变，原稿已保留，未发送。'), { uncertain: false });
+      }
+    };
+    assert();
+    mainSubmissionAuthorities.current.set(assert, { acceptCreated(threadId, navigation) {
+      checkConnection();
+      const actual = composerController.current?.snapshot()?.owner, route = routeRef.current;
+      if (original.threadId !== null || !threadId || route.hostId !== original.hostId || route.threadId !== threadId
+        || sendBindings.current[sendThreadKey(original.hostId, threadId)] !== original.draftId
+        || !actual || actual.hostId !== original.hostId || actual.threadId !== threadId || actual.draftId !== original.draftId) {
+        throw Object.assign(new Error('原草稿的新会话移交无法核对，未发送。'), { uncertain: false });
+      }
+      expected = { ...original, threadId }; generation = navigation; controller = composerController.current;
+      assert();
+    } });
+    return assert;
+  }, []);
   const beginBrowserDraftOperation = useCallback((owner: BrowserOwner) => {
     const controller = composerController.current, snapshot = controller?.snapshot();
     if (!controller || !snapshot || routeRef.current.readOnly || navigationLocked.current
@@ -924,16 +1004,22 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
             await completion;
           } finally { if (targetChange.current === pending) { targetChange.current = null; setLeaving(false); } }
         }} activeTurnId={thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null} busy={busy}
-          onSubmit={(draft, options, action, description) => submit(draft, options, action, undefined, description)} onInterrupt={interrupt} onStartQueued={async queuedSubmissionId => {
+          captureSubmissionAuthority={captureMainSubmissionAuthority}
+          onSubmit={(draft, options, action, description, authority) => submit(draft, options, action, undefined, description, undefined, undefined, undefined, authority)} onInterrupt={interrupt} onStartQueued={async (queuedSubmissionId, authority) => {
+          if (!authority) throw Object.assign(new Error('原队列权限尚未捕获，未启动。'), { uncertain: false });
+          authority();
           if (!current.threadId || current.readOnly || inFlight.current || isThreadBusy(threadRef.current)) throw new Error('当前会话暂时无法启动队列。');
           const identity = { hostId: current.hostId, threadId: current.threadId }, generation = navigationGeneration.current;
           inFlight.current = true; setSubmitting(true);
           try {
             await sessions.ready(identity);
-            const view = sessions.view(identity).snapshot(), route = routeRef.current;
-            if (generation !== navigationGeneration.current || route.hostId !== identity.hostId || route.threadId !== identity.threadId
-              || route.readOnly || !view.canSubmit || isThreadBusy(view.thread)) throw new Error('会话目标或状态已改变，队列未启动。');
-            await client.rpc('thread/queue/start', { threadId: identity.threadId, queuedSubmissionId }, identity.hostId);
+            const assertBeforeSend = () => {
+              authority();
+              const view = sessions.view(identity).snapshot(), route = routeRef.current;
+              if (generation !== navigationGeneration.current || route.hostId !== identity.hostId || route.threadId !== identity.threadId
+                || route.readOnly || !view.canSubmit || isThreadBusy(view.thread)) throw Object.assign(new Error('会话目标或状态已改变，队列未启动。'), { uncertain: false });
+            };
+            await client.rpc('thread/queue/start', { threadId: identity.threadId, queuedSubmissionId }, identity.hostId, { assertBeforeSend });
           }
           finally { inFlight.current = false; setSubmitting(false); }
         }} />}</div></div>
