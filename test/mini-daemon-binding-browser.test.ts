@@ -101,7 +101,19 @@ test('Mini binds actual writes to the captured daemon socket identity', {
           return saved?.draft.input?.[0]?.text?.includes('MCP app initiated');
         });
         await page.locator('.yard-mini-conversation .standalone-composer__submit').click();
-        await page.waitForFunction(() => (window as any).miniWorkspaceFixture.calls.some((x: any) => x.method === 'turn/start'));
+        try { await page.waitForFunction(() => (window as any).miniWorkspaceFixture.calls.some((x: any) => x.method === 'turn/start')); }
+        catch (cause) {
+          const diagnostic = await page.evaluate(async () => {
+            const fixture = (window as any).miniWorkspaceFixture;
+            const state = await fixture.records();
+            const draft = await fixture.miniDraft(JSON.parse(fixture.pointer()));
+            return { alerts: Array.from(document.querySelectorAll('.yard-mini-conversation [role="alert"]'), node => node.textContent),
+              methods: fixture.calls.map((call: any) => call.method), hostEndpoints: fixture.hostCalls.map((call: any) => call.endpoint),
+              requests: Object.values(state.requests).map((request: any) => ({ stage: request.stage, injectionPhase: request.injection?.phase })),
+              originalInputRetained: draft?.draft.input?.[0]?.text?.includes('MCP app initiated') === true };
+          });
+          throw new Error('Original app context did not reach its turn: ' + JSON.stringify(diagnostic), { cause });
+        }
         const writes = (await wire(page)).filter((x: any) => ['thread/inject_items', 'turn/start'].includes(x.request?.method));
         assert.deepEqual(writes.map((x: any) => x.request.method), ['thread/inject_items', 'turn/start']);
         assert.ok(writes.every((x: any) => x.hostId === 'local' && x.daemonConnectionGeneration === 'daemon-A'
@@ -217,6 +229,7 @@ test('Mini binds actual writes to the captured daemon socket identity', {
         await open(page);
         const select = page.locator('.yard-mini-conversation select[aria-label="运行位置"]');
         await select.locator('option').filter({ hasText: 'Remote: /fixture/remote' }).waitFor({ state: 'attached' });
+        await page.locator('.yard-mini-conversation .standalone-composer__target summary').click();
         await page.evaluate(() => (window as any).miniWorkspaceFixture.holdSendRead());
         await select.selectOption(JSON.stringify(['remote', '/fixture/remote']));
         await page.waitForFunction(() => (window as any).miniWorkspaceFixture.sendReadWaiting());
@@ -234,6 +247,7 @@ test('Mini binds actual writes to the captured daemon socket identity', {
         await open(page);
         const select = page.locator('.yard-mini-conversation select[aria-label="运行位置"]');
         await select.locator('option').filter({ hasText: 'Remote: /fixture/remote' }).waitFor({ state: 'attached' });
+        await page.locator('.yard-mini-conversation .standalone-composer__target summary').click();
         await select.selectOption(JSON.stringify(['remote', '/fixture/remote']));
         await page.waitForFunction(() => JSON.parse((window as any).miniWorkspaceFixture.pointer()).hostId === 'remote');
         const input = page.locator('.yard-mini-conversation textarea').first();

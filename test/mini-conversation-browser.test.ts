@@ -75,6 +75,7 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
       try {
         const mini = page.locator('.yard-mini-conversation');
         await mini.locator('textarea').first().fill('retain rich');
+        await mini.locator('.standalone-composer__add > summary').click();
         await mini.getByRole('button', { name: '富文本编辑' }).click();
         const rich = mini.locator('.ProseMirror'); await rich.waitFor();
         await rich.focus();
@@ -92,7 +93,7 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         await page.evaluate(() => (window as any).miniFixture.renderOwner(true));
         await page.waitForFunction(() => !(document.querySelector('.yard-mini-conversation .standalone-composer')?.parentElement as HTMLElement)?.inert);
         assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', 'thread-b')), false);
-        assert.equal(await mini.locator('strong').count(), 1);
+        assert.equal(await rich.locator('strong').count(), 1);
         await page.getByRole('button', { name: 'Close Quick chat' }).click();
         await page.getByText('The draft could not be saved.').waitFor();
         await page.evaluate(() => (window as any).miniFixture.hide());
@@ -388,6 +389,7 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', null)), true);
         const mini = page.locator('.yard-mini-conversation');
         await mini.locator('textarea').first().fill('created rich');
+        await mini.locator('.standalone-composer__add > summary').click();
         await mini.getByRole('button', { name: '富文本编辑' }).click();
         const rich = mini.locator('.ProseMirror'); await rich.waitFor();
         await rich.focus();
