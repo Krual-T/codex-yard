@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import type { ClipboardEvent } from 'react';
 import type { ComposerDraft, StandaloneComposerProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
-import { activatePending, canEditStructuredDraft, createId, documentFromText, draftToInput, editStructuredDraftText, hasContent, isStructuredAppInput, mergePrefill, recoverLegacyDraft, removeStructuredImage, removeStructuredSkill, richEditIssue, structuredEditIssue, textEditIssue, updateDraftText, updateRichDraft } from './standalone-draft.ts';
+import { activatePending, canEditStructuredDraft, createId, documentFromText, draftToInput, editStructuredDraftText, hasContent, isStructuredAppInput, mergePrefill, prepareDraftInput, recoverLegacyDraft, removeStructuredImage, removeStructuredSkill, richEditIssue, structuredEditIssue, textEditIssue, updateDraftText, updateRichDraft } from './standalone-draft.ts';
 import { localizeDraftIssue } from './standalone-draft-issues.ts';
 import { useComposerDraft } from './use-composer-draft.ts';
 import type { ComposerDraftController, ComposerDraftExternalOperation, ComposerDraftLease } from './use-composer-draft.ts';
@@ -315,7 +315,15 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       action = { type: 'steer', turnId: activeTurnId };
     }
     const documentPlainTextMode = readyPlainTextMode ?? plainTextSetting.value;
-    try { draftToInput(current.current.draft, context.hostId, { plainTextMode: documentPlainTextMode }); }
+    try {
+      // This ID only validates the payload; the parent owns the durable call ID.
+      const prepared = prepareDraftInput(current.current.draft, context.hostId,
+        { plainTextMode: documentPlainTextMode, callId: 'composer-preflight' });
+      if (action.type !== 'send') {
+        if (prepared.responseItems.length) throw new Error('此 app 上下文须在会话空闲时发送，不能排队或追加当前任务。');
+        draftToInput(current.current.draft, context.hostId, { plainTextMode: documentPlainTextMode });
+      }
+    }
     catch (reason) { setError(message(reason)); return; }
     let assertAuthority: (() => void) | undefined;
     try { assertAuthority = captureSubmissionAuthority?.(structuredClone(owner)); }

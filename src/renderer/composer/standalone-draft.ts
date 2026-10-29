@@ -873,12 +873,14 @@ export function prepareDraftInput(draft: ComposerDraft, hostId: string, options?
     reviewedImages.push({ after: inputIndex, urls: prepared.reviewedImages });
   });
   if (appEnvelopes > 1 && responseItems.length) return invalidAppInput();
+  if (!appEnvelopes) return { input: structuredClone(input), responseItems };
   for (const item of input) {
     if (item.type === 'text') {
-      if (!hasOnly(item, ['type', 'text', 'text_elements']) || typeof item.text !== 'string' || !Array.isArray(item.text_elements)
+      if (!hasOnly(item, ['type', 'text', 'text_elements']) || typeof item.text !== 'string'
+        || item.text_elements !== undefined && (!Array.isArray(item.text_elements)
         || item.text_elements.some(element => !record(element) || !hasOnly(element, ['byteRange', 'placeholder'])
           || !record(element.byteRange) || !hasOnly(element.byteRange, ['start', 'end'])
-          || element.placeholder !== null && typeof element.placeholder !== 'string')) return invalidAppInput();
+          || element.placeholder !== null && typeof element.placeholder !== 'string'))) return invalidAppInput();
     } else if (item.type === 'image' || item.type === 'localImage') {
       if (!hasOnly(item, item.type === 'image' ? ['type', 'url', 'fileId', 'detail'] : ['type', 'path', 'detail'])
         || item.detail !== undefined && (typeof item.detail !== 'string' || !['auto', 'low', 'high', 'original'].includes(item.detail))) return invalidAppInput();
