@@ -7,6 +7,7 @@ import { applyTextEdits, editSourceSignature, latestEditTarget } from '../messag
 import type { MessageEditAccess, MessageEditRebaseCandidate, MessageEditRebaseMarker, MessageEditRecovery, MessageEditRecoveryVersion } from '../messages/use-message-editing.ts';
 import { readBrowserAtom, updateBrowserAtom } from '../storage/ui-atoms.ts';
 import { loadThread } from './load-thread.ts';
+import type { SideChatBrowserIdentity } from '../side-chat/browser-authority.ts';
 
 export const messageEditsAtom = 'codex-yard.message-edits.v1';
 export const messageEditChanged = 'yard-message-edit-updated';
@@ -26,6 +27,11 @@ export type MessageEditRecoveryOptions = {
   /** Set only when the host verifies expectedSource inside its revert write interval. */
   hostChecksRebasedSourceBeforeRevert?: boolean;
 };
+/** Captured by the original child before any asynchronous preparation. */
+export interface MessageEditChildDispatch {
+  proof: { readonly identity: Readonly<SideChatBrowserIdentity>; readonly challengeId: string };
+  assertCurrent(): void;
+}
 const browserStorage: EditRecoveryStorage = {
   read: () => readBrowserAtom(messageEditsAtom),
   update: change => updateBrowserAtom(messageEditsAtom, change),
@@ -369,7 +375,9 @@ export class MessageEditRecoveryStore {
   }
 
   async submit(origin: MessageEditOrigin, expectedTurnIds: string[], turnParams: Record<string, unknown>, assertCanDispatch?: () => void,
-    daemonConnectionGeneration?: string) {
+    daemonConnectionGeneration?: string, childDispatch?: MessageEditChildDispatch) {
+    const proof = childDispatch && structuredClone(childDispatch.proof);
+    const assertChild = childDispatch && childDispatch.assertCurrent.bind(childDispatch);
     if (daemonConnectionGeneration !== undefined && (typeof daemonConnectionGeneration !== 'string' || !daemonConnectionGeneration)) {
       throw new Error('原 daemon 连接身份无效，编辑稿已保留，未发送。');
     }
@@ -433,6 +441,19 @@ export class MessageEditRecoveryStore {
         void Promise.resolve(assertion).catch(() => {});
         throw new Error('派发前检查必须同步完成，未发送。');
       }
+      // Read-only reconciliation belongs to the already issued operation. It
+      // must not require, or accidentally claim, a new child dispatch grant.
+      if (operation !== 'check' && proof) {
+        if (!proof.challengeId || proof.identity.hostId !== origin.hostId || proof.identity.childThreadId !== origin.threadId) {
+          throw new Error('原侧聊编辑授权不匹配，编辑稿已保留，未发送。');
+        }
+        const checked: unknown = assertChild?.();
+        if (checked && (typeof checked === 'object' || typeof checked === 'function')
+          && typeof (checked as { then?: unknown }).then === 'function') {
+          void Promise.resolve(checked).catch(() => {});
+          throw new Error('侧聊派发前检查必须同步完成，未发送。');
+        }
+      }
     };
     const restoreUnsent = async () => {
       try {
@@ -447,7 +468,8 @@ export class MessageEditRecoveryStore {
     let response: EditMessageResult;
     try {
       response = await this.client.host<EditMessageResult>('message-edit', { hostId: origin.hostId, threadId: origin.threadId,
-        ...pending.request, ...(daemonConnectionGeneration === undefined ? {} : { daemonConnectionGeneration }) }, { assertBeforeSend });
+        ...pending.request, ...(daemonConnectionGeneration === undefined ? {} : { daemonConnectionGeneration }),
+        ...(operation !== 'check' && proof ? { sideChat: proof } : {}) }, { assertBeforeSend });
     } catch (reason) {
       if (reason && typeof reason === 'object' && 'uncertain' in reason && reason.uncertain === false
         && 'sendPhase' in reason && reason.sendPhase === 'before-send') await restoreUnsent();
