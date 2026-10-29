@@ -322,6 +322,13 @@ export function createSideChatHost(deps: SideChatDependencies) {
     let op: SideChatOperation;
     try {
       op = await update(event.operationId, current => {
+        // This in-process prepare result is retained only when committing its
+        // transition failed before send(). Recovery may read that transition
+        // back after rename; its exact next attempt still proves no dispatch.
+        if (event.step === 'prepare' && event.error === undefined && event.nextAttemptId
+          && current.close.status === 'inflight' && current.close.attemptId === event.nextAttemptId) {
+          return { ...current, close: { ...current.close, status: 'not-sent', error: undefined } };
+        }
         const expected = event.step === 'prepare' ? 'preparing' : 'cleaning';
         if (current.close.status !== expected || current.close.attemptId !== event.attemptId) return current;
         claimed = true;
