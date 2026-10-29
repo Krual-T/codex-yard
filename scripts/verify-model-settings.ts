@@ -107,7 +107,7 @@ async function retainedOverride(operationId: string, field: 'model' | 'effort', 
     const origin = record(operation?.origin);
     const draft = drafts.find(item => item.editorId === origin.editorId && item.hostId === 'local' && item.section === 'models');
     const contents = record(draft?.draft), terminal = record(record(operation?.operation).terminal);
-    if (operation?.phase === 'finished' && terminal.kind === 'okOverridden' && contents[field] === value
+    if (operation && draft && operation.phase === 'finished' && terminal.kind === 'okOverridden' && contents[field] === value
       && contents.profile === 'work' && Array.isArray(contents.conflicts) && contents.conflicts.includes(field)) {
       return { operation, draft };
     }
