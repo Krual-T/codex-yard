@@ -12,6 +12,7 @@ import { useCompletions } from './standalone-completions.tsx';
 import type { Completion } from './standalone-completions.tsx';
 import { StandaloneOptions } from './standalone-options.tsx';
 import { StandaloneQueue } from './standalone-queue.tsx';
+import type { QueueEditEntry } from './standalone-queue-storage.ts';
 import { useEnterSetting } from './standalone-enter-setting.ts';
 import { useFollowUpSetting } from './standalone-follow-up.ts';
 import { usePlainTextSetting } from './standalone-plain-text-setting.ts';
@@ -29,12 +30,16 @@ export { bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraf
 export type { DraftInputOptions, DraftSkill } from './standalone-draft.ts';
 export type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescription } from './composer-draft-store.ts';
 export type { ComposerDraftController, ComposerDraftExternalOperation, ComposerDraftLease } from './use-composer-draft.ts';
+export type { QueueEditEntry } from './standalone-queue-storage.ts';
 export type ComposerReference = NonNullable<ComposerDraft['references']>[number];
 export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSubmit'> & {
   onSubmit(draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, description?: ComposerSubmissionDescription,
     assertAuthority?: () => void): Promise<void>;
   /** Capture the original owner, connection and navigation authority before any submission wait. */
   captureSubmissionAuthority?: (owner: ComposerDraftOwner) => () => void;
+  /** Remove after the host/thread Yard write queue compares the original complete entry. */
+  removeQueuedOriginal?: (entry: QueueEditEntry, originalAuthority: () => void,
+    assertBeforeSend: () => void) => Promise<'deleted' | 'changed'>;
   /** The app's authoritative active turn, used as the steer precondition. */
   activeTurnId?: string | null;
   initialOptions?: SubmitOptions;
@@ -71,7 +76,7 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
   }}><summary>{name}</summary>{preview == null ? t('Reading...') : <pre>{preview}</pre>}</details>;
 }
 
-function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
+function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, removeQueuedOriginal, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
   const { t, locale } = useI18n('zh-CN');
   const inputRoot = useRef<HTMLDivElement>(null);
   const freezeGuard = useRef<(afterDrain: boolean) => boolean>(() => false);
@@ -506,6 +511,15 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     <div ref={inputRoot} inert={frozen} aria-busy={frozen || undefined}>
     {context.threadId ? <StandaloneQueue key={JSON.stringify([context.hostId, context.threadId])} client={client} hostId={context.hostId} threadId={context.threadId} busy={busy} refreshVersion={queueVersion} onStartQueued={onStartQueued} frozen={frozen}
       captureAuthority={captureSubmissionAuthority ? () => captureSubmissionAuthority(structuredClone(owner)) : undefined}
+      beginQueueEdit={removeQueuedOriginal && captureSubmissionAuthority ? () => {
+        const capturedOwner = structuredClone(owner);
+        const originalAuthority = captureSubmissionAuthority(capturedOwner);
+        const operation = controller.beginExternalOperation(capturedOwner);
+        if (!operation) return null;
+        return { owner: capturedOwner, operation, assertAuthority: originalAuthority,
+          removeQueuedOriginal: (entry, assertBeforeSend) => removeQueuedOriginal(entry, originalAuthority, assertBeforeSend) };
+      } : undefined}
+      onQueueDraftCommitted={(before, after) => controller.acceptCommittedVersion(before, after)}
       beginOperation={beginOperation} onEditStateChange={(editing, pending) => { queueEditState.current = { editing, pending }; }}
       onCompositionChange={value => setComposition('queue', value)} /> : null}
     <div className="standalone-composer__editor" inert={switchingTarget} aria-busy={switchingTarget || undefined}>

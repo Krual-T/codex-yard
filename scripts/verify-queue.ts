@@ -62,7 +62,7 @@ try {
   assert.equal(fake.queues.get(threadId)?.length, 1);
   checks.push('Deletion reached thread/queue/delete and removed only the selected item');
   const editButton = page.getByRole('button', { name: '编辑待发送消息', exact: true });
-  assert.equal(await editButton.isEnabled(), true, 'Queue Edit requires the main-composer and conditional-delete bindings');
+  assert.equal(await editButton.isEnabled(), true, 'Queue Edit requires the main-composer and Yard queue-edit bindings');
   await editButton.click();
   const editor = page.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作)$/ });
   await page.waitForFunction(text => [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]

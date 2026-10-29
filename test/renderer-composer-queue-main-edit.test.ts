@@ -30,6 +30,12 @@ test('queue edit uses the composer controller and retains exact recovery receipt
       async rpc(method,params){state.calls.push(method);
         if(method==='thread/queue/list')return {data:structuredClone(state.queue),nextCursor:null};
         if(method==='thread/items/list')return {data:[],nextCursor:null};
+        if(method==='thread/queue/delete'){
+          const index=state.queue.findIndex(item=>item.id===params.queuedSubmissionId);
+          if(index<0)return {deleted:false};
+          state.queue.splice(index,1); sessionStorage.setItem('fixture-queue',JSON.stringify(state.queue));
+          return {deleted:true};
+        }
         throw Error('unexpected RPC '+method)},
       async host(method){throw Error('unexpected host '+method)},
       subscribe(listener){state.listeners.add(listener);return ()=>state.listeners.delete(listener)}
@@ -48,18 +54,24 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         const operation=value.controller.beginExternalOperation(captured);
         if(!operation)return null;
         const assertAuthority=()=>{if(generation!==state.generation)throw Error('fixture authority changed')};
-        return {owner:state.wrongHost?{...captured,hostId:'other'}:captured,operation,assertAuthority,async deleteIfUnchanged(entry,assertBeforeSend){
+        return {owner:state.wrongHost?{...captured,hostId:'other'}:captured,operation,assertAuthority,async removeQueuedOriginal(entry,assertBeforeSend){
           assertBeforeSend();
           if(state.mode==='hold')await new Promise(resolve=>state.release=resolve);
-          assertBeforeSend(); state.calls.push('conditional-delete');
+          assertBeforeSend(); state.calls.push('yard-edit');
           if(state.mode==='changed'){
             state.queue[0].input[0].text='changed elsewhere';
             sessionStorage.setItem('fixture-queue',JSON.stringify(state.queue));
           }
-          const item=state.queue.find(item=>item.id===entry.id);
+          const page=await client.rpc('thread/queue/list',{threadId:'thread'});
+          const item=page.data.find(item=>item.id===entry.id);
           if(!item || JSON.stringify(item)!==JSON.stringify(entry))return 'changed';
-          state.queue=state.queue.filter(item=>item.id!==entry.id);
-          sessionStorage.setItem('fixture-queue',JSON.stringify(state.queue));
+          if(state.mode==='external-race'){
+            state.queue[0].input[0].text='external change after read';
+            state.externalUpdate=structuredClone(state.queue[0]);
+          }
+          assertBeforeSend();
+          const result=await client.rpc('thread/queue/delete',{threadId:'thread',queuedSubmissionId:entry.id});
+          if(!result.deleted)return 'changed';
           if(state.mode==='unknown')throw Error('fixture lost receipt');
           if(state.mode==='hold-after')await new Promise(resolve=>state.release=resolve);
           if(state.mode==='pending-link'){state.pendingLink=true;state.link.current=true;state.force()}
@@ -114,7 +126,7 @@ test('queue edit uses the composer controller and retains exact recovery receipt
   };
   const edit = (page: import('playwright-core').Page) => page.getByRole('button', { name: '编辑待发送消息' });
   try {
-    await t.test('atomic deletion transfers all input and parks the existing draft', async () => {
+    await t.test('Yard read, compare and delete transfers all input and parks the existing draft', async () => {
       const { context, page } = await open();
       try {
         assert.equal(await page.evaluate(() => (window as any).fixture.seed()), true);
@@ -130,12 +142,13 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         assert.equal(data.snapshot.draft.pendingDrafts[0].text, 'older draft');
         assert.equal(data.snapshot.draft.pendingDrafts[1].text, 'existing draft');
         assert.equal(data.snapshot.draft.pendingDrafts[1].references[0].context.fixture, 'original');
-        assert.equal(data.calls.filter((call: string) => call === 'conditional-delete').length, 1);
+        assert.equal(data.calls.filter((call: string) => call === 'yard-edit').length, 1);
+        assert.equal(data.calls.filter((call: string) => call === 'thread/queue/delete').length, 1);
         assert.ok(!data.calls.some((call: string) => /queue\/(add|update|start)|turn\/start/.test(call)));
         await page.reload(); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
         await page.waitForFunction(() => (window as any).fixture.state.loaded);
         assert.equal((await page.evaluate(() => (window as any).fixture.state.controller.snapshot())).draft.text, 'hello\nworld');
-        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.includes('conditional-delete')), false);
+        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.includes('yard-edit')), false);
       } finally { await context.close(); }
     });
     await t.test('a changed queue entry is not deleted and original content survives reload', async () => {
@@ -151,7 +164,22 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         assert.equal(result.recovery.edits[0].stage, 'conflict');
         await page.reload(); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
         await page.getByText('队列消息未确认删除，原内容已保留。').waitFor();
-        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.includes('conditional-delete')), false);
+        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.includes('yard-edit')), false);
+      } finally { await context.close(); }
+    });
+    await t.test('an independent daemon client can change the entry between read and ID deletion', async () => {
+      const { context, page } = await open();
+      try {
+        await page.evaluate(() => { (window as any).fixture.state.mode = 'external-race'; });
+        await edit(page).click();
+        await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot()?.draft.text === 'hello\nworld');
+        const data = await page.evaluate(() => { const f = (window as any).fixture;
+          return { queue:f.state.queue, input:f.draftToInput(f.state.controller.snapshot().draft,'local'),
+            externalUpdate:f.state.externalUpdate, calls:f.state.calls }; });
+        assert.deepEqual(data.queue, []);
+        assert.equal(data.externalUpdate.input[0].text, 'external change after read');
+        assert.equal(data.input[0].text, 'hello');
+        assert.equal(data.calls.filter((call: string) => call === 'thread/queue/delete').length, 1);
       } finally { await context.close(); }
     });
     await t.test('a lost delete receipt stays unknown even when the item is absent', async () => {
@@ -169,7 +197,7 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         assert.equal(result.recovery.edits[0].stage, 'deleting');
         assert.deepEqual(result.recovery.edits[0].entry, result.original);
         assert.equal(result.draft.text, '');
-        assert.ok(!result.calls.includes('conditional-delete'));
+        assert.ok(!result.calls.includes('yard-edit'));
       } finally { await context.close(); }
     });
     await t.test('IDB failures stop dispatch or preserve a known receipt for local retry', async () => {
@@ -178,7 +206,7 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         await page.evaluate(() => (window as any).fixture.failWrites());
         await edit(page).click();
         await page.getByRole('textbox', { name: '未保存的队列原始内容' }).waitFor();
-        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.includes('conditional-delete')), false);
+        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.includes('yard-edit')), false);
         await page.evaluate(() => (window as any).fixture.restore());
       } finally { await context.close(); }
       const second = await open();
@@ -190,7 +218,7 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         await second.page.getByRole('button', { name: '恢复到输入区' }).waitFor();
         await second.page.getByRole('button', { name: '恢复到输入区' }).click();
         await second.page.waitForFunction(() => (window as any).fixture.state.controller.snapshot()?.draft.text === 'hello\nworld');
-        assert.equal(await second.page.evaluate(() => (window as any).fixture.state.calls.filter((call: string) => call === 'conditional-delete').length), 1);
+        assert.equal(await second.page.evaluate(() => (window as any).fixture.state.calls.filter((call: string) => call === 'yard-edit').length), 1);
       } finally { await second.context.close(); }
     });
     await t.test('owner or authority changes prevent late deletion or replacement', async () => {
@@ -202,7 +230,7 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         await page.evaluate(() => { const f = (window as any).fixture; f.state.generation++; f.state.release(); });
         await page.getByText('队列消息未确认删除，原内容已保留。').waitFor();
         assert.equal(await page.evaluate(() => (window as any).fixture.state.queue.length), 1);
-        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.includes('conditional-delete')), false);
+        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.includes('yard-edit')), false);
       } finally { await context.close(); }
     });
     await t.test('confirmed deletion after owner changes remains scoped to the original draft', async () => {
@@ -222,7 +250,7 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot()?.owner.draftId === 'draft-a');
         await page.getByRole('button', { name: '恢复到输入区' }).click();
         await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot()?.draft.text === 'hello\nworld');
-        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: string) => call === 'conditional-delete').length), 1);
+        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: string) => call === 'yard-edit').length), 1);
       } finally { await context.close(); }
     });
     await t.test('a refused committed draft can be explicitly accepted with its original receipt', async () => {
@@ -240,10 +268,10 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         await page.evaluate(() => { const state = (window as any).fixture.state; state.pendingLink = false; state.link.current = false; state.force(); });
         await page.getByRole('button', { name: '接收已保存草稿' }).click();
         await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot()?.draft.text === 'hello\nworld');
-        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: string) => call === 'conditional-delete').length), 1);
+        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: string) => call === 'yard-edit').length), 1);
       } finally { await context.close(); }
     });
-    await t.test('missing conditional deletion never falls back to ID-only deletion', async () => {
+    await t.test('missing Yard edit callback never falls back to uncoordinated ID-only deletion', async () => {
       const { context, page } = await open();
       try {
         await page.evaluate(() => { const state = (window as any).fixture.state; state.binding = false; state.force(); });
@@ -260,7 +288,7 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         await edit(page).click();
         await page.getByRole('alert').filter({ hasText: '原队列和输入区身份不一致' }).waitFor();
         assert.equal(await page.evaluate(() => (window as any).fixture.state.queue.length), 1);
-        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.includes('conditional-delete')), false);
+        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.includes('yard-edit')), false);
         assert.equal(await page.evaluate(async () => (await (window as any).fixture.readUnknownQueueRecovery('local', 'thread')).edits.length), 0);
       } finally { await context.close(); }
     });
@@ -276,7 +304,7 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         const shared = await other.evaluate(async () => (window as any).fixture.readUnknownQueueRecovery('local', 'thread'));
         assert.equal(shared.edits.length, 1);
         assert.equal(shared.edits[0].entry.id, 'q1');
-        assert.equal(await other.evaluate(() => (window as any).fixture.state.calls.includes('conditional-delete')), false);
+        assert.equal(await other.evaluate(() => (window as any).fixture.state.calls.includes('yard-edit')), false);
         await page.evaluate(() => (window as any).fixture.state.release());
         await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot()?.draft.text === 'hello\nworld');
       } finally { await context.close(); }

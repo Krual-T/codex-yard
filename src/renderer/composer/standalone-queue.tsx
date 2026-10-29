@@ -16,9 +16,10 @@ export interface QueueEditBinding {
   owner: ComposerDraftOwner;
   operation: ComposerDraftExternalOperation;
   assertAuthority(): void;
-  /** Compare id, clientUserMessageId and complete input and delete atomically at the queue authority.
-   * Call assertBeforeSend at dispatch, do not retry, and return changed only when no deletion occurred. */
-  deleteIfUnchanged(entry: QueueEditEntry, assertBeforeSend: () => void): Promise<'deleted' | 'changed'>;
+  /** Compare the complete entry and delete within the host/thread Yard write queue.
+   * Check at dispatch, do not retry, and return changed only when no deletion occurred.
+   * Independent daemon clients are not serialized by this queue. */
+  removeQueuedOriginal(entry: QueueEditEntry, assertBeforeSend: () => void): Promise<'deleted' | 'changed'>;
 }
 export interface QueueProps { client: WorkbenchClient; hostId: string; threadId: string; busy: boolean; refreshVersion: number; onStartQueued?: (id: string, assertAuthority?: () => void) => Promise<void>;
   captureAuthority?: () => () => void;
@@ -283,7 +284,7 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
     const binding = beginQueueEdit();
     if (!binding) return null;
     if (binding.owner.hostId !== hostId || binding.owner.threadId !== threadId || !binding.owner.draftId
-      || typeof binding.deleteIfUnchanged !== 'function') {
+      || typeof binding.removeQueuedOriginal !== 'function') {
       binding.operation.finish(false);
       throw new Error('原队列和输入区身份不一致。');
     }
@@ -338,7 +339,7 @@ function QueueSession({ client, hostId, threadId, busy, refreshVersion, onStartQ
         dispatched = true;
         let result: 'deleted' | 'changed';
         try {
-          result = await binding!.deleteIfUnchanged(structuredClone(entry), beforeSend);
+          result = await binding!.removeQueuedOriginal(structuredClone(entry), beforeSend);
         } catch (reason) {
           if (record(reason).sendPhase === 'before-send') { dispatched = false; await advanceQueueEdit(hostId, threadId, operationId, 'deleting', 'not-sent'); }
           throw reason;
