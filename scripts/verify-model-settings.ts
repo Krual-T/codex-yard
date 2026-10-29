@@ -239,6 +239,8 @@ try {
   app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: fake.socketPath, codexHome: join(root, 'codex'),
     hostCatalog: { hosts: [], projects: [], assignments: {} },
     httpFetch: async () => new Response('External telemetry disabled for model fixture', { status: 503 }) });
+  const appOrigin = app.url;
+  assert.notEqual(new URL(appOrigin).port, '8765');
   browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome',
     headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-proxy-server',
       '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost'] });
@@ -255,7 +257,7 @@ try {
     const label = profile ?? 'default';
     page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN' });
     observePage(page);
-    await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
+    await page.route('**/*', route => new URL(route.request().url()).origin === appOrigin ? route.continue() : route.abort());
     let phase = 'initial controls';
     try {
       await page.goto(app.url, { waitUntil: 'commit' });
@@ -376,7 +378,7 @@ try {
     profiles: { work: { model: 'fixture-model', model_reasoning_effort: 'high' } } });
   page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN' });
   observePage(page);
-  await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
+  await page.route('**/*', route => new URL(route.request().url()).origin === appOrigin ? route.continue() : route.abort());
   try {
     await page.goto(app.url, { waitUntil: 'commit' });
     await page.locator('[data-owned-renderer="true"]').waitFor();
