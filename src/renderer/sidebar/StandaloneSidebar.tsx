@@ -20,6 +20,7 @@ export type SidebarOptionChange = { type: 'organization'; value: 'by-project' | 
 export interface SidebarOptions {
   organization: 'by-project' | 'one-list';
   sort: 'last-updated' | 'manual';
+  projectSort?: 'last-updated' | 'manual';
   showProjects: boolean;
 }
 
@@ -65,6 +66,8 @@ export interface StandaloneSidebarProps {
   isThreadUnread?(row: ThreadListRow): boolean;
   sidebarOptions?: SidebarOptions;
   onSidebarOptionChange?(change: SidebarOptionChange): void | Promise<void>;
+  orderThreads?(rows: readonly ThreadListRow[], project: Project | null): readonly ThreadListRow[];
+  orderProjects?(projects: readonly Project[]): readonly Project[];
   onHelpAction?(action: 'changelog' | 'shortcuts' | 'guide'): void | Promise<void>;
 }
 
@@ -292,7 +295,7 @@ export function StandaloneSidebar({ hostId, currentThread, projectState, fallbac
   onRefresh, onLoadMore, onRetryProjectLookup, shortcutHints, onNavigateHistory, canNavigateBack, canNavigateForward,
   onOpenPlugins, onOpenExplore, accountLabel, onOpenProductModeMenu, onSwitchProductMode, activeProjectId, onProjectOptions,
   onProjectAction, availableProjectActions, isProjectPinned, availableThreadActions, onThreadAction, onMoveThreadToProject, isThreadPinned,
-  isThreadUnread, sidebarOptions, onSidebarOptionChange, onHelpAction }: StandaloneSidebarProps) {
+  isThreadUnread, sidebarOptions, onSidebarOptionChange, orderThreads, orderProjects, onHelpAction }: StandaloneSidebarProps) {
   const { t } = useI18n();
   const query = search.trim().toLowerCase();
   const [projectsExpanded, toggleProjects] = useExpansion(query);
@@ -328,9 +331,10 @@ export function StandaloneSidebar({ hostId, currentThread, projectState, fallbac
   const options: SidebarOptions = sidebarOptions ?? { organization: 'by-project', sort: 'last-updated', showProjects: true };
   const { projects, grouped, recent, fallback } = useMemo(() => {
     const assigned = projectState ? projectsForHost(projectState, hostId) : [];
-    const projects: Project[] = assigned.length ? assigned : hostId === 'local' && fallbackWorkspace
+    const rawProjects: Project[] = assigned.length ? assigned : hostId === 'local' && fallbackWorkspace
       ? [{ id: fallbackWorkspace, name: fallbackWorkspace.split(/[\\/]/).filter(Boolean).at(-1) || t('Workspace'),
         rootPaths: [fallbackWorkspace], hostId }] : [];
+    const projects = [...(orderProjects?.(rawProjects) ?? rawProjects)];
     const grouped = new Map(projects.map(project => [project.id, [] as ThreadListRow[]]));
     const recent: ThreadListRow[] = [];
     for (const row of rows) {
@@ -340,8 +344,12 @@ export function StandaloneSidebar({ hostId, currentThread, projectState, fallbac
       if (group) group.push(row);
       recent.push(row);
     }
-    return { projects, grouped, recent, fallback: assigned.length === 0 };
-  }, [projectState, hostId, fallbackWorkspace, rows, t]);
+    for (const project of projects) {
+      const group = grouped.get(project.id)!;
+      grouped.set(project.id, [...(orderThreads?.(group, project) ?? group)]);
+    }
+    return { projects, grouped, recent: [...(orderThreads?.(recent, null) ?? recent)], fallback: assigned.length === 0 };
+  }, [projectState, hostId, fallbackWorkspace, rows, t, orderThreads, orderProjects]);
   const unresolved = projectState && (!projectState.inventory.complete || Object.keys(projectState.unresolved.assignments).length > 0
     || projectState.unresolved.projectless.length > 0 || projectState.unresolved.qualified.length > 0);
   const visibleRecent = options.showProjects ? recent : recent.filter(row => !projectForThread(projectState, projects, hostId, row));
@@ -358,8 +366,10 @@ export function StandaloneSidebar({ hostId, currentThread, projectState, fallbac
       optionItem('one-list', 'In one list', { type: 'organization', value: 'one-list' }, options.organization === 'one-list', <List aria-hidden="true" />),
     ] },
     { kind: 'item', id: 'sort', label: 'Sort chats by', icon: <ArrowDownUp aria-hidden="true" />, children: [
-      optionItem('updated', 'Last updated', { type: 'sort', value: 'last-updated' }, options.sort === 'last-updated'),
-      optionItem('manual', 'Manual order', { type: 'sort', value: 'manual' }, options.sort === 'manual'),
+      optionItem('updated', 'Last updated', { type: 'sort', value: 'last-updated' },
+        (includeShow ? options.sort : options.projectSort ?? options.sort) === 'last-updated'),
+      optionItem('manual', 'Manual order', { type: 'sort', value: 'manual' },
+        (includeShow ? options.sort : options.projectSort ?? options.sort) === 'manual'),
     ] },
     ...(includeShow ? [
       { kind: 'separator' } as const,
