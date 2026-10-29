@@ -41,6 +41,8 @@ Summary Outputs 从当前 ConversationSessions 的完整消息、原 thread-proj
 
 项目归属、工作目录提示及输出目录通知同步清除旧目录事实，沿现有项目读取代次重新查询；替代事实未返回或读取失败时保持未知。消息文件动作把本次卡片的同步核查闭包作为可选 `assertCurrent`，经 Main 或 SideChat 的原 activation、openFile/showPanel 传至 `FilePanelRequest`。文件服务在原 host 的两次读取派发与回包及接收新标签前核查；失效只移除本次尚未成功的占位，不删除已有标签、草稿或恢复记录。成功标签和普通文件树、Reload 沿原生命周期，不永久携带本次卡片的授权。
 
+消息末尾网页卡沿同一完成 turn 的优先级投影：合格本地文件先于网页，唯一带非默认端口的本地 HTTP(S) URL 先于唯一合格 HTML 改动。HTML 标题通过原 host 的受控 `read-file` 取得，失败保留 Web preview，打开走既有文件面板；不运行文件内容或创建 HTML 网站服务。Google 文档卡只识别原 Markdown/citation 与成功工具回执中的资源，保留读写、标题和去重规则，通过现有 `source:link` 及原链接偏好打开；正文 Drive 图标只是自有 SVG 装饰，不改变复制和点击。部分历史在完整核查前保留等待提示。网站卡使用现有 Chrome 面板；面板未配对不能称作已打开网站或已完成外部应用发现。
+
 WorkbenchClient 提供 `rpc(method,params,hostId)`、`host(endpoint,params)`、事件 `subscribe` 和审批 `reply(ref,response)`。它使用 `/native-host` WebSocket，关联请求id、超时及响应错误，建立后发送ready。reply为必需方法，反向请求有必填ServerRequestEvent.requestRef；浏览器验证后才交UI。审批ref由服务端产生，包含hostId、每个请求唯一的generation和原请求id，并在宿主绑定原连接。generation不是host代次，同host的不同请求可有不同值。只向收到请求的原连接发送，禁止回复时自动重连；resolved/取消/断开使原ref失效，同ID新请求不能接受旧ref。服务端发送回执表示已转发，不能声称daemon已完成业务处理；发送不确定时保留未知结果，不能自动再次批准。
 
 App 以 `/`、`/local/:threadId`、`/settings/:section` 和已存在的独立页面路由为入口，并兼容当前host查询参数、旧会话别名和分享后的直接链接。页面历史使用History API；模块不另存一份当前会话。设置接收必填的pathname/search/hash/history state及onNavigate，导航携带replace/back语义，不保留initialSection或第二份section权威状态；内部切换、重定向、host更换、关闭和back/forward均经过同一个未保存守卫。非默认路由逐项按F20/F23实证恢复，未核实分支保持打开。
