@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { CodexConnection } from '../../lib/codex.ts';
 import { removeQueuedOriginal } from './queue-edit.ts';
+import { createSendInjection } from './send-injection.ts';
+import type { SendInjectionOriginal, SendInjectionReference, SendInjectionSource } from './send-injection.ts';
 import { createAppTools } from '../../lib/app-tools.ts';
 import { appToolCatalog, createHostToolHandler } from '../../lib/host-tools.ts';
 import { projectRoot, rendererVersion } from '../../lib/app-resources.ts';
@@ -49,6 +51,7 @@ import { createPetAssets } from './pet-assets.ts';
 import { SideChatParentReceipts } from './side-chat-parent-receipts.ts';
 import type { SideChatReceiptAttempt } from './side-chat-parent-receipts.ts';
 import { createNativeSideChatParent } from './side-chat-native-parent.ts';
+import { createSideChatNativeBrowserAuthority } from './side-chat-browser-authority.ts';
 import type { SideChatBrowserAuthority } from './side-chat-native-parent.ts';
 import { webManifest, brandAssets } from './visual-feedback.ts';
 import { TerminalHost } from './terminal.ts';
@@ -173,10 +176,25 @@ export async function createNativeWorkbench(options: Options = {}) {
   const ownedPaths = new WeakMap<CodexConnection, { paths?: HostPaths; sshHost: typeof catalog.hosts[number] }>();
   const connectionSnapshots = new WeakMap<WebSocket, { connection: CodexConnection; hostId: string; paths: HostPaths; sshHost?: typeof catalog.hosts[number] }>();
   const connectionGenerations = new WeakMap<WebSocket, string>();
+  const resumedPersistentThreads = new WeakMap<WebSocket, Set<string>>();
   function connectionGeneration(socket: WebSocket): string {
     let generation = connectionGenerations.get(socket);
     if (!generation) { generation = crypto.randomUUID(); connectionGenerations.set(socket, generation); }
     return generation;
+  }
+  function injectionSource(hostId: string, connection: CodexConnection, socket: WebSocket): SendInjectionSource {
+    let snapshot = connectionSnapshots.get(socket);
+    if (!snapshot) {
+      const remote = ownedPaths.get(connection);
+      const paths = hostId === 'local' ? { homeDirectory: homedir(), codexHome } : remote?.paths;
+      if (!paths) throw Object.assign(new Error('原宿主的状态目录尚未核实。'), { uncertain: false, sendPhase: 'before-send' });
+      snapshot = { connection, hostId, paths: { ...paths }, ...(remote ? { sshHost: { ...remote.sshHost } } : {}) };
+      connectionSnapshots.set(socket, snapshot);
+    }
+    if (snapshot.connection !== connection || snapshot.hostId !== hostId) throw new Error('原宿主连接来源不匹配。');
+    const ssh = snapshot.sshHost;
+    return { paths: { ...snapshot.paths }, sshTarget: ssh ? { hostId: ssh.hostId, sshAlias: ssh.sshAlias,
+      sshHost: ssh.sshHost, sshPort: ssh.sshPort, identity: ssh.identity } : null };
   }
   async function ownedConnectionFor(hostId: string) {
     validHost(hostId);
@@ -258,6 +276,16 @@ export async function createNativeWorkbench(options: Options = {}) {
     if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(message));
   }
   function broadcast(message: unknown) { for (const client of clients.keys()) send(client, message); }
+  const injectionObservers = new Set<WebSocket>();
+  const sendInjections = createSendInjection({ mutations: stateMutations, assertStateAvailable: nativeState.assertAvailable,
+    readSection: () => state.sendInjections,
+    persistSection: section => persistRoot({ ...state, globals, settings, sendInjections: section }),
+    onChange(reference, receipt) {
+      for (const page of injectionObservers) {
+        try { send(page, { type: 'send-injection-updated', reference, receipt }); } catch { /* The durable result remains queryable. */ }
+      }
+    },
+  });
   function broadcastRecovery(message: unknown) {
     for (const client of clients.keys()) {
       try { send(client, message); } catch { /* The state owner must remain available to other pages. */ }
@@ -326,13 +354,20 @@ export async function createNativeWorkbench(options: Options = {}) {
     readThread: (params, options) => readToolHistory(control, params, options),
   });
   const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'), tools: appToolCatalog, callTool: callHostTool });
+  const sideChatBrowserAuthority: ReturnType<typeof createSideChatNativeBrowserAuthority> = createSideChatNativeBrowserAuthority({
+    assertOrigin: scope => sideChats.assertBrowserOrigin(scope),
+    notify(page, request) {
+      if (!clients.has(page) || page.readyState !== WebSocket.OPEN) throw new Error('原侧聊页面已断开。');
+      send(page, request);
+    },
+  });
   const sideChats = createNativeSideChatParent({ mutations: stateMutations, assertStateAvailable: nativeState.assertAvailable,
     readSection: () => state.sideChats, persistSection: section => persistRoot({ ...state, globals, settings, sideChats: section }),
     globals, compatibility: () => compatibility,
     receipts: sideChatParents, connections: page => clients.get(page),
     generation: connectionGeneration, validateHost: validHost,
     forkConfig: hostId => hostId === 'local' ? hostTools.config : undefined,
-    authority: options.sideChatBrowserAuthority,
+    authority: options.sideChatBrowserAuthority ?? sideChatBrowserAuthority,
     notify: (hint, except) => {
       for (const page of clients.keys()) {
         if (except.has(page)) continue;
@@ -515,7 +550,9 @@ export async function createNativeWorkbench(options: Options = {}) {
     });
     client.on('close', () => {
       clients.delete(client);
+      injectionObservers.delete(client);
       sideChatParents.forgetPage(client);
+      sideChatBrowserAuthority.invalidate(client);
       sideChats.forgetPage(client);
       approvalRequests.closePage(client);
       void browser.close().finally(() => browsers.delete(client));
@@ -546,9 +583,13 @@ export async function createNativeWorkbench(options: Options = {}) {
     let connection = connections.get(hostId);
     if (connection) return connection;
     const ssh = sshHosts.get(hostId);
+    const remote = ssh ? { sshHost: { ...ssh }, paths: undefined as HostPaths | undefined } : undefined;
     connection = new CodexConnection(ssh ? '' : socketPath, ssh ? {
-      createConnection: () => (options.sshStream ?? createSshProxyStream)(ssh, paths => hostPaths.set(hostId, paths)), connectTimeout: 20_000,
+      createConnection: () => (options.sshStream ?? createSshProxyStream)(remote!.sshHost, paths => {
+        remote!.paths = { ...paths }; hostPaths.set(hostId, paths);
+      }), connectTimeout: 20_000,
     } : { cwd: workspace });
+    if (remote) ownedPaths.set(connection, remote);
     connections.set(hostId, connection);
     const current = connection;
     current.on('message', (message, sourceSocket) => {
@@ -610,7 +651,10 @@ export async function createNativeWorkbench(options: Options = {}) {
       // The daemon survives a client disconnect. Keep other hosts connected;
       // the renderer restores subscriptions when this host reconnects.
       if (current.socket) observeApprovalSocket(client, hostId, current.socket);
-      if (!current.connected && current.socket) sideChatParents.forgetSocket(client, current.socket);
+      if (!current.connected && current.socket) {
+        sideChatParents.forgetSocket(client, current.socket);
+        sideChatBrowserAuthority.invalidate(client, hostId);
+      }
       notifyConnection(client, hostId, current);
     });
     return current;
@@ -638,6 +682,21 @@ export async function createNativeWorkbench(options: Options = {}) {
     };
     assertOriginal();
     return { connection: connection!, assertOriginal };
+  }
+  function captureInjectionConnection(client: WebSocket, connections: Map<string, CodexConnection>, hostId: string,
+    generation: unknown, reference: SendInjectionReference): SendInjectionOriginal {
+    const original = capturePageConnection(client, connections, hostId, generation), socket = original.connection.socket!;
+    const source = injectionSource(hostId, original.connection, socket);
+    const assertOriginal = () => {
+      original.assertOriginal();
+      if (reference.hostId !== hostId || reference.owner?.hostId !== hostId) throw Object.assign(new Error('原发送所属宿主已改变。'), { uncertain: false, sendPhase: 'before-send' });
+    };
+    assertOriginal();
+    return { connection: original.connection, socket, generation: connectionGeneration(socket), source, assertOriginal,
+      assertResumedSource(resumed) {
+        assertOriginal();
+        if (!resumedPersistentThreads.get(socket)?.has(resumed.threadId)) throw Object.assign(new Error('此连接尚未确认恢复原持久会话。'), { uncertain: false, sendPhase: 'before-send' });
+      } };
   }
 
   async function handle(message: HostMessage, client: WebSocket, connections: Map<string, CodexConnection>) {
@@ -754,13 +813,21 @@ export async function createNativeWorkbench(options: Options = {}) {
       let response;
       try {
         response = writeMethods.has(method) && typeof params.threadId === 'string'
-          ? await conversationWrite(hostId, params.threadId, request) : await request();
+          ? await conversationWrite(hostId, params.threadId, async () => {
+            if (method !== 'thread/resume' && method !== 'thread/unsubscribe') await sendInjections.assertCanWrite(hostId, params.threadId as string);
+            return request();
+          }) : await request();
       } catch (error) {
         if (parentAttempt && record(error).code !== 'TIMEOUT') sideChatParents.cancel(parentAttempt);
         throw error;
       }
       if (parentAttempt) sideChatParents.receive(parentAttempt, response.result, response.eventCursor);
       let result = response.result;
+      if (method === 'thread/resume' && sourceSocket && connection.socket === sourceSocket
+        && record(record(result).thread).id === params.threadId && record(record(result).thread).ephemeral === false) {
+        const resumed = resumedPersistentThreads.get(sourceSocket) ?? new Set<string>();
+        resumed.add(params.threadId as string); resumedPersistentThreads.set(sourceSocket, resumed);
+      }
       if (method === 'thread/start' && record(record(result).thread).id) createdThreads.add(hostId + ':' + String(record(record(result).thread).id));
       if (method === 'thread/delete') createdThreads.delete(hostId + ':' + String(params.threadId));
       if (method === 'config/read') result = publicConfig(result);
@@ -807,6 +874,10 @@ export async function createNativeWorkbench(options: Options = {}) {
   async function fetchHost(endpoint: string, params: ObjectValue, client: WebSocket, connections: Map<string, CodexConnection>): Promise<unknown> {
     if (endpoint === 'configuration-write') return configurationWriteHost.handle(params, { client, connections });
     if (endpoint === 'side-chat') return sideChats.handle(client, params);
+    if (endpoint === 'side-chat-browser-authority') return stateMutations.run(() => {
+      nativeState.assertAvailable();
+      return sideChatBrowserAuthority.handle(client, params);
+    });
     const hostId = typeof params.hostId === 'string' ? params.hostId : 'local';
     validHost(hostId);
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
@@ -890,18 +961,35 @@ export async function createNativeWorkbench(options: Options = {}) {
       }
       case 'thread-projects': return threadProjects(params.operation as ThreadProjectOperation, params.value);
       case 'project-add': return addProject(hostId, params.path, params.name);
+      case 'send-injection': {
+        const reference = params.reference as SendInjectionReference;
+        if (!reference || reference.hostId !== hostId) throw Object.assign(new Error('原注入宿主身份无效。'), { uncertain: false, sendPhase: 'before-send' });
+        injectionObservers.add(client);
+        if (params.action === 'status') return sendInjections.status(reference);
+        if (params.action === 'retryPersistence') return sendInjections.retryPersistence(reference,
+          params.receipt as { step: 'injection' | 'turn'; attemptId: string });
+        if (params.action !== 'inject' && params.action !== 'start') throw Object.assign(new Error('原注入操作无效。'), { uncertain: false, sendPhase: 'before-send' });
+        const original = captureInjectionConnection(client, connections, hostId, params.daemonConnectionGeneration, reference);
+        return conversationWrite(hostId, reference.threadId, () => params.action === 'inject'
+          ? sendInjections.inject({ reference, items: params.items as ObjectValue[], turnParams: params.turnParams as ObjectValue }, original)
+          : sendInjections.startTurn({ reference, turnAttemptId: params.turnAttemptId as string }, original));
+      }
       case 'queue-edit': {
         if (typeof params.threadId !== 'string' || !params.threadId) throw Object.assign(new Error('原队列会话无效，未删除。'), { uncertain: false, sendPhase: 'before-send' });
         const original = capturePageConnection(client, connections, hostId, params.daemonConnectionGeneration);
-        return conversationWrite(hostId, params.threadId, () => removeQueuedOriginal(original.connection, params.threadId as string, params.entry, original.assertOriginal));
+        return conversationWrite(hostId, params.threadId, async () => {
+          await sendInjections.assertCanWrite(hostId, params.threadId as string);
+          return removeQueuedOriginal(original.connection, params.threadId as string, params.entry, original.assertOriginal);
+        });
       }
       case 'message-edit': {
         if (typeof params.threadId !== 'string' || !params.threadId) throw new Error('编辑需要会话身份。');
         let entered = false;
         try {
           const original = capturePageConnection(client, connections, hostId, params.daemonConnectionGeneration);
-          return await conversationWrite(hostId, params.threadId, () => {
+          return await conversationWrite(hostId, params.threadId, async () => {
             original.assertOriginal();
+            if (params.operation !== 'check') await sendInjections.assertCanWrite(hostId, params.threadId as string);
             if (params.operation !== 'check') sideChatParents.invalidate(hostId, params.threadId as string);
             entered = true;
             return editMessage(original.connection, hostId, params.threadId as string, params, original);

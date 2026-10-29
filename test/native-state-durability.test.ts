@@ -218,6 +218,7 @@ test('file reconciliation does not replay a late fork or send its boundary until
       assert.equal(scope.connectionGeneration, parent.connectionGeneration); return run();
     },
     canReconcile: () => true,
+    assertDispatch(scope) { assert.equal(scope.connectionGeneration, parent.connectionGeneration); },
     async request(scope, method, _params, _mutating, late) {
       assert.equal(scope.connectionGeneration, parent.connectionGeneration);
       calls.push(method);

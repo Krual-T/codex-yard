@@ -89,6 +89,7 @@ async function fixture(t: TestContext, changeParent: Partial<SideChatParent> = {
       return run();
     },
     async withScope(scope, access, run) { if (access.kind === 'dispatch') assertSocket(scope); return run(); },
+    assertDispatch(scope) { assertSocket(scope); },
     canReconcile(scope) { try { assertSocket(scope); return true; } catch { return false; } },
     request(scope, method, params, mutating, onLateTerminal) {
       assertSocket(scope);

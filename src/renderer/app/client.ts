@@ -38,6 +38,7 @@ const readHostEndpoints = new Set(['get-settings', 'get-setting', 'get-global-st
   'home-directory', 'workspace-root-options', 'workspace-directory-entries', 'remote-workspace-directory-entries', 'read-file', 'read-file-metadata', 'read-file-binary',
   'git-diff', 'app-server-connection-state', 'codex-command-keymap-state', 'custom-avatars', 'chrome-status', 'thread-project-state', 'message-send-status', 'workspace-file-save-status']);
 export function hostRequestMutates(endpoint: string, params: Record<string, unknown>): boolean {
+  if (endpoint === 'send-injection') return params.action !== 'status';
   if (endpoint === 'configuration-write') return params.action !== 'status';
   if (endpoint === 'message-edit') return params.operation !== 'check';
   if (endpoint === 'workspace-files') return !['read', 'getMetadata'].includes(String(params.operation));

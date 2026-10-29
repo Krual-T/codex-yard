@@ -41,6 +41,8 @@ export interface SideChatEndpointDependencies {
   withParent<T>(hostId: string, parentThreadId: string, run: () => Promise<T>): Promise<T>;
   /** Dispatch guards the original connection, draft association and applicable close barrier through the claim. */
   withScope<T>(scope: SideChatEndpointScope, access: SideChatEndpointAccess, run: () => Promise<T>): Promise<T>;
+  /** Synchronous authorization inside the exact claim or close-intent store transaction. */
+  assertDispatch(scope: SideChatEndpointScope, action: SideChatHostAction, phase: 'claim' | 'close-intent'): void;
   /** Called synchronously inside the store transaction for an explicit original-page reconciliation. */
   canReconcile(scope: SideChatEndpointScope): boolean;
   /** Atomically recheck the original socket and scope at each actual send, including late continuations. */
@@ -56,6 +58,15 @@ export interface SideChatEndpointDependencies {
   /** True only when the old adapter and all its connection observers are known to have ended. */
   ownerStopped(ownerId: string): boolean;
   notify(hint: { hostId: string; operationId: string }): void | Promise<void>;
+}
+
+function assertDispatch(deps: SideChatEndpointDependencies, scope: SideChatEndpointScope,
+  action: SideChatHostAction, phase: 'claim' | 'close-intent'): void {
+  const checked = deps.assertDispatch(scope, action, phase);
+  if (checked !== undefined) {
+    void Promise.resolve(checked).catch(() => {});
+    throw new Error('dispatch authorization must be synchronous');
+  }
 }
 
 interface ActiveCall { action: SideChatHostAction; ownerId: string; callId: string }
@@ -283,7 +294,13 @@ export function createSideChatEndpointHost(deps: SideChatEndpointDependencies) {
         const result = await deps.store.update(id, operation => {
           const fence = fenceOf(operation);
           if (!fence || fence.ownerId !== ownerId) throw new Error('original operation owner changed');
-          return update(operation);
+          const next = update(operation);
+          if (!operation.close.requested && next.close.requested) {
+            if (!fence.active) throw new Error('original close claim missing');
+            assertDispatch(deps, scopeOf(operation, { hostId: operation.parent.hostId,
+              parentThreadId: operation.parent.threadId, operationId: operation.operationId }), fence.active.action, 'close-intent');
+          }
+          return next;
         });
         notify(result);
         return result;
@@ -501,6 +518,7 @@ export function createSideChatEndpointHost(deps: SideChatEndpointDependencies) {
       await deps.withScope(scope, { kind: 'dispatch', action, closeRequested: before.close.requested }, async () => {
         await deps.store.update(input.operationId, operation => {
           sameScope(operation, scope!);
+          assertDispatch(deps, scope!, action, 'claim');
           if (operation.close.requested !== before.close.requested) throw new Error('close intent changed');
           const fence = fenceOf(operation);
           if (!fence || fence.ownerId !== ownerId || fence.recovering || fence.token !== input.token || fence.active) {

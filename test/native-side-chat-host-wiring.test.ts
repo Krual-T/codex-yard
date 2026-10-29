@@ -227,11 +227,10 @@ test('a slow original directory request does not block other native-state operat
   assert.equal(found.body.view.operationId, completed.body.view.operationId);
 });
 
-test('a committed prepare whose original authority changes is uncertain and recoverable by its prepare identity', async t => {
+test('a committed prepare whose daemon settings authority changes is uncertain and recoverable by its prepare identity', async t => {
   const f = await fixture(t), a = await f.connect(), b = await f.connect();
   await a.rpc('thread/start', { cwd: f.root });
   await b.rpc('model/list', {});
-  f.fake.handlers.set('thread/settings/update', () => ({}));
   let entered!: () => void, release!: () => void;
   const inCommit = new Promise<void>(resolve => { entered = resolve; });
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -239,7 +238,12 @@ test('a committed prepare whose original authority changes is uncertain and reco
   f.gateNextCommit({ entered, wait: gate });
   const preparing = a.host('side-chat', prepared);
   await inCommit;
-  assert.ok((await b.rpc('thread/settings/update', { threadId: 'parent-a', approvalPolicy: 'never' })).message.result);
+  // A Yard write now waits for the same native-state fence, so it cannot be
+  // awaited while that fence is deliberately held here. An external daemon
+  // update can still revoke the original receipt during its disk commit.
+  const from = a.messages.length;
+  f.fake.broadcast({ method: 'thread/settings/updated', params: { threadId: 'parent-a', approvalPolicy: 'never' } });
+  await a.until(item => item.type === 'mcp-notification' && item.method === 'thread/settings/updated', from);
   release();
   const result = await preparing;
   assert.equal(result.responseType, 'error'); assert.equal(result.uncertain, true);

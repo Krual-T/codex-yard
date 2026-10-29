@@ -106,6 +106,10 @@ function fixture() {
       return run();
     },
     canReconcile(scope) { return available && scope.connectionGeneration === generation; },
+    assertDispatch(scope, action, phase) {
+      if (!available || !linked || scope.connectionGeneration !== generation
+        || closeBlocked && (action === 'close' || phase === 'close-intent')) throw new Error('PRIVATE_FENCE');
+    },
     async request(scope, method, params, _mutating, late) {
       if (!available || scope.hostId !== parent.hostId || scope.parentThreadId !== parent.threadId
         || scope.connectionGeneration !== generation) throw Object.assign(new Error('PRIVATE_SOCKET'), { delivery: 'not-sent' });
@@ -267,6 +271,35 @@ test('host, parent, operation, draft linkage and original generation are checked
   await assert.rejects(f.host.start(action(prepared)), unsent);
   assert.deepEqual(f.calls.map(call => call.method), ['config/read']);
   assert.equal((await f.host.read(input(prepared))).view.fork.status, 'waiting');
+});
+
+test('a revoked browser grant between scope authorization and claim cannot write the claim or close intent', async () => {
+  const f = fixture(), prepared = await f.host.prepare({ ...parent, prepareId: 'revoke-before-claim' });
+  const original = f.deps.withScope;
+  f.deps.withScope = (scope, access, run) => original(scope, access, async () => {
+    if (access.kind === 'dispatch') f.setCloseBlocked(true);
+    return run();
+  });
+  await assert.rejects(f.host.close(action(prepared)), unsent);
+  const operation = await f.store.read(prepared.view.operationId);
+  assert.equal(operation!.close.requested, false);
+  assert.equal((operation as unknown as { endpointFence: { active: unknown } }).endpointFence.active, null);
+  assert.deepEqual(f.calls.map(call => call.method), ['config/read']);
+});
+
+test('a revoked browser grant after claim cannot publish close.requested, including a childless close', async () => {
+  const f = fixture(), prepared = await f.host.prepare({ ...parent, prepareId: 'revoke-before-close-intent' });
+  const before = await f.store.read(prepared.view.operationId);
+  const original = f.deps.assertDispatch;
+  f.deps.assertDispatch = (scope, action, phase) => {
+    original(scope, action, phase);
+    if (phase === 'claim') queueMicrotask(() => f.setCloseBlocked(true));
+  };
+  await assert.rejects(f.host.close(action(prepared)));
+  const operation = await f.store.read(prepared.view.operationId);
+  assert.equal(operation!.close.requested, false);
+  assert.deepEqual(operation!.close, before!.close);
+  assert.deepEqual(f.calls.map(call => call.method), ['config/read']);
 });
 
 test('generation changes after the claim are fenced again at the actual send', async () => {

@@ -321,6 +321,19 @@ export function createNativeSideChatParent(options: Options) {
       current.claimed = claim.value;
       return result;
     },
+    assertDispatch(scope, action, phase) {
+      const current = context.getStore(), binding = bindingFor(scope);
+      if (!current || current.page !== binding.page) throw new BeforeSend('侧聊属于另一页面。');
+      const stored = record(record(record(options.readSection()).operations)[scope.operationId]);
+      const closing = action === 'close' || action === 'retry' && record(stored.close).requested === true;
+      (closing ? assertConnection : assertBinding)(binding);
+      if (phase === 'close-intent') {
+        const claimed = current.claimed;
+        if (action !== 'close' || !claimed || claims.get(scope.operationId) !== claimed) throw new BeforeSend('原关闭调用权限已改变。');
+        operation(scope);
+      }
+      checkBrowser(binding, scope, action, 'claim');
+    },
     canReconcile(scope) {
       try {
         const current = context.getStore(), binding = bindingFor(scope);

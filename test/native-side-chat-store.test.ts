@@ -341,6 +341,7 @@ test('real endpoint and E lifecycle recover a late receipt through the file-back
       assert.equal(scope.connectionGeneration, original.connectionGeneration); return run();
     },
     canReconcile: () => true,
+    assertDispatch(scope) { assert.equal(scope.connectionGeneration, original.connectionGeneration); },
     async request(scope, method, _params, _mutating, late) {
       assert.equal(scope.connectionGeneration, original.connectionGeneration);
       calls.push(method);

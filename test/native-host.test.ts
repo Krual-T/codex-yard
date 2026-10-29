@@ -78,6 +78,56 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
   return { root, fake, app, connect };
 }
 
+for (const reconnect of [false, true]) test(`native injection fences all Yard consumers and resumes its immutable original turn (reconnect=${reconnect})`, async t => {
+  const h = await fixture(t);
+  h.fake.handlers.set('thread/inject_items', () => ({}));
+  h.fake.threads.set('injection-parent', fixtureThread('injection-parent', h.root));
+  let page = await h.connect();
+  assert((await page.rpc(700, 'thread/resume', { threadId: 'injection-parent' })).result);
+  let generation = (await page.until(message => message.type === 'codex-app-server-connection-changed' && message.state === 'connected')).daemonConnectionGeneration;
+  const reference = { hostId: 'local', threadId: 'injection-parent', intentId: 'original-intent', injectionAttemptId: 'original-injection',
+    callId: 'original-call', clientUserMessageId: 'original-user-message', owner: { hostId: 'local', threadId: 'injection-parent', draftId: 'original-draft' },
+    revision: 'original-revision', connectionGeneration: generation };
+  const items = [{ type: 'function_call', call_id: reference.callId, name: 'untrusted_input', arguments: '{}' },
+    { type: 'function_call_output', call_id: reference.callId, output: [{ type: 'input_text', text: 'ORIGINAL_CONTEXT' }] }];
+  const turnParams = { threadId: reference.threadId, input: [{ type: 'text', text: 'ORIGINAL_TURN', text_elements: [] }],
+    clientUserMessageId: reference.clientUserMessageId };
+  let hostId = 0;
+  async function host(params: Record<string, unknown>) {
+    const requestId = 'injection-host-' + ++hostId;
+    page.send({ type: 'fetch', requestId, url: 'vscode://codex/send-injection', body: JSON.stringify({ hostId: 'local', reference, ...params }) });
+    return page.until(message => message.type === 'fetch-response' && message.requestId === requestId);
+  }
+  const injected = await host({ action: 'inject', items, turnParams, daemonConnectionGeneration: generation });
+  assert.equal(injected.responseType, 'success', JSON.stringify(injected));
+  assert.equal(injected.body.injection.phase, 'injected');
+  const other = await h.connect();
+  for (const [id, method, params] of [
+    [710, 'turn/start', { threadId: reference.threadId, input: [{ type: 'text', text: 'OTHER_PAGE' }] }],
+    [711, 'thread/queue/add', { threadId: reference.threadId, input: [{ type: 'text', text: 'OTHER_QUEUE' }] }],
+    [712, 'thread/queue/start', { threadId: reference.threadId }],
+  ] as const) assert((await other.rpc(id, method, params)).error, method);
+  assert.equal(h.fake.calls('turn/start').length, 0);
+  if (reconnect) {
+    page.socket.terminate();
+    page = await h.connect();
+    assert((await page.rpc(720, 'thread/resume', { threadId: reference.threadId })).result);
+    generation = (await page.until(message => message.type === 'codex-app-server-connection-changed' && message.state === 'connected')).daemonConnectionGeneration;
+    assert.notEqual(generation, reference.connectionGeneration);
+  }
+  const started = await host({ action: 'start', turnAttemptId: 'original-turn-attempt', daemonConnectionGeneration: generation });
+  assert.equal(started.responseType, 'success', JSON.stringify(started));
+  assert.equal(started.body.turn.phase, 'accepted');
+  assert.deepEqual(h.fake.calls('turn/start')[0]!.params, turnParams);
+  assert.equal(h.fake.calls('thread/inject_items').length, 1);
+  const persisted = JSON.parse(await readFile(join(h.root, 'data/native-state.json'), 'utf8'));
+  assert.deepEqual(persisted.sendInjections.operations[0].reference, reference);
+  assert.deepEqual(persisted.sendInjections.operations[0].items, items);
+  assert.deepEqual(persisted.sendInjections.operations[0].turnParams, turnParams);
+  const observed = await host({ action: 'status' });
+  assert.equal(observed.body.turn.phase, 'accepted');
+});
+
 test('native state recovery precedes settings, project, Mini and configuration consumers', async t => {
   let loseCommit = false, recoveryBlocked = true;
   const initial = JSON.parse('{"globals":{"keep":"global"},"settings":{"selected-avatar-id":"old"},"sideChats":{"version":1,"operations":{},"prepared":{}},"future":{"nested":[1,{"keep":true}]},"__proto__":{"keep":"ordinary-key"}}');
