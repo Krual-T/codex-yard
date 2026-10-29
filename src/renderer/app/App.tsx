@@ -48,6 +48,11 @@ import { readSettingsRoute } from '../settings/routing.ts';
 import { readThreadArchived } from './thread-archive.ts';
 import { useWorkbenchShortcuts } from './use-workbench-shortcuts.ts';
 import { useShellPreferences } from './use-shell-preferences.ts';
+import { SideChatRoot } from '../side-chat/SideChatRoot.tsx';
+import type { SideChatRootChild, SideChatRootController, SideChatRootParentGrant } from '../side-chat/SideChatRoot.tsx';
+import type { SideChatWorkspaceNavigationLease } from './SideChatWorkspace.tsx';
+import type { SideChatBrowserIdentity, SideChatSendLease } from '../side-chat/browser-authority.ts';
+import type { SideChatWorkspaceIdentity } from './side-chat-workspace-runtime.ts';
 import { fullAccessVisible } from '../settings/preferences.ts';
 import { ProductWorkspace } from './ProductWorkspace.tsx';
 import { readProductRoute } from './product-routes.ts';
@@ -61,6 +66,10 @@ import './app.css';
 type ThreadRow = ThreadSummary & { preview?: string; updatedAt?: number; createdAt?: number };
 interface Host { hostId: string; displayName: string }
 interface Route { pathname: string; search: string; hash: string; state: unknown; threadId: string | null; hostId: string; section: string | null; readOnly: boolean }
+type SideChatPanelSource = Pick<SideChatRootChild, 'identity' | 'owner'>;
+const sameComposerOwner = (left: ComposerDraftOwner, right: ComposerDraftOwner) => left.hostId === right.hostId
+  && left.threadId === right.threadId && left.draftId === right.draftId;
+const composerOwnerKey = (owner: ComposerDraftOwner) => JSON.stringify([owner.hostId, owner.threadId, owner.draftId]);
 function route(): Route {
   const url = new URL(location.href), parts = url.pathname.split('/').filter(Boolean);
   return { pathname: url.pathname, search: url.search, hash: url.hash, state: history.state && Object.hasOwn(history.state, '__yardState') ? history.state.__yardState : history.state,
@@ -158,7 +167,26 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [editState, setEditState] = useState<StoredMessageEdit | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelMounted, setPanelMounted] = useState(false);
-  const [panelKind, setPanelKind] = useState<'workspace' | 'browser' | 'visualization'>('workspace');
+  const [panelKind, setPanelKind] = useState<'workspace' | 'browser' | 'visualization' | 'side-chat'>('workspace');
+  const sideChats = useRef<SideChatRootController | null>(null);
+  const sideChatNavigation = useRef<SideChatWorkspaceNavigationLease | null>(null);
+  const sideChatFlushed = useRef(false);
+  const sideChatActive = useRef<SideChatRootChild | null>(null);
+  const [sideChatChild, setSideChatChild] = useState<SideChatRootChild | null>(null);
+  const [sideChatSource, setSideChatSource] = useState<SideChatPanelSource | null>(null);
+  const sideChatSourceRef = useRef(sideChatSource); sideChatSourceRef.current = sideChatSource;
+  const [sideChatOpened, setSideChatOpened] = useState(false);
+  const frozenChildOwners = useRef(new Map<string, object>());
+  const receiveSideChatController = useCallback((controller: SideChatRootController | null) => { sideChats.current = controller; }, []);
+  const receiveSideChatChild = useCallback((child: SideChatRootChild | null) => { sideChatActive.current = child; setSideChatChild(child); }, []);
+  const releaseSideChatNavigation = () => {
+    const lease = sideChatNavigation.current;
+    if (!lease) return;
+    // An uncertain revoke retains only its own child leases. A later explicit
+    // navigation retries that same revoke; it never acquires a replacement.
+    try { lease.release(); sideChatNavigation.current = null; sideChatFlushed.current = false; }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  };
   const [browserMounted, setBrowserMounted] = useState(false);
   const [browserNavigation, setBrowserNavigation] = useState<{ id: string; url: string } | null>(null);
   const [visualization, setVisualization] = useState<{ hostId: string; threadId: string; path: string } | null>(null);
@@ -188,6 +216,12 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     // Keep the original editor frozen until the new route actually commits.
     const editLease = navigationLease.current;
     try {
+      if (sideChatNavigation.current) {
+        sideChatNavigation.current.handoff();
+        sideChatNavigation.current.release(); sideChatNavigation.current = null; sideChatFlushed.current = false;
+        setSideChatOpened(false); setSideChatSource(null);
+        if (sideChatOpened || sideChatSource) setPanelOpen(false);
+      }
       if (editLease) {
         if (!current.section && current.hostId === editLease.origin.hostId && current.threadId === editLease.origin.threadId) editLease.release();
         else editLease.handoff();
@@ -264,6 +298,12 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [homeGeneration, setHomeGeneration] = useState(0);
   const newDraftId = useMemo(() => homeDraftIdentity(current.hostId), [current.hostId, homeGeneration]);
   const inFlight = useRef(false);
+  const mainIdleWaiters = useRef(new Set<() => void>());
+  const finishMainDispatch = () => {
+    inFlight.current = false; setSubmitting(false);
+    for (const done of mainIdleWaiters.current) done();
+    mainIdleWaiters.current.clear();
+  };
   const selectionReady = useRef<{ key: string; resolve(): void; reject(error: Error): void } | null>(null);
   const settingsGuard = useRef<{ requestLeave(): Promise<boolean> } | null>(null);
   const navigation = useRef<ReturnType<typeof createRouteNavigation> | null>(null);
@@ -354,11 +394,19 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         const borrowed = targetChange.current?.controller === composer ? targetChange.current.lease : undefined;
         composerNavigationLease.current = snapshot ? composer!.freeze(snapshot.owner, borrowed) : null;
         if (composer && (!snapshot || !composerNavigationLease.current)) return false;
+        if (!sideChatNavigation.current && sideChats.current) {
+          sideChatNavigation.current = sideChats.current.freeze(); sideChatFlushed.current = false;
+          if (!sideChatNavigation.current) return false;
+        }
         // Apply native inert before the first await so input cannot change while
         // the message, composer and file transactions are being drained.
         flushSync(() => setLeaving(true));
         await navigationLease.current?.flush();
         if (composerNavigationLease.current && !await composerNavigationLease.current.flush()) return false;
+        if (sideChatNavigation.current && !sideChatFlushed.current) {
+          if (!await sideChatNavigation.current.flush()) return false;
+          sideChatFlushed.current = true;
+        }
         if (settingsGuard.current && !await settingsGuard.current.requestLeave()) return false;
         if (panelsDirty.current && !window.confirm('Keep unsaved file changes and switch pages?')) return false;
         await panelRecoveryBarrier.current?.();
@@ -366,16 +414,19 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         if (Object.keys(browserProjections.current).length) throw new Error('浏览器引用有已保存但尚未接收的版本，请先核对、复制或明确放弃。');
         await navigationLease.current?.flush();
         if (composerNavigationLease.current && !await composerNavigationLease.current.flush()) return false;
+        await sideChatNavigation.current?.revoke();
         accepted = true;
         return true;
       } catch (cause) { accepted = false; setError(String(cause)); return false; }
       finally { if (!accepted) {
+        releaseSideChatNavigation();
         navigationLease.current?.release(); navigationLease.current = null;
         releaseEditAcquisitionFreeze.current?.(); releaseEditAcquisitionFreeze.current = null;
         composerNavigationLease.current?.release(); composerNavigationLease.current = null; navigationLocked.current = false; setLeaving(false);
       } }
     }, (committed, cause) => {
       if (!committed) {
+        releaseSideChatNavigation();
         committedNavigation.current = null;
         navigationLease.current?.release(); navigationLease.current = null;
         releaseEditAcquisitionFreeze.current?.(); releaseEditAcquisitionFreeze.current = null;
@@ -777,7 +828,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       }
       if (!origin) setError(cause instanceof Error ? cause.message : String(cause));
       throw cause;
-    } finally { inFlight.current = false; setSubmitting(false); }
+    } finally { finishMainDispatch(); }
   };
   const interrupt = async () => {
     const active = threadRef.current?.turns?.find(turn => turn.status === 'inProgress');
@@ -882,15 +933,100 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     return action?.type === 'queue' || (action?.type === 'steer'
       ? thread?.turns.some(turn => turn.id === action.turnId && turn.status === 'inProgress') === true : !busy);
   };
-  const panelScope = JSON.stringify([current.hostId, current.threadId ?? newDraftId]);
-  const panelCwd = thread?.cwd || cwd || workspace;
   const composerOwner = { hostId: current.hostId, threadId: current.threadId,
     draftId: current.threadId ? sendState?.bindings[sendThreadKey(current.hostId, current.threadId)] ?? current.threadId : newDraftId };
+  const panelHostId = sideChatSource?.owner.hostId ?? current.hostId;
+  const panelThreadId = sideChatSource?.owner.threadId ?? current.threadId;
+  const panelScope = JSON.stringify([panelHostId, sideChatSource?.owner.draftId ?? current.threadId ?? newDraftId]);
+  const panelCwd = sideChatSource?.identity.cwd ?? thread?.cwd ?? (cwd || workspace);
   const composerIsCurrent = composerSnapshot?.owner.hostId === composerOwner.hostId
     && composerSnapshot.owner.threadId === composerOwner.threadId && composerSnapshot.owner.draftId === composerOwner.draftId;
-  const browserOwner = browserDraftOwner(composerOwner, sendState?.bindings ?? {});
+  const browserOwner = browserDraftOwner(sideChatSource?.owner ?? composerOwner, sendState?.bindings ?? {});
   const activeBrowserOwner = useRef(browserOwner); activeBrowserOwner.current = browserOwner;
   const sendBindings = useRef(sendState?.bindings ?? {}); sendBindings.current = sendState?.bindings ?? {};
+  const panelComposer = useCallback((): ComposerDraftController | null => {
+    const source = sideChatSourceRef.current;
+    if (!source) return composerController.current;
+    const child = sideChatActive.current;
+    return child && child.identity.prepareId === source.identity.prepareId && sameComposerOwner(child.owner, source.owner)
+      ? child.draft : null;
+  }, []);
+  const panelComposerSnapshot = sideChatSource
+    ? sideChatChild && sideChatChild.identity.prepareId === sideChatSource.identity.prepareId
+      && sameComposerOwner(sideChatChild.owner, sideChatSource.owner) ? sideChatChild.snapshot : null
+    : composerSnapshot;
+  const captureSideChatParent = useCallback((): SideChatRootParentGrant => {
+    const original = routeRef.current, source = threadRef.current;
+    if (navigationLocked.current || original.section || !original.threadId || !source || source.id !== original.threadId || !source.cwd) {
+      throw new Error('原父会话尚未就绪，侧聊未打开。');
+    }
+    const hostId = original.hostId, threadId = original.threadId, cwd = source.cwd;
+    const daemon = client.captureDaemonConnection(hostId), connection = transportIdentity.current;
+    const bridgeRevision = connection.bridgeRevision, hostRevision = connection.hosts[hostId]?.revision;
+    const assertCurrent = () => {
+      daemon.assertOriginal();
+      const route = routeRef.current, thread = threadRef.current, now = transportIdentity.current;
+      if (route.section || route.hostId !== hostId || route.threadId !== threadId || thread?.id !== threadId || thread.cwd !== cwd
+        || now.bridge !== 'connected' || now.bridgeRevision !== bridgeRevision || now.hosts[hostId]?.state !== 'connected'
+        || now.hosts[hostId]?.revision !== hostRevision) throw new Error('原父会话或连接已改变，侧聊操作未派发。');
+    };
+    assertCurrent();
+    return { parent: { hostId, threadId, cwd, archived: original.readOnly || sessions.view({ hostId, threadId }).snapshot().archived === true }, assertCurrent };
+  }, [client, sessions]);
+  const freezeSideChatOwner = useCallback((owner: ComposerDraftOwner, identity: SideChatWorkspaceIdentity,
+    draft: ComposerDraftController | null, assertOriginal: () => void): SideChatSendLease => {
+    assertOriginal();
+    if (owner.hostId !== identity.hostId || owner.draftId !== identity.draftId) throw new Error('原侧聊草稿身份不匹配。');
+    const key = composerOwnerKey(owner), token = {};
+    if (frozenChildOwners.current.has(key)) throw new Error('原侧聊输入仍有未完成的移交。');
+    frozenChildOwners.current.set(key, token);
+    const main = composerController.current, snapshot = main?.snapshot();
+    let mainLease: ComposerDraftLease | null = null;
+    try {
+      // The Workspace already froze its own controller. Only acquire a second
+      // lease if Main actually holds another projection of this exact owner.
+      if (main && main !== draft && snapshot && sameComposerOwner(snapshot.owner, owner)) {
+        mainLease = main.freeze(owner);
+        if (!mainLease) throw new Error('原输入区的同一草稿尚不能移交。');
+      }
+    } catch (cause) { frozenChildOwners.current.delete(key); throw cause; }
+    const assertCurrent = () => {
+      assertOriginal();
+      if (frozenChildOwners.current.get(key) !== token) throw new Error('原侧聊输入移交租约已改变。');
+      if (mainLease && (composerController.current !== main || !main?.snapshot() || !sameComposerOwner(main.snapshot()!.owner, owner))) {
+        throw new Error('原输入区的同一草稿投影已改变。');
+      }
+    };
+    return {
+      assertCurrent,
+      async drain() {
+        assertCurrent();
+        if (mainLease && inFlight.current) await new Promise<void>(done => mainIdleWaiters.current.add(done));
+        if (mainLease && !await mainLease.flush()) throw new Error('原输入区尚未保存，侧聊移交未完成。');
+        const source = sideChatSourceRef.current;
+        if (source && sameComposerOwner(source.owner, owner)) {
+          if (panelsDirty.current && !window.confirm('Keep unsaved file changes and close the side chat?')) throw new Error('文件编辑已保留，侧聊未关闭。');
+          await panelRecoveryBarrier.current?.(); await browserRecoveryBarrier.current?.();
+        }
+        if (Object.values(browserProjections.current).some(value => sameComposerOwner(value.after.owner, owner))) {
+          throw new Error('原侧聊浏览器引用尚未接收，已保存版本保留。');
+        }
+        assertCurrent();
+      },
+      release() {
+        if (frozenChildOwners.current.get(key) !== token) return;
+        mainLease?.release(); frozenChildOwners.current.delete(key);
+      },
+    };
+  }, []);
+  const cleanupSideChat = useCallback(async (identity: SideChatBrowserIdentity) => {
+    const source = sideChatSourceRef.current;
+    if (source && source.identity.hostId === identity.hostId && source.identity.draftId === identity.draftId
+      && source.identity.prepareId === identity.prepareId && source.owner.threadId === identity.childThreadId) {
+      await panelRecoveryBarrier.current?.(); await browserRecoveryBarrier.current?.();
+      setPanelOpen(false); setSideChatSource(null);
+    }
+  }, []);
   const captureMainSubmissionAuthority = useCallback((owner: ComposerDraftOwner) => {
     const original = structuredClone(owner), connection = transportIdentity.current;
     const daemon = client.captureDaemonConnection(owner.hostId);
@@ -902,7 +1038,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       const connection = transportIdentity.current;
       if (connection.bridge !== 'connected' || connection.bridgeRevision !== bridgeRevision
         || connection.hosts[original.hostId]?.state !== 'connected' || connection.hosts[original.hostId]?.revision !== hostRevision
-        || mainGrantRevision.current !== grant) throw Object.assign(new Error('原页面连接或输入使用权已改变，未发送。'), { uncertain: false });
+        || mainGrantRevision.current !== grant || frozenChildOwners.current.has(composerOwnerKey(expected))) throw Object.assign(new Error('原页面连接或输入使用权已改变，未发送。'), { uncertain: false });
     };
     const assert = () => {
       checkConnection();
@@ -928,25 +1064,26 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     return assert;
   }, []);
   const beginBrowserDraftOperation = useCallback((owner: BrowserOwner) => {
-    const controller = composerController.current, snapshot = controller?.snapshot();
+    const controller = panelComposer(), snapshot = controller?.snapshot();
     if (!controller || !snapshot || routeRef.current.readOnly || navigationLocked.current
+      || frozenChildOwners.current.has(composerOwnerKey(snapshot.owner))
       || browserOwnerKey(owner) !== browserOwnerKey(activeBrowserOwner.current)
       || browserOwnerKey(browserDraftOwner(snapshot.owner, sendBindings.current)) !== browserOwnerKey(owner)) return null;
     return controller.beginExternalOperation(snapshot.owner);
-  }, []);
+  }, [panelComposer]);
   const acceptBrowserCommittedVersion = useCallback(async (before: ComposerDraftSnapshot, after: ComposerDraftSnapshot) => {
-    const controller = composerController.current;
+    const controller = panelComposer();
     if (!controller || routeRef.current.readOnly || navigationLocked.current
       || browserOwnerKey(browserDraftOwner(after.owner, sendBindings.current)) !== browserOwnerKey(activeBrowserOwner.current)) return false;
     const accepted = await controller.acceptCommittedVersion(before, after);
     if (accepted) releaseBrowserProjection(after);
     return accepted;
-  }, [releaseBrowserProjection]);
+  }, [panelComposer, releaseBrowserProjection]);
   useEffect(() => {
-    if (!composerSnapshot || browserOwnerKey(browserDraftOwner(composerSnapshot.owner, sendBindings.current)) !== browserOwnerKey(browserOwner)) return;
+    if (!panelComposerSnapshot || browserOwnerKey(browserDraftOwner(panelComposerSnapshot.owner, sendBindings.current)) !== browserOwnerKey(browserOwner)) return;
     setBrowserSyncError('');
     return watchBrowserDraftDeletions(browserOwner, () => {
-      const snapshot = composerController.current?.snapshot();
+      const snapshot = panelComposer()?.snapshot();
       return snapshot && browserOwnerKey(browserDraftOwner(snapshot.owner, sendBindings.current)) === browserOwnerKey(browserOwner) ? snapshot : null;
     }, async () => {
       const operation = beginBrowserDraftOperation(browserOwner);
@@ -954,7 +1091,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       await syncBrowserDraftDeletions(browserOwner, operation, retainBrowserProjection, releaseBrowserProjection);
       return true;
     }, cause => setBrowserSyncError(String(cause)));
-  }, [browserOwner.hostId, browserOwner.threadId, browserOwner.draftId, composerSnapshot?.revision, browserSyncRetry, beginBrowserDraftOperation, retainBrowserProjection, releaseBrowserProjection]);
+  }, [browserOwner.hostId, browserOwner.threadId, browserOwner.draftId, panelComposerSnapshot?.revision, browserSyncRetry, panelComposer, beginBrowserDraftOperation, retainBrowserProjection, releaseBrowserProjection]);
   useEffect(() => {
     let keyboardClose = false;
     const keydown = (event: KeyboardEvent) => {
@@ -976,32 +1113,50 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     window.addEventListener('beforeunload', beforeUnload);
     return () => { window.removeEventListener('keydown', keydown); window.removeEventListener('beforeunload', beforeUnload); };
   }, [shellPreferences.values['confirm-before-close']]);
-  const showBrowser = (source?: { hostId: string; threadId: string; url?: string }) => {
-    if (source && (source.hostId !== current.hostId || source.threadId !== current.threadId)) {
+  const checkPanelChild = (child: SideChatPanelSource) => {
+    const active = sideChatActive.current;
+    if (navigationLocked.current || !active || active.identity.prepareId !== child.identity.prepareId
+      || !sameComposerOwner(active.owner, child.owner) || frozenChildOwners.current.has(composerOwnerKey(child.owner))) {
+      throw new Error('原侧聊面板目标已改变，请返回原侧聊。');
+    }
+  };
+  const showBrowser = (source?: { hostId: string; threadId: string; url?: string }, child: SideChatPanelSource | null = null) => {
+    if (child) checkPanelChild(child);
+    if (source && (source.hostId !== (child?.owner.hostId ?? current.hostId) || source.threadId !== (child?.owner.threadId ?? current.threadId))) {
       setError('浏览器链接所属会话已改变，请返回原会话。'); return;
     }
+    setSideChatSource(child);
     setBrowserMounted(true); setPanelKind('browser'); setPanelOpen(true);
     if (source?.url) setBrowserNavigation({ id: crypto.randomUUID(), url: source.url });
   };
-  const showVisualization = (source: { hostId: string; threadId: string; path: string }) => {
-    if (source.hostId !== current.hostId || source.threadId !== current.threadId) { setError('可视化所属会话已改变，请返回原会话。'); return; }
+  const showVisualization = (source: { hostId: string; threadId: string; path: string }, child: SideChatPanelSource | null = null) => {
+    if (child) checkPanelChild(child);
+    if (source.hostId !== (child?.owner.hostId ?? current.hostId) || source.threadId !== (child?.owner.threadId ?? current.threadId)) { setError('可视化所属会话已改变，请返回原会话。'); return; }
+    setSideChatSource(child);
     setVisualization(source); setPanelKind('visualization'); setPanelOpen(true);
   };
-  const showPanel = (request?: { kind: 'terminal'; reuse?: boolean } | { kind: 'file'; path: string; line?: number; column?: number } | { kind: 'diff'; path?: string; diff?: string }) => {
+  const showPanel = (request?: { kind: 'terminal'; reuse?: boolean } | { kind: 'file'; path: string; line?: number; column?: number } | { kind: 'diff'; path?: string; diff?: string }, child: SideChatPanelSource | null = null) => {
+    if (child) checkPanelChild(child);
+    const hostId = child?.owner.hostId ?? current.hostId, threadId = child?.owner.threadId ?? current.threadId;
+    const scopeId = JSON.stringify([hostId, child?.owner.draftId ?? threadId ?? newDraftId]);
+    const targetCwd = child?.identity.cwd ?? thread?.cwd ?? (cwd || workspace);
     const connection = transportIdentity.current;
-    if (request?.kind === 'terminal' && (connection.bridge !== 'connected' || connection.hosts[current.hostId]?.state !== 'connected')) {
+    if (request?.kind === 'terminal' && (connection.bridge !== 'connected' || connection.hosts[hostId]?.state !== 'connected')) {
       setError('终端当前不可用：主机连接已断开或尚未就绪，请先重新连接。');
       return;
     }
+    setSideChatSource(child);
     setPanelMounted(true); setPanelKind('workspace'); setPanelOpen(true);
-    if (request) setPanelRequest({ ...request, id: crypto.randomUUID(), scopeId: panelScope, hostId: current.hostId, cwd: panelCwd });
+    if (request) setPanelRequest({ ...request, id: crypto.randomUUID(), scopeId, hostId, cwd: targetCwd });
   };
-  const openFile = (path: string, line?: number, column?: number, fileCwd = panelCwd) =>
+  const openFile = (path: string, line?: number, column?: number, fileCwd = thread?.cwd || cwd || workspace) =>
     showPanel({ kind: 'file', path: resolveFilePath(fileCwd, path), line, column });
   const addReference = async (draft: ComposerDraft) => {
-    const controller = composerController.current, snapshot = controller?.snapshot();
+    const controller = panelComposer(), snapshot = controller?.snapshot(), source = sideChatSourceRef.current;
     if (!controller || !snapshot || navigationLocked.current || routeRef.current.readOnly
-      || snapshot.owner.hostId !== routeRef.current.hostId || snapshot.owner.threadId !== routeRef.current.threadId)
+      || frozenChildOwners.current.has(composerOwnerKey(snapshot.owner))
+      || (source ? !sameComposerOwner(snapshot.owner, source.owner)
+        : snapshot.owner.hostId !== routeRef.current.hostId || snapshot.owner.threadId !== routeRef.current.threadId))
       throw new Error('原输入区尚未就绪，引用未加入，请保留来源后重试。');
     const operation = controller.beginExternalOperation(snapshot.owner);
     if (!operation) throw new Error('原输入区正在处理其他输入，引用未加入，请重试。');
@@ -1009,8 +1164,17 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     try {
       accepted = await operation.applyPrefill({ id: crypto.randomUUID(), draft: structuredClone(draft) });
       if (!accepted) throw new Error('引用尚未保存，来源内容已保留。');
-      if (controller === composerController.current) setPanelOpen(false);
+      if (controller === panelComposer()) { if (source) setPanelKind('side-chat'); else setPanelOpen(false); }
     } finally { operation.finish(accepted); }
+  };
+  const openSideChat = async () => {
+    try {
+      const controller = sideChats.current;
+      if (!controller) throw new Error('原侧聊工作区尚未就绪。');
+      await controller.open();
+      if (controller !== sideChats.current || navigationLocked.current) throw new Error('原侧聊工作区已改变。');
+      setSideChatOpened(true); setPanelKind('side-chat'); setPanelOpen(true); setMenu(false);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
   const turnDiff = [...thread?.turns ?? []].reverse().map(turn => record(turn).diff).find(value => typeof value === 'string') as string | undefined;
   const addProject = () => {
@@ -1115,6 +1279,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         {current.threadId && <div className="yard-conversation-actions"><button className="yard-icon-button" aria-label="Conversation menu" aria-expanded={menu} onClick={() => setMenu(value => !value)}><MoreHorizontal aria-hidden="true" /></button>
           {menu && <div className="yard-menu" role="menu">{['rename', 'fork', 'copy', current.readOnly ? 'restore' : 'archive'].map(name => <button role="menuitem" key={name} onClick={() => { void action(name); }}>{name === 'copy' ? 'Copy conversation link' : name[0]!.toUpperCase() + name.slice(1)}</button>)}
           <button role="menuitem" onClick={() => { setMenu(false); setMessageSearchOpen(true); }}>Search messages</button>
+          {!current.readOnly && <button role="menuitem" disabled={loading || leaving || !sendState} onClick={openSideChat}>{chinese ? '新建侧聊' : 'New side chat'}</button>}
           <button role="menuitem" onClick={() => { setMenu(false); setGoalMounted(true); setGoalOpen(value => !value); }}>Goal</button></div>}
         </div>}
         {requests.length > 0 && <details className="yard-toolbar-menu"><summary aria-label="Inspect approval request"><ListTodo aria-hidden="true" /></summary><div className="yard-menu">
@@ -1127,6 +1292,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         <details className="yard-toolbar-menu"><summary aria-label="Open side panel"><PanelRight aria-hidden="true" /></summary><div className="yard-menu" role="menu">
           <button role="menuitem" aria-label="Workspace files" onClick={() => showPanel()}>Files</button>
           <button role="menuitem" aria-label="Open Chrome panel" disabled={!sendState} onClick={() => showBrowser()}><Globe aria-hidden="true" />Chrome</button>
+          {sideChatOpened && <button role="menuitem" onClick={() => { setPanelKind('side-chat'); setPanelOpen(true); }}>{chinese ? '侧聊' : 'Side chat'}</button>}
           {visualization?.hostId === current.hostId && visualization.threadId === current.threadId && <button role="menuitem" aria-label="Open visualization" onClick={() => showVisualization(visualization)}>Preview</button>}
           {turnDiff !== undefined && <button role="menuitem" aria-label="Open turn changes" onClick={() => showPanel({ kind: 'diff', diff: turnDiff })}>Changes</button>}
           <label>Execution host<select aria-label="Execution host" value={current.hostId} disabled={!hostCatalogReady} onChange={event => { void navigate('/?hostId=' + encodeURIComponent(event.target.value)); }}>{hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.displayName}</option>)}</select></label>
@@ -1311,24 +1477,48 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
             await client.rpc('thread/queue/start', { threadId: identity.threadId, queuedSubmissionId }, identity.hostId,
               { assertBeforeSend, daemonConnectionGeneration: daemon.generation });
           }
-          finally { inFlight.current = false; setSubmitting(false); }
+          finally { finishMainDispatch(); }
         }} />}</div></div>
       </>}
       </div>
       <aside className="yard-workspace-panel" hidden={!panelOpen || settings} aria-label="Workspace panel" inert={leaving}>
-        <div hidden={panelKind !== 'workspace'} style={{ height: '100%' }}>{panelMounted && <WorkspacePanels ref={workspacePanels} client={client} scopeId={panelScope} hostId={current.hostId} threadId={current.threadId ?? undefined} cwd={panelCwd}
+        <div className="yard-side-chat-workspace" hidden={panelKind !== 'side-chat'}><SideChatRoot client={client} sessions={sessions} sends={sendStore} edits={editStore} approvals={approvals}
+          visible={panelOpen && !settings && panelKind === 'side-chat'} captureParent={captureSideChatParent}
+          onController={receiveSideChatController} onActiveChild={receiveSideChatChild}
+          freezeChildOwner={freezeSideChatOwner} cancelSend={(intent, guard) => sendStore.cancelOriginal(intent, guard)}
+          cleanupChild={cleanupSideChat}
+          onClosed={identity => { if (sideChatActive.current?.identity.prepareId === identity.prepareId) setPanelOpen(false); }}
+          onExitObservation={() => setPanelOpen(false)}
+          onRemoveReference={(_child, owner, reference, operation) => removeBrowserDraftReference(browserDraftOwner(owner, sendBindings.current), reference,
+            operation, retainBrowserProjection, releaseBrowserProjection)}
+          onOpenFile={value => {
+            const child = sideChatActive.current;
+            if (!child || child.owner.hostId !== value.hostId || child.owner.threadId !== value.threadId) throw new Error('原侧聊文件来源已改变。');
+            showPanel({ kind: 'file', path: resolveFilePath(value.cwd ?? child.identity.cwd, value.path), line: value.line, column: value.column }, child);
+          }}
+          onOpenBrowser={value => {
+            const child = sideChatActive.current;
+            if (!child || child.owner.hostId !== value.hostId || child.owner.threadId !== value.threadId) throw new Error('原侧聊浏览器来源已改变。');
+            showBrowser(value, child);
+          }}
+          onOpenVisualization={value => {
+            const child = sideChatActive.current;
+            if (!child || child.owner.hostId !== value.hostId || child.owner.threadId !== value.threadId) throw new Error('原侧聊可视化来源已改变。');
+            showVisualization(value, child);
+          }} /></div>
+        <div hidden={panelKind !== 'workspace'} style={{ height: '100%' }}>{panelMounted && <WorkspacePanels ref={workspacePanels} client={client} scopeId={panelScope} hostId={panelHostId} threadId={panelThreadId ?? undefined} cwd={panelCwd}
           appearance={panelAppearance} request={panelRequest} onRequestConsumed={id => setPanelRequest(previous => previous?.id === id ? null : previous)}
-          onNewTerminal={() => showPanel({ kind: 'terminal' })}
+          onNewTerminal={() => { try { showPanel({ kind: 'terminal' }, sideChatSource); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } }}
           onRecoveryBarrier={receivePanelRecoveryBarrier}
           onClose={() => setPanelOpen(false)} onReference={addReference} onDirtyChange={dirty => { panelsDirty.current = dirty; }} />}</div>
         {browserMounted && <StandaloneBrowser client={client} {...browserOwner} browserTabId="primary"
-          draft={composerSnapshot && browserOwnerKey(browserDraftOwner(composerSnapshot.owner, sendState?.bindings ?? {})) === browserOwnerKey(browserOwner)
-            ? composerSnapshot.draft : { text: '', images: [], files: [] }}
+          draft={panelComposerSnapshot && browserOwnerKey(browserDraftOwner(panelComposerSnapshot.owner, sendState?.bindings ?? {})) === browserOwnerKey(browserOwner)
+            ? panelComposerSnapshot.draft : { text: '', images: [], files: [] }}
           visible={panelOpen && !settings && panelKind === 'browser'} allowNavigation
           navigationRequest={browserNavigation} onNavigationConsumed={id => setBrowserNavigation(previous => previous?.id === id ? null : previous)}
           beginDraftOperation={beginBrowserDraftOperation} onDraftVersionCommitted={acceptBrowserCommittedVersion}
           onRecoveryBarrier={receiveBrowserRecoveryBarrier} onClose={() => setPanelOpen(false)} />}
-        {panelOpen && !settings && panelKind === 'visualization' && visualization?.hostId === current.hostId && visualization.threadId === current.threadId
+        {panelOpen && !settings && panelKind === 'visualization' && visualization?.hostId === panelHostId && visualization.threadId === panelThreadId
           && <StandaloneVisualization client={client} {...visualization} theme={previewAppearance.theme} themeVariables={previewAppearance.variables}
             locale={previewAppearance.locale} onPrefill={addReference} onFollowUp={async (request, signal) => {
               if (leaving || navigationLocked.current || signal.aborted || current.readOnly || !composerIsCurrent
