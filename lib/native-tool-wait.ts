@@ -25,8 +25,9 @@ interface Projection {
   latestAssistantMessage: LatestMessage | null;
   latestToolMarker: ToolMarker | null;
 }
-interface PollState { manager: NativeManager; generation: string; revision: number; fingerprint: string; ordinal: number; projection: Projection }
+interface PollState { manager: NativeManager; generation: string; revision: number; fingerprint: string; ordinal: number; itemsComplete: boolean; projection: Projection }
 interface Poll extends Projection { schemaVersion: 1; cursor: string; revision: number; changed: boolean; cursorReset?: boolean; latestAssistantMessageId: string | null; latestToolMarkerId: string | null }
+interface ObservedRead { thread?: ThreadSummary; turns?: TurnSummary[]; ordinal?: number; threadOrdinal?: number; turnsOrdinal?: number }
 type Wake = { reason: 'turnCompleted'; turnId: string } | { reason: 'inactiveStatus' | 'actionableStatus' };
 interface WaitResult { timedOut: boolean; wake: Wake | null; poll: Poll }
 
@@ -34,7 +35,7 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const aborted = () => reject(signal.reason);
+    const aborted = () => { signal.removeEventListener('abort', aborted); reject(signal.reason); };
     signal.addEventListener('abort', aborted, { once: true });
     promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', aborted)).catch(() => {});
   });
@@ -248,18 +249,34 @@ export class ThreadWaiter {
   private formatter: typeof formatAssistantMessage;
   constructor(hosts: NativeHosts, formatter: typeof formatAssistantMessage) { this.hosts = hosts; this.formatter = formatter; }
 
+  private commitProjection(manager: NativeManager, threadId: string, cursor: string | undefined, ordinal: number, projection: Projection, itemsComplete: boolean): Poll {
+    const key = JSON.stringify([manager.getHostId(), threadId]);
+    let prior = this.states.get(key);
+    if (prior?.manager !== manager) prior = undefined;
+    if (prior && prior.ordinal > ordinal) return toPoll(prior, cursor);
+    const fingerprint = JSON.stringify({ status: projection.thread.status, turnId: projection.latestTurn?.id ?? null, turnStatus: projection.latestTurn?.status ?? null,
+      turnError: projection.latestTurn?.error?.message ?? null, assistant: projection.latestAssistantMessage, tool: projection.latestToolMarker });
+    const state: PollState = { manager, generation: prior?.generation ?? crypto.randomUUID(), revision: prior ? prior.revision + (prior.fingerprint === fingerprint ? 0 : 1) : 1, fingerprint, ordinal, itemsComplete, projection };
+    this.states.delete(key); this.states.set(key, state);
+    if (this.states.size > 256) this.states.delete(this.states.keys().next().value!);
+    return toPoll(state, cursor);
+  }
+
   private async fromCurrent<T>(manager: NativeManager, threadId: string, signal: AbortSignal, read: () => Promise<T>): Promise<T> {
     signal.throwIfAborted();
     const local = new AbortController();
     const host = manager.getHostId();
+    let listening = true;
     const unhost = this.hosts.subscribe(host, () => { if (!this.hosts.getManagers().includes(manager)) local.abort(new Error('Task host changed during passive read')); });
     const undelete = manager.addThreadDeletedListener(id => {
-      if (id === threadId) { this.states.delete(JSON.stringify([host, threadId])); local.abort(new DeletedThreadError()); }
-    }, error => local.abort(error));
+      if (listening && this.hosts.getManagers().includes(manager) && id === threadId) {
+        this.states.delete(JSON.stringify([host, threadId])); local.abort(new DeletedThreadError());
+      }
+    }, error => { if (listening && this.hosts.getManagers().includes(manager)) local.abort(error); });
     try {
       if (!this.hosts.getManagers().includes(manager)) throw new Error('Task host changed during passive read');
       return await abortable(read(), AbortSignal.any([signal, local.signal]));
-    } finally { undelete(); unhost(); }
+    } finally { listening = false; undelete(); unhost(); }
   }
   async resolveThreadHost(options: { preferredHostId?: string; threadId: string; signal: AbortSignal; requestOptions?: { timeoutMs?: number } }): Promise<{ hostId: string; manager: NativeManager }> {
     const { signal, threadId, preferredHostId } = options;
@@ -287,42 +304,104 @@ export class ThreadWaiter {
     const searched = [...(preferredHostId ? [preferredHostId] : []), ...other.map((_, i) => managers.filter(manager => manager !== preferred)[i]!.getHostId())];
     throw new Error(`No Codex thread found for threadId: ${threadId}${searched.length ? `. Hosts without a readable match: ${searched.join(', ')}` : ''}`);
   }
-  private async pollResolved(manager: NativeManager, threadId: string, cursor: string | undefined, signal: AbortSignal, completed?: ExtraTurn): Promise<Poll> {
+  private async pollResolved(manager: NativeManager, threadId: string, cursor: string | undefined, signal: AbortSignal, observedRead: ObservedRead): Promise<Poll> {
     const ordinal = ++this.ordinal, hostId = manager.getHostId(), key = JSON.stringify([hostId, threadId]);
+    observedRead.ordinal = ordinal;
     const [read, page] = await this.fromCurrent(manager, threadId, signal, () => Promise.all([
-      manager.readThread(threadId, { includeTurns: false, requestOptions: readOptions }),
-      manager.listThreadTurns(threadId, { itemsView: 'full', itemSnapshot: 'latest', limit: 1, requestOptions: readOptions }),
+      manager.readThread(threadId, { includeTurns: false, requestOptions: readOptions }).then(value => { observedRead.thread = value.thread; return value; }),
+      manager.listThreadTurns(threadId, { itemsView: 'full', itemSnapshot: 'latest', limit: 1, requestOptions: readOptions })
+        .then(value => { observedRead.turns = value.response.data; return value; }),
     ]));
     signal.throwIfAborted();
     if (!this.hosts.getManagers().includes(manager)) throw new Error('Task host changed during passive read');
-    let turn = page.response.data[0] as ExtraTurn | undefined;
-    if (completed && (!turn || (turn.id === completed.id && turn.status === 'inProgress') || isNewer(completed as Projection['latestTurn'], turn as Projection['latestTurn']))) {
-      turn = completed.id === turn?.id && turn.itemsView === 'full' && completed.itemsView !== 'full' ? { ...completed, items: turn.items, itemsView: 'full' } : completed;
-    }
+    const turn = page.response.data[0] as ExtraTurn | undefined;
     let prior = this.states.get(key);
     if (prior?.manager !== manager) prior = undefined;
     if (prior && prior.ordinal > ordinal) return toPoll(prior, cursor);
     const latestTurn = turn ? { id: turn.id, status: turn.status, error: turn.error ? { message: turn.error.message.slice(0, maxText) } : null,
       startedAt: turn.startedAt, completedAt: turn.completedAt, durationMs: turn.durationMs } : null;
+    let itemsComplete = turn == null || turn.itemsView === 'full';
     let projection: Projection = { thread: { id: read.thread.id, hostId, status: read.thread.status }, latestTurn,
       latestAssistantMessage: latestMessage(turn ?? null, this.formatter), latestToolMarker: latestMarker(turn ?? null) };
-    if (completed && completed.itemsView !== 'full' && prior?.projection.latestTurn?.id === completed.id) {
-      projection.latestAssistantMessage ??= prior.projection.latestAssistantMessage;
-      projection.latestToolMarker ??= prior.projection.latestToolMarker;
-    }
     if (prior?.projection.latestTurn && (!latestTurn || isNewer(prior.projection.latestTurn, latestTurn) ||
       (prior.projection.latestTurn.id === latestTurn.id && prior.projection.latestTurn.status !== 'inProgress' && latestTurn.status === 'inProgress'))) {
       projection = { ...prior.projection, thread: projection.thread };
+      itemsComplete = prior.itemsComplete;
     } else if (latestTurn?.status === 'inProgress' && prior?.projection.latestAssistantMessage && projection.latestAssistantMessage &&
       prior.projection.latestAssistantMessage.id === projection.latestAssistantMessage.id && prior.projection.latestAssistantMessage.text.length > projection.latestAssistantMessage.text.length) {
       projection.latestAssistantMessage = prior.projection.latestAssistantMessage;
     }
-    const fingerprint = JSON.stringify({ status: projection.thread.status, turnId: projection.latestTurn?.id ?? null, turnStatus: projection.latestTurn?.status ?? null,
-      turnError: projection.latestTurn?.error?.message ?? null, assistant: projection.latestAssistantMessage, tool: projection.latestToolMarker });
-    const state: PollState = { manager, generation: prior?.generation ?? crypto.randomUUID(), revision: prior ? prior.revision + (prior.fingerprint === fingerprint ? 0 : 1) : 1, fingerprint, ordinal, projection };
-    this.states.delete(key); this.states.set(key, state);
-    if (this.states.size > 256) this.states.delete(this.states.keys().next().value!);
-    return toPoll(state, cursor);
+    return this.commitProjection(manager, threadId, cursor, ordinal, projection, itemsComplete);
+  }
+
+  private projectEvent(manager: NativeManager, threadId: string, cursor: string | undefined, signal: AbortSignal,
+    completed: ExtraTurn | undefined, observedStatus: Status | undefined, observedRead: ObservedRead): Poll {
+    signal.throwIfAborted();
+    if (!this.hosts.getManagers().includes(manager)) throw new Error('Task host changed during passive read');
+    const hostId = manager.getHostId();
+    const saved = this.states.get(JSON.stringify([hostId, threadId]));
+    const prior = saved?.manager === manager ? saved.projection : undefined;
+    const status = observedStatus ?? prior?.thread.status ?? (observedRead.thread?.id === threadId ? observedRead.thread.status : undefined);
+    if (!status) throw new Error('Cannot project event: thread status is unavailable');
+    if (!prior && !completed && !observedRead.turns) throw new Error('Cannot project event: turn snapshot is unavailable');
+    const observedTurn = observedRead.turns?.[0] as ExtraTurn | undefined;
+    const priorTurn = prior?.latestTurn;
+    const useObservedTurn = observedTurn && (!prior || (observedRead.turnsOrdinal ?? 0) >= saved!.ordinal) &&
+      (!priorTurn || (priorTurn.id === observedTurn.id && priorTurn.status === 'inProgress') ||
+        isNewer(observedTurn as Projection['latestTurn'], priorTurn));
+    let itemsComplete = prior ? saved!.itemsComplete : observedRead.turns?.length === 0;
+    const projection: Projection = { thread: { id: threadId, hostId, status }, latestTurn: prior?.latestTurn ?? null,
+      latestAssistantMessage: prior?.latestAssistantMessage ?? null, latestToolMarker: prior?.latestToolMarker ?? null };
+    if (useObservedTurn) {
+      projection.latestTurn = { id: observedTurn.id, status: observedTurn.status,
+        error: observedTurn.error ? { message: observedTurn.error.message.slice(0, maxText) } : null,
+        startedAt: observedTurn.startedAt, completedAt: observedTurn.completedAt, durationMs: observedTurn.durationMs };
+      projection.latestAssistantMessage = latestMessage(observedTurn, this.formatter);
+      projection.latestToolMarker = latestMarker(observedTurn);
+      itemsComplete = observedTurn.itemsView === 'full';
+      if (observedTurn.status === 'inProgress' && prior?.latestAssistantMessage && projection.latestAssistantMessage &&
+        prior.latestAssistantMessage.id === projection.latestAssistantMessage.id && prior.latestAssistantMessage.text.length > projection.latestAssistantMessage.text.length) {
+        projection.latestAssistantMessage = prior.latestAssistantMessage;
+      }
+    }
+    if (completed) {
+      if (!['completed', 'interrupted', 'failed'].includes(completed.status)) throw new Error('Cannot project event: invalid terminal turn');
+      const currentTurn = projection.latestTurn;
+      const sameTurn = currentTurn?.id === completed.id;
+      const oldTurn = currentTurn && !sameTurn ? currentTurn : null;
+      if (oldTurn && isNewer(oldTurn, completed as Projection['latestTurn'])) {
+        return this.commitProjection(manager, threadId, cursor, ++this.ordinal, projection, itemsComplete);
+      }
+      if (oldTurn && !isNewer(completed as Projection['latestTurn'], oldTurn)) throw new Error('Cannot project event: turn order is unknown');
+      const full = completed.itemsView === 'full' && Array.isArray(completed.items);
+      if (!full && !sameTurn) throw new Error('Cannot project event: terminal turn items are unavailable');
+      const priorTurn = sameTurn ? currentTurn : null;
+      if (priorTurn && priorTurn.status !== 'inProgress') {
+        // A complete event may fill a partial terminal projection without replacing an already confirmed final.
+        if (full) {
+          const message = latestMessage(completed, this.formatter);
+          if (!itemsComplete) {
+            projection.latestAssistantMessage = message;
+            projection.latestToolMarker = latestMarker(completed);
+          } else if (message && (!projection.latestAssistantMessage || (projection.latestAssistantMessage.phase === 'commentary' && message.phase !== 'commentary'))) {
+            projection.latestAssistantMessage = message;
+          }
+          projection.latestToolMarker ??= latestMarker(completed);
+          itemsComplete = true;
+        }
+        return this.commitProjection(manager, threadId, cursor, ++this.ordinal, projection, itemsComplete);
+      }
+      projection.latestTurn = { id: completed.id, status: completed.status,
+        error: completed.error ? { message: completed.error.message.slice(0, maxText) } : null,
+        startedAt: completed.startedAt ?? priorTurn?.startedAt, completedAt: completed.completedAt ?? priorTurn?.completedAt,
+        durationMs: completed.durationMs ?? priorTurn?.durationMs };
+      if (full) {
+        projection.latestAssistantMessage = latestMessage(completed, this.formatter);
+        projection.latestToolMarker = latestMarker(completed);
+      }
+      itemsComplete = full;
+    }
+    return this.commitProjection(manager, threadId, cursor, ++this.ordinal, projection, itemsComplete);
   }
   private async resolve(target: WaitTarget, signal: AbortSignal) {
     const preferred = this.hosts.getManagers().find(manager => manager.getHostId() === target.hostId);
@@ -335,50 +414,116 @@ export class ThreadWaiter {
     const local = new AbortController();
     const combined = AbortSignal.any([signal, local.signal]);
     let completed: ExtraTurn | undefined, observedStatus: Status | undefined, eventWake: Wake | null = null;
+    let observedRead: ObservedRead = {};
     let notify!: () => void;
     let event = new Promise<void>(resolve => { notify = resolve; });
-    let unhost = () => {}, unmessage = () => {}, undelete = () => {};
-    const cleanup = () => { unhost(); unmessage(); undelete(); };
+    let unhost = () => {}, unmessage = () => {}, undelete = () => {}, deactivate = () => {};
+    const cleanup = () => { deactivate(); unhost(); unmessage(); undelete(); };
+    const clearEvents = () => {
+      completed = undefined; observedStatus = undefined; eventWake = null; observedRead = {};
+      event = new Promise<void>(resolve => { notify = resolve; });
+    };
     const bind = () => {
       cleanup();
-      unhost = this.hosts.subscribe(manager.getHostId(), () => {
-        if (!this.hosts.getManagers().includes(manager)) notify();
+      const bound = manager;
+      let listening = true;
+      deactivate = () => { listening = false; };
+      const isCurrent = () => listening && manager === bound && this.hosts.getManagers().includes(bound);
+      unhost = this.hosts.subscribe(bound.getHostId(), () => {
+        if (listening && manager === bound && !isCurrent()) notify();
       });
-      undelete = manager.addThreadDeletedListener(id => {
-        if (id === target.threadId) { this.states.delete(JSON.stringify([manager.getHostId(), id])); local.abort(new DeletedThreadError()); notify(); }
-      }, error => { local.abort(error); notify(); });
-      unmessage = manager.addNotificationCallback(['turn/completed', 'thread/status/changed'], message => {
-        if (!isRecord(message.params) || message.params.threadId !== target.threadId) return;
+      undelete = bound.addThreadDeletedListener(id => {
+        if (isCurrent() && id === target.threadId) { this.states.delete(JSON.stringify([bound.getHostId(), id])); local.abort(new DeletedThreadError()); notify(); }
+      }, error => { if (isCurrent()) { local.abort(error); notify(); } });
+      unmessage = bound.addNotificationCallback(['turn/completed', 'thread/status/changed'], message => {
+        if (!isCurrent() || !isRecord(message.params) || message.params.threadId !== target.threadId) return;
         if (message.method === 'turn/completed' && isRecord(message.params.turn) && typeof message.params.turn.id === 'string') {
           completed = message.params.turn as unknown as ExtraTurn;
           eventWake = { reason: 'turnCompleted', turnId: completed.id }; notify();
         } else if (message.method === 'thread/status/changed' && isRecord(message.params.status)) {
           const status = message.params.status as Status;
-          const oldStatus = observedStatus ?? this.states.get(JSON.stringify([manager.getHostId(), target.threadId]))?.projection.thread.status;
+          const saved = this.states.get(JSON.stringify([bound.getHostId(), target.threadId]));
+          const oldStatus = observedStatus ?? (saved?.manager === bound ? saved.projection.thread.status : undefined);
           observedStatus = status;
           if (status.type === 'active' && status.activeFlags.length && !isDeepStrictEqual(status, oldStatus)) { eventWake = { reason: 'actionableStatus' }; notify(); }
           else if (status.type === 'notLoaded' || status.type === 'systemError') { eventWake = { reason: 'inactiveStatus' }; notify(); }
           else if (status.type === 'idle') notify();
         }
-      }, error => { local.abort(error); notify(); });
+      }, error => { if (isCurrent()) { local.abort(error); notify(); } });
+    };
+    const switchManager = (next: NativeManager) => {
+      if (manager !== next) { cleanup(); manager = next; clearEvents(); }
+      bind();
+    };
+    const pollCurrent = async () => {
+      const source = manager, read: ObservedRead = {};
+      try { return await this.pollResolved(source, target.threadId, target.afterCursor, combined, read); }
+      finally {
+        if (manager === source && this.hosts.getManagers().includes(source)) {
+          if (read.thread?.id === target.threadId && (read.ordinal ?? 0) >= (observedRead.threadOrdinal ?? 0)) {
+            observedRead.thread = read.thread; observedRead.threadOrdinal = read.ordinal;
+          }
+          if (read.turns && (read.ordinal ?? 0) >= (observedRead.turnsOrdinal ?? 0)) {
+            observedRead.turns = read.turns; observedRead.turnsOrdinal = read.ordinal;
+          }
+        }
+      }
+    };
+    const projectEvent = () => this.projectEvent(manager, target.threadId, target.afterCursor, combined, completed, observedStatus, observedRead);
+    const pollAfterSwitch = async () => {
+      const replacement = this.hosts.getManagers().find(value => value.getHostId() === manager.getHostId());
+      if (!replacement) throw new Error('Task host changed during passive read');
+      switchManager(replacement);
+      try { return await pollCurrent(); }
+      catch (cause) {
+        combined.throwIfAborted();
+        if (eventWake && this.hosts.getManagers().includes(manager)) return projectEvent();
+        throw cause;
+      }
+    };
+    const eventWakeFor = (poll: Poll): Wake | null => {
+      if (eventWake?.reason === 'turnCompleted' && poll.changed && poll.latestTurn?.id === eventWake.turnId && poll.latestTurn.status !== 'inProgress') return eventWake;
+      if (eventWake?.reason === 'actionableStatus' && poll.changed && poll.thread.status.type === 'active' && poll.thread.status.activeFlags.length) return eventWake;
+      if (eventWake?.reason === 'inactiveStatus' && (poll.thread.status.type === 'systemError' || poll.thread.status.type === 'notLoaded')) return eventWake;
+      return wakeFor(poll);
     };
     bind();
     try {
-      let poll: Poll;
-      try { poll = await this.pollResolved(manager, target.threadId, target.afterCursor, combined); }
+      let poll: Poll | undefined;
+      let projectedEvent = false;
+      try { poll = await pollCurrent(); }
       catch (cause) {
         combined.throwIfAborted();
-        resolved = await this.resolveThreadHost({ preferredHostId: target.hostId, threadId: target.threadId, signal: combined, requestOptions: readOptions });
-        manager = resolved.manager; bind();
-        try { poll = await this.pollResolved(manager, target.threadId, target.afterCursor, combined); }
-        catch { throw cause; }
+        try { resolved = await this.resolveThreadHost({ preferredHostId: target.hostId, threadId: target.threadId, signal: combined, requestOptions: readOptions }); }
+        catch (resolveCause) {
+          combined.throwIfAborted();
+          if (!eventWake || !this.hosts.getManagers().includes(manager)) throw resolveCause;
+          poll = projectEvent(); projectedEvent = true;
+        }
+        if (!projectedEvent) {
+          switchManager(resolved.manager);
+          try { poll = await pollCurrent(); }
+          catch {
+            combined.throwIfAborted();
+            if (!this.hosts.getManagers().includes(manager)) poll = await pollAfterSwitch();
+            else if (!eventWake) throw cause;
+            else { poll = projectEvent(); projectedEvent = true; }
+          }
+        }
       }
-      if (eventWake) {
-        try { poll = await this.pollResolved(manager, target.threadId, target.afterCursor, combined, completed); }
-        catch (cause) { combined.throwIfAborted(); if (!this.states.get(JSON.stringify([manager.getHostId(), target.threadId]))) throw cause; }
+      if (eventWake && !projectedEvent) {
+        try { poll = await pollCurrent(); }
+        catch (cause) {
+          combined.throwIfAborted();
+          if (!this.hosts.getManagers().includes(manager)) poll = await pollAfterSwitch();
+          else if (!eventWake) throw cause;
+        }
+        if (eventWake) poll = projectEvent();
       }
-      let wake = eventWake ?? wakeFor(poll);
+      if (!poll) throw new Error('Task snapshot is unavailable');
+      let wake = eventWakeFor(poll);
       if (wake) return { timedOut: false, wake, poll };
+      if (eventWake) clearEvents();
       if (!poll.changed && poll.thread.status.type === 'idle' && poll.latestTurn && poll.latestTurn.status !== 'inProgress') return { timedOut: false, wake: null, poll };
       while (Date.now() < deadline) {
         const delay = Math.min(5_000, Math.max(0, deadline - Date.now()));
@@ -389,19 +534,19 @@ export class ThreadWaiter {
         if (!this.hosts.getManagers().includes(manager)) {
           const replacement = this.hosts.getManagers().find(value => value.getHostId() === manager.getHostId());
           if (!replacement) throw new Error('Task host changed during passive read');
-          manager = replacement; completed = undefined; observedStatus = undefined; eventWake = null; bind();
+          switchManager(replacement);
         }
         event = new Promise<void>(resolve => { notify = resolve; });
-        try { poll = await this.pollResolved(manager, target.threadId, target.afterCursor, combined, completed); }
+        try { poll = await pollCurrent(); }
         catch (cause) {
           combined.throwIfAborted();
-          if (!eventWake) continue;
-          const cached = this.states.get(JSON.stringify([manager.getHostId(), target.threadId]));
-          if (!cached || cached.manager !== manager) throw cause;
-          poll = toPoll(cached, target.afterCursor);
+          if (!this.hosts.getManagers().includes(manager)) poll = await pollAfterSwitch();
+          else if (!eventWake) continue;
         }
-        wake = eventWake ?? wakeFor(poll);
+        if (eventWake) poll = projectEvent();
+        wake = eventWakeFor(poll);
         if (wake) return { timedOut: false, wake, poll };
+        if (eventWake) clearEvents();
       }
       const state = this.states.get(JSON.stringify([manager.getHostId(), target.threadId]));
       return { timedOut: true, wake: null, poll: state ? { ...poll, latestAssistantMessage: state.projection.latestAssistantMessage, latestToolMarker: state.projection.latestToolMarker } : poll };
