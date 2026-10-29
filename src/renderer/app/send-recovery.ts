@@ -3,6 +3,7 @@ import type { ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { SendInjectionReference, SendInjectionStatus } from '../../native/send-injection.ts';
 import { readBrowserAtom, updateBrowserAtoms } from '../storage/ui-atoms.ts';
 import { assertBrowserDraftReferencesNotDeleted, browserCommentsAtomKey, ensureBrowserCommentStore } from '../browser/comments.ts';
+import { sameComposerDraftValue } from '../composer/composer-draft-store.ts';
 import { browserDraftOwner } from './browser-draft.ts';
 
 export const sendsAtom = 'codex-yard.send-recovery.v1';
@@ -502,30 +503,57 @@ export class SendRecoveryStore {
       delete state.requests[id];
     });
   }
+  private cancelInState(state: SendRecoverySnapshot, intent: SendIntent) {
+    if (!['prepared', 'ready', 'failed'].includes(intent.stage) || intent.injection && intent.injection.phase !== 'prepared'
+      || intent.injection?.native?.status?.pendingPersistence) {
+      throw new Error('发送或上下文注入结果尚未核对，恢复记录已保留。');
+    }
+    if (intent.threadId) {
+      const key = sendThreadKey(intent.owner.hostId, intent.threadId), receipt = state.creations[key];
+      if (receipt) {
+        if (sendOwnerKey(receipt.owner) !== sendOwnerKey(intent.owner) || state.bindings[key] !== intent.owner.draftId
+          || receipt.thread.id !== intent.threadId || intent.created && (JSON.stringify(intent.created.thread) !== JSON.stringify(receipt.thread)
+            || JSON.stringify(intent.created.settings) !== JSON.stringify(receipt.settings))
+          || Object.hasOwn(receipt, 'projectId') && receipt.projectId !== (intent.projectId ?? null)) {
+          throw new Error('新会话原项目或创建回执已改变，恢复记录已保留。');
+        }
+        // Older receipts need the still-matching intent's original project
+        // before cancellation removes its only durable source.
+        if (!Object.hasOwn(receipt, 'projectId')) receipt.projectId = intent.projectId ?? null;
+      } else if (intent.created) throw new Error('新会话创建回执无法核对，恢复记录已保留。');
+    }
+    delete state.requests[intent.id];
+  }
   /** Explicitly cancel only a request whose write has not started or was rejected. */
   async cancel(id: string) {
     await this.change(state => {
       const intent = state.requests[id];
-      if (!intent) return;
-      if (!['prepared', 'ready', 'failed'].includes(intent.stage) || intent.injection && intent.injection.phase !== 'prepared'
-        || intent.injection?.native?.status?.pendingPersistence) {
-        throw new Error('发送或上下文注入结果尚未核对，恢复记录已保留。');
+      if (intent) this.cancelInState(state, intent);
+    });
+  }
+  /** Cancel only the complete original snapshot under its synchronous owner guard. */
+  async cancelOriginal(expected: SendIntent, assertCurrent: () => void): Promise<void> {
+    const captured = structuredClone(expected);
+    if (!captured || !nonempty(captured.id) || typeof assertCurrent !== 'function') throw new Error('原发送身份或权限无效，未取消。');
+    await this.change(state => {
+      const current = state.requests[captured.id];
+      if (!current) throw new Error('原发送记录已不存在，请重新读取核对。');
+      if (!sameComposerDraftValue(current, captured)) throw new Error('原发送记录已改变，请重新读取核对。');
+      const asserted: unknown = assertCurrent();
+      if (asserted !== undefined) {
+        if (asserted && (typeof asserted === 'object' || typeof asserted === 'function')
+          && 'then' in asserted && typeof asserted.then === 'function') void Promise.resolve(asserted).catch(() => {});
+        throw new Error('原取消权限必须同步核对，未取消。');
       }
-      if (intent.threadId) {
-        const key = sendThreadKey(intent.owner.hostId, intent.threadId), receipt = state.creations[key];
-        if (receipt) {
-          if (sendOwnerKey(receipt.owner) !== sendOwnerKey(intent.owner) || state.bindings[key] !== intent.owner.draftId
-            || receipt.thread.id !== intent.threadId || intent.created && (JSON.stringify(intent.created.thread) !== JSON.stringify(receipt.thread)
-              || JSON.stringify(intent.created.settings) !== JSON.stringify(receipt.settings))
-            || Object.hasOwn(receipt, 'projectId') && receipt.projectId !== (intent.projectId ?? null)) {
-            throw new Error('新会话原项目或创建回执已改变，恢复记录已保留。');
-          }
-          // Older receipts need the still-matching intent's original project
-          // before cancellation removes its only durable source.
-          if (!Object.hasOwn(receipt, 'projectId')) receipt.projectId = intent.projectId ?? null;
-        } else if (intent.created) throw new Error('新会话创建回执无法核对，恢复记录已保留。');
+      if ([...this.confirmedInjections].some(receipt => (JSON.parse(receipt) as unknown[])[0] === current.id)) {
+        throw new Error('原注入成功回执尚未保存，恢复记录已保留。');
       }
-      delete state.requests[id];
+      const native = current.injection?.native;
+      if (native && !(native.turnAttemptId === undefined && (native.beforeSend === true && !native.status
+        || native.status && !native.status.pendingPersistence && ['rejected', 'not-sent'].includes(native.status.injection.phase)))) {
+        throw new Error('原宿主注入结果尚未核对，恢复记录已保留。');
+      }
+      this.cancelInState(state, current);
     });
   }
 }
