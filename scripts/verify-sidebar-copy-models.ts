@@ -56,9 +56,10 @@ fake.handlers.set('config/read', () => {
     layers: [{ name: { type: 'user', file: configFile, profile: null }, version: String(state.version) }] };
 });
 fake.handlers.set('model/list', () => ({ data: [
-  ['gpt-6-sol', 'GPT-6 Sol'], ['gpt-6.1-sol', 'GPT-6.1 Sol'], ['gpt-6.1-terra', 'GPT-6.1 Terra'], ['hidden-fixture', 'Hidden fixture'],
+  ['gpt-6-sol', 'GPT-6 Sol'], ['gpt-6.1-sol', 'GPT-6.1 Sol'], ['gpt-6.1-terra', 'GPT-6.1 Terra'],
+  ['hidden-fixture', 'Hidden fixture'], ['gpt-6.1-hidden-fixture', 'Hidden 6.1 fixture'],
 ].map(([model, displayName], index) => ({ id: model, model, displayName, description: 'Model visibility fixture', isDefault: index === 0,
-  hidden: index === 3, defaultReasoningEffort: 'high', inputModalities: ['text'],
+  hidden: index >= 3, defaultReasoningEffort: 'high', inputModalities: ['text'],
   supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Low' }, { reasoningEffort: 'high', description: 'High' }] })), nextCursor: null }));
 fake.handlers.set('config/batchWrite', params => {
   const state = readFixture();
@@ -210,8 +211,9 @@ try {
   assert.equal(await modelPicker.locator('option[value="gpt-6.1-sol"]').isDisabled(), false);
   assert.equal(await modelPicker.locator('option[value="gpt-6.1-terra"]').isDisabled(), false);
   assert.equal(await modelPicker.locator('option[value="hidden-fixture"]').count(), 0);
+  assert.equal(await modelPicker.locator('option[value="gpt-6.1-hidden-fixture"]').count(), 0);
   await modelPicker.screenshot({ path: join(output, 'models.png') });
-  checks.push('Both 6.1 models are selectable and hidden models stay hidden');
+  checks.push('Both visible 6.1 models are selectable and hidden models, including a 6.1 fixture, stay hidden');
   try {
     await waitEnabled(modelPicker);
     await waitValue(modelPicker, 'gpt-6-sol');
