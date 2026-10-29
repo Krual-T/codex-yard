@@ -13,6 +13,10 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
     import {createRoot} from 'react-dom/client';
     import {I18nProvider} from './src/renderer/i18n/index.tsx';
     import {StandaloneComposer,draftToInput,readComposerDraft} from './src/renderer/composer/StandaloneComposer.tsx';
+    import {composerDraftAtomKey,saveComposerDraftConflict,readComposerDraftVersions,updateComposerDraftVersionInRoot}
+      from './src/renderer/composer/composer-draft-store.ts';
+    import {updateBrowserAtoms} from './src/renderer/storage/ui-atoms.ts';
+    import {createId} from './src/renderer/composer/standalone-draft.ts';
     const state={calls:[],hostCalls:[],submissions:[],snapshots:[],controller:null,grant:1,epochs:{local:1,'ssh:other':1},hold:null,pending:[],failList:false,
       plainOverride:null,listeners:new Set()};
     const pages=(host,cursor)=>host==='local' ? cursor ? {data:[{id:'same-id',name:'Review local',cwd:'/workspace'}],nextCursor:null}
@@ -58,6 +62,17 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
     window.fixture={state,render(changes={}){props={...props,...changes,context:{...props.context,...changes.context}};
       root.render(React.createElement(I18nProvider,{locale:'en-US'},React.createElement(StandaloneComposer,props)));},
       read(){const {hostId,threadId,draftId}=props.context;return readComposerDraft({hostId,threadId,draftId});},
+      addVersion(draft,revision){const c=state.controller;return saveComposerDraftConflict(c.snapshot().owner,{draft,revision,prefills:[]});},
+      versions(){const c=state.controller;return readComposerDraftVersions(c.snapshot().owner);},
+      async commitExternal(draft){const c=state.controller,operation=c.beginExternalOperation(c.snapshot().owner);
+        if(!operation)throw Error('external operation unavailable');
+        try {const receipt=await operation.transaction(async(before,isCurrent)=>{
+          if(!isCurrent())throw Error('owner changed before root update');
+          const after=await updateBrowserAtoms(atoms=>{if(!isCurrent())throw Error('owner changed during root update');
+            const result=updateComposerDraftVersionInRoot(atoms[composerDraftAtomKey],before,()=>draft,createId());
+            return result.changed?{value:result.after,updates:{[composerDraftAtomKey]:result.root}}:{value:result.after};});
+          return {after,value:null};});operation.finish(receipt.accepted);return receipt;
+        } catch(error){operation.finish(false);throw error;}},
       releaseOne(){state.pending.shift()?.();},
       release(){const pending=state.pending.splice(0);state.hold=null;for(const resolve of pending)resolve();}};
     window.fixture.render();
@@ -728,7 +743,7 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
-    await t.test('a same-text external link revision cannot be overwritten by the retained view', async () => {
+    await t.test('a same-text external link revision is displayed before editing and sending', async () => {
       const { page, errors } = await open('chat-inline-new-source');
       const editor = page.getByRole('textbox', { name: 'Work with Codex' });
       await editor.pressSequentially('Link @Rev'); await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
@@ -748,10 +763,99 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
           link.attrs.literalMarkdownOccurrenceId = 99; return next;
         });
       }), true);
+      await page.waitForFunction(() => {
+        const link = document.querySelector('[contenteditable="true"] a[data-composer-attrs]');
+        return !!link && JSON.parse(link.getAttribute('data-composer-attrs') || '{}').literalMarkdownOccurrenceId === 99;
+      });
       await editor.press('End'); await editor.pressSequentially('X');
-      await page.getByRole('alert').filter({ hasText: 'Unsupported document changes were not saved' }).waitFor();
       const after = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
-      assert.equal(after.text, before); assert.equal(after.document.content[0].content[0].marks[0].attrs.literalMarkdownOccurrenceId, 99);
+      assert.equal(after.text, before + 'X'); assert.equal(after.document.content[0].content[0].marks[0].attrs.literalMarkdownOccurrenceId, 99);
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      const sent = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
+      assert.equal(sent.draft.text, after.text); assert.match(sent.input[0].text, /source\).*X$/);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('choosing another same-owner document updates the editor and submitted version', async () => {
+      const { page, errors } = await open('chat-inline-select-version');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Original @Rev'); await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const old = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+      const replacement = { text: '**Replacement**', images: [], files: [], references: [], skills: [],
+        document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Replacement', marks: [{ type: 'strong' }] }] }] } };
+      await page.evaluate(value => (window as any).fixture.addVersion(value, 'fixture-alternate'), replacement);
+      await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
+      await page.getByRole('button', { name: '**Replacement**', exact: true }).click();
+      await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot().revision === 'fixture-alternate');
+      await page.locator('[contenteditable="true"] strong').filter({ hasText: 'Replacement' }).waitFor();
+      assert.equal(await editorText(editor), 'Replacement');
+      const versions = await page.evaluate(() => (window as any).fixture.versions());
+      assert.ok(versions.versions.some((version: any) => JSON.stringify(version.draft) === JSON.stringify(old)));
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      const sent = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
+      assert.equal(sent.draft.text, replacement.text); assert.equal(sent.input[0].text, replacement.text);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('an externally committed document replaces the visible version before send', async () => {
+      const { page, errors } = await open('chat-inline-committed-version');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Original @Rev'); await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      const replacement = { text: '**Committed**', images: [], files: [], references: [], skills: [],
+        document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Committed', marks: [{ type: 'strong' }] }] }] } };
+      const receipt = await page.evaluate(value => (window as any).fixture.commitExternal(value), replacement);
+      assert.equal(receipt.accepted, true);
+      await page.locator('[contenteditable="true"] strong').filter({ hasText: 'Committed' }).waitFor();
+      assert.equal(await editorText(editor), 'Committed');
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      const sent = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
+      assert.deepEqual(sent.draft.document, replacement.document); assert.equal(sent.input[0].text, replacement.text);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('a slow textarea composition is one undo event and blocks another draft adoption', async () => {
+      const { page, errors } = await open('chat-slow-composition');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('before ');
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      await page.evaluate(() => (window as any).fixture.addVersion({ text: 'Other version', images: [], files: [], references: [], skills: [] }, 'ime-other'));
+      await page.locator('summary').filter({ hasText: 'Select draft version' }).waitFor();
+      await editor.evaluate(element => element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })));
+      const input = async (value: string, time: number) => editor.evaluate((element, data) => {
+        const originalNow = Date.now; Date.now = () => data.time;
+        try {
+          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(element, data.value);
+          element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertCompositionText', data: data.value, isComposing: true }));
+        } finally { Date.now = originalNow; }
+      }, { value, time });
+      await input('before に', 10_000); await input('before 日本', 11_000);
+      assert.equal(await editor.inputValue(), 'before 日本');
+      assert.equal(await page.evaluate(() => {
+        const c = (window as any).fixture.state.controller;
+        return c.update(c.snapshot().owner, (draft: any) => ({ ...draft, text: 'other' }));
+      }), false);
+      await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
+      await page.getByRole('button', { name: 'Other version', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: '请先完成输入法输入' }).waitFor();
+      assert.equal(await editor.inputValue(), 'before 日本');
+      assert.notEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().revision), 'ime-other');
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.submissions.length), 0);
+      await editor.evaluate(async element => {
+        element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      });
+      await editor.press('Control+z'); assert.equal(await editor.inputValue(), 'before ');
+      await editor.press('Control+Shift+z'); assert.equal(await editor.inputValue(), 'before 日本');
+      await editor.pressSequentially('!'); await editor.press('Control+z'); assert.equal(await editor.inputValue(), 'before 日本');
+      const versions = await page.evaluate(() => (window as any).fixture.versions());
+      assert.ok(versions.versions.some((version: any) => version.revision === 'ime-other' && version.draft.text === 'Other version'));
       assert.deepEqual(errors, []); await page.close();
     });
 

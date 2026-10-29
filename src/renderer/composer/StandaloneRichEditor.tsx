@@ -21,6 +21,7 @@ import type { TextAgentSpan } from './text-agent-document.ts';
 
 export interface RichEditorHandle {
   focus(): void;
+  matchesDocument(document: ComposerDocument): boolean;
   insertCompletion(context: RichCompletionContext, query: RichCompletionQuery, item: Completion, cwd: string): boolean;
   captureAgentMentionTarget(readCurrent: () => AgentMentionCurrent | null, query?: RichCompletionQuery): AgentMentionTarget | null;
   insertAgentMention(target: AgentMentionTarget, choice: AgentMentionChoice): boolean;
@@ -358,6 +359,7 @@ interface TextControlProps {
   onCompositionChange?(composing: boolean): void;
   formatting?: boolean;
   plainTextMode?: boolean;
+  document?: ComposerDocument;
   currentDocument?(): ComposerDocument | undefined;
   onPendingLinkChange?(pending: boolean): void;
   onInvalid?(message?: string): void;
@@ -447,6 +449,22 @@ function TextControl(props: TextControlProps) {
     return () => { if (props.controls.get(props.index) === control) props.controls.delete(props.index); };
   }, [control, props.controls, props.index]);
   useLayoutEffect(() => {
+    if (composing.current || control.view?.composing) return;
+    if (control.rich && props.formatting && props.document && props.currentDocument?.() === props.document) {
+      const source = readRichDocument(props.document), projected = fullHistoryDocument(control.state);
+      const displayed = projected && readRichDocument(projected);
+      if (source && displayed && !source.eq(displayed)) {
+        const doc = textHistorySchema.nodeFromJSON(source.toJSON());
+        const historyPlugin = history(), modes = richEditorPlugins(textHistorySchema, historyPlugin);
+        const plugins = props.plainTextMode ? modes.plain : modes.rich;
+        plugins.unshift(richAutolinkPlugin(() => control.canEdit()));
+        control.state = EditorState.create({ doc, plugins });
+        control.historyPlugin = historyPlugin;
+        control.plainMode = !!props.plainTextMode;
+        control.view?.updateState(control.state);
+      }
+      return;
+    }
     if (control.rich && !props.formatting) {
       control.rich = false;
       control.state = textHistoryState(props.text, props.agentMentions);
@@ -460,7 +478,7 @@ function TextControl(props: TextControlProps) {
       control.historyPlugin = control.state.plugins[0]!;
       control.view?.updateState(control.state);
     }
-  }, [control, props.text, props.agentMentions, props.formatting]);
+  }, [control, props.text, props.agentMentions, props.formatting, props.document, props.currentDocument, props.plainTextMode]);
   useLayoutEffect(() => { control.applyMode(); }, [control, props.formatting, props.plainTextMode]);
   useLayoutEffect(() => {
     if (!showView || props.formatting || !props.sourceMarks) return;
@@ -680,6 +698,7 @@ function TextControl(props: TextControlProps) {
         return;
       }
       const transaction = textChange(control.state, before, after);
+      if (composing.current) transaction.setMeta('composition', compositionGeneration.current);
       const provisional = control.state.apply(transaction), position = historyPosition(provisional, element.selectionStart);
       transaction.setSelection(TextSelection.create(transaction.doc, position));
       if (!publish(transaction, inputType)) {
@@ -698,12 +717,16 @@ function TextControl(props: TextControlProps) {
     }} onPaste={props.onPaste}
     onCompositionStart={() => {
       compositionGeneration.current++;
-      if (!composing.current) { control.composing = true; composing.current = true; latest.current.onCompositionChange?.(true); }
+      if (!composing.current) {
+        control.state = control.state.apply(closeHistory(control.state.tr));
+        control.composing = true; composing.current = true; latest.current.onCompositionChange?.(true);
+      }
     }}
     onCompositionEnd={event => {
       const element = event.currentTarget, generation = compositionGeneration.current;
       requestAnimationFrame(() => {
         if (!composing.current || generation !== compositionGeneration.current) return;
+        control.state = control.state.apply(closeHistory(control.state.tr));
         control.composing = false; composing.current = false; latest.current.onCompositionChange?.(false);
         const index = Number(element.dataset.composerInputIndex);
         if (element.isConnected && element.ownerDocument.activeElement === element && Number.isSafeInteger(index)
@@ -801,7 +824,7 @@ function textEditorHandle(controls: Map<number, TextControlModel>): StructuredIn
       if (element && position !== undefined) element.setSelectionRange(position, position);
     },
     matchesDocument(document) {
-      const control = controls.get(-1), actual = control && historyDocument(control.state, document);
+      const control = controls.get(-1), actual = control && (control.rich ? fullHistoryDocument(control.state) : historyDocument(control.state, document));
       const source = readRichDocument(document), current = actual && readRichDocument(actual);
       return !!source && !!current && source.eq(current);
     },
@@ -1186,6 +1209,10 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
   };
   useImperativeHandle(ref, () => ({
     focus: () => view.current?.focus(),
+    matchesDocument: document => {
+      const source = readRichDocument(document), editor = view.current;
+      return !!source && !!editor && source.eq(editor.state.doc);
+    },
     insertCompletion: (context, query, item, cwd) => {
       const editor = view.current;
       if (editor && !composing.current) syncRichSelection(editor);
@@ -1297,7 +1324,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
 
   useLayoutEffect(() => { applyMode.current?.(); }, [props.plainTextMode]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (props.currentDocument() !== props.document) return;
     const editor = view.current, doc = readRichDocument(props.document);
     if (!editor || !doc || editor.state.doc.eq(doc)) return;

@@ -114,6 +114,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
   projectSource.current = { context, projectChoices, selectedProjectId, onProjectChange };
   const freezeGuard = useRef<(afterDrain: boolean) => boolean>(() => false);
   const pendingLink = useRef(false);
+  const pendingComposition = useRef(false);
   const frozenRef = useRef(false);
   const thawWaiters = useRef(new Set<() => void>());
   const [frozen, setFrozen] = useState(false);
@@ -125,7 +126,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
   }, []);
   const { owner, controller, current, stored, changeDraft, changeDraftFromOperation, updateDraftFromOperation, beginOperation,
     retain, clear, selectVersion, conflicts, storageError, saving, loaded, unresolved, saveUnresolved, retry, lastWrite, recheckProjection }
-    = useComposerDraft(context, onDraftController, onDraftChange, freezeGuard, setInputFrozen, pendingLink);
+    = useComposerDraft(context, onDraftController, onDraftChange, freezeGuard, setInputFrozen, pendingLink, pendingComposition);
   const optionsListener = useRef(onEffectiveOptionsChange);
   optionsListener.current = onEffectiveOptionsChange;
   const lastOptionsProjection = useRef('');
@@ -188,6 +189,9 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
   const compositions = useRef(new Set<'editor' | 'queue'>());
   const setComposition = (source: 'editor' | 'queue', value: boolean) => {
     if (value) compositions.current.add(source); else compositions.current.delete(source);
+    const wasPending = pendingComposition.current;
+    pendingComposition.current = compositions.current.size > 0;
+    if (wasPending && !pendingComposition.current) recheckProjection();
   };
   const queueEditState = useRef({ editing: false, pending: false });
   const defaultPendingRef = useRef(false);
@@ -496,6 +500,12 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
     if (readOnly || submitInFlight.current || uploadsInFlight.current || failedUploads.current.length || unresolved || !hasContent(current.current.draft)) return;
     if (busy && followUp === 'queue' && !queueAvailable) return;
     if (pendingLink.current) { setError(t('Apply or close the link editor first.')); return; }
+    if (pendingComposition.current) { setError(locale.toLowerCase().startsWith('zh') ? '请先完成输入法输入。' : 'Finish text composition first.'); return; }
+    const shownDocument = current.current.draft.document;
+    if (shownDocument && (textFormatting && !editor.current?.matchesDocument(shownDocument)
+      || richActive && !richEditor.current?.matchesDocument(shownDocument))) {
+      setError(locale.toLowerCase().startsWith('zh') ? '草稿视图正在更新，请核对后发送。' : 'The draft view is updating. Review it before sending.'); return;
+    }
     if (defaultPending) { setError(t('Resolve the default model change before sending.')); return; }
     const currentIssue = current.current.draft.document && richEditIssue(current.current.draft);
     if (current.current.draft.blocked || currentIssue && !(currentIssue === structuredEditIssue
@@ -972,7 +982,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
       <StandalonePlainInputEditor key={composerOwnerKey} ref={editor} label={t('Work with Codex')}
         placeholder={context.threadId ? t('Work with Codex') : locale.toLowerCase().startsWith('en') ? 'Do anything' : t('Message')}
         text={textViewValue} agentMentions={agentSegments.get(-1) ?? []} sourceMarks={markSegments.get(-1)} readOnly={!!editIssue}
-        formatting={textFormatting} plainTextMode={plainTextSetting.value} currentDocument={() => current.current.draft.document}
+        formatting={textFormatting} plainTextMode={plainTextSetting.value} document={draft.document} currentDocument={() => current.current.draft.document}
         onInvalid={message => setError(message ?? t('Unsupported document changes were not saved.'))}
         onPendingLinkChange={value => { const wasPending = pendingLink.current; pendingLink.current = value; if (wasPending && !value) recheckProjection(); }}
         canEdit={() => !frozenRef.current} completionListId={completions.query ? completions.listId : undefined}
