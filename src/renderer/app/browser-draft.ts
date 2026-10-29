@@ -60,6 +60,7 @@ export async function syncBrowserDraftDeletions(owner: BrowserOwner, operation: 
 export function watchBrowserDraftDeletions(owner: BrowserOwner,
   currentDraft: () => ComposerDraftSnapshot | null, apply: () => Promise<boolean>, onError: (error: unknown) => void) {
   let active = true, pending = false, running = false, retryAfterInput = false;
+  let inputFrame: number | undefined;
   const refresh = () => {
     if (!active) return;
     pending = true;
@@ -75,15 +76,22 @@ export function watchBrowserDraftDeletions(owner: BrowserOwner,
           retryAfterInput = !await apply();
         } else retryAfterInput = false;
       }
-    })().catch(error => { if (active) onError(error); })
+    })().catch(error => { if (active) { retryAfterInput = true; onError(error); } })
       .finally(() => { running = false; if (active && pending) refresh(); });
   };
   const unsubscribe = subscribeBrowserComments(refresh);
-  const inputReady = () => { if (retryAfterInput) queueMicrotask(refresh); };
+  // The editor clears its composing flag in its composition-end animation frame.
+  // Run after that callback, including when an in-flight read fails at the boundary.
+  const inputReady = () => {
+    if (!retryAfterInput && !running) return;
+    if (inputFrame !== undefined) cancelAnimationFrame(inputFrame);
+    inputFrame = requestAnimationFrame(() => { inputFrame = undefined; refresh(); });
+  };
   if (typeof window !== 'undefined') { window.addEventListener('compositionend', inputReady); window.addEventListener('input', inputReady); }
   refresh();
   return () => {
     active = false; unsubscribe();
+    if (inputFrame !== undefined) cancelAnimationFrame(inputFrame);
     if (typeof window !== 'undefined') { window.removeEventListener('compositionend', inputReady); window.removeEventListener('input', inputReady); }
   };
 }

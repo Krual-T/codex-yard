@@ -300,9 +300,11 @@ export async function readComposerDraft(owner: ComposerDraftOwner, revision?: st
   const found = versions.find(value => sameOwner(entry, value.owner, owner) && (revision === undefined || value.revision === revision));
   return found ? snapshot(found, owner) : null;
 }
-export async function readComposerDraftVersions(owner: ComposerDraftOwner): Promise<ComposerDraftVersions> {
-  const raw = await readBrowserAtom(composerDraftAtomKey);
+export function readComposerDraftVersionsInRoot(raw: unknown, owner: ComposerDraftOwner): ComposerDraftVersions {
   return raw === undefined ? { versions: [], retained: [] } : versionsFor(repository(raw), owner);
+}
+export async function readComposerDraftVersions(owner: ComposerDraftOwner): Promise<ComposerDraftVersions> {
+  return readComposerDraftVersionsInRoot(await readBrowserAtom(composerDraftAtomKey), owner);
 }
 
 /** Remove only the confirmed version; newer branches and pending drafts remain recoverable. */

@@ -1,7 +1,7 @@
 import type { ChromeElementContext } from '../../browser-reuse/protocol.ts';
 import type { ComposerDraft } from '../workbench-contract.ts';
 import { readBrowserAtom, subscribeBrowserAtoms, updateBrowserAtom, updateBrowserAtoms } from '../storage/ui-atoms.ts';
-import { composerDraftAtomKey } from '../composer/composer-draft-store.ts';
+import { composerDraftAtomKey, readComposerDraftVersionsInRoot } from '../composer/composer-draft-store.ts';
 import type { ComposerDraftSnapshot } from '../composer/composer-draft-store.ts';
 import { sameBrowserValue, updateBrowserDraftVersion } from './draft-transaction.ts';
 
@@ -407,6 +407,17 @@ export async function pruneBrowserDraftDeletions(owner: BrowserOwner, snapshot: 
     const store = commentStore(atoms[browserCommentsAtomKey]);
     const deleted = ownerRecords(store, 'codex-yard.browser-deletions.v1', key).flatMap(value =>
       record(value) && record(value.reference) ? [value.reference as unknown as BrowserReference] : []);
+    const versions = readComposerDraftVersionsInRoot(atoms[composerDraftAtomKey], captured.owner).versions;
+    if (!versions.some(version => version.revision === captured.revision) && versions.length === 1) {
+      const expected = removeExplicitlyDeletedBrowserReferences(captured.draft, deleted), version = versions[0]!;
+      if (!same(expected, captured.draft) && same(version.draft, expected)) {
+        // Another page already applied exactly these deletions. Adopt only that
+        // unique full version; do not create another write or merge independent text.
+        const next = updateBrowserDraftVersion(atoms, owner, { ...captured, revision: version.revision, draft: version.draft }, draft => draft);
+        if (isCurrent && !isCurrent()) throw new Error('草稿已切换，未同步浏览器引用。');
+        return { value: next.snapshot };
+      }
+    }
     const next = updateBrowserDraftVersion(atoms, owner, captured, draft => removeExplicitlyDeletedBrowserReferences(draft, deleted));
     if (isCurrent && !isCurrent()) throw new Error('草稿已切换，未同步浏览器引用。');
     return next.snapshot.revision === captured.revision ? { value: next.snapshot }
