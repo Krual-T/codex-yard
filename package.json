@@ -13,6 +13,7 @@
     "build:host": "node scripts/build-native.ts",
     "typecheck": "tsc --noEmit",
     "thread:title": "node scripts/set-thread-title.ts",
+    "tools:configure": "node --env-file-if-exists=.env scripts/configure-native-tools.ts",
     "prestart": "npm run build",
     "start": "node --env-file-if-exists=.env --env-file-if-exists=.local/chrome.env --use-env-proxy src/native/server.ts",
     "pretest": "npm run build:host",
@@ -41,6 +42,7 @@
     "@types/react-dom": "19.3.0",
     "@types/ws": "8.18.2",
     "chrome-devtools-mcp": "1.12.0",
+    "entities": "8.1.0",
     "esbuild": "0.28.2",
     "playwright-core": "1.58.2",
     "typescript": "5.9.3"

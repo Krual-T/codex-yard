@@ -10,6 +10,27 @@ The project's MIT license applies to project-authored source and excludes `vendo
 
 Changes to Codex App's private module exports or host contracts can require updates to the version boundary in `src/native/renderer-assets.ts` and the corresponding host code. Compatibility with other renderer versions is not assumed. The CLI/daemon versions and the separate UI reference version are documented in README.md.
 
+## Native conversation tool adapter and derived kernel
+
+`vendor/native-app-tools/26.1013.40934/server.mjs` is the unmodified official
+`codex-app-tools/server.mjs` from the same package. The tool host uses this copy
+so that its runtime does not depend on the old renderer snapshot directory.
+
+`vendor/native-app-tools/26.1013.40934/portable-tools.mjs` contains a bounded subset
+of the same App snapshot: its twelve conversation-tool descriptors, strict argument
+schemas, history projection, passive wait kernel, Markdown formatting, model
+validation, ancestry helper and delegation-input constructor, including their
+dependencies and retained bundled notices. `scripts/extract-native-tools.ts`
+selects upstream lexical bindings and bundles this subset with esbuild; the
+original snapshot is unchanged. The browser HTML entity decoder is the sole
+platform port inside the copied kernel and uses `entities.decodeHTMLStrict`.
+
+This derived code retains the upstream copyrights and terms and is excluded from
+the project's MIT grant. See its [notice](vendor/native-app-tools/LICENSE).
+The declaration file, extraction script and daemon/Yard I/O adapter are
+project-authored. The extraction script also copies the official adapter without
+changes. Neither runtime artifact starts or imports a desktop renderer.
+
 ## Package dependencies
 
 The npm dependencies are declared in `package.json` and locked in `package-lock.json`. They retain the licenses and notices distributed in their packages. `npm ci` installs them locally; `node_modules/` stays outside Git.

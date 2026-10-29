@@ -18,6 +18,8 @@
 
 ## 版本与运行条件
 
+对话工具由常驻宿主提供，包含创建、分叉、发送、等待、历史、标题、归档、置顶和已读等十二项；复用原版参数校验、历史投影和等待逻辑，关闭 Yard 页面后仍可执行。已加载旧对话的迁移、桌面与云端能力边界见[工具说明](docs/native-app-tools.md)。
+
 | 组件 | 版本 | 用途与验证范围 |
 | --- | --- | --- |
 | Codex | `0.164.0` | 已验证无需桌面 App 的部署：自动启动后端、网页加载与真实模型回复 |
@@ -51,6 +53,8 @@ npm start
 
 打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。将 `.env.example` 复制为 `.env` 后可设置端口、数据目录、工作目录和连接地址。`AGENTS_CODEX_BIN` 指定 CLI 可执行文件；`AGENTS_CODEX_SOCKET` 直接连接已有后端并跳过自动启动；`AGENTS_APP_TOOLS_ADAPTER` 可覆盖仓库内的工具适配器路径。Unix socket 的完整路径上限为 107 字节，隔离工作树宜设置较短的私有数据目录。
 
+要让连接同一 daemon 的桌面端共用十二项对话工具，在已部署的检出目录执行 `npm run tools:configure` 查看配置计划，确认后追加 `-- --apply`。配置备份、旧会话迁移和三端接入方式见[注册说明](docs/native-app-tools.md#explicit-registration-for-app-and-yard)。
+
 跨设备访问时，用私有隧道或带身份认证的 HTTPS 反向代理，并将 `AGENTS_PUBLIC_ORIGIN` 设为完整且精确的 HTTPS 来源。服务只监听回环地址；它可以访问文件和执行命令，没有多用户登录系统。[部署边界](SECURITY.md)
 
 原版界面会访问外部配置和事件服务，模型请求仍使用 Codex 中配置的提供方。网络需要代理时，可设置标准 `HTTPS_PROXY` 与 `NO_PROXY`。
@@ -75,4 +79,4 @@ npm run test:app-tools
 
 当前仍受指定界面版本约束，Git/工作树操作与通用自动化尚未完整接通；两台实体 iPhone、Windows Chrome 配对和 2 秒启动目标仍需继续验证或实现。
 
-自有项目源码采用 [MIT](LICENSE)。`vendor/codex-app/` 下的第三方编译资源不在此 MIT 授权范围内，保留原有版权、声明与适用条款，详见[资源声明](vendor/codex-app/LICENSE)。本项目与 OpenAI 无隶属或背书关系。
+自有项目源码采用 [MIT](LICENSE)。`vendor/codex-app/` 和 `vendor/native-app-tools/` 下的第三方编译资源不在此 MIT 授权范围内，保留原有版权、声明与适用条款，详见[第三方组件说明](THIRD_PARTY.md)。本项目与 OpenAI 无隶属或背书关系。

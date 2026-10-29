@@ -11,7 +11,9 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { CodexConnection } from '../../lib/codex.ts';
 import { createAppTools } from '../../lib/app-tools.ts';
-import { appToolCatalog, createHostToolHandler } from '../../lib/host-tools.ts';
+import { createHostToolHandler } from '../../lib/host-tools.ts';
+import { createNativeAppToolHost } from '../../lib/native-app-tools.ts';
+import type { NativeProject } from '../../lib/native-app-tools.ts';
 import { projectRoot, rendererRoot, rendererVersion } from '../../lib/app-resources.ts';
 import { record, publicConfig, readMethods, writeMethods } from './protocol.ts';
 import type { HostMessage, ObjectValue } from './protocol.ts';
@@ -171,7 +173,47 @@ export async function createNativeWorkbench(options: Options = {}) {
     listThreads: async params => control.request('thread/list', { ...params, archived: false }),
     readThread: async params => control.request('thread/read', { threadId: params.threadId, includeTurns: true }),
   });
-  const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'), tools: appToolCatalog, callTool: callHostTool });
+  async function toolConnection(hostId: string) {
+    validHost(hostId);
+    let connection = hostId === 'local' ? control : fileConnections.get(hostId);
+    if (!connection) {
+      connection = new CodexConnection('', { createConnection: () => (options.sshStream ?? createSshProxyStream)(sshHosts.get(hostId)!, paths => hostPaths.set(hostId, paths)), connectTimeout: 20_000 });
+      fileConnections.set(hostId, connection);
+    }
+    await connection.connect();
+    return connection;
+  }
+  const nativeTools = createNativeAppToolHost({ connectionFor: toolConnection, hostIds: () => ['local', ...sshHosts.keys()],
+    globals, projectlessRoot: join(dataDir, 'workspaces'), configFor: hostId => hostId === 'local' ? hostTools.config : {},
+    async listProjects() {
+      const local: NativeProject[] = Object.entries(record(globals['local-projects'])).flatMap(([id, value]) => {
+        const project = record(value), roots = Array.isArray(project.rootPaths) ? project.rootPaths : [];
+        const path = typeof roots[0] === 'string' ? roots[0] : id;
+        return [{ projectId: id, projectKind: 'local', label: typeof project.name === 'string' ? project.name : basename(path),
+          path, hostId: 'local', hostDisplayName: null, isGitRepository: false }];
+      });
+      const remote: NativeProject[] = (Array.isArray(globals['remote-projects']) ? globals['remote-projects'] : []).flatMap(value => {
+        const project = record(value), host = typeof project.hostId === 'string' ? sshHosts.get(project.hostId) : undefined;
+        if (!host || typeof project.id !== 'string' || typeof project.remotePath !== 'string') return [];
+        return [{ projectId: project.id, projectKind: 'remote', label: typeof project.label === 'string' ? project.label : basename(project.remotePath),
+          path: project.remotePath, hostId: host.hostId, hostDisplayName: host.displayName, isGitRepository: false }];
+      });
+      await Promise.all(local.map(async project => {
+        try { await promisify(execFile)('git', ['-C', project.path, 'rev-parse', '--is-inside-work-tree'], { timeout: 5000 }); project.isGitRepository = true; }
+        catch { /* A saved folder may be unavailable or outside Git. */ }
+      }));
+      return [...local, ...remote];
+    },
+    async persistGlobals(keys) { await persist(); broadcast({ type: 'global-state-updated', keys }); },
+    async setMembership(threadId, hostId, project, cwd) {
+      await threadProjects('setMembership', { threadId, hostId, projectless: project === null, assignment: project === null ? null :
+        project.projectKind === 'remote' ? { projectKind: 'remote', projectId: project.projectId, hostId } : { projectKind: 'local', projectId: project.projectId } });
+      if (!project) await threadProjects('updateProjectlessThread', { threadId, hostId, outputDirectory: cwd, workspaceRoot: join(dataDir, 'workspaces') });
+    },
+  });
+  const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'),
+    tools: nativeTools.tools, callTool: nativeTools.callTool,
+  });
   // A daemon request is broadcast to every page subscribed to its thread.
   // Retain each result through the turn so another page or a replay only replies.
   const legacyTitleCalls = new Map<string, Map<string, ReturnType<typeof callHostTool>>>();
@@ -623,7 +665,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       for (const [client, connections] of clients) { client.terminate(); for (const connection of connections.values()) connection.close(); }
       control.close(); webSockets.close(); chromeSockets.close();
       await new Promise<void>(resolve => server.close(() => resolve()));
-      await hostTools.close(); await threadProjects('flush', undefined); await persistQueue;
+      await hostTools.close(); await nativeTools.close(); await threadProjects('flush', undefined); await persistQueue;
     },
   };
 }
