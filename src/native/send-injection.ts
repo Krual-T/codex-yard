@@ -26,6 +26,8 @@ export interface SendInjectionOriginal {
   generation: string;
   /** Must synchronously verify the original page, owner, revision and daemon connection. */
   assertOriginal(reference: SendInjectionReference): void;
+  /** Required for a new turn connection; verifies actual resume and the same backend lifecycle. */
+  assertResumedContinuity?(reference: SendInjectionReference): void;
 }
 
 export interface SendInjectionInput {
@@ -42,7 +44,7 @@ export type SendInjectionTerminal =
 type InjectionPhase = 'preparing' | 'sending' | 'unknown' | 'injected' | 'rejected' | 'not-sent';
 type TurnPhase = 'waiting' | 'preparing' | 'sending' | 'unknown' | 'accepted' | 'rejected' | 'not-sent';
 interface InjectionState { phase: InjectionPhase; terminal?: SendInjectionTerminal }
-interface TurnState { phase: TurnPhase; attemptId?: string; attempts: string[]; terminal?: SendInjectionTerminal }
+interface TurnState { phase: TurnPhase; attemptId?: string; attempts: string[]; connectionGeneration?: string; terminal?: SendInjectionTerminal }
 interface StoredOperation {
   reference: SendInjectionReference;
   items: ObjectValue[];
@@ -57,6 +59,7 @@ interface Observation {
   reference: SendInjectionReference;
   step: Step;
   attemptId: string;
+  connectionGeneration: string;
   terminal: SendInjectionTerminal | null;
   /** Only used when the original reservation itself could not be confirmed. */
   reservation?: StoredOperation;
@@ -153,8 +156,9 @@ function section(value: unknown): Section {
       || !validTerminal(item.injection.terminal, 'injection', String(item.injection.phase))
       || !object(item.turn) || !turnPhases.includes(item.turn.phase as TurnPhase) || !Array.isArray(item.turn.attempts)
       || !item.turn.attempts.every(id) || new Set(item.turn.attempts).size !== item.turn.attempts.length
-      || (item.turn.phase === 'waiting' ? item.turn.attemptId !== undefined || item.turn.attempts.length !== 0
-        : !id(item.turn.attemptId) || item.turn.attempts.at(-1) !== item.turn.attemptId)
+      || (item.turn.phase === 'waiting' ? item.turn.attemptId !== undefined || item.turn.connectionGeneration !== undefined || item.turn.attempts.length !== 0
+        : !id(item.turn.attemptId) || item.turn.attempts.at(-1) !== item.turn.attemptId
+          || item.turn.connectionGeneration !== undefined && !id(item.turn.connectionGeneration))
       || !validTerminal(item.turn.terminal, 'turn', String(item.turn.phase))
       || item.injection.phase !== 'injected' && item.turn.phase !== 'waiting') {
       throw new Error('原注入记录无法安全读取，会话写入已暂停。');
@@ -177,16 +181,31 @@ function matching(operations: StoredOperation[], reference: SendInjectionReferen
   return found;
 }
 
-function assertConnection(original: SendInjectionOriginal, reference: SendInjectionReference): void {
-  if (!original || original.generation !== reference.connectionGeneration || !original.connection?.connected
+function assertConnection(original: SendInjectionOriginal, reference: SendInjectionReference, step: Step): void {
+  if (!original || !id(original.generation) || !original.connection?.connected
     || original.connection.socket !== original.socket || original.socket?.readyState !== WebSocket.OPEN) {
     throw new Error('原 Codex 连接已改变。');
+  }
+  if (original.generation !== reference.connectionGeneration) {
+    if (step !== 'turn' || !original.assertResumedContinuity) throw new Error('尚不能确认原会话的后端生命周期。');
+    const resumed = original.assertResumedContinuity(reference);
+    if (resumed !== undefined) {
+      void Promise.resolve(resumed).catch(() => {});
+      throw new Error('恢复后的原会话必须同步核对。');
+    }
   }
   const result = original.assertOriginal(reference);
   if (result !== undefined) {
     void Promise.resolve(result).catch(() => {});
     throw new Error('原发送权限必须同步核对。');
   }
+}
+
+function captureOriginal(original: SendInjectionOriginal): SendInjectionOriginal {
+  if (!original || typeof original.assertOriginal !== 'function') throw new Error('缺少原发送权限。');
+  return { connection: original.connection, socket: original.socket, generation: original.generation,
+    assertOriginal: original.assertOriginal.bind(original),
+    ...(original.assertResumedContinuity ? { assertResumedContinuity: original.assertResumedContinuity.bind(original) } : {}) };
 }
 
 function terminalFor(step: Step, terminal: LateRpcTerminal): SendInjectionTerminal | null {
@@ -252,7 +271,9 @@ export function createSendInjection(options: SendInjectionOptions) {
           && !operation.turn.attempts.includes(event.attemptId)) operation.turn = clone(event.reservation.turn);
         const state = event.step === 'injection' ? operation.injection : operation.turn;
         const sameAttempt = event.step === 'injection' ? event.attemptId === operation.reference.injectionAttemptId
-          : operation.turn.attemptId === event.attemptId;
+          && event.connectionGeneration === operation.reference.connectionGeneration
+          : operation.turn.attemptId === event.attemptId
+            && event.connectionGeneration === (operation.turn.connectionGeneration ?? operation.reference.connectionGeneration);
         if (sameAttempt && ['preparing', 'sending', 'unknown'].includes(state.phase)) {
           state.phase = (event.terminal?.kind ?? 'unknown') as never;
           if (event.terminal) state.terminal = clone(event.terminal); else delete state.terminal;
@@ -301,16 +322,16 @@ export function createSendInjection(options: SendInjectionOptions) {
   async function retryPersistence(reference: SendInjectionReference, receipt: SendInjectionReceiptIdentity): Promise<SendInjectionStatus | null> {
     if (!validReference(reference) || !receipt || !['injection', 'turn'].includes(receipt.step) || !id(receipt.attemptId)
       || receipt.step === 'injection' && receipt.attemptId !== reference.injectionAttemptId) throw new Error('原回执身份无效。');
-    const event = observed.get(observationKey({ reference, ...receipt, terminal: null }));
+    const event = observed.get(observationKey({ reference, ...receipt, connectionGeneration: reference.connectionGeneration, terminal: null }));
     if (event && !isDeepStrictEqual(event.reference, reference)) throw new Error('原注入身份不匹配，未修改原记录。');
     if (event) await settle(event);
     return status(reference);
   }
 
-  async function idle(reference: SendInjectionReference, original: SendInjectionOriginal): Promise<void> {
+  async function idle(reference: SendInjectionReference, original: SendInjectionOriginal, step: Step): Promise<void> {
     const pending = await options.mutations.run(() => {
       read();
-      assertConnection(original, reference);
+      assertConnection(original, reference, step);
       return { reply: original.connection.request('thread/read', { threadId: reference.threadId, includeTurns: false }) };
     });
     const reply: unknown = await pending.reply;
@@ -326,25 +347,26 @@ export function createSendInjection(options: SendInjectionOptions) {
         const current = read(), operation = matching(current.operations, reference);
         if (!operation) throw new Error('原发送记录不存在。');
         const state = step === 'injection' ? operation.injection : operation.turn;
-        if (state.phase !== 'preparing' || step === 'turn' && operation.turn.attemptId !== attemptId) {
+        if (state.phase !== 'preparing' || step === 'turn' && (operation.turn.attemptId !== attemptId
+          || operation.turn.connectionGeneration !== original.generation)) {
           throw new Error('原发送尝试已改变。');
         }
         checkedReservation = true;
         state.phase = 'sending';
         await save(current);
-        assertConnection(original, reference);
+        assertConnection(original, reference, step);
       });
     } catch (error) {
       if (!checkedReservation) throw error;
-      const reason = (() => { try { assertConnection(original, reference); return 'storage-failed' as const; }
+      const reason = (() => { try { assertConnection(original, reference, step); return 'storage-failed' as const; }
         catch { return 'original-changed' as const; } })();
-      return retain({ reference, step, attemptId, terminal: { kind: 'not-sent', reason } }, fallback);
+      return retain({ reference, step, attemptId, connectionGeneration: original.generation, terminal: { kind: 'not-sent', reason } }, fallback);
     }
-    try { await idle(reference, original); }
+    try { await idle(reference, original, step); }
     catch {
-      const reason = (() => { try { assertConnection(original, reference); return 'idle-unconfirmed' as const; }
+      const reason = (() => { try { assertConnection(original, reference, step); return 'idle-unconfirmed' as const; }
         catch { return 'original-changed' as const; } })();
-      return retain({ reference, step, attemptId, terminal: { kind: 'not-sent', reason } }, fallback);
+      return retain({ reference, step, attemptId, connectionGeneration: original.generation, terminal: { kind: 'not-sent', reason } }, fallback);
     }
     let pending: { reply: Promise<unknown> };
     try {
@@ -352,34 +374,36 @@ export function createSendInjection(options: SendInjectionOptions) {
         const current = read(), operation = matching(current.operations, reference);
         if (!operation) throw new Error('原发送记录不存在。');
         const state = step === 'injection' ? operation.injection : operation.turn;
-        if (state.phase !== 'sending' || step === 'turn' && operation.turn.attemptId !== attemptId) {
+        if (state.phase !== 'sending' || step === 'turn' && (operation.turn.attemptId !== attemptId
+          || operation.turn.connectionGeneration !== original.generation)) {
           throw new Error('原发送尝试已改变。');
         }
-        assertConnection(original, reference);
+        assertConnection(original, reference, step);
         const method = step === 'injection' ? 'thread/inject_items' : 'turn/start';
         const params = step === 'injection' ? { threadId: reference.threadId, items: clone(operation.items) } : clone(operation.turnParams);
         return { reply: original.connection.request(method, params, { mutating: true, retainLateUntilDisconnect: true,
           onLateTerminal: terminal => {
-            const event: Observation = { reference: clone(reference), step, attemptId, terminal: terminalFor(step, terminal) };
+            const event: Observation = { reference: clone(reference), step, attemptId, connectionGeneration: original.generation,
+              terminal: terminalFor(step, terminal) };
             void settle(event).catch(() => {});
           } }) };
       });
     } catch {
-      const reason = (() => { try { assertConnection(original, reference); return 'storage-failed' as const; }
+      const reason = (() => { try { assertConnection(original, reference, step); return 'storage-failed' as const; }
         catch { return 'original-changed' as const; } })();
-      return retain({ reference, step, attemptId, terminal: { kind: 'not-sent', reason } }, fallback);
+      return retain({ reference, step, attemptId, connectionGeneration: original.generation, terminal: { kind: 'not-sent', reason } }, fallback);
     }
     let terminal: SendInjectionTerminal | null;
     try { terminal = terminalFor(step, { outcome: 'success', result: await pending.reply }); }
     catch (error) { terminal = failure(error); }
-    return retain({ reference, step, attemptId, terminal }, fallback);
+    return retain({ reference, step, attemptId, connectionGeneration: original.generation, terminal }, fallback);
   }
 
-  async function inject(input: SendInjectionInput, original: SendInjectionOriginal): Promise<SendInjectionStatus> {
+  async function inject(input: SendInjectionInput, origin: SendInjectionOriginal): Promise<SendInjectionStatus> {
     if (!input || !validReference(input.reference) || !validPayload(input.reference, input.items, input.turnParams)) {
       throw new Error('原注入请求身份或内容无效，未发送。');
     }
-    const reference = clone(input.reference), operation: StoredOperation = { reference, items: clone(input.items), turnParams: clone(input.turnParams),
+    const original = captureOriginal(origin), reference = clone(input.reference), operation: StoredOperation = { reference, items: clone(input.items), turnParams: clone(input.turnParams),
       injection: { phase: 'preparing' }, turn: { phase: 'waiting', attempts: [] } };
     let existing: StoredOperation | undefined;
     let reservationStarted = false;
@@ -407,7 +431,7 @@ export function createSendInjection(options: SendInjectionOptions) {
         }
         if (current.operations.some(value => value.reference.hostId === reference.hostId
           && value.reference.threadId === reference.threadId && active(value))) throw new Error('此会话已有待核对的原注入。');
-        assertConnection(original, reference);
+        assertConnection(original, reference, 'injection');
         current.operations.push(operation);
         reservationStarted = true;
         await save(current);
@@ -417,6 +441,7 @@ export function createSendInjection(options: SendInjectionOptions) {
       // No request is made if reservation or original authority failed.
       if (!reservationStarted) throw error;
       const event: Observation = { reference, step: 'injection', attemptId: reference.injectionAttemptId,
+        connectionGeneration: reference.connectionGeneration,
         terminal: { kind: 'not-sent', reason: 'storage-failed' }, reservation: operation };
       remember(event);
       return statusOf(operation);
@@ -426,9 +451,9 @@ export function createSendInjection(options: SendInjectionOptions) {
   }
 
   async function startTurn(input: { reference: SendInjectionReference; turnAttemptId: string },
-    original: SendInjectionOriginal): Promise<SendInjectionStatus> {
+    origin: SendInjectionOriginal): Promise<SendInjectionStatus> {
     if (!input || !validReference(input.reference) || !id(input.turnAttemptId)) throw new Error('原发送身份无效，未发送。');
-    const reference = clone(input.reference), attemptId = input.turnAttemptId;
+    const original = captureOriginal(origin), reference = clone(input.reference), attemptId = input.turnAttemptId;
     let reservation: StoredOperation | undefined;
     let prepared: { operation: StoredOperation; existing: boolean };
     try {
@@ -444,8 +469,8 @@ export function createSendInjection(options: SendInjectionOptions) {
         }
         if (operation.turn.attempts.includes(attemptId)) return { operation, existing: true };
         if (!['waiting', 'not-sent', 'rejected'].includes(operation.turn.phase)) throw new Error('原消息结果尚未确认，未重复发送。');
-        assertConnection(original, reference);
-        operation.turn = { phase: 'preparing', attemptId, attempts: [...operation.turn.attempts, attemptId] };
+        assertConnection(original, reference, 'turn');
+        operation.turn = { phase: 'preparing', attemptId, attempts: [...operation.turn.attempts, attemptId], connectionGeneration: original.generation };
         reservation = clone(operation);
         await save(current);
         return { operation, existing: false };
@@ -453,6 +478,7 @@ export function createSendInjection(options: SendInjectionOptions) {
     } catch (error) {
       if (!reservation) throw error;
       const event: Observation = { reference, step: 'turn', attemptId,
+        connectionGeneration: original.generation,
         terminal: { kind: 'not-sent', reason: 'storage-failed' }, reservation };
       remember(event);
       return statusOf(reservation);
