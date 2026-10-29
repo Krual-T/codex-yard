@@ -65,6 +65,10 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
         state.precommit=null;const element=document.querySelector('[data-composer-input-index="'+(pending.index??0)+'"]');
         element.focus();if(element instanceof HTMLTextAreaElement)element.setSelectionRange(element.value.length,element.value.length);
         const before=element instanceof HTMLTextAreaElement?element.value:element.textContent;
+        if(pending.action==='local-redo'){
+          const remove=document.querySelector('button[aria-label="Remove file local.txt"]');
+          if(!remove)throw Error('fixture attachment control missing');remove.click();
+        }
         if(pending.action==='compose'){
           element.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
           Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(element,element.value+'Q');
@@ -73,7 +77,7 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
           ? element.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertCompositionText',data:'Q',isComposing:true}))
           : pending.action==='view-undo'
           ? element.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'z',ctrlKey:true}))
-          : pending.action==='undo'||pending.action==='redo'
+          : pending.action==='undo'||pending.action==='redo'||pending.action==='local-redo'
           ? element.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:pending.action==='undo'?'historyUndo':'historyRedo'}))
           : document.execCommand('insertText',false,'Q');
         state.precommitResult={before,dispatched,after:element instanceof HTMLTextAreaElement?element.value:element.textContent,snapshot:state.controller.snapshot()};},
@@ -86,6 +90,9 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       read(){const {hostId,threadId,draftId}=props.context;return readComposerDraft({hostId,threadId,draftId});},
       addVersion(draft,revision){const c=state.controller;return saveComposerDraftConflict(c.snapshot().owner,{draft,revision,prefills:[]});},
       versions(){const c=state.controller;return readComposerDraftVersions(c.snapshot().owner);},
+      replaceVersion(draft){const before=state.controller.snapshot();return updateBrowserAtoms(atoms=>{
+        const result=updateComposerDraftVersionInRoot(atoms[composerDraftAtomKey],before,()=>draft,createId());
+        return result.changed?{value:result.after,updates:{[composerDraftAtomKey]:result.root}}:{value:result.after};});},
       mountSegmentProbe(draft){const host=document.createElement('div');document.body.append(host);
         const directRoot=createRoot(host),ref=React.createRef();let current=draft;
         const render=()=>flushSync(()=>directRoot.render(React.createElement(I18nProvider,{locale:'en-US'},
@@ -1108,11 +1115,17 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
-    for (const scenario of ['removed-immediate', 'removed-deep', 'removed-after-layout', 'retained', 'other-removed'] as const) await t.test(`G redo-only skill ownership ${scenario}`, async () => {
+    for (const scenario of ['removed-immediate', 'removed-deep', 'removed-after-layout', 'retained', 'other-removed',
+      'same-empty-immediate', 'same-empty-after-layout', 'same-empty-external', 'same-empty-refresh', 'same-empty-followed-local'] as const) await t.test(`G redo-only skill ownership ${scenario}`, async () => {
       const retained = scenario === 'retained' || scenario === 'other-removed';
+      const external = scenario === 'same-empty-external';
+      const refresh = scenario === 'same-empty-refresh';
+      const followedLocal = scenario === 'same-empty-followed-local';
+      const sameEmpty = scenario === 'same-empty-immediate' || scenario === 'same-empty-after-layout' || external || refresh || followedLocal;
+      const afterLayout = scenario === 'removed-after-layout' || scenario === 'same-empty-after-layout' || external || refresh;
       const { page, errors } = await open(`g-redo-skill-${scenario}`);
       await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
-      const original = { text: 'First\nSecond\nThird', images: [], files: [], references: [], skills: [], input: [
+      const original = { text: 'First\nSecond\nThird', images: [], files: followedLocal ? [{ name: 'local.txt', path: '/workspace/local.txt' }] : [], references: [], skills: [], input: [
         { type: 'text', text: 'First', text_elements: [] }, { type: 'image', fileId: 'one', detail: 'high' },
         { type: 'text', text: 'Second', text_elements: [] }, { type: 'image', fileId: 'two', detail: 'low' },
         { type: 'text', text: 'Third', text_elements: [] },
@@ -1132,28 +1145,49 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), [{ name: 'review-skill', path: '/skills/review' }]);
       await first.press('Control+z'); assert.equal(await first.inputValue(), 'First $rev');
       if (scenario === 'removed-deep') { await first.press('Control+z'); assert.equal(await first.inputValue(), 'First'); }
-      await second.focus(); await second.press('End'); await second.pressSequentially(' $rev');
-      await page.getByRole('option', { name: /review-skill/ }).click();
+      if (!sameEmpty) {
+        await second.focus(); await second.press('End'); await second.pressSequentially(' $rev');
+        await page.getByRole('option', { name: /review-skill/ }).click();
+      }
       if (scenario === 'other-removed') {
         await second.focus(); await second.press('End'); await second.pressSequentially(' $aud');
         await page.getByRole('option', { name: /audit-skill/ }).click();
       }
-      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills),
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), sameEmpty ? [] :
         [{ name: 'review-skill', path: '/skills/review' }, ...(scenario === 'other-removed' ? [{ name: 'audit-skill', path: '/skills/audit' }] : [])]);
       assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
       const alternate = await page.evaluate(scenario => {
         const draft = structuredClone((window as any).fixture.state.controller.snapshot().draft);
         if (scenario === 'other-removed') draft.skills = draft.skills.filter((skill: any) => skill.name !== 'audit-skill');
         else if (scenario !== 'retained') draft.skills = [];
+        if (scenario === 'same-empty-external' || scenario === 'same-empty-refresh') draft.files = [{ name: 'external.txt', path: '/workspace/external.txt' }];
         return draft;
       }, scenario);
-      const revision = `g-redo-${scenario}`;
-      await page.evaluate(({ draft, revision }) => (window as any).fixture.addVersion(draft, revision), { draft: alternate, revision });
-      await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
-      if (scenario !== 'removed-after-layout') await page.evaluate(revision => { (window as any).fixture.state.precommit = { action: 'redo', revision }; }, revision);
-      await page.getByRole('button', { name: alternate.text.replace(/\s+/g, ' '), exact: true }).click();
+      let revision = `g-redo-${scenario}`;
+      const beforeVersion = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+      if (sameEmpty) {
+        assert.deepEqual(beforeVersion.draft.input, alternate.input);
+        assert.deepEqual(beforeVersion.draft.document, alternate.document);
+        assert.deepEqual(beforeVersion.draft.skills, alternate.skills);
+        if (!external && !refresh) assert.deepEqual(beforeVersion.draft, alternate);
+      }
+      if (external) {
+        const receipt = await page.evaluate(draft => (window as any).fixture.commitExternal(draft), alternate);
+        assert.equal(receipt.accepted, true); revision = receipt.after.revision;
+      } else if (refresh) {
+        const receipt = await page.evaluate(draft => (window as any).fixture.replaceVersion(draft), alternate);
+        revision = receipt.revision;
+      } else {
+        await page.evaluate(({ draft, revision }) => (window as any).fixture.addVersion(draft, revision), { draft: alternate, revision });
+        await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
+        if (!afterLayout) await page.evaluate(({ revision, followedLocal }) => {
+          (window as any).fixture.state.precommit = { action: followedLocal ? 'local-redo' : 'redo', revision };
+        }, { revision, followedLocal });
+        await page.getByRole('button', { name: alternate.text.replace(/\s+/g, ' '), exact: true }).click();
+      }
+      assert.notEqual(beforeVersion.revision, revision);
       let observed;
-      if (scenario === 'removed-after-layout') {
+      if (afterLayout) {
         await page.waitForFunction(revision => (window as any).fixture.state.controller.snapshot().revision === revision, revision);
         const before = await first.inputValue(); await first.focus(); await first.press('Control+Shift+z');
         observed = { before, after: await first.inputValue(), snapshot: await page.evaluate(() => (window as any).fixture.state.controller.snapshot()) };
@@ -1165,8 +1199,13 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
         revision: observed.snapshot.revision, skills: observed.snapshot.draft.skills }));
       assert.equal(observed.before, scenario === 'removed-deep' ? 'First' : 'First $rev');
       if (!retained) {
-        assert.equal(observed.snapshot.revision, revision);
-        assert.deepEqual(observed.snapshot.draft, alternate);
+        if (followedLocal) {
+          assert.notEqual(observed.snapshot.revision, revision);
+          assert.deepEqual(observed.snapshot.draft, { ...alternate, files: [] });
+        } else {
+          assert.equal(observed.snapshot.revision, revision);
+          assert.deepEqual(observed.snapshot.draft, alternate);
+        }
         await first.focus(); await first.press('Control+Shift+z'); await first.press('Control+Shift+z');
         assert.equal(await first.inputValue(), scenario === 'removed-deep' ? 'First' : 'First $rev');
         assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), []);
@@ -1182,6 +1221,90 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(versions.versions.find((version: any) => version.revision === current.revision)?.draft, current.draft);
       assert.deepEqual(current.draft.skills, alternate.skills);
       assert.deepEqual(current.draft.input[1], original.input[1]); assert.deepEqual(current.draft.input[3], original.input[3]);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('G redo-only skill ownership survives a local attachment edit', async () => {
+      const { page, errors } = await open('g-redo-local-attachment');
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      const original = { text: 'First\nSecond\nThird', images: [], files: [], references: [], skills: [], input: [
+        { type: 'text', text: 'First', text_elements: [] }, { type: 'image', fileId: 'one', detail: 'high' },
+        { type: 'text', text: 'Second', text_elements: [] }, { type: 'image', fileId: 'two', detail: 'low' },
+        { type: 'text', text: 'Third', text_elements: [] },
+      ], document: { type: 'doc', content: ['First', 'Second', 'Third'].map(text => ({ type: 'paragraph', content: [{ type: 'text', text }] })) } };
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const first = page.getByRole('textbox', { name: 'Work with Codex 1' });
+      const third = page.getByRole('textbox', { name: 'Work with Codex 3' });
+      await third.focus(); await third.press('End'); await third.pressSequentially('T');
+      await first.focus(); await first.press('End'); await first.pressSequentially(' $rev');
+      await page.getByRole('option', { name: /review-skill/ }).click();
+      await first.press('Control+z'); assert.equal(await first.inputValue(), 'First $rev');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), []);
+      const before = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller;
+        return c.update(c.snapshot().owner, (draft: any) => ({ ...draft, files: [{ name: 'local.txt', path: '/workspace/local.txt' }] })); }), true);
+      const local = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+      assert.notEqual(local.revision, before.revision);
+      await first.focus(); await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'First ');
+      const after = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+      assert.deepEqual(after.draft.skills, [{ name: 'review-skill', path: '/skills/review' }]);
+      assert.deepEqual(after.draft.files, [{ name: 'local.txt', path: '/workspace/local.txt' }]);
+      await third.focus(); await third.press('Control+z'); assert.equal(await third.inputValue(), 'Third');
+      await third.press('Control+Shift+z'); assert.equal(await third.inputValue(), 'ThirdT');
+      await first.focus(); await first.press('Control+z'); assert.equal(await first.inputValue(), 'First $rev');
+      assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), true);
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.append('document')), { status: 'accepted' });
+      await first.focus(); await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'First ');
+      const appended = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+      assert.deepEqual(appended.skills, [{ name: 'review-skill', path: '/skills/review' }]);
+      assert.deepEqual(appended.files, [{ name: 'local.txt', path: '/workspace/local.txt' }]);
+      assert.match(JSON.stringify(appended.document), /plugin:\/\/documents@openai-primary-runtime/);
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('G redo-only skill ownership rejects returning to the original revision', async () => {
+      const { page, errors } = await open('g-redo-original-revision');
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      const original = { text: 'First\nSecond\nThird', images: [], files: [], references: [], skills: [], input: [
+        { type: 'text', text: 'First', text_elements: [] }, { type: 'image', fileId: 'one', detail: 'high' },
+        { type: 'text', text: 'Second', text_elements: [] }, { type: 'image', fileId: 'two', detail: 'low' },
+        { type: 'text', text: 'Third', text_elements: [] },
+      ], document: { type: 'doc', content: ['First', 'Second', 'Third'].map(text => ({ type: 'paragraph', content: [{ type: 'text', text }] })) } };
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const first = page.getByRole('textbox', { name: 'Work with Codex 1' });
+      const third = page.getByRole('textbox', { name: 'Work with Codex 3' });
+      await third.focus(); await third.press('End'); await third.pressSequentially('T');
+      await first.focus(); await first.press('End'); await first.pressSequentially(' $rev');
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const base = await page.evaluate(() => structuredClone((window as any).fixture.state.controller.snapshot().draft));
+      const revision = 'g-redo-returned-ancestor';
+      const choose = async () => {
+        await page.evaluate(({ draft, revision }) => (window as any).fixture.addVersion(draft, revision), { draft: base, revision });
+        await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
+        await page.getByRole('button', { name: base.text.replace(/\s+/g, ' '), exact: true }).click();
+        await page.waitForFunction(value => (window as any).fixture.state.controller.snapshot().revision === value, revision);
+      };
+      await choose();
+      await first.focus(); await first.press('End'); await first.pressSequentially('x'); await first.press('Backspace');
+      await page.getByRole('option', { name: /review-skill/ }).click();
+      await first.press('Control+z'); assert.equal(await first.inputValue(), 'First $rev');
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const before = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+      assert.notEqual(before.revision, revision); assert.deepEqual(before.draft, base);
+      await page.evaluate(({ draft, revision }) => (window as any).fixture.addVersion(draft, revision), { draft: base, revision });
+      const versionMenu = page.locator('details').filter({ has: page.locator('summary').filter({ hasText: 'Select draft version' }) });
+      if (!await versionMenu.evaluate((element: HTMLDetailsElement) => element.open)) await versionMenu.locator('summary').click();
+      await page.evaluate(value => { (window as any).fixture.state.precommit = { action: 'redo', revision: value }; }, revision);
+      const versions = await page.evaluate(() => (window as any).fixture.versions());
+      assert.equal(versions.versions.at(-1).revision, revision);
+      await page.getByRole('button', { name: base.text.replace(/\s+/g, ' '), exact: true }).last().click();
+      await page.waitForFunction(() => (window as any).fixture.state.precommitResult);
+      const observed = await page.evaluate(() => (window as any).fixture.state.precommitResult);
+      assert.equal(observed.before, 'First $rev'); assert.equal(observed.after, 'First $rev');
+      assert.equal(observed.snapshot.revision, revision); assert.deepEqual(observed.snapshot.draft, base);
+      await third.focus(); await third.press('Control+z'); assert.equal(await third.inputValue(), 'Third');
+      await third.press('Control+Shift+z'); assert.equal(await third.inputValue(), 'ThirdT');
       assert.deepEqual(errors, []); await page.close();
     });
 

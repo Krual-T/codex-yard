@@ -30,6 +30,7 @@ export interface RichEditorHandle {
 }
 export type { AgentMentionChoice, AgentMentionCurrent, AgentMentionTarget } from './rich-editor-actions.ts';
 export interface StructuredInputEditorHandle {
+  advanceRevision(before: string, after: string): void;
   focus(index?: number, position?: number): void;
   matchesDocument(document: ComposerDocument): boolean;
   preparePromptAppend(source: ComposerDocument, addition: ComposerDocument, index?: number, before?: ComposerDraft): PreparedPromptAppend | null;
@@ -55,6 +56,8 @@ export interface TextAgentChange { before: TextAgentSegment[]; after: TextAgentS
 export interface StructuredInputEditorProps {
   draft: Draft;
   currentDraft(): Draft;
+  sourceRevision?: string;
+  currentSourceRevision?(): string;
   onEdit(index: number, expectedText: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
   onStaleEdit?(index: number, expectedText: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange, composing?: boolean): boolean;
   agentMentions?(index: number): readonly TextAgentSpan[];
@@ -258,9 +261,8 @@ function historySkills(state: EditorState): TextCompletionSkill[] {
   });
   return result;
 }
-function historyContainsManagedSkills(state: EditorState, skills: readonly { name: string; path: string }[]): boolean {
-  const contains = (value: EditorState) => historySkills(value).some(item => item.managed
-    && skills.some(skill => skill.name === item.name && skill.path === item.path));
+function historyContainsManagedSkills(state: EditorState, isStale: (skill: TextCompletionSkill) => boolean): boolean {
+  const contains = (value: EditorState) => historySkills(value).some(item => item.managed && isStale(item));
   if (contains(state)) return true;
   // Inspect reachable history on immutable states without dispatching to the live editor.
   for (const [command, depth] of [[undoNoScroll, undoDepth(state)], [redoNoScroll, redoDepth(state)]] as const) {
@@ -371,9 +373,10 @@ interface TextControlModel {
   state: EditorState; element: HTMLTextAreaElement | null; index: number;
   sourceDocument: SegmentDocument | null;
   authoritySkills: readonly { name: string; path: string }[] | null;
+  authorityRevision: string | null;
   view: EditorView | null; activateView(): void;
   historyPlugin: Plugin; composing: boolean; rich: boolean; plainMode: boolean; applyMode(): void; canEdit(): boolean;
-  synchronize(): boolean; renderedSourceMatches(): boolean; refreshSource(): void; observeSkills(): void;
+  synchronize(): boolean; renderedSourceMatches(): boolean; refreshSource(): void; observeAuthority(): void;
   apply(transaction: Transaction, inputType?: string): boolean;
 }
 export interface TextAgentTarget {
@@ -394,6 +397,8 @@ interface TextControlProps {
   currentSegment?(): SegmentSnapshot | null;
   sourceSkills?: readonly { name: string; path: string }[];
   currentSkills?(): readonly { name: string; path: string }[];
+  sourceRevision?: string;
+  currentSourceRevision?(): string;
   onSelection?(index: number, cursor: number, text?: string): void;
   onKeyDown(event: KeyboardEvent): boolean;
   onPaste?(event: TextPasteEvent): void;
@@ -413,10 +418,11 @@ function TextControl(props: TextControlProps) {
   if (!model.current) {
     const state = applySourceMarks(textHistoryState(props.text, props.agentMentions), props.sourceMarks ?? []);
     model.current = { state, element: null, index: props.index, sourceDocument: props.sourceDocument ?? null,
-      authoritySkills: props.sourceSkills?.map(({ name, path }) => ({ name, path })) ?? null, historyPlugin: state.plugins[0]!,
+      authoritySkills: props.sourceSkills?.map(({ name, path }) => ({ name, path })) ?? null,
+      authorityRevision: props.sourceRevision ?? null, historyPlugin: state.plugins[0]!,
       view: null, activateView: () => {}, composing: false, rich: false, plainMode: false,
       applyMode: () => {}, canEdit: () => false, synchronize: () => false, renderedSourceMatches: () => false,
-      refreshSource: () => {}, observeSkills: () => {}, apply: () => false };
+      refreshSource: () => {}, observeAuthority: () => {}, apply: () => false };
   }
   const control = model.current;
   const [showView, setShowView] = useState(() => !!props.agentMentions?.length);
@@ -443,9 +449,10 @@ function TextControl(props: TextControlProps) {
   control.renderedSourceMatches = () => latest.current.sourceDocument !== undefined
     && sameSegmentDocument(control.sourceDocument, latest.current.sourceDocument);
   control.refreshSource = () => { if (latest.current.currentSourceDocument) control.sourceDocument = latest.current.currentSourceDocument(); };
-  control.observeSkills = () => {
+  control.observeAuthority = () => {
     const skills = latest.current.currentSkills?.();
     control.authoritySkills = skills?.map(({ name, path }) => ({ name, path })) ?? null;
+    control.authorityRevision = latest.current.currentSourceRevision?.() ?? null;
   };
   control.synchronize = () => {
     if (!latest.current.currentSourceDocument || !latest.current.currentSegment) return true;
@@ -454,7 +461,11 @@ function TextControl(props: TextControlProps) {
     const skills = latest.current.currentSkills?.();
     const removedSkills = skills && control.authoritySkills?.filter(previous =>
       !skills.some(skill => skill.name === previous.name && skill.path === previous.path));
-    const staleHistory = !!removedSkills?.length && historyContainsManagedSkills(control.state, removedSkills);
+    const revision = latest.current.currentSourceRevision?.();
+    const changedSource = revision !== undefined && revision !== control.authorityRevision;
+    const staleHistory = !!skills && (changedSource || !!removedSkills?.length) && historyContainsManagedSkills(control.state, skill =>
+      changedSource ? !skills.some(item => item.name === skill.name && item.path === skill.path)
+        : !!removedSkills?.some(item => item.name === skill.name && item.path === skill.path));
     const staleSkills: number[] = [];
     // A marker and its undo history belong only to skills still present in the authoritative draft.
     if (skills) control.state.doc.descendants((node, position) => {
@@ -462,10 +473,10 @@ function TextControl(props: TextControlProps) {
         staleSkills.push(position);
       }
     });
-    if (sameSource && currentSource && !staleSkills.length && !staleHistory) { control.observeSkills(); return true; }
+    if (sameSource && currentSource && !staleSkills.length && !staleHistory) { control.observeAuthority(); return true; }
     const current = latest.current.currentSegment();
     if (!current || !sameSegmentDocument(current.source, currentSource)) return false;
-    if (sameSource && current.text === historyText(control.state) && !staleSkills.length && !staleHistory) { control.observeSkills(); return true; }
+    if (sameSource && current.text === historyText(control.state) && !staleSkills.length && !staleHistory) { control.observeAuthority(); return true; }
     const previous = control.state;
     // Retain inline nodes and selection when the new source has the same visible projection, but discard its old history.
     const authoritative = applySourceMarks(textHistoryState(current.text, current.agents), current.marks);
@@ -487,7 +498,7 @@ function TextControl(props: TextControlProps) {
     control.state = EditorState.create({ doc, selection, storedMarks: sameContent ? valid.storedMarks : null, plugins });
     control.historyPlugin = plugin;
     control.sourceDocument = currentSource;
-    control.observeSkills();
+    control.observeAuthority();
     control.view?.updateState(control.state);
     if (control.element && historyText(previous) !== current.text) control.element.value = current.text;
     return true;
@@ -512,7 +523,7 @@ function TextControl(props: TextControlProps) {
         snapshot.item.state = snapshot.item === control ? proposed : snapshot.state;
         snapshot.item.historyPlugin = snapshot.historyPlugin;
         snapshot.item.refreshSource();
-        snapshot.item.observeSkills();
+        snapshot.item.observeAuthority();
         snapshot.item.view?.updateState(snapshot.item.state);
         if (snapshot.item.element) snapshot.item.element.value = historyText(snapshot.item.state);
       }
@@ -561,7 +572,7 @@ function TextControl(props: TextControlProps) {
     control.state = next;
     if (transaction.docChanged) {
       if (latest.current.currentSourceDocument) control.sourceDocument = latest.current.currentSourceDocument();
-      for (const item of all) item.observeSkills();
+      for (const item of all) item.observeAuthority();
     }
     if (control.view && !control.view.isDestroyed) control.view.updateState(next);
     return true;
@@ -1017,6 +1028,12 @@ function appendPromptState(state: EditorState, addition: ComposerDocument, inher
 
 function textEditorHandle(controls: Map<number, TextControlModel>): StructuredInputEditorHandle {
   return {
+    advanceRevision(before, after) {
+      // A control on an older version must still reconcile after this local edit.
+      for (const control of controls.values()) {
+        if (control.authorityRevision === before) control.authorityRevision = after;
+      }
+    },
     focus(index, position) {
       const values = Array.from(controls.values());
       const control = (index === undefined ? undefined : controls.get(index))
@@ -1270,6 +1287,7 @@ export const StandaloneStructuredInputEditor = forwardRef<StructuredInputEditorH
         currentSegment={() => currentSegmentSnapshot(props.currentDraft(), index, currentDocuments().get(index) ?? null)}
         sourceSkills={props.draft.skills}
         currentSkills={() => props.currentDraft().skills}
+        sourceRevision={props.sourceRevision} currentSourceRevision={props.currentSourceRevision}
         label={(props.ariaLabel ?? t('Work with Codex')) + (entries.length > 1 ? ' ' + new Intl.NumberFormat(locale).format(position + 1) : '')}
         placeholder={props.placeholder ?? t('Message')} readOnly={!!props.readOnly || isStructuredAppInput(entry)} onKeyDown={props.onKeyDown}
         onPaste={props.onPaste} onInvalid={props.onInvalid} onCompositionChange={value => {

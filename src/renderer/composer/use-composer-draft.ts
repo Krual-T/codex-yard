@@ -51,7 +51,8 @@ interface Mutation { saved: Promise<boolean> }
 
 export function useComposerDraft(context: ComposerContext, onController?: (controller: ComposerDraftController | null) => void,
   onChange?: (snapshot: ComposerDraftSnapshot) => void, freezeGuard?: RefObject<((afterDrain: boolean) => boolean)>,
-  onFreeze?: (frozen: boolean) => void, pendingLink?: RefObject<boolean>, pendingComposition?: RefObject<boolean>) {
+  onFreeze?: (frozen: boolean) => void, pendingLink?: RefObject<boolean>, pendingComposition?: RefObject<boolean>,
+  onLocalRevision?: (before: string, after: string) => void) {
   const owner = useMemo<ComposerDraftOwner>(() => ({ hostId: context.hostId, threadId: context.threadId, draftId: context.draftId }),
     [context.hostId, context.threadId, context.draftId]);
   const [initial] = useState<StoredDraft>(() => ({ revision: createId(), draft: emptyDraft(), prefills: [] }));
@@ -87,6 +88,8 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   const refreshVersions = useRef<(() => void) | null>(null);
   const changeCallback = useRef(onChange);
   changeCallback.current = onChange;
+  const localRevisionCallback = useRef(onLocalRevision);
+  localRevisionCallback.current = onLocalRevision;
   const freezeCallback = useRef(onFreeze);
   freezeCallback.current = onFreeze;
   const markUnresolved = useCallback(() => {
@@ -145,6 +148,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       prefills: prefillId ? [...previous.prefills, prefillId] : previous.prefills };
     pendingAncestors.current.add(previous.revision);
     current.current = next;
+    localRevisionCallback.current?.(previous.revision, next.revision);
     dirty.current = true;
     setStored(next);
     if (preserveProjection.current || external.current?.phase === 'working') {
@@ -160,6 +164,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     if (!mounted.current || !active.current || frozen.current || external.current || initializing.current || dirty.current
       || preserveProjection.current || pendingLink?.current || (pendingComposition?.current && !composing) || current.current.revision === rendered.revision) return false;
     current.current = { ...rendered, revision: createId(), draft };
+    localRevisionCallback.current?.(rendered.revision, current.current.revision);
     dirty.current = true;
     setStored(current.current);
     markUnresolved();
@@ -289,6 +294,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
           if (applyProjection?.() === false) return false;
           const next = candidates[0]!;
           current.current = next; setStored(next); setVersions(view.versions);
+          if (applyProjection) localRevisionCallback.current?.(observed.revision, next.revision);
           durableRevision.current = next.revision; dirty.current = false; preserveProjection.current = false; setUnresolved(false); setSaving(false);
           lastWrite.current = Promise.resolve(true); setStorageError(''); publish(result, next);
           success = true;
@@ -410,6 +416,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
             }
             if (!view || current.current !== previous) continue;
             current.current = next; setStored(next); setVersions(view.versions);
+            localRevisionCallback.current?.(previous.revision, next.revision);
             durableRevision.current = next.revision; dirty.current = false; preserveProjection.current = false; setSaving(false);
             lastWrite.current = Promise.resolve(true); setStorageError(''); publish(result, next);
             return true;
@@ -545,6 +552,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       const view = await saveComposerDraftConflict(owner, next);
       if (active.current !== controller || current.current !== previous || pendingComposition?.current) return false;
       current.current = next; setStored(next); setVersions(view.versions); durableRevision.current = next.revision;
+      localRevisionCallback.current?.(previous.revision, next.revision);
       dirty.current = false; preserveProjection.current = false; pendingAncestors.current.clear(); setUnresolved(false); setSaving(false);
       lastWrite.current = Promise.resolve(true); setStorageError(''); publish(controller, next);
       success = true; return true;

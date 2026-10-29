@@ -164,6 +164,10 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
   const freezeGuard = useRef<(afterDrain: boolean) => boolean>(() => false);
   const pendingLink = useRef(false);
   const pendingComposition = useRef(false);
+  const structuredEditor = useRef<StructuredInputEditorHandle>(null);
+  const advanceLocalRevision = useCallback((before: string, after: string) => {
+    structuredEditor.current?.advanceRevision(before, after);
+  }, []);
   const frozenRef = useRef(false);
   const thawWaiters = useRef(new Set<() => void>());
   const [frozen, setFrozen] = useState(false);
@@ -175,7 +179,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
   }, []);
   const { owner, controller, current, stored, changeDraft, preserveVisibleDraft, changeDraftFromOperation, updateDraftFromOperation, beginOperation,
     retain, clear, selectVersion, conflicts, storageError, saving, loaded, unresolved, saveUnresolved, retry, lastWrite, recheckProjection }
-    = useComposerDraft(context, onDraftController, onDraftChange, freezeGuard, setInputFrozen, pendingLink, pendingComposition);
+    = useComposerDraft(context, onDraftController, onDraftChange, freezeGuard, setInputFrozen, pendingLink, pendingComposition, advanceLocalRevision);
   const optionsListener = useRef(onEffectiveOptionsChange);
   optionsListener.current = onEffectiveOptionsChange;
   const lastOptionsProjection = useRef('');
@@ -249,7 +253,6 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
   const notifyDefaultPending = useCallback((value: boolean) => { defaultPendingRef.current = value; setDefaultPending(value); }, []);
   const editor = useRef<StructuredInputEditorHandle>(null);
   const richEditor = useRef<RichEditorHandle>(null);
-  const structuredEditor = useRef<StructuredInputEditorHandle>(null);
   const promptAppendRuntime = useRef<PromptAppendRuntime | null>(null);
   const promptAppendPort = useRef<ComposerPromptAppendPort | null>(null);
   // Keep the original text control and its history after its first agent insertion.
@@ -1169,6 +1172,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
         onInvalid={message => setError(message ?? t('Unsupported document changes were not saved.'))} /> :
       segmented ? <>
         <StandaloneStructuredInputEditor key={composerOwnerKey} ref={structuredEditor} draft={draft} currentDraft={() => current.current.draft}
+          sourceRevision={stored.revision} currentSourceRevision={() => current.current.revision}
           onEdit={editSegment} onStaleEdit={preserveStaleSegment} agentMentions={index => agentSegments.get(index) ?? []}
           sourceMarks={index => markSegments.get(index) ?? []}
           placeholder={context.threadId ? t('Work with Codex') : locale.toLowerCase().startsWith('en') ? 'Do anything' : t('Message')}
