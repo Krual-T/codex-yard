@@ -138,6 +138,50 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
       } finally { await context.close(); }
     });
 
+    await t.test('Mini captures the original authority before the real composer retain waits', async () => {
+      const { context, page, errors } = await open();
+      const blocker = await context.newPage();
+      try {
+        const input = page.locator('.yard-mini-conversation textarea').first();
+        await input.fill('retain across reconnection');
+        await waitForBrowser(page, async () => (window as any).miniFixture.miniDurable('retain across reconnection'));
+        await blocker.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<main></main>' }));
+        await blocker.goto('http://127.0.0.1:32147/');
+        await blocker.evaluate(async () => {
+          const db = await new Promise<IDBDatabase>((resolve, reject) => {
+            const request = indexedDB.open('codex-yard.ui-atoms.v1', 1);
+            request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+          });
+          const tx = db.transaction('atoms', 'readwrite'), store = tx.objectStore('atoms');
+          let released = false;
+          const done = new Promise<void>((resolve, reject) => {
+            tx.oncomplete = () => { db.close(); resolve(); }; tx.onabort = () => reject(tx.error);
+          });
+          await new Promise<void>((resolve, reject) => {
+            let first = true;
+            const poll = () => { const request = store.get('native-atoms');
+              request.onerror = () => reject(request.error); request.onsuccess = () => {
+                if (!released) poll(); if (first) { first = false; resolve(); }
+              }; };
+            poll();
+          });
+          (window as any).releaseMiniIdb = () => { released = true; return done; };
+        });
+        const before = await page.evaluate(() => ({ captures: (window as any).miniFixture.captures(),
+          writes: (window as any).miniFixture.writesAfterCapture() }));
+        await page.locator('.yard-mini-conversation .standalone-composer__submit').click();
+        await page.waitForFunction((value: any) => (window as any).miniFixture.captures() > value.captures
+          && (window as any).miniFixture.writesAfterCapture() > value.writes, before);
+        await page.evaluate(() => { (window as any).miniFixture.disconnect(); (window as any).miniFixture.reconnect(); });
+        await blocker.evaluate(() => (window as any).releaseMiniIdb());
+        await page.locator('.yard-mini-conversation .standalone-composer [role="alert"]')
+          .filter({ hasText: 'Mini 原连接或输入权限已改变' }).waitFor();
+        assert.equal(await input.inputValue(), 'retain across reconnection');
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((call: any) => call.method === 'turn/start').length), 0);
+        assert.deepEqual(errors, []);
+      } finally { await blocker.close(); await context.close(); }
+    });
+
     await t.test('navigation lease freezes input synchronously until released', async () => {
       const { context, page, errors } = await open();
       try {
@@ -179,6 +223,8 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         assert.equal(request.params.hostId, 'remote'); assert.equal(request.params.threadId, 'thread-b');
         assert.deepEqual(request.params.expectedTurnIds, ['original-turn']);
         assert.equal(request.params.turnParams.input[0].text, 'edited remotely');
+        assert.equal(Object.hasOwn(request.params.turnParams, 'model'), false);
+        assert.equal(Object.hasOwn(request.params.turnParams, 'approvalPolicy'), false);
         assert.deepEqual(errors, []);
       } finally { await context.close(); }
     });
@@ -198,6 +244,15 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         const peer = page.locator('#peer-messages [data-message-id="original-item"]');
         await peer.getByText('remote original').waitFor();
         assert.equal(await peer.getByRole('textbox', { name: 'Edit message text' }).count(), 0);
+        assert.equal(await peer.getByRole('button', { name: 'Edit message' }).isDisabled(), true);
+        const originalTarget = await page.evaluate(() => (window as any).miniFixture.controller().target());
+        const targetWrites = await page.evaluate(() => (window as any).miniFixture.targets.length);
+        await input.evaluate(element => { (window as any).miniOriginalEditor = element; });
+        assert.equal(await page.evaluate((target: any) => (window as any).miniFixture.exactTarget(target), originalTarget), true);
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.targets.length), targetWrites);
+        assert.equal(await page.evaluate((target: any) => (window as any).miniFixture.exactTarget({ ...target, cwd: '/fixture/updated' }), originalTarget), true);
+        assert.equal(await input.evaluate(element => element === (window as any).miniOriginalEditor), true);
+        assert.equal(await input.inputValue(), 'owned by Mini');
         assert.equal(await peer.getByRole('button', { name: 'Edit message' }).isDisabled(), true);
         await page.evaluate(() => (window as any).miniFixture.setFailure(true));
         assert.equal(await page.evaluate(() => (window as any).miniFixture.target('local', 'thread-a')), false);
@@ -265,6 +320,30 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         await item.getByRole('button', { name: 'Send', exact: true }).click();
         await page.waitForFunction(() => (window as any).miniFixture.hostCalls.some((call: any) => call.endpoint === 'message-edit'));
         assert.equal(await page.evaluate(() => (window as any).miniFixture.hostCalls.filter((call: any) => call.endpoint === 'message-edit').length), 1);
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+
+    await t.test('message edit captures its authority before the actual prepare saves', async () => {
+      const { context, page, errors } = await open();
+      try {
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', 'thread-b')), true);
+        const item = page.locator('.yard-mini-conversation [data-message-id="original-item"]');
+        await item.getByRole('button', { name: 'Edit message' }).click();
+        const input = item.getByRole('textbox', { name: 'Edit message text' });
+        await input.fill('retain edit during prepare');
+        await waitForBrowser(page, async () => (await (window as any).miniFixture.editState('remote', 'thread-b'))
+          ?.recovery.editor.edits[0]?.text === 'retain edit during prepare');
+        const before = await page.evaluate(() => (window as any).miniFixture.captures());
+        await page.evaluate(() => (window as any).miniFixture.holdEditSnapshot());
+        await item.getByRole('button', { name: 'Send', exact: true }).click();
+        await page.waitForFunction(() => (window as any).miniFixture.editSnapshotWaiting());
+        assert.ok(await page.evaluate(() => (window as any).miniFixture.captures()) > before);
+        await page.evaluate(() => { (window as any).miniFixture.revokeEditGrant(); (window as any).miniFixture.restoreAuthority();
+          (window as any).miniFixture.releaseEditSnapshot(); });
+        await item.getByRole('alert').filter({ hasText: 'Synthetic edit grant revoked' }).waitFor();
+        assert.equal(await input.inputValue(), 'retain edit during prepare');
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.hostCalls.filter((call: any) => call.endpoint === 'message-edit').length), 0);
         assert.deepEqual(errors, []);
       } finally { await context.close(); }
     });
@@ -385,11 +464,26 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         assert.equal(failed.calls.filter((value: any) => value.method === 'turn/start').length, 0);
         assert.equal(await page.evaluate(() => (window as any).miniFixture.canDrain()), true);
         await page.evaluate(() => (window as any).miniFixture.setTargetFailure(false));
+        await page.evaluate(() => (window as any).miniFixture.failTargetAfterWrite());
+        await assert.rejects(page.evaluate((id: string) => (window as any).miniFixture.controller().retry(id), intent.id), /failure after persistence/);
+        assert.equal(await page.evaluate(() => JSON.parse(sessionStorage.getItem('fixture-mini-target')!).threadId), null);
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.controller().target().threadId), null);
+        assert.equal(await input.inputValue(), 'original home text');
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((value: any) => value.method === 'turn/start').length), 0);
         await page.evaluate(() => (window as any).miniFixture.setAsyncTarget(true));
         await assert.rejects(page.evaluate((id: string) => (window as any).miniFixture.controller().retry(id), intent.id), /必须同步持久化/);
         assert.equal(await input.inputValue(), 'original home text');
         assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((value: any) => value.method === 'turn/start').length), 0);
         await page.evaluate(() => (window as any).miniFixture.setAsyncTarget(false));
+        await page.evaluate((id: string) => {
+          const fixture = (window as any).miniFixture; fixture.holdRetryRead();
+          (window as any).retryOutcome = fixture.controller().retry(id).then(() => 'sent', (error: Error) => error.message);
+        }, intent.id);
+        await page.waitForFunction(() => (window as any).miniFixture.retryReadWaiting());
+        await page.evaluate(() => { (window as any).miniFixture.revokeEditGrant(); (window as any).miniFixture.restoreAuthority();
+          (window as any).miniFixture.releaseRetryRead(); });
+        assert.match(await page.evaluate(() => (window as any).retryOutcome), /原连接或输入权限已改变/);
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((value: any) => value.method === 'turn/start').length), 0);
         await page.evaluate((id: string) => (window as any).miniFixture.controller().retry(id), intent.id);
         const final = await page.evaluate(async () => ({ target: (window as any).miniFixture.controller().target(),
           state: await (window as any).miniFixture.records(), calls: (window as any).miniFixture.calls }));
@@ -415,7 +509,10 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         const intent: any = Object.values(state.requests)[0];
         assert.equal((state.creations as any)[JSON.stringify(['remote', 'created-1'])].projectId, 'project-original');
         assert.equal(await page.evaluate(() => (window as any).miniFixture.controller().target().threadId), null);
+        await page.evaluate(() => (window as any).miniFixture.stripCreationProject('remote', 'created-1'));
         await page.evaluate((id: string) => (window as any).miniFixture.cancel(id), intent.id);
+        assert.equal((await page.evaluate(() => (window as any).miniFixture.records())).creations[JSON.stringify(['remote', 'created-1'])].projectId,
+          'project-original', 'legacy project evidence is restored in the same cancellation transaction');
         assert.equal(await page.evaluate((draftId: string) => (window as any).miniFixture.exactTarget({ hostId: 'remote', threadId: 'created-1',
           draftId, cwd: '/fixture/remote' }), intent.owner.draftId), true);
         await page.waitForFunction(() => (window as any).miniFixture.miniReady('remote', 'created-1'));
@@ -432,6 +529,53 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         await page.evaluate((id: string) => (window as any).miniFixture.controller().retry(id), retry.id);
         assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((value: any) => value.method === 'turn/start').length), 1);
         assert.equal(await page.evaluate(() => (window as any).miniFixture.projectMembership[JSON.stringify(['remote', 'created-1'])]), 'project-original');
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+
+    await t.test('the original authority guards the actual project write and created-thread handoff', async () => {
+      const { context, page, errors } = await open();
+      try {
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.target('remote', null, 'project-original')), true);
+        await page.waitForFunction(() => (window as any).miniFixture.miniReady('remote', null));
+        const input = page.locator('.yard-mini-conversation textarea').first();
+        await input.fill('original project guard');
+        await page.evaluate(() => (window as any).miniFixture.holdProject());
+        await page.locator('.yard-mini-conversation .standalone-composer__submit').click();
+        await page.waitForFunction(() => (window as any).miniFixture.projectWaiting());
+        await page.evaluate(() => { (window as any).miniFixture.revokeEditGrant(); (window as any).miniFixture.restoreAuthority();
+          (window as any).miniFixture.releaseProject(); });
+        await waitForBrowser(page, async () => Object.values((await (window as any).miniFixture.records()).requests)
+          .some((value: any) => value.stage === 'failed' && value.created));
+        const failed = await page.evaluate(async () => ({ state: await (window as any).miniFixture.records(),
+          writes: (window as any).miniFixture.projectMembership, calls: (window as any).miniFixture.calls }));
+        const intent: any = Object.values(failed.state.requests)[0];
+        assert.equal(failed.writes[JSON.stringify(['remote', 'created-1'])], undefined);
+        assert.equal(failed.calls.filter((call: any) => call.method === 'thread/start').length, 1);
+        assert.equal(failed.calls.filter((call: any) => call.method === 'turn/start').length, 0);
+        assert.equal(await input.inputValue(), 'original project guard');
+        await page.evaluate((id: string) => (window as any).miniFixture.controller().retry(id), intent.id);
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.projectMembership[JSON.stringify(['remote', 'created-1'])]), 'project-original');
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((call: any) => call.method === 'thread/start').length), 1);
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((call: any) => call.method === 'turn/start').length), 1);
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+
+    await t.test('the parent transport rechecks original authority immediately before the write', async () => {
+      const { context, page, errors } = await open();
+      try {
+        const mini = page.locator('.yard-mini-conversation'), input = mini.locator('textarea').first();
+        await input.fill('do not dispatch after regrant');
+        await page.evaluate(() => (window as any).miniFixture.holdDispatch('turn/start'));
+        await mini.locator('.standalone-composer__submit').click();
+        await page.waitForFunction(() => (window as any).miniFixture.dispatchWaiting());
+        await page.evaluate(() => { (window as any).miniFixture.revokeEditGrant(); (window as any).miniFixture.restoreAuthority();
+          (window as any).miniFixture.releaseDispatch(); });
+        await waitForBrowser(page, async () => Object.values((await (window as any).miniFixture.records()).requests)
+          .some((value: any) => value.stage === 'failed'));
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((call: any) => call.method === 'turn/start').length), 0);
+        assert.equal(await input.inputValue(), 'do not dispatch after regrant');
         assert.deepEqual(errors, []);
       } finally { await context.close(); }
     });
@@ -472,17 +616,35 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         await page.waitForFunction(() => (window as any).miniFixture.calls.some((value: any) => value.method === 'thread/queue/add'));
         await page.evaluate(() => (window as any).miniFixture.complete('local', 'thread-a'));
         const start = mini.getByRole('button', { name: '立即发送待发送消息' }); await start.waitFor();
-        await page.evaluate(() => (window as any).miniFixture.failReady());
+        await page.evaluate(() => (window as any).miniFixture.holdQueueLock());
         await start.click();
+        await page.waitForFunction(() => (window as any).miniFixture.queueLockWaiting());
+        await page.evaluate(() => { (window as any).miniFixture.revokeEditGrant(); (window as any).miniFixture.restoreAuthority();
+          (window as any).miniFixture.releaseQueueLock(); });
         await page.waitForFunction(() => (window as any).miniFixture.hostCalls.some((value: any) =>
           value.endpoint === 'queued-follow-up-send-lock-release' && value.params.sent === false));
+        await waitForBrowser(page, async () => !(await (window as any).miniFixture.queueRecovery()).markers.length);
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((value: any) => value.method === 'thread/queue/start').length), 0);
+        await page.evaluate(() => (window as any).miniFixture.holdDispatch('thread/queue/start'));
+        await start.click();
+        await page.waitForFunction(() => (window as any).miniFixture.dispatchWaiting());
+        await page.evaluate(() => { (window as any).miniFixture.revokeEditGrant(); (window as any).miniFixture.restoreAuthority();
+          (window as any).miniFixture.releaseDispatch(); });
+        await page.waitForFunction(() => (window as any).miniFixture.hostCalls.filter((value: any) =>
+          value.endpoint === 'queued-follow-up-send-lock-release' && value.params.sent === false).length === 2);
+        await waitForBrowser(page, async () => !(await (window as any).miniFixture.queueRecovery()).markers.length);
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((value: any) => value.method === 'thread/queue/start').length), 0);
+        await page.evaluate(() => (window as any).miniFixture.failReady());
+        await start.click();
+        await page.waitForFunction(() => (window as any).miniFixture.hostCalls.filter((value: any) =>
+          value.endpoint === 'queued-follow-up-send-lock-release' && value.params.sent === false).length === 3);
         await waitForBrowser(page, async () => !(await (window as any).miniFixture.queueRecovery()).markers.length);
         assert.equal(await page.evaluate(() => (window as any).miniFixture.calls.filter((value: any) => value.method === 'thread/queue/start').length), 0);
         await page.evaluate(() => (window as any).miniFixture.failQueueReply());
         await start.click();
         await waitForBrowser(page, async () => (await (window as any).miniFixture.queueRecovery()).markers.length === 1);
         await page.waitForFunction(() => (window as any).miniFixture.calls.some((value: any) => value.method === 'thread/queue/start'));
-        assert.equal(await page.evaluate(() => (window as any).miniFixture.hostCalls.filter((value: any) => value.endpoint === 'queued-follow-up-send-lock-release').length), 1);
+        assert.equal(await page.evaluate(() => (window as any).miniFixture.hostCalls.filter((value: any) => value.endpoint === 'queued-follow-up-send-lock-release').length), 3);
         assert.deepEqual(errors, []);
       } finally { await context.close(); }
     });
@@ -545,6 +707,10 @@ test('real Mini conversation uses shared sessions and preserves drafts through s
         await page.evaluate(() => (window as any).miniFixture.release());
         await waitForBrowser(page, async () => Object.values((await (window as any).miniFixture.records()).requests)
           .some((intent: any) => intent.stage === 'confirmed') && (window as any).miniFixture.errors.some((error: string) => error.includes('发送已确认')));
+        const confirmation = mini.locator('.standalone-composer [role="alert"]').filter({ hasText: '发送已确认' });
+        await confirmation.waitFor();
+        assert.match(await confirmation.innerText(), /发送结果：.*发送已确认/);
+        assert.doesNotMatch(await confirmation.innerText(), /发送未确认/);
         const state = await page.evaluate(async () => ({ records: await (window as any).miniFixture.records(),
           versions: await (window as any).miniFixture.versions((window as any).miniFixture.receipt().before.owner),
           snapshot: (window as any).miniFixture.draftController().snapshot() }));

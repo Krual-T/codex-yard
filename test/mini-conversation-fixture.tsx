@@ -41,7 +41,13 @@ let connected = true, unknownNext = false, holdNext = false, rejectTarget = fals
 let rejectProject = false, rejectReady = false, unknownQueue = false, throwRecovery = false, throwError = false;
 let rejectSendRead = false, rejectEditThread = '', rejectSendOnTarget = '';
 let authorityEpoch = 0, holdEditPreparation = false, editPreparing = false, releaseEditPreparation: (() => void) | undefined;
-let revokeOnTarget = false, asyncEditAssertion = false, asyncTarget = false;
+let captures = 0, writesAfterCapture = 0;
+let heldDispatch = '', dispatchWaiting = false, releaseDispatch: (() => void) | undefined;
+let holdProject = false, projectWaiting = false, releaseProject: (() => void) | undefined;
+let holdRetryRead = false, retryReadWaiting = false, releaseRetryRead: (() => void) | undefined;
+let holdQueueLock = false, queueLockWaiting = false, releaseQueueLock: (() => void) | undefined;
+let holdEditSnapshot = false, editSnapshotWaiting = false, releaseEditSnapshot: (() => void) | undefined;
+let revokeOnTarget = false, asyncEditAssertion = false, asyncTarget = false, failTargetAfterWrite = false;
 let controller: MiniConversationController | null = null, mainController: ComposerDraftController | null = null;
 let miniController: ComposerDraftController | null = null;
 let miniSnapshot: ComposerDraftSnapshot | null = null;
@@ -107,7 +113,12 @@ const client: WorkbenchClient & { connected: boolean } = {
     if (endpoint === 'workspace-root-options') return { roots: ['/fixture/local', '/fixture/other'] } as T;
     if (endpoint === 'codex-home') return { codexHome: '/fixture/.codex' } as T;
     if (endpoint === 'get-persisted-atom') return {} as T;
-    if (endpoint === 'queued-follow-up-send-lock-acquire') { hostCalls.push({ endpoint, params: structuredClone(params) }); return { acquired: true } as T; }
+    if (endpoint === 'queued-follow-up-send-lock-acquire') {
+      hostCalls.push({ endpoint, params: structuredClone(params) });
+      if (holdQueueLock) { holdQueueLock = false; queueLockWaiting = true;
+        await new Promise<void>(resolve => { releaseQueueLock = resolve; }); queueLockWaiting = false; }
+      return { acquired: true } as T;
+    }
     if (endpoint === 'queued-follow-up-send-lock-release') { hostCalls.push({ endpoint, params: structuredClone(params) }); return {} as T; }
     if (endpoint === 'message-send-status') return { turnId: null, queuedSubmissionId: null } as T;
     throw new Error('Unexpected synthetic host ' + endpoint);
@@ -132,9 +143,20 @@ const editStorage: EditRecoveryStorage = {
   changed: () => window.dispatchEvent(new Event(messageEditChanged)),
 };
 const edits = new MessageEditRecoveryStore(client, editStorage, { hostChecksRebasedSourceBeforeRevert: true });
+const realSaveEdit = edits.save.bind(edits);
+edits.save = async (...args: Parameters<MessageEditRecoveryStore['save']>) => {
+  if (holdEditSnapshot) { holdEditSnapshot = false; editSnapshotWaiting = true;
+    await new Promise<void>(resolve => { releaseEditSnapshot = resolve; }); editSnapshotWaiting = false; }
+  return realSaveEdit(...args);
+};
 const peerAccess = edits.createAccess();
 const realReadSends = sends.read.bind(sends), realReadEdits = edits.read.bind(edits), realReady = sessions.ready.bind(sessions);
-sends.read = async () => { if (rejectSendRead) { rejectSendRead = false; throw new Error('Synthetic send recovery read failure'); } return realReadSends(); };
+sends.read = async () => {
+  if (holdRetryRead) { holdRetryRead = false; retryReadWaiting = true;
+    await new Promise<void>(resolve => { releaseRetryRead = resolve; }); retryReadWaiting = false; }
+  if (rejectSendRead) { rejectSendRead = false; throw new Error('Synthetic send recovery read failure'); }
+  return realReadSends();
+};
 edits.read = async (hostId, threadId) => { if (rejectEditThread === threadId) throw new Error('Synthetic edit recovery read failure'); return realReadEdits(hostId, threadId); };
 sessions.ready = async (identity, allowFirstTurn) => { if (rejectReady) { rejectReady = false; throw new Error('Synthetic session ready failure'); }
   return realReady(identity, allowFirstTurn); };
@@ -164,8 +186,9 @@ function PeerMessages({ visible }: { visible: boolean }) {
   return <section id="peer-messages"><StandaloneMessages client={client} hostId="remote" thread={view.thread}
     editAccess={peerAccess} editRecovery={recovery?.recovery ?? null} editHistory={{ order: 'ascending', tailComplete: view.historyComplete }}
     onEditNavigationController={value => { peerController = value; }}
-    onEditDraftChange={(value, origin, version) => edits.save(value, origin, version)} onEdit={async (_draft, origin) => {
+    onEditDraftChange={(value, origin, version) => edits.save(value, origin, version)} onEdit={async (_draft, origin, prepare) => {
       const assertAccess = peerAccess.capture(origin);
+      await prepare();
       await edits.submit(origin, ['original-turn'], {}, assertAccess);
     }} /></section>;
 }
@@ -205,11 +228,17 @@ function Fixture() {
         isConnected={() => connected} canUseOwner={owner => ownerAvailable && authorityGranted && owner.draftId !== 'main-draft'}
         captureEditAuthority={owner => {
           if (!connected || !ownerAvailable || !authorityGranted || owner.draftId === 'main-draft') throw new Error('Synthetic edit grant unavailable');
+          captures++;
           const captured = authorityEpoch;
           return () => {
             if (captured !== authorityEpoch || !connected || !authorityGranted) throw new Error('Synthetic edit grant revoked');
             if (asyncEditAssertion) return Promise.resolve() as unknown as void;
           };
+        }} dispatchSubmission={async (method, params, hostId, assertAuthority) => {
+          if (heldDispatch === method) { heldDispatch = ''; dispatchWaiting = true;
+            await new Promise<void>(resolve => { releaseDispatch = resolve; }); dispatchWaiting = false; }
+          assertAuthority();
+          return client.rpc(method, params, hostId);
         }} onController={value => { controller = value; }}
         onDraftController={value => { miniController = value; }}
         onDraftChange={value => { miniSnapshot = structuredClone(value); }}
@@ -230,11 +259,15 @@ function Fixture() {
           if (asyncTarget) return Promise.resolve();
           if (value.threadId === rejectSendOnTarget) { rejectSendRead = true; rejectSendOnTarget = ''; }
           targets.push(value); sessionStorage.setItem('fixture-mini-target', JSON.stringify(value)); setTarget(value);
+          if (failTargetAfterWrite) { failTargetAfterWrite = false; throw new Error('Synthetic target failure after persistence'); }
           if (revokeOnTarget) { revokeOnTarget = false; authorityGranted = false; authorityEpoch++; } }}
         onRecoveryChanged={() => { if (throwRecovery) throw new Error('Synthetic recovery notification failure'); }}
         onError={error => { errors.push(error); if (throwError) throw new Error('Synthetic error notification failure'); }}
-        onAssignCreatedProject={async (owner, created) => {
+        onAssignCreatedProject={async (owner, created, assertAuthority) => {
           projectChecks.push({ target: structuredClone(owner), threadId: created.id });
+          if (holdProject) { holdProject = false; projectWaiting = true;
+            await new Promise<void>(resolve => { releaseProject = resolve; }); projectWaiting = false; }
+          assertAuthority();
           const key = threadKey(owner.hostId, created.id), previous = projectMembership[key];
           if (previous && previous !== owner.projectId) throw new Error('Synthetic project conflict');
           if (rejectProject) throw new Error('Synthetic project association failure');
@@ -245,6 +278,11 @@ function Fixture() {
 }
 const nativePut = IDBObjectStore.prototype.put;
 const nativeGet = IDBObjectStore.prototype.get;
+const nativeTransaction = IDBDatabase.prototype.transaction;
+IDBDatabase.prototype.transaction = function (...args: Parameters<IDBDatabase['transaction']>) {
+  if (captures && args[0] === 'atoms' && args[1] === 'readwrite') writesAfterCapture++;
+  return nativeTransaction.apply(this, args);
+};
 let failWrites = false;
 IDBObjectStore.prototype.put = function (...args: Parameters<IDBObjectStore['put']>) {
   if (failWrites) throw new DOMException('Synthetic storage failure', 'QuotaExceededError');
@@ -261,6 +299,18 @@ IDBObjectStore.prototype.get = function (key) {
 const root = createRoot(document.getElementById('root')!);
 const fixture = {
   calls, hostCalls, opened, errors, targets, projectChecks, projectMembership, sends, sessions,
+  captures: () => captures, writesAfterCapture: () => writesAfterCapture,
+  holdDispatch(method: string) { heldDispatch = method; }, dispatchWaiting: () => dispatchWaiting,
+  releaseDispatch() { releaseDispatch?.(); releaseDispatch = undefined; },
+  holdProject() { holdProject = true; }, projectWaiting: () => projectWaiting,
+  releaseProject() { releaseProject?.(); releaseProject = undefined; },
+  holdRetryRead() { holdRetryRead = true; }, retryReadWaiting: () => retryReadWaiting,
+  releaseRetryRead() { releaseRetryRead?.(); releaseRetryRead = undefined; },
+  holdQueueLock() { holdQueueLock = true; }, queueLockWaiting: () => queueLockWaiting,
+  releaseQueueLock() { releaseQueueLock?.(); releaseQueueLock = undefined; },
+  holdEditSnapshot() { holdEditSnapshot = true; }, editSnapshotWaiting: () => editSnapshotWaiting,
+  releaseEditSnapshot() { releaseEditSnapshot?.(); releaseEditSnapshot = undefined; },
+  failTargetAfterWrite() { failTargetAfterWrite = true; },
   renderConnection: (_value: boolean) => {}, renderOwner: (_value: boolean) => {}, renderPeer: (_value: boolean) => {},
   controller: () => controller, main: () => mainController?.snapshot(),
   draftController: () => miniController,
@@ -357,7 +407,8 @@ const fixture = {
   disconnect() { connected = false; authorityEpoch++; fixture.renderConnection(false); emit({ type: 'connection-state', state: 'disconnected' }); },
   reconnect() { connected = true; authorityEpoch++; fixture.renderConnection(true); emit({ type: 'connection-state', state: 'connected' }); },
   unknown() { unknownNext = true; }, hold() { holdNext = true; }, release() { resolveHeld?.(); resolveHeld = undefined; }, complete,
-  dispose() { root.unmount(); mainRelease?.(); sessions.dispose(); IDBObjectStore.prototype.put = nativePut; IDBObjectStore.prototype.get = nativeGet; },
+  dispose() { root.unmount(); mainRelease?.(); sessions.dispose(); IDBObjectStore.prototype.put = nativePut; IDBObjectStore.prototype.get = nativeGet;
+    IDBDatabase.prototype.transaction = nativeTransaction; },
 };
 (window as unknown as { miniFixture: typeof fixture }).miniFixture = fixture;
 root.render(<Fixture />);

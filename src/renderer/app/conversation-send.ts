@@ -10,7 +10,6 @@ import { submitDraft } from './submission.ts';
 import { sendsAtom, sendThreadKey } from './send-recovery.ts';
 import type { SendIntent, SendRecoveryStore } from './send-recovery.ts';
 import { readVisualizationModelContext } from '../visualizations/state.ts';
-import { updateBrowserAtoms } from '../storage/ui-atoms.ts';
 
 export interface ConversationSendScope {
   hostId: string;
@@ -20,6 +19,11 @@ export interface ConversationSendScope {
   projectId?: string;
 }
 
+export type ConversationWriteMethod = 'thread/start' | 'turn/start' | 'turn/steer' | 'thread/queue/add' | 'thread/queue/start';
+/** Run the assertion after transport preparation, immediately before sending on the original connection. */
+export type ConversationWriteDispatch = <T>(method: ConversationWriteMethod, params: Record<string, unknown>, hostId: string,
+  assertAuthority: () => void) => Promise<T>;
+
 export interface ConversationSendServices {
   client: WorkbenchClient;
   sessions: ConversationSessions;
@@ -27,11 +31,13 @@ export interface ConversationSendServices {
   cleanup: ConversationSendCleanup;
   /** Synchronously check the original owner, connection, and writable session. */
   guard(threadId: string | null, allowFirstTurn: boolean): void;
+  dispatch: ConversationWriteDispatch;
   /** Freeze and drain the original owner before its created-thread binding. */
   prepareCreated(): Promise<void>;
   selectCreated(thread: ThreadSummary): Promise<void>;
   /** Reconcile authoritative membership before writing, including after an unknown result. */
-  assignCreatedProject(creation: { owner: SendIntent['owner']; thread: ThreadSummary; cwd: string; projectId: string }): Promise<void>;
+  assignCreatedProject(creation: { owner: SendIntent['owner']; thread: ThreadSummary; cwd: string; projectId: string },
+    assertAuthority: () => void): Promise<void>;
   recoveryChanged(): void;
 }
 
@@ -49,25 +55,6 @@ const submittedIdentity = (intent: SendIntent) => ({ id: intent.id, clientUserMe
   draft: intent.draft, options: intent.options, overrides: intent.overrides, action: intent.action,
   additionalContext: intent.additionalContext, documentPlainTextMode: intent.documentPlainTextMode,
   collaborationMode: intent.collaborationMode, created: intent.created });
-
-/** Add the original project to the existing receipt while its original intent still exists. */
-async function retainCreationProject(intent: SendIntent, threadId: string) {
-  await updateBrowserAtoms(atoms => {
-    const state = record(atoms[sendsAtom]), requests = record(state?.requests), creations = record(state?.creations);
-    const bindings = record(state?.bindings), saved = record(requests?.[intent.id]);
-    const key = sendThreadKey(intent.owner.hostId, threadId), receipt = record(creations?.[key]);
-    const projectId = intent.projectId ?? null;
-    if (!state || !requests || !creations || !bindings || !saved || !receipt
-      || saved.attemptId !== intent.attemptId || saved.threadId !== threadId || !same(saved.owner, intent.owner)
-      || (saved.projectId ?? null) !== projectId || !same(receipt.owner, intent.owner)
-      || record(receipt.thread)?.id !== threadId || bindings[key] !== intent.owner.draftId
-      || Object.hasOwn(receipt, 'projectId') && receipt.projectId !== projectId) {
-      throw new Error('新会话原项目或创建回执无法核对，首条消息未发送。');
-    }
-    if (Object.hasOwn(receipt, 'projectId')) return { value: undefined };
-    return { value: undefined, updates: { [sendsAtom]: { ...state, creations: { ...creations, [key]: { ...receipt, projectId } } } } };
-  });
-}
 
 function creationProject(state: Awaited<ReturnType<SendRecoveryStore['read']>>, hostId: string, threadId: string) {
   const receipt = state.creations[sendThreadKey(hostId, threadId)];
@@ -174,25 +161,40 @@ export async function sendConversationDraft(services: ConversationSendServices, 
     guard(original.threadId, allowFirstTurn);
     if (creation?.projectId) {
       await services.assignCreatedProject({ owner: creation.receipt.owner, thread: creation.receipt.thread,
-        cwd: creation.receipt.thread.cwd || original.cwd, projectId: creation.projectId });
+        cwd: creation.receipt.thread.cwd || original.cwd, projectId: creation.projectId }, () => guard(original.threadId, allowFirstTurn));
       guard(original.threadId, allowFirstTurn);
     }
     const selectCreated = async (thread: ThreadSummary) => {
       if (intent!.projectId) {
-        await services.assignCreatedProject({ owner: intent!.owner, thread, cwd: intent!.cwd, projectId: intent!.projectId });
+        await services.assignCreatedProject({ owner: intent!.owner, thread, cwd: intent!.cwd, projectId: intent!.projectId },
+          () => guard(null, allowFirstTurn));
         guard(null, allowFirstTurn);
       }
       await services.selectCreated(thread);
     };
     if (resumingCreated && intent.created) {
-      await retainCreationProject(intent, intent.created.thread.id);
       await services.prepareCreated();
       await bindComposerDraftToThread(intent.owner, intent.created.thread.id);
       await selectCreated(intent.created.thread);
     }
     const dispatchThreadId = resumingCreated ? intent.threadId : original.threadId;
     const active = dispatchThreadId ? sessions.view({ hostId: original.hostId, threadId: dispatchThreadId }).snapshot() : null;
-    const result = await submitDraft(client, {
+    const sendClient: WorkbenchClient = {
+      rpc<T>(method: string, params: Record<string, unknown> = {}, hostId = original.hostId, options?: Parameters<WorkbenchClient['rpc']>[3]) {
+        if (method === 'thread/start' || method === 'turn/start' || method === 'turn/steer' || method === 'thread/queue/add') {
+          if (hostId !== original.hostId || method !== 'thread/start' && typeof params.threadId !== 'string') {
+            throw Object.assign(new Error('原发送目标无法确认，未派发。'), { uncertain: false });
+          }
+          const threadId = method === 'thread/start' ? null : params.threadId as string;
+          return services.dispatch<T>(method, params, hostId, () => guard(threadId, allowFirstTurn));
+        }
+        return client.rpc<T>(method, params, hostId, options);
+      },
+      host: (endpoint, params) => client.host(endpoint, params),
+      subscribe: listener => client.subscribe(listener),
+      reply: (ref, response) => client.reply(ref, response),
+    };
+    const result = await submitDraft(sendClient, {
       hostId: original.hostId, threadId: dispatchThreadId, cwd: intent.cwd, readOnly: false,
       initialOptions: active?.options ?? undefined, overrides: intent.overrides,
       documentPlainTextMode: intent.documentPlainTextMode, additionalContext: intent.additionalContext,
@@ -203,7 +205,6 @@ export async function sendConversationDraft(services: ConversationSendServices, 
         creating: async () => { guard(null, allowFirstTurn); await sends.creating(intent!.id, intent!.attemptId); guard(null, allowFirstTurn); },
         created: async (thread, settings) => {
           await sends.created(intent!.id, thread.id, { thread, settings: sessionOptions(settings) }, intent!.attemptId);
-          await retainCreationProject(intent!, thread.id);
           notify();
           await services.prepareCreated();
           await bindComposerDraftToThread(intent!.owner, thread.id);
