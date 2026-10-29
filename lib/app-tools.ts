@@ -11,6 +11,16 @@ export const defaultAppToolsAdapter = bundledAppToolsAdapter;
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const MAX_PENDING_CALLS = 128;
 
+/** The same explicit definition is used by Yard starts and the daemon's user config. */
+export function appToolsConfig(adapterPath: string, socketPath: string) {
+  adapterPath = resolve(adapterPath);
+  return { 'mcp_servers.codex_app': {
+    command: process.execPath, args: [adapterPath], cwd: dirname(adapterPath),
+    env: { CODEX_APP_TOOLS_PIPE_PATH: resolve(socketPath), CODEX_APP_TOOLS_CALLER_HOST_ID: 'local' },
+    enabled: true, required: true, default_tools_approval_mode: 'approve',
+  } };
+}
+
 export interface ToolArgumentSchema {
   type?: 'string' | 'integer' | 'number' | 'boolean' | 'array' | 'object'; description?: string; default?: boolean;
   minLength?: number; maxLength?: number; minimum?: number; maximum?: number; enum?: readonly string[];
@@ -217,11 +227,7 @@ export async function createAppTools({ tools, callTool, adapterPath = process.en
 
   return {
     socketPath, adapterPath,
-    config: { 'mcp_servers.codex_app': {
-      command: process.execPath, args: [adapterPath], cwd: dirname(adapterPath),
-      env: { CODEX_APP_TOOLS_PIPE_PATH: socketPath, CODEX_APP_TOOLS_CALLER_HOST_ID: 'local' },
-      enabled: true, required: true, default_tools_approval_mode: 'approve',
-    } },
+    config: appToolsConfig(adapterPath, socketPath),
     close() {
       closing ??= (async () => {
         for (const socket of clients) socket.destroy();

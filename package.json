@@ -13,6 +13,7 @@
     "build:host": "node scripts/build-native.ts",
     "typecheck": "tsc --noEmit",
     "thread:title": "node scripts/set-thread-title.ts",
+    "tools:configure": "node --env-file-if-exists=.env scripts/configure-native-tools.ts",
     "prestart": "npm run build",
     "start": "node --env-file-if-exists=.env --env-file-if-exists=.local/chrome.env --use-env-proxy src/native/server.ts",
     "pretest": "npm run build:host",

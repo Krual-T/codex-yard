@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { copyFile, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import ts from 'typescript';
 import { build } from 'esbuild';
@@ -199,4 +199,6 @@ await build({ stdin: { contents: input, resolveDir: root, sourcefile: 'portable-
   if (!content) throw new Error('Native tool extraction produced no output');
   await writeFile(output, content);
 });
-console.log('Extracted original native tool catalog, schemas, history projection and wait kernel.');
+// Preserve the original transport next to the kernel, independently of the UI snapshot.
+await copyFile(resolve(root, '../../codex-app-tools/server.mjs'), resolve(dirname(output), 'server.mjs'));
+console.log('Extracted original native tool catalog, schemas, history projection, wait kernel and MCP adapter.');

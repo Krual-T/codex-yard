@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, stat, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, stat, writeFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { CodexConnection } from '../lib/codex.ts';
 import { createAppTools } from '../lib/app-tools.ts';
 import type { Page, RpcMessage, TurnSummary } from '../lib/codex-protocol.ts';
@@ -75,7 +77,7 @@ const cli = spawn('codex', ['app-server', '--listen', 'unix://' + socket], {
 const exited = once(cli, 'exit');
 let stderr = '';
 cli.stderr.on('data', bytes => { stderr = (stderr + bytes).slice(-4000); });
-const app = new CodexConnection(socket), yard = new CodexConnection(socket);
+const app = new CodexConnection(socket), yard = new CodexConnection(socket), linux = new CodexConnection(socket);
 const logs: RpcMessage[] = [], adapters: Awaited<ReturnType<typeof createAppTools>>[] = [];
 let workbench: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
 let web: WebSocket | undefined;
@@ -107,7 +109,7 @@ async function turn(id: string) {
 try {
   await until(async () => { try { return (await stat(socket)).isSocket(); } catch { return false; } }, 'backend startup');
   await Promise.all([app.connect(), yard.connect()]);
-  for (const client of [app, yard]) client.on('message', event => logs.push(event));
+  for (const client of [app, yard, linux]) client.on('message', event => logs.push(event));
   const appConfig = await adapter('native_app_probe'), yardConfig = await adapter('yard_probe');
   const disabled = await app.request('thread/start', { cwd: root,
     config: { 'mcp_servers.codex_app.command': '', 'mcp_servers.codex_app.enabled': false }, historyMode: 'paginated' });
@@ -241,16 +243,85 @@ CODEX_APP_TOOLS_CALLER_HOST_ID="local"
   assert.equal((await app.request('thread/read', { threadId: targetId, includeTurns: false })).thread.name, '🩺 All Yard pages closed');
   // Native App-shaped thread origins remain on their original healthy pipe.
   assert.deepEqual(await tools(native.thread.id), { status: 'connected', tools: ['native_app_probe'] });
+  phase = 'explicit daemon registration';
+  const configure = async (apply = false) => {
+    const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('./configure-native-tools.ts', import.meta.url)),
+      '--socket', socket, '--data-dir', dataDir, ...(apply ? ['--apply'] : [])],
+    { cwd: root, env: { ...process.env, CODEX_HOME: home }, timeout: 20_000 });
+    return JSON.parse(stdout) as Record<string, unknown>;
+  };
+  const previousConfig = await readFile(join(home, 'config.toml'), 'utf8');
+  const conflictingPlan = await configure();
+  assert.equal(conflictingPlan.hostReady, true);
+  assert.equal(conflictingPlan.existingDefinition, 'different');
+  await assert.rejects(configure(true), /An explicit codex_app definition already exists/);
+  assert.equal(await readFile(join(home, 'config.toml'), 'utf8'), previousConfig);
+  const preservedConfig = baseConfig + '\n[mcp_servers.unrelated_fixture]\ncommand="unused"\nenabled=false\n';
+  await writeFile(join(home, 'config.toml'), preservedConfig);
+  await yard.request('config/mcpServer/reload', null, { mutating: true });
+  const plan = await configure();
+  assert.equal(plan.existingDefinition, 'absent');
+  assert.equal(await readFile(join(home, 'config.toml'), 'utf8'), preservedConfig, 'planning does not write');
+  const beforeRegistration = await app.request<{ config: Record<string, unknown> }>('config/read', { includeLayers: false });
+  assert.ok(isRecord(beforeRegistration.config.mcp_servers));
+  const applied = await configure(true);
+  assert.equal(applied.writeState, 'installed');
+  assert.equal(typeof applied.backupPath, 'string');
+  assert.equal(await readFile(String(applied.backupPath), 'utf8'), preservedConfig);
+  assert.equal((await stat(String(applied.backupPath))).mode & 0o777, 0o600);
+  const saved = await app.request<{ config: Record<string, unknown> }>('config/read', { includeLayers: false });
+  assert.ok(isRecord(saved.config.mcp_servers));
+  assert.deepEqual(saved.config.mcp_servers.unrelated_fixture, beforeRegistration.config.mcp_servers.unrelated_fixture);
+  assert.equal(saved.config.model, 'fixture');
+  assert.equal((await configure(true)).alreadyInstalled, true, 'repeated registration preserves the same definition');
+  // New App/CLI starts need no per-thread Yard configuration. The desktop
+  // remote branch respects this explicit codex_app entry on the execution host.
+  phase = 'global App origin with three client subscribers';
+  const globalThread = await app.request('thread/start', { cwd: root, historyMode: 'paginated' });
+  await turn(globalThread.thread.id);
+  assert.deepEqual(await tools(globalThread.thread.id), nativeCatalog);
+  await linux.connect();
+  const threeClients = await Promise.all([app.request('thread/resume', { threadId: globalThread.thread.id, excludeTurns: true }),
+    yard.request('thread/resume', { threadId: globalThread.thread.id, excludeTurns: true }),
+    linux.request('thread/resume', { threadId: globalThread.thread.id, excludeTurns: true })]);
+  assert.ok(threeClients.every(value => value.thread.id === globalThread.thread.id));
+  callModelTool = true;
+  await turn(globalThread.thread.id);
+  assert.equal(modelToolCalls, 2);
+  phase = 'Windows native tool host disappears';
+  await adapters[0]!.close();
+  await nativeCall('set_thread_title', { title: '🩺 Independent of Windows tools' }, globalThread.thread.id);
+  // Migrate an obsolete explicit native mount only after all its subscribers
+  // release the idle thread. The public API does not forcibly unload it.
+  phase = 'idle old-mount migration to explicit user configuration';
+  await app.request('thread/unsubscribe', { threadId: native.thread.id });
+  await yard.request('thread/unsubscribe', { threadId: native.thread.id });
+  await until(async () => !(await yard.request('thread/loaded/list', {})).data.includes(native.thread.id), 'obsolete native mount unload');
+  await linux.request('thread/resume', { threadId: native.thread.id, excludeTurns: true });
+  await turn(native.thread.id);
+  assert.deepEqual(await tools(native.thread.id), nativeCatalog);
+  // Restart only this probe's Yard Node host, preserving the stable socket and
+  // state directory. Already-running official adapters reconnect on the next
+  // explicit invocation, with no replay of an earlier write.
+  phase = 'permanent host restart and adapter reconnection';
+  await workbench.close(); workbench = undefined;
+  workbench = await createNativeWorkbench({ socketPath: socket, codexHome: home, dataDir, workspace: root, port: 0 });
+  await nativeCall('set_thread_title', { title: '🩺 Host reconnected' }, globalThread.thread.id);
+  assert.equal((await app.request('thread/read', { threadId: globalThread.thread.id, includeTurns: false })).thread.name, '🩺 Host reconnected');
+  const persistedPins = await nativeCall('list_threads', { limit: 10 }, globalThread.thread.id);
+  assert.ok(Array.isArray(persistedPins.pinnedThreads) && persistedPins.pinnedThreads.some(thread => isRecord(thread) && thread.id === targetId));
   console.log(JSON.stringify({ backend: app.server, before, after, bothSubscribed, yardUnsubscribe,
     afterYardUnsubscribe, stillLoaded, appUnsubscribe, yardFinalUnsubscribe, recovered, loadedAfterResumeRetentionOverride, nativeCatalog,
     verified: ['original-adapter', 'model-native-call-metadata', 'native-create-read-send-wait-fork-title-pin-readstate-archive',
-      'app-yard-peer-continuation', 'simultaneous-clients-active-delegation', 'all-yard-pages-closed', 'healthy-native-mount-preserved'] }));
+      'app-yard-peer-continuation', 'simultaneous-clients-active-delegation', 'all-yard-pages-closed', 'healthy-native-mount-preserved',
+      'registration-plan-read-only', 'registration-refuses-existing-definition', 'versioned-user-registration-and-private-backup',
+      'global-app-origin-three-clients', 'windows-native-host-offline', 'idle-native-mount-migration', 'host-restart-adapter-reconnection-and-durable-pins'] }));
 } catch (cause) {
   throw new Error('Native MCP verification failed at: ' + phase, { cause });
 } finally {
   releaseResponse?.(); releaseResponse = undefined;
   web?.terminate(); await workbench?.close();
-  app.close(); yard.close(); cli.kill('SIGTERM');
+  app.close(); yard.close(); linux.close(); cli.kill('SIGTERM');
   const timer = globalThis.setTimeout(() => cli.kill('SIGKILL'), 2000);
   try { await exited; } finally { globalThis.clearTimeout(timer); }
   await Promise.all(adapters.map(value => value.close()));

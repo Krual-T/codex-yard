@@ -6,13 +6,14 @@ history projection, wait kernel, Markdown formatting, model validation, ancestry
 and delegation-input constructor. A thread created through Yard can be continued
 by another client while retaining its tools, including after all Yard pages close.
 
-This change covers the local-daemon conversation tools. Full App service parity,
-recovery of already-loaded obsolete mounts and native Windows UI testing remain
-separate release requirements described below.
+This change covers conversation tools on the execution host's daemon. An explicit
+registration lets Windows App, Linux App and Yard share that host. Native Windows
+UI testing and migration of production conversations remain release checks.
 
 ## Execution and copied-code boundary
 
-The unmodified official `codex-app-tools/server.mjs` connects to the private
+The unmodified official adapter, copied to
+`vendor/native-app-tools/26.1013.40934/server.mjs`, connects to the private
 `${dataDir}/app-tools.sock` pipe supplied by `lib/app-tools.ts`. The permanent
 `lib/native-app-tools.ts` host routes business I/O through existing
 `CodexConnection` transports and Yard project/state services. Browser pages do
@@ -32,9 +33,9 @@ node scripts/extract-native-tools.ts
 ```
 
 An optional first argument supplies an extracted snapshot's `webview/assets`
-directory. Normal builds use the checked-in kernel and do not need to extract or
-load the full UI. The kernel's own vendor directory survives removal of the old
-renderer snapshot.
+directory. The extractor generates the kernel and copies the official adapter.
+Normal builds use these checked-in artifacts and do not need to extract or load
+the full UI. Their vendor directory survives removal of the old renderer snapshot.
 
 The catalog contains `list_projects`, `create_thread`, `fork_thread`,
 `list_threads`, `list_archived_threads`, `read_thread`, `wait_threads`,
@@ -91,10 +92,58 @@ subscribers keep a thread loaded. No production retention setting is changed.
 
 For permanent availability across local App/CLI creation, a deployment must also
 register the stable `codex_app` definition in that daemon's user configuration.
-This patch does not silently edit that file or restart a shared daemon. Existing
-obsolete mounts require a coordinated idle migration; the public protocol has no
-guarded immediate unload RPC. A shared daemon restart must wait for all affected
-work to finish and explicit deployment approval.
+Existing obsolete mounts require a coordinated idle migration; the public
+protocol has no guarded immediate unload RPC. A shared daemon restart must wait
+for all affected work to finish and explicit deployment approval.
+
+## Explicit registration for App and Yard
+
+Start the new Yard Node host against the intended daemon and a stable private
+data directory. Inspect the proposed registration with the same settings:
+
+```sh
+npm run tools:configure -- --socket /absolute/path/to/app-server-control.sock --data-dir /absolute/path/to/private/data
+```
+
+This command reads the live tool catalog and the daemon's base user configuration.
+Its JSON output contains the proposed `codex_app` definition, the configuration
+path and a `hostReady` result. It does not write configuration. Use the deployed
+checkout and permanent adapter/data paths, since the resulting entry must survive
+task-worktree removal.
+
+After reviewing that plan, append `--apply` to install it. The command requires
+all twelve tools to be available. It refuses to replace a different explicit
+`codex_app` entry. Before adding a new entry it saves a private mode-0600 copy of
+the configuration under `$CODEX_HOME/backups/`, then uses `config/batchWrite`
+with the daemon's configuration version and reloads the MCP configuration.
+Other settings remain in place. Repeating an identical registration is harmless.
+An uncertain write is reported for inspection and never retried automatically.
+Neither mode resumes a conversation or restarts a shared service.
+
+The remote `buildMcpCodexConfig` branch in shipped Windows App 26.1023.6123.0 and
+Linux App 26.1013.40934 checks the execution host's saved configuration. When
+`mcp_servers.codex_app` exists, that branch skips desktop-supplied native tool
+injection. This permits the explicit same-name definition above to serve SSH
+conversations without changing either App binary. This behavior was checked in
+the shipped code; the integration probe models App protocol clients.
+
+Connect both desktop Apps to the same execution host over SSH. A Linux App on
+that host should use a loopback SSH connection for these shared projects; its
+ordinary local project entry starts a separate stdio backend. Yard connects to
+the daemon's Unix socket. All clients then address the same thread IDs and
+server-side tool host. Desktop-local projects continue to use their own backend.
+
+Closing a desktop App or all Yard pages leaves the Node tool host running.
+Stopping that Node process stops tool service until it restarts. Run the host
+under the deployment's process supervisor with the same data directory and
+socket path. The official adapter reconnects on the next explicit call after a
+host restart; an in-flight write is not automatically repeated.
+
+For rollback, remove only this registered entry with `codex mcp remove codex_app`
+using the same Codex home, then reload the daemon's MCP configuration. Consult
+the private backup to restore the prior entry if needed; preserve unrelated
+configuration changes. Existing loaded conversations follow the idle migration
+boundary described above in either direction.
 
 ## Service boundaries
 
@@ -105,8 +154,8 @@ automations and plugin-management services are not supplied by this kernel.
 Remote daemon tool injection is not yet installed; existing remote mounts are
 preserved. No unsupported desktop/cloud tools are advertised as executable.
 
-The original Windows App keeps its own full implementation. The isolated test
-models its protocol client. A read-only check of Windows App 26.1023.6123.0's
+The original Windows App also contains its own full implementation. The isolated
+test models its protocol client. A read-only check of Windows App 26.1023.6123.0's
 running native pipe returned 32 default tools and 44 tools for `threadStartKind:
 "all"`. That catalog check did not execute its business tools or verify Windows
 UI continuation. It is a newer App version than the copied kernel.
@@ -122,6 +171,10 @@ injection, model validation and read-state conflicts.
 private temporary Codex home and local synthetic Responses endpoint. It exercises
 all twelve tools through the official adapter, cross-client continuation, closed
 Yard pages, preservation of a healthy native mount and the old-mount lifecycle.
+It also exercises the configuration command, preservation of unrelated settings,
+private backups, new threads from global configuration, three simultaneous
+clients, removal of a simulated Windows tool host, idle migration and stable-pipe
+reconnection with durable pins after the Node host restarts.
 It uses no account, personal conversations or shared services and removes its
 temporary state on exit.
 

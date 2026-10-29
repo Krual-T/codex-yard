@@ -6,4 +6,4 @@ Run `npm ci`, `npm run typecheck`, and `npm test` before submitting a change. Th
 
 Describe the user-visible behavior, the changed host contract, and the validation performed. Include remaining platform or runtime limitations. Use synthetic conversations for screenshots and reports.
 
-Keep the fixed compiled Codex resources under `vendor/codex-app/` with their original notices and provenance. Put custom behavior in the project's TypeScript/React modules. Runtime state, personal machine paths, account data, and private validation logs stay out of commits. See [third-party components](THIRD_PARTY.md) and [deployment boundaries](SECURITY.md).
+Keep the fixed compiled Codex UI resources under `vendor/codex-app/` and the standalone tool adapter/kernel under `vendor/native-app-tools/`, with their original notices and provenance. Put custom behavior in the project's TypeScript/React modules. Runtime state, personal machine paths, account data, and private validation logs stay out of commits. See [third-party components](THIRD_PARTY.md) and [deployment boundaries](SECURITY.md).

@@ -1,11 +1,13 @@
 Third-party compiled components
 
-This directory contains a derived subset of compiled Codex App resources produced
-by OpenAI and bundled third-party components. Their existing copyrights, license
+This directory contains an unmodified compiled Codex App Node adapter and a derived
+subset of compiled App resources produced by OpenAI and bundled third-party
+components. Their existing copyrights, license
 notices and applicable terms remain in effect. The MIT license in the repository
 root covers project-authored source and does not apply to this directory.
 
 No new license or additional permission for these upstream components is granted
-by this repository. Notices retained in the generated file remain applicable.
+by this repository. Notices retained in the adapter and generated kernel remain
+applicable.
 
 See ../../THIRD_PARTY.md for provenance and the component boundary.
