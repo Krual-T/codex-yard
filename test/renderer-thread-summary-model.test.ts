@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseThreadSummaryGoal, projectThreadSummary } from '../src/renderer/app/thread-summary-model.ts';
+import { projectThreadSummary } from '../src/renderer/app/thread-summary-model.ts';
 import type { ThreadSummary } from '../lib/codex-protocol.ts';
 
 test('summary projects actual attachments, search and tools without turning arbitrary values into links or outputs', () => {
@@ -23,8 +23,4 @@ test('summary projects actual attachments, search and tools without turning arbi
       { kind: 'tool', server: 'search', tools: ['lookup'] },
       { kind: 'web', queries: ['query'], urls: ['https://example.test/page'] }],
   });
-  assert.equal(parseThreadSummaryGoal({ goal: null }, 'one'), null);
-  assert.throws(() => parseThreadSummaryGoal({ goal: { threadId: 'one', objective: 'incomplete', status: 'active' } }, 'one'));
-  assert.throws(() => parseThreadSummaryGoal({ goal: { threadId: 'other', objective: 'wrong', status: 'active' } }, 'one'));
-  assert.throws(() => parseThreadSummaryGoal({}, 'one'));
 });

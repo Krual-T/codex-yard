@@ -13,8 +13,6 @@ import { nativeFixture } from './native-fixture.ts';
 import type {} from './renderer-thread-summary-fixture.tsx';
 
 const chrome = process.env.YARD_VALIDATION_CHROME_BIN ?? '/usr/bin/google-chrome';
-const goal = (threadId: string, objective: string) => ({ threadId, objective, status: 'active', tokenBudget: null,
-  tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 });
 
 test('summary consumes the shared conversation and host read with scoped actions and recovery', {
   skip: !existsSync(chrome) && 'Google Chrome is unavailable', timeout: 120_000,
@@ -34,18 +32,9 @@ test('summary consumes the shared conversation and host read with scoped actions
   ]);
   local.threads.set('thread-a', fixtureThread('thread-a', '/fixture/project', { turns: [turn] }));
   local.threads.set('thread-b', fixtureThread('thread-b', '/fixture/project', { turns: [] }));
-  remote.threads.set('thread-a', fixtureThread('thread-a', '/remote/project', { turns: [] }));
-  let failGoal = true, holdGoal = false, releaseGoal: (() => void) | undefined, enteredGoal: (() => void) | undefined;
-  const goalEntered = new Promise<void>(resolve => { enteredGoal = resolve; });
-  local.handlers.set('thread/goal/get', async params => {
-    if (failGoal) throw Error('synthetic goal failure');
-    if (holdGoal && params.threadId === 'thread-a') {
-      await new Promise<void>(resolve => { releaseGoal = resolve; enteredGoal?.(); });
-      return { goal: goal('thread-a', 'Late local goal') };
-    }
-    return { goal: goal(String(params.threadId), 'Local goal') };
-  });
-  remote.handlers.set('thread/goal/get', params => ({ goal: goal(String(params.threadId), 'Remote goal') }));
+  remote.threads.set('thread-a', fixtureThread('thread-a', '/remote/project', { turns: [
+    fixtureTurn('remote-turn', [{ id: 'remote-plan', type: 'plan', text: '# Remote plan' }]),
+  ] }));
   const resources = await nativeFixture(root);
   const bundle = await build({ entryPoints: ['test/renderer-thread-summary-fixture.tsx'], bundle: true, write: false,
     outdir: 'summary-fixture-output', format: 'iife', jsx: 'automatic' });
@@ -66,21 +55,18 @@ test('summary consumes the shared conversation and host read with scoped actions
   const context = await browser.newContext({ viewport: { width: 390, height: 800 }, serviceWorkers: 'block' });
   cleanup.push(() => context.close());
   const page = await context.newPage(); page.setDefaultTimeout(10_000);
-  const errors: string[] = [], received: string[] = [];
+  const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  page.on('websocket', socket => socket.on('framereceived', frame => received.push(String(frame.payload))));
   await page.route('**/*', route => new URL(route.request().url()).origin === app.url ? route.continue() : route.abort());
   const artifactDir = process.env.YARD_TEST_ARTIFACTS;
   try {
     await page.goto(app.url + '/');
-    await page.getByRole('alert').filter({ hasText: 'synthetic goal failure' }).waitFor();
     await page.getByRole('button', { name: 'input.png' }).waitFor();
     assert.ok(local.calls('thread/read').some(call => call.params.threadId === 'thread-a'));
     assert.ok(local.calls('thread/turns/list').some(call => call.params.threadId === 'thread-a'));
-    assert.ok(local.calls('thread/goal/get').some(call => call.params.threadId === 'thread-a'));
-    failGoal = false;
-    await page.getByRole('alert').filter({ hasText: 'synthetic goal failure' }).getByRole('button', { name: 'Retry' }).click();
-    await page.getByRole('button', { name: /Local goal/ }).click();
+    assert.equal(local.calls('thread/goal/get').length, 0);
+    await page.getByRole('button', { name: 'Saved goal' }).click();
+    await page.getByRole('button', { name: /Scheduled task/ }).click();
     await page.getByRole('button', { name: 'Inspect the change', exact: true }).click();
     await page.getByRole('button', { name: 'input.png' }).click();
     await page.getByRole('button', { name: 'fixture-tool' }).click();
@@ -124,7 +110,11 @@ test('summary consumes the shared conversation and host read with scoped actions
       { hostId: 'local', threadId: 'thread-a', cwd: '/fixture/project', turnId: 'turn-a', itemId: 'plan', text: '# Inspect the change' });
     assert.deepEqual(calls.find(call => call.kind === 'web')?.value,
       { kind: 'web', queries: ['integration query'], urls: ['https://example.test/page'] });
-    for (const kind of ['goal', 'tool', 'output', 'retry-outputs', 'retry-side-chats', 'agent', 'process', 'stop-processes', 'created', 'add-source', 'close']) {
+    assert.deepEqual(calls.filter(call => call.kind === 'automation').map(call => {
+      const value = call.value as { kind: string; entry: { sourceKey: string; item: { id: string } } };
+      return [value.kind, value.entry.sourceKey, value.entry.item.id];
+    }), [['goal', 'local', 'saved-goal'], ['scheduled', 'local', 'scheduled-task']]);
+    for (const kind of ['tool', 'output', 'retry-outputs', 'retry-side-chats', 'agent', 'process', 'stop-processes', 'created', 'add-source', 'close']) {
       assert.ok(calls.some(call => call.kind === kind), kind);
     }
     await page.evaluate(() => window.threadSummaryFixture.locale('zh-CN'));
@@ -133,10 +123,6 @@ test('summary consumes the shared conversation and host read with scoped actions
     await page.evaluate(() => window.threadSummaryFixture.locale('zh-TW'));
     await page.getByRole('button', { name: '側聊 2' }).waitFor();
     await page.evaluate(() => window.threadSummaryFixture.locale('en-US'));
-    local.broadcast({ method: 'thread/goal/updated', params: { threadId: 'thread-a', goal: goal('thread-a', 'Updated live goal') } });
-    await page.getByRole('button', { name: /Updated live goal/ }).waitFor();
-    local.broadcast({ method: 'thread/goal/updated', params: { threadId: 'thread-b', goal: goal('thread-b', 'Wrong thread goal') } });
-    assert.equal(await page.getByText('Wrong thread goal').count(), 0);
     await page.locator('.yard-thread-summary__content').evaluate(element => { element.scrollTop = 0; });
     const overflow = await page.locator('.yard-thread-summary').evaluate(element => element.scrollWidth > element.clientWidth);
     assert.equal(overflow, false);
@@ -147,26 +133,16 @@ test('summary consumes the shared conversation and host read with scoped actions
       await page.screenshot({ path: join(artifactDir, 'summary-desktop.png') });
     }
 
-    await page.evaluate(() => window.threadSummaryFixture.select('local', 'thread-b'));
-    await local.waitFor(message => message.method === 'thread/goal/get' && message.params.threadId === 'thread-b');
-    await page.getByRole('button', { name: /Local goal/ }).waitFor();
-    holdGoal = true;
-    const before = local.calls('thread/goal/get').filter(call => call.params.threadId === 'thread-a').length;
-    await page.evaluate(() => window.threadSummaryFixture.select('local', 'thread-a'));
-    await goalEntered;
-    assert.ok(local.calls('thread/goal/get').filter(call => call.params.threadId === 'thread-a').length > before);
-    assert.ok(releaseGoal, 'the original host request must actually be pending');
+    await page.evaluate(() => window.threadSummaryFixture.holdShow(true));
+    await page.getByRole('button', { name: 'Current side chat' }).click();
     await page.evaluate(() => window.threadSummaryFixture.select('remote-fixture', 'thread-a'));
-    await page.getByRole('button', { name: /Remote goal/ }).waitFor();
-    assert.ok(remote.calls('thread/goal/get').some(call => call.params.threadId === 'thread-a'));
-    releaseGoal();
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(Error('The late original RPC reply was not delivered to the page')), 5000);
-      const check = () => { if (received.some(frame => frame.includes('Late local goal'))) { clearTimeout(timer); resolve(); } else setTimeout(check, 10); };
-      check();
-    });
-    await page.getByRole('button', { name: /Remote goal/ }).waitFor();
-    assert.equal(await page.getByText('Late local goal').count(), 0);
+    await page.getByRole('button', { name: 'Remote plan' }).waitFor();
+    assert.ok(remote.calls('thread/read').some(call => call.params.threadId === 'thread-a'));
+    assert.equal(remote.calls('thread/goal/get').length, 0);
+    await page.evaluate(() => window.threadSummaryFixture.failHeldShow());
+    assert.equal(await page.getByText('late synthetic show failure').count(), 0);
+    assert.equal(await page.getByText('input.png').count(), 0);
+    assert.equal(await page.getByText('Saved goal').count(), 0);
     assert.equal(await page.getByText('Current side chat').count(), 0);
     assert.deepEqual(errors, []);
     await page.evaluate(() => window.threadSummaryFixture.close());

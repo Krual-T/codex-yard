@@ -72,20 +72,3 @@ export function projectThreadSummary(thread: ThreadSummary | null, hostId: strin
   if (searched) sources.push({ kind: 'web', queries: [...queries], urls: [...urls] });
   return { plan, sources };
 }
-
-export interface ThreadSummaryGoal { threadId: string; objective: string; status: string }
-export function parseThreadSummaryGoal(value: unknown, threadId: string): ThreadSummaryGoal | null {
-  const result = record(value);
-  if (!Object.hasOwn(result, 'goal')) throw new Error('Invalid goal response');
-  if (result.goal === null) return null;
-  const goal = record(result.goal);
-  if (goal.threadId !== threadId || typeof goal.objective !== 'string' || typeof goal.status !== 'string'
-    || !(goal.tokenBudget === null || typeof goal.tokenBudget === 'number' && Number.isFinite(goal.tokenBudget))
-    || typeof goal.tokensUsed !== 'number' || !Number.isFinite(goal.tokensUsed)
-    || typeof goal.timeUsedSeconds !== 'number' || !Number.isFinite(goal.timeUsedSeconds)
-    || typeof goal.createdAt !== 'number' || !Number.isFinite(goal.createdAt)
-    || typeof goal.updatedAt !== 'number' || !Number.isFinite(goal.updatedAt)) {
-    throw new Error('Invalid goal response');
-  }
-  return { threadId, objective: goal.objective, status: goal.status };
-}
