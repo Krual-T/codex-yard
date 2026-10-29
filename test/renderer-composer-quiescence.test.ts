@@ -25,11 +25,13 @@ test('composer leases drain real attachment, reference and queue edits before th
     import {createRoot} from 'react-dom/client';
     import {StandaloneComposer} from './src/renderer/composer/StandaloneComposer.tsx';
     import {readComposerDraft} from './src/renderer/composer/composer-draft-store.ts';
-    import {addUnknownQueueStart,prepareUnknownQueueRelease,readUnknownQueueStarts,removeUnknownQueueStart} from './src/renderer/composer/standalone-queue-storage.ts';
+    import {addUnknownQueueStart,prepareUnknownQueueRelease,readUnknownQueueRecovery,readUnknownQueueStarts,removeUnknownQueueStart} from './src/renderer/composer/standalone-queue-storage.ts';
     const state={controller:null, snapshots:[], uploadWaiting:false, uploadStarts:0, removalWaiting:false, queueWaiting:false,
       queued:[{id:'queue-1',clientUserMessageId:'client-1',input:[{type:'text',text:'queued',text_elements:[]}]}], result:null,
-      holdSubmit:false,submitWaiting:false,submitCalls:0,lockReleaseWaiting:false,lockReleasePending:0,lockReleaseSent:[],queueChecks:0,failNextList:false,failQueueImmediately:false};
+      holdSubmit:false,submitWaiting:false,submitCalls:0,lockReleaseWaiting:false,lockReleasePending:0,lockReleaseSent:[],queueChecks:0,
+      failNextList:false,queueMode:'hold-before',queueCaptures:[],queueAttempts:[],queueDispatches:[],listeners:new Set()};
     let resolveUpload, rejectUpload, resolveRemoval, rejectRemoval, resolveQueue, rejectQueue, resolveSubmit, resolveLockRelease, rejectLockRelease;
+    const authorities=new WeakMap();
     window.fetch = async (url) => {
       if (String(url)==='/api/files/uploads') {
         state.uploadWaiting=true;state.uploadStarts++;
@@ -45,17 +47,34 @@ test('composer leases drain real attachment, reference and queue edits before th
       if(method==='thread/queue/list'){state.queueChecks++;if(state.failNextList){state.failNextList=false;throw Error('synthetic list failure')}
         return {data:structuredClone(state.queued),nextCursor:null};}
       if(method==='thread/items/list')return {data:[{item:{type:'userMessage',clientId:'client-1'}}],nextCursor:null};
-      if(method==='thread/queue/update') {if(state.failQueueImmediately){state.failQueueImmediately=false;throw Error('immediate queue failure')}
-        state.queueWaiting=true;await new Promise((resolve,reject)=>{resolveQueue=resolve;rejectQueue=reject});
-        state.queued[0].input=params.input;state.queueWaiting=false;return {};}
       throw Error('Unexpected RPC '+method);
-    },async host(method,params) {
+    },async host(method,params,options={}) {
       if(method==='get-setting')return {exists:true,value:params.key==='composerEnterBehavior'?'cmdAlways':params.key==='composerPlainTextMode'?false:'queue'};
       if(method==='queued-follow-up-send-lock-release'){state.lockReleaseSent.push(params.sent);state.lockReleasePending++;state.lockReleaseWaiting=true;try{await new Promise((resolve,reject)=>{resolveLockRelease=resolve;rejectLockRelease=reject})}finally{state.lockReleasePending--;state.lockReleaseWaiting=state.lockReleasePending>0}return {};}
+      if(method==='queue-edit'){
+        options.assertBeforeSend();state.queueAttempts.push(structuredClone(params));
+        const mode=state.queueMode;
+        const wait=async before=>{state.queueWaiting=true;try{await new Promise((resolve,reject)=>{
+          resolveQueue=resolve;rejectQueue=()=>reject(Object.assign(Error('synthetic queue failure'),before?{sendPhase:'before-send'}:{}));
+        })}finally{state.queueWaiting=false}};
+        if(mode==='hold-before')await wait(true);
+        options.assertBeforeSend();state.queueDispatches.push(structuredClone(params));
+        const index=state.queued.findIndex(item=>item.id===params.entry.id);
+        if(index<0||JSON.stringify(state.queued[index])!==JSON.stringify(params.entry))return 'changed';
+        state.queued.splice(index,1);
+        if(mode==='hold-after')await wait(false);
+        return 'deleted';
+      }
       throw Error('Unexpected host '+method);
-    },subscribe(){return ()=>{}},async reply(){throw Error('unexpected approval')}};
+    },subscribe(listener){state.listeners.add(listener);return ()=>state.listeners.delete(listener)},async reply(){throw Error('unexpected approval')}};
     let props={client,context:{hostId:'local',threadId:null,draftId:'draft-a',cwd:'/fixture'},busy:false,
       onDraftController(value){state.controller=value},onDraftChange(value){state.snapshots.push(structuredClone(value))},
+      captureSubmissionAuthority(owner){const captured=structuredClone(owner);const authority=()=>{
+        if(JSON.stringify(state.controller?.snapshot()?.owner)!==JSON.stringify(captured))throw Error('original owner changed');};
+        authority();state.queueCaptures.push(captured);authorities.set(authority,captured);return authority;},
+      async removeQueuedOriginal(entry,authority,assertBeforeSend){const owner=authorities.get(authority);
+        if(!owner)throw Error('original authority lost');
+        return client.host('queue-edit',{hostId:owner.hostId,threadId:owner.threadId,entry},{assertBeforeSend});},
       onRemoveReference(){state.removalWaiting=true;return new Promise((resolve,reject)=>{
         resolveRemoval=()=>{state.removalWaiting=false;resolve()};rejectRemoval=()=>{state.removalWaiting=false;reject(Error('synthetic reference failure'))}})},
       async onSubmit(){state.submitCalls++;if(state.holdSubmit){state.submitWaiting=true;await new Promise(resolve=>{resolveSubmit=resolve});state.submitWaiting=false}},async onInterrupt(){}};
@@ -67,7 +86,10 @@ test('composer leases drain real attachment, reference and queue edits before th
         fixture.lease=lease;fixture.oldController=controller;fixture.oldOwner=owner;state.result=null;
         state.flush=lease.flush().then(value=>{state.result=value;return value});return true;},
       release(){fixture.lease.release()},resolveUpload(){resolveUpload()},rejectUpload(){rejectUpload()},
-      resolveRemoval(){resolveRemoval()},rejectRemoval(){rejectRemoval()},resolveQueue(){resolveQueue()},rejectQueue(){state.queueWaiting=false;rejectQueue(Error('synthetic queue failure'))},resolveSubmit(){resolveSubmit()},
+      resolveRemoval(){resolveRemoval()},rejectRemoval(){rejectRemoval()},resolveQueue(){resolveQueue()},rejectQueue(){rejectQueue()},resolveSubmit(){resolveSubmit()},
+      resetQueue(id,text){state.queued=[{id,clientUserMessageId:'client-'+id,input:[{type:'text',text,text_elements:[]}]}];
+        for(const listener of state.listeners)listener({type:'mcp-notification',hostId:'local',method:'thread/queue/changed',params:{threadId:'queue-thread'}});},
+      readQueueRecovery(){return readUnknownQueueRecovery('local','queue-thread')},
       async addUnknown(){state.queued=[];await addUnknownQueueStart('local','queue-thread',{id:'queue-1',clientUserMessageId:'client-1',lockId:'lock-1'});},
       async addRejected(){state.queued=[{id:'queue-1',clientUserMessageId:'client-1',input:[{type:'text',text:'queued',text_elements:[]}]}];
         const marker={id:'queue-1',clientUserMessageId:'client-1',lockId:'lock-1'};
@@ -364,7 +386,7 @@ test('composer leases drain real attachment, reference and queue edits before th
       await page.evaluate(() => (window as any).fixture.release());
     });
 
-    await t.test('IME and unsaved queue editing refuse the lease; an accepted queue save is drained', async () => {
+    await t.test('IME refuses the lease; queue-to-main commits and uncertain deletes are drained for the original owner', async () => {
       await rich.focus();
       await rich.dispatchEvent('compositionstart', { data: '' });
       assert.equal(await page.evaluate(() => (window as any).fixture.freeze()), false);
@@ -378,59 +400,111 @@ test('composer leases drain real attachment, reference and queue edits before th
       assert.equal(await page.evaluate(() => (window as any).fixture.freeze()), true);
       await page.evaluate(() => (window as any).fixture.release());
       await page.evaluate(() => (window as any).fixture.render({ context: { threadId: 'queue-thread', draftId: 'queue-draft' } }));
-      await page.getByRole('button', { name: '编辑待发送消息' }).click();
-      await page.getByRole('textbox', { name: '编辑待发送消息' }).fill('new queued content');
-      assert.equal(await page.evaluate(() => (window as any).fixture.freeze()), false);
-      await page.getByRole('alert').filter({ hasText: '队列编辑' }).waitFor();
-      await page.getByRole('button', { name: '保存', exact: true }).click();
+      const edit = page.getByRole('button', { name: '编辑待发送消息' });
+      await page.waitForFunction(() => {
+        const f = (window as any).fixture, button = document.querySelector<HTMLButtonElement>('button[aria-label="编辑待发送消息"]');
+        return f.state.controller?.snapshot()?.owner.draftId === 'queue-draft' && button && !button.disabled;
+      });
+      await editor.fill('original main draft');
+      await page.evaluate(async () => { const c = (window as any).fixture.state.controller; await c.flush(c.snapshot().owner); });
+      assert.equal(await page.evaluate(() => {
+        const c = (window as any).fixture.state.controller, owner = c.snapshot().owner;
+        return c.beginExternalOperation({ ...owner, hostId: 'other' });
+      }), null);
+      const started = await page.evaluate(() => {
+        const f = (window as any).fixture;
+        (document.querySelector('button[aria-label="编辑待发送消息"]') as HTMLButtonElement).click();
+        return { owner: f.state.queueCaptures.at(-1), frozen: f.freeze(),
+          inert: document.querySelector('.standalone-composer > div')!.hasAttribute('inert'), attempts: f.state.queueAttempts.length };
+      });
+      assert.deepEqual(started, { owner: { hostId: 'local', threadId: 'queue-thread', draftId: 'queue-draft' },
+        frozen: true, inert: true, attempts: 0 });
       await page.waitForFunction(() => (window as any).fixture.state.queueWaiting);
-      const queuedEditor = page.getByRole('textbox', { name: '编辑待发送消息' });
-      assert.equal(await queuedEditor.evaluate((element: HTMLTextAreaElement) => element.readOnly), true);
-      await queuedEditor.focus(); await page.keyboard.type('should not be lost');
-      assert.equal(await queuedEditor.inputValue(), 'new queued content');
-      assert.equal(await page.evaluate(() => (window as any).fixture.freeze()), true);
+      await page.keyboard.insertText('should not be lost');
+      assert.equal(await page.evaluate(() => (window as any).fixture.oldController.snapshot().draft.text), 'original main draft');
       assert.equal(await page.evaluate(() => (window as any).fixture.state.result), null);
       await page.evaluate(() => (window as any).fixture.resolveQueue());
       await page.waitForFunction(() => (window as any).fixture.state.result === true);
-      assert.equal(await page.evaluate(() => (window as any).fixture.state.queued[0].input[0].text), 'new queued content');
+      const committed = await page.evaluate(async () => {
+        const f = (window as any).fixture, snapshot = f.oldController.snapshot();
+        return { snapshot, saved: await f.readComposerDraft(f.oldOwner, snapshot.revision), queue: f.state.queued,
+          attempts: f.state.queueAttempts, dispatches: f.state.queueDispatches, submissions: f.state.submitCalls };
+      });
+      assert.equal(committed.snapshot.draft.text, 'queued');
+      assert.equal(committed.snapshot.draft.pendingDrafts[0].text, 'original main draft');
+      assert.deepEqual(committed.saved, committed.snapshot);
+      assert.deepEqual(committed.queue, []);
+      assert.equal(committed.attempts.length, 1);
+      assert.equal(committed.dispatches.length, 1);
+      assert.equal(committed.submissions, 0);
       await page.evaluate(() => (window as any).fixture.release());
-      await page.getByRole('button', { name: '编辑待发送消息' }).click();
-      await page.getByRole('textbox', { name: '编辑待发送消息' }).fill('saved but refresh failed');
-      await page.getByRole('button', { name: '保存', exact: true }).click();
+      await editor.fill('new queued content');
+      await page.evaluate(async () => { const c = (window as any).fixture.state.controller; await c.flush(c.snapshot().owner); });
+
+      await page.evaluate(() => { const f = (window as any).fixture; f.state.queueMode = 'hold-after'; f.resetQueue('queue-late', 'saved but refresh failed'); });
+      await page.getByText('saved but refresh failed', { exact: true }).waitFor();
+      await edit.click();
       await page.waitForFunction(() => (window as any).fixture.state.queueWaiting);
       assert.equal(await page.evaluate(() => (window as any).fixture.freeze()), true);
       await page.evaluate(() => { const f = (window as any).fixture; f.state.failNextList = true; f.resolveQueue(); });
-      await page.waitForFunction(() => (window as any).fixture.state.result === false);
-      assert.equal(await page.evaluate(() => (window as any).fixture.state.queued[0].input[0].text), 'saved but refresh failed');
+      await page.waitForFunction(() => (window as any).fixture.state.result === true);
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.text), 'saved but refresh failed');
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.pendingDrafts.some((draft: any) => draft.text === 'new queued content')), true);
       await page.evaluate(() => (window as any).fixture.release());
       const listFailure = page.getByRole('alert').filter({ hasText: 'synthetic list failure' });
       await listFailure.waitFor();
-      assert.equal(await page.getByRole('button', { name: '编辑待发送消息' }).isDisabled(), true);
       await listFailure.getByRole('button', { name: '重试读取' }).click();
-      await page.getByText('saved but refresh failed', { exact: true }).waitFor();
-      await page.getByRole('button', { name: '编辑待发送消息' }).click();
-      await queuedEditor.fill('retry after failure');
-      await page.getByRole('button', { name: '保存', exact: true }).click();
+      await listFailure.waitFor({ state: 'detached' });
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.queueAttempts.length), 2);
+
+      await page.evaluate(() => { const f = (window as any).fixture; f.state.queueMode = 'hold-before'; f.resetQueue('queue-rejected', 'retry after failure'); });
+      await page.getByText('retry after failure', { exact: true }).waitFor();
+      const beforeFailure = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+      await edit.click();
       await page.waitForFunction(() => (window as any).fixture.state.queueWaiting);
-      assert.equal(await queuedEditor.evaluate((element: HTMLTextAreaElement) => element.readOnly), true);
+      assert.equal(await page.evaluate(() => (window as any).fixture.freeze()), true);
       await page.evaluate(() => (window as any).fixture.rejectQueue());
+      await page.waitForFunction(() => (window as any).fixture.state.result === false);
+      await page.evaluate(() => (window as any).fixture.release());
       await page.getByRole('alert').filter({ hasText: 'synthetic queue failure' }).waitFor();
-      assert.equal(await queuedEditor.evaluate((element: HTMLTextAreaElement) => element.readOnly), false);
-      assert.equal(await queuedEditor.inputValue(), 'retry after failure');
-      await queuedEditor.fill('retry with newer content');
-      await page.getByRole('button', { name: '保存', exact: true }).click();
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot()), beforeFailure);
+      const rejected = await page.evaluate(async () => ({ queue: (window as any).fixture.state.queued,
+        recovery: await (window as any).fixture.readQueueRecovery(), attempts: (window as any).fixture.state.queueAttempts.length,
+        dispatches: (window as any).fixture.state.queueDispatches.length }));
+      assert.equal(rejected.queue[0].input[0].text, 'retry after failure');
+      assert.equal(rejected.recovery.edits[0].stage, 'not-sent');
+      assert.deepEqual(rejected.recovery.edits[0].entry, rejected.queue[0]);
+      assert.equal(rejected.attempts, 3);
+      assert.equal(rejected.dispatches, 2);
+      page.once('dialog', dialog => dialog.accept());
+      await page.getByRole('button', { name: '放弃恢复记录' }).click();
+      await page.waitForFunction(() => !document.querySelector('button[aria-label="编辑待发送消息"]')?.hasAttribute('disabled'));
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.queueAttempts.length), 3);
+
+      await page.evaluate(() => { const f = (window as any).fixture; f.state.queueMode = 'hold-after'; });
+      await edit.click();
       await page.waitForFunction(() => (window as any).fixture.state.queueWaiting);
-      await page.evaluate(() => (window as any).fixture.resolveQueue());
-      await page.waitForFunction(() => (window as any).fixture.state.queued[0].input[0].text === 'retry with newer content');
-      await page.getByRole('button', { name: '编辑待发送消息' }).click();
-      await queuedEditor.fill('immediate failure keeps editing');
-      await page.evaluate(() => { (window as any).fixture.state.failQueueImmediately = true; });
-      await page.getByRole('button', { name: '保存', exact: true }).click();
-      await page.getByRole('alert').filter({ hasText: 'immediate queue failure' }).waitFor();
-      assert.equal(await queuedEditor.evaluate((element: HTMLTextAreaElement) => element.readOnly), false);
-      assert.equal(await queuedEditor.inputValue(), 'immediate failure keeps editing');
-      await queuedEditor.fill('continued editing');
-      await page.getByRole('button', { name: '取消', exact: true }).click();
+      assert.equal(await page.evaluate(() => (window as any).fixture.freeze()), true);
+      await page.evaluate(() => (window as any).fixture.rejectQueue());
+      await page.waitForFunction(() => (window as any).fixture.state.result === false);
+      await page.evaluate(() => (window as any).fixture.release());
+      await page.getByText('队列删除结果未知，不会自动重试。').waitFor();
+      const unknown = await page.evaluate(async () => ({ snapshot: (window as any).fixture.state.controller.snapshot(),
+        queue: (window as any).fixture.state.queued, recovery: await (window as any).fixture.readQueueRecovery(),
+        attempts: (window as any).fixture.state.queueAttempts.length, dispatches: (window as any).fixture.state.queueDispatches.length }));
+      assert.deepEqual(unknown.snapshot, beforeFailure);
+      assert.deepEqual(unknown.queue, []);
+      assert.equal(unknown.recovery.edits[0].stage, 'deleting');
+      assert.deepEqual(unknown.recovery.edits[0].entry, rejected.queue[0]);
+      assert.equal(unknown.attempts, 4);
+      assert.equal(unknown.dispatches, 3);
+      page.once('dialog', dialog => dialog.accept());
+      await page.getByRole('button', { name: '放弃恢复记录' }).click();
+      await waitForBrowser(async () => (await page.evaluate(() => (window as any).fixture.readQueueRecovery())).edits.length === 0);
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.queueAttempts.length), 4);
+      await page.evaluate(() => (window as any).fixture.render({ context: { threadId: 'queue-thread', draftId: 'queue-following' } }));
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.owner.draftId === 'queue-following');
+      assert.deepEqual(await page.evaluate(({ owner, revision }) => (window as any).fixture.readComposerDraft(owner, revision), beforeFailure), beforeFailure);
     });
 
     await t.test('a history-confirmed queue lock release is included in the drain', async () => {
