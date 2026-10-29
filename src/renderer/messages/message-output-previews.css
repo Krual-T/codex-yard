@@ -19,6 +19,6 @@
 .yard-output-menu-note { padding: 7px 9px; color: var(--yard-muted, #626c69); font-size: 12px; line-height: 1.4; }
 .yard-output-error { color: var(--yard-danger, #a33333); font-size: 12px; }
 .yard-output-error button { border: 0; padding: 0; color: inherit; background: none; font: inherit; text-decoration: underline; cursor: pointer; }
-.yard-markdown .yard-file-link:has(> .yard-citation-icon) { color: var(--yard-info, #0084ff); text-decoration: none; }
-.yard-markdown .yard-file-link:has(> .yard-citation-icon):hover { text-decoration: underline; }
-.yard-citation-icon { display: inline-flex; align-items: center; vertical-align: -2px; margin-right: 3px; }
+.yard-message-citations .yard-file-link:has(> .yard-citation-icon) { color: var(--yard-info, #0084ff); text-decoration: none; }
+.yard-message-citations .yard-file-link:has(> .yard-citation-icon):hover { text-decoration: underline; }
+.yard-message-citations .yard-citation-icon { display: inline-flex; align-items: center; vertical-align: -2px; margin-right: 3px; }

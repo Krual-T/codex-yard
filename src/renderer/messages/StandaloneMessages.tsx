@@ -283,8 +283,9 @@ function MessageMarkdown(props: StandaloneMarkdownProps) {
   useLayoutEffect(() => {
     const next = Array.from(body.current?.querySelectorAll('.yard-file-link > .yard-citation-icon') ?? []);
     setIcons(previous => previous.length === next.length && previous.every((icon, index) => icon === next[index]) ? previous : next);
-  }, [props.text, Boolean(props.onOpenFile), Boolean(props.onOpenFileAt)]);
-  return <div ref={body}><StandaloneMarkdown {...props} />
+  }, [props.text, props.client, props.hostId, props.threadId, props.cwd, props.allowBasicHtml,
+    props.onOpenFile, props.onOpenFileAt, props.onOpenVisualization, props.onOpenBrowser, props.onOpenImage]);
+  return <div className="yard-message-citations" ref={body}><StandaloneMarkdown {...props} />
     {icons.map((icon, index) => createPortal(<File size={13} strokeWidth={1.5} aria-hidden="true" />, icon, index))}</div>;
 }
 

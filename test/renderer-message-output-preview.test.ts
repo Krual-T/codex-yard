@@ -47,6 +47,7 @@ declare global {
         onOpen?: 'at' | 'plain' | 'throw' | 'none'; authority?: 'sync' | 'thenable'; sourceKey?: string;
         directory?: {status:'none'} | {status:'known';path:string} | {status:'unknown'} }) => void;
       renderBasicHtml: (text: string) => void;
+      renderStandaloneMarkdown: (text: string) => void;
       dispatch: (index: number) => boolean;
       resolve: (index: number, paths: unknown) => void;
       reject: (index: number, message: string) => void;
@@ -95,6 +96,10 @@ before(async () => {
       },
       renderBasicHtml(text) {
         root.render(<StandaloneMarkdown text={text} client={client} hostId="ssh-one" cwd="/work" allowBasicHtml
+          onOpenFileAt={location => calls.opens.push(location)} />);
+      },
+      renderStandaloneMarkdown(text) {
+        root.render(<StandaloneMarkdown text={text} client={client} hostId="ssh-one" cwd="/work"
           onOpenFileAt={location => calls.opens.push(location)} />);
       },
       dispatch(i) {const d=deferred[i]; try {d.options?.assertBeforeSend?.(); d.info.dispatched=true; return true}
@@ -150,6 +155,11 @@ test('only actual inline file citations get the file icon and original link trea
       assert.equal(await ordinary.evaluate(element => getComputedStyle(element).textDecorationLine), 'underline');
       await file.click();
       assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.opens), [{hostId:'ssh-one',cwd:'/work',path:'/work/report.md'}]);
+      await page.evaluate(text => window.outputHarness.render({ status: 'inProgress', texts: [text], host: 'ssh-two', cwd: '/other' }), text);
+      await file.locator('.yard-citation-icon svg.lucide-file').waitFor({ timeout: 3_000 });
+      await file.click();
+      assert.deepEqual((await page.evaluate(() => window.outputHarness.calls.opens))[1],
+        {hostId:'ssh-two',cwd:'/other',path:'/other/report.md'});
       await page.evaluate(text => window.outputHarness.render({ status: 'inProgress', texts: [text] }),
         `${text} ${citation('other.pdf', 'source')}`);
       await page.waitForFunction(() => document.querySelectorAll('.yard-citation-icon svg.lucide-file').length === 2);
@@ -161,7 +171,13 @@ test('only actual inline file citations get the file icon and original link trea
       await page.getByRole('button', { name: 'report.md', exact: true }).waitFor();
       assert.equal(await page.locator('.yard-citation-icon').count(), 0);
       await page.getByRole('button', { name: 'report.md', exact: true }).click();
-      assert.equal((await page.evaluate(() => window.outputHarness.calls.opens)).length, 2);
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.opens)).length, 3);
+
+      await page.evaluate(text => window.outputHarness.renderStandaloneMarkdown(text), citation('standalone.md'));
+      const standalone = page.getByRole('button', { name: 'standalone.md', exact: true });
+      await standalone.waitFor();
+      assert.equal(await standalone.locator('svg').count(), 0);
+      assert.equal(await standalone.evaluate(element => getComputedStyle(element).textDecorationLine), 'underline');
       assert.deepEqual(errors, []);
     } finally { await page.close(); }
   });
