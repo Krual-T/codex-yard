@@ -22,14 +22,15 @@ export function entryState(entry: PreferenceEntry<unknown>) {
   return { disabled: !entry.available || entry.loading || entry.saving, error: entry.error };
 }
 
-export function Toggle<K extends PreferenceKey>({ preferences, snapshot, setting, label, description, unavailable }: PreferenceProps & {
-  setting: K; label: string; description?: ReactNode; unavailable?: string;
+export function Toggle<K extends PreferenceKey>({ preferences, snapshot, setting, label, description, unavailable, accent, ariaLabel }: PreferenceProps & {
+  setting: K; label: string; description?: ReactNode; unavailable?: string; accent?: boolean; ariaLabel?: string;
 }) {
   const { t } = useI18n();
   const entry = snapshot[setting];
   return <Row label={label} description={unavailable ?? description} error={entry.error} retry={() => { void preferences.reload(setting); }}>
-    <input type="checkbox" role="switch" aria-label={translateKnown(t, label)} checked={entry.value === true}
+    <input type="checkbox" role="switch" aria-label={translateKnown(t, ariaLabel ?? label)} checked={entry.value === true}
       disabled={Boolean(unavailable) || entryState(entry).disabled}
+      style={accent && entry.value === true ? { backgroundColor: 'var(--yard-accent, #339cff)' } : undefined}
       onChange={event => preferences.edit(setting, event.target.checked as PreferenceValues[K])} />
   </Row>;
 }

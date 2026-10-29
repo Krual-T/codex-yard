@@ -2,11 +2,16 @@ export interface SettingsSearchItem { id: string; label: string }
 
 export const settingsSearchItems: Record<string, readonly SettingsSearchItem[]> = {
   'general-settings': [
+    { id: 'default-permissions', label: 'Default permissions' }, { id: 'full-access', label: 'Full access' },
+    { id: 'file-open-destination', label: 'Default file open destination' }, { id: 'close-confirmation', label: 'Confirm before closing a window' },
+    { id: 'bottom-panel', label: 'Bottom panel' }, { id: 'import-apps', label: 'Import work from other AI apps' },
     { id: 'terminal-location', label: 'Default terminal location' }, { id: 'prevent-sleep', label: 'Prevent sleep while running' },
     { id: 'auto-archive', label: 'Automatically archive inactive chats' }, { id: 'suggestions', label: 'Suggestions' },
     { id: 'language', label: 'Language' }, { id: 'educational-tips', label: 'Educational tips' },
     { id: 'plain-text', label: 'Plain text composer' }, { id: 'context-usage', label: 'Show context window usage' },
-    { id: 'send-message', label: 'Send message' }, { id: 'follow-up', label: 'Follow-up messages' },
+    { id: 'send-message', label: 'Send shortcut' }, { id: 'follow-up', label: 'Follow-up messages' },
+    { id: 'turn-notifications', label: 'Turn completion notifications' }, { id: 'permission-notifications', label: 'Enable permission notifications' },
+    { id: 'question-notifications', label: 'Enable question notifications' }, { id: 'dot-notifications', label: 'Enable dot notifications' },
   ],
   appearance: [
     { id: 'ui-font-size', label: 'Interface font size' }, { id: 'code-font-size', label: 'Code font size' },

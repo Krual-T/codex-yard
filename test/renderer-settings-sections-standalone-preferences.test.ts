@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
-import { Preferences, defaultThemes, exportTheme, importTheme, mergeImportedTheme } from '../src/renderer/settings/preferences.ts';
+import { Preferences, defaultThemes, exportTheme, fullAccessVisible, importTheme, mergeImportedTheme, setFullAccessVisible } from '../src/renderer/settings/preferences.ts';
 import { assertPreferenceExpectation } from '../src/native/protocol.ts';
 import { createPreferenceWrites } from '../src/native/preference-writes.ts';
 import { createStateMutations } from '../src/native/state-mutations.ts';
@@ -39,6 +39,114 @@ class FakeClient implements WorkbenchClient {
     throw new Error(`Unknown ${endpoint}`);
   }
 }
+
+test('General uses the original atom and global keys, defaults, and conditional writes', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  client.atoms['composer-permission-mode-visibility'] = { 'full-access': true, legacy: { other: 7 } };
+  client.atoms['confirm-before-close'] = 'always';
+  client.globals['notifications-permissions-enabled'] = false;
+  await prefs.load();
+  let snapshot = prefs.getSnapshot();
+  assert.equal(fullAccessVisible(snapshot['composer-permission-mode-visibility'].value), true);
+  assert.equal(snapshot['app-shell-bottom-panel-launcher-visible'].value, true);
+  assert.equal(snapshot['confirm-before-close'].value, 'always');
+  assert.equal(snapshot['notifications-turn-mode'].value, 'unfocused');
+  assert.equal(snapshot['notifications-permissions-enabled'].value, false);
+  prefs.edit('composerPlainTextMode', true);
+  prefs.edit('composer-permission-mode-visibility', setFullAccessVisible(snapshot['composer-permission-mode-visibility'].value, false));
+  assert.equal(await prefs.saveOne('composer-permission-mode-visibility'), true);
+  assert.deepEqual(client.atoms['composer-permission-mode-visibility'], { 'full-access': false, legacy: { other: 7 } });
+  assert.deepEqual(client.calls.find(call => call.endpoint === 'set-persisted-atom' && call.params?.key === 'composer-permission-mode-visibility')?.params?.expected,
+    { exists: true, value: { 'full-access': true, legacy: { other: 7 } } });
+  assert.equal(client.settings.composerPlainTextMode, false);
+  assert.equal(prefs.getSnapshot().composerPlainTextMode.value, true);
+  prefs.edit('app-shell-bottom-panel-launcher-visible', false);
+  assert.equal(await prefs.saveOne('app-shell-bottom-panel-launcher-visible'), true);
+  assert.deepEqual(client.calls.find(call => call.endpoint === 'set-persisted-atom' && call.params?.key === 'app-shell-bottom-panel-launcher-visible')?.params?.expected, { exists: false });
+  prefs.edit('confirm-before-close', 'never');
+  assert.equal(await prefs.saveOne('confirm-before-close'), true);
+  assert.equal(client.atoms['confirm-before-close'], 'never');
+  assert.equal(client.settings['confirm-before-close'], undefined);
+  prefs.edit('notifications-turn-mode', 'always');
+  assert.equal(await prefs.saveOne('notifications-turn-mode'), true);
+  assert.equal(client.globals['notifications-turn-mode'], 'always');
+  assert.deepEqual(client.calls.find(call => call.endpoint === 'set-global-state' && call.params?.key === 'notifications-turn-mode')?.params?.expected, { exists: false });
+  prefs.edit('notifications-permissions-enabled', true);
+  assert.equal(await prefs.saveOne('notifications-permissions-enabled'), true);
+  assert.deepEqual(client.calls.find(call => call.endpoint === 'set-global-state' && call.params?.key === 'notifications-permissions-enabled')?.params?.expected,
+    { exists: true, value: false });
+  snapshot = prefs.getSnapshot();
+  assert.equal(snapshot['notifications-questions-enabled'].value, true);
+  assert.equal(snapshot['notifications-dot-enabled'].value, true);
+});
+
+test('General conflict reapplication retains the newer authority and unrelated object fields', async () => {
+  const client = new FakeClient(), first = new Preferences(client), second = new Preferences(client);
+  client.atoms['composer-permission-mode-visibility'] = { 'full-access': true, preserved: 1 };
+  const stopFirst = first.start(), stopSecond = second.start();
+  await Promise.all([first.load(), second.load()]);
+  first.edit('composer-permission-mode-visibility', { 'full-access': false, preserved: 1 });
+  second.edit('composer-permission-mode-visibility', { 'full-access': true, preserved: 2, newer: { data: 'keep' } });
+  assert.equal(await second.saveOne('composer-permission-mode-visibility'), true);
+  for (const listener of client.listeners) listener({ type: 'persisted-atoms-changed', keys: ['composer-permission-mode-visibility'] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(first.getSnapshot()['composer-permission-mode-visibility'].conflict, true);
+  assert.equal(await first.saveOne('composer-permission-mode-visibility'), false);
+  first.resolveConflict('composer-permission-mode-visibility', 'draft');
+  assert.deepEqual(first.getSnapshot()['composer-permission-mode-visibility'].value,
+    { 'full-access': false, preserved: 2, newer: { data: 'keep' } });
+  assert.equal(await first.saveOne('composer-permission-mode-visibility'), true);
+  assert.deepEqual(client.atoms['composer-permission-mode-visibility'], { 'full-access': false, preserved: 2, newer: { data: 'keep' } });
+  const write = client.calls.filter(call => call.endpoint === 'set-persisted-atom' && call.params?.key === 'composer-permission-mode-visibility').at(-1);
+  assert.deepEqual(write?.params?.expected, { exists: true, value: { 'full-access': true, preserved: 2, newer: { data: 'keep' } } });
+  stopFirst(); stopSecond();
+});
+
+test('General rebases a boolean draft onto a newer legacy object without losing fields', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  client.atoms['composer-permission-mode-visibility'] = true;
+  const stop = prefs.start();
+  await prefs.load();
+  prefs.edit('composer-permission-mode-visibility', false);
+  client.atoms['composer-permission-mode-visibility'] = { 'full-access': null, future: { retained: true } };
+  for (const listener of client.listeners) listener({ type: 'persisted-atoms-changed' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(prefs.getSnapshot()['composer-permission-mode-visibility'].conflict, true);
+  assert.equal(fullAccessVisible(prefs.getSnapshot()['composer-permission-mode-visibility'].saved), true);
+  prefs.resolveConflict('composer-permission-mode-visibility', 'draft');
+  assert.deepEqual(prefs.getSnapshot()['composer-permission-mode-visibility'].value,
+    { 'full-access': false, future: { retained: true } });
+  assert.equal(await prefs.saveOne('composer-permission-mode-visibility'), true);
+  assert.deepEqual(client.atoms['composer-permission-mode-visibility'], { 'full-access': false, future: { retained: true } });
+  stop();
+});
+
+test('General preserves failed or newer drafts and rejects malformed legacy values', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  client.atoms['composer-permission-mode-visibility'] = { 'full-access': 'invalid', other: 1 };
+  await prefs.load();
+  assert.equal(prefs.getSnapshot()['composer-permission-mode-visibility'].available, false);
+  prefs.edit('composer-permission-mode-visibility', false);
+  assert.deepEqual(client.atoms['composer-permission-mode-visibility'], { 'full-access': 'invalid', other: 1 });
+  prefs.edit('app-shell-bottom-panel-launcher-visible', false);
+  client.fail = 'set-persisted-atom';
+  assert.equal(await prefs.saveOne('app-shell-bottom-panel-launcher-visible'), false);
+  assert.equal(prefs.getSnapshot()['app-shell-bottom-panel-launcher-visible'].value, false);
+  assert.match(prefs.getSnapshot()['app-shell-bottom-panel-launcher-visible'].error ?? '', /offline/);
+  client.fail = '';
+  let release: () => void = () => {};
+  client.pauseWrite = () => new Promise<void>(resolve => { release = resolve; });
+  const saving = prefs.saveOne('app-shell-bottom-panel-launcher-visible');
+  prefs.edit('app-shell-bottom-panel-launcher-visible', true);
+  release();
+  assert.equal(await saving, true);
+  assert.equal(prefs.getSnapshot()['app-shell-bottom-panel-launcher-visible'].saved, false);
+  assert.equal(prefs.getSnapshot()['app-shell-bottom-panel-launcher-visible'].value, true);
+  assert.equal(prefs.dirty, true);
+  client.pauseWrite = null;
+  assert.equal(await prefs.saveOne('app-shell-bottom-panel-launcher-visible'), true);
+  assert.equal(client.atoms['app-shell-bottom-panel-launcher-visible'], true);
+});
 
 test('preferences read existing sources and write each key to its owning store', async () => {
   const client = new FakeClient(), prefs = new Preferences(client);
