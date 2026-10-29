@@ -1,4 +1,4 @@
-import { versionAtLeast } from '../../lib/native-tool-kernel.ts';
+import { versionAtLeast } from '../../lib/codex-version.ts';
 import { userConfigTarget } from '../renderer/settings/config-target.ts';
 
 type Config = Record<string, unknown>;
