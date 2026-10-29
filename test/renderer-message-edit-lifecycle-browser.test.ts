@@ -28,6 +28,34 @@ async function fixture() {
 const options = { skip: !existsSync(chromePath) && 'An isolated headless browser is unavailable', timeout: 90_000 };
 const view = (page: Page, name: 'one' | 'two') => page.locator(`[data-view="${name}"]`);
 const editor = (page: Page, name: 'one' | 'two') => view(page, name).getByRole('textbox', { name: 'Edit message text' });
+
+test('an explicitly renewed view grant restores its saved edit even when no peer acquired that thread', options, async () => {
+  const h = await fixture();
+  try {
+    const page = await h.open(), input = editor(page, 'one');
+    await input.waitFor();
+    await input.fill('Main edit retained while Mini uses another thread');
+    await savedText(page, 'Main edit retained while Mini uses another thread');
+    await page.evaluate(() => {
+      window.editAuthorityHarness.freeze('one');
+      window.editAuthorityHarness.setEditable('one', false);
+      window.editAuthorityHarness.setEditable('two', false);
+    });
+    await page.evaluate(() => window.editAuthorityHarness.flush('one'));
+    await page.evaluate(() => window.editAuthorityHarness.handoff('one'));
+    assert.equal(await input.count(), 0);
+    assert.equal(await page.evaluate(() => window.editAuthorityHarness.owner('one')), false);
+    assert.equal(await page.evaluate(() => window.editAuthorityHarness.owner('two')), false);
+    await page.evaluate(() => window.editAuthorityHarness.restore());
+    assert.equal(await input.count(), 0, 'Observing a newer projection grants no edit authority');
+    await page.evaluate(() => window.editAuthorityHarness.setEditable('one', true));
+    await input.waitFor();
+    assert.equal(await input.inputValue(), 'Main edit retained while Mini uses another thread');
+    await input.fill('Main resumed under its new grant');
+    await savedText(page, 'Main resumed under its new grant');
+    assert.equal(await page.evaluate(() => window.editAuthorityHarness.owner('two')), false);
+  } finally { await h.browser.close(); }
+});
 async function savedText(page: Page, text: string) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {

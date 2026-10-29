@@ -67,6 +67,8 @@ export type MessageEditRebaseCandidate = {
 };
 
 export type StandaloneMessagesRecoveryProps = {
+  /** Keep observing shared recovery while this view has yielded its edit grant. */
+  editEnabled?: boolean;
   editRecovery?: MessageEditRecovery | null;
   editAccess?: MessageEditAccess;
   /** A null value clears only the specified origin and version. */
@@ -135,7 +137,7 @@ const recoveryKey = (origin: MessageEditOrigin) => JSON.stringify([origin.hostId
 const newRecoveryId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
 const recoveryVersion = (session: EditingSession): MessageEditRecoveryVersion => ({ sessionId: session.sessionId, revision: session.revision });
 
-export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? null, threadIdentity, editRecovery, editAccess, onEditDraftChange, onEditNavigationController,
+export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? null, threadIdentity, editEnabled = true, editRecovery, editAccess, onEditDraftChange, onEditNavigationController,
   editRebase, onPrepareEditRebase, onCommitEditRebase }: StandaloneMessagesRecoveryProps & {
   hostId: string; thread: ThreadSummary | null; threadId?: string | null; threadIdentity: string;
 }) {
@@ -156,6 +158,8 @@ export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? nul
   const rebaseChecks = useRef(new Map<number, symbol>());
   const activeIdentity = useRef(threadIdentity);
   const mounted = useRef(false);
+  const enabled = useRef(editEnabled), previousEnabled = useRef(editEnabled);
+  enabled.current = editEnabled;
   const cancelAcquisition = useCallback((attempt: PendingAcquisition) => {
     if (attempt.state !== 'pending') return;
     attempt.state = 'cancelled';
@@ -167,6 +171,15 @@ export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? nul
     return () => { mounted.current = false; for (const attempt of acquisitions.current.values()) cancelAcquisition(attempt); };
   }, [cancelAcquisition]);
   useLayoutEffect(() => editAccess?.subscribe(() => setAccessEpoch(value => value + 1)), [editAccess]);
+  useLayoutEffect(() => {
+    if (!editEnabled) for (const attempt of acquisitions.current.values()) cancelAcquisition(attempt);
+    else if (!previousEnabled.current) {
+      // An explicit new parent grant may return without any peer having acquired
+      // this thread. Its former handoff marker cannot block its own recovery.
+      yieldedRecovery.current.delete(threadIdentity);
+    }
+    previousEnabled.current = editEnabled;
+  }, [cancelAcquisition, editEnabled, threadIdentity]);
   const nextEditId = useRef(0);
   const putSession = useCallback((identity: string, session: EditingSession | null) => {
     const next = new Map(sessionsRef.current);
@@ -249,13 +262,13 @@ export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? nul
     if (!hasVersion && !attachmentRecoveryInvalid) publishSession(session);
   }, [publishSession, putSession]);
   const currentAcquisition = useCallback((attempt: PendingAcquisition) => {
-    if (attempt.state !== 'pending' || acquisitions.current.get(attempt.identity) !== attempt || !mounted.current
+    if (!enabled.current || attempt.state !== 'pending' || acquisitions.current.get(attempt.identity) !== attempt || !mounted.current
       || activeIdentity.current !== attempt.identity || frozenSessions.current.has(attempt.identity)) return false;
     try { attempt.authority(); return true; } catch { return false; }
   }, []);
   const startEditRef = useRef<(session: StartEdit) => void>(() => {});
   const startEdit = useCallback((session: StartEdit) => {
-    if (sessionsRef.current.has(session.identity) || acquisitions.current.has(session.identity) || frozenSessions.current.has(session.identity)) return;
+    if (!enabled.current || sessionsRef.current.has(session.identity) || acquisitions.current.has(session.identity) || frozenSessions.current.has(session.identity)) return;
     if (activeRecovery && activeRecovery.origin.hostId === session.origin.hostId && activeRecovery.origin.threadId === session.origin.threadId
       && dismissedRecovery.current.get(session.identity) !== recoveryKey(activeRecovery.origin)) {
       yieldedRecovery.current.delete(session.identity);
@@ -298,6 +311,7 @@ export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? nul
   }, [activeRecovery, cancelAcquisition, currentAcquisition, editAccess, publishSession, putSession, restoreSession, thread]);
   startEditRef.current = startEdit;
   const updateEdit = useCallback<UpdateEdit>((id, update) => {
+    if (!enabled.current) return;
     const current = findSession(id);
     if (!current || (editAccess && !editAccess.owns(current.origin)) || current.pending || current.sent || current.attachmentRecoveryInvalid || frozenSessions.current.has(current.identity)) return;
     const result = update(current);
@@ -307,6 +321,7 @@ export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? nul
     if (changed) publishSession(next);
   }, [editAccess, findSession, publishSession, putSession]);
   const endEdit = useCallback((id: number, submitted = false) => {
+    if (!enabled.current) return;
     const current = findSession(id);
     if (!current || (editAccess && !editAccess.owns(current.origin)) || frozenSessions.current.has(current.identity) || current.rebaseChecking || (current.pending && !submitted)) return;
     const authority = editAccess?.capture(current.origin);
@@ -325,6 +340,7 @@ export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? nul
     });
   }, [editAccess, findSession, notifyRecovery, putSession]);
   const submitEdit = useCallback((id: number, submit: NonNullable<StandaloneMessagesProps['onEdit']>) => {
+    if (!enabled.current) return;
     const current = findSession(id);
     if (!current || (editAccess && !editAccess.owns(current.origin)) || current.pending || current.sent || current.rebaseChecking || current.attachmentRecoveryInvalid || frozenSessions.current.has(current.identity)) return;
     const result = applyTextEdits(current.draft, current.edits, current.addedText, current.removedAttachments);
@@ -368,6 +384,7 @@ export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? nul
     if (current) putSession(current.identity, { ...current, rebaseChecking: false, error: '' });
   }, [findSession, putSession]);
   const startRebase = useCallback((id: number) => {
+    if (!enabled.current) return;
     const current = findSession(id);
     if (!current || (editAccess && !editAccess.owns(current.origin)) || current.pending || current.sent || current.rebaseChecking || current.attachmentRecoveryInvalid
       || frozenSessions.current.has(current.identity) || !onPrepareEditRebase || !onCommitEditRebase || !recoveryCallback.current) return;
@@ -416,6 +433,7 @@ export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? nul
     })();
   }, [editAccess, findSession, notifyRecovery, onCommitEditRebase, onPrepareEditRebase, putSession]);
   useEffect(() => {
+    if (!editEnabled) return;
     if (!activeRecovery) { dismissedRecovery.current.delete(threadIdentity); failedRecovery.current.delete(threadIdentity); return; }
     const requested = activeRecovery.origin;
     if (!thread || requested.hostId !== hostId || requested.threadId !== thread.id || sessionsRef.current.has(threadIdentity)
@@ -452,7 +470,7 @@ export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? nul
       if (mounted.current) setAccessError(`Could not read the saved message edit: ${errorMessage(reason, 'Unknown error.')}`);
     });
     return () => { cancelAcquisition(attempt); };
-  }, [accessEpoch, activeRecovery, cancelAcquisition, currentAcquisition, editAccess, hostId, restoreSession, thread, threadIdentity]);
+  }, [accessEpoch, activeRecovery, cancelAcquisition, currentAcquisition, editAccess, editEnabled, hostId, restoreSession, thread, threadIdentity]);
   const freeze = useCallback((): MessageEditNavigationLease | null => {
     if (!mounted.current) throw new Error('The message editor is no longer mounted.');
     const identity = activeIdentity.current;
@@ -553,8 +571,8 @@ export function useMessageEditing({ hostId, thread, threadId = thread?.id ?? nul
     return () => { onEditNavigationController?.(null); };
   }, [navigationController, onEditNavigationController]);
   const activeSession = sessions.get(threadIdentity) ?? null;
-  const editingHere = activeSession && (!editAccess || editAccess.owns(activeSession.origin)) ? activeSession : null;
-  const accessRestricted = Boolean(editAccess && thread && !editAccess.available({ hostId, threadId: thread.id }));
+  const editingHere = editEnabled && activeSession && (!editAccess || editAccess.owns(activeSession.origin)) ? activeSession : null;
+  const accessRestricted = !editEnabled || Boolean(editAccess && thread && !editAccess.available({ hostId, threadId: thread.id }));
   const recoveryAvailable = Boolean(editingHere && (onEditDraftChange
     || (editRecovery && recoveryKey(editRecovery.origin) === recoveryKey(editingHere.origin))));
   const rebaseRequired = Boolean(editingHere && editRebase && recoveryKey(editRecovery?.origin ?? editRebase.origin) === recoveryKey(editingHere.origin)

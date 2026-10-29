@@ -69,11 +69,12 @@ const controllers: Partial<Record<'one' | 'two', MessageEditNavigationController
 const leases: Partial<Record<'one' | 'two', MessageEditNavigationLease>> = {};
 const root = createRoot(document.getElementById('root')!);
 const visible = { one: true, two: true };
+const editable = { one: true, two: true };
 let suppliedRecovery: MessageEditRecovery | null = null;
 
 function render() {
   const view = (name: 'one' | 'two') => visible[name] ? createElement('section', { 'data-view': name, key: name },
-    createElement(StandaloneMessages, { client, hostId: origin.hostId, thread, editRecovery: suppliedRecovery, editAccess: access[name],
+    createElement(StandaloneMessages, { client, hostId: origin.hostId, thread, editEnabled: editable[name], editRecovery: suppliedRecovery, editAccess: access[name],
       editHistory: { order: 'ascending', tailComplete: true },
       onEditNavigationController: value => { if (value) controllers[name] = value; else delete controllers[name]; },
       onEditDraftChange: async (value, target, version, authority) => {
@@ -134,6 +135,7 @@ Object.assign(window, { editAuthorityHarness: {
   readWaiting: () => readWaiting,
   releaseRead: () => { releaseRead?.(); releaseRead = undefined; readWaiting = false; },
   show: (name: 'one' | 'two', value: boolean) => { visible[name] = value; render(); },
+  setEditable: (name: 'one' | 'two', value: boolean) => { editable[name] = value; flushSync(render); },
   acquire: (name: 'one' | 'two') => access[name].acquire(origin),
   waiting: () => waiting,
   targetValid: (value: boolean) => { targetValid = value; },

@@ -32,6 +32,7 @@ declare global {
       readWaiting(): boolean;
       releaseRead(): void;
       show(name: 'one' | 'two', value: boolean): void;
+      setEditable(name: 'one' | 'two', value: boolean): void;
       acquire(name: 'one' | 'two'): boolean;
       waiting(): boolean;
       targetValid(value: boolean): void;
