@@ -24,7 +24,7 @@ test('queue edit uses the composer controller and retains exact recovery receipt
     ]};
     const state = {queue:JSON.parse(sessionStorage.getItem('fixture-queue') || 'null') || structuredClone([original]),
       calls:[],listeners:new Set(),controller:null,loaded:false,mode:'success',generation:0,editing:false,pending:false,
-      pendingLink:false, gate:null, release:null, binding:true, frozen:false, owner:'draft-a'};
+      pendingLink:false, gate:null, release:null, binding:true, wrongHost:false, frozen:false, owner:'draft-a'};
     function notify(){for(const listener of state.listeners)listener({type:'mcp-notification',hostId:'local',method:'thread/queue/changed',params:{threadId:'thread'}})}
     const client = {
       async rpc(method,params){state.calls.push(method);
@@ -48,7 +48,7 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         const operation=value.controller.beginExternalOperation(captured);
         if(!operation)return null;
         const assertAuthority=()=>{if(generation!==state.generation)throw Error('fixture authority changed')};
-        return {owner:captured,operation,assertAuthority,async deleteIfUnchanged(entry,assertBeforeSend){
+        return {owner:state.wrongHost?{...captured,hostId:'other'}:captured,operation,assertAuthority,async deleteIfUnchanged(entry,assertBeforeSend){
           assertBeforeSend();
           if(state.mode==='hold')await new Promise(resolve=>state.release=resolve);
           assertBeforeSend(); state.calls.push('conditional-delete');
@@ -96,8 +96,10 @@ test('queue edit uses the composer controller and retains exact recovery receipt
   ` }, bundle: true, write: false, format: 'iife' });
   const executablePath = process.env.YARD_TEST_CHROME ?? '/usr/bin/google-chrome';
   const browser = await chromium.launch({ executablePath, headless: true, args: ['--no-sandbox', '--process-per-tab', '--disable-background-networking'] });
+  const errors: string[] = [];
   const openPage = async (context: import('playwright-core').BrowserContext) => {
     const page = await context.newPage();
+    page.on('pageerror', error => errors.push(error.message));
     page.setDefaultTimeout(8_000);
     await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }));
     await page.goto('http://localhost/');
@@ -251,6 +253,17 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         assert.ok(!(await page.evaluate(() => (window as any).fixture.state.calls)).includes('thread/queue/delete'));
       } finally { await context.close(); }
     });
+    await t.test('a binding for a different host is rejected before deletion', async () => {
+      const { context, page } = await open();
+      try {
+        await page.evaluate(() => { (window as any).fixture.state.wrongHost = true; });
+        await edit(page).click();
+        await page.getByRole('alert').filter({ hasText: '原队列和输入区身份不一致' }).waitFor();
+        assert.equal(await page.evaluate(() => (window as any).fixture.state.queue.length), 1);
+        assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.includes('conditional-delete')), false);
+        assert.equal(await page.evaluate(async () => (await (window as any).fixture.readUnknownQueueRecovery('local', 'thread')).edits.length), 0);
+      } finally { await context.close(); }
+    });
     await t.test('two pages share the original recovery atom for one in-flight entry', async () => {
       const { context, page } = await open();
       try {
@@ -268,5 +281,6 @@ test('queue edit uses the composer controller and retains exact recovery receipt
         await page.waitForFunction(() => (window as any).fixture.state.controller.snapshot()?.draft.text === 'hello\nworld');
       } finally { await context.close(); }
     });
+    assert.deepEqual(errors, []);
   } finally { await browser.close(); }
 });
