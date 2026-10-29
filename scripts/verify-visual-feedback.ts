@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { createServer } from 'node:http';
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from 'node:fs/promises';
+import { userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
@@ -21,13 +22,14 @@ const output = resolve(process.env.AGENTS_VISUAL_OUTPUT || join(source, '.local/
 const binary = process.env.AGENTS_VISUAL_CODEX_BIN || 'codex';
 const chrome = process.env.AGENTS_BROWSER_EXECUTABLE || process.env.AGENTS_TEST_CHROMIUM || '/usr/bin/google-chrome';
 const inherited = { ...process.env };
+const existingIsolation = process.argv.includes('--existing-isolation');
 const root = await mkdtemp('/tmp/yard-visual-');
 const home = join(root, 'home'), codexHome = join(root, 'codex'), workspace = join(root, 'workspace'), dataDir = join(root, 'data');
 const env: Record<string, string> = { PATH: inherited.PATH || '/usr/local/bin:/usr/bin:/bin', LANG: 'C.UTF-8',
   HOME: home, CODEX_HOME: codexHome, TMPDIR: root, SHELL: '/bin/sh', ENV: '/dev/null', BASH_ENV: '/dev/null',
   XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache'), XDG_DATA_HOME: join(root, 'xdg-data') };
 const errors: string[] = [], assetErrors: string[] = [], cleanupErrors: string[] = [];
-const events: { method: string; status?: string; command?: string }[] = [];
+const events: { method: string; status?: string; command?: string; exitCode?: number; output?: string }[] = [];
 const results: Record<string, unknown> = { renderer: 'owned React + TypeScript', historicalAppUi: '26.1013.40934',
   realInference: false, personalConfig: false, sharedDaemon: false, errors, assetErrors, events,
   scope: 'Disposable CLI Unix listener, local scripted Responses provider, actual owned App and Chrome; fixed sleep command.' };
@@ -139,6 +141,20 @@ async function stopCli() {
 }
 try {
   await mkdir(output, { recursive: true });
+  if (existingIsolation) {
+    const parentUser = inherited.AGENTS_TERMINAL_PARENT_USER_NAMESPACE;
+    const parentNetwork = inherited.AGENTS_TERMINAL_PARENT_NETWORK_NAMESPACE;
+    assert.match(parentUser || '', /^user:\[\d+\]$/, 'Provide the invoking parent user namespace');
+    assert.match(parentNetwork || '', /^net:\[\d+\]$/, 'Provide the invoking parent network namespace');
+    assert.equal(process.getuid?.(), 10000, 'Existing isolation must map the disposable fixture UID');
+    assert.equal(userInfo().username, 'yard-fixture', 'Existing isolation must install the disposable fixture account');
+    assert.match((await readFile('/proc/self/uid_map', 'utf8')).trim(), /^10000\s+\d+\s+1$/);
+    const userNamespace = await readlink('/proc/self/ns/user'), networkNamespace = await readlink('/proc/self/ns/net');
+    assert.notEqual(userNamespace, parentUser); assert.notEqual(networkNamespace, parentNetwork);
+    const interfaces = (await readFile('/proc/net/dev', 'utf8')).trim().split('\n').slice(2);
+    assert.ok(interfaces.length === 1 && /^\s*lo:/.test(interfaces[0]!), 'Existing isolation must expose only loopback');
+    results.outerIsolation = { userNamespace, networkNamespace };
+  }
   for (const path of [home, codexHome, workspace, dataDir, env.XDG_CONFIG_HOME!, env.XDG_CACHE_HOME!, env.XDG_DATA_HOME!]) await mkdir(path, { mode: 0o700 });
   // Load host modules only after isolating every environment-derived default.
   for (const key of Object.keys(process.env)) delete process.env[key]; Object.assign(process.env, env);
@@ -169,10 +185,16 @@ try {
     if (message.method === 'turn/completed') turnRunning = false;
     if (message.method.startsWith('turn/') || message.method === 'thread/status/changed' || item.type === 'commandExecution') events.push({ method: message.method,
       status: typeof turn.status === 'string' ? turn.status : typeof item.status === 'string' ? item.status : typeof record(params.status).type === 'string' ? String(record(params.status).type) : undefined,
-      command: typeof item.command === 'string' ? item.command : undefined });
+      command: typeof item.command === 'string' ? item.command : undefined,
+      exitCode: typeof item.exitCode === 'number' ? item.exitCode : undefined,
+      output: typeof item.aggregatedOutput === 'string' ? item.aggregatedOutput.slice(-4000) : undefined });
   });
   const historyReady = waitForCompletion('Setup turn');
-  await native.request('turn/start', { threadId, input: [{ type: 'text', text: 'YARD_VISUAL_READY. Reply VISUAL_SESSION_READY without tools.' }] });
+  // https://learn.chatgpt.com/docs/app-server#turns
+  // An explicit outer sandbox supplies isolation in this optional verification mode.
+  await native.request('turn/start', { threadId,
+    ...(existingIsolation ? { sandboxPolicy: { type: 'externalSandbox', networkAccess: 'restricted' } } : {}),
+    input: [{ type: 'text', text: 'YARD_VISUAL_READY. Reply VISUAL_SESSION_READY without tools.' }] });
   await historyReady;
   await writeFile(join(dataDir, 'native-state.json'), JSON.stringify({ settings: { localeOverride: 'en-US' } }));
   app = await createWorkbench({ port: 0, dataDir, workspace, socketPath, codexHome,
