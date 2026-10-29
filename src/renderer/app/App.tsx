@@ -33,6 +33,10 @@ import type { SettingsContext, SettingsOrigin } from './settings-origin.ts';
 import { SendRecoveryStore, sendsAtom, sendThreadKey } from './send-recovery.ts';
 import type { SendIntent, SendRecoverySnapshot } from './send-recovery.ts';
 import { SendRecoveryNotice } from './SendRecoveryNotice.tsx';
+import { MiniWorkspace } from './MiniWorkspace.tsx';
+import type { MiniWorkspaceController, MiniWorkspaceDefaultTarget, MiniWorkspaceLease } from './MiniWorkspace.tsx';
+import type { MiniActivity, MiniHostConnection } from '../mini/index.tsx';
+import { readMiniTarget } from '../mini/mini-draft-identity.ts';
 import { StandaloneBrowser } from '../browser/index.tsx';
 import { browserOwnerKey } from '../browser/comments.ts';
 import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference, syncBrowserDraftDeletions, watchBrowserDraftDeletions } from './browser-draft.ts';
@@ -88,6 +92,12 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const connectionReadGeneration = useRef(0);
   const transportIdentity = useRef({ bridge: 'connecting', bridgeRevision: 0, hosts: {} as Record<string, { state: string; revision: number }> });
   const mainGrantRevision = useRef(0);
+  const mainHeldByMini = useRef(false);
+  const [mainEditable, setMainEditable] = useState(true);
+  const [miniMounted, setMiniMounted] = useState(false);
+  const miniController = useRef<MiniWorkspaceController | null>(null);
+  const miniNavigationLease = useRef<MiniWorkspaceLease | null>(null);
+  const receiveMiniController = useCallback((controller: MiniWorkspaceController | null) => { miniController.current = controller; }, []);
   const mainSubmissionAuthorities = useRef(new WeakMap<() => void, {
     daemon: ReturnType<BrowserWorkbenchClient['captureDaemonConnection']>;
     acceptCreated(threadId: string, navigation: number): void;
@@ -174,11 +184,13 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         if (!current.section && current.hostId === editLease.origin.hostId && current.threadId === editLease.origin.threadId) editLease.release();
         else editLease.handoff();
       }
+      miniNavigationLease.current?.handoff();
     } catch (cause) {
       editLease?.release();
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       navigationLease.current = null;
+      miniNavigationLease.current?.release(); miniNavigationLease.current = null;
       releaseEditAcquisitionFreeze.current?.(); releaseEditAcquisitionFreeze.current = null;
       composerNavigationLease.current?.release(); composerNavigationLease.current = null; navigationLocked.current = false;
       committedNavigation.current = null;
@@ -217,6 +229,41 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   }, []);
   const receiveComposerSnapshot = useCallback((value: ComposerDraftSnapshot) => setComposerSnapshot(value), []);
   const receiveComposerController = useCallback((controller: ComposerDraftController | null) => { composerController.current = controller; }, []);
+  const freezeMain = useCallback((): MiniWorkspaceLease => {
+    if (mainHeldByMini.current || navigationLocked.current || inFlight.current) throw new Error('主输入仍在处理，请稍后打开 Mini。');
+    const source = routeRef.current;
+    let editLease: MessageEditNavigationLease | null = null, draftLease: ComposerDraftLease | null = null;
+    let unfreeze: (() => void) | null = null;
+    mainHeldByMini.current = true; mainGrantRevision.current++;
+    try {
+      unfreeze = source.threadId && !source.section ? editAccess.freezeAcquisition({ hostId: source.hostId, threadId: source.threadId }) : null;
+      editLease = messageEditController.current?.freeze() ?? null;
+      const controller = composerController.current, snapshot = controller?.snapshot();
+      if (controller && (!snapshot || !(draftLease = controller.freeze(snapshot.owner)))) throw new Error('主输入尚不能保存，Mini 未打开。');
+      flushSync(() => setMainEditable(false));
+    } catch (cause) {
+      draftLease?.release(); editLease?.release(); unfreeze?.(); mainHeldByMini.current = false; mainGrantRevision.current++;
+      setMainEditable(true); throw cause;
+    }
+    let active = true, flushed = false, handedOff = false;
+    return {
+      async flush() {
+        if (!active) return false;
+        await editLease?.flush();
+        flushed = draftLease ? await draftLease.flush() : true;
+        return flushed;
+      },
+      handoff() {
+        if (!active || !flushed) throw new Error('主输入尚未保存，不能移交 Mini。');
+        if (!handedOff) { editLease?.handoff(); handedOff = true; }
+      },
+      release() {
+        if (!active) return;
+        active = false; draftLease?.release(); editLease?.release(); unfreeze?.();
+        mainHeldByMini.current = false; mainGrantRevision.current++; setMainEditable(true);
+      },
+    };
+  }, [editAccess]);
   const sendReadGeneration = useRef(0);
   const reloadSends = useCallback(async () => {
     const generation = ++sendReadGeneration.current;
@@ -322,17 +369,20 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       navigationLocked.current = true;
       let accepted = false;
       try {
+        miniNavigationLease.current = miniController.current?.freeze() ?? null;
+        if (miniController.current && !miniNavigationLease.current) return false;
         const originalRoute = routeRef.current;
-        releaseEditAcquisitionFreeze.current = !originalRoute.section && originalRoute.threadId
+        releaseEditAcquisitionFreeze.current = !mainHeldByMini.current && !originalRoute.section && originalRoute.threadId
           ? editAccess.freezeAcquisition({ hostId: originalRoute.hostId, threadId: originalRoute.threadId }) : null;
-        navigationLease.current = messageEditController.current?.freeze() ?? null;
+        navigationLease.current = mainHeldByMini.current ? null : messageEditController.current?.freeze() ?? null;
         const composer = composerController.current, snapshot = composer?.snapshot();
         const borrowed = targetChange.current?.controller === composer ? targetChange.current.lease : undefined;
-        composerNavigationLease.current = snapshot ? composer!.freeze(snapshot.owner, borrowed) : null;
-        if (composer && (!snapshot || !composerNavigationLease.current)) return false;
+        composerNavigationLease.current = !mainHeldByMini.current && snapshot ? composer!.freeze(snapshot.owner, borrowed) : null;
+        if (!mainHeldByMini.current && composer && (!snapshot || !composerNavigationLease.current)) return false;
         // Apply native inert before the first await so input cannot change while
         // the message, composer and file transactions are being drained.
         flushSync(() => setLeaving(true));
+        if (miniNavigationLease.current && !await miniNavigationLease.current.flush()) return false;
         await navigationLease.current?.flush();
         if (composerNavigationLease.current && !await composerNavigationLease.current.flush()) return false;
         if (settingsGuard.current && !await settingsGuard.current.requestLeave()) return false;
@@ -346,6 +396,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         return true;
       } catch (cause) { accepted = false; setError(String(cause)); return false; }
       finally { if (!accepted) {
+        miniNavigationLease.current?.release(); miniNavigationLease.current = null;
         navigationLease.current?.release(); navigationLease.current = null;
         releaseEditAcquisitionFreeze.current?.(); releaseEditAcquisitionFreeze.current = null;
         composerNavigationLease.current?.release(); composerNavigationLease.current = null; navigationLocked.current = false; setLeaving(false);
@@ -353,6 +404,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     }, (committed, cause) => {
       if (!committed) {
         committedNavigation.current = null;
+        miniNavigationLease.current?.release(); miniNavigationLease.current = null;
         navigationLease.current?.release(); navigationLease.current = null;
         releaseEditAcquisitionFreeze.current?.(); releaseEditAcquisitionFreeze.current = null;
         composerNavigationLease.current?.release(); composerNavigationLease.current = null;
@@ -597,6 +649,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const allowFirstTurn = !origin && action.type === 'send';
     const activeCwd = retry?.cwd ?? (thread?.cwd || cwd || workspace);
     const requireCurrent = (threadId: string | null) => {
+      if (mainHeldByMini.current) throw new Error('输入使用权已交给 Mini，原稿已保留。');
       daemon.assertOriginal();
       earlyAuthority?.();
       const connection = transportIdentity.current;
@@ -745,7 +798,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const owner = composerController.current?.snapshot()?.owner;
     if (!owner) throw new Error('原输入目标尚未确认，未停止任务。');
     const assertAuthority = captureMainSubmissionAuthority(owner);
-    await client.rpc('turn/interrupt', { threadId: current.threadId, turnId: active.id }, current.hostId, { assertBeforeSend: () => {
+    await client.rpc('turn/interrupt', { threadId: current.threadId, turnId: active.id }, current.hostId, {
+      daemonConnectionGeneration: mainSubmissionAuthorities.current.get(assertAuthority)!.daemon.generation, assertBeforeSend: () => {
       assertAuthority();
       if (!threadRef.current?.turns.some(turn => turn.id === active.id && turn.status === 'inProgress')) throw new Error('原任务已改变，未停止其他任务。');
     } });
@@ -798,6 +852,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     let expected = original, generation = navigationGeneration.current, controller = composerController.current;
     const checkConnection = () => {
       daemon.assertOriginal();
+      if (mainHeldByMini.current) throw new Error('输入使用权已交给 Mini，原稿已保留。');
       const connection = transportIdentity.current;
       if (connection.bridge !== 'connected' || connection.bridgeRevision !== bridgeRevision
         || connection.hosts[original.hostId]?.state !== 'connected' || connection.hosts[original.hostId]?.revision !== hostRevision
@@ -894,6 +949,44 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       if (controller === composerController.current) setPanelOpen(false);
     } finally { operation.finish(accepted); }
   };
+  const resolveMiniTarget = async (identity: { hostId: string; threadId: string | null }): Promise<MiniWorkspaceDefaultTarget> => {
+    if (!hostCatalogConfirmed.current || !hosts.some(host => host.hostId === identity.hostId)) throw new Error('Mini 原执行主机尚未核实。');
+    const original = client.captureDaemonConnection(identity.hostId);
+    const projects = await client.host<ProjectState>('thread-project-state'); original.assertOriginal();
+    const catalog = projectsForHost(projects, identity.hostId);
+    if (identity.threadId) {
+      const result = await client.rpc<{ thread: ThreadSummary }>('thread/read', { threadId: identity.threadId, includeTurns: false }, identity.hostId,
+        { daemonConnectionGeneration: original.generation, assertBeforeSend: original.assertOriginal });
+      original.assertOriginal();
+      if (result.thread.id !== identity.threadId || !result.thread.cwd) throw new Error('Mini 原会话和目录无法核对。');
+      const readOnly = await readThreadArchived(client, { hostId: identity.hostId, threadId: identity.threadId }); original.assertOriginal();
+      const project = projectForThread(projects, catalog, identity.hostId, result.thread);
+      return { ...identity, cwd: result.thread.cwd, ...(project ? { projectId: project.id } : {}), readOnly };
+    }
+    const pointer = readMiniTarget();
+    const samePointer = pointer?.hostId === identity.hostId && pointer.threadId === null;
+    const root = samePointer ? pointer.cwd : identity.hostId === routeRef.current.hostId ? threadRef.current?.cwd || cwd || workspace : '';
+    const projectId = samePointer ? pointer.projectId : selectedProjectRef.current?.hostId === identity.hostId ? selectedProjectRef.current.id : undefined;
+    if (!root || projectId && !catalog.some(project => project.id === projectId)) throw new Error('Mini 原草稿的目录或项目已改变，请保留原稿并核对。');
+    const metadata = await client.host<{ isDirectory: boolean }>('read-file-metadata', { hostId: identity.hostId, path: root, cwd: root }); original.assertOriginal();
+    if (!metadata.isDirectory) throw new Error('Mini 原草稿的工作目录不可用。');
+    return { ...identity, cwd: root, ...(projectId ? { projectId } : {}), readOnly: false };
+  };
+  const miniHostConnections = Object.fromEntries(hosts.map(host => {
+    const source = transportIdentity.current.hosts[host.hostId];
+    const state: MiniHostConnection['state'] = source?.state === 'connected' ? 'connected' : source?.state === 'disconnected' ? 'disconnected' : 'connecting';
+    return [host.hostId, { state, fresh: bridgeStatus === 'connected' && hostCatalogReady && !!source,
+      revision: JSON.stringify([transportIdentity.current.bridgeRevision, source?.revision ?? null]) } satisfies MiniHostConnection];
+  }));
+  const miniActivities: MiniActivity[] = threads.map(row => {
+    const active = sessions.view({ hostId: row.hostId, threadId: row.id }).snapshot().thread ?? row;
+    return { hostId: row.hostId, threadId: row.id, title: title(active),
+      status: isThreadBusy(active) ? 'running' : requests.some(entry => entry.current && record(entry.request.params).threadId === row.id
+        && entry.request.ref.hostId === row.hostId) ? 'waiting' : 'idle' };
+  });
+  useEffect(() => {
+    if (workspace && sendState && hostCatalogReady && (!current.threadId || thread)) setMiniMounted(true);
+  }, [workspace, sendState, hostCatalogReady, current.threadId, thread]);
   const turnDiff = [...thread?.turns ?? []].reverse().map(turn => record(turn).diff).find(value => typeof value === 'string') as string | undefined;
   const addProject = () => {
     const path = prompt('Project directory'); if (!path) return;
@@ -944,6 +1037,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       onRefresh={() => { void list.refresh(); }} onLoadMore={() => { void list.loadMore(); }} onRetryProjectLookup={() => { void reloadProjects().catch(cause => setError(String(cause))); }} />}
     <main className="yard-main">
       <header className="yard-toolbar"><button aria-label="Toggle sidebar" onClick={() => setSidebar(value => !value)}>◧</button>
+        <button type="button" aria-label="Open Mini" disabled={!miniMounted} onClick={() => {
+          void client.host('pet-overlay', { message: { type: 'avatar-overlay-open', isOpen: false } }).catch(cause => setError(String(cause)));
+        }}>Mini</button>
         <div className="yard-tab-strip" role="tablist" aria-label="Workspace tabs">{tabs.map((tab, index) => {
           const slot = document.documentElement.dir === 'rtl' ? tabs.length - index : index + 1;
           return <div className="yard-tab" key={tab.hostId + ':' + tab.id}><button role="tab" aria-selected={tab.id === current.threadId && tab.hostId === current.hostId} onClick={() => { void openTab(tab); }}>{tab.title}{shortcuts.hints === 'tabs' && slot <= 9 && <kbd>{shortcuts.label('tabs', slot as NumberShortcutSlot)}</kbd>}</button><button aria-label={'Close ' + tab.title} onClick={() => setTabs(previous => previous.filter(item => item !== tab))}>×</button></div>;
@@ -969,11 +1065,12 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       </header>
       {error && <div role="alert" className="yard-error">{error}<button onClick={() => { setError(''); navigation.current?.replaceCurrentURL(location.href); setRefresh(value => value + 1); setNavigationFactsEpoch(value => value + 1); }}>Retry</button><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
       {browserSyncError && <div role="alert" className="yard-error">{browserSyncError}<button onClick={() => setBrowserSyncRetry(value => value + 1)}>Retry browser reference sync</button></div>}
+      <div inert={leaving || !mainEditable}>
       {Object.entries(browserProjectionState).map(([key, receipt]) => <BrowserDraftRecoveryNotice key={key} before={receipt.before} snapshot={receipt.after}
         onAccept={() => acceptBrowserCommittedVersion(receipt.before, receipt.after)} onDiscard={() => releaseBrowserProjection(receipt.after)} />)}
       {Object.values(sendState?.requests ?? {}).map(intent => <SendRecoveryNotice key={intent.id} intent={intent}
         canCheckInjectionReceipt={sendStore.hasConfirmedInjectionReceipt(intent)}
-        canRetry={!submitting && !loading && canRetryAction(intent) && !current.readOnly && current.hostId === intent.owner.hostId && current.threadId === intent.threadId
+        canRetry={mainEditable && !submitting && !loading && canRetryAction(intent) && !current.readOnly && current.hostId === intent.owner.hostId && current.threadId === intent.threadId
           && (intent.threadId !== null || newDraftId === intent.owner.draftId)}
         onOpen={async () => {
           if (intent.threadId) { await openThread(intent.threadId, intent.owner.hostId, false); return; }
@@ -987,8 +1084,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         onRetry={() => submit(intent.draft, intent.options, intent.action ?? { type: 'send' }, undefined,
           { owner: intent.owner, revision: intent.revision, overrides: intent.overrides }, intent)}
         onFinish={() => finishSend(intent)} onCancel={async () => { await sendStore.cancel(intent.id); await reloadSends(); }} />)}
+      </div>
       <div className="yard-workspace" data-panel-open={panelOpen && !settings}>
-      <div className="yard-chat-pane">
+      <div className="yard-chat-pane" inert={leaving || !mainEditable}>
       {settings ? <InstructionEditorTheme.Provider value={panelAppearance.theme}><StandaloneSettings client={client} hostId={current.hostId}
         projectRoots={settingsContext.projectRoots} sessionCwd={settingsContext.sessionCwd} InstructionEditor={SettingsInstructionEditor}
         scopeStatus={{ state: settingsSource.key === settingsSourceKey ? settingsSource.state : 'loading',
@@ -998,7 +1096,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         {current.threadId && <header className="yard-conversation-header"><strong>{thread?.name || threads.find(item => item.id === current.threadId)?.name || 'Conversation'}</strong><span>{thread?.cwd}</span><button aria-label="Conversation menu" onClick={() => setMenu(value => !value)}>•••</button>{menu && <div className="yard-menu" role="menu">{['rename', 'fork', 'copy', 'archive'].map(name => <button role="menuitem" key={name} onClick={() => { void action(name); }}>{name === 'copy' ? 'Copy conversation link' : name[0]!.toUpperCase() + name.slice(1)}</button>)}</div>}</header>}
         <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')} inert={leaving}>
           {streamGap && <p role="status" className="yard-stream-gap">此页面未收到连续的活动内容，正在核对会话记录。{isThreadBusy(thread) && '任务正在运行；完成后将重新读取完整记录。'}</p>}
-          {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} threadId={current.threadId} thread={thread} editRecovery={editState?.recovery ?? null} editAccess={editAccess} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
+          {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} threadId={current.threadId} thread={thread} editRecovery={editState?.recovery ?? null} editEnabled={mainEditable && !leaving} editAccess={editAccess} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
             editRebase={messageEditRebaseMarker(editState)} onPrepareEditRebase={(origin, version) => editStore.prepareRebase(origin, version)}
             onCommitEditRebase={async candidate => {
               const recovered = await editStore.commitRebase(candidate);
@@ -1038,6 +1136,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           onSubmit={(draft, options, action, description, authority) => submit(draft, options, action, undefined, description, undefined, undefined, undefined, authority)} onInterrupt={interrupt} onStartQueued={async (queuedSubmissionId, authority) => {
           if (!authority) throw Object.assign(new Error('原队列权限尚未捕获，未启动。'), { uncertain: false });
           authority();
+          const daemon = mainSubmissionAuthorities.current.get(authority)?.daemon;
+          if (!daemon) throw new Error('原队列的 daemon 连接未捕获，未启动。');
           if (!current.threadId || current.readOnly || inFlight.current || isThreadBusy(threadRef.current)) throw new Error('当前会话暂时无法启动队列。');
           const identity = { hostId: current.hostId, threadId: current.threadId }, generation = navigationGeneration.current;
           inFlight.current = true; setSubmitting(true);
@@ -1049,7 +1149,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
               if (generation !== navigationGeneration.current || route.hostId !== identity.hostId || route.threadId !== identity.threadId
                 || route.readOnly || !view.canSubmit || isThreadBusy(view.thread)) throw Object.assign(new Error('会话目标或状态已改变，队列未启动。'), { uncertain: false });
             };
-            await client.rpc('thread/queue/start', { threadId: identity.threadId, queuedSubmissionId }, identity.hostId, { assertBeforeSend });
+            await client.rpc('thread/queue/start', { threadId: identity.threadId, queuedSubmissionId }, identity.hostId,
+              { assertBeforeSend, daemonConnectionGeneration: daemon.generation });
           }
           finally { inFlight.current = false; setSubmitting(false); }
         }} />}</div></div>
@@ -1082,6 +1183,51 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       </aside>
       </div>
     </main>
+    {miniMounted && <MiniWorkspace client={client} sessions={sessions} sends={sendStore} edits={editStore} approvals={approvals}
+      activities={miniActivities} bridgeState={bridgeStatus === 'connected' ? 'connected' : bridgeStatus === 'disconnected' ? 'disconnected' : 'connecting'}
+      hostConnections={miniHostConnections} defaultTarget={{ hostId: current.hostId, threadId: current.threadId,
+        cwd: thread?.cwd || cwd || workspace, ...(selectedProject?.hostId === current.hostId ? { projectId: selectedProject.id } : {}), readOnly: current.readOnly }}
+      resolveTarget={resolveMiniTarget} captureConnection={hostId => {
+        const captured = client.captureDaemonConnection(hostId);
+        return Object.assign(() => captured.assertOriginal(), { daemonConnectionGeneration: captured.generation });
+      }} freezeMain={freezeMain} onController={receiveMiniController} initialOptions={initialOptions ?? undefined} hosts={hosts}
+      onError={setError} onOpenThread={identity => { void openThread(identity.threadId, identity.hostId); }}
+      onOpenRequest={(identity, ref) => {
+        void openThread(identity.threadId, identity.hostId).then(accepted => {
+          if (accepted) { setSelectedRequest(ref); setRequestViewHidden(false); }
+        });
+      }} onOpenSettings={() => { void navigate('/settings/personalization' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId))); }}
+      onExpand={() => {
+        void client.host('pet-overlay', { message: { type: 'avatar-overlay-open', isOpen: true } }).then(() => window.focus()).catch(cause => setError(String(cause)));
+      }} onAssignCreatedProject={async (target, created, assertAuthority) => {
+        if (!target.projectId) return;
+        assertAuthority();
+        const state = await client.host<ProjectState>('thread-project-state'); assertAuthority();
+        if (!projectsForHost(state, target.hostId).some(project => project.id === target.projectId)) throw new Error('Mini 原项目已改变，首条消息未发送。');
+        await client.host('thread-projects', { operation: 'setMembership', value: { hostId: target.hostId, threadId: created.id, projectless: false,
+          assignment: target.hostId === 'local' ? { projectKind: 'local', projectId: target.projectId }
+            : { projectKind: 'remote', projectId: target.projectId, hostId: target.hostId } } }, { assertBeforeSend: assertAuthority });
+        await reloadProjects();
+      }} onOpenFile={location => {
+        void openThread(location.threadId, location.hostId).then(accepted => {
+          if (!accepted) return;
+          const root = location.cwd || sessions.view(location).snapshot().thread?.cwd;
+          if (!root) { setError('Mini 文件的原目录无法核对。'); return; }
+          setPanelMounted(true); setPanelKind('workspace'); setPanelOpen(true);
+          setPanelRequest({ id: crypto.randomUUID(), kind: 'file', path: resolveFilePath(root, location.path), line: location.line, column: location.column,
+            hostId: location.hostId, cwd: root, scopeId: JSON.stringify([location.hostId, location.threadId]) });
+        });
+      }} onOpenVisualization={value => {
+        void openThread(value.threadId, value.hostId).then(accepted => {
+          if (accepted) { setVisualization(value); setPanelKind('visualization'); setPanelOpen(true); }
+        });
+      }} onOpenBrowser={value => {
+        void openThread(value.threadId, value.hostId).then(accepted => {
+          if (accepted) { setBrowserMounted(true); setPanelKind('browser'); setPanelOpen(true);
+            if (value.url) setBrowserNavigation({ id: crypto.randomUUID(), url: value.url }); }
+        });
+      }} onRemoveReference={(owner, reference, operation) => removeBrowserDraftReference(browserDraftOwner(owner, sendBindings.current), reference,
+        operation, retainBrowserProjection, releaseBrowserProjection)} />}
     {approvalDialog && <ApprovalDialog key={JSON.stringify(approvalDialog.request.ref)} {...approvalDialog}
       onCloseView={() => setRequestViewHidden(true)}
       onInputEscape={async origin => { await client.host('approval-request-interrupt', { ref: origin.ref, hostId: origin.hostId,

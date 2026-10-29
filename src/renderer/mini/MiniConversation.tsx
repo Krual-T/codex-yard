@@ -533,7 +533,7 @@ export function MiniConversation(props: MiniConversationProps) {
     await sourceClient.rpc('turn/interrupt', { threadId: identity.threadId, turnId: turn.id }, identity.hostId,
       { assertBeforeSend: assertAuthority, ...(daemonConnectionGeneration === undefined ? {} : { daemonConnectionGeneration }) });
   };
-  const edit = usable && props.editEnabled !== false && editState?.key === key && editState.status === 'ready' ? editState.value : null;
+  const edit = editState?.key === key && editState.status === 'ready' ? editState.value : null;
   const thread = conversation.thread?.id === target.threadId ? conversation.thread : null;
   return <div className="yard-mini-conversation" inert={frozen}>
     {target.threadId && <button type="button" className="yard-mini-conversation-open" disabled={!usable} onClick={() => props.onOpenThread({ hostId: target.hostId, threadId: target.threadId! })}>
@@ -548,6 +548,7 @@ export function MiniConversation(props: MiniConversationProps) {
     {target.threadId && <div className="yard-mini-conversation-messages" inert={!usable}>
       {conversation.loading && <p role="status">Loading conversation...</p>}
       <StandaloneMessages client={props.client} hostId={target.hostId} threadId={target.threadId} thread={thread}
+        editEnabled={usable && props.editEnabled !== false}
         editAccess={editAccess} editRecovery={edit?.recovery ?? null} editRebase={messageEditRebaseMarker(edit)} editHistory={{ order: 'ascending', tailComplete: conversation.historyComplete }}
         onEditNavigationController={receiveEditor} onEditDraftChange={(value, origin, version, authority) => props.edits.save(value, origin, version, authority)}
         onPrepareEditRebase={(origin, version) => props.edits.prepareRebase(origin, version)} onCommitEditRebase={async candidate => {
