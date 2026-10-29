@@ -646,6 +646,13 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
           <button type="button" className="yard-panel-tab-close" title={t('Close diff')} aria-label={t('Close diff')} onClick={() => closeDiff(tab.key)}><X /></button>
         </div>)}
       </div>
+      {visibleTerminals.length > 0 && <button type="button" className="yard-panel-icon" title={t('New terminal')} aria-label={t('Create terminal tab')}
+        disabled={closing} onClick={() => {
+          if (closingRef.current) return;
+          const key = JSON.stringify(['terminal', scopeId, hostId, cwd, crypto.randomUUID()]);
+          setTerminals(previous => [...previous, { key, scopeId, hostId, cwd, threadId }]);
+          select(key);
+        }}><Plus /></button>}
       {activeTerminal ? <button type="button" className="yard-panel-icon" title={t('Hide panel')} aria-label={t('Hide panel')}
         disabled={closing} onClick={onClose}><PanelRightClose /></button> : null}
       <button type="button" className="yard-panel-icon" title={t('Close panel')} aria-label={t('Close panel')} disabled={closing || tabs.some(tab => tab.saving)} onClick={() => void closePanel()}><X /></button>

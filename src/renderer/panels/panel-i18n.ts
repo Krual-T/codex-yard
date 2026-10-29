@@ -5,7 +5,7 @@ type Catalog = Record<string, string>;
 const simplified: Catalog = {
   'Workspace files':'工作区文件', 'Hide files':'隐藏文件', 'Show files':'显示文件', 'Files':'文件',
   'Refresh files':'刷新文件', 'Open workspace tabs':'打开的工作区标签页', 'Terminal':'终端',
-  'Close terminal':'关闭终端', 'Close diff':'关闭差异', 'Close panel':'关闭面板', 'Hide panel':'隐藏面板',
+  'Close terminal':'关闭终端', 'Create terminal tab':'新建终端标签页', 'Close diff':'关闭差异', 'Close panel':'关闭面板', 'Hide panel':'隐藏面板',
   'Changes':'更改', '{name} changes':'{name} 的更改', 'Close {name}':'关闭 {name}',
   'Close panel here only':'仅关闭此页面的面板', 'Save file':'保存文件', 'Reload file':'重新加载文件',
   'Download file':'下载文件', 'Add file to conversation':'将文件添加到对话', 'Review recovery':'检查恢复记录',

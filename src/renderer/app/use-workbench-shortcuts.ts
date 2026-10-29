@@ -56,7 +56,8 @@ export function useWorkbenchShortcuts(client: WorkbenchClient, actions: Shortcut
     readLayout(); keyboard?.addEventListener?.('layoutchange', readLayout);
     const clear = () => { clearTimeout(timer); timer = undefined; held = null; setHints(null); setSidebarHintKeys([]); };
     const blocked = () => current.current.blocked() || [...document.querySelectorAll('[role="dialog"], [role="menu"]')]
-      .some(element => element.getClientRects().length > 0 && !element.closest('[hidden], [inert]'));
+      // Closed details can retain a child's layout rect even though its menu is not rendered.
+      .some(element => element.getClientRects().length > 0 && !element.closest('[hidden], [inert], details:not([open])'));
     const down = (event: KeyboardEvent) => {
       if (blocked()) { clear(); return; }
       const modifier = !event.shiftKey && !event.getModifierState('AltGraph')

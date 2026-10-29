@@ -271,6 +271,17 @@ test('terminal panels use the page-owned host session and never replay input aft
   await page.waitForFunction(previous => (window as any).fixture.state.events
     .filter((message: any) => message.type === 'terminal-event' && message.event?.type === 'attached').length === previous + 1, attachedBeforeDelayedRestart);
   assert.equal(await filesToggle.evaluate(element => document.activeElement === element), true, 'A delayed restart must not steal focus');
+  const shellsBeforeNewTab = fake.calls('process/spawn').filter(call => call.params.tty).length;
+  const inputBeforeNewTab = inputs();
+  await page.getByRole('button', { name: 'Create terminal tab', exact: true }).click();
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="tab"]')].filter(tab => tab.textContent === 'Terminal').length === 2);
+  await page.waitForFunction(previous => (window as any).fixture.state.calls
+    .filter((call: any) => call.endpoint === 'terminal' && call.params.operation === 'create').length > previous, shellsBeforeNewTab);
+  await page.locator('.yard-terminal-container:not([hidden]) .xterm-rows').getByText('READY').waitFor();
+  assert.equal(fake.calls('process/spawn').filter(call => call.params.tty).length, shellsBeforeNewTab + 1);
+  assert.equal(inputs(), inputBeforeNewTab, 'A new terminal must not replay input from its sibling');
+  await page.getByRole('button', { name: 'Close terminal' }).last().click();
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="tab"]')].filter(tab => tab.textContent === 'Terminal').length === 1);
   await page.getByRole('button', { name: 'Close terminal' }).click();
   await terminalTabs.first().waitFor({ state: 'detached' });
 
