@@ -18,7 +18,9 @@ import { panelError as localizeError, usePanelText } from './panel-i18n.ts';
 import './workspace-panels.css';
 
 interface RequestScope { id: string; scopeId: string; hostId: string; cwd: string }
-export type FilePanelRequest = RequestScope & { kind: 'file'; path: string; line?: number; column?: number };
+export type FilePanelRequest = RequestScope & { kind: 'file'; path: string; line?: number; column?: number;
+  /** Original message source, used only until this file open has finished. */
+  assertCurrent?: () => void };
 /** `reuse` selects an existing terminal for a global reveal shortcut; ordinary requests create a new tab. */
 export type TerminalPanelRequest = RequestScope & { kind: 'terminal'; reuse?: boolean };
 export type DiffPanelRequest = RequestScope & { kind: 'diff'; path?: string; diff?: string };
@@ -188,14 +190,32 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     return () => window.removeEventListener('beforeunload', warn);
   }, [dirty]);
 
-  const load = useCallback((key: string, targetHost: string, path: string, loadId: number) => {
+  const load = useCallback((key: string, targetHost: string, path: string, loadId: number, assertCurrent?: () => void) => {
     void (async () => {
+      const check = assertCurrent ? () => {
+        assertCurrent();
+        if (!mounted.current || !tabsRef.current.some(tab => tab.key === key && tab.loadId === loadId)) throw new Error('The original file open has ended.');
+      } : undefined;
+      const stopped = () => {
+        try { check?.(); return false; } catch { return true; }
+      };
+      const cancelOpen = () => {
+        const tab = tabsRef.current.find(tab => tab.key === key && tab.loadId === loadId && tab.loading && !tab.content);
+        if (!tab) return;
+        updateTabs(previous => previous.filter(item => item !== tab));
+        const originalScope = JSON.stringify([tab.scopeId, tab.hostId, tab.cwd]);
+        if (selections.current.get(originalScope) === key) selections.current.delete(originalScope);
+        if (currentScope.current === originalScope && selectedRef.current === key) { selectedRef.current = undefined; setSelected(undefined); }
+      };
       let content: FileContents | undefined, readError: string | undefined;
-      try { content = await readWorkspaceFile(client, targetHost, path); }
+      try { content = await readWorkspaceFile(client, targetHost, path, check); }
       catch (error) { readError = errorMessage(error); }
+      if (stopped()) { cancelOpen(); return; }
       let recovery: FileSaveRecovery | undefined, storageError: string | undefined;
       try { recovery = await queueRecovery(key, async () => {
+        if (stopped()) return undefined;
         const stored = await readFileRecovery(key);
+        if (stopped()) return undefined;
         if (content && stored && !unresolved(stored) && stored.phase !== 'conflict' && stored.draft === stored.saved) {
           await discardFileRecovery(key, stored);
           return undefined;
@@ -203,6 +223,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
         return stored;
       }); }
       catch (error) { storageError = errorMessage(error); }
+      if (stopped()) { cancelOpen(); return; }
       if (!storageError && tabsRef.current.some(tab => tab.key === key && tab.loadId === loadId)) confirmedRecoveries.current.set(key, recovery);
       const disk = content;
       if (recovery && content?.kind !== 'text') content = { kind: 'text', text: recovery.saved };
@@ -221,7 +242,8 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     })();
   }, [client, queueRecovery, updateTabs]);
 
-  const openFile = useCallback((path: string, line?: number, column?: number) => {
+  const openFile = useCallback((path: string, line?: number, column?: number, assertCurrent?: () => void) => {
+    assertCurrent?.();
     const target = resolveFilePath(cwd, path);
     const key = JSON.stringify([scopeId, hostId, cwd, target]);
     const existing = tabsRef.current.find(tab => tab.key === key);
@@ -231,7 +253,7 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     } else {
       const loadId = ++sequence.current;
       updateTabs(previous => [...previous, { key, scopeId, hostId, cwd, path: target, loadId, loading: true, saving: false, draft: '', saved: '', revision: 0, location }]);
-      load(key, hostId, target, loadId);
+      load(key, hostId, target, loadId, assertCurrent);
     }
     select(key);
   }, [scopeId, cwd, hostId, load, select, updateTabs]);
@@ -249,7 +271,10 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
     consumedRequests.current.add(request.id);
     onRequestConsumed(request.id);
     if (request.scopeId !== scopeId || request.hostId !== hostId || request.cwd !== cwd) return;
-    if (request.kind === 'file') openFile(request.path, request.line, request.column);
+    if (request.kind === 'file') {
+      try { openFile(request.path, request.line, request.column, request.assertCurrent); }
+      catch { /* A revoked source cannot open or change an existing tab. */ }
+    }
     else if (request.kind === 'terminal') {
       const candidates = request.reuse ? terminals.filter(tab => tab.scopeId === scopeId && tab.hostId === hostId && tab.cwd === cwd) : [];
       const selectedTerminal = candidates.find(tab => tab.key === selectedRef.current);
