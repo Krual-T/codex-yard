@@ -34,6 +34,7 @@ import { createSummaryOutputPrefill } from './summary-output-prefill.ts';
 import { HomeSubagentsBanner } from './HomeSubagentsBanner.tsx';
 import { projectCreatedChats } from './thread-summary-created-chats.ts';
 import { threadOutputDirectory, useThreadSummaryOutputs } from './use-thread-summary-outputs.ts';
+import { useAppgenGate } from './use-appgen-gate.ts';
 import { sameSummarySideChat, useSummarySideChats } from './use-summary-side-chats.ts';
 import { commitSidebarProjectMembership, createSidebarProjectInventory } from './sidebar-project-inventory.ts';
 import { WorkspacePanels } from '../panels/WorkspacePanels.tsx';
@@ -119,6 +120,7 @@ function SettingsInstructionEditor(props: SettingsInstructionEditorProps) {
 export function App({ client }: { client: BrowserWorkbenchClient }) {
   const shellPreferences = useShellPreferences(client);
   const [current, setCurrent] = useState(route);
+  const appgenGate = useAppgenGate(client, current.hostId);
   const [bridgeStatus, setBridgeStatus] = useState('connecting');
   const [hostStatuses, setHostStatuses] = useState<Record<string, string>>({});
   const [sidebarAccount, setSidebarAccount] = useState<{ hostId: string; label: string } | null>(null);
@@ -1496,11 +1498,14 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const messageOutputAuthority = (hostId: string, threadId: string, cwd: string): MessageOutputPreviewAuthority => {
     const directory = threadOutputDirectory(projectState, hostId, threadId), directoryKey = JSON.stringify(directory);
     return {
-      sourceKey: JSON.stringify([summarySourceKey, navigationFactsEpoch, messageOutputProjectGeneration, hostId, threadId, cwd, directoryKey]),
+      sourceKey: JSON.stringify([summarySourceKey, navigationFactsEpoch, messageOutputProjectGeneration, hostId, threadId, cwd, directoryKey,
+        appgenGate.sourceKey, appgenGate.enabled]),
       outputDirectory: directory,
+      appgenEnabled: appgenGate.enabled,
       assertCurrent() {
         if (!messageOutputDaemon) throw new Error('The original output connection is unavailable.');
         messageOutputDaemon.assertOriginal(); assertSummaryCurrent();
+        if (appgenGate.enabled !== undefined) appgenGate.assertCurrent();
         if (projectGeneration.current !== messageOutputProjectGeneration || routeRef.current !== messageOutputPage || hostId !== messageOutputPage.hostId
           || JSON.stringify(threadOutputDirectory(projectStateRef.current, hostId, threadId)) !== directoryKey)
           throw new Error('The original output conversation or directory changed.');
@@ -1552,7 +1557,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     fallbackTitle: previewAppearance.locale.startsWith('zh') ? '侧聊' : 'Side chat', assertCurrent: assertSummaryCurrent });
   const summaryOutputs = useThreadSummaryOutputs({ client, hostId: current.hostId, threadId: current.threadId ?? '',
     snapshot: conversation, projectState, enabled: summaryOpen && !loading && !!thread && !current.section,
-    sourceKey: summarySourceKey, assertCurrent: assertSummaryCurrent });
+    appgenEnabled: appgenGate.enabled, sourceKey: JSON.stringify([summarySourceKey, appgenGate.sourceKey, appgenGate.enabled]),
+    assertCurrent() { assertSummaryCurrent(); if (appgenGate.enabled !== undefined) appgenGate.assertCurrent(); } });
   const showSummarySideChat = async (identity: Parameters<SideChatRootController['restore']>[0], recover: boolean) => {
     assertSummaryCurrent();
     if (identity.hostId !== current.hostId || identity.parentThreadId !== current.threadId) throw new Error('The side chat belongs to another conversation.');
