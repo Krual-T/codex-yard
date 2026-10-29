@@ -709,6 +709,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     setVisualization(source); setPanelKind('visualization'); setPanelOpen(true);
   };
   const showPanel = (request?: { kind: 'terminal'; reuse?: boolean } | { kind: 'file'; path: string; line?: number; column?: number } | { kind: 'diff'; path?: string; diff?: string }) => {
+    if (request?.kind === 'terminal' && status !== 'connected') {
+      setError('终端当前不可用：主机连接已断开或尚未就绪，请先重新连接。');
+      return;
+    }
     setPanelMounted(true); setPanelKind('workspace'); setPanelOpen(true);
     if (request) setPanelRequest({ ...request, id: crypto.randomUUID(), scopeId: panelScope, hostId: current.hostId, cwd: panelCwd });
   };
@@ -759,7 +763,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       void openTab(tab); return true;
     },
     toggleTerminal: () => {
-      if (current.section || !panelCwd || status !== 'connected') return false;
+      if (current.section || !panelCwd) return false;
+      if (status !== 'connected') { showPanel({ kind: 'terminal', reuse: true }); return true; }
       if (panelOpen && panelKind === 'workspace' && workspacePanels.current?.isActiveTerminal()) setPanelOpen(false);
       else showPanel({ kind: 'terminal', reuse: true });
       return true;
