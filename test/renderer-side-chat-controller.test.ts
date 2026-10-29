@@ -198,6 +198,30 @@ test('lost close response is not replayed on an idle read', async () => {
   assert.equal(restored.getSnapshot().pendingClose, true);
   assert.equal(restored.getSnapshot().phase, 'close-unknown');
   assert.equal(restored.getSnapshot().view!.close.requested, false);
+  assert.equal(restored.cancelUndispatchedClose(), false);
+  assert.equal(restored.getSnapshot().pendingClose, true);
+});
+
+test('only a locally undispatched close attempt can be cancelled', async () => {
+  const f = fixture(); await f.controller.start();
+  const view = f.controller.getSnapshot().view!;
+  const observer = new SideChatController({ hostId: 'host-a', parentThreadId: 'parent-a', draftId: 'draft-observer', port: f.port,
+    onPrepared: async () => {}, canDispatch: () => false, restored: view });
+  await observer.close();
+  assert.equal(observer.getSnapshot().pendingClose, true);
+  assert.equal(observer.cancelUndispatchedClose(), true);
+  assert.equal(observer.getSnapshot().pendingClose, false);
+  assert.equal(f.portCalls.filter(call => call === 'close').length, 0);
+
+  const deferredClose = deferred<SideChatHostView>();
+  const port = { ...f.port, close: () => deferredClose.promise };
+  const active = new SideChatController({ hostId: 'host-a', parentThreadId: 'parent-a', draftId: 'draft-active', port,
+    onPrepared: async () => {}, canDispatch: () => true, restored: view });
+  const closing = active.close();
+  assert.equal(active.cancelUndispatchedClose(), false);
+  deferredClose.reject(Error('synthetic close outcome unknown')); await closing;
+  assert.equal(active.cancelUndispatchedClose(), false);
+  assert.equal(active.getSnapshot().pendingClose, true);
 });
 
 test('lost start response cannot be cleared or replayed by reading the original waiting record', async () => {
@@ -393,7 +417,10 @@ test('close during draft linking never starts a fork and links the original oper
   const c = new SideChatController({ hostId: 'host-a', parentThreadId: 'parent-a', draftId: 'draft-a', port: f.port,
     onPrepared: async () => { links++; await link.promise; }, canDispatch: () => true });
   const start = c.start(); await eventually(() => links === 1);
-  const close = c.close(); link.resolve(); await Promise.all([start, close]);
+  const close = c.close();
+  assert.equal(c.cancelUndispatchedClose(), false);
+  assert.equal(c.getSnapshot().pendingClose, true);
+  link.resolve(); await Promise.all([start, close]);
   assert.equal(links, 1); assert.equal(c.getSnapshot().phase, 'closed');
   assert.equal(f.calls.filter(call => call.method === 'thread/fork').length, 0);
   assert.equal(f.portCalls.filter(call => call === 'close').length, 1);

@@ -253,6 +253,7 @@ export class SideChatWorkspaceRuntime {
       onPrepared: async scope => {
         if (!this.generation) throw new Error('原侧聊连接代次尚未确认。');
         await this.bridge.linkPrepared(scope, this.generation, identity.cwd);
+        this.prepareUnknown = false;
       }, ...(restored ? { restored } : {}) });
     this.controller = controller;
     return controller;
@@ -260,9 +261,20 @@ export class SideChatWorkspaceRuntime {
   /** Only a locally proven, never-dispatched or terminal empty prepare may be abandoned. */
   assertUnpreparedClose(): void {
     this.options.assertCurrent();
-    if (this.preparePending || this.prepareUnknown || this.controller?.getSnapshot().view) {
+    if (this.preparePending || this.prepareUnknown || this.controller?.getSnapshot().phase === 'preparing'
+      || this.controller?.getSnapshot().view) {
       throw new Error('原侧聊准备结果尚未确认，草稿已保留。');
     }
+  }
+  get needsPrepareReconciliation(): boolean { return this.prepareUnknown && !this.controller?.getSnapshot().view; }
+  /** A restored or recovered page may exit locally, but does not close the host operation. */
+  canExitObservation(scope: SideChatScope & { childThreadId: string | null }): boolean {
+    const { identity } = this.options, view = this.controller?.getSnapshot().view;
+    return !this.original && !this.invalidated && !this.preparePending && !this.prepareUnknown && !this.dispatching
+      && !this.lastCall && !this.bridge.hasRegistration && !!view && !view.close.requested && view.close.status !== 'closed'
+      && scope.hostId === identity.hostId && scope.parentThreadId === identity.parentThreadId && scope.draftId === identity.draftId
+      && scope.operationId === view.operationId && scope.childThreadId === view.childId
+      && this.bridge.hasLinkedOperation(view.operationId);
   }
   assertScope(): void { this.options.assertCurrent(); }
   /** Freeze host actions synchronously before a close or route change can wait. */

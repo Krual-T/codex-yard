@@ -35,6 +35,10 @@ export interface SideChatPanelProps {
   onBeforeClose(scope: SideChatCloseBarrier): Promise<void>;
   /** Release a successful barrier only if the parent proves close was not dispatched. */
   onCloseBarrierAborted?(scope: SideChatCloseBarrier): void;
+  /** Exit a read-only observer without reporting that the host operation closed. */
+  canExitObservation?(scope: SideChatCloseBarrier): boolean;
+  onExitObservation?(): void;
+  prepareResultUnknown?: boolean;
   onSubmit(description: ComposerSubmissionDescription, draft: ComposerDraft, options: SubmitOptions,
     action: SubmitAction, controller: ComposerDraftController, assertAuthority?: () => void): Promise<void>;
   /** Capture the real shared owner and connection at the original input action. */
@@ -96,7 +100,7 @@ export function SideChatPanel(props: SideChatPanelProps) {
   return <SideChatSession key={JSON.stringify([hostId, parentThreadId, draftId])} {...props} />;
 }
 
-function SideChatSession({ client, controller, open, history, onClose, onBeforeClose, onCloseBarrierAborted, onSubmit, onInterrupt, onOpenNew, onStartQueued, removeQueuedOriginal, dispatchQueueMutation, messages, prefill,
+function SideChatSession({ client, controller, open, history, onClose, onBeforeClose, onCloseBarrierAborted, canExitObservation, onExitObservation, prepareResultUnknown, onSubmit, onInterrupt, onOpenNew, onStartQueued, removeQueuedOriginal, dispatchQueueMutation, messages, prefill,
   onPrefillConsumed, onDraftChange, onRemoveReference, captureSubmissionAuthority, onDraftController, confirmBeforeClose = true }: SideChatPanelProps) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const [confirm, setConfirm] = useState(false), [frozen, setFrozen] = useState(false);
@@ -104,6 +108,7 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
   const [, refreshDraft] = useState(0);
   const titleId = useId(), dialog = useRef<HTMLDialogElement>(null), composer = useRef<HTMLDivElement>(null);
   const draftController = useRef<ComposerDraftController | null>(null), freezing = useRef(false), gatePassed = useRef(false), openingNew = useRef(false);
+  const activeBarrier = useRef<SideChatCloseBarrier | null>(null);
   const closed = useRef(false), mountedComposer = useRef(false), historyRef = useRef(history);
   const draftCallback = useRef(onDraftController); draftCallback.current = onDraftController;
   const receiveDraft = useCallback((value: ComposerDraftController | null) => {
@@ -167,7 +172,7 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
         if (!await draft!.flush(owner)) throw new Error('侧聊草稿未能保存。');
       }
       if (mountedComposer.current && draftController.current !== draft) throw new Error('侧聊草稿身份已改变。');
-      gatePassed.current = true;
+      activeBarrier.current = scope; gatePassed.current = true;
       return scope;
     } catch (error) {
       try { onCloseBarrierAborted?.(scope); }
@@ -175,6 +180,15 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
       freezing.current = false; restoreInputState(); setFrozen(false);
       throw error;
     }
+  };
+  const releaseUndispatched = () => {
+    const scope = activeBarrier.current;
+    if (!scope || !onCloseBarrierAborted || !controller.cancelUndispatchedClose()) return;
+    const exit = !!onExitObservation && canExitObservation?.(scope) === true;
+    onCloseBarrierAborted(scope);
+    activeBarrier.current = null; gatePassed.current = false; freezing.current = false;
+    restoreInputState(); setFrozen(false);
+    if (exit) onExitObservation?.();
   };
   const close = async () => {
     if (freezing.current) return;
@@ -184,6 +198,7 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
       if (current.phase === 'closed') { finishClose(); return; }
       if (!current.view && current.phase !== 'preparing') { finishClose(); return; }
       await controller.close();
+      if (controller.getSnapshot().phase === 'closed') finishClose(); else releaseUndispatched();
     } catch (error) { setLocalError('无法关闭侧聊，草稿已保留：' + (error instanceof Error ? error.message : String(error))); }
   };
   const requestClose = () => {
@@ -196,6 +211,7 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
       if ((current.pendingClose || current.view?.close.requested) && !gatePassed.current) await barrier();
       if (controller.getSnapshot().phase === 'closed') { finishClose(); return; }
       if (persistence) await controller.retryPersistence(); else await controller.retry();
+      if (controller.getSnapshot().phase === 'closed') finishClose(); else releaseUndispatched();
     } catch (error) { setLocalError('无法继续关闭，草稿已保留：' + (error instanceof Error ? error.message : String(error))); }
   };
   const openNew = async () => {
@@ -223,7 +239,7 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
   return <section className="yard-side-chat" aria-label="侧聊" hidden={!open}>
     <header className="yard-side-chat__header"><strong>侧聊</strong><button type="button" className="yard-side-chat__icon"
       title="关闭侧聊" aria-label="关闭侧聊" onClick={requestClose} disabled={frozen}><X size={16} /></button></header>
-    {state.phase === 'idle' ? <div className="yard-side-chat__status"><button type="button" onClick={() => void controller.start()}>打开侧聊</button></div> : null}
+    {state.phase === 'idle' ? <div className="yard-side-chat__status"><button type="button" onClick={() => void controller.start()}>{prepareResultUnknown ? '核对准备结果' : '打开侧聊'}</button></div> : null}
     {['preparing', 'starting', 'forking', 'injecting', 'closing'].includes(state.phase)
       ? <div className="yard-side-chat__status" role="status">{state.pendingClose || view?.close.requested ? '正在关闭侧聊…' : '正在准备侧聊…'}</div> : null}
     {state.phase === 'closing' && state.pendingClose && !view?.close.requested && retryable

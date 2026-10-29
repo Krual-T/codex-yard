@@ -228,7 +228,7 @@ export class SideChatController {
   }
   markActivity(): void { if (!this.value.hasActivity) this.set({ hasActivity: true }); }
   private async dispatchClose(): Promise<void> {
-    if (this.closeInFlight || this.closeDispatched || !this.value.view || this.value.view.close.requested || !this.linked) return;
+    if (!this.value.pendingClose || this.closeInFlight || this.closeDispatched || !this.value.view || this.value.view.close.requested || !this.linked) return;
     if (!this.permitted(this.value.view, 'close')) {
       this.set({ error: '上一次关闭调用尚未确认，侧聊记录已保留。' }); return;
     }
@@ -247,5 +247,12 @@ export class SideChatController {
     }
     if (!this.linked && !await this.link()) return;
     await this.dispatchClose();
+  }
+  /** Release only this page's close attempt when no close could have been sent. */
+  cancelUndispatchedClose(): boolean {
+    if (this.disposed || !this.value.pendingClose || this.linking || this.closeInFlight || this.closeDispatched
+      || this.uncertain.has('close') || this.value.view?.close.requested) return false;
+    this.set({ pendingClose: false });
+    return true;
   }
 }

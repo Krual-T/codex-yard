@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ComposerDraft, MessageEditOrigin, SubmitAction, SubmitOptions, WorkbenchClient, WorkbenchDispatchOptions } from '../workbench-contract.ts';
-import type { ComposerDraftController, ComposerDraftLease, ComposerDraftOwner, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
+import type { ComposerDraftController, ComposerDraftLease, ComposerDraftOwner, ComposerSubmissionDescription, StandaloneComposerRuntimeProps } from '../composer/StandaloneComposer.tsx';
 import type { MessageEditNavigationController, MessageEditNavigationLease } from '../messages/StandaloneMessages.tsx';
 import { SideChatPanel } from '../side-chat/SideChatPanel.tsx';
 import type { SideChatActiveChildScope, SideChatCloseBarrier, SideChatChildScope, SideChatInterruptScope, SideChatQueueEntry, SideChatQueueMutation } from '../side-chat/SideChatPanel.tsx';
@@ -67,7 +67,12 @@ export interface SideChatWorkspaceProps {
   onNavigationController(controller: SideChatWorkspaceNavigationController | null): void;
   /** This is a notification, not permission to unmount without the navigation lease. */
   onClosed(): void;
+  /** This page did not dispatch close; the host operation and its draft remain intact. */
+  onExitObservation(): void;
   onOpenNew?(scope: SideChatChildScope): void | Promise<void>;
+  onDraftController?: StandaloneComposerRuntimeProps['onDraftController'];
+  onDraftChange?: StandaloneComposerRuntimeProps['onDraftChange'];
+  onRemoveReference?: StandaloneComposerRuntimeProps['onRemoveReference'];
   onOpenFile?(location: { hostId: string; threadId: string; path: string; cwd?: string; line?: number; column?: number }): void;
   onOpenBrowser?(value: { hostId: string; threadId: string; url?: string }): void;
   onOpenVisualization?(value: { hostId: string; threadId: string; path: string }): void;
@@ -280,6 +285,7 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
   const beforeClose = (scope: SideChatCloseBarrier): Promise<void> => {
     if (locked.current || scope.draftId !== original.draftId || scope.hostId !== original.hostId || scope.parentThreadId !== original.parentThreadId
       || scope.childThreadId !== currentOwner().threadId || scope.draftController !== draft.current) throw notSent('原侧聊关闭身份已改变。');
+    if (!scope.operationId) runtime.assertUnpreparedClose();
     setLocked(true); closeScope.current = scope;
     closeHostFreeze.current = runtime.freezeHostOperations('close');
     closeEdit.current = freezeEdits();
@@ -290,7 +296,9 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
   };
   const abortClose = (scope: SideChatCloseBarrier) => {
     if (closeScope.current !== scope) return;
-    runtime.bridge.releaseUndispatchedClose(() => assertOriginal());
+    runtime.bridge.releaseUndispatchedClose(() => {
+      if (!mounted.current || closeScope.current !== scope) throw notSent('原侧聊关闭实例已改变。');
+    });
     closeEdit.current?.lease?.release(); closeEdit.current?.releaseAcquisition(); closeEdit.current = null;
     closeHostFreeze.current?.(); closeHostFreeze.current = null; closeScope.current = null; setLocked(false);
   };
@@ -398,13 +406,22 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
       onCancel={() => task(async () => { const authority = capture(currentOwner()), current = await reloadIntent(intent); authority();
         await latest.current.cancelSend(current, authority); changed(); })} />)}
     <SideChatPanel client={scopedClient} controller={controller} open={props.open} history={history} onClose={() => void finishClosed()}
-      onBeforeClose={beforeClose} onCloseBarrierAborted={abortClose} onOpenNew={props.onOpenNew ? scope => task(async () => {
-        assertOriginal(); const current = controller.getSnapshot();
+      onBeforeClose={beforeClose} onCloseBarrierAborted={abortClose} prepareResultUnknown={runtime.needsPrepareReconciliation}
+      canExitObservation={scope => !!scope.operationId && runtime.canExitObservation({ ...scope, operationId: scope.operationId })}
+      onExitObservation={() => latest.current.onExitObservation()}
+      onOpenNew={props.onOpenNew ? scope => {
+        const current = controller.getSnapshot(), now = latest.current.identity, openNew = latest.current.onOpenNew;
+        if (!mounted.current || !openNew || now.hostId !== original.hostId || now.parentThreadId !== original.parentThreadId
+          || now.draftId !== original.draftId || now.prepareId !== original.prepareId || now.cwd !== original.cwd || now.mode !== original.mode)
+          throw notSent('原侧聊工作区已改变。');
         if (scope.hostId !== original.hostId || scope.parentThreadId !== original.parentThreadId || scope.draftId !== original.draftId
           || current.view?.operationId !== scope.operationId || current.view.childId !== scope.childThreadId) throw notSent('原侧聊已改变。');
-        await latest.current.onOpenNew!(structuredClone(scope));
-      }) : undefined}
-      onDraftController={value => { draft.current = value; }} captureSubmissionAuthority={capture}
+        let captured: SideChatChildScope;
+        try { captured = structuredClone(scope); } catch { throw notSent('原侧聊身份无法复制。'); }
+        return openNew(captured);
+      } : undefined}
+      onDraftController={value => { draft.current = value; latest.current.onDraftController?.(value); }}
+      onDraftChange={props.onDraftChange} onRemoveReference={props.onRemoveReference} captureSubmissionAuthority={capture}
       dispatchQueueMutation={(method, params, hostId, authority, beforeSend) => dispatchQueue(method, params, hostId, authority, beforeSend)}
       onSubmit={(description, value, options, action, _draft, authority) => runSend(description, value, options, action, authority)}
       onInterrupt={scope => task(async () => {

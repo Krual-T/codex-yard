@@ -20,13 +20,13 @@ async function peer() {
   const root = await mkdtemp('/tmp/hscw-'), fake = await createFakeCodex(root), mutations = createStateMutations();
   const parentThread = fixtureThread('parent-a', root);
   fake.threads.set('parent-a', parentThread); fake.loaded.add('parent-a');
-  const response = (child = false) => ({ thread: child ? { ...parentThread, id: 'child-a', ephemeral: true, forkedFromId: 'parent-a', turns: [] } : parentThread,
+  const response = (child: string | null = null) => ({ thread: child ? { ...parentThread, id: child, ephemeral: true, forkedFromId: 'parent-a', turns: [] } : parentThread,
     cwd: root, runtimeWorkspaceRoots: [root], model: 'peer-model', modelProvider: 'peer', reasoningEffort: null, serviceTier: null,
     approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, activePermissionProfile: null });
   fake.handlers.set('thread/start', () => response());
   fake.handlers.set('config/read', () => ({ config: { developer_instructions: null } }));
-  let holdFork = false, lateFork: (() => void) | null = null, holdChild = false, deliverChild: (() => void) | null = null;
-  let failRevoke = false, lostPersistence = 0, generation = 'generation-a', section: any, terminalStarts = 0;
+  let holdFork = false, lateFork: (() => void) | null = null, holdChild = false, deliverChild: (() => void) | null = null, forks = 0;
+  let failRevoke = false, lostPersistence = 0, lostPrepare = 0, readPrepared = 0, generation = 'generation-a', section: any, terminalStarts = 0;
   let holdPrepare = false, deliverPrepare: (() => void) | null = null;
   let holdChallenge = false, deliverChallenge: (() => void) | null = null;
   let holdApproval = false, deliverApproval: (() => void) | null = null;
@@ -38,10 +38,11 @@ async function peer() {
   const order: string[] = [], reads: { purpose: string; token: unknown }[] = [];
   fake.handlers.set('thread/fork', (_params, context) => {
     order.push('fork');
-    fake.threads.set('child-a', { ...parentThread, id: 'child-a', sessionId: 'child-a', ephemeral: true, forkedFromId: 'parent-a', turns: [] });
-    fake.loaded.add('child-a');
-    if (holdFork) { lateFork = () => context.send({ id: context.message.id, result: response(true) }); return NO_REPLY; }
-    return response(true);
+    const child = ++forks === 1 ? 'child-a' : 'child-' + forks;
+    fake.threads.set(child, { ...parentThread, id: child, sessionId: child, ephemeral: true, forkedFromId: 'parent-a', turns: [] });
+    fake.loaded.add(child);
+    if (holdFork) { lateFork = () => context.send({ id: context.message.id, result: response(child) }); return NO_REPLY; }
+    return response(child);
   });
   fake.handlers.set('thread/inject_items', () => { order.push('inject'); return {}; });
   const server = createServer((_request, reply) => {
@@ -58,7 +59,8 @@ async function peer() {
       if (request.kind === 'child') {
         const op = section?.operations?.[request.identity.operationId];
         assert.equal(op?.fork?.status, 'received'); assert.equal(op?.inject?.status, 'inflight');
-        assert.equal(fake.calls('thread/inject_items').length, 0); order.push('child');
+        assert.equal(fake.calls('thread/inject_items').filter(call => call.params.threadId === request.identity.childThreadId).length, 0);
+        order.push('child');
       }
       const send = () => { page.send(JSON.stringify(request)); };
       if (request.kind === 'child' && holdChild) deliverChild = send; else send();
@@ -120,7 +122,9 @@ async function peer() {
           if (body.action === 'close') order.push('close');
           result = await parent.handle(page, body);
           if (body.action === 'start') terminalStarts++;
+          if (body.action === 'readPrepared') readPrepared++;
           if (body.action === 'read') reads.push({ purpose: body.purpose, token: (result as Message).token });
+          if (body.action === 'prepare' && lostPrepare-- > 0) throw Object.assign(new Error('Synthetic prepare reply lost.'), { uncertain: true });
           if (body.action === 'retryPersistence' && lostPersistence-- > 0) throw Object.assign(new Error('Synthetic persistence reply lost.'), { uncertain: true });
         } else if (endpoint === 'queued-follow-up-send-lock-acquire') result = { acquired: true };
         else if (endpoint === 'queued-follow-up-send-lock-release') result = {};
@@ -145,6 +149,8 @@ async function peer() {
     holdChild() { holdChild = true; }, releaseChild() { holdChild = false; deliverChild?.(); }, childWaiting: () => !!deliverChild,
     holdFork() { holdFork = true; }, releaseFork() { lateFork?.(); }, forkWaiting: () => !!lateFork,
     holdPrepare() { holdPrepare = true; }, releasePrepare() { holdPrepare = false; deliverPrepare?.(); }, prepareWaiting: () => !!deliverPrepare,
+    losePrepare() { lostPrepare = 1; }, preparedReads: () => readPrepared,
+    holdUnsubscribe() { fake.handlers.set('thread/unsubscribe', () => NO_REPLY); },
     holdChallenge() { holdChallenge = true; }, releaseChallenge() { holdChallenge = false; deliverChallenge?.(); }, challengeWaiting: () => !!deliverChallenge,
     losePersistence(count: number) { lostPersistence = count; }, failRevoke(value: boolean) { failRevoke = value; },
     enableQueue() {
@@ -269,6 +275,158 @@ test('real workspace, IDB, browser client and native parent/provider use one syn
         p.hint(); await eventually(() => p.reads.filter(read => read.purpose === 'observe').length >= 2);
         assert.ok(p.reads.filter(read => read.purpose === 'observe').every(read => read.token === null));
         assert.equal(p.fake.calls('thread/fork').length, 1);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('in-flight prepare refuses close before acquiring a lease', async () => {
+      const p = await peer(); p.holdPrepare();
+      const { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.getByRole('button', { name: '打开侧聊' }).click(); await eventually(p.prepareWaiting);
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        await page.getByText(/准备结果尚未确认/).waitFor();
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.frozen), false);
+        assert.equal(p.order.includes('close'), false);
+        p.releasePrepare();
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        assert.equal(p.fake.calls('thread/fork').length, 1);
+      } finally { p.releasePrepare(); await context.close(); await p.close(); }
+    });
+    await t.test('lost prepare is explicitly read back and an observer exits without closing the host', async () => {
+      const p = await peer(); p.losePrepare();
+      const { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.getByRole('button', { name: '打开侧聊' }).click();
+        await page.getByText(/Synthetic prepare reply lost/).waitFor();
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        await page.getByText(/准备结果尚未确认/).waitFor();
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.frozen), false);
+        assert.equal(p.fake.calls('thread/fork').length, 0);
+        await page.getByRole('button', { name: '核对准备结果' }).click();
+        await page.getByText(/上一次宿主调用尚未确认/).waitFor();
+        const association = await page.evaluate(() => window.sideChatWorkspaceFixture.association());
+        assert.ok(association?.operationId); assert.equal(p.preparedReads(), 1);
+        assert.equal(p.fake.calls('thread/fork').length, 0);
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        await page.waitForFunction(() => window.sideChatWorkspaceFixture.exited === 1);
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.closed), 0);
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.frozen), false);
+        assert.deepEqual(await page.evaluate(() => window.sideChatWorkspaceFixture.association()), association);
+        assert.equal(p.order.includes('close'), false);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('restored observer releases its close attempt without unsubscribing the original child', async () => {
+      const p = await peer(), { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.getByRole('button', { name: '打开侧聊' }).click();
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        const association = await page.evaluate(() => window.sideChatWorkspaceFixture.association());
+        const other = await context.newPage(); await other.goto(p.url); await other.addScriptTag({ content: script });
+        await other.evaluate(() => window.sideChatWorkspaceFixture.mount(true));
+        await other.waitForFunction(() => window.sideChatWorkspaceFixture.draftSnapshot()?.owner.threadId === 'child-a');
+        await other.getByRole('button', { name: '关闭侧聊' }).click();
+        await other.waitForFunction(() => window.sideChatWorkspaceFixture.exited === 1);
+        assert.equal(await other.evaluate(() => window.sideChatWorkspaceFixture.closed), 0);
+        assert.equal(await other.evaluate(() => window.sideChatWorkspaceFixture.frozen), false);
+        assert.deepEqual(await other.evaluate(() => window.sideChatWorkspaceFixture.association()), association);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+        assert.equal(await page.getByRole('textbox', { name: '和 Codex 一起工作' }).count(), 1);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('disconnect during close drain releases the undispatched lease and permits a separate new instance', async () => {
+      const p = await peer(), { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.getByRole('button', { name: '打开侧聊' }).click();
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await input.fill('断线后仍保留的草稿');
+        const association = await page.evaluate(() => window.sideChatWorkspaceFixture.association());
+        await page.evaluate(() => window.sideChatWorkspaceFixture.holdDrain());
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.frozen), true);
+        await page.evaluate(() => { window.sideChatWorkspaceFixture.disconnect(); window.sideChatWorkspaceFixture.releaseDrain(); });
+        await page.getByText(/无法关闭侧聊/).waitFor();
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.frozen), false);
+        await page.getByRole('button', { name: '另开侧聊' }).click();
+        await page.waitForFunction(() => window.sideChatWorkspaceFixture.opened().length === 1
+          || document.body.textContent?.includes('无法确认新侧聊是否已打开'));
+        const opened = await page.evaluate(() => window.sideChatWorkspaceFixture.opened());
+        assert.equal(opened.length, 1, await page.locator('body').innerText()); assert.equal(opened[0]?.scope.operationId, association?.operationId);
+        assert.notEqual(opened[0]?.draftId, 'workspace-draft'); assert.notEqual(opened[0]?.operationId, association?.operationId);
+        assert.equal(await input.inputValue(), '断线后仍保留的草稿');
+        assert.deepEqual(await page.evaluate(() => window.sideChatWorkspaceFixture.association()), association);
+        assert.equal(p.fake.calls('thread/fork').length, 2); assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+        assert.equal(Object.keys(p.section().operations).length, 2);
+        assert.equal(p.section().operations[opened[0]!.operationId].childId, 'child-2');
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('unknown dispatched close keeps its lease while a new instance is requested', async () => {
+      const p = await peer(); p.holdUnsubscribe();
+      const { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.getByRole('button', { name: '打开侧聊' }).click();
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await input.fill('未知关闭保留的草稿');
+        const association = await page.evaluate(() => window.sideChatWorkspaceFixture.association());
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        await page.getByText(/原操作结果未知/).waitFor();
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.frozen), true);
+        await page.getByRole('button', { name: '另开侧聊' }).click();
+        await page.waitForFunction(() => window.sideChatWorkspaceFixture.opened().length === 1
+          || document.body.textContent?.includes('无法确认新侧聊是否已打开'));
+        const opened = await page.evaluate(() => window.sideChatWorkspaceFixture.opened());
+        assert.equal(opened.length, 1, await page.locator('body').innerText()); assert.equal(opened[0]?.scope.operationId, association?.operationId);
+        assert.notEqual(opened[0]?.draftId, 'workspace-draft');
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.frozen), true);
+        assert.deepEqual(await page.evaluate(() => window.sideChatWorkspaceFixture.association()), association);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 1); assert.equal(p.fake.calls('thread/fork').length, 2);
+        assert.equal(Object.keys(p.section().operations).length, 2);
+        assert.equal(p.section().operations[opened[0]!.operationId].childId, 'child-2');
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.draftSnapshot()?.draft.text), '未知关闭保留的草稿');
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('new-instance guard distinguishes before-send from a parent callback of unknown outcome', async () => {
+      const p = await peer(), { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.getByRole('button', { name: '打开侧聊' }).click();
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        const button = page.getByRole('button', { name: '另开侧聊' });
+        await page.evaluate(() => window.sideChatWorkspaceFixture.changePresentedScope());
+        await button.click(); await page.getByText(/新侧聊尚未打开/).waitFor();
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.openAttempts().length), 0);
+        assert.equal(await button.isEnabled(), true);
+      } finally { await context.close(); await p.close(); }
+      const q = await peer(), second = await setup(browser, script, q.url);
+      try {
+        await second.page.getByRole('button', { name: '打开侧聊' }).click();
+        await second.page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        const button = second.page.getByRole('button', { name: '另开侧聊' });
+        await second.page.evaluate(() => window.sideChatWorkspaceFixture.setOpenBehavior('unsent'));
+        await button.click(); await second.page.getByText(/新侧聊尚未打开/).waitFor();
+        assert.equal(await second.page.evaluate(() => window.sideChatWorkspaceFixture.openAttempts().length), 1);
+        assert.equal(await button.isEnabled(), true);
+        await second.page.evaluate(() => window.sideChatWorkspaceFixture.setOpenBehavior('unknown'));
+        await button.click();
+        await second.page.getByText(/无法确认新侧聊是否已打开/).waitFor();
+        assert.equal(await second.page.evaluate(() => window.sideChatWorkspaceFixture.openAttempts().length), 2);
+        assert.equal(await button.isDisabled(), true);
+      } finally { await second.context.close(); await q.close(); }
+    });
+    await t.test('real child draft callbacks attach and remove a browser reference in the shared root transaction', async () => {
+      const p = await peer(), { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.getByRole('button', { name: '打开侧聊' }).click();
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.waitForFunction(() => !!window.sideChatWorkspaceFixture.draftSnapshot());
+        const reference = await page.evaluate(() => window.sideChatWorkspaceFixture.attachBrowserReference());
+        assert.equal(reference.context?.hostId, 'local'); assert.equal(reference.context?.threadId, 'child-a');
+        assert.equal(reference.context?.draftId, 'workspace-draft');
+        await page.waitForFunction(() => window.sideChatWorkspaceFixture.draftSnapshot()?.draft.references?.length === 1);
+        assert.equal((await page.evaluate(() => window.sideChatWorkspaceFixture.browserComments())).comments.length, 1);
+        await page.getByRole('button', { name: '移除引用' }).click();
+        await page.waitForFunction(() => window.sideChatWorkspaceFixture.draftSnapshot()?.draft.references?.length === 0);
+        assert.equal((await page.evaluate(() => window.sideChatWorkspaceFixture.browserComments())).comments.length, 0);
+        assert.deepEqual(await page.evaluate(() => window.sideChatWorkspaceFixture.removedOwners()),
+          [{ hostId: 'local', threadId: 'child-a', draftId: 'workspace-draft' }]);
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.hasDraftController()), true);
       } finally { await context.close(); await p.close(); }
     });
     await t.test('an IDB association failure retries initialization on the original workspace', async () => {
