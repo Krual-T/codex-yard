@@ -90,7 +90,7 @@ test('real settings editors restore rejected submissions and newer drafts after 
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
     args: ['--no-sandbox', '--disable-background-networking'] });
   try {
-    for (const section of ['models', 'agent', 'worktrees', 'hooks-settings', 'skills-settings']) {
+    for (const section of ['models', 'worktrees', 'hooks-settings', 'skills-settings', 'agent']) {
       const context = await browser.newContext();
       const page = await context.newPage();
       const errors: string[] = [];
