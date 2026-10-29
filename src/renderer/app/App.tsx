@@ -88,7 +88,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const connectionReadGeneration = useRef(0);
   const transportIdentity = useRef({ bridge: 'connecting', bridgeRevision: 0, hosts: {} as Record<string, { state: string; revision: number }> });
   const mainGrantRevision = useRef(0);
-  const mainSubmissionAuthorities = useRef(new WeakMap<() => void, { acceptCreated(threadId: string, navigation: number): void }>());
+  const mainSubmissionAuthorities = useRef(new WeakMap<() => void, {
+    daemon: ReturnType<BrowserWorkbenchClient['captureDaemonConnection']>;
+    acceptCreated(threadId: string, navigation: number): void;
+  }>());
   const [error, setError] = useState('');
   const [refresh, setRefresh] = useState(0);
   const [workspace, setWorkspace] = useState('');
@@ -577,6 +580,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       earlyAuthority();
     }
     origin = origin && structuredClone(origin);
+    const daemon = origin ? client.captureDaemonConnection(origin.hostId)
+      : earlyAuthority && mainSubmissionAuthorities.current.get(earlyAuthority)?.daemon;
+    if (!daemon) throw new Error('原 daemon 连接尚未捕获，原稿已保留，未发送。');
+    daemon.assertOriginal();
     const assertEditAuthority = origin && editAccess.capture(origin);
     const editConnectionRevision = origin && sessions.view(origin).connectionRevision;
     inFlight.current = true; setSubmitting(true); setError('');
@@ -590,6 +597,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const allowFirstTurn = !origin && action.type === 'send';
     const activeCwd = retry?.cwd ?? (thread?.cwd || cwd || workspace);
     const requireCurrent = (threadId: string | null) => {
+      daemon.assertOriginal();
       earlyAuthority?.();
       const connection = transportIdentity.current;
       if (connection.bridge !== 'connected' || connection.bridgeRevision !== originalBridge
@@ -653,7 +661,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       const active = current.threadId ? sessions.view({ hostId, threadId: current.threadId }).snapshot() : conversation;
       const sendClient = { rpc: <T,>(method: string, params: Record<string, unknown> = {}, targetHost = hostId, dispatchOptions?: Parameters<BrowserWorkbenchClient['rpc']>[3]) => {
         if (!['thread/start', 'thread/inject_items', 'turn/start', 'turn/steer', 'thread/queue/add', 'thread/queue/start'].includes(method)) return client.rpc<T>(method, params, targetHost, dispatchOptions);
-        return client.rpc<T>(method, params, targetHost, { ...dispatchOptions, assertBeforeSend: () => {
+        return client.rpc<T>(method, params, targetHost, { ...dispatchOptions, daemonConnectionGeneration: daemon.generation, assertBeforeSend: () => {
           if (targetHost !== hostId) throw new Error('发送主机已改变，未发送。');
           const target = method === 'thread/start' ? null : typeof params.threadId === 'string' ? params.threadId : current.threadId;
           requireCurrent(target);
@@ -718,7 +726,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           throw Object.assign(new Error('消息编辑来源已改变，编辑稿已保留，未发送。'), { uncertain: false });
         }
         requireCurrent(origin.threadId);
-      }));
+      }, daemon.generation));
       if (result.turn) sessions.started({ hostId, threadId: result.threadId }, result.turn);
       void refreshList().catch(cause => setError(String(cause)));
       if (intent) await finishSend((await sendStore.read()).requests[intent.id]!);
@@ -784,10 +792,12 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const sendBindings = useRef(sendState?.bindings ?? {}); sendBindings.current = sendState?.bindings ?? {};
   const captureMainSubmissionAuthority = useCallback((owner: ComposerDraftOwner) => {
     const original = structuredClone(owner), connection = transportIdentity.current;
+    const daemon = client.captureDaemonConnection(owner.hostId);
     const bridgeRevision = connection.bridgeRevision, hostRevision = connection.hosts[owner.hostId]?.revision;
     const grant = mainGrantRevision.current;
     let expected = original, generation = navigationGeneration.current, controller = composerController.current;
     const checkConnection = () => {
+      daemon.assertOriginal();
       const connection = transportIdentity.current;
       if (connection.bridge !== 'connected' || connection.bridgeRevision !== bridgeRevision
         || connection.hosts[original.hostId]?.state !== 'connected' || connection.hosts[original.hostId]?.revision !== hostRevision
@@ -803,7 +813,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       }
     };
     assert();
-    mainSubmissionAuthorities.current.set(assert, { acceptCreated(threadId, navigation) {
+    mainSubmissionAuthorities.current.set(assert, { daemon, acceptCreated(threadId, navigation) {
       checkConnection();
       const actual = composerController.current?.snapshot()?.owner, route = routeRef.current;
       if (original.threadId !== null || !threadId || route.hostId !== original.hostId || route.threadId !== threadId
@@ -962,6 +972,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       {Object.entries(browserProjectionState).map(([key, receipt]) => <BrowserDraftRecoveryNotice key={key} before={receipt.before} snapshot={receipt.after}
         onAccept={() => acceptBrowserCommittedVersion(receipt.before, receipt.after)} onDiscard={() => releaseBrowserProjection(receipt.after)} />)}
       {Object.values(sendState?.requests ?? {}).map(intent => <SendRecoveryNotice key={intent.id} intent={intent}
+        canCheckInjectionReceipt={sendStore.hasConfirmedInjectionReceipt(intent)}
         canRetry={!submitting && !loading && canRetryAction(intent) && !current.readOnly && current.hostId === intent.owner.hostId && current.threadId === intent.threadId
           && (intent.threadId !== null || newDraftId === intent.owner.draftId)}
         onOpen={async () => {

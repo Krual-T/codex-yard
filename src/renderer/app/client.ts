@@ -120,8 +120,9 @@ export class BrowserWorkbenchClient implements WorkbenchClient {
         }
         if (message.type === 'mcp-response') {
           if (!record(message.message) || !rpcId(message.message.id)) return;
-          const reply = message.message as { id: string; result?: unknown; error?: { message: string; code?: number; data?: { uncertain?: boolean } } };
-          this.settle(String(reply.id), reply.result, reply.error && new WorkbenchError(reply.error.message, reply.error.data?.uncertain === true, reply.error.code), message.late === true);
+          const reply = message.message as { id: string; result?: unknown; error?: { message: string; code?: number; data?: { uncertain?: boolean; sendPhase?: unknown } } };
+          this.settle(String(reply.id), reply.result, reply.error && new WorkbenchError(reply.error.message, reply.error.data?.uncertain === true, reply.error.code,
+            reply.error.data?.uncertain === false && reply.error.data.sendPhase === 'before-send' ? 'before-send' : undefined), message.late === true);
         } else if (message.type === 'fetch-response') {
           this.settle(String(message.requestId), message.body, message.responseType === 'error' ? new WorkbenchError(String(message.error), message.uncertain === true) : undefined);
         } else if (message.type === 'server-request-response') {

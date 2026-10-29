@@ -65,10 +65,13 @@ test('a captured injection success can retry only local persistence and then con
   await h.store.injecting(intent.id, intent.attemptId);
   h.rejectNextWrite();
   await assert.rejects(h.store.injected(intent.id, intent.attemptId), /transaction aborted/);
+  assert.equal(h.store.hasConfirmedInjectionReceipt((await h.request(intent.id))), true);
+  assert.equal(h.reload().hasConfirmedInjectionReceipt((await h.request(intent.id))), false);
   await h.store.failed(intent.id, Object.assign(new Error('receipt save failed'), { uncertain: false }), intent.attemptId);
   assert.equal((await h.request(intent.id)).stage, 'unknown');
   const confirmed = await h.store.check(intent.id);
   assert.equal(confirmed.injection?.phase, 'confirmed');
+  assert.equal(h.store.hasConfirmedInjectionReceipt(confirmed), false);
   assert.equal(confirmed.stage, 'failed');
   assert.equal(h.checks(), 0);
   await assert.rejects(h.store.cancel(intent.id), /上下文注入结果尚未核对/);

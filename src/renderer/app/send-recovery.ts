@@ -106,6 +106,10 @@ export class SendRecoveryStore {
     this.storage = storage;
   }
   async read() { return snapshot(await this.storage.read()); }
+  hasConfirmedInjectionReceipt(intent: SendIntent): boolean {
+    return !!intent.attemptId && !!intent.injection && ['sending', 'unknown'].includes(intent.injection.phase)
+      && this.confirmedInjections.has(JSON.stringify([intent.id, intent.attemptId]));
+  }
   private async change(update: (value: SendRecoverySnapshot, atoms?: Record<string, unknown>) => void): Promise<SendRecoverySnapshot> {
     let result!: SendRecoverySnapshot;
     await this.storage.update((value, atoms) => { result = snapshot(value); update(result, atoms); return result; });

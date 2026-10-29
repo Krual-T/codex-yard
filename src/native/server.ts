@@ -39,7 +39,7 @@ import { createRemoteConnectionPreferences } from './remote-connection-preferenc
 import { createProjectCatalogWrites } from './project-catalog-writes.ts';
 import { readToolHistory } from './tool-history.ts';
 import { createConversationWrites } from './conversation-writes.ts';
-import { editMessage } from './message-edit.ts';
+import { editMessage, editMessageBeforeWriteFailure } from './message-edit.ts';
 import { findSubmission } from './message-submission-status.ts';
 import { createFiles, fileEndpoints, fileMethods } from './files.ts';
 import type { RemoteFileCommand } from './files.ts';
@@ -503,7 +503,8 @@ export async function createNativeWorkbench(options: Options = {}) {
             && message.url.split('/').at(-1) === 'side-chat' && error.uncertain !== false });
         else if (message.request) send(client, { type: 'mcp-response', hostId: message.hostId ?? 'local', message: { id: message.request.id,
           error: { code: typeof error.code === 'number' ? error.code : -32000, message: error.message,
-            data: error.data === undefined ? { uncertain: error.uncertain === true } : error.data } } });
+            data: error.data === undefined ? { uncertain: error.uncertain === true,
+              ...(error.sendPhase === 'before-send' ? { sendPhase: 'before-send' } : {}) } : error.data } } });
       }).finally(() => {
         if (message.type === 'fetch' && typeof message.url === 'string' && message.url.split('/').at(-1) === 'side-chat') {
           sideChats.flushNotifications(client);
@@ -527,8 +528,11 @@ export async function createNativeWorkbench(options: Options = {}) {
   });
 
   function notifyConnection(client: WebSocket, hostId: string, connection: CodexConnection, isSnapshot = false) {
+    const socket = connection.socket;
     send(client, { type: 'codex-app-server-connection-changed', hostId, transport: 'websocket', isSnapshot,
-      state: connection.connected ? 'connected' : 'disconnected', error: connection.lastError });
+      state: connection.connected ? 'connected' : 'disconnected', error: connection.lastError,
+      ...(connection.connected && socket?.readyState === WebSocket.OPEN
+        ? { daemonConnectionGeneration: connectionGeneration(socket) } : {}) });
     if (connection.connected) {
       const version = serverVersion(connection);
       send(client, { type: 'codex-app-server-initialized', hostId, transport: 'websocket', isSnapshot, appServerVersion: version, installedCodexVersion: version });
@@ -620,6 +624,20 @@ export async function createNativeWorkbench(options: Options = {}) {
     return connection;
   }
 
+  function capturePageConnection(client: WebSocket, connections: Map<string, CodexConnection>, hostId: string, generation: unknown) {
+    validHost(hostId);
+    const connection = connections.get(hostId), socket = connection?.socket;
+    const assertOriginal = () => {
+      if (typeof generation !== 'string' || !generation || clients.get(client) !== connections || client.readyState !== WebSocket.OPEN
+        || !connection || connections.get(hostId) !== connection || !connection.connected || !socket
+        || connection.socket !== socket || socket.readyState !== WebSocket.OPEN || connectionGeneration(socket) !== generation) {
+        throw Object.assign(new Error('原页面的 daemon 连接已改变，原请求未派发。'), { uncertain: false, sendPhase: 'before-send' });
+      }
+    };
+    assertOriginal();
+    return { connection: connection!, assertOriginal };
+  }
+
   async function handle(message: HostMessage, client: WebSocket, connections: Map<string, CodexConnection>) {
     if (await petOverlay.handle(message, value => send(client, value))) return;
     const hostId = message.hostId ?? 'local';
@@ -664,6 +682,8 @@ export async function createNativeWorkbench(options: Options = {}) {
     if ((message.type === 'mcp-request' || message.type === 'thread-prewarm-start') && message.request) {
       const { method, id } = message.request;
       const params = { ...message.request.params };
+      const original = Object.hasOwn(message, 'daemonConnectionGeneration')
+        ? capturePageConnection(client, connections, hostId, message.daemonConnectionGeneration) : undefined;
       if (method === 'config/batchWrite' || method === 'skills/config/write') {
         throw new Error('Configuration changes require an original operation ID through configuration-write.');
       }
@@ -677,11 +697,13 @@ export async function createNativeWorkbench(options: Options = {}) {
       if (method === 'thread/unsubscribe' && typeof params.threadId === 'string' && await sideChats.ownsChild(hostId, params.threadId)) {
         throw Object.assign(new Error('侧聊会话由侧聊操作负责关闭。'), { uncertain: false });
       }
-      const connection = readsConfigurationSource ? await ownedConnectionFor(hostId) : await connectedFor(client, connections, hostId);
+      const connection = original?.connection ?? (readsConfigurationSource ? await ownedConnectionFor(hostId) : await connectedFor(client, connections, hostId));
+      original?.assertOriginal();
       const sourceSocket = connection.socket;
       const readSource = readsConfigurationSource ? configurationSource(hostId, connection, sourceSocket) : undefined;
       if (method === 'thread/delete') {
         if (!createdThreads.has(hostId + ':' + String(params.threadId))) throw new Error('仅清理本次宿主创建的空预热对话');
+        original?.assertOriginal();
         const { thread } = await connection.request('thread/read', { threadId: params.threadId, includeTurns: true });
         if (thread.turns?.length || thread.status?.type !== 'idle') throw new Error('对话已有内容，保留当前数据');
       }
@@ -689,6 +711,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         params.config = { ...record(params.config), ...hostTools.config };
       }
       if (hostId === 'local' && method === 'thread/resume') {
+        original?.assertOriginal();
         const loaded = await connection.request('thread/loaded/list', {});
         if (!loaded.data.some(id => id === params.threadId)) params.config = { ...record(params.config), ...hostTools.config };
       }
@@ -712,7 +735,9 @@ export async function createNativeWorkbench(options: Options = {}) {
             'sandboxPolicy', 'collaborationMode'].some(key => Object.hasOwn(params, key))) sideChatParents.invalidate(hostId, params.threadId);
       }
       const observeSubscription = message.observeSubscriptionTerminal === true && ['thread/resume', 'thread/unsubscribe'].includes(method);
-      const request = () => connection.requestWithCursor(method, params, { mutating: writeMethods.has(method),
+      const request = () => {
+        original?.assertOriginal();
+        return connection.requestWithCursor(method, params, { mutating: writeMethods.has(method),
         onLateTerminal: observeSubscription || parentAttempt ? terminal => {
           if (parentAttempt) {
             if (terminal.outcome === 'success' && terminal.eventCursor !== undefined) sideChatParents.receive(parentAttempt, terminal.result, terminal.eventCursor);
@@ -723,9 +748,10 @@ export async function createNativeWorkbench(options: Options = {}) {
             ? { id, result: terminal.result } : { id, error: { code: -32000, message: terminal.error.message, data: terminal.error.data } } });
         } : undefined,
         ...(parentAttempt ? { retainLateUntilDisconnect: true as const } : {}) });
+      };
       let response;
       try {
-        response = ['turn/start', 'thread/revert', 'thread/queue/start'].includes(method) && typeof params.threadId === 'string'
+        response = ['thread/inject_items', 'turn/start', 'thread/revert', 'thread/queue/start'].includes(method) && typeof params.threadId === 'string'
           ? await conversationWrite(hostId, params.threadId, request) : await request();
       } catch (error) {
         if (parentAttempt && record(error).code !== 'TIMEOUT') sideChatParents.cancel(parentAttempt);
@@ -864,9 +890,19 @@ export async function createNativeWorkbench(options: Options = {}) {
       case 'project-add': return addProject(hostId, params.path, params.name);
       case 'message-edit': {
         if (typeof params.threadId !== 'string' || !params.threadId) throw new Error('编辑需要会话身份。');
-        const connection = await connectedFor(client, connections, hostId);
-        if (params.operation !== 'check') sideChatParents.invalidate(hostId, params.threadId);
-        return conversationWrite(hostId, params.threadId, () => editMessage(connection, hostId, params.threadId as string, params));
+        let entered = false;
+        try {
+          const original = capturePageConnection(client, connections, hostId, params.daemonConnectionGeneration);
+          return await conversationWrite(hostId, params.threadId, () => {
+            original.assertOriginal();
+            if (params.operation !== 'check') sideChatParents.invalidate(hostId, params.threadId as string);
+            entered = true;
+            return editMessage(original.connection, hostId, params.threadId as string, params, original);
+          });
+        } catch (cause) {
+          if (entered) throw cause;
+          return editMessageBeforeWriteFailure(hostId, params.threadId, params, cause);
+        }
       }
       case 'message-send-status': {
         if (typeof params.threadId !== 'string' || typeof params.clientUserMessageId !== 'string') throw new Error('核对发送需要原会话及请求身份。');
