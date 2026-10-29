@@ -75,6 +75,7 @@ export interface SettingsNavigationGuard { requestLeave(): Promise<boolean> }
 export type SettingsIntegrationProps = StandaloneSettingsProps & {
   registerNavigationGuard?: (guard: SettingsNavigationGuard | null) => void;
   onOpenArchivedThread?: (hostId: string, threadId: string) => Promise<void>;
+  onOpenConfig?: Parameters<typeof AgentSection>[0]['onOpenConfig'];
   projectRoots: SettingsProjectRoots | null;
   sessionCwd: SettingsSessionCwd | null;
   scopeStatus?: { state: 'loading' | 'error' | 'ready'; error?: string; retry(): void };
@@ -98,7 +99,7 @@ export function StandaloneSettings(props: SettingsIntegrationProps) {
   return <SettingsPage {...props} preferences={preferences} snapshot={snapshot} />;
 }
 
-function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, onOpenArchivedThread, projectRoots, sessionCwd, scopeStatus, InstructionEditor, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
+function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, onOpenArchivedThread, onOpenConfig, projectRoots, sessionCwd, scopeStatus, InstructionEditor, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
   const { t, locale } = useI18n();
   const configurationOperations = useMemo(() => settingsConfigOperations(client), [client]);
   const recovery = useSyncExternalStore(configurationOperations.subscribe, configurationOperations.getSnapshot, configurationOperations.getSnapshot);
@@ -306,9 +307,9 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
             section === 'configuration' ? <><div className="yard-configuration-heading"><h1>{translateKnown(t, 'Configuration')}</h1>
               <p>{t('Configure permissions, web access, and agent responses for new chats')}{' '}
                 <a href="https://developers.openai.com/codex/config-basic" target="_blank" rel="noreferrer">{t('Learn more')}</a></p></div>
-              <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /></> :
+              <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} onOpenConfig={onOpenConfig} /></> :
             section === 'models' ? <ModelSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
-              section === 'agent' ? <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
+                section === 'agent' ? <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} onOpenConfig={onOpenConfig} /> :
                 section === 'personalization' ? <PersonalizationSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} InstructionEditor={InstructionEditor} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
                   section === 'voice' ? <VoiceSection preferences={preferences} snapshot={snapshot} /> :
                     section === 'usage' ? <UsageSection key={selectedHost} client={client} hostId={selectedHost} /> :

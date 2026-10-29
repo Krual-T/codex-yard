@@ -45,7 +45,18 @@
 .yard-setting-description, .yard-settings .yard-muted { color: var(--yard-muted, #717171); font-size: 12px; }
 .yard-setting-control { flex: 0 1 auto; display: flex; gap: 8px; align-items: center; min-width: 0; }
 .yard-setting-control input[type="text"] { max-width: 240px; width: 100%; }
-.yard-settings .yard-setting-control > select { width: auto; min-width: 0; max-width: min(240px, 100%); field-sizing: content; padding: 4px 9px; border-color: var(--yard-settings-border, #e8e8e8); border-radius: 9px; background: var(--yard-bg, #fff); }
+.yard-settings .yard-setting-control > select, .yard-settings #default-file-open-destination .yard-setting-control > button { padding: 4px 30px 4px 12px; border-color: var(--yard-settings-border, #e8e8e8); border-radius: 12px; background-color: var(--yard-bg, #fff); background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-position: right 10px center; background-repeat: no-repeat; }
+.yard-settings .yard-setting-control > select { width: auto; min-width: 0; max-width: min(240px, 100%); field-sizing: content; appearance: none; }
+.yard-config-scope { position: relative; }
+.yard-config-scope > summary { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 4px 12px; border: 1px solid var(--yard-settings-border, #e8e8e8); border-radius: 12px; cursor: pointer; list-style: none; }
+.yard-config-scope > summary::-webkit-details-marker { display: none; }
+.yard-config-scope > summary svg { color: var(--yard-muted, #888); }
+.yard-config-scope[open] > summary, .yard-config-scope > summary:hover { background: color-mix(in srgb, var(--yard-fg, #1a1c1f) 5%, var(--yard-bg, #fff)); }
+.yard-config-scope > [role="menu"] { position: absolute; z-index: 20; top: calc(100% + 2px); inset-inline-start: 0; width: 240px; padding: 4px; border: 1px solid var(--yard-settings-border, #e8e8e8); border-radius: 16px; background: var(--yard-bg, #fff); box-shadow: 0 4px 10px rgb(0 0 0 / .08); }
+.yard-config-scope-label { display: block; padding: 4px 8px; color: var(--yard-muted, #888); }
+.yard-settings .yard-config-scope [role="menuitem"] { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; text-align: start; }
+.yard-settings .yard-config-scope [role="menuitem"]:hover { background: color-mix(in srgb, var(--yard-fg, #1a1c1f) 5%, var(--yard-bg, #fff)); }
+.yard-settings .yard-config-open { display: inline-flex; align-items: center; gap: 4px; padding: 0 8px; border: 0; background: transparent; color: var(--yard-muted, #888); }
 .yard-setting-control textarea { width: min(360px, 100%); min-width: 180px; resize: vertical; }
 .yard-setting-control input[type="number"] { width: 76px; }
 .yard-setting-control input[type="color"] { width: 36px; height: 30px; padding: 1px; border: 1px solid var(--yard-border, #d8dde1); border-radius: 4px; background: var(--yard-surface, var(--yard-bg, #fff)); }

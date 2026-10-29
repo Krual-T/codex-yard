@@ -3,6 +3,7 @@ import type { ComposerMessageKey } from './composer-messages.ts';
 import type { GoalQueueMessageKey } from './goal-queue-messages.ts';
 
 export const settingsMessageKeys = [
+  'Global config',
   'Configure permissions, web access, and agent responses for new chats', 'Learn more',
   'The previous hook save has an unknown result. The host must confirm it has ended before another save.',
   'The default model is unavailable or ambiguous. Refresh the model list before changing reasoning effort.',
@@ -95,6 +96,7 @@ export type MessageKey = typeof messageKeys[number] | WorkspaceMessageKey | Comp
 export type Messages = Partial<Record<MessageKey, string>>;
 
 export const simplifiedChinese: Messages = {
+  'Global config': '全局配置',
   'Configure permissions, web access, and agent responses for new chats': '为新聊天配置权限、网络访问和智能体回复', 'Learn more': '了解更多',
   'The previous hook save has an unknown result. The host must confirm it has ended before another save.': '上次钩子保存的结果未知。主机确认该操作结束后才能再次保存。',
   'The default model is unavailable or ambiguous. Refresh the model list before changing reasoning effort.': '默认模型不可用或不唯一。更改推理强度前请刷新模型列表。',
@@ -190,6 +192,7 @@ export const simplifiedChinese: Messages = {
 };
 
 export const traditionalChinese: Messages = {
+  'Global config': '全域設定',
   'Configure permissions, web access, and agent responses for new chats': '為新聊天設定權限、網路存取和代理程式回覆', 'Learn more': '瞭解更多',
   'The previous hook save has an unknown result. The host must confirm it has ended before another save.': '上次掛鉤儲存的結果未知。主機確認該操作結束後才能再次儲存。',
   'The default model is unavailable or ambiguous. Refresh the model list before changing reasoning effort.': '預設模型無法使用或不唯一。更改推理強度前請重新整理模型清單。',

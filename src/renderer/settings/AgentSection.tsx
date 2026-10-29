@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { ArrowUpRight, Check, ChevronDown } from 'lucide-react';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { Row } from './PreferenceControls.tsx';
 import { AgentSettings } from './agent-settings.ts';
@@ -51,9 +52,18 @@ export function AgentSection({ client, hostId, onDirtyChange, onSavingChange, re
 }) {
   const { t } = useI18n();
   const agent = useMemo(() => new AgentSettings(client, hostId), [client, hostId]);
+  const scopeMenu = useRef<HTMLDetailsElement>(null);
   const state = useSyncExternalStore(agent.subscribe, agent.getSnapshot, agent.getSnapshot), dirty = agent.dirty;
   const text = (value: string) => translateKnown(t, value);
   useEffect(() => { void agent.load(); return () => agent.dispose(); }, [agent]);
+  useEffect(() => {
+    const outside = (event: PointerEvent) => {
+      const menu = scopeMenu.current;
+      if (menu && event.target instanceof Node && !menu.contains(event.target)) menu.open = false;
+    };
+    document.addEventListener('pointerdown', outside);
+    return () => document.removeEventListener('pointerdown', outside);
+  }, []);
   useLayoutEffect(() => { onDirtyChange(dirty || Boolean(state.draftStorageError)); }, [dirty, state.draftStorageError, onDirtyChange]);
   useLayoutEffect(() => { onSavingChange(state.saving || state.draftSaving); }, [state.saving, state.draftSaving, onSavingChange]);
   useLayoutEffect(() => { registerDiscard?.(() => agent.discard()); return () => registerDiscard?.(null); }, [agent, registerDiscard]);
@@ -76,8 +86,28 @@ export function AgentSection({ client, hostId, onDirtyChange, onSavingChange, re
     ? <>{text(detail)} {' '}{text('Managed by admin policy.')}</> : detail;
   return <>
     <div className="yard-section-heading"><h3 style={{ fontWeight: 500 }}>{text('Agent defaults')}</h3></div>
-    <div className="yard-section-heading"><span>{text('User config')}</span><button type="button" className="yard-link" disabled={!onOpenConfig || !state.configFile || state.loading || state.saving}
-      onClick={() => { const target = agent.getOpenConfigTarget(); if (onOpenConfig && target) onOpenConfig(target.hostId, target.file, target.source); }}>{text('Open config.toml')}</button></div>
+    <div className="yard-section-heading">
+      <details className="yard-config-scope" ref={scopeMenu} onKeyDown={event => {
+        const menu = scopeMenu.current, summary = menu?.querySelector('summary');
+        if (!menu || !summary) return;
+        if (event.key === 'Escape' && menu.open) { event.preventDefault(); event.stopPropagation(); menu.open = false; summary.focus(); }
+        else if (event.key === 'ArrowDown' && event.target === summary) {
+          event.preventDefault(); menu.open = true; menu.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+        }
+      }}>
+        <summary role="button" aria-haspopup="menu" aria-label={text('User config')}>{text('User config')}<ChevronDown size={12} aria-hidden="true" /></summary>
+        <div role="menu" aria-label={text('User config')}>
+          <span className="yard-config-scope-label">{t('Global config')}</span>
+          <button type="button" role="menuitem" onClick={() => {
+            const menu = scopeMenu.current; if (menu) { menu.open = false; menu.querySelector('summary')?.focus(); }
+          }}>{text('User config')}<Check size={14} aria-hidden="true" /></button>
+        </div>
+      </details>
+      <button type="button" className="yard-config-open" disabled={!onOpenConfig || !state.configFile || state.loading || state.saving}
+        onClick={() => { const target = agent.getOpenConfigTarget(); if (onOpenConfig && target) onOpenConfig(target.hostId, target.file, target.source); }}>
+        {text('Open config.toml')}<ArrowUpRight size={12} aria-hidden="true" />
+      </button>
+    </div>
     <SettingsDraftRecovery client={client} hostId={hostId} section="agent" editorId={agent.editorId}
       disabled={dirty || state.loading || state.saving || state.draftSaving} onRestore={draft => agent.restoreDraft(draft)} />
     {state.error && <p className="yard-setting-error" role="alert">{translateKnown(t, state.error)} <button type="button" className="yard-link" disabled={state.loading || state.saving} onClick={() => { void agent.load(); }}>{t('Reload')}</button></p>}
@@ -93,7 +123,7 @@ export function AgentSection({ client, hostId, onDirtyChange, onSavingChange, re
           <button type="button" disabled={state.saving} onClick={() => agent.resolveConflict(field, 'draft')}>{t('Keep my change')}</button></div>
       </div>;
     })}
-    {state.loading ? <p>{t('Loading agent settings...')}</p> : <div className="yard-setting-group" style={{ border: '1px solid var(--yard-border, #d8dde1)', borderRadius: 8, padding: '0 16px' }}>
+    {state.loading ? <p>{t('Loading agent settings...')}</p> : <div className="yard-setting-group">
       <Row label="Approval policy" description={description('approval', 'Choose when ChatGPT asks for approval')}>
         {select('approval', state.approvals)}
       </Row>
