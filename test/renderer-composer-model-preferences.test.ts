@@ -72,6 +72,7 @@ test('home model preferences use versioned single-field writes and thread choice
       expectedVersion: '3', reloadUserConfig: true,
     } });
     assert.equal(await page.evaluate(() => (window as any).fixture.saved().model), null);
+    assert.equal(await page.evaluate(() => (window as any).fixture.saved().profile), 'work');
     await page.reload(); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     await page.waitForFunction(() => (document.querySelector('select[aria-label="推理强度"]') as HTMLSelectElement)?.value === 'low');
     await model.selectOption('beta');
@@ -91,6 +92,7 @@ test('home model preferences use versioned single-field writes and thread choice
     calls = await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.method === 'config/batchWrite'));
     assert.equal(calls[1].params.expectedVersion, '6');
     assert.deepEqual(calls[1].params.edits, [{ keyPath: 'model', value: 'gamma', mergeStrategy: 'upsert' }]);
+    assert.equal(await page.evaluate(() => (window as any).fixture.saved().profile), 'work');
     await page.waitForFunction(() => !(document.querySelector('select[aria-label="模型"]') as HTMLSelectElement)?.disabled);
     await page.evaluate(() => { (window as any).fixture.state.mode = 'reject'; });
     await model.selectOption('alpha');
