@@ -4,6 +4,7 @@ import { ArrowDown, ChevronDown, ChevronLeft, ChevronRight, GitFork, MoreHorizon
 import type { ThreadItemSummary, ThreadSummary, TurnSummary } from '../../../lib/codex-protocol.ts';
 import type { StandaloneMessagesProps, WorkbenchClient } from '../workbench-contract.ts';
 import { StandaloneMarkdown } from '../markdown/StandaloneMarkdown.tsx';
+import type { LiveCitationTarget } from '../markdown/file-citations.ts';
 import { ToolItem } from '../tools/ToolItem.tsx';
 import { CopyButton } from './CopyButton.tsx';
 import { MessageOutputPreviews } from './MessageOutputPreviews.tsx';
@@ -27,6 +28,7 @@ type RenderItemProps = {
   outputTurn?: TurnSummary;
   outputThread?: ThreadSummary;
   outputPreviewAuthority?: MessageOutputPreviewAuthority;
+  sourceActive: boolean;
   threadId: string;
   client: WorkbenchClient;
   hostId: string;
@@ -277,8 +279,50 @@ function MessageMoreActions({ turnId, onFork, onError }: {
 }
 
 function MessageItem(props: RenderItemProps) {
-  const { item, turnId, outputTurn, outputThread, outputPreviewAuthority, threadId, client, hostId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenArtifactSession, onOpenImages, onFork } = props;
+  const { item, turnId, outputTurn, outputThread, outputPreviewAuthority, sourceActive, threadId, client, hostId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenArtifactSession, onOpenImages, onFork } = props;
   const [actionError, setActionError] = useState('');
+  const [connectionRevision, setConnectionRevision] = useState(0);
+  const citationScope = useMemo(() => ({ client, hostId, threadId, cwd, turnId, itemId: item.id, text: item.text,
+    authority: outputPreviewAuthority, connectionRevision, sourceActive }),
+  [client, hostId, threadId, cwd, turnId, item.id, item.text, connectionRevision, sourceActive, Boolean(outputPreviewAuthority),
+    outputPreviewAuthority?.sourceKey, outputPreviewAuthority?.canOpenArtifactPage, outputPreviewAuthority?.isSharedConversation]);
+  const currentCitationScope = useRef<typeof citationScope | null>(citationScope);
+  useLayoutEffect(() => {
+    currentCitationScope.current = citationScope;
+    return () => { if (currentCitationScope.current === citationScope) currentCitationScope.current = null; };
+  }, [citationScope]);
+  useEffect(() => {
+    if ((item.type !== 'agentMessage' && item.type !== 'plan') || typeof item.text !== 'string'
+      || !item.text.includes('codex-file-citation')) return;
+    return client.subscribe(event => {
+      if (event.type === 'page-resumed' || event.type === 'connection-state'
+        || event.type === 'codex-app-server-connection-changed' && event.hostId === hostId) {
+        currentCitationScope.current = null;
+        setConnectionRevision(value => value + 1);
+      }
+    });
+  }, [client, hostId, item.type, item.text]);
+  const openArtifactCitation = useCallback((target: LiveCitationTarget) => {
+    const check = () => {
+      if (!citationScope.sourceActive || currentCitationScope.current !== citationScope) throw new Error('The original message source changed.');
+      const checked: unknown = citationScope.authority?.assertCurrent();
+      if (checked && (typeof checked === 'object' || typeof checked === 'function') && typeof (checked as { then?: unknown }).then === 'function') {
+        void Promise.resolve(checked).catch(() => {});
+        throw new Error('The message source check must be synchronous.');
+      }
+      if (currentCitationScope.current !== citationScope) throw new Error('The original message source changed.');
+    };
+    try {
+      check();
+      if (target.pageId ? citationScope.authority?.canOpenArtifactPage !== true
+        : citationScope.hostId !== 'local' || citationScope.authority?.isSharedConversation === true) {
+        throw new Error('Artifact session navigation is unavailable for this conversation.');
+      }
+      if (!onOpenArtifactSession) throw new Error('Artifact session navigation is unavailable for this page.');
+      onOpenArtifactSession({ hostId: citationScope.hostId, threadId: citationScope.threadId, ...target, assertCurrent: check });
+      setActionError('');
+    } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); }
+  }, [citationScope, onOpenArtifactSession]);
   const openSingleImage = useCallback((image: ImageSource) => onOpenImages([image], 0), [onOpenImages]);
   const markdownProps = { client, hostId, threadId, cwd, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage: openSingleImage };
   if (item.type === 'userMessage') return <UserMessage {...props} />;
@@ -286,7 +330,7 @@ function MessageItem(props: RenderItemProps) {
     const text = asString(item.text);
     return <div className="yard-assistant-message">{item.type === 'plan'
       ? <div className="yard-message-label">Plan</div> : <h4 className="yard-screen-reader">ChatGPT said:</h4>}
-      <StandaloneMarkdown text={text} {...markdownProps} />
+      <StandaloneMarkdown text={text} {...markdownProps} onOpenArtifactCitation={openArtifactCitation} />
       {outputTurn && outputThread && <MessageOutputPreviews client={client} hostId={hostId} thread={outputThread} turn={outputTurn} authority={outputPreviewAuthority}
         onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenBrowser={onOpenBrowser} onOpenArtifactSession={onOpenArtifactSession} />}
       {asArray(item.questions).map((value, index) => {
@@ -527,6 +571,7 @@ export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, o
             return <article className="yard-message-item" key={duplicateId ? `${item.id}:edit-draft` : item.id} data-message-id={item.id} data-search-current={selected?.key === key || undefined}
               ref={(node) => { if (node) nodes.current.set(key, node); else nodes.current.delete(key); }}>
               <MemoMessageItem item={item} turnId={turn.id} threadId={thread.id} client={client} hostId={hostId} cwd={thread.cwd} onEdit={onEdit}
+                sourceActive={requestedThreadId === thread.id}
                 outputThread={outputTurn ? thread : undefined} outputTurn={outputTurn}
                 outputPreviewAuthority={outputPreviewAuthority}
                 onFork={item.type === 'userMessage' && turn.items.some((entry) => entry.type === 'agentMessage' || entry.type === 'plan') ? undefined : onFork}

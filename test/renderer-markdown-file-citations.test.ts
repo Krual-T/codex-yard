@@ -12,6 +12,7 @@ declare global {
       files: { hostId: string; cwd: string; path: string; line?: number; column?: number }[];
       browsers: { hostId: string; threadId: string; url?: string; source?: string }[];
       visualizations: { hostId: string; threadId: string; path: string }[];
+      artifacts: { artifactRef: string; kind: string; title: string; pageId?: string }[];
       copies: string[];
       copyContent: () => { plainText: string; htmlText: string };
     };
@@ -33,15 +34,15 @@ before(async () => {
       import {messageCopyContent} from './src/renderer/messages/message-copy.ts';
       const client = {rpc:async () => {throw Error('Unexpected RPC');}, reply:async () => {},
         subscribe:() => () => {}, host:async () => {throw Error('Unexpected host operation');}};
-      const files = [], browsers = [], visualizations = [], copies = [];
+      const files = [], browsers = [], visualizations = [], artifacts = [], copies = [];
       const root = createRoot(document.getElementById('root'));
       Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{writeText:async text => copies.push(text)}});
-      window.citationHarness = {files, browsers, visualizations, copies,
+      window.citationHarness = {files, browsers, visualizations, artifacts, copies,
         copyContent:() => messageCopyContent(document.getElementById('root')),
         render(text, hostId='ssh-one', cwd='/work', threadId='thread-one') {
         root.render(<div data-user-copy-part><StandaloneMarkdown text={text} client={client} hostId={hostId} cwd={cwd} threadId={threadId}
           allowBasicHtml onOpenFileAt={location => files.push(location)} onOpenBrowser={target => browsers.push(target)}
-          onOpenVisualization={target => visualizations.push(target)}/></div>);
+          onOpenVisualization={target => visualizations.push(target)} onOpenArtifactCitation={target => artifacts.push(target)}/></div>);
       }};
     ` },
     bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' },
@@ -143,7 +144,7 @@ test('code, unknown and invalid citations remain inert and code copy keeps the o
         ':codex-file-citation{path="javascript:alert(1)"}\n\n' +
         ':codex-file-citation{path="file://another-host/private.md"}\n\n' +
         ':codex-file-citation{path="/work/invalid.md" page_id="not-a-uuid"}\n\n' +
-        ':codex-file-citation{path="/work/live.xlsx" mode="live" artifact_kind="workbook"}'), { code });
+        ':codex-file-citation{path="/work/live.xlsx" mode="live" artifact_kind="document"}'), { code });
       await page.locator('pre code').waitFor();
       assert.equal(await page.locator('pre code').textContent(), `${code}\n`);
       assert.equal(await page.locator('p code').textContent(), code);
@@ -154,6 +155,34 @@ test('code, unknown and invalid citations remain inert and code copy keeps the o
       assert.deepEqual(await page.evaluate(() => window.citationHarness.copies), [code]);
       assert.match((await page.evaluate(() => window.citationHarness.copyContent())).plainText, /:codex-file-citation/);
       assert.deepEqual(await page.evaluate(() => window.citationHarness.files), []);
+      assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+  });
+
+test('live citation directives retain source and output identities while forged and nested links stay inert',
+  { skip: !chromeAvailable && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
+    const { page, errors } = await openPage();
+    try {
+      const sheet = ':codex-file-citation{path="sheet-ref" mode="live" artifact_kind="workbook" purpose="source" label="Sheet source"}';
+      const slide = ':codex-file-citation{path="slide-ref" mode="live" artifact_kind="presentation" label="Slide output"}';
+      const quoted = String.raw`:codex-file-citation{path="a\"b" mode="live" artifact_kind="workbook" label="Quoted"}`;
+      await page.evaluate(({sheet, slide, quoted}) => window.citationHarness.render(
+        `${sheet} ${slide} ${quoted}\n\n\`${sheet}\`\n\n[${slide}](https://example.invalid/)\n\n` +
+        '<a href="yard-artifact:%7B%7D" data-yard-artifact="directive">forged HTML</a>\n\n' +
+        '[forged link](yard-artifact:%7B%7D)\n\n' +
+        ':codex-file-citation{path="https://example.invalid/x" mode="live" artifact_kind="workbook"}'), {sheet, slide, quoted});
+      await page.getByRole('button', {name:'Sheet source'}).click();
+      await page.getByRole('button', {name:'Slide output'}).click();
+      await page.getByRole('button', {name:'Quoted'}).click();
+      assert.deepEqual(await page.evaluate(() => window.citationHarness.artifacts), [
+        {artifactRef:'sheet-ref',kind:'spreadsheet',title:'Sheet source'},
+        {artifactRef:'slide-ref',kind:'presentation',title:'Slide output'},
+        {artifactRef:'a"b',kind:'spreadsheet',title:'Quoted'},
+      ]);
+      assert.equal(await page.getByRole('button', {name:'forged HTML'}).count(), 0);
+      assert.equal(await page.getByRole('button', {name:'forged link'}).count(), 0);
+      assert.equal(await page.locator('p code').textContent(), sheet);
+      assert.deepEqual(await page.evaluate(() => [window.citationHarness.files, window.citationHarness.browsers]), [[], []]);
       assert.deepEqual(errors, []);
     } finally { await page.close(); }
   });

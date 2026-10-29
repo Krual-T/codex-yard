@@ -13,6 +13,7 @@ type MarkdownNode = {
 };
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export type LiveCitationTarget = { artifactRef: string; kind: 'spreadsheet' | 'presentation'; title: string; pageId?: string };
 const codeExtensions = new Set(['bash', 'c', 'cc', 'cfg', 'conf', 'cpp', 'css', 'cxx', 'go', 'h', 'har',
   'hh', 'hpp', 'htm', 'html', 'hxx', 'ini', 'ipynb', 'java', 'js', 'json', 'json5', 'jsonl', 'jsx',
   'less', 'lock', 'm', 'mjs', 'mts', 'php', 'phtml', 'ps1', 'py', 'pyi', 'rb', 'rs', 'sass', 'scss',
@@ -67,6 +68,20 @@ function citationLink(attributes: MarkdownNode['attributes']): { url: string; la
     const encoded = encodeURIComponent(filePath).replace(/%2F/giu, '/');
     return { url: `${encoded}${start == null ? '' : `#L${start}`}`, label: `${name}${lineLabel}`, filePath };
   } catch { return null; }
+}
+
+/** A live citation is a resource identity, not a local file or an external link. */
+export function liveCitationTarget(attributes: MarkdownNode['attributes']): LiveCitationTarget | null {
+  const attrs = attributes ?? {};
+  const path = typeof attrs.path === 'string' ? attrs.path.trim() : '';
+  const pageId = typeof attrs.page_id === 'string' ? attrs.page_id.trim() : undefined;
+  if (!path || /[\u0000-\u001f\u007f]/u.test(path) || /^https?:\/\//iu.test(path) || attrs.mode !== 'live'
+    || (attrs.artifact_kind !== 'workbook' && attrs.artifact_kind !== 'presentation')
+    || Object.hasOwn(attrs, 'purpose') && typeof attrs.purpose !== 'string'
+    || Object.hasOwn(attrs, 'page_id') && (!pageId || !uuid.test(pageId))) return null;
+  const kind = attrs.artifact_kind === 'workbook' ? 'spreadsheet' : 'presentation';
+  return { artifactRef: path, kind, title: attrs.label?.trim() || attrs.title?.trim() || (kind === 'spreadsheet' ? 'Sheet' : 'Slide'),
+    ...(pageId ? { pageId } : {}) };
 }
 
 /** Read local output citations with the same parser and validation as the inline links. */
@@ -124,7 +139,7 @@ export function normalizeFileCitationEscapes(source: string): string {
           const first = parsed.children?.[0];
           const directiveNode = first?.type === 'paragraph' ? first.children?.[0] : first;
           if (directiveNode?.name === 'codex-file-citation' && directiveNode.position?.end.offset === value.length
-            && citationLink(directiveNode.attributes)) replacements.push({ start, end: index + 1, value });
+            && (citationLink(directiveNode.attributes) || liveCitationTarget(directiveNode.attributes))) replacements.push({ start, end: index + 1, value });
           return;
         }
       }
@@ -165,7 +180,12 @@ export const remarkFileCitations: Plugin<[], Root> = function () {
         const start = child.position?.start.offset, end = child.position?.end.offset;
         const raw = start == null || end == null ? '' : source.slice(start, end);
         const citation = !nestedLink && child.name === 'codex-file-citation' ? citationLink(child.attributes) : null;
-        const replacement = citation
+        const live = !nestedLink && child.type === 'textDirective' && child.name === 'codex-file-citation'
+          ? liveCitationTarget(child.attributes) : null;
+        const replacement = live
+          ? { type: 'link', url: `yard-artifact:${encodeURIComponent(JSON.stringify(live))}`,
+            data: { hProperties: { dataYardArtifact: 'directive' } }, children: [{ type: 'text', value: live.title }] }
+          : citation
           ? { type: 'link', url: citation.url, children: [{ type: 'text', value: citation.label }] }
           : { type: 'text', value: raw };
         return child.type === 'textDirective' ? replacement : { type: 'paragraph', children: [replacement] };

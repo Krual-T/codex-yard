@@ -298,6 +298,42 @@ async function pending(page: Page, count: number) {
   await page.waitForFunction(n => window.outputHarness.calls.pending.length === n, count);
 }
 
+test('inline live citations capture the original message and connection authority',
+  { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
+    const { page, errors } = await newPage(390);
+    try {
+      const sheet = liveCitation('sheet-ref', 'workbook', 'purpose="source" label="Sheet source"');
+      const slide = liveCitation('slide-ref', 'presentation', 'label="Slide output"');
+      const text = `${sheet} ${slide}`;
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',texts:[text]}), text);
+      const body = page.locator('.yard-assistant-message > .yard-markdown');
+      const sheetButton = body.getByRole('button', {name:'Sheet source'});
+      const slideButton = body.getByRole('button', {name:'Slide output'});
+      await sheetButton.click();
+      await slideButton.click();
+      assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.artifacts), [
+        {hostId:'local',threadId:'thread-one',artifactRef:'sheet-ref',kind:'spreadsheet',title:'Sheet source'},
+        {hostId:'local',threadId:'thread-one',artifactRef:'slide-ref',kind:'presentation',title:'Slide output'},
+      ]);
+      assert.equal(await sheetButton.locator('svg').evaluate(element => getComputedStyle(element).color), 'rgb(0, 163, 71)');
+      assert.equal(await slideButton.locator('svg').evaluate(element => getComputedStyle(element).color), 'rgb(240, 92, 47)');
+      assert.equal(await page.evaluate(() => window.outputHarness.checkArtifact(0)), 'current');
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',texts:[text + ' changed']}), text);
+      await body.getByText('changed').waitFor();
+      assert.equal(await page.evaluate(() => window.outputHarness.checkArtifact(0)), 'The original message source changed.');
+      await sheetButton.click();
+      await page.evaluate(() => window.outputHarness.emit('codex-app-server-connection-changed', 'local'));
+      assert.equal(await page.evaluate(() => window.outputHarness.checkArtifact(2)), 'The original message source changed.');
+      await page.getByRole('button', {name:'Copy',exact:true}).click();
+      assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.copies), [`${text} changed`]);
+      await page.evaluate(text => window.outputHarness.render({host:'local',threadId:'next-thread',actualThreadId:'thread-one',texts:[text]}), text);
+      await sheetButton.click();
+      await page.getByRole('alert').filter({hasText:'The original message source changed.'}).waitFor();
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.artifacts)).length, 3);
+      assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+  });
+
 test('live artifact rows render original titles and dispatch the scoped parent action',
   { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
     const { page, errors } = await newPage(390);

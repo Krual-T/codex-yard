@@ -1,6 +1,6 @@
 import { Children, isValidElement, useEffect, useId, useMemo, useState } from 'react';
 import type { ComponentProps, ReactNode } from 'react';
-import { Check, Clipboard, Code2, Eye, File } from 'lucide-react';
+import { Check, Clipboard, Code2, Eye, File, PanelTop, Table2 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import type { Components, UrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -16,18 +16,19 @@ import { resolveFileLocation, resolveToolFileLocation, safeExternalUrl } from '.
 import type { ImageSource } from '../messages/message-data.ts';
 import { remarkVisualizations } from './visualization-directives.ts';
 import { normalizeFileCitationEscapes, remarkFileCitations } from './file-citations.ts';
+import type { LiveCitationTarget } from './file-citations.ts';
 
 const schema = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
-    a: [...(defaultSchema.attributes?.a ?? []), ['dataYardVisualization', 'directive']],
+    a: [...(defaultSchema.attributes?.a ?? []), ['dataYardVisualization', 'directive'], ['dataYardArtifact', 'directive']],
     code: [...(defaultSchema.attributes?.code ?? []), ['className', /^language-./, 'math-inline', 'math-display']],
     input: [...(defaultSchema.attributes?.input ?? []), 'checked'],
     ul: [...(defaultSchema.attributes?.ul ?? []), ['className', 'contains-task-list']],
     li: [...(defaultSchema.attributes?.li ?? []), ['className', 'task-list-item']],
   },
-  protocols: { ...defaultSchema.protocols, href: [...(defaultSchema.protocols?.href ?? []), 'yard-visualization'], src: ['http', 'https', 'data'] },
+  protocols: { ...defaultSchema.protocols, href: [...(defaultSchema.protocols?.href ?? []), 'yard-visualization', 'yard-artifact'], src: ['http', 'https', 'data'] },
 };
 
 const remarkPlugins: NonNullable<ComponentProps<typeof Markdown>['remarkPlugins']> = [remarkGfm, remarkMath, remarkFileCitations, remarkVisualizations];
@@ -109,6 +110,7 @@ export type StandaloneMarkdownProps = {
   onOpenFileAt?: StandaloneMessagesProps['onOpenFileAt'];
   onOpenVisualization?: StandaloneMessagesProps['onOpenVisualization'];
   onOpenBrowser?: StandaloneMessagesProps['onOpenBrowser'];
+  onOpenArtifactCitation?: (target: LiveCitationTarget) => void;
   onOpenImage?: (image: ImageSource) => void;
 };
 
@@ -132,12 +134,25 @@ function GoogleDocumentLinkIcon({ url }: { url: string }) {
   </svg>;
 }
 
-export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowBasicHtml = false, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage }: StandaloneMarkdownProps) {
+export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowBasicHtml = false, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenArtifactCitation, onOpenImage }: StandaloneMarkdownProps) {
   const markdownText = useMemo(() => normalizeFileCitationEscapes(text), [text]);
   const components = useMemo<Components>(() => ({
     pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
     a: ({ href, children, node }) => {
       if (!href) return <span>{children}</span>;
+      if (href.startsWith('yard-artifact:')) {
+        // Only the directive transformer may create this action; raw HTML and ordinary links retain positions.
+        if (node?.properties?.dataYardArtifact !== 'directive' || node.position) return <span>{children}</span>;
+        let target: LiveCitationTarget;
+        try { target = JSON.parse(decodeURIComponent(href.slice('yard-artifact:'.length))) as LiveCitationTarget; }
+        catch { return <span>{children}</span>; }
+        const Icon = target.kind === 'spreadsheet' ? Table2 : PanelTop;
+        const icon = <Icon className="yard-markdown-file-icon" size={13} strokeWidth={1.5} aria-hidden="true"
+          style={{ color: target.kind === 'spreadsheet' ? '#00a347' : '#f05c2f' }} />;
+        return onOpenArtifactCitation
+          ? <button type="button" className="yard-file-link yard-markdown-file-link" onClick={() => onOpenArtifactCitation(target)}>{icon}{children}</button>
+          : <span className="yard-markdown-file-link">{icon}{children}</span>;
+      }
       if (href.startsWith('yard-visualization:')) {
         // Generated visualization links have no source position; raw HTML retains one.
         if (node?.properties?.dataYardVisualization !== 'directive' || node.position) return <span>{children}</span>;
@@ -171,10 +186,10 @@ export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowB
       const source: ImageSource = { kind: /^(?:https?:|data:)/i.test(src) ? 'url' : 'path', value: src, label: alt || 'Image' };
       return <MessageImage source={source} client={client} hostId={hostId} cwd={cwd} onOpen={onOpenImage ? () => onOpenImage(source) : undefined} />;
     },
-  }), [client, cwd, hostId, threadId, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage]);
+  }), [client, cwd, hostId, threadId, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenArtifactCitation, onOpenImage]);
   const transformUrl: UrlTransform = (value, _key) => {
     const trimmed = value.trim();
-    if (_key === 'href' && trimmed.startsWith('yard-visualization:')) return trimmed;
+    if (_key === 'href' && (trimmed.startsWith('yard-visualization:') || trimmed.startsWith('yard-artifact:'))) return trimmed;
     if (/^(?:https?:|mailto:|data:|#)/i.test(trimmed)) return safeExternalUrl(trimmed, _key === 'src') ?? '';
     if (/^(?:file:\/\/|\/|\.\.?\/)/i.test(trimmed) || !/^[a-z][a-z\d+.-]*:/i.test(trimmed)) return trimmed;
     return '';
