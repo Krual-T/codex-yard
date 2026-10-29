@@ -45,6 +45,7 @@ import type { SendIntent, SendRecoverySnapshot } from './send-recovery.ts';
 import { SendRecoveryNotice } from './SendRecoveryNotice.tsx';
 import { FullAccessNotice } from './FullAccessNotice.tsx';
 import { StandaloneBrowser } from '../browser/index.tsx';
+import { LinkSettings } from '../browser/link-settings.ts';
 import { browserOwnerKey } from '../browser/comments.ts';
 import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference, syncBrowserDraftDeletions, watchBrowserDraftDeletions } from './browser-draft.ts';
 import { BrowserDraftRecoveryNotice } from './BrowserDraftRecoveryNotice.tsx';
@@ -187,6 +188,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const sideChatNavigation = useRef<SideChatWorkspaceNavigationLease | null>(null);
   const sideChatFlushed = useRef(false);
   const sideChatActive = useRef<SideChatRootChild | null>(null);
+  const messageLinkSettings = useRef<{ main: LinkSettings | null; child: LinkSettings | null }>({ main: null, child: null });
   const [sideChatChild, setSideChatChild] = useState<SideChatRootChild | null>(null);
   const [sideChatSource, setSideChatSource] = useState<SideChatPanelSource | null>(null);
   const sideChatSourceRef = useRef(sideChatSource); sideChatSourceRef.current = sideChatSource;
@@ -365,6 +367,35 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const projectStateRef = useRef(projectState); projectStateRef.current = projectState;
   const selectedProjectRef = useRef(selectedProject); selectedProjectRef.current = selectedProject;
   const routeRef = useRef(current); routeRef.current = current;
+  useEffect(() => {
+    const instances: { main: LinkSettings | null; child: LinkSettings | null } = { main: null, child: null };
+    messageLinkSettings.current = instances;
+    if (!current.section && bridgeStatus === 'connected' && hostStatuses[current.hostId] === 'connected') {
+      const originalRoute = current, navigation = navigationGeneration.current;
+      const make = (child: SideChatRootChild | null): LinkSettings => {
+        const daemon = client.captureDaemonConnection(child?.owner.hostId ?? current.hostId);
+        return new LinkSettings(client, { assertCurrent() {
+          daemon.assertOriginal();
+          if (routeRef.current !== originalRoute || navigationGeneration.current !== navigation || navigationLocked.current) {
+            throw new Error('The original link conversation changed.');
+          }
+          if (child) {
+            const actual = sideChatActive.current;
+            if (!actual || actual.identity.prepareId !== child.identity.prepareId || !sameComposerOwner(actual.owner, child.owner)
+              || frozenChildOwners.current.has(composerOwnerKey(child.owner))) throw new Error('The original side chat changed.');
+          }
+        } });
+      };
+      try {
+        if (current.threadId) { instances.main = make(null); instances.main.start(); }
+        if (sideChatChild) { instances.child = make(sideChatChild); instances.child.start(); }
+      } catch { instances.main?.close(); instances.child?.close(); }
+    }
+    return () => {
+      instances.main?.close(); instances.child?.close();
+      if (messageLinkSettings.current === instances) messageLinkSettings.current = { main: null, child: null };
+    };
+  }, [client, current, bridgeStatus, hostStatuses[current.hostId], settingsSourceEpoch, sideChatChild?.identity.prepareId]);
   const projectGeneration = useRef(0);
   const projectResponseGeneration = useRef(0);
   const preferenceGeneration = useRef(0);
@@ -1188,10 +1219,26 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       throw new Error('原侧聊面板目标已改变，请返回原侧聊。');
     }
   };
-  const showBrowser = (source?: { hostId: string; threadId: string; url?: string }, child: SideChatPanelSource | null = null) => {
+  const showBrowser = (source?: { hostId: string; threadId: string; url?: string; source?: 'link' }, child: SideChatPanelSource | null = null) => {
     if (child) checkPanelChild(child);
     if (source && (source.hostId !== (child?.owner.hostId ?? current.hostId) || source.threadId !== (child?.owner.threadId ?? current.threadId))) {
       setError('浏览器链接所属会话已改变，请返回原会话。'); return;
+    }
+    if (source?.source === 'link' && source.url) {
+      const preferences = child ? messageLinkSettings.current.child : messageLinkSettings.current.main;
+      // This build registers both the authored browser pane and the matching
+      // native chrome-browser router. Pairing is handled inside that pane;
+      // agent/desktop rollout flags do not grant this UI capability.
+      const target = preferences?.resolve(source.url, { browserPaneEnabled: true });
+      if (!target || target.kind === 'unavailable') {
+        preferences?.retry();
+        setError('Link preferences could not be verified. Retry this link after the settings reload.'); return;
+      }
+      if (target.kind === 'invalid-url') { setError('This link is not a valid HTTP or HTTPS address.'); return; }
+      if (target.target === 'external-browser') {
+        window.open(target.url, '_blank', 'noopener,noreferrer'); return;
+      }
+      source = { ...source, url: target.url };
     }
     setSideChatSource(child);
     setBrowserMounted(true); setPanelKind('browser'); setPanelOpen(true);
@@ -1523,7 +1570,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         {shellPreferences.values['app-shell-bottom-panel-launcher-visible'] && <button className="yard-icon-button" aria-label="Toggle bottom panel" onClick={() => {
           if (panelOpen && panelKind === 'workspace') setPanelOpen(false); else showPanel({ kind: 'terminal', reuse: true });
         }}><Terminal aria-hidden="true" /></button>}
-        <details className="yard-toolbar-menu"><summary aria-label="Open side panel"><PanelRight aria-hidden="true" /></summary><div className="yard-menu" role="menu">
+        <details className="yard-toolbar-menu"><summary aria-label="Open side panel"><PanelRight aria-hidden="true" /></summary><div className="yard-menu" role="menu" onClick={event => {
+          if (event.target instanceof Element && event.target.closest('[role="menuitem"]')) event.currentTarget.closest('details')?.removeAttribute('open');
+        }}>
           <button role="menuitem" aria-label="Workspace files" onClick={() => showPanel()}>Files</button>
           <button role="menuitem" aria-label="Open Chrome panel" disabled={!sendState} onClick={() => showBrowser()}><Globe aria-hidden="true" />Chrome</button>
           {sideChatOpened && <button role="menuitem" onClick={() => { setPanelKind('side-chat'); setPanelOpen(true); }}>{chinese ? '侧聊' : 'Side chat'}</button>}
