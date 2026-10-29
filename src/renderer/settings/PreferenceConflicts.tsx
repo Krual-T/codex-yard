@@ -1,9 +1,9 @@
 import { translateKnown, useI18n } from '../i18n/index.tsx';
-import { allPreferenceKeys } from './preferences.ts';
-import type { AnyPreferenceKey } from './preferences.ts';
+import { preferenceKeys } from './preferences.ts';
+import type { PreferenceKey } from './preferences.ts';
 import type { PreferenceProps } from './PreferenceControls.tsx';
 
-const labels: Record<AnyPreferenceKey, string> = {
+const labels: Record<PreferenceKey, string> = {
   appearanceTheme: 'Appearance', appearanceLightChromeTheme: 'Light theme', appearanceDarkChromeTheme: 'Dark theme',
   appearanceLightCodeThemeId: 'Light theme: Code theme', appearanceDarkCodeThemeId: 'Dark theme: Code theme',
   appearanceDiffMarkerStyle: 'Diff markers', sansFontSize: 'Interface font size', codeFontSize: 'Code font size',
@@ -30,7 +30,7 @@ const labels: Record<AnyPreferenceKey, string> = {
 
 export function PreferenceConflicts({ preferences, snapshot }: PreferenceProps) {
   const { t } = useI18n();
-  const keys = allPreferenceKeys.filter(key => snapshot[key].conflict);
+  const keys = preferenceKeys.filter(key => snapshot[key].conflict);
   if (!keys.length) return null;
   return <section className="yard-preference-conflicts" aria-label={t('Conflicting preferences')}>
     <p role="alert">{t('The saved preference changed elsewhere. Review the current value before saving.')}</p>

@@ -2,8 +2,11 @@ import { useState } from 'react';
 import { entryState, Row, Select, Toggle } from './PreferenceControls.tsx';
 import type { PreferenceProps } from './PreferenceControls.tsx';
 import { fullAccessVisible, setFullAccessVisible } from './preferences.ts';
-import type { GeneralPreferenceKey, GeneralPreferenceValues } from './preferences.ts';
+import type { PreferenceKey, PreferenceValues } from './preferences.ts';
 import { hasTranslations, languageOptions, translateKnown, useI18n } from '../i18n/index.tsx';
+
+const archiveOptions = [0, 1, 7, 14, 30, 90];
+const archiveLabel = (days: number) => days === 0 ? 'Never' : `${days} ${days === 1 ? 'day' : 'days'}`;
 
 export function GeneralSection(props: PreferenceProps & { platform: string; navigate: (section: string) => void }) {
   const { t } = useI18n();
@@ -12,7 +15,7 @@ export function GeneralSection(props: PreferenceProps & { platform: string; navi
   const fullAccess = props.snapshot['composer-permission-mode-visibility'];
   const bottomPanel = props.snapshot['app-shell-bottom-panel-launcher-visible'];
   const close = props.snapshot['confirm-before-close'];
-  const save = <K extends GeneralPreferenceKey>(key: K, value: GeneralPreferenceValues[K]) => {
+  const save = <K extends PreferenceKey>(key: K, value: PreferenceValues[K]) => {
     props.preferences.edit(key, value);
     void props.preferences.saveOne(key);
   };
@@ -39,7 +42,6 @@ export function GeneralSection(props: PreferenceProps & { platform: string; navi
             if (event.target.checked) setConfirmFullAccess(true); else setFullAccess(false);
           }} />
       </Row>
-
     </div>
     <h3 className="yard-settings-group-title">{t('General')}</h3>
     <div className="yard-setting-group">
@@ -58,18 +60,16 @@ export function GeneralSection(props: PreferenceProps & { platform: string; navi
       <Row label="Confirm before closing a window" description={close.value === 'keyboardOnly' ? 'Warn when a tab-close shortcut would close the window' : 'Choose when to warn before closing a window. Alt+F4 and the close button warn only with Always'}
         error={close.error} retry={() => { void props.preferences.reload('confirm-before-close'); }}>
         <select aria-label="Confirm before closing a window" value={close.value} disabled={entryState(close).disabled || close.conflict}
-          onChange={event => save('confirm-before-close', event.target.value as GeneralPreferenceValues['confirm-before-close'])}>
+          onChange={event => save('confirm-before-close', event.target.value as PreferenceValues['confirm-before-close'])}>
           <option value="never">Never</option><option value="keyboardOnly">Close shortcut only</option><option value="always">Always</option>
         </select>
       </Row>
-
       <Row label="Bottom panel" description="Show the bottom panel control in the app header"
         error={bottomPanel.error} retry={() => { void props.preferences.reload('app-shell-bottom-panel-launcher-visible'); }}>
         <input type="checkbox" role="switch" aria-label="Bottom panel" checked={bottomPanel.value} disabled={entryState(bottomPanel).disabled || bottomPanel.conflict}
           style={bottomPanel.value ? { backgroundColor: 'var(--yard-accent, #339cff)' } : undefined}
           onChange={event => save('app-shell-bottom-panel-launcher-visible', event.target.checked)} />
       </Row>
-
       {bottomPanel.value && <Row label="Default terminal location" description="Choose where the terminal shortcut and environment actions open terminal tabs"
         error={props.snapshot.defaultTerminalLocation.error} retry={() => { void props.preferences.reload('defaultTerminalLocation'); }}>
         <div className="yard-segmented" role="group" aria-label={t('Default terminal location')}>
@@ -77,12 +77,20 @@ export function GeneralSection(props: PreferenceProps & { platform: string; navi
             disabled={entryState(props.snapshot.defaultTerminalLocation).disabled} onClick={() => props.preferences.edit('defaultTerminalLocation', value)}>{t(value === 'bottom' ? 'Bottom' : 'Right')}</button>)}
         </div>
       </Row>}
-      {props.platform !== 'windows' && <Toggle {...props} accent setting="preventSleepWhileRunning" label="Prevent sleep while running"
-        unavailable="Keeping the computer awake is not available in this web host." />}
-      <Row label="Automatically archive inactive chats" description="Automatic archiving is not available in this web host." error={props.snapshot.autoArchiveAfterDays.error}
+      {props.platform !== 'windows' && <Row label="Prevent sleep while running" description="Keep your computer awake while ChatGPT is running a task"
+        error={props.snapshot.preventSleepWhileRunning.error} retry={() => { void props.preferences.reload('preventSleepWhileRunning'); }}>
+        <input type="checkbox" role="switch" aria-label={t('Prevent sleep while running')} checked={props.snapshot.preventSleepWhileRunning.value}
+          disabled={entryState(props.snapshot.preventSleepWhileRunning).disabled || props.snapshot.preventSleepWhileRunning.conflict}
+          style={props.snapshot.preventSleepWhileRunning.value ? { backgroundColor: 'var(--yard-accent, #339cff)' } : undefined}
+          onChange={event => save('preventSleepWhileRunning', event.target.checked)} />
+      </Row>}
+      <Row label="Automatically archive inactive chats" description="Archive local chats after a period of inactivity" error={props.snapshot.autoArchiveAfterDays.error}
         retry={() => { void props.preferences.reload('autoArchiveAfterDays'); }}>
-        <select aria-label="Automatically archive inactive chats" value={archiveDays} disabled>
-          <option value={archiveDays}>{archiveDays === 0 ? 'Never' : `${archiveDays} ${archiveDays === 1 ? 'day' : 'days'}`}</option>
+        <select aria-label={t('Automatically archive inactive chats')} value={archiveDays}
+          disabled={entryState(props.snapshot.autoArchiveAfterDays).disabled || props.snapshot.autoArchiveAfterDays.conflict}
+          onChange={event => save('autoArchiveAfterDays', Number(event.target.value))}>
+          {!archiveOptions.includes(archiveDays) && <option value={archiveDays} disabled>{archiveLabel(archiveDays)}</option>}
+          {archiveOptions.map(days => <option key={days} value={days}>{archiveLabel(days)}</option>)}
         </select>
       </Row>
       <Row label="Import work from other AI apps" description="Bring over your setup, projects, and recent chats">
@@ -110,15 +118,14 @@ export function GeneralSection(props: PreferenceProps & { platform: string; navi
     </div>
     <h3 className="yard-settings-group-title">{translateKnown(t, 'Notifications')}</h3>
     <div className="yard-setting-group">
-      <Row label="Turn completion notifications" description="Set when ChatGPT alerts you that it's finished. Notification delivery is not available in this web host."
+      <Row label="Turn completion notifications" description="Set when ChatGPT alerts you that it's finished"
         error={props.snapshot['notifications-turn-mode'].error} retry={() => { void props.preferences.reload('notifications-turn-mode'); }}>
         <select aria-label="Turn completion notifications" value={props.snapshot['notifications-turn-mode'].value}
           disabled={entryState(props.snapshot['notifications-turn-mode']).disabled || props.snapshot['notifications-turn-mode'].conflict}
-          onChange={event => save('notifications-turn-mode', event.target.value as GeneralPreferenceValues['notifications-turn-mode'])}>
+          onChange={event => save('notifications-turn-mode', event.target.value as PreferenceValues['notifications-turn-mode'])}>
           <option value="off">Never</option><option value="unfocused">Only when unfocused</option><option value="always">Always</option>
         </select>
       </Row>
-
       {(['notifications-permissions-enabled', 'notifications-questions-enabled', 'notifications-dot-enabled'] as const).map((key, index) =>
         <Row key={key} label={['Enable permission notifications', 'Enable question notifications', 'Enable dot notifications'][index]}
           description={['Show alerts when notification permissions are required', 'Show alerts when input is needed to continue', 'Show alerts when your dot sends you a message'][index]}

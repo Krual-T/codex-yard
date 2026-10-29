@@ -22,7 +22,7 @@ import type { SettingsInstructionEditorProps } from './PersonalizationSection.ts
 import { PluginSection } from './PluginSection.tsx';
 import { SkillSection } from './SkillSection.tsx';
 import type { SkillSectionMemory } from './SkillSection.tsx';
-import { Preferences, allPreferenceKeys } from './preferences.ts';
+import { Preferences, preferenceKeys } from './preferences.ts';
 import type { PreferenceProps } from './PreferenceControls.tsx';
 import { PreferenceConflicts } from './PreferenceConflicts.tsx';
 import { WorktreesSection } from './WorktreesSection.tsx';
@@ -131,7 +131,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
   const transition = useRef(0);
   const dirty = preferences.dirty || otherDirty || !!recovery.localRetry.length || !!recovery.draftRetry.length
     || recovery.records.some(item => item.phase === 'pending' || item.phase === 'unknown' || item.phase === 'blocked');
-  const anySaving = saving || otherSaving || recovery.draftPending > 0 || recovery.inFlight.length > 0 || allPreferenceKeys.some(key => snapshot[key].saving);
+  const anySaving = saving || otherSaving || recovery.draftPending > 0 || recovery.inFlight.length > 0 || preferenceKeys.some(key => snapshot[key].saving);
   const flags = useRef({ dirty, saving: anySaving });
   flags.current = { dirty, saving: anySaving };
 
@@ -331,11 +331,11 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
           preferences.discard();
           if (section === 'appearance') { setOtherDirty(false); setEditorRevision(value => value + 1); }
         }}>{t('Discard')}</button>
-        <button type="button" disabled={anySaving || appearanceInvalid || !preferences.dirty || allPreferenceKeys.some(key => snapshot[key].conflict)} onClick={() => {
+        <button type="button" disabled={anySaving || appearanceInvalid || !preferences.dirty || preferenceKeys.some(key => snapshot[key].conflict)} onClick={() => {
           setSaving(true); void preferences.save().finally(() => setSaving(false));
         }}>{saving ? t('Saving...') : t('Save')}</button>
       </div></div>}
-      {allPreferenceKeys.some(key => snapshot[key].saving) && <span className="yard-sr-only" role="status">{t('Saving preferences')}</span>}
+      {preferenceKeys.some(key => snapshot[key].saving) && <span className="yard-sr-only" role="status">{t('Saving preferences')}</span>}
     </main>
     {confirmLeave && <div className="yard-dialog-backdrop"><div className="yard-dialog" role="dialog" aria-modal="true" aria-labelledby="yard-unsaved-title" onKeyDown={event => { if (event.key === 'Escape') void finishLeave(false); }}>
       <h2 id="yard-unsaved-title">{t('Discard unsaved changes?')}</h2><p>{t('Your edits have not been saved.')}</p>

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
-import { Preferences, defaultThemes, exportTheme, fullAccessVisible, importTheme, mergeImportedTheme, setFullAccessVisible } from '../src/renderer/settings/preferences.ts';
+import { Preferences, defaultThemes, exportTheme, fullAccessVisible, importTheme, mergeImportedTheme, preferenceKeys, setFullAccessVisible } from '../src/renderer/settings/preferences.ts';
 import { assertPreferenceExpectation } from '../src/native/protocol.ts';
 import { createPreferenceWrites } from '../src/native/preference-writes.ts';
 import { createStateMutations } from '../src/native/state-mutations.ts';
@@ -39,6 +39,13 @@ class FakeClient implements WorkbenchClient {
     throw new Error(`Unknown ${endpoint}`);
   }
 }
+
+test('the shared preference key list includes every General atom and global preference once', () => {
+  for (const key of ['composer-permission-mode-visibility', 'app-shell-bottom-panel-launcher-visible', 'confirm-before-close',
+    'notifications-turn-mode', 'notifications-permissions-enabled', 'notifications-questions-enabled', 'notifications-dot-enabled'] as const) {
+    assert.equal(preferenceKeys.filter(candidate => candidate === key).length, 1);
+  }
+});
 
 test('General uses the original atom and global keys, defaults, and conditional writes', async () => {
   const client = new FakeClient(), prefs = new Preferences(client);

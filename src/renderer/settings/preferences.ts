@@ -55,9 +55,6 @@ export interface PreferenceValues {
   'ambient-suggestions-enabled': boolean;
   'show-context-window-usage': boolean;
   'show-educational-tips': boolean;
-}
-export type PermissionModeVisibility = boolean | { 'full-access'?: boolean | null; [key: string]: unknown };
-export interface GeneralPreferenceValues {
   'composer-permission-mode-visibility': PermissionModeVisibility;
   'app-shell-bottom-panel-launcher-visible': boolean;
   'confirm-before-close': 'never' | 'keyboardOnly' | 'always';
@@ -66,17 +63,15 @@ export interface GeneralPreferenceValues {
   'notifications-questions-enabled': boolean;
   'notifications-dot-enabled': boolean;
 }
+export type PermissionModeVisibility = boolean | { 'full-access'?: boolean | null; [key: string]: unknown };
 export type PreferenceKey = keyof PreferenceValues;
-export type GeneralPreferenceKey = keyof GeneralPreferenceValues;
-export type AnyPreferenceValues = PreferenceValues & GeneralPreferenceValues;
-export type AnyPreferenceKey = keyof AnyPreferenceValues;
 type Source = 'setting' | 'global' | 'atom';
-interface Definition<K extends AnyPreferenceKey> {
+interface Definition<K extends PreferenceKey> {
   source: Source;
-  defaultValue: AnyPreferenceValues[K];
-  valid(value: unknown): value is AnyPreferenceValues[K];
+  defaultValue: PreferenceValues[K];
+  valid(value: unknown): value is PreferenceValues[K];
 }
-type Definitions = { [K in AnyPreferenceKey]: Definition<K> };
+type Definitions = { [K in PreferenceKey]: Definition<K> };
 
 const oneOf = <T extends string>(...values: T[]) => (value: unknown): value is T =>
   typeof value === 'string' && values.includes(value as T);
@@ -158,12 +153,7 @@ export const preferenceDefinitions: Definitions = {
   'notifications-dot-enabled': { source: 'global', defaultValue: true, valid: bool },
 };
 
-export const generalPreferenceKeys: readonly GeneralPreferenceKey[] = ['composer-permission-mode-visibility',
-  'app-shell-bottom-panel-launcher-visible', 'confirm-before-close', 'notifications-turn-mode',
-  'notifications-permissions-enabled', 'notifications-questions-enabled', 'notifications-dot-enabled'];
-export const allPreferenceKeys = Object.keys(preferenceDefinitions) as AnyPreferenceKey[];
-// Retained for callers that deliberately request the original preference group.
-export const preferenceKeys = allPreferenceKeys.filter((key): key is PreferenceKey => !generalPreferenceKeys.includes(key as GeneralPreferenceKey));
+export const preferenceKeys = Object.keys(preferenceDefinitions) as PreferenceKey[];
 export interface PreferenceObservation { exists: boolean; value?: unknown }
 export interface PreferenceEntry<T> {
   value: T;
@@ -178,7 +168,7 @@ export interface PreferenceEntry<T> {
   saving: boolean;
   error: string | null;
 }
-export type PreferenceSnapshot = { [K in AnyPreferenceKey]: PreferenceEntry<AnyPreferenceValues[K]> };
+export type PreferenceSnapshot = { [K in PreferenceKey]: PreferenceEntry<PreferenceValues[K]> };
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const clone = <T>(value: T): T => structuredClone(value);
 const put = (target: Record<string, unknown>, key: string, value: unknown) =>
@@ -224,7 +214,7 @@ export function mergeImportedTheme(current: ChromeTheme, imported: ChromeTheme):
 }
 
 function initialSnapshot(): PreferenceSnapshot {
-  return Object.fromEntries(allPreferenceKeys.map(key => {
+  return Object.fromEntries(preferenceKeys.map(key => {
     const value = clone(preferenceDefinitions[key].defaultValue);
     return [key, { value, saved: clone(value), observation: null, editBase: null, baseValue: clone(value),
       editRevision: 0, conflict: false, available: false, loading: true, saving: false, error: null }];
@@ -235,8 +225,8 @@ function initialSnapshot(): PreferenceSnapshot {
 export class Preferences {
   private snapshot = initialSnapshot();
   private listeners = new Set<() => void>();
-  private revisions = new Map<AnyPreferenceKey, number>();
-  private pendingRefresh = new Set<AnyPreferenceKey>();
+  private revisions = new Map<PreferenceKey, number>();
+  private pendingRefresh = new Set<PreferenceKey>();
   private lifecycle = 0;
   private disposed = false;
   private platform = 'unknown';
@@ -246,7 +236,7 @@ export class Preferences {
   setPlatform(platform: string): void { this.platform = platform; }
   getSnapshot = (): PreferenceSnapshot => this.snapshot;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
-  private update<K extends AnyPreferenceKey>(key: K, patch: Partial<PreferenceEntry<AnyPreferenceValues[K]>>): void {
+  private update<K extends PreferenceKey>(key: K, patch: Partial<PreferenceEntry<PreferenceValues[K]>>): void {
     if (this.disposed) return;
     this.snapshot = { ...this.snapshot, [key]: { ...this.snapshot[key], ...patch } };
     for (const listener of this.listeners) listener();
@@ -259,10 +249,10 @@ export class Preferences {
         event.type === 'settings-changed' ? 'setting' : null;
       if (source) {
         const keys = Array.isArray(event.keys) && event.keys.length ? event.keys : typeof event.key === 'string' ? [event.key] :
-          allPreferenceKeys.filter(key => preferenceDefinitions[key].source === source);
+          preferenceKeys.filter(key => preferenceDefinitions[key].source === source);
         for (const key of keys) if (typeof key === 'string' && key in preferenceDefinitions &&
-          preferenceDefinitions[key as AnyPreferenceKey].source === source) {
-          const preferenceKey = key as AnyPreferenceKey;
+          preferenceDefinitions[key as PreferenceKey].source === source) {
+          const preferenceKey = key as PreferenceKey;
           if (this.snapshot[preferenceKey].saving) this.pendingRefresh.add(preferenceKey);
           else void this.reload(preferenceKey);
         }
@@ -272,8 +262,8 @@ export class Preferences {
     return () => { if (this.lifecycle === lifecycle) { this.disposed = true; this.lifecycle++; this.unsubscribe?.(); this.unsubscribe = null; } };
   }
   async load(): Promise<void> {
-    const settings = allPreferenceKeys.filter(key => preferenceDefinitions[key].source === 'setting');
-    const others = allPreferenceKeys.filter(key => preferenceDefinitions[key].source !== 'setting');
+    const settings = preferenceKeys.filter(key => preferenceDefinitions[key].source === 'setting');
+    const others = preferenceKeys.filter(key => preferenceDefinitions[key].source !== 'setting');
     const lifecycle = this.lifecycle;
     const revisions = new Map(settings.map(key => [key, this.revisions.get(key) ?? 0]));
     await Promise.allSettled([
@@ -293,7 +283,7 @@ export class Preferences {
       ...others.map(key => this.reload(key)),
     ]);
   }
-  private applyRead<K extends AnyPreferenceKey>(key: K, raw: PreferenceObservation): void {
+  private applyRead<K extends PreferenceKey>(key: K, raw: PreferenceObservation): void {
     const definition = preferenceDefinitions[key];
     const entry = this.snapshot[key];
     if (entry.saving) { this.pendingRefresh.add(key); return; }
@@ -308,7 +298,7 @@ export class Preferences {
     this.update(key, { observation: clone(raw), editBase, conflict, saved: clone(value),
       value: editBase ? entry.value : clone(value), available: true, loading: false, error: null });
   }
-  async reload(key: AnyPreferenceKey): Promise<void> {
+  async reload(key: PreferenceKey): Promise<void> {
     if (this.snapshot[key].saving) { this.pendingRefresh.add(key); return; }
     const revision = (this.revisions.get(key) ?? 0) + 1;
     const lifecycle = this.lifecycle;
@@ -322,9 +312,7 @@ export class Preferences {
       if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) this.update(key, { loading: false, error: errorText(error) });
     }
   }
-  edit<K extends PreferenceKey>(key: K, value: PreferenceValues[K]): void;
-  edit<K extends GeneralPreferenceKey>(key: K, value: GeneralPreferenceValues[K]): void;
-  edit(key: AnyPreferenceKey, value: AnyPreferenceValues[AnyPreferenceKey]): void {
+  edit<K extends PreferenceKey>(key: K, value: PreferenceValues[K]): void {
     const entry = this.snapshot[key];
     if (!entry.available || !entry.observation || !preferenceDefinitions[key].valid(value) || same(entry.value, value)) return;
     const editBase = entry.editBase ?? clone(entry.observation);
@@ -334,13 +322,13 @@ export class Preferences {
       editRevision: entry.editRevision + 1, error: null });
   }
   discard(): void {
-    for (const key of allPreferenceKeys) {
+    for (const key of preferenceKeys) {
       const entry = this.snapshot[key];
       if (!entry.saving && entry.editBase) this.update(key,
         { value: clone(entry.saved), editBase: null, conflict: false, error: entry.available ? null : entry.error });
     }
   }
-  resolveConflict(key: AnyPreferenceKey, choice: 'current' | 'draft'): void {
+  resolveConflict(key: PreferenceKey, choice: 'current' | 'draft'): void {
     const entry = this.snapshot[key];
     if (!entry.conflict || entry.saving || !entry.observation) return;
     if (choice === 'current') {
@@ -360,20 +348,20 @@ export class Preferences {
     this.update(key, { value: clone(draft) as never, editBase: clone(entry.observation), baseValue: clone(entry.saved) as never,
       editRevision: entry.editRevision + 1, conflict: false, error: null });
   }
-  get dirty(): boolean { return allPreferenceKeys.some(key => this.snapshot[key].editBase !== null); }
-  get saving(): boolean { return allPreferenceKeys.some(key => this.snapshot[key].saving); }
+  get dirty(): boolean { return preferenceKeys.some(key => this.snapshot[key].editBase !== null); }
+  get saving(): boolean { return preferenceKeys.some(key => this.snapshot[key].saving); }
   async save(): Promise<boolean> {
-    const keys = allPreferenceKeys.filter(key => this.snapshot[key].editBase !== null);
+    const keys = preferenceKeys.filter(key => this.snapshot[key].editBase !== null);
     if (keys.some(key => !this.snapshot[key].available || this.snapshot[key].saving || this.snapshot[key].conflict)) return false;
     const results = await Promise.all(keys.map(key => this.saveKey(key)));
     return results.every(Boolean);
   }
-  async saveOne(key: AnyPreferenceKey): Promise<boolean> {
+  async saveOne(key: PreferenceKey): Promise<boolean> {
     const entry = this.snapshot[key];
     if (!entry.available || entry.saving || !entry.editBase || entry.conflict) return false;
     return this.saveKey(key);
   }
-  private async saveKey(key: AnyPreferenceKey): Promise<boolean> {
+  private async saveKey(key: PreferenceKey): Promise<boolean> {
     const source = preferenceDefinitions[key].source;
     const endpoint = source === 'setting' ? 'set-setting' : source === 'global' ? 'set-global-state' : 'set-persisted-atom';
     const getEndpoint = source === 'setting' ? 'get-setting' : source === 'global' ? 'get-global-state' : 'get-persisted-atom';

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { preferenceDefinitions } from '../settings/preferences.ts';
-import type { GeneralPreferenceValues } from '../settings/preferences.ts';
+import type { PreferenceValues } from '../settings/preferences.ts';
 
 const keys = ['composer-permission-mode-visibility', 'app-shell-bottom-panel-launcher-visible', 'confirm-before-close'] as const;
-type ShellPreferences = Pick<GeneralPreferenceValues, typeof keys[number]>;
+type ShellPreferences = Pick<PreferenceValues, typeof keys[number]>;
 const defaults: ShellPreferences = {
   'composer-permission-mode-visibility': preferenceDefinitions['composer-permission-mode-visibility'].defaultValue,
   'app-shell-bottom-panel-launcher-visible': preferenceDefinitions['app-shell-bottom-panel-launcher-visible'].defaultValue,
