@@ -1,41 +1,28 @@
 # Native conversation tools
 
 Yard previously exposed four handwritten conversation tools. It now runs twelve
-tools in a permanent Node host, using the shipped App's catalog, strict schemas,
-history projection, wait kernel, Markdown formatting, model validation, ancestry
-and delegation-input constructor. A thread created through Yard can be continued
+tools in a permanent Node host, maintaining the catalog, strict schemas,
+history projection, passive waits, Markdown formatting, model validation, ancestry
+and delegation input in project-authored TypeScript. A thread created through Yard can be continued
 by another client while retaining its tools, including after all Yard pages close.
 
 This change covers conversation tools on the execution host's daemon. An explicit
 registration lets Windows App, Linux App and Yard share that host. Native Windows
 UI testing and migration of production conversations remain release checks.
 
-## Execution and copied-code boundary
+## Execution and source boundary
 
-The unmodified official adapter, copied to
-`vendor/native-app-tools/26.1013.40934/server.mjs`, connects to the private
+The project-authored `lib/owned-tools-adapter.ts` connects to the private
 `${dataDir}/app-tools.sock` pipe supplied by `lib/app-tools.ts`. The permanent
 `lib/native-app-tools.ts` host routes business I/O through existing
 `CodexConnection` transports and Yard project/state services. Browser pages do
 not own tool calls.
 
-`vendor/native-app-tools/26.1013.40934/portable-tools.mjs` is a bounded generated
-closure from App 26.1013.40934's original compiled modules. It imports no renderer
-and runs without a desktop installation or DOM. The sole platform substitution
-inside the closure replaces the browser HTML-entity decoder with
-`entities.decodeHTMLStrict`. Upstream files remain unchanged. Its provenance and
-copyright boundary are in `THIRD_PARTY.md`.
-
-Regenerate from the pinned upstream snapshot with:
-
-```sh
-node scripts/extract-native-tools.ts
-```
-
-An optional first argument supplies an extracted snapshot's `webview/assets`
-directory. The extractor generates the kernel and copies the official adapter.
-Normal builds use these checked-in artifacts and do not need to extract or load
-the full UI. Their vendor directory survives removal of the old renderer snapshot.
+`lib/native-tool-kernel.ts` maintains descriptors, validation and projections;
+`lib/native-tool-wait.ts` maintains passive reads and waits. Their parsers and
+validation library come from npm. No vendor snapshot, generated App closure or
+extraction script is required. See `THIRD_PARTY.md` for the historical reference
+and package notice boundaries.
 
 The catalog contains `list_projects`, `create_thread`, `fork_thread`,
 `list_threads`, `list_archived_threads`, `read_thread`, `wait_threads`,
@@ -44,7 +31,7 @@ The catalog contains `list_projects`, `create_thread`, `fork_thread`,
 
 ## Calls, concurrency and cancellation
 
-The original MCP adapter supplies the caller host, thread, turn and business
+The owned MCP adapter supplies the caller host, thread, turn and business
 call ID. A bounded host cache retains the same execution promise for a repeated
 business call, including an uncertain write result. Transport IDs never replace
 the business ID, and a reconnect never triggers an automatic write retry.
@@ -56,7 +43,7 @@ model/effort overrides preserve destination settings. The original root-turn ID
 is read from the caller rather than invented from its current turn. Self sends
 and native ancestor sends are refused.
 
-History reads remain passive. The copied wait kernel retains its generation and
+History reads remain passive. The owned wait implementation retains its generation and
 revision cursors, final-text suppression and commentary filtering. Cancellation
 stops the caller's wait without interrupting the target turn. Single-thread
 lookups and waits connect only their preferred/declared host; fallback discovery connects

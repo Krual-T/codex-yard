@@ -2,34 +2,22 @@
 
 ## Codex App resources
 
-Codex App **26.1013.40934** is the historical UI behavior reference. Its compiled `webview/` resources and `codex-app-tools/` Node adapter remain tracked under `vendor/codex-app/26.1013.40934/` during the migration. The owned React entry and build no longer load the snapshot renderer; remaining reference tests and resource helpers are being replaced before deleting the snapshot. A desktop app installation and a separate App package download are not required.
+Codex App **26.1013.40934** is the historical UI behavior reference. The renderer, state, host and conversation tool adapter now use project-authored TypeScript and npm dependencies. The compiled App snapshot and the subsequently extracted native-tool copy have been removed from the source tree; neither is a build or runtime fallback. A desktop installation and a separate App package download are not required.
 
-The snapshot was extracted from [OpenAI's versioned Linux package](https://persistent.oaistatic.com/codex-app-prod/linux/arch/26.1013.40934/x86_64/chatgpt-bin-26.1013.40934-1-x86_64.pkg.tar.zst). The web files and adapter are preserved byte-for-byte, including bundled copyright and license notices. The repository does not contain the package archive, desktop executable, original App TypeScript/TSX sources, account data, or downloaded configuration responses.
+The historical reference was extracted from [OpenAI's versioned Linux package](https://persistent.oaistatic.com/codex-app-prod/linux/arch/26.1013.40934/x86_64/chatgpt-bin-26.1013.40934-1-x86_64.pkg.tar.zst). Its unmodified files and bundled notices remain recoverable in Git history. The current tree does not contain that package archive, compiled App code, desktop executable, original App TypeScript/TSX sources, account data, or downloaded configuration responses.
 
-The project's MIT license applies to project-authored source and excludes `vendor/codex-app/` and the nine upstream sprite sheets in `public/pets/`. The compiled App code, its bundled dependencies, and the sprites retain their existing copyrights and terms; this repository does not relicense them. See the [vendor notice](vendor/codex-app/LICENSE), retained upstream notices, the [pet provenance and notice](public/pets/NOTICE.md), and [OpenAI's applicable terms](https://openai.com/policies/service-terms/).
+The project's MIT license applies to project-authored source and excludes the nine upstream sprite sheets in `public/pets/`. Historical App artifacts, their bundled dependencies and the retained sprites keep their existing copyrights, notices and applicable terms; this repository does not relicense them or grant additional permissions. See the [pet provenance and notice](public/pets/NOTICE.md) and [OpenAI's applicable terms](https://openai.com/policies/service-terms/).
 
 Compatibility with other App reference versions or CLI/daemon versions is not assumed. The CLI/daemon versions and the separate UI reference version are documented in README.md.
 
-## Native conversation tool adapter and derived kernel
+## Native conversation tools
 
-`vendor/native-app-tools/26.1013.40934/server.mjs` is the unmodified official
-`codex-app-tools/server.mjs` from the same package. The tool host uses this copy
-so that its runtime does not depend on the old renderer snapshot directory.
-
-`vendor/native-app-tools/26.1013.40934/portable-tools.mjs` contains a bounded subset
-of the same App snapshot: its twelve conversation-tool descriptors, strict argument
-schemas, history projection, passive wait kernel, Markdown formatting, model
-validation, ancestry helper and delegation-input constructor, including their
-dependencies and retained bundled notices. `scripts/extract-native-tools.ts`
-selects upstream lexical bindings and bundles this subset with esbuild; the
-original snapshot is unchanged. The browser HTML entity decoder is the sole
-platform port inside the copied kernel and uses `entities.decodeHTMLStrict`.
-
-This derived code retains the upstream copyrights and terms and is excluded from
-the project's MIT grant. See its [notice](vendor/native-app-tools/LICENSE).
-The declaration file, extraction script and daemon/Yard I/O adapter are
-project-authored. The extraction script also copies the official adapter without
-changes. Neither runtime artifact starts or imports a desktop renderer.
+`lib/owned-tools-adapter.ts`, `lib/native-app-tools.ts`, `lib/native-tool-kernel.ts`
+and `lib/native-tool-wait.ts` maintain the twelve-tool protocol and business
+behavior as readable TypeScript. They use the external Codex CLI/daemon protocol;
+they do not extract, import or execute compiled App code. General validation,
+Markdown and HTML parsers come from the exact npm dependencies, including Zod,
+mdast/micromark utilities and node-html-parser, with their packaged notices.
 
 ## Package dependencies
 
@@ -39,7 +27,7 @@ The owned file editor uses the MIT-licensed CodeMirror 6 packages for editing, c
 
 KaTeX and its fonts come from the npm `katex` package and are included in the renderer output by esbuild. The PDF worker is copied from the npm `pdfjs-dist` package to `.local/renderer/pdf.worker.min.mjs`; the PDF viewer loads it from the same origin. Their package licenses and notices remain applicable to these generated resources.
 
-The nine upstream WebP sprite sheets are tracked separately under `public/pets/` with their original provenance and notice. They are not npm packages or project-authored artwork. The server must expose those files for the Mini pet consumer to load them.
+The nine upstream WebP sprite sheets remain separately under `public/pets/` with their original provenance and notice. They are not npm packages or project-authored artwork. Mini/Pets is disabled; these retained historical assets do not enable or mount that UI.
 
 The host uses the npm `chrome-devtools-mcp` runtime dependency for local Chrome integration. The Chrome companion bundles this project's transport and declares the same `chrome-devtools-mcp` version and `ws` as dependencies, installed separately on the access computer. It is generated into `.local/` during the host build and does not contain Chrome, browser profiles, cookies, or paired-device credentials.
 
