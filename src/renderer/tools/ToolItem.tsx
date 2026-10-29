@@ -46,7 +46,7 @@ function BrowserLink({ url, hostId, threadId, onOpenBrowser, children }: Browser
   const safe = safeExternalUrl(url);
   if (!safe || !/^https?:\/\//i.test(safe)) return <span>{children ?? url}</span>;
   return onOpenBrowser
-    ? <button type="button" className="yard-file-link" onClick={() => onOpenBrowser({ hostId, threadId, url: safe })}>{children ?? safe}</button>
+    ? <button type="button" className="yard-file-link" onClick={() => onOpenBrowser({ hostId, threadId, url: safe, source: 'link' })}>{children ?? safe}</button>
     : <a href={safe} target="_blank" rel="noreferrer noopener">{children ?? safe}</a>;
 }
 

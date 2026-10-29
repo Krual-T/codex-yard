@@ -396,7 +396,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       instances.main?.close(); instances.child?.close();
       if (messageLinkSettings.current === instances) messageLinkSettings.current = { main: null, child: null };
     };
-  }, [client, current, bridgeStatus, hostStatuses[current.hostId], settingsSourceEpoch, sideChatChild?.identity.prepareId]);
+  }, [client, current, bridgeStatus, hostStatuses[current.hostId], settingsSourceEpoch, navigationFactsEpoch, sideChatChild?.identity.prepareId]);
   const projectGeneration = useRef(0);
   const projectResponseGeneration = useRef(0);
   const preferenceGeneration = useRef(0);
@@ -572,6 +572,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       }
       if (event.type === 'mcp-notification' && ['thread/archived', 'thread/unarchived'].includes(String(event.method))) {
         navigationGeneration.current++;
+        setNavigationFactsEpoch(value => value + 1);
         const id = record(event.params).threadId;
         const readOnly = event.method === 'thread/archived';
         setTabs(previous => previous.map(tab => tab.hostId === event.hostId && tab.id === id ? { ...tab, readOnly } : tab));
@@ -1116,6 +1117,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       release() {
         if (frozenChildOwners.current.get(key) !== token) return;
         mainLease?.release(); frozenChildOwners.current.delete(key);
+        setNavigationFactsEpoch(value => value + 1);
       },
     };
   }, []);

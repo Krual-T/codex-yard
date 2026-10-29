@@ -28,6 +28,7 @@ test('message and side-chat Markdown preserve native link behavior and original 
   const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'jsx', contents: `
     import React from 'react';
     import { createRoot } from 'react-dom/client';
+    import { flushSync } from 'react-dom';
     import { StandaloneMessages } from './src/renderer/messages/StandaloneMessages.tsx';
     import { StandaloneMarkdown } from './src/renderer/markdown/StandaloneMarkdown.tsx';
     import { SideChatController } from './src/renderer/side-chat/controller.ts';
@@ -87,7 +88,7 @@ test('message and side-chat Markdown preserve native link behavior and original 
       <div id="target">Anchor target</div>
     </>);}
     window.messageLinkFixture={calls,clicks,files,copies,unexpected,blockNext(){blocked=true;},
-      changeMain(nextHost,nextThread){hostId=nextHost;mainThread={...mainThread,id:nextThread};render();}};
+      changeMain(nextHost,nextThread){hostId=nextHost;mainThread={...mainThread,id:nextThread};flushSync(render);}};
     render();
   ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' },
   plugins: [{ name: 'single-katex', setup(builder) {
@@ -160,7 +161,7 @@ test('message and side-chat Markdown preserve native link behavior and original 
     await page.locator('#main [data-message-id="search"] summary').click();
     await page.locator('#main [data-message-id="search"]').getByRole('button', { name: 'https://example.invalid/tool' }).click();
     assert.deepEqual((await page.evaluate(() => window.messageLinkFixture.calls)).at(-1),
-      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'https://example.invalid/tool' });
+      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'https://example.invalid/tool', source: 'link' });
 
     await page.evaluate(() => window.messageLinkFixture.changeMain('ssh-other', 'parent-thread'));
     const assistantLink = page.locator('#main [data-message-id="assistant"]').getByRole('link', { name: 'Assistant link' });
