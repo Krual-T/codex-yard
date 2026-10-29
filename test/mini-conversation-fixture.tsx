@@ -9,6 +9,7 @@ import type { ComposerDraftController, ComposerDraftSnapshot } from '../src/rend
 import { removeBrowserDraftReference } from '../src/renderer/app/browser-draft.ts';
 import { addBrowserComment } from './browser-comment-fixture.ts';
 import { updateBrowserAtom } from '../src/renderer/storage/ui-atoms.ts';
+import { readUnknownQueueRecovery } from '../src/renderer/composer/standalone-queue-storage.ts';
 import { ConversationSessions, useConversationSession } from '../src/renderer/app/conversation-sessions.ts';
 import { SendRecoveryStore, sendsAtom, sendThreadKey } from '../src/renderer/app/send-recovery.ts';
 import { MessageEditRecoveryStore } from '../src/renderer/app/message-edit-recovery.ts';
@@ -22,6 +23,8 @@ const hostCalls: { endpoint: string; params: Record<string, unknown> }[] = [];
 const opened: { hostId: string; threadId: string }[] = [];
 const errors: string[] = [];
 const targets: MiniConversationTarget[] = [];
+const projectChecks: { target: MiniConversationTarget; threadId: string }[] = [];
+const projectMembership: Record<string, string> = {};
 const queues: Record<string, { id: string; clientUserMessageId: string; input: Record<string, unknown>[] }[]> = {};
 const threads: Record<string, ThreadSummary> = {};
 const threadKey = (hostId: string, id: string) => JSON.stringify([hostId, id]);
@@ -32,6 +35,8 @@ const thread = (hostId: string, id: string) => threads[threadKey(hostId, id)] ??
   }] : [],
 };
 let connected = true, unknownNext = false, holdNext = false, rejectTarget = false, resolveHeld: (() => void) | undefined;
+let rejectProject = false, rejectReady = false, unknownQueue = false, throwRecovery = false, throwError = false;
+let rejectSendRead = false, rejectEditThread = '', rejectSendOnTarget = '';
 let controller: MiniConversationController | null = null, mainController: ComposerDraftController | null = null;
 let miniController: ComposerDraftController | null = null;
 let miniSnapshot: ComposerDraftSnapshot | null = null;
@@ -76,6 +81,7 @@ const client: WorkbenchClient & { connected: boolean } = {
       return { queuedSubmission: entry } as T;
     }
     if (method === 'thread/queue/start') {
+      if (unknownQueue) { unknownQueue = false; throw Object.assign(new Error('Synthetic queue lost reply'), { uncertain: true }); }
       queues[threadKey(hostId, String(params.threadId))] = (queues[threadKey(hostId, String(params.threadId))] ?? [])
         .filter(entry => entry.id !== params.queuedSubmissionId);
       return {} as T;
@@ -95,8 +101,8 @@ const client: WorkbenchClient & { connected: boolean } = {
     if (endpoint === 'workspace-root-options') return { roots: ['/fixture/local', '/fixture/other'] } as T;
     if (endpoint === 'codex-home') return { codexHome: '/fixture/.codex' } as T;
     if (endpoint === 'get-persisted-atom') return {} as T;
-    if (endpoint === 'queued-follow-up-send-lock-acquire') return { acquired: true } as T;
-    if (endpoint === 'queued-follow-up-send-lock-release') return {} as T;
+    if (endpoint === 'queued-follow-up-send-lock-acquire') { hostCalls.push({ endpoint, params: structuredClone(params) }); return { acquired: true } as T; }
+    if (endpoint === 'queued-follow-up-send-lock-release') { hostCalls.push({ endpoint, params: structuredClone(params) }); return {} as T; }
     if (endpoint === 'message-send-status') return { turnId: null, queuedSubmissionId: null } as T;
     throw new Error('Unexpected synthetic host ' + endpoint);
   },
@@ -106,6 +112,11 @@ const client: WorkbenchClient & { connected: boolean } = {
 const sends = new SendRecoveryStore(client);
 const sessions = new ConversationSessions(client, async identity => (await sends.read()).creations[sendThreadKey(identity.hostId, identity.threadId)]);
 const edits = new MessageEditRecoveryStore(client, undefined, { hostChecksRebasedSourceBeforeRevert: true });
+const realReadSends = sends.read.bind(sends), realReadEdits = edits.read.bind(edits), realReady = sessions.ready.bind(sessions);
+sends.read = async () => { if (rejectSendRead) { rejectSendRead = false; throw new Error('Synthetic send recovery read failure'); } return realReadSends(); };
+edits.read = async (hostId, threadId) => { if (rejectEditThread === threadId) throw new Error('Synthetic edit recovery read failure'); return realReadEdits(hostId, threadId); };
+sessions.ready = async (identity, allowFirstTurn) => { if (rejectReady) { rejectReady = false; throw new Error('Synthetic session ready failure'); }
+  return realReady(identity, allowFirstTurn); };
 function complete(hostId: string, id: string) {
   const value = thread(hostId, id), active = value.turns.find(item => item.status === 'inProgress');
   if (!active) return;
@@ -165,8 +176,17 @@ function Fixture() {
           };
         }, () => { browserReceipt = null; })}
         onTargetChanged={value => { if (rejectTarget) throw new Error('Synthetic target persistence failure');
+          if (value.threadId === rejectSendOnTarget) { rejectSendRead = true; rejectSendOnTarget = ''; }
           targets.push(value); sessionStorage.setItem('fixture-mini-target', JSON.stringify(value)); setTarget(value); }}
-        onRecoveryChanged={() => {}} onError={error => errors.push(error)} onOpenThread={value => opened.push(value)} />
+        onRecoveryChanged={() => { if (throwRecovery) throw new Error('Synthetic recovery notification failure'); }}
+        onError={error => { errors.push(error); if (throwError) throw new Error('Synthetic error notification failure'); }}
+        onAssignCreatedProject={async (owner, created) => {
+          projectChecks.push({ target: structuredClone(owner), threadId: created.id });
+          const key = threadKey(owner.hostId, created.id), previous = projectMembership[key];
+          if (previous && previous !== owner.projectId) throw new Error('Synthetic project conflict');
+          if (rejectProject) throw new Error('Synthetic project association failure');
+          if (!previous && owner.projectId) projectMembership[key] = owner.projectId;
+        }} onOpenThread={value => opened.push(value)} />
     </StandaloneMini>
   </>;
 }
@@ -187,7 +207,8 @@ IDBObjectStore.prototype.get = function (key) {
 };
 const root = createRoot(document.getElementById('root')!);
 const fixture = {
-  calls, hostCalls, opened, errors, targets, sends, sessions, renderConnection: (_value: boolean) => {}, renderOwner: (_value: boolean) => {},
+  calls, hostCalls, opened, errors, targets, projectChecks, projectMembership, sends, sessions,
+  renderConnection: (_value: boolean) => {}, renderOwner: (_value: boolean) => {},
   controller: () => controller, main: () => mainController?.snapshot(),
   draftController: () => miniController,
   receipt: () => structuredClone(browserReceipt),
@@ -226,10 +247,26 @@ const fixture = {
       return { ...state, bindings: { ...state.bindings, [sendThreadKey(hostId, threadId)]: draftId } };
     });
   },
-  async target(hostId: string, threadId: string | null) {
-    const state = await sends.read(), draftId = miniDraftIdentity(hostId, threadId, state.bindings);
-    return controller?.switchTarget({ hostId, threadId, draftId, cwd: '/fixture/' + hostId }) ?? false;
+  async stripCreationProject(hostId: string, threadId: string) {
+    await updateBrowserAtom(sendsAtom, previous => {
+      if (!previous || typeof previous !== 'object' || Array.isArray(previous)) throw new Error('Missing fixture recovery state');
+      const state = previous as { creations: Record<string, Record<string, unknown>> }, key = sendThreadKey(hostId, threadId);
+      const receipt = { ...state.creations[key] }; delete receipt.projectId;
+      return { ...state, creations: { ...state.creations, [key]: receipt } };
+    });
   },
+  async target(hostId: string, threadId: string | null, projectId?: string) {
+    const state = await sends.read(), draftId = miniDraftIdentity(hostId, threadId, state.bindings);
+    return controller?.switchTarget({ hostId, threadId, draftId, cwd: '/fixture/' + hostId, ...(projectId ? { projectId } : {}) }) ?? false;
+  },
+  async exactTarget(value: MiniConversationTarget) { return controller?.switchTarget(value) ?? false; },
+  async cancel(id: string) { await sends.cancel(id); },
+  async queueRecovery() { return readUnknownQueueRecovery('local', 'thread-a'); },
+  failReady() { rejectReady = true; }, failQueueReply() { unknownQueue = true; },
+  setProjectFailure(value: boolean) { rejectProject = value; },
+  setNotificationFailures(recovery: boolean, error: boolean) { throwRecovery = recovery; throwError = error; },
+  failSendReadOnTarget(threadId: string) { rejectSendOnTarget = threadId; },
+  failEditReadFor(threadId: string) { rejectEditThread = threadId; },
   async records() { return sends.read(); },
   async editState(hostId: string, threadId: string) { return edits.read(hostId, threadId); },
   miniReady(hostId: string, threadId: string | null) {
