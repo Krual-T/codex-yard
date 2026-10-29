@@ -52,7 +52,7 @@ async function fixture(t: TestContext) {
     assert.ok(connection.socket);
     const captured: Grant = { connection, socket: connection.socket, generation, draftId, revision };
     grants.set(page, captured);
-    return { connection, socket: captured.socket, generation, assertOriginal(reference) {
+    return { connection, socket: captured.socket, generation, source: { paths: { homeDirectory: root, codexHome: join(root, 'codex') }, sshTarget: null }, assertOriginal(reference) {
       if (grants.get(page) !== captured || reference.hostId !== 'host-a' || reference.threadId !== 'thread-a'
         || reference.owner.draftId !== captured.draftId || reference.revision !== captured.revision
         || reference.connectionGeneration !== captured.generation) throw new Error('original fixture authority changed');
@@ -118,14 +118,14 @@ test('a new daemon socket cannot continue a confirmed original injection', async
   assert.equal((await f.inject(value)).injection.phase, 'injected');
   const replacement = await f.connect();
   const replacementOrigin = f.grant('page-a', replacement, 'generation-b', 'draft-a');
-  await assert.rejects(f.start(value.reference, 'turn-attempt-1', replacementOrigin), /连接|改变|生命周期/);
+  await assert.rejects(f.start(value.reference, 'turn-attempt-1', replacementOrigin), /连接|改变|来源/);
   await assert.rejects(f.start(value.reference), /authority changed/);
   await assert.rejects(f.otherTurn(), /尚未结算/);
   assert.equal(f.peer.calls('thread/inject_items').length, 1);
   assert.equal(f.peer.calls('turn/start').length, 0);
 });
 
-test('an explicitly resumed original turn can use a new connection with a verified backend witness', async t => {
+test('an explicitly resumed original turn can use a new connection with a verified persistent source', async t => {
   const f = await fixture(t), value = f.input();
   assert.equal((await f.inject(value)).injection.phase, 'injected');
   f.peer.handlers.set('turn/start', () => { throw Object.assign(new Error('fixture rejection'), { code: -32602 }); });
@@ -135,16 +135,14 @@ test('an explicitly resumed original turn can use a new connection with a verifi
   assert.ok(socket);
   const resume = await replacement.request('thread/resume', { threadId: value.reference.threadId });
   assert.equal(resume.thread.id, value.reference.threadId);
-  const originalPeer = f.peer;
-  const origin: SendInjectionOriginal = { connection: replacement, socket, generation: 'generation-b',
+  const origin: SendInjectionOriginal = { connection: replacement, socket, generation: 'generation-b', source: f.original.source,
     assertOriginal(reference) {
       assert.deepEqual(reference, value.reference);
       if (replacement.socket !== socket) throw new Error('fixture socket changed');
     },
-    assertResumedContinuity(reference) {
-      if (originalPeer !== f.peer || resume.thread.id !== reference.threadId || replacement.socket !== socket) {
-        throw new Error('fixture backend continuity unavailable');
-      }
+    assertResumedSource(reference, source) {
+      assert.deepEqual(source, f.original.source);
+      if (resume.thread.id !== reference.threadId || replacement.socket !== socket) throw new Error('fixture resumed source unavailable');
     } };
   f.peer.handlers.set('turn/start', () => ({ turn: fixtureTurn('resumed-turn', [], 'inProgress') }));
   const result = await f.start(value.reference, 'turn-attempt-2', origin);
@@ -152,6 +150,104 @@ test('an explicitly resumed original turn can use a new connection with a verifi
   assert.equal(result.turn.connectionGeneration, 'generation-b');
   assert.deepEqual(f.peer.calls('turn/start')[1].params, value.turnParams);
   assert.equal(f.peer.calls('thread/inject_items').length, 1);
+});
+
+test('a new peer can resume a confirmed durable injection after reloading the native-state file', async t => {
+  const f = await fixture(t), value = f.input();
+  const injected = await f.inject(value);
+  assert.equal(injected.injection.persistentThread, true);
+  const saved = (await f.disk()).sendInjections as { operations: { source: unknown }[] };
+  assert.deepEqual(saved.operations[0].source, f.original.source);
+  f.first.close();
+  const newRoot = await mkdtemp('/tmp/aw-injection-peer-'), newPeer = await createFakeCodex(newRoot);
+  const replacement = new CodexConnection(newPeer.socketPath, { timeout: 100 });
+  t.after(async () => { replacement.close(); await newPeer.close(); await rm(newRoot, { recursive: true, force: true }); });
+  newPeer.threads.set(value.reference.threadId, fixtureThread(value.reference.threadId, f.root));
+  await replacement.connect();
+  const socket = replacement.socket;
+  assert.ok(socket);
+  const resume = await replacement.request('thread/resume', { threadId: value.reference.threadId });
+  newPeer.handlers.set('turn/start', () => ({ turn: fixtureTurn('new-daemon-turn', [], 'inProgress') }));
+  const reloaded: Value = {}, native = createNativeState({ dataDir: f.root, publish: next => replace(reloaded, next) });
+  replace(reloaded, await native.load());
+  const mutations = createStateMutations(native.beforeAction);
+  const rebuilt = createSendInjection({ mutations, assertStateAvailable: native.assertAvailable, readSection: () => reloaded.sendInjections,
+    persistSection: section => native.persist({ ...reloaded, sendInjections: section }) });
+  const origin: SendInjectionOriginal = { connection: replacement, socket, generation: 'generation-new-daemon', source: f.original.source,
+    assertOriginal(reference) { assert.deepEqual(reference, value.reference); assert.equal(replacement.socket, socket); },
+    assertResumedSource(reference, source) {
+      assert.deepEqual(source, f.original.source); assert.equal(resume.thread.id, reference.threadId); assert.equal(Reflect.get(resume.thread, 'ephemeral'), false);
+    } };
+  const result = await f.start(value.reference, 'new-daemon-attempt', origin, rebuilt);
+  assert.equal(result.turn.phase, 'accepted');
+  assert.equal(result.turn.connectionGeneration, 'generation-new-daemon');
+  assert.deepEqual(newPeer.calls('turn/start')[0].params, value.turnParams);
+  assert.equal(newPeer.calls('thread/inject_items').length, 0);
+  assert.equal(f.peer.calls('thread/inject_items').length, 1);
+});
+
+test('a changed codex home cannot resume the original injection even with a callback', async t => {
+  const f = await fixture(t), value = f.input();
+  assert.equal((await f.inject(value)).injection.phase, 'injected');
+  const replacement = await f.connect(), socket = replacement.socket;
+  assert.ok(socket);
+  const resume = await replacement.request('thread/resume', { threadId: value.reference.threadId });
+  const origin: SendInjectionOriginal = { connection: replacement, socket, generation: 'generation-b',
+    source: { ...f.original.source, paths: { ...f.original.source.paths, codexHome: join(f.root, 'other-codex') } },
+    assertOriginal(reference) { assert.deepEqual(reference, value.reference); },
+    assertResumedSource(reference) { assert.equal(resume.thread.id, reference.threadId); } };
+  await assert.rejects(f.start(value.reference, 'turn-attempt-1', origin), /状态目录已改变/);
+  await assert.rejects(f.otherTurn(), /尚未结算/);
+  assert.equal(f.peer.calls('turn/start').length, 0);
+});
+
+test('a confirmed injection in an ephemeral thread cannot resume on a new connection', async t => {
+  const f = await fixture(t), value = f.input();
+  f.peer.threads.set(value.reference.threadId, fixtureThread(value.reference.threadId, f.root, { ephemeral: true }));
+  const injected = await f.inject(value);
+  assert.equal(injected.injection.persistentThread, false);
+  const replacement = await f.connect(), socket = replacement.socket;
+  assert.ok(socket);
+  const resume = await replacement.request('thread/resume', { threadId: value.reference.threadId });
+  const origin: SendInjectionOriginal = { connection: replacement, socket, generation: 'generation-b', source: f.original.source,
+    assertOriginal(reference) { assert.deepEqual(reference, value.reference); },
+    assertResumedSource(reference) { assert.equal(resume.thread.id, reference.threadId); } };
+  await assert.rejects(f.start(value.reference, 'turn-attempt-1', origin), /持久会话/);
+  assert.equal(f.peer.calls('turn/start').length, 0);
+  await assert.rejects(f.otherTurn(), /尚未结算/);
+});
+
+test('a resumed thread must still be persistent in the final original-connection idle read', async t => {
+  const f = await fixture(t), value = f.input();
+  assert.equal((await f.inject(value)).injection.persistentThread, true);
+  const replacement = await f.connect(), socket = replacement.socket;
+  assert.ok(socket);
+  const resume = await replacement.request('thread/resume', { threadId: value.reference.threadId });
+  const origin: SendInjectionOriginal = { connection: replacement, socket, generation: 'generation-b', source: f.original.source,
+    assertOriginal(reference) { assert.deepEqual(reference, value.reference); },
+    assertResumedSource(reference) { assert.equal(resume.thread.id, reference.threadId); } };
+  f.peer.handlers.set('thread/read', () => ({ thread: fixtureThread(value.reference.threadId, f.root, { ephemeral: true }) }));
+  const result = await f.start(value.reference, 'turn-attempt-1', origin);
+  assert.deepEqual(result.turn.terminal, { kind: 'not-sent', reason: 'idle-unconfirmed' });
+  assert.equal(f.peer.calls('turn/start').length, 0);
+  await assert.rejects(f.otherTurn(), /尚未结算/);
+});
+
+test('a legacy operation without source evidence remains same-connection only', async t => {
+  const f = await fixture(t), value = f.input();
+  assert.equal((await f.inject(value)).injection.phase, 'injected');
+  const legacy = structuredClone(f.state), section = legacy.sendInjections as { operations: { source?: unknown; injection: { persistentThread?: boolean } }[] };
+  delete section.operations[0].source;
+  delete section.operations[0].injection.persistentThread;
+  await f.mutations.run(() => f.native.persist(legacy));
+  const replacement = await f.connect(), socket = replacement.socket;
+  assert.ok(socket);
+  const origin: SendInjectionOriginal = { connection: replacement, socket, generation: 'generation-b', source: f.original.source,
+    assertOriginal(reference) { assert.deepEqual(reference, value.reference); }, assertResumedSource() {} };
+  await assert.rejects(f.start(value.reference, 'turn-attempt-1', origin), /持久会话/);
+  assert.equal((await f.start(value.reference)).turn.phase, 'accepted');
+  assert.equal(f.peer.calls('thread/inject_items').length, 1);
+  assert.equal(f.peer.calls('turn/start').length, 1);
 });
 
 test('a new connection cannot retry an original turn with an unknown outcome even after resume', async t => {
@@ -163,33 +259,35 @@ test('a new connection cannot retry an original turn with an unknown outcome eve
   const replacement = await f.connect(), socket = replacement.socket;
   assert.ok(socket);
   const resume = await replacement.request('thread/resume', { threadId: value.reference.threadId });
-  const origin: SendInjectionOriginal = { connection: replacement, socket, generation: 'generation-b',
+  const origin: SendInjectionOriginal = { connection: replacement, socket, generation: 'generation-b', source: f.original.source,
     assertOriginal(reference) { assert.deepEqual(reference, value.reference); },
-    assertResumedContinuity(reference) { assert.equal(resume.thread.id, reference.threadId); } };
+    assertResumedSource(reference, source) { assert.deepEqual(source, f.original.source); assert.equal(resume.thread.id, reference.threadId); } };
   await assert.rejects(f.start(value.reference, 'turn-attempt-2', origin), /尚未确认/);
   await assert.rejects(f.otherTurn(), /尚未结算/);
   assert.equal(f.peer.calls('thread/inject_items').length, 1);
   assert.equal(f.peer.calls('turn/start').length, 1);
 });
 
-test('a resumed connection loses its write authority if continuity is revoked while idle is pending', async t => {
+test('a resumed connection loses its write authority if its source is revoked while idle is pending', async t => {
   const f = await fixture(t), value = f.input();
   assert.equal((await f.inject(value)).injection.phase, 'injected');
   f.first.close();
   const replacement = await f.connect(), socket = replacement.socket;
   assert.ok(socket);
   const resume = await replacement.request('thread/resume', { threadId: value.reference.threadId });
-  let epoch: typeof f.peer | null = f.peer;
-  const origin: SendInjectionOriginal = { connection: replacement, socket, generation: 'generation-b',
+  let authorizedSource: typeof f.peer | null = f.peer;
+  const origin: SendInjectionOriginal = { connection: replacement, socket, generation: 'generation-b', source: f.original.source,
     assertOriginal(reference) { assert.deepEqual(reference, value.reference); },
-    assertResumedContinuity(reference) {
-      if (epoch !== f.peer || resume.thread.id !== reference.threadId) throw new Error('fixture lifecycle changed');
+    assertResumedSource(reference, source) {
+      if (authorizedSource !== f.peer || resume.thread.id !== reference.threadId || source.paths.codexHome !== f.original.source.paths.codexHome) {
+        throw new Error('fixture source changed');
+      }
     } };
   let pending: { id: string | number; send(value: unknown): void } | undefined;
   f.peer.handlers.set('thread/read', (_params, context) => { pending = { id: context.message.id!, send: context.send }; return NO_REPLY; });
   const starting = f.start(value.reference, 'turn-attempt-1', origin);
   await f.peer.waitForCall('thread/read', 2);
-  epoch = null;
+  authorizedSource = null;
   assert.ok(pending); pending.send({ id: pending.id, result: { thread: fixtureThread('thread-a', f.root) } });
   const stopped = await starting;
   assert.deepEqual(stopped.turn.terminal, { kind: 'not-sent', reason: 'original-changed' });

@@ -4,6 +4,7 @@ import { RpcError } from '../../lib/codex.ts';
 import type { CodexConnection } from '../../lib/codex.ts';
 import type { LateRpcTerminal } from '../../lib/codex-protocol.ts';
 import type { StateMutations } from './state-mutations.ts';
+import type { HostPaths, SshHost } from './ssh.ts';
 
 type ObjectValue = Record<string, unknown>;
 
@@ -19,15 +20,22 @@ export interface SendInjectionReference {
   connectionGeneration: string;
 }
 
+export interface SendInjectionSource {
+  paths: HostPaths;
+  sshTarget: Pick<SshHost, 'hostId' | 'sshAlias' | 'sshHost' | 'sshPort' | 'identity'> | null;
+}
+
 /** Captured by the server before entering its existing conversationWrite interval. */
 export interface SendInjectionOriginal {
   connection: CodexConnection;
   socket: WebSocket;
   generation: string;
+  /** Actual host-owned connection paths and SSH target, never renderer-supplied. */
+  source: SendInjectionSource;
   /** Must synchronously verify the original page, owner, revision and daemon connection. */
   assertOriginal(reference: SendInjectionReference): void;
-  /** Required for a new turn connection; verifies actual resume and the same backend lifecycle. */
-  assertResumedContinuity?(reference: SendInjectionReference): void;
+  /** Required for a new turn connection; verifies actual resume and the original persistent backend. */
+  assertResumedSource?(reference: SendInjectionReference, source: SendInjectionSource): void;
 }
 
 export interface SendInjectionInput {
@@ -43,10 +51,11 @@ export type SendInjectionTerminal =
   | { kind: 'not-sent'; reason: 'original-changed' | 'idle-unconfirmed' | 'storage-failed' | 'transport-unavailable' };
 type InjectionPhase = 'preparing' | 'sending' | 'unknown' | 'injected' | 'rejected' | 'not-sent';
 type TurnPhase = 'waiting' | 'preparing' | 'sending' | 'unknown' | 'accepted' | 'rejected' | 'not-sent';
-interface InjectionState { phase: InjectionPhase; terminal?: SendInjectionTerminal }
+interface InjectionState { phase: InjectionPhase; persistentThread?: boolean; terminal?: SendInjectionTerminal }
 interface TurnState { phase: TurnPhase; attemptId?: string; attempts: string[]; connectionGeneration?: string; terminal?: SendInjectionTerminal }
 interface StoredOperation {
   reference: SendInjectionReference;
+  source?: SendInjectionSource;
   items: ObjectValue[];
   turnParams: ObjectValue;
   injection: InjectionState;
@@ -60,6 +69,7 @@ interface Observation {
   step: Step;
   attemptId: string;
   connectionGeneration: string;
+  persistentThread?: boolean;
   terminal: SendInjectionTerminal | null;
   /** Only used when the original reservation itself could not be confirmed. */
   reservation?: StoredOperation;
@@ -116,6 +126,18 @@ function validReference(value: unknown): value is SendInjectionReference {
     && (value.owner.threadId === null || value.owner.threadId === value.threadId);
 }
 
+function validSource(value: unknown, reference: SendInjectionReference): value is SendInjectionSource {
+  if (!object(value) || !object(value.paths) || !jsonValue(value) || Object.keys(value).length !== 2
+    || Object.keys(value.paths).length !== 2 || !id(value.paths.homeDirectory) || !id(value.paths.codexHome)) return false;
+  if (value.sshTarget === null) return true;
+  if (!object(value.sshTarget) || Object.keys(value.sshTarget).length !== 5) return false;
+  return value.sshTarget.hostId === reference.hostId && id(value.sshTarget.sshHost)
+    && (value.sshTarget.sshAlias === null || id(value.sshTarget.sshAlias))
+    && (value.sshTarget.identity === null || id(value.sshTarget.identity))
+    && (value.sshTarget.sshPort === null || Number.isInteger(value.sshTarget.sshPort)
+      && typeof value.sshTarget.sshPort === 'number' && value.sshTarget.sshPort > 0 && value.sshTarget.sshPort <= 65535);
+}
+
 function validPayload(reference: SendInjectionReference, items: unknown, turnParams: unknown): boolean {
   return Array.isArray(items) && items.length === 2 && items.every(object) && jsonValue(items)
     && items[0].type === 'function_call' && items[0].call_id === reference.callId
@@ -151,8 +173,10 @@ function section(value: unknown): Section {
   if (!object(value) || value.version !== 1 || !Array.isArray(value.operations)) throw new Error('原注入记录无法安全读取，会话写入已暂停。');
   const identities = new Set<string>(), activeThreads = new Set<string>();
   for (const item of value.operations) {
-    if (!object(item) || !validReference(item.reference) || !validPayload(item.reference, item.items, item.turnParams)
+    if (!object(item) || !validReference(item.reference) || item.source !== undefined && !validSource(item.source, item.reference)
+      || !validPayload(item.reference, item.items, item.turnParams)
       || !object(item.injection) || !injectionPhases.includes(item.injection.phase as InjectionPhase)
+      || item.injection.persistentThread !== undefined && (item.injection.phase !== 'injected' || typeof item.injection.persistentThread !== 'boolean')
       || !validTerminal(item.injection.terminal, 'injection', String(item.injection.phase))
       || !object(item.turn) || !turnPhases.includes(item.turn.phase as TurnPhase) || !Array.isArray(item.turn.attempts)
       || !item.turn.attempts.every(id) || new Set(item.turn.attempts).size !== item.turn.attempts.length
@@ -181,14 +205,18 @@ function matching(operations: StoredOperation[], reference: SendInjectionReferen
   return found;
 }
 
-function assertConnection(original: SendInjectionOriginal, reference: SendInjectionReference, step: Step): void {
+function assertConnection(original: SendInjectionOriginal, reference: SendInjectionReference, step: Step,
+  source?: SendInjectionSource): void {
   if (!original || !id(original.generation) || !original.connection?.connected
     || original.connection.socket !== original.socket || original.socket?.readyState !== WebSocket.OPEN) {
     throw new Error('原 Codex 连接已改变。');
   }
+  if (!validSource(original.source, reference) || source && !isDeepStrictEqual(original.source, source)) {
+    throw new Error('原会话的宿主或状态目录已改变。');
+  }
   if (original.generation !== reference.connectionGeneration) {
-    if (step !== 'turn' || !original.assertResumedContinuity) throw new Error('尚不能确认原会话的后端生命周期。');
-    const resumed = original.assertResumedContinuity(reference);
+    if (step !== 'turn' || !source || !original.assertResumedSource) throw new Error('尚不能确认原持久会话的来源。');
+    const resumed = original.assertResumedSource(reference, clone(source));
     if (resumed !== undefined) {
       void Promise.resolve(resumed).catch(() => {});
       throw new Error('恢复后的原会话必须同步核对。');
@@ -201,11 +229,12 @@ function assertConnection(original: SendInjectionOriginal, reference: SendInject
   }
 }
 
-function captureOriginal(original: SendInjectionOriginal): SendInjectionOriginal {
+function captureOriginal(original: SendInjectionOriginal, reference: SendInjectionReference): SendInjectionOriginal {
   if (!original || typeof original.assertOriginal !== 'function') throw new Error('缺少原发送权限。');
-  return { connection: original.connection, socket: original.socket, generation: original.generation,
+  if (!validSource(original.source, reference)) throw new Error('缺少原会话的宿主或状态目录。');
+  return { connection: original.connection, socket: original.socket, generation: original.generation, source: clone(original.source),
     assertOriginal: original.assertOriginal.bind(original),
-    ...(original.assertResumedContinuity ? { assertResumedContinuity: original.assertResumedContinuity.bind(original) } : {}) };
+    ...(original.assertResumedSource ? { assertResumedSource: original.assertResumedSource.bind(original) } : {}) };
 }
 
 function terminalFor(step: Step, terminal: LateRpcTerminal): SendInjectionTerminal | null {
@@ -262,7 +291,8 @@ export function createSendInjection(options: SendInjectionOptions) {
         }
         if (!operation) return null;
         if (event.reservation && (!isDeepStrictEqual(operation.items, event.reservation.items)
-          || !isDeepStrictEqual(operation.turnParams, event.reservation.turnParams))) {
+          || !isDeepStrictEqual(operation.turnParams, event.reservation.turnParams)
+          || !isDeepStrictEqual(operation.source, event.reservation.source))) {
           throw new Error('原注入内容已改变，无法补存。');
         }
         if (event.step === 'turn' && event.reservation && operation.turn.attemptId !== event.attemptId
@@ -277,6 +307,9 @@ export function createSendInjection(options: SendInjectionOptions) {
         if (sameAttempt && ['preparing', 'sending', 'unknown'].includes(state.phase)) {
           state.phase = (event.terminal?.kind ?? 'unknown') as never;
           if (event.terminal) state.terminal = clone(event.terminal); else delete state.terminal;
+          if (event.step === 'injection' && event.terminal?.kind === 'injected' && event.persistentThread !== undefined) {
+            operation.injection.persistentThread = event.persistentThread;
+          }
           await save(current);
         } else if (event.reservation && operation.injection.phase === 'preparing') {
           throw new Error('原注入恢复身份已改变。');
@@ -328,15 +361,17 @@ export function createSendInjection(options: SendInjectionOptions) {
     return status(reference);
   }
 
-  async function idle(reference: SendInjectionReference, original: SendInjectionOriginal, step: Step): Promise<void> {
+  async function idle(reference: SendInjectionReference, original: SendInjectionOriginal, step: Step,
+    source?: SendInjectionSource): Promise<boolean | undefined> {
     const pending = await options.mutations.run(() => {
       read();
-      assertConnection(original, reference, step);
+      assertConnection(original, reference, step, source);
       return { reply: original.connection.request('thread/read', { threadId: reference.threadId, includeTurns: false }) };
     });
     const reply: unknown = await pending.reply;
     if (!object(reply) || !object(reply.thread) || reply.thread.id !== reference.threadId
       || !object(reply.thread.status) || reply.thread.status.type !== 'idle') throw new Error('原会话尚未确认空闲。');
+    return typeof reply.thread.ephemeral === 'boolean' ? !reply.thread.ephemeral : undefined;
   }
 
   async function dispatch(reference: SendInjectionReference, original: SendInjectionOriginal, step: Step,
@@ -354,17 +389,23 @@ export function createSendInjection(options: SendInjectionOptions) {
         checkedReservation = true;
         state.phase = 'sending';
         await save(current);
-        assertConnection(original, reference, step);
+        assertConnection(original, reference, step, operation.source);
       });
     } catch (error) {
       if (!checkedReservation) throw error;
-      const reason = (() => { try { assertConnection(original, reference, step); return 'storage-failed' as const; }
+      const reason = (() => { try { assertConnection(original, reference, step, fallback.source); return 'storage-failed' as const; }
         catch { return 'original-changed' as const; } })();
       return retain({ reference, step, attemptId, connectionGeneration: original.generation, terminal: { kind: 'not-sent', reason } }, fallback);
     }
-    try { await idle(reference, original, step); }
+    let persistentThread: boolean | undefined;
+    try {
+      persistentThread = await idle(reference, original, step, fallback.source);
+      if (step === 'turn' && original.generation !== reference.connectionGeneration && persistentThread !== true) {
+        throw new Error('恢复后的原会话不是可确认的持久会话。');
+      }
+    }
     catch {
-      const reason = (() => { try { assertConnection(original, reference, step); return 'idle-unconfirmed' as const; }
+      const reason = (() => { try { assertConnection(original, reference, step, fallback.source); return 'idle-unconfirmed' as const; }
         catch { return 'original-changed' as const; } })();
       return retain({ reference, step, attemptId, connectionGeneration: original.generation, terminal: { kind: 'not-sent', reason } }, fallback);
     }
@@ -378,32 +419,33 @@ export function createSendInjection(options: SendInjectionOptions) {
           || operation.turn.connectionGeneration !== original.generation)) {
           throw new Error('原发送尝试已改变。');
         }
-        assertConnection(original, reference, step);
+        assertConnection(original, reference, step, operation.source);
         const method = step === 'injection' ? 'thread/inject_items' : 'turn/start';
         const params = step === 'injection' ? { threadId: reference.threadId, items: clone(operation.items) } : clone(operation.turnParams);
         return { reply: original.connection.request(method, params, { mutating: true, retainLateUntilDisconnect: true,
           onLateTerminal: terminal => {
             const event: Observation = { reference: clone(reference), step, attemptId, connectionGeneration: original.generation,
-              terminal: terminalFor(step, terminal) };
+              persistentThread, terminal: terminalFor(step, terminal) };
             void settle(event).catch(() => {});
           } }) };
       });
     } catch {
-      const reason = (() => { try { assertConnection(original, reference, step); return 'storage-failed' as const; }
+      const reason = (() => { try { assertConnection(original, reference, step, fallback.source); return 'storage-failed' as const; }
         catch { return 'original-changed' as const; } })();
       return retain({ reference, step, attemptId, connectionGeneration: original.generation, terminal: { kind: 'not-sent', reason } }, fallback);
     }
     let terminal: SendInjectionTerminal | null;
     try { terminal = terminalFor(step, { outcome: 'success', result: await pending.reply }); }
     catch (error) { terminal = failure(error); }
-    return retain({ reference, step, attemptId, connectionGeneration: original.generation, terminal }, fallback);
+    return retain({ reference, step, attemptId, connectionGeneration: original.generation, persistentThread, terminal }, fallback);
   }
 
   async function inject(input: SendInjectionInput, origin: SendInjectionOriginal): Promise<SendInjectionStatus> {
     if (!input || !validReference(input.reference) || !validPayload(input.reference, input.items, input.turnParams)) {
       throw new Error('原注入请求身份或内容无效，未发送。');
     }
-    const original = captureOriginal(origin), reference = clone(input.reference), operation: StoredOperation = { reference, items: clone(input.items), turnParams: clone(input.turnParams),
+    const reference = clone(input.reference), original = captureOriginal(origin, reference);
+    const operation: StoredOperation = { reference, source: clone(original.source), items: clone(input.items), turnParams: clone(input.turnParams),
       injection: { phase: 'preparing' }, turn: { phase: 'waiting', attempts: [] } };
     let existing: StoredOperation | undefined;
     let reservationStarted = false;
@@ -411,7 +453,8 @@ export function createSendInjection(options: SendInjectionOptions) {
       existing = await options.mutations.run(async () => {
         const current = read(), previous = matching(current.operations, reference);
         if (previous) {
-          if (!isDeepStrictEqual(previous.items, operation.items) || !isDeepStrictEqual(previous.turnParams, operation.turnParams)) {
+          if (!isDeepStrictEqual(previous.items, operation.items) || !isDeepStrictEqual(previous.turnParams, operation.turnParams)
+            || previous.source && !isDeepStrictEqual(previous.source, operation.source)) {
             throw new Error('原注入内容已改变，未重复发送。');
           }
           return previous;
@@ -420,7 +463,8 @@ export function createSendInjection(options: SendInjectionOptions) {
           && key(value.reference) === key(reference));
         if (unpersisted?.reservation) {
           if (!isDeepStrictEqual(unpersisted.reference, reference) || !isDeepStrictEqual(unpersisted.reservation.items, operation.items)
-            || !isDeepStrictEqual(unpersisted.reservation.turnParams, operation.turnParams)) {
+            || !isDeepStrictEqual(unpersisted.reservation.turnParams, operation.turnParams)
+            || !isDeepStrictEqual(unpersisted.reservation.source, operation.source)) {
             throw new Error('原注入身份或内容已改变，未重复发送。');
           }
           return unpersisted.reservation;
@@ -431,7 +475,7 @@ export function createSendInjection(options: SendInjectionOptions) {
         }
         if (current.operations.some(value => value.reference.hostId === reference.hostId
           && value.reference.threadId === reference.threadId && active(value))) throw new Error('此会话已有待核对的原注入。');
-        assertConnection(original, reference, 'injection');
+        assertConnection(original, reference, 'injection', operation.source);
         current.operations.push(operation);
         reservationStarted = true;
         await save(current);
@@ -453,7 +497,7 @@ export function createSendInjection(options: SendInjectionOptions) {
   async function startTurn(input: { reference: SendInjectionReference; turnAttemptId: string },
     origin: SendInjectionOriginal): Promise<SendInjectionStatus> {
     if (!input || !validReference(input.reference) || !id(input.turnAttemptId)) throw new Error('原发送身份无效，未发送。');
-    const original = captureOriginal(origin), reference = clone(input.reference), attemptId = input.turnAttemptId;
+    const reference = clone(input.reference), original = captureOriginal(origin, reference), attemptId = input.turnAttemptId;
     let reservation: StoredOperation | undefined;
     let prepared: { operation: StoredOperation; existing: boolean };
     try {
@@ -469,7 +513,10 @@ export function createSendInjection(options: SendInjectionOptions) {
         }
         if (operation.turn.attempts.includes(attemptId)) return { operation, existing: true };
         if (!['waiting', 'not-sent', 'rejected'].includes(operation.turn.phase)) throw new Error('原消息结果尚未确认，未重复发送。');
-        assertConnection(original, reference, 'turn');
+        if (original.generation !== reference.connectionGeneration && (!operation.source || operation.injection.persistentThread !== true)) {
+          throw new Error('尚不能确认原持久会话的来源。');
+        }
+        assertConnection(original, reference, 'turn', operation.source);
         operation.turn = { phase: 'preparing', attemptId, attempts: [...operation.turn.attempts, attemptId], connectionGeneration: original.generation };
         reservation = clone(operation);
         await save(current);
