@@ -130,7 +130,7 @@ export const readMethods = new Set([
 export const writeMethods = new Set([
   'config/batchWrite',
   'thread/start', 'thread/fork', 'thread/inject_items', 'thread/resume', 'thread/unsubscribe', 'thread/name/set', 'thread/archive', 'thread/unarchive',
-  'thread/rollback', 'thread/revert', 'thread/readState/set', 'thread/settings/update', 'thread/delete',
+  'thread/rollback', 'thread/revert', 'thread/readState/set', 'thread/readState/update', 'thread/settings/update', 'thread/delete',
   'turn/start', 'turn/steer', 'turn/interrupt',
   'thread/queue/add', 'thread/queue/delete', 'thread/queue/update', 'thread/queue/reorder', 'thread/queue/start',
   'thread/goal/set', 'thread/goal/clear', 'thread/goal/update',

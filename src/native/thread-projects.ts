@@ -2,6 +2,8 @@ import { record } from './protocol.ts';
 import { createStateMutations } from './state-mutations.ts';
 import type { StateMutations } from './state-mutations.ts';
 import type { ObjectValue } from './protocol.ts';
+import { captureThreadProjectMembershipExpected, equalThreadProjectObservation, observeThreadProjectMembershipSources } from './thread-project-condition.ts';
+import type { ProjectConditionSlot, ThreadProjectRootIdentity } from './thread-project-condition.ts';
 
 export type ProjectAssignment =
   | { projectKind: 'local'; projectId: string; projectOrigin?: 'chatgpt' }
@@ -46,7 +48,7 @@ const projectlessKey = 'projectless-thread-ids';
 const outputKey = 'thread-projectless-output-directories';
 const workspaceKey = 'thread-workspace-root-hints';
 type StoreKey = typeof assignmentKey | typeof projectlessKey | typeof outputKey | typeof workspaceKey;
-type Store = { $codexYardThreadProjects: 1; legacy: unknown; hosts: ObjectValue };
+type Store = { $codexYardThreadProjects: 1; legacy: unknown; hosts: ObjectValue; [key: string]: unknown };
 type Stores = Record<StoreKey, Store>;
 type InternalSnapshot = ThreadProjectSnapshot & { qualifiedIdentities: ThreadIdentity[] };
 
@@ -66,7 +68,7 @@ function copyLegacy(value: unknown) {
 }
 function loadStore(value: unknown, projectless = false): Store {
   if (isObject(value) && value.$codexYardThreadProjects === 1 && Object.hasOwn(value, 'legacy') && isObject(value.hosts)) {
-    return { $codexYardThreadProjects: 1, legacy: copyLegacy(value.legacy), hosts: Object.fromEntries(
+    return { ...value, $codexYardThreadProjects: 1, legacy: copyLegacy(value.legacy), hosts: Object.fromEntries(
       Object.entries(value.hosts).map(([hostId, entries]) => [hostId, isObject(entries) ? { ...entries } : entries])) };
   }
   return { $codexYardThreadProjects: 1, legacy: value === undefined ? (projectless ? [] : {}) : copyLegacy(value), hosts: {} };
@@ -309,6 +311,44 @@ function ensureWritable(state: ThreadProjectSnapshot, key: StoreKey, identity: T
       (entry.threadId === undefined || entry.threadId === identity.threadId))) throw new Error('已保存的主机会话项目数据无法解析');
 }
 
+function conditionProject(value: unknown): ThreadProjectRootIdentity | null {
+  if (value === null) return null;
+  const project = record(value);
+  if (typeof project.hostId !== 'string' || !project.hostId || typeof project.id !== 'string' || !project.id ||
+      !Array.isArray(project.rootPaths) || project.rootPaths.some(path => typeof path !== 'string')) {
+    throw new Error('Invalid original project observation.');
+  }
+  return { hostId: project.hostId, id: project.id, rootPaths: [...project.rootPaths] };
+}
+function protectUnknownAssignment(slot: ProjectConditionSlot) {
+  if (slot.state !== 'value' || slot.value === null || !isObject(slot.value)) return;
+  if (Object.keys(slot.value).some(key => !['projectKind', 'projectId', 'projectOrigin', 'hostId'].includes(key))) {
+    throw new Error('The original membership contains unknown fields and was retained.');
+  }
+}
+function checkMembershipExpected(globals: ObjectValue, options: ThreadProjectCompatibility, item: MembershipUpdate, value: unknown) {
+  const expected = record(value), identity = record(expected.identity);
+  if (typeof item.hostId !== 'string' || identity.hostId !== item.hostId || identity.threadId !== item.threadId)
+    throw new Error('The original host-qualified membership identity changed.');
+  const source = conditionProject(expected.source), target = conditionProject(expected.target);
+  if (target === null ? item.assignment !== null || item.projectless !== true :
+      !item.assignment || item.assignment.projectId !== target.id || item.projectless !== false ||
+      item.assignment.projectKind !== (target.hostId === 'local' ? 'local' : 'remote') ||
+      item.assignment.projectKind === 'remote' && item.assignment.hostId !== undefined && item.assignment.hostId !== target.hostId) {
+    throw new Error('The requested project does not match the original target.');
+  }
+  const qualified = { hostId: item.hostId, threadId: item.threadId };
+  const state = { ...readThreadProjectState(globals, options), catalog: { local: globals['local-projects'], remote: globals['remote-projects'] },
+    membershipSources: observeThreadProjectMembershipSources(globals, [qualified]) };
+  const current = captureThreadProjectMembershipExpected(state, qualified, source, target);
+  if (!equalThreadProjectObservation(expected, current)) throw new Error('The original thread membership changed.');
+  const legacy = current.observed.raw.assignment.legacy, stores = storesFrom(globals);
+  if (legacy.state === 'value' && legacyAssignment(globals, withQualifiedEvidence(options, stores), item.threadId, legacy.value)?.hostId === item.hostId) {
+    protectUnknownAssignment(legacy);
+  }
+  protectUnknownAssignment(current.observed.raw.assignment.qualified);
+}
+
 // Each original globals key remains authoritative for its own field. Its v1
 // envelope retains the untouched legacy value alongside host-qualified entries.
 export function createThreadProjects(globals: ObjectValue, persist: () => Promise<void>, publish: (message: unknown) => void,
@@ -387,13 +427,19 @@ export function createThreadProjects(globals: ObjectValue, persist: () => Promis
     for (const key of revived) removedProjectlessThreads.delete(key);
     return changed;
   }
-  return async function request(operation: ThreadProjectOperation, value?: unknown): Promise<unknown> {
+  return async function request(operation: ThreadProjectOperation, value?: unknown, assertBeforeCommit?: () => void): Promise<unknown> {
     switch (operation) {
       case 'setAssignment':
       case 'setProjectless':
       case 'setMembership': {
         const item = parseUpdate(value, operation !== 'setProjectless', operation !== 'setAssignment');
-        return enqueue(async () => { await apply([item], cachedCompatibility(compatibility)); });
+        const params = record(value), conditional = operation === 'setMembership' && Object.hasOwn(params, 'expected');
+        return enqueue(async () => {
+          const options = cachedCompatibility(compatibility);
+          assertBeforeCommit?.();
+          if (conditional) checkMembershipExpected(globals, options, item, params.expected);
+          await apply([item], options);
+        });
       }
       case 'restoreMemberships':
       case 'assignIfUnassigned': {
