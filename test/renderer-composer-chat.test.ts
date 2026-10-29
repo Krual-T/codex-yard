@@ -73,8 +73,8 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
           ? element.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertCompositionText',data:'Q',isComposing:true}))
           : pending.action==='view-undo'
           ? element.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'z',ctrlKey:true}))
-          : pending.action==='undo'
-          ? element.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:'historyUndo'}))
+          : pending.action==='undo'||pending.action==='redo'
+          ? element.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:pending.action==='undo'?'historyUndo':'historyRedo'}))
           : document.execCommand('insertText',false,'Q');
         state.precommitResult={before,dispatched,after:element instanceof HTMLTextAreaElement?element.value:element.textContent,snapshot:state.controller.snapshot()};},
       onPromptAppendPort(port){state.appendPort=port;},
@@ -1105,6 +1105,83 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
         scenario === 'retained-same' ? [] : alternate.skills);
       await first.press('Control+Shift+z');
       assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), alternate.skills);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    for (const scenario of ['removed-immediate', 'removed-deep', 'removed-after-layout', 'retained', 'other-removed'] as const) await t.test(`G redo-only skill ownership ${scenario}`, async () => {
+      const retained = scenario === 'retained' || scenario === 'other-removed';
+      const { page, errors } = await open(`g-redo-skill-${scenario}`);
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      const original = { text: 'First\nSecond\nThird', images: [], files: [], references: [], skills: [], input: [
+        { type: 'text', text: 'First', text_elements: [] }, { type: 'image', fileId: 'one', detail: 'high' },
+        { type: 'text', text: 'Second', text_elements: [] }, { type: 'image', fileId: 'two', detail: 'low' },
+        { type: 'text', text: 'Third', text_elements: [] },
+      ], document: { type: 'doc', content: ['First', 'Second', 'Third'].map(text => ({ type: 'paragraph', content: [{ type: 'text', text }] })) } };
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const first = page.getByRole('textbox', { name: 'Work with Codex 1' });
+      const second = page.getByRole('textbox', { name: 'Work with Codex 2' });
+      const third = page.getByRole('textbox', { name: 'Work with Codex 3' });
+      await third.focus(); await third.press('End'); await third.pressSequentially('T');
+      await third.press('Control+z'); assert.equal(await third.inputValue(), 'Third');
+      await third.press('Control+Shift+z'); assert.equal(await third.inputValue(), 'ThirdT');
+      await first.focus(); await first.press('End'); await first.pressSequentially(' $rev');
+      await page.getByRole('option', { name: /review-skill/ }).click();
+      await first.press('Control+z'); assert.equal(await first.inputValue(), 'First $rev');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), []);
+      await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'First ');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), [{ name: 'review-skill', path: '/skills/review' }]);
+      await first.press('Control+z'); assert.equal(await first.inputValue(), 'First $rev');
+      if (scenario === 'removed-deep') { await first.press('Control+z'); assert.equal(await first.inputValue(), 'First'); }
+      await second.focus(); await second.press('End'); await second.pressSequentially(' $rev');
+      await page.getByRole('option', { name: /review-skill/ }).click();
+      if (scenario === 'other-removed') {
+        await second.focus(); await second.press('End'); await second.pressSequentially(' $aud');
+        await page.getByRole('option', { name: /audit-skill/ }).click();
+      }
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills),
+        [{ name: 'review-skill', path: '/skills/review' }, ...(scenario === 'other-removed' ? [{ name: 'audit-skill', path: '/skills/audit' }] : [])]);
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const alternate = await page.evaluate(scenario => {
+        const draft = structuredClone((window as any).fixture.state.controller.snapshot().draft);
+        if (scenario === 'other-removed') draft.skills = draft.skills.filter((skill: any) => skill.name !== 'audit-skill');
+        else if (scenario !== 'retained') draft.skills = [];
+        return draft;
+      }, scenario);
+      const revision = `g-redo-${scenario}`;
+      await page.evaluate(({ draft, revision }) => (window as any).fixture.addVersion(draft, revision), { draft: alternate, revision });
+      await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
+      if (scenario !== 'removed-after-layout') await page.evaluate(revision => { (window as any).fixture.state.precommit = { action: 'redo', revision }; }, revision);
+      await page.getByRole('button', { name: alternate.text.replace(/\s+/g, ' '), exact: true }).click();
+      let observed;
+      if (scenario === 'removed-after-layout') {
+        await page.waitForFunction(revision => (window as any).fixture.state.controller.snapshot().revision === revision, revision);
+        const before = await first.inputValue(); await first.focus(); await first.press('Control+Shift+z');
+        observed = { before, after: await first.inputValue(), snapshot: await page.evaluate(() => (window as any).fixture.state.controller.snapshot()) };
+      } else {
+        await page.waitForFunction(() => (window as any).fixture.state.precommitResult);
+        observed = await page.evaluate(() => (window as any).fixture.state.precommitResult);
+      }
+      t.diagnostic(JSON.stringify({ scenario, before: observed.before, after: observed.after,
+        revision: observed.snapshot.revision, skills: observed.snapshot.draft.skills }));
+      assert.equal(observed.before, scenario === 'removed-deep' ? 'First' : 'First $rev');
+      if (!retained) {
+        assert.equal(observed.snapshot.revision, revision);
+        assert.deepEqual(observed.snapshot.draft, alternate);
+        await first.focus(); await first.press('Control+Shift+z'); await first.press('Control+Shift+z');
+        assert.equal(await first.inputValue(), scenario === 'removed-deep' ? 'First' : 'First $rev');
+        assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), []);
+      } else {
+        assert.equal(observed.snapshot.draft.input[0].text, 'First ');
+        assert.deepEqual(observed.snapshot.draft.skills, alternate.skills);
+      }
+      await third.focus(); await third.press('Control+z'); assert.equal(await third.inputValue(), 'Third');
+      await third.press('Control+Shift+z'); assert.equal(await third.inputValue(), 'ThirdT');
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const current = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+      const versions = await page.evaluate(() => (window as any).fixture.versions());
+      assert.deepEqual(versions.versions.find((version: any) => version.revision === current.revision)?.draft, current.draft);
+      assert.deepEqual(current.draft.skills, alternate.skills);
+      assert.deepEqual(current.draft.input[1], original.input[1]); assert.deepEqual(current.draft.input[3], original.input[3]);
       assert.deepEqual(errors, []); await page.close();
     });
 
