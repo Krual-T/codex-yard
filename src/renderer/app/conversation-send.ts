@@ -6,10 +6,11 @@ import type { ComposerDraftController } from '../composer/use-composer-draft.ts'
 import { acknowledgeSubmittedBrowserReferences } from './browser-draft.ts';
 import type { ConversationSessions } from './conversation-sessions.ts';
 import { sessionOptions } from './session-options.ts';
-import { submitDraft } from './submission.ts';
+import { captureDraftInjection, submitDraft } from './submission.ts';
 import { sendsAtom, sendThreadKey } from './send-recovery.ts';
 import type { SendIntent, SendRecoveryStore } from './send-recovery.ts';
 import { readVisualizationModelContext } from '../visualizations/state.ts';
+import { isThreadBusy } from './thread-state.ts';
 
 export interface ConversationSendScope {
   hostId: string;
@@ -19,7 +20,7 @@ export interface ConversationSendScope {
   projectId?: string;
 }
 
-export type ConversationWriteMethod = 'thread/start' | 'turn/start' | 'turn/steer' | 'thread/queue/add' | 'thread/queue/start';
+export type ConversationWriteMethod = 'thread/start' | 'thread/inject_items' | 'turn/start' | 'turn/steer' | 'thread/queue/add' | 'thread/queue/start';
 /** Run the assertion after transport preparation, immediately before sending on the original connection. */
 export type ConversationWriteDispatch = <T>(method: ConversationWriteMethod, params: Record<string, unknown>, hostId: string,
   assertAuthority: () => void) => Promise<T>;
@@ -50,11 +51,13 @@ export interface ConversationSendCleanup {
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+const injectionIdentity = (intent: SendIntent) => intent.injection && { callId: intent.injection.callId,
+  input: intent.injection.input, responseItems: intent.injection.responseItems };
 const submittedIdentity = (intent: SendIntent) => ({ id: intent.id, clientUserMessageId: intent.clientUserMessageId,
   owner: intent.owner, revision: intent.revision, threadId: intent.threadId, cwd: intent.cwd, projectId: intent.projectId,
   draft: intent.draft, options: intent.options, overrides: intent.overrides, action: intent.action,
   additionalContext: intent.additionalContext, documentPlainTextMode: intent.documentPlainTextMode,
-  collaborationMode: intent.collaborationMode, created: intent.created });
+  collaborationMode: intent.collaborationMode, created: intent.created, injection: injectionIdentity(intent) });
 
 function creationProject(state: Awaited<ReturnType<SendRecoveryStore['read']>>, hostId: string, threadId: string) {
   const receipt = state.creations[sendThreadKey(hostId, threadId)];
@@ -78,7 +81,8 @@ export async function finishConversationSend(sends: SendRecoveryStore, intent: S
     || current.attemptId !== intent.attemptId || current.cwd !== intent.cwd || current.projectId !== intent.projectId
     || current.documentPlainTextMode !== intent.documentPlainTextMode || !same(current.draft, intent.draft)
     || !same(current.options, intent.options) || !same(current.overrides, intent.overrides)
-    || !same(current.action, intent.action) || !same(current.additionalContext, intent.additionalContext)) {
+    || !same(current.action, intent.action) || !same(current.additionalContext, intent.additionalContext)
+    || !same(injectionIdentity(current), injectionIdentity(intent))) {
     throw new Error('原发送结果或草稿版本尚未确认。');
   }
   const controller = cleanup.controller(current), snapshot = controller?.snapshot();
@@ -115,6 +119,7 @@ export async function sendConversationDraft(services: ConversationSendServices, 
   const notify = () => { try { services.recoveryChanged(); } catch { /* A notification is not a send result. */ } };
   let intent: SendIntent | undefined, confirmed = false;
   try {
+    const draftInjection = retry?.injection ?? captureDraftInjection(draft, original.hostId, description.documentPlainTextMode);
     if (original.threadId) await sessions.ready({ hostId: original.hostId, threadId: original.threadId }, allowFirstTurn);
     guard(original.threadId, allowFirstTurn);
     const resumingCreated = !!retry && original.threadId === null && retry.owner.threadId === null
@@ -155,7 +160,7 @@ export async function sendConversationDraft(services: ConversationSendServices, 
       if (!stored || JSON.stringify(stored.draft) !== JSON.stringify(draft)) throw new Error('原提交版本未能核对，未发送。');
       guard(original.threadId, allowFirstTurn);
       intent = await sends.prepare(description, original.cwd, draft, options, description.overrides,
-        creation ? creation.projectId ?? undefined : original.projectId, additionalContext, action);
+        creation ? creation.projectId ?? undefined : original.projectId, additionalContext, action, draftInjection);
     }
     notify();
     guard(original.threadId, allowFirstTurn);
@@ -181,12 +186,17 @@ export async function sendConversationDraft(services: ConversationSendServices, 
     const active = dispatchThreadId ? sessions.view({ hostId: original.hostId, threadId: dispatchThreadId }).snapshot() : null;
     const sendClient: WorkbenchClient = {
       rpc<T>(method: string, params: Record<string, unknown> = {}, hostId = original.hostId, options?: Parameters<WorkbenchClient['rpc']>[3]) {
-        if (method === 'thread/start' || method === 'turn/start' || method === 'turn/steer' || method === 'thread/queue/add') {
+        if (method === 'thread/start' || method === 'thread/inject_items' || method === 'turn/start' || method === 'turn/steer' || method === 'thread/queue/add') {
           if (hostId !== original.hostId || method !== 'thread/start' && typeof params.threadId !== 'string') {
             throw Object.assign(new Error('原发送目标无法确认，未派发。'), { uncertain: false });
           }
           const threadId = method === 'thread/start' ? null : params.threadId as string;
-          return services.dispatch<T>(method, params, hostId, () => guard(threadId, allowFirstTurn));
+          return services.dispatch<T>(method, params, hostId, () => {
+            guard(threadId, allowFirstTurn);
+            if (threadId && (method === 'thread/inject_items' || method === 'turn/start' && action.type === 'send')
+              && isThreadBusy(sessions.view({ hostId, threadId }).snapshot().thread)) throw Object.assign(new Error('当前任务已开始，原输入已保留，未发送。'), { uncertain: false });
+            options?.assertBeforeSend?.();
+          });
         }
         return client.rpc<T>(method, params, hostId, options);
       },
@@ -199,9 +209,17 @@ export async function sendConversationDraft(services: ConversationSendServices, 
       initialOptions: active?.options ?? undefined, overrides: intent.overrides,
       documentPlainTextMode: intent.documentPlainTextMode, additionalContext: intent.additionalContext,
       collaborationMode: intent.collaborationMode, createdOptions: intent.created?.settings,
+      injection: intent.injection,
+      assertInjectionAuthority: target => {
+        guard(target, allowFirstTurn);
+        if (isThreadBusy(sessions.view({ hostId: original.hostId, threadId: target }).snapshot().thread)) throw Object.assign(new Error('当前任务仍在运行，原 app 上下文未发送。'), { uncertain: false });
+      },
       activeTurnId: active?.thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null, thread: active?.thread ?? null,
       send: {
         clientUserMessageId: intent.clientUserMessageId,
+        injecting: async () => { await sends.injecting(intent!.id, intent!.attemptId); },
+        injected: async () => { await sends.injected(intent!.id, intent!.attemptId); },
+        injectionFailed: async cause => { await sends.injectionFailed(intent!.id, cause, intent!.attemptId); },
         creating: async () => { guard(null, allowFirstTurn); await sends.creating(intent!.id, intent!.attemptId); guard(null, allowFirstTurn); },
         created: async (thread, settings) => {
           await sends.created(intent!.id, thread.id, { thread, settings: sessionOptions(settings) }, intent!.attemptId);

@@ -15,7 +15,7 @@ import { isThreadBusy } from './thread-state.ts';
 import { ConversationSessions, useConversationSession } from './conversation-sessions.ts';
 import { ApprovalDialog } from './ApprovalDialog.tsx';
 import { ApprovalRequestsController } from './approval-requests.ts';
-import { submitDraft } from './submission.ts';
+import { captureDraftInjection, submitDraft } from './submission.ts';
 import { applyAppearance } from './appearance.ts';
 import { sessionOptions } from './session-options.ts';
 import { MessageEditRecoveryStore, messageEditChanged, messageEditRebaseMarker, messageEditsAtom } from './message-edit-recovery.ts';
@@ -612,6 +612,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       }
     };
     try {
+      const draftInjection = retry?.injection ?? (!origin ? captureDraftInjection(draft, hostId, description?.documentPlainTextMode) : undefined);
       if (origin) { await prepareEdit?.(); assertEditAuthority?.(); requireCurrent(origin.threadId); }
       if (current.threadId) await sessions.ready({ hostId, threadId: current.threadId }, allowFirstTurn);
       requireCurrent(current.threadId);
@@ -632,7 +633,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           }
           requireCurrent(current.threadId);
           intent = await sendStore.prepare(description, activeCwd, draft, options, description.overrides,
-            selectedProject?.hostId === hostId ? selectedProject.id : undefined, additionalContext, action);
+            selectedProject?.hostId === hostId ? selectedProject.id : undefined, additionalContext, action, draftInjection);
         } else {
           intent = await sendStore.attempt(retry.id);
         }
@@ -651,17 +652,28 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       if (retry?.created && retry.threadId) await assignCreatedProject(retry.threadId);
       const active = current.threadId ? sessions.view({ hostId, threadId: current.threadId }).snapshot() : conversation;
       const sendClient = { rpc: <T,>(method: string, params: Record<string, unknown> = {}, targetHost = hostId, dispatchOptions?: Parameters<BrowserWorkbenchClient['rpc']>[3]) => {
-        if (!['thread/start', 'turn/start', 'turn/steer', 'thread/queue/add', 'thread/queue/start'].includes(method)) return client.rpc<T>(method, params, targetHost, dispatchOptions);
+        if (!['thread/start', 'thread/inject_items', 'turn/start', 'turn/steer', 'thread/queue/add', 'thread/queue/start'].includes(method)) return client.rpc<T>(method, params, targetHost, dispatchOptions);
         return client.rpc<T>(method, params, targetHost, { ...dispatchOptions, assertBeforeSend: () => {
           if (targetHost !== hostId) throw new Error('发送主机已改变，未发送。');
-          requireCurrent(method === 'thread/start' ? null : typeof params.threadId === 'string' ? params.threadId : current.threadId);
+          const target = method === 'thread/start' ? null : typeof params.threadId === 'string' ? params.threadId : current.threadId;
+          requireCurrent(target);
+          if (target && (method === 'thread/inject_items' || method === 'turn/start' && action.type === 'send')
+            && isThreadBusy(sessions.view({ hostId, threadId: target }).snapshot().thread)) throw new Error('当前任务已开始，原输入已保留，未发送。');
           dispatchOptions?.assertBeforeSend?.();
         } }); }, host: client.host.bind(client), subscribe: client.subscribe.bind(client), reply: client.reply.bind(client) };
       const result = await submitDraft(sendClient, { hostId, threadId: current.threadId, cwd: activeCwd, initialOptions: active.options ?? undefined,
         documentPlainTextMode: intent ? intent.documentPlainTextMode : description?.documentPlainTextMode,
         overrides: origin ? {} : description?.overrides, additionalContext: intent ? intent.additionalContext : additionalContext,
         collaborationMode: intent?.collaborationMode, createdOptions: intent?.created?.settings,
+        injection: intent?.injection,
+        assertInjectionAuthority: target => {
+          requireCurrent(target);
+          if (isThreadBusy(sessions.view({ hostId, threadId: target }).snapshot().thread)) throw Object.assign(new Error('当前任务仍在运行，原 app 上下文未发送。'), { uncertain: false });
+        },
         ...(intent ? { send: { clientUserMessageId: intent.clientUserMessageId,
+          injecting: async () => { await sendStore.injecting(intent!.id, intent!.attemptId); },
+          injected: async () => { await sendStore.injected(intent!.id, intent!.attemptId); },
+          injectionFailed: async cause => { await sendStore.injectionFailed(intent!.id, cause, intent!.attemptId); },
           creating: async () => { requireCurrent(null); await sendStore.creating(intent!.id, intent!.attemptId); },
           created: async (created: ThreadSummary, settings: ThreadSettingsResponse) => {
             await sendStore.created(intent!.id, created.id, { thread: created, settings: sessionOptions(settings) }, intent!.attemptId);

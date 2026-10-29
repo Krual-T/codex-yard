@@ -1,6 +1,15 @@
 import type { ThreadSettingsResponse, ThreadSummary, TurnSummary } from '../../../lib/codex-protocol.ts';
 import type { ComposerDraft, MessageEditOrigin, SubmissionCollaborationMode, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
-import { draftToInput } from '../composer/standalone-draft.ts';
+import { draftToInput, isStructuredAppInput, prepareDraftInput } from '../composer/standalone-draft.ts';
+import type { SendInjectedInput, SendIntent } from './send-recovery.ts';
+
+/** Capture the original app payload once; retries retain the stored call ID. */
+export function captureDraftInjection(draft: ComposerDraft, hostId: string, documentPlainTextMode?: boolean): SendInjectedInput | undefined {
+  if (!draft.input?.some(isStructuredAppInput)) return;
+  const callId = crypto.randomUUID();
+  const prepared = prepareDraftInput(draft, hostId, { plainTextMode: documentPlainTextMode, callId });
+  return prepared.responseItems.length ? { callId, ...prepared } : undefined;
+}
 
 export interface SubmissionContext {
   hostId: string;
@@ -20,6 +29,9 @@ export interface SubmissionContext {
   collaborationMode?: SubmissionCollaborationMode | null;
   /** Actual thread/start settings retained by an older, not-yet-resolved intent. */
   createdOptions?: Pick<SubmitOptions, 'model' | 'effort'>;
+  injection?: SendIntent['injection'];
+  /** Recheck this original owner/connection and the actual idle session. */
+  assertInjectionAuthority?(threadId: string): void;
   /** A durable submission intent; hooks complete before issuing each write. */
   send?: {
     clientUserMessageId: string;
@@ -29,6 +41,9 @@ export interface SubmissionContext {
     confirmed(turnId: string): Promise<unknown>;
     queued?(queuedSubmissionId: string): Promise<unknown>;
     resolvedCollaboration?(mode: SubmissionCollaborationMode | null): Promise<unknown>;
+    injecting?(): Promise<unknown>;
+    injected?(): Promise<unknown>;
+    injectionFailed?(error: unknown): Promise<unknown>;
   };
 }
 
@@ -59,7 +74,20 @@ export async function submitDraft(client: WorkbenchClient, context: SubmissionCo
   const changes: SubmitOptions = context.overrides ?? (context.threadId && context.initialOptions
     ? Object.fromEntries(Object.entries(options).filter(([key, value]) =>
       JSON.stringify(value) !== JSON.stringify(context.initialOptions![key as keyof SubmitOptions]))) : options);
-  const input = draftToInput(draft, context.hostId, { plainTextMode: context.documentPlainTextMode }), clientUserMessageId = context.send?.clientUserMessageId ?? crypto.randomUUID();
+  const prepared = draft.input?.some(isStructuredAppInput)
+    ? prepareDraftInput(draft, context.hostId, { plainTextMode: context.documentPlainTextMode, callId: context.injection?.callId })
+    : { input: draftToInput(draft, context.hostId, { plainTextMode: context.documentPlainTextMode }), responseItems: [] };
+  const { input } = prepared, injection = context.injection, send = context.send;
+  if (injection || prepared.responseItems.length) {
+    if (!injection || action.type !== 'send' || origin || !send?.injecting || !send.injected || !send.injectionFailed || !context.assertInjectionAuthority) {
+      throw new Error('此 app 上下文须由原发送记录在会话空闲时注入，原内容已保留。');
+    }
+    if (!['prepared', 'confirmed'].includes(injection.phase)
+      || JSON.stringify(input) !== JSON.stringify(injection.input) || JSON.stringify(prepared.responseItems) !== JSON.stringify(injection.responseItems)) {
+      throw new Error('原 app 注入上下文或阶段已改变，未重复发送。');
+    }
+  }
+  const clientUserMessageId = send?.clientUserMessageId ?? crypto.randomUUID();
   if (!input.length) throw new Error('请输入消息。');
   if (action.type === 'queue') {
     if (!context.threadId || origin) throw new Error('只有已有会话的新消息可以排队。');
@@ -130,6 +158,28 @@ export async function submitDraft(client: WorkbenchClient, context: SubmissionCo
     ...(collaborationMode ? { collaborationMode } : {}),
     ...(origin ? { turnTrigger: 'edit_user_message' } : {}),
     ...(Object.keys(additionalContext).length ? { additionalContext } : {}) };
+  if (injection) {
+    if (injection.phase === 'prepared') {
+      context.assertInjectionAuthority!(id);
+      await send!.injecting!();
+      try {
+        try { context.assertInjectionAuthority!(id); }
+        catch (cause) { throw Object.assign(new Error('原上下文注入尚未派发：' + (cause instanceof Error ? cause.message : String(cause)), { cause }),
+          { uncertain: false, sendPhase: 'before-send' }); }
+        const result = await client.rpc<unknown>('thread/inject_items', { threadId: id, items: injection.responseItems }, context.hostId);
+        if (!result || typeof result !== 'object' || Array.isArray(result) || Object.keys(result).length !== 0) {
+          throw Object.assign(new Error('原 app 上下文注入回执无法确认，未发送消息。'), { uncertain: true });
+        }
+      } catch (cause) {
+        await send!.injectionFailed!(cause);
+        throw cause;
+      }
+      // A received success is retained by the existing send store if its local
+      // atom commit fails. That recovery never repeats the backend injection.
+      await send!.injected!();
+    }
+    context.assertInjectionAuthority!(id);
+  }
   // The edit controller durably records each phase; the host verifies full history.
   if (!origin) await context.send?.sending();
   const result = origin ? await edit!(origin, (context.thread?.turns ?? []).map(turn => turn.id), turnParams)
