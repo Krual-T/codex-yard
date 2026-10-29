@@ -10,6 +10,8 @@ import type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescr
 import { importAttachments } from './standalone-files.ts';
 import { useCompletions } from './standalone-completions.tsx';
 import type { Completion } from './standalone-completions.tsx';
+import { ChatThreadResults } from './standalone-chat-lookup.tsx';
+import type { ChatChoice, ChatLookupSnapshot } from './standalone-chat-lookup.tsx';
 import { StandaloneOptions } from './standalone-options.tsx';
 import { positionComposerMenu } from './composer-menu-position.ts';
 import { StandaloneQueue } from './standalone-queue.tsx';
@@ -22,9 +24,9 @@ import type { FollowUpAction } from './standalone-follow-up.ts';
 import { StandaloneTarget } from './standalone-target.tsx';
 import type { ComposerHost, ComposerProjectChoice, ComposerProjectDisplay, ComposerTarget } from './standalone-target.tsx';
 import { StandalonePlainInputEditor, StandaloneRichEditor, StandaloneStructuredInputEditor } from './StandaloneRichEditor.tsx';
-import type { RichEditorHandle, StructuredInputEditorHandle, TextSkillChange } from './StandaloneRichEditor.tsx';
+import type { AgentMentionTarget, RichEditorHandle, StructuredInputEditorHandle, TextSkillChange } from './StandaloneRichEditor.tsx';
 import type { RichCompletionContext } from './rich-editor-actions.ts';
-import { ArrowUp, FilePenLine, Lightbulb, Mic, Paperclip, Plus } from 'lucide-react';
+import { ArrowUp, FilePenLine, Lightbulb, MessageSquare, Mic, Paperclip, Plus } from 'lucide-react';
 import './standalone-composer.css';
 
 export { draftToInput } from './standalone-draft.ts';
@@ -36,6 +38,13 @@ export type { QueueEditEntry } from './standalone-queue-storage.ts';
 export type { DispatchQueueMutation, QueueMutationMethod } from './standalone-queue.tsx';
 export type { ComposerProjectChoice } from './standalone-target.tsx';
 export type ComposerReference = NonNullable<ComposerDraft['references']>[number];
+interface ChatSelection {
+  controller: ComposerDraftController; editor: RichEditorHandle; target: AgentMentionTarget;
+  owner: ComposerDraftOwner; revision: string; cwd: string;
+}
+interface ChatLookup {
+  id: number; selection: ChatSelection; client: WorkbenchClient; hostId: string; search: string; assertOwner(): void; assertOriginal(): void;
+}
 export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSubmit'> & {
   onSubmit(draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, description?: ComposerSubmissionDescription,
     assertAuthority?: () => void): Promise<void>;
@@ -148,6 +157,13 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const lastRichContext = useRef<RichCompletionContext | null>(null);
   const [fileLookup, setFileLookup] = useState<{ text: string; draft: ComposerDraft; revision: string;
     hostId: string; cwd: string; cursor: number; segment: { index: number; cursor: number } | null; rich: RichCompletionContext | null } | null>(null);
+  const [chatLookup, setChatLookup] = useState<ChatLookup | null>(null);
+  const [chatCompletion, setChatCompletion] = useState<ChatLookup | null>(null);
+  const [chatSnapshot, setChatSnapshot] = useState<ChatLookupSnapshot | null>(null);
+  const [chatIndex, setChatIndex] = useState(-1);
+  const [chatError, setChatError] = useState('');
+  const chatSequence = useRef(0);
+  const lastChatSelection = useRef<ChatSelection | null>(null);
   const enterSetting = useEnterSetting(client);
   const followUpSetting = useFollowUpSetting(client);
   const plainTextSetting = usePlainTextSetting(client);
@@ -238,14 +254,69 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     busy, richActive ? 'rich:' + richContext?.blockStart : segmented ? 'segment:' + segmentSelection?.index : 'plain');
   const lookupText = fileLookup ? '@' + fileLookup.text : '';
   const fileResults = useCompletions(client, context.hostId, context.cwd, lookupText, lookupText.length, busy, 'menu-file-lookup');
+  const chatHosts = [{ hostId: context.hostId, displayName: hosts?.find(host => host.hostId === context.hostId)?.displayName ?? context.hostId },
+    ...(hosts ?? []).filter(host => host.hostId !== context.hostId)]
+    .filter((host, index, all) => all.findIndex(item => item.hostId === host.hostId) === index);
+  const captureChatSelection = (query?: { start: number; end: number; token: string }): ChatSelection | null => {
+    const editor = richEditor.current, originalController = controller, snapshot = originalController.snapshot();
+    if (!editor || !snapshot || frozenRef.current || pendingLink.current || compositions.current.size) return null;
+    const target = editor.captureAgentMentionTarget(() => originalController.snapshot(), query);
+    return target ? { controller: originalController, editor, target, owner: snapshot.owner, revision: snapshot.revision, cwd: context.cwd } : null;
+  };
+  const makeChatLookup = (selection: ChatSelection, hostId: string, search: string, originalAuthority?: () => void): ChatLookup => {
+    if (!originalAuthority && !captureSubmissionAuthority) throw new Error('Chat lookup requires the original conversation authority.');
+    const authority = originalAuthority ?? captureSubmissionAuthority!(structuredClone(selection.owner));
+    const transport = client as WorkbenchClient & { captureDaemonConnection?: (hostId: string) => { generation: string; assertOriginal(): void } };
+    if (typeof transport.captureDaemonConnection !== 'function') throw new Error('Chat lookup requires a confirmed host connection.');
+    const connection = transport.captureDaemonConnection(hostId);
+    const assertOriginal = () => {
+      authority(); connection.assertOriginal();
+      const snapshot = selection.controller.snapshot(), source = projectSource.current.context;
+      if (activeController.current !== selection.controller || richEditor.current !== selection.editor || !snapshot
+        || snapshot.revision !== selection.revision || snapshot.owner.hostId !== selection.owner.hostId
+        || snapshot.owner.threadId !== selection.owner.threadId || snapshot.owner.draftId !== selection.owner.draftId
+        || source.hostId !== selection.owner.hostId || source.cwd !== selection.cwd
+        || frozenRef.current || pendingLink.current || compositions.current.size) {
+        throw new Error('The original draft or selection changed; search for the chat again.');
+      }
+    };
+    assertOriginal();
+    const lookupClient: WorkbenchClient = {
+      rpc<T = unknown>(method: string, params?: Record<string, unknown>, requestedHost?: string, options?: Parameters<WorkbenchClient['rpc']>[3]) {
+        if (requestedHost !== hostId) return Promise.reject(new Error('The chat host changed.'));
+        try { assertOriginal(); } catch (cause) { return Promise.reject(cause); }
+        return client.rpc<T>(method, params, requestedHost, { ...options, daemonConnectionGeneration: connection.generation,
+          assertBeforeSend: () => { assertOriginal(); options?.assertBeforeSend?.(); } });
+      },
+      host: client.host.bind(client), subscribe: client.subscribe.bind(client), reply: client.reply.bind(client),
+    };
+    return { id: ++chatSequence.current, selection, client: lookupClient, hostId, search, assertOwner: authority, assertOriginal };
+  };
+  const reportChatSnapshot = useCallback((snapshot: ChatLookupSnapshot) => setChatSnapshot(snapshot), []);
+  const chatQuery = richActive && completions.query?.kind === 'file' && !completions.query.directory ? completions.query : null;
+  useLayoutEffect(() => {
+    setChatIndex(-1); setChatError('');
+    if (!chatQuery) { setChatCompletion(null); return; }
+    const selection = captureChatSelection(chatQuery);
+    if (!selection) { setChatCompletion(null); return; }
+    try { setChatCompletion(makeChatLookup(selection, context.hostId, chatQuery.term)); }
+    catch (cause) { setChatCompletion(null); setChatError(message(cause)); }
+  }, [client, controller, captureSubmissionAuthority, context.hostId, context.cwd,
+    chatQuery?.start, chatQuery?.end, chatQuery?.token, richContext?.text, richContext?.blockStart]);
   useLayoutEffect(() => {
     const menu = inputRoot.current?.querySelector<HTMLDetailsElement>('.standalone-composer__add[open]');
     if (menu) positionComposerMenu(menu);
-  }, [fileLookup, fileResults.items, fileResults.loading, fileResults.error]);
+  }, [fileLookup, fileResults.items, fileResults.loading, fileResults.error, chatLookup]);
   const onRichContext = useCallback((next: RichCompletionContext | null) => {
     if (next) lastRichContext.current = next;
+    const editor = richEditor.current, snapshot = controller.snapshot();
+    if (editor && snapshot && !frozenRef.current && !pendingLink.current && !compositions.current.size) {
+      const originalController = controller, target = editor.captureAgentMentionTarget(() => originalController.snapshot());
+      if (target) lastChatSelection.current = { controller: originalController, editor, target, owner: snapshot.owner,
+        revision: snapshot.revision, cwd: projectSource.current.context.cwd };
+    }
     setRichContext(previous => previous?.text === next?.text && previous?.cursor === next?.cursor && previous?.blockStart === next?.blockStart ? previous : next);
-  }, []);
+  }, [controller]);
   useEffect(() => {
     if (!appliedOptions) return;
     const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
@@ -594,19 +665,48 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     if (menu) menu.open = false;
     requestAnimationFrame(() => control.focus(index, position + replacement.length));
   };
+  const chooseChat = (lookup: ChatLookup, choice: ChatChoice, fromMenu: boolean) => {
+    try {
+      lookup.assertOriginal();
+      if (choice.hostId !== lookup.hostId || !lookup.selection.editor.insertAgentMention(lookup.selection.target, choice)) {
+        throw new Error('The original draft or selection changed; search for the chat again.');
+      }
+      setError(''); setChatError(''); lastChatSelection.current = null;
+      if (fromMenu) {
+        setChatLookup(null);
+        const menu = inputRoot.current?.querySelector<HTMLDetailsElement>('.standalone-composer__add');
+        if (menu) menu.open = false;
+      } else { completions.dismiss(); setChatCompletion(null); }
+    } catch (cause) { setError(message(cause)); }
+  };
+  const completionChats = chatCompletion && chatSnapshot?.key === String(chatCompletion.id) ? chatSnapshot.items : [];
+  const effectiveChatIndex = chatIndex >= 0 && chatIndex < completionChats.length ? chatIndex
+    : !completions.items.length && completionChats.length ? 0 : -1;
+  const selectedCompletion = effectiveChatIndex >= 0 ? completions.items.length + effectiveChatIndex : completions.selected;
   const keyDown = (event: globalThis.KeyboardEvent): boolean => {
     if (frozenRef.current) { event.preventDefault(); return true; }
     if (compositions.current.has('editor') || event.isComposing || event.keyCode === 229) return false;
     if (completions.query) {
       if (event.key === 'Escape') { event.preventDefault(); completions.dismiss(); return true; }
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        if (completions.items.length) { event.preventDefault(); completions.move(event.key === 'ArrowDown' ? 1 : -1); return true; }
+        const total = completions.items.length + completionChats.length;
+        if (total) {
+          event.preventDefault();
+          const next = (Math.max(0, selectedCompletion) + (event.key === 'ArrowDown' ? 1 : -1) + total) % total;
+          if (next < completions.items.length) { setChatIndex(-1); completions.select(next); }
+          else setChatIndex(next - completions.items.length);
+          return true;
+        }
         return false;
       }
       if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        if (effectiveChatIndex >= 0 && completionChats[effectiveChatIndex] && chatCompletion) {
+          event.preventDefault(); chooseChat(chatCompletion, completionChats[effectiveChatIndex]!, false); return true;
+        }
         const selected = completions.items[completions.selected];
         if (selected) { event.preventDefault(); chooseCompletion(selected); return true; }
-        if (event.key === 'Enter' && completions.loading) { event.preventDefault(); return true; }
+        if (event.key === 'Enter' && (completions.loading || !!chatCompletion && chatSnapshot?.key !== String(chatCompletion.id)
+          || chatSnapshot?.key === String(chatCompletion?.id) && chatSnapshot.loading)) { event.preventDefault(); return true; }
       }
     }
     if (event.key !== 'Enter' || event.altKey || event.repeat || enterSetting.pending || enterSetting.error) return false;
@@ -627,6 +727,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     catch (reason) { if (activeController.current === controller) setError(t('Could not stop:') + message(reason)); }
     finally { interruptInFlight.current = false; if (mounted.current) setInterrupting(false); }
   };
+  const completionSelectedId = effectiveChatIndex >= 0 ? completions.listId + '-chat-' + effectiveChatIndex
+    : completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined;
   return <div className="standalone-composer">
     <div ref={inputRoot} inert={frozen} aria-busy={frozen || undefined} onKeyDown={event => {
       if (event.key !== 'Escape' || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
@@ -714,13 +816,13 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         onCompositionChange={value => setComposition('editor', value)}
         onPendingLinkChange={value => { const wasPending = pendingLink.current; pendingLink.current = value; if (wasPending && !value) recheckProjection(); }}
         onCompletionContext={onRichContext} completionListId={completions.query ? completions.listId : undefined}
-        completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
+        completionSelectedId={completionSelectedId}
         onImages={files => { void addFiles(files); }}
         onInvalid={message => setError(message ?? t('Unsupported document changes were not saved.'))} /> :
       segmented ? <>
         <StandaloneStructuredInputEditor ref={structuredEditor} draft={draft} onEdit={editSegment}
           activeIndex={segmentSelection?.index} completionListId={completions.query ? completions.listId : undefined}
-          completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
+          completionSelectedId={completionSelectedId}
           onSelection={(index, position) => setSegmentSelection({ index, cursor: position })}
           onKeyDown={keyDown} onPaste={paste} onCompositionChange={value => {
             setComposition('editor', value); if (value) setSegmentSelection(null);
@@ -730,7 +832,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       </> :
       <StandalonePlainInputEditor ref={editor} label={t('Work with Codex')} placeholder={locale.toLowerCase().startsWith('en') ? 'Do anything' : t('Message')} text={draft.text} readOnly={!!editIssue}
         canEdit={() => !frozenRef.current} completionListId={completions.query ? completions.listId : undefined}
-        completionSelectedId={completions.selected >= 0 ? completions.listId + '-' + completions.selected : undefined}
+        completionSelectedId={completionSelectedId}
         onEdit={(_index, expected, text, inputType, skills) => {
           if (frozenRef.current) return false;
           if (expected !== text || inputType === 'historyUndo' || inputType === 'historyRedo') completions.show();
@@ -745,12 +847,19 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         onCompositionChange={value => setComposition('editor', value)} />}
       {completions.query ? <div className="standalone-composer__completions" id={completions.listId} role="listbox" aria-label={t(completions.query.kind === 'file' ? 'Workspace files' : 'Skill')}>
         {completions.items.map((item, index) => <button type="button" role="option" id={completions.listId + '-' + index} key={item.kind + ':' + (item.kind === 'command' ? item.name : item.path)}
-          aria-selected={index === completions.selected} onMouseDown={event => event.preventDefault()} onClick={() => chooseCompletion(item)}>
+          aria-selected={effectiveChatIndex < 0 && index === completions.selected} onMouseDown={event => event.preventDefault()} onClick={() => chooseCompletion(item)}>
           <span>{item.kind === 'command' ? '/' : ''}{item.name}{item.kind === 'directory' ? '/' : ''}</span><small>{item.kind === 'command' ? t('Select model') : item.kind === 'skill' ? item.description : item.path}</small>
         </button>)}
+        {chatCompletion ? <ChatThreadResults key={chatCompletion.id} client={chatCompletion.client} hostId={chatCompletion.hostId}
+          hostName={chatHosts.find(host => host.hostId === chatCompletion.hostId)?.displayName ?? chatCompletion.hostId}
+          search={chatCompletion.search} resultKey={String(chatCompletion.id)} listId={completions.listId} offset={completions.items.length}
+          selected={selectedCompletion} preserveFocus chinese={locale.toLowerCase().startsWith('zh')}
+          onSnapshot={reportChatSnapshot} onChoose={choice => chooseChat(chatCompletion, choice, false)} /> : null}
+        {chatError ? <div role="alert">{chatError}</div> : null}
         {completions.loading ? <div role="status">{t('Loading suggestions...')}</div> : null}
         {completions.error ? <div role="alert">{t('Could not load suggestions:')}{completions.error}</div> : null}
-        {!completions.loading && !completions.error && !completions.items.length ? <div>{t('No matches')}</div> : null}
+        {!completions.loading && !completions.error && !completions.items.length && !completionChats.length
+          && (!chatCompletion || chatSnapshot?.key === String(chatCompletion.id) && !chatSnapshot.loading) ? <div>{t('No matches')}</div> : null}
       </div> : null}
       <div className="standalone-composer__footer">
         <input ref={picker} type="file" multiple hidden onChange={event => {
@@ -758,10 +867,11 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
         }} />
         <details className="standalone-composer__menu standalone-composer__add" onToggle={event => {
           positionComposerMenu(event.currentTarget);
-          if (!event.currentTarget.open) setFileLookup(null);
+          if (!event.currentTarget.open) { setFileLookup(null); setChatLookup(null); }
         }}>
           <summary aria-label={locale.toLowerCase().startsWith('en') ? 'Add files and more' : t('Add attachment')}
-            title={locale.toLowerCase().startsWith('en') ? 'Add files and more' : t('Add attachment')}><Plus size={18} aria-hidden="true" /></summary>
+            title={locale.toLowerCase().startsWith('en') ? 'Add files and more' : t('Add attachment')}
+            onMouseDown={() => { const selection = captureChatSelection(); if (selection) lastChatSelection.current = selection; }}><Plus size={18} aria-hidden="true" /></summary>
           <div className="standalone-composer__menu-panel standalone-composer__add-panel">
             <button type="button" disabled={uploading || !!editIssue} onClick={event => {
               if (!picker.current || frozenRef.current) return;
@@ -772,8 +882,34 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
             {onOpenGoal ? <button type="button" onClick={event => {
               event.currentTarget.closest('details')?.removeAttribute('open'); onOpenGoal();
             }}><Lightbulb size={16} aria-hidden="true" />{t('Goal')}</button> : null}
+            {!chatLookup ? <button type="button" disabled={!!editIssue} onClick={() => {
+              if (!richActive) {
+                setError(locale.toLowerCase().startsWith('zh') ? '请先使用富文本编辑器添加会话；当前草稿和撤销历史已保留。'
+                  : 'Use the rich text editor to add a chat; the current draft and undo history are retained.');
+                return;
+              }
+              const selection = lastChatSelection.current;
+              if (!selection) { setError('Select an insertion point in the editor and try again.'); return; }
+              try { setFileLookup(null); setError(''); setChatLookup(makeChatLookup(selection, context.hostId, '')); }
+              catch (cause) { setError(message(cause)); }
+            }}><MessageSquare size={16} aria-hidden="true" />{locale.toLowerCase().startsWith('zh') ? '添加会话' : 'Add chat'}</button> :
+              <div className="standalone-composer__lookup standalone-composer__chat-lookup">
+                <input autoFocus aria-label={locale.toLowerCase().startsWith('zh') ? '查找会话' : 'Find chats'} value={chatLookup.search}
+                  onChange={event => setChatLookup({ ...chatLookup, search: event.currentTarget.value })} />
+                {chatHosts.length > 1 ? <label>{locale.toLowerCase().startsWith('zh') ? '主机' : 'Host'}
+                  <select aria-label={locale.toLowerCase().startsWith('zh') ? '会话主机' : 'Chat host'} value={chatLookup.hostId}
+                    onChange={event => {
+                      try { setError(''); setChatLookup(makeChatLookup(chatLookup.selection, event.currentTarget.value, chatLookup.search, chatLookup.assertOwner)); }
+                      catch (cause) { setError(message(cause)); }
+                    }}>{chatHosts.map(host => <option value={host.hostId} key={host.hostId}>{host.displayName}</option>)}</select></label> : null}
+                <ChatThreadResults key={chatLookup.id} client={chatLookup.client} hostId={chatLookup.hostId}
+                  hostName={chatHosts.find(host => host.hostId === chatLookup.hostId)?.displayName ?? chatLookup.hostId}
+                  search={chatLookup.search} resultKey={String(chatLookup.id)} chinese={locale.toLowerCase().startsWith('zh')}
+                  onChoose={choice => chooseChat(chatLookup, choice, true)} />
+              </div>}
             {!fileLookup ? <button type="button" disabled={!!editIssue} onClick={() => {
               const source = current.current;
+              setChatLookup(null);
               setFileLookup({ text: '', draft: structuredClone(source.draft), revision: source.revision,
                 hostId: context.hostId, cwd: context.cwd, cursor, segment: segmentSelection, rich: lastRichContext.current });
             }}>{locale.toLowerCase().startsWith('zh') ? '查找文件' : 'Find files'}</button> : <div className="standalone-composer__lookup">

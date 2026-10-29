@@ -87,6 +87,7 @@ export function useCompletions(client: WorkbenchClient, hostId: string, cwd: str
   return {
     query: active, listId, items: current.items, selected, loading: current.loading, error: current.error,
     move(delta: number) { if (current.items.length) setIndex((selected + delta + current.items.length) % current.items.length); },
+    select(index: number) { setIndex(index); },
     dismiss() { setDismissed(queryKey); },
     show() { setDismissed(''); },
   };
