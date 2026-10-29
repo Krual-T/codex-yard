@@ -240,16 +240,19 @@ export function SideChatRoot(props: SideChatRootProps) {
   };
   const freezeSending = (entry: Entry, owner: ComposerDraftOwner, purpose?: 'cancel', disconnectedHandoff?: () => void): SideChatSendLease => {
     if (disconnectedHandoff && purpose) throw beforeSend('断线撤权证明不能用于取消发送。');
+    // A restored, closed child only mounts its saved-draft inspection. It has
+    // no composer or dispatch grant, but still drains the original child owner.
+    const observedWithoutEditor = entry.identity.mode === 'restore' && entry.draft === null && purpose !== 'cancel'
+      && owner.threadId !== null && entry.projection?.childThreadId === owner.threadId;
     const assertLeaseScope = () => {
       assertMountedEntry(entry);
       if (disconnectedHandoff) synchronous(disconnectedHandoff()); else assertEntry(entry);
       const current = entry.draft?.snapshot();
-      if (current && !sameOwner(current.owner, owner) || !current && owner.threadId !== null) throw beforeSend('原侧聊输入身份已改变。');
+      if (current ? !sameOwner(current.owner, owner) : owner.threadId !== null && !(observedWithoutEditor
+        && entry.draft === null && entry.projection?.childThreadId === owner.threadId)) throw beforeSend('原侧聊输入身份已改变。');
     };
     assertLeaseScope();
-    const snapshot = entry.draft?.snapshot();
-    if (entry.frozen || owner.hostId !== entry.identity.hostId || owner.draftId !== entry.identity.draftId
-      || snapshot && !sameOwner(snapshot.owner, owner) || !snapshot && owner.threadId !== null) throw beforeSend('原侧聊输入租约不可用。');
+    if (entry.frozen || owner.hostId !== entry.identity.hostId || owner.draftId !== entry.identity.draftId) throw beforeSend('原侧聊输入租约不可用。');
     const lease = { purpose }; entry.frozen = lease;
     let parentLease: SideChatSendLease;
     try { parentLease = latest.current.freezeChildOwner(structuredClone(owner), structuredClone(entry.identity), entry.draft, assertLeaseScope); }

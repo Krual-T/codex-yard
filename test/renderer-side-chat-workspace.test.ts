@@ -1112,6 +1112,30 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
         assert.equal(p.fake.calls('thread/fork').length, 1); assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
       } finally { await context.close(); await p.close(); }
     });
+    await t.test('a restored closed operation can close its draft inspection without a mounted composer', async () => {
+      const p = await peer(), { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const identity = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' });
+        await input.waitFor(); await input.fill('retained closed child draft 中文🙂');
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        await page.waitForFunction(() => window.sideChatRootFixture.closed === 1);
+        const other = await context.newPage(); await other.goto(p.url); await other.addScriptTag({ content: script });
+        await other.evaluate(() => window.sideChatRootFixture.mount());
+        await other.waitForFunction(() => window.sideChatRootFixture.mounted());
+        await other.evaluate(value => window.sideChatRootFixture.restore(value), identity);
+        const inspection = other.getByRole('region', { name: '保留的侧聊草稿' });
+        await inspection.waitFor();
+        assert.equal(await inspection.getByRole('textbox', { name: '草稿', exact: true }).inputValue(), 'retained closed child draft 中文🙂');
+        assert.equal(await other.locator('.yard-side-chat__composer').count(), 0);
+        await other.getByRole('button', { name: '关闭侧聊' }).click();
+        await other.waitForFunction(() => window.sideChatRootFixture.closed === 1);
+        assert.equal(p.fake.calls('thread/fork').length, 1);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 1, 'The inspection does not close the already closed host again');
+        assert.equal(p.fake.calls('turn/start').length, 0);
+        assert.equal((await other.evaluate(() => window.sideChatRootFixture.listRecoverable()))[0]?.draftId, identity.draftId);
+      } finally { await context.close(); await p.close(); }
+    });
     await t.test('unknown close preserves the old mounted draft when a separate side chat is opened', async () => {
       const p = await peer(); p.holdUnsubscribe();
       const { context, page } = await setupRoot(browser, script, p.url);
