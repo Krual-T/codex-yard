@@ -77,7 +77,7 @@ sending to an unloaded local thread also supplies that configuration. Already
 loaded threads retain their existing mount, preserving a healthy native App
 connection and its settings.
 
-An isolated CLI 0.164.0 experiment confirmed that both global
+With stdio mounts, an isolated CLI 0.164.0 experiment confirmed that both global
 `config/mcpServer/reload` and loaded-thread `thread/resume` overrides retain an
 explicit per-thread MCP definition. A disabled definition stays disabled.
 Changing `thread_unload_delay_secs` through resume also leaves the loaded
@@ -115,10 +115,16 @@ After reviewing that plan, append `--apply` to install it. The command requires
 all twelve tools to be available. It refuses to replace a different explicit
 `codex_app` entry. Before adding a new entry it saves a private mode-0600 copy of
 the configuration under `$CODEX_HOME/backups/`, then uses `config/batchWrite`
-with the daemon's configuration version and reloads the MCP configuration.
+with the daemon's configuration version. New and cold-resumed threads read it.
 Other settings remain in place. Repeating an identical registration is harmless.
 An uncertain write is reported for inspection and never retried automatically.
 Neither mode resumes a conversation or restarts a shared service.
+
+The command leaves loaded MCP runtimes in place. CLI 0.164.0's global MCP reload
+can merge an old per-thread HTTP `url` with the new stdio transport fields and
+reject the mixed definition. Registration therefore avoids that global reload;
+the integration probe preserves an already-loaded HTTP mount while new threads
+receive the stdio default.
 
 The remote `buildMcpCodexConfig` branch in shipped Windows App 26.1023.6123.0 and
 Linux App 26.1013.40934 checks the execution host's saved configuration. When
@@ -145,7 +151,7 @@ socket path. The official adapter reconnects on the next explicit call after a
 host restart; an in-flight write is not automatically repeated.
 
 For rollback, remove only this registered entry with `codex mcp remove codex_app`
-using the same Codex home, then reload the daemon's MCP configuration. Consult
+using the same Codex home. New and cold-resumed threads read that change. Consult
 the private backup to restore the prior entry if needed; preserve unrelated
 configuration changes. Existing loaded conversations follow the idle migration
 boundary described above in either direction.

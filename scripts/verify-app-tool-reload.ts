@@ -21,6 +21,16 @@ const provider = createServer(async (request, response) => {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   const body: unknown = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+  if (request.url === '/mcp') {
+    if (request.method !== 'POST') { response.writeHead(405); response.end(); return; }
+    if (!isRecord(body) || body.id === undefined) { response.writeHead(202); response.end(); return; }
+    const result = body.method === 'initialize' ? { protocolVersion: '2025-03-26', capabilities: { tools: {} },
+      serverInfo: { name: 'Synthetic HTTP App', version: '0.0.1' } }
+      : body.method === 'tools/list' ? { tools: [{ name: 'native_http_probe', description: 'Synthetic HTTP mount',
+        inputSchema: { type: 'object', properties: {}, additionalProperties: false } }] } : {};
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result })); return;
+  }
   const names = isRecord(body) && Array.isArray(body.tools) ? body.tools.filter(isRecord).flatMap(tool => {
     if (typeof tool.name !== 'string') return [];
     return tool.type === 'namespace' && Array.isArray(tool.tools)
@@ -259,6 +269,13 @@ CODEX_APP_TOOLS_CALLER_HOST_ID="local"
   const preservedConfig = baseConfig + '\n[mcp_servers.unrelated_fixture]\ncommand="unused"\nenabled=false\n';
   await writeFile(join(home, 'config.toml'), preservedConfig);
   await yard.request('config/mcpServer/reload', null, { mutating: true });
+  // Existing remote Desktop mounts use HTTP. Registering a stdio default must
+  // preserve this loaded runtime; a global reload merges mutually exclusive
+  // transport fields in CLI 0.164.0 and fails before migration can take place.
+  const httpThread = await app.request('thread/start', { cwd: root, historyMode: 'paginated',
+    config: { 'mcp_servers.codex_app': { url: `http://127.0.0.1:${address.port}/mcp`, enabled: true } } });
+  await turn(httpThread.thread.id);
+  assert.deepEqual(await tools(httpThread.thread.id), { status: 'connected', tools: ['native_http_probe'] });
   // A local desktop can enable its bundled plugin while using a shared daemon.
   // Install a real isolated plugin as a positive control, then verify that the
   // explicit server definition wins the same-name registration collision.
@@ -295,6 +312,7 @@ CODEX_APP_TOOLS_CALLER_HOST_ID="local"
   assert.deepEqual(saved.config.mcp_servers.unrelated_fixture, beforeRegistration.config.mcp_servers.unrelated_fixture);
   assert.equal(saved.config.model, 'fixture');
   assert.equal((await configure(true)).alreadyInstalled, true, 'repeated registration preserves the same definition');
+  assert.deepEqual(await tools(httpThread.thread.id), { status: 'connected', tools: ['native_http_probe'] });
   // New App/CLI starts need no per-thread Yard configuration. The desktop
   // remote branch respects this explicit codex_app entry on the execution host.
   phase = 'global App origin with three client subscribers';
@@ -336,7 +354,7 @@ CODEX_APP_TOOLS_CALLER_HOST_ID="local"
     verified: ['original-adapter', 'model-native-call-metadata', 'native-create-read-send-wait-fork-title-pin-readstate-archive',
       'app-yard-peer-continuation', 'simultaneous-clients-active-delegation', 'all-yard-pages-closed', 'healthy-native-mount-preserved',
       'registration-plan-read-only', 'registration-refuses-existing-definition', 'versioned-user-registration-and-private-backup',
-      'local-desktop-plugin-precedence', 'global-app-origin-three-clients', 'windows-native-host-offline',
+      'loaded-http-mount-preserved-with-stdio-default', 'local-desktop-plugin-precedence', 'global-app-origin-three-clients', 'windows-native-host-offline',
       'idle-native-mount-migration', 'host-restart-adapter-reconnection-and-durable-pins'] }));
 } catch (cause) {
   throw new Error('Native MCP verification failed at: ' + phase, { cause });
