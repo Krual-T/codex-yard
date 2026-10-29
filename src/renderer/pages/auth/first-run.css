@@ -1,0 +1,16 @@
+.yard-first-run { display: grid; min-width: 0; min-height: 100%; place-items: center; padding: 32px 20px; color: var(--yard-fg, #202926); background: var(--yard-bg, #fff); font: var(--yard-font-size, 14px)/1.5 var(--yard-ui-font, system-ui, sans-serif); }
+.yard-first-run * { box-sizing: border-box; }
+.yard-first-run-content { width: min(100%, 480px); }
+.yard-first-run-illustration { display: block; margin: 54px auto 28px; color: var(--yard-accent, #087a70); }
+.yard-first-run h1 { margin: 24px 0 12px; font-size: 23px; line-height: 1.25; overflow-wrap: anywhere; }
+.yard-first-run h1:focus { outline: 0; }
+.yard-first-run p, .yard-first-run ul { font-family: var(--yard-content-font, system-ui, sans-serif); overflow-wrap: anywhere; }
+.yard-first-run ul { display: grid; gap: 20px; margin: 28px 0 0; padding: 0; list-style: none; }
+.yard-first-run li { display: flex; align-items: flex-start; gap: 12px; }
+.yard-first-run li svg { flex: 0 0 auto; margin-top: 2px; color: var(--yard-accent, #087a70); }
+.yard-first-run-actions { display: flex; justify-content: space-between; gap: 12px; margin-top: 36px; }
+.yard-first-run-actions button { min-height: 40px; padding: 8px 16px; border: 1px solid var(--yard-border, #cbd4d1); border-radius: 5px; color: inherit; background: var(--yard-surface, #f4f7f6); font: inherit; cursor: pointer; }
+.yard-first-run-actions .yard-first-run-primary { margin-left: auto; color: var(--yard-bg, #fff); background: var(--yard-accent, #087a70); border-color: var(--yard-accent, #087a70); }
+.yard-first-run button:disabled { opacity: .55; cursor: not-allowed; }
+.yard-first-run :focus-visible { outline: 2px solid var(--yard-accent, #087a70); outline-offset: 2px; }
+.yard-first-run-error { color: var(--yard-muted, #626c68); }

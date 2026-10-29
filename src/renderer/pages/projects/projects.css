@@ -1,0 +1,43 @@
+.yard-projects { height: 100%; overflow: auto; background: var(--yard-bg); color: var(--yard-fg); font: var(--yard-font-size) var(--yard-ui-font); }
+.yard-projects-content { max-width: 1020px; margin: auto; padding: 24px 28px 40px; }
+.yard-projects button, .yard-projects input, .yard-project-dialog button { font: inherit; }
+.yard-projects button, .yard-project-dialog button { color: inherit; cursor: pointer; }
+.yard-projects button:disabled, .yard-project-dialog button:disabled { cursor: default; opacity: .5; }
+.yard-projects button:focus-visible, .yard-projects input:focus-visible, .yard-projects summary:focus-visible, .yard-project-dialog button:focus-visible { outline: 2px solid var(--yard-accent); outline-offset: 2px; }
+.yard-projects-title, .yard-projects-actions { display: flex; align-items: center; gap: 8px; }
+.yard-projects-title { justify-content: space-between; }
+.yard-projects h1 { margin: 0; font-size: 22px; }
+.yard-projects-create { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; border: 0; border-radius: 6px; color: var(--yard-bg) !important; background: var(--yard-fg); }
+.yard-projects-icon, .yard-project-menu summary { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 5px; background: transparent; }
+.yard-projects-icon:not(:disabled):hover, .yard-project-menu summary:hover { background: var(--yard-surface); }
+.yard-projects-search { display: flex; align-items: center; gap: 8px; margin: 22px 0 18px; padding: 0 10px; min-height: 38px; border: 1px solid var(--yard-border); border-radius: 6px; background: var(--yard-surface); color: var(--yard-muted); }
+.yard-projects-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--yard-fg); }
+.yard-projects-columns { display: flex; justify-content: space-between; border-bottom: 1px solid var(--yard-border); padding: 0 118px 8px 44px; }
+.yard-projects-columns button { display: flex; gap: 4px; align-items: center; border: 0; background: transparent; color: var(--yard-muted); font-size: .85em; }
+.yard-projects-state { color: var(--yard-muted); line-height: 1.5; }
+.yard-projects-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; line-height: 1.5; }
+.yard-projects-error button, .yard-projects-more, .yard-project-dialog-actions button { border: 1px solid var(--yard-border); border-radius: 6px; background: var(--yard-surface); padding: 6px 10px; }
+.yard-project-line { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 8px 0; border-bottom: 1px solid var(--yard-border); }
+.yard-project-folder { flex: 0 0 auto; color: var(--yard-muted); }
+.yard-project-name { display: grid; gap: 2px; flex: 1 1 auto; min-width: 0; text-align: left; border: 0; background: transparent; }
+.yard-project-name strong, .yard-project-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.yard-project-name span, .yard-project-updated { color: var(--yard-muted); font-size: .85em; }
+.yard-project-updated { flex: 0 0 92px; text-align: right; }
+.yard-project-menu { position: relative; flex: 0 0 32px; }
+.yard-project-menu summary { cursor: pointer; list-style: none; }
+.yard-project-menu summary::-webkit-details-marker { display: none; }
+.yard-project-menu > div { position: absolute; z-index: 2; right: 0; top: 34px; min-width: 160px; padding: 4px; border: 1px solid var(--yard-border); border-radius: 6px; background: var(--yard-bg); box-shadow: 0 4px 12px rgb(0 0 0 / 12%); }
+.yard-project-menu > div button { display: block; width: 100%; padding: 8px; text-align: left; border: 0; border-radius: 4px; background: transparent; }
+.yard-project-menu > div button:not(:disabled):hover { background: var(--yard-surface); }
+.yard-project-chats { padding: 0 0 8px 44px; }
+.yard-project-chat { display: flex; justify-content: space-between; gap: 10px; width: 100%; padding: 9px 4px; border: 0; background: transparent; text-align: left; }
+.yard-project-chat span:first-child { overflow-wrap: anywhere; }
+.yard-project-chat span:last-child { color: var(--yard-muted); white-space: nowrap; font-size: .85em; }
+.yard-projects-more { display: block; margin: 14px auto; }
+.yard-project-dialog { box-sizing: border-box; width: min(460px, calc(100vw - 24px)); padding: 20px; border: 1px solid var(--yard-border); border-radius: 8px; background: var(--yard-bg); color: var(--yard-fg); font: var(--yard-font-size) var(--yard-ui-font); }
+.yard-project-dialog::backdrop { background: rgb(0 0 0 / 45%); }
+.yard-project-dialog-header, .yard-project-dialog-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.yard-project-dialog h2 { margin: 0; font-size: 19px; }
+.yard-project-dialog p { line-height: 1.5; overflow-wrap: anywhere; }
+.yard-project-dialog-actions { justify-content: flex-end; margin-top: 24px; }
+@media (max-width: 560px) { .yard-projects-content { padding: 20px 16px; } .yard-project-updated { display: none; } .yard-projects-columns { padding-right: 0; } .yard-project-line { gap: 2px; } }

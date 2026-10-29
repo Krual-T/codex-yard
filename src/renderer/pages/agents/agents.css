@@ -1,0 +1,52 @@
+.yard-agents { height: 100%; overflow: auto; background: var(--yard-bg); color: var(--yard-fg); font: var(--yard-font-size) var(--yard-ui-font); }
+.yard-agents-header, .yard-agents-results { max-width: 1020px; margin: 0 auto; padding: 24px 28px 0; }
+.yard-agents-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.yard-agents h1 { margin: 0; font-size: 22px; line-height: 1.3; }
+.yard-agents button, .yard-agents input { font: inherit; }
+.yard-agents button { color: inherit; cursor: pointer; }
+.yard-agents button:disabled { cursor: default; opacity: .55; }
+.yard-agents button:focus-visible, .yard-agents input:focus-visible { outline: 2px solid var(--yard-accent); outline-offset: 2px; }
+.yard-agents-create { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 0 12px; background: var(--yard-fg); color: var(--yard-bg) !important; border: 0; border-radius: 6px; white-space: nowrap; }
+.yard-agents-search { display: flex; align-items: center; gap: 8px; margin-top: 22px; padding: 0 10px; min-height: 38px; border: 1px solid var(--yard-border); border-radius: 6px; color: var(--yard-muted); background: var(--yard-surface); }
+.yard-agents-search input { width: 100%; min-width: 0; border: 0; outline: 0; color: var(--yard-fg); background: transparent; }
+.yard-agents-tabs { display: flex; gap: 18px; overflow-x: auto; margin-top: 18px; border-bottom: 1px solid var(--yard-border); }
+.yard-agents-tabs button { flex: 0 0 auto; padding: 9px 0; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--yard-muted); }
+.yard-agents-tabs button[aria-current] { border-bottom-color: var(--yard-fg); color: var(--yard-fg); }
+.yard-agents-results { padding-top: 18px; padding-bottom: 32px; }
+.yard-agents-state { color: var(--yard-muted); line-height: 1.5; }
+.yard-agents > .yard-agents-state, .yard-agents > .yard-agents-error { max-width: 1020px; margin: 20px auto; padding: 0 28px; }
+.yard-agents-error { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; line-height: 1.5; color: var(--yard-fg); }
+.yard-agents-error button, .yard-agents-more, .yard-agent-edit { background: var(--yard-surface); border: 1px solid var(--yard-border); border-radius: 6px; padding: 6px 10px; }
+.yard-agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 10px; }
+.yard-agents-list { display: grid; }
+.yard-agent { display: flex; align-items: center; min-width: 0; }
+.yard-agents-list .yard-agent { border-bottom: 1px solid var(--yard-border); }
+.yard-agents-grid .yard-agent { border: 1px solid var(--yard-border); border-radius: 6px; background: var(--yard-surface); }
+.yard-agent-main { display: flex; align-items: center; gap: 12px; min-width: 0; width: 100%; padding: 14px 10px; text-align: left; border: 0; background: transparent; }
+.yard-agent-main:not(:disabled):hover { background: color-mix(in srgb, var(--yard-fg) 5%, transparent); }
+.yard-agent-icon { flex: 0 0 40px; height: 40px; display: grid; place-items: center; border: 1px solid var(--yard-border); border-radius: 6px; color: var(--yard-muted); }
+.yard-agent-text { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.yard-agent-text strong { font-size: 1em; }
+.yard-agent-text > span { color: var(--yard-muted); line-height: 1.4; }
+.yard-agent-edit { flex: 0 0 auto; margin-right: 8px; }
+.yard-agents-more { display: block; margin: 20px auto 0; }
+@media (max-width: 480px) { .yard-agents-header, .yard-agents-results { padding-left: 16px; padding-right: 16px; } .yard-agents-title { align-items: flex-start; } .yard-agents h1 { font-size: 19px; } }
+.yard-agent-dialog { box-sizing: border-box; width: min(560px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; padding: 20px; border: 1px solid var(--yard-border); border-radius: 8px; color: var(--yard-fg); background: var(--yard-bg); font: var(--yard-font-size) var(--yard-ui-font); }
+.yard-agent-dialog::backdrop { background: rgb(0 0 0 / 45%); }
+.yard-agent-dialog header { display: flex; justify-content: space-between; gap: 16px; }
+.yard-agent-dialog h2 { margin: 0; font-size: 19px; overflow-wrap: anywhere; }
+.yard-agent-dialog header p { color: var(--yard-muted); line-height: 1.5; overflow-wrap: anywhere; }
+.yard-agent-dialog button, .yard-agent-dialog input { font: inherit; }
+.yard-agent-dialog button { color: inherit; cursor: pointer; }
+.yard-agent-dialog button:disabled { opacity: .55; cursor: default; }
+.yard-agent-dialog button:focus-visible, .yard-agent-dialog input:focus-visible { outline: 2px solid var(--yard-accent); outline-offset: 2px; }
+.yard-agent-close { flex: 0 0 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; }
+.yard-agent-detail-identity { display: flex; align-items: center; gap: 12px; margin: 18px 0; color: var(--yard-muted); }
+.yard-agent-prompts { list-style: none; margin: 16px 0; padding: 0; border-top: 1px solid var(--yard-border); }
+.yard-agent-prompts li { display: grid; gap: 4px; padding: 12px 0; border-bottom: 1px solid var(--yard-border); overflow-wrap: anywhere; }
+.yard-agent-prompts li span { color: var(--yard-muted); }
+.yard-agent-secondary, .yard-agent-primary { border-radius: 6px; padding: 7px 12px; }
+.yard-agent-secondary { background: var(--yard-surface); border: 1px solid var(--yard-border); }
+.yard-agent-primary { background: var(--yard-fg); color: var(--yard-bg) !important; border: 1px solid var(--yard-fg); }
+.yard-agent-pin { display: flex; align-items: center; gap: 8px; margin: 18px 0; }
+.yard-agent-dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }

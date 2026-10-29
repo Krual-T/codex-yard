@@ -1,0 +1,15 @@
+.yard-login { display: grid; min-width: 0; min-height: 100%; place-items: center; padding: 32px 20px; color: var(--yard-fg, #202926); background: var(--yard-bg, #fff); font: var(--yard-font-size, 14px)/1.5 var(--yard-ui-font, system-ui, sans-serif); }
+.yard-login * { box-sizing: border-box; }
+.yard-login-content { width: min(100%, 380px); }
+.yard-login h1 { margin: 24px 0; font-size: 24px; line-height: 1.25; }
+.yard-login-actions, .yard-login section, .yard-login form { display: grid; gap: 10px; }
+.yard-login button, .yard-login input, .yard-login a { font: inherit; }
+.yard-login button, .yard-login a.yard-login-primary { min-height: 40px; padding: 8px 12px; border: 1px solid var(--yard-border, #cbd4d1); border-radius: 5px; color: inherit; background: var(--yard-surface, #f4f7f6); text-align: center; cursor: pointer; }
+.yard-login button:disabled { opacity: .55; cursor: not-allowed; }
+.yard-login .yard-login-primary { color: var(--yard-bg, white); background: var(--yard-accent, #087a70); border-color: var(--yard-accent, #087a70); text-decoration: none; }
+.yard-login label { display: grid; gap: 5px; }
+.yard-login input { min-width: 0; width: 100%; padding: 9px; border: 1px solid var(--yard-border, #cbd4d1); border-radius: 5px; color: inherit; background: var(--yard-bg, #fff); }
+.yard-login :focus-visible { outline: 2px solid var(--yard-accent, #087a70); outline-offset: 2px; }
+.yard-login-error, .yard-login-help { overflow-wrap: anywhere; color: var(--yard-muted, #626c68); }
+.yard-login-help { margin-top: 28px; font-family: var(--yard-content-font, system-ui, sans-serif); }
+.yard-login code, .yard-login-code { font: var(--yard-code-size, 13px)/1.5 var(--yard-code-font, monospace); }

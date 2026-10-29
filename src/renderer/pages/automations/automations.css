@@ -1,0 +1,66 @@
+.yard-automations { min-height: 100%; min-width: 0; background: var(--yard-bg, #fff); color: var(--yard-fg, #222926); font: var(--yard-font-size, 14px)/1.5 var(--yard-ui-font, system-ui, sans-serif); }
+.yard-automations *, .yard-automation-dialog * { box-sizing: border-box; }
+.yard-automations-content { max-width: 1180px; padding: 32px; margin: 0 auto; }
+.yard-automations button, .yard-automations input, .yard-automations textarea, .yard-automations select, .yard-automation-dialog button { color: inherit; font: inherit; }
+.yard-automations button, .yard-automation-dialog button { cursor: pointer; }
+.yard-automations button:disabled, .yard-automations input:disabled, .yard-automations textarea:disabled, .yard-automations select:disabled, .yard-automation-dialog button:disabled { opacity: .55; cursor: not-allowed; }
+.yard-automations :focus-visible, .yard-automation-dialog :focus-visible { outline: 2px solid var(--yard-accent, #087a70); outline-offset: 2px; }
+.yard-automations h1 { font-size: 24px; line-height: 1.2; margin: 0; }
+.yard-automations h2, .yard-automation-dialog h2 { font-size: 17px; line-height: 1.3; margin: 0; overflow-wrap: anywhere; }
+.yard-automations-header, .yard-automations-header > div, .yard-automation-detail-header, .yard-automation-dialog header { display: flex; align-items: center; gap: 8px; }
+.yard-automations-header, .yard-automation-dialog header { justify-content: space-between; }
+.yard-automations .yard-automation-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 12px; border: 1px solid var(--yard-fg, #222926); border-radius: 6px; background: var(--yard-fg, #222926); color: var(--yard-bg, #fff); }
+.yard-automation-icon { display: inline-grid; place-items: center; flex: 0 0 34px; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 5px; background: transparent; }
+.yard-automation-icon:not(:disabled):hover { background: var(--yard-surface, #f4f6f5); }
+.yard-automations-toolbar { display: flex; gap: 8px; margin: 24px 0 14px; }
+.yard-automation-search { display: flex; flex: 1 1 260px; align-items: center; gap: 8px; min-width: 0; padding: 0 10px; border: 1px solid var(--yard-border, #d4dcda); border-radius: 6px; background: var(--yard-surface, #f4f6f5); color: var(--yard-muted, #626c68); }
+.yard-automation-search input { min-width: 0; width: 100%; height: 38px; border: 0; outline: 0; background: transparent; }
+.yard-automation-filter select { height: 40px; max-width: 140px; padding: 0 10px; border: 1px solid var(--yard-border, #d4dcda); border-radius: 6px; background: var(--yard-bg, #fff); }
+.yard-automation-sr { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+.yard-automations-layout { display: grid; grid-template-columns: minmax(220px, 0.9fr) minmax(320px, 1.1fr); gap: 24px; align-items: start; }
+.yard-automation-list { min-width: 0; border-top: 1px solid var(--yard-border, #d4dcda); }
+.yard-automation-row { display: flex; align-items: center; gap: 12px; width: 100%; min-width: 0; padding: 12px 8px; border: 0; border-bottom: 1px solid var(--yard-border, #d4dcda); background: transparent; text-align: left; }
+.yard-automation-row:hover, .yard-automation-row[aria-current] { background: var(--yard-surface, #f4f6f5); }
+.yard-automation-row > svg { flex: none; color: var(--yard-muted, #626c68); }
+.yard-automation-row > span { display: grid; min-width: 0; gap: 2px; }
+.yard-automation-row strong, .yard-automation-row small { overflow-wrap: anywhere; }
+.yard-automation-row small, .yard-automation-muted, .yard-automation-facts dt { color: var(--yard-muted, #626c68); }
+.yard-automation-detail { min-width: 0; padding: 2px 0 24px; }
+.yard-automation-detail-header { margin-bottom: 16px; }
+.yard-automation-prompt-view { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
+.yard-automation-facts { margin: 18px 0; border-top: 1px solid var(--yard-border, #d4dcda); }
+.yard-automation-facts > div { display: grid; grid-template-columns: minmax(95px, .4fr) minmax(0, 1fr); gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--yard-border, #d4dcda); }
+.yard-automation-facts dd { margin: 0; overflow-wrap: anywhere; }
+.yard-automation-rule-view, .yard-automation-rule { font-family: var(--yard-code-font, monospace) !important; font-size: var(--yard-code-size, 13px) !important; }
+.yard-automation-detail-actions, .yard-automation-editor-actions, .yard-automation-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.yard-automation-detail-actions button, .yard-automation-editor-actions button, .yard-automation-dialog-actions button, .yard-automation-alert button { padding: 6px 10px; border: 1px solid var(--yard-border, #d4dcda); border-radius: 6px; background: var(--yard-surface, #f4f6f5); }
+.yard-automation-more { margin-top: 12px; }
+.yard-automation-more button { padding: 6px 10px; border: 1px solid var(--yard-border, #d4dcda); border-radius: 6px; background: var(--yard-surface, #f4f6f5); }
+.yard-automation-alert { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 9px 0; overflow-wrap: anywhere; }
+.yard-automation-error { color: #b53636; overflow-wrap: anywhere; }
+.yard-automation-diagnostic { display: block; }
+.yard-automation-editor { display: grid; gap: 16px; }
+.yard-automation-editor > label, .yard-automation-fields > label, .yard-automation-inline label { display: grid; gap: 5px; min-width: 0; }
+.yard-automation-editor input:not([type=checkbox]), .yard-automation-editor textarea, .yard-automation-editor select { width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid var(--yard-border, #d4dcda); border-radius: 5px; background: var(--yard-bg, #fff); }
+.yard-automation-editor textarea { resize: vertical; }
+.yard-automation-prompt { min-height: 130px; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)) !important; }
+.yard-automation-fields { display: grid; gap: 10px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.yard-automation-fields legend { margin-bottom: 8px; font-weight: 600; }
+.yard-automation-checkbox { display: flex !important; align-items: center; gap: 8px; }
+.yard-automation-checkbox input { width: 16px; height: 16px; accent-color: var(--yard-accent, #087a70); }
+.yard-automation-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.yard-automation-schedule { min-width: 0; margin: 0; padding: 0; border: 0; }
+.yard-automation-editor-actions { justify-content: flex-end; }
+.yard-automation-dialog { box-sizing: border-box; width: min(460px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; padding: 20px; border: 1px solid var(--yard-border, #d4dcda); border-radius: 8px; background: var(--yard-bg, #fff); color: var(--yard-fg, #222926); font: var(--yard-font-size, 14px)/1.5 var(--yard-ui-font, system-ui, sans-serif); }
+.yard-automation-dialog::backdrop { background: rgb(0 0 0 / 45%); }
+.yard-automation-dialog p { overflow-wrap: anywhere; }
+.yard-automation-dialog-actions { justify-content: flex-end; }
+@media (max-width: 700px) {
+  .yard-automations-content { padding: 22px 16px 48px; }
+  .yard-automations-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .yard-automation-detail { border-top: 1px solid var(--yard-border, #d4dcda); padding-top: 20px; }
+}
+.yard-automation-linked { padding: 16px 0; }
+.yard-automation-linked header { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.yard-automation-linked h2, .yard-automation-dialog h2 { font-size: 18px; }
+.yard-automation-dialog p { overflow-wrap: anywhere; }

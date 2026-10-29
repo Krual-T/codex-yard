@@ -1,0 +1,75 @@
+.yard-agent-page { box-sizing: border-box; height: 100%; overflow: auto; background: var(--yard-bg); color: var(--yard-fg); font: var(--yard-font-size) var(--yard-ui-font); }
+.yard-agent-page *, .yard-agent-modal * { box-sizing: border-box; }
+.yard-agent-page button, .yard-agent-page input, .yard-agent-page textarea, .yard-agent-page select, .yard-agent-modal button { font: inherit; color: inherit; }
+.yard-agent-page button, .yard-agent-modal button { cursor: pointer; }
+.yard-agent-page button:disabled, .yard-agent-modal button:disabled { opacity: .55; cursor: default; }
+.yard-agent-page :focus-visible, .yard-agent-modal :focus-visible { outline: 2px solid var(--yard-accent); outline-offset: 2px; }
+.yard-agent-content { max-width: 900px; margin: auto; padding: 24px 28px 60px; }
+.yard-agent-toolbar, .yard-agent-heading, .yard-agent-actions, .yard-agent-form-head, .yard-agent-section-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.yard-agent-toolbar { margin-bottom: 28px; }
+.yard-agent-toolbar h1, .yard-agent-heading h1 { font-size: 22px; line-height: 1.3; margin: 0; overflow-wrap: anywhere; }
+.yard-agent-heading { justify-content: flex-start; align-items: flex-start; margin: 20px 0; }
+.yard-agent-heading > div { min-width: 0; overflow-wrap: anywhere; }
+.yard-agent-heading p { margin: 5px 0; color: var(--yard-muted); }
+.yard-agent-heading .yard-agent-glyph { flex: 0 0 50px; }
+.yard-agent-page h2 { font-size: 16px; margin: 0; }
+.yard-agent-page h3 { font-size: 14px; margin: 0; }
+.yard-agent-btn, .yard-agent-icon-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; border: 1px solid var(--yard-border); border-radius: 5px; background: var(--yard-surface); padding: 6px 10px; }
+.yard-agent-btn-primary { color: var(--yard-bg) !important; background: var(--yard-fg); border-color: var(--yard-fg); }
+.yard-agent-icon-button { width: 34px; padding: 0; }
+.yard-agent-page .yard-agent-muted { color: var(--yard-muted); }
+.yard-agent-message { margin: 12px 0; line-height: 1.5; overflow-wrap: anywhere; }
+.yard-agent-error { border-left: 3px solid var(--yard-accent); padding: 8px 12px; background: var(--yard-surface); }
+.yard-agent-tabs { display: flex; gap: 20px; overflow-x: auto; border-bottom: 1px solid var(--yard-border); }
+.yard-agent-tabs button { flex: 0 0 auto; padding: 10px 0; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--yard-muted); }
+.yard-agent-tabs button[aria-selected=true] { color: var(--yard-fg); border-bottom-color: var(--yard-fg); }
+.yard-agent-section { padding: 22px 0; border-bottom: 1px solid var(--yard-border); }
+.yard-agent-section > p { line-height: 1.5; }
+.yard-agent-list { list-style: none; padding: 0; margin: 12px 0; }
+.yard-agent-list li { border-bottom: 1px solid var(--yard-border); }
+.yard-agent-list li > button:not(.yard-agent-icon-button) { display: flex; width: 100%; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 2px; text-align: left; background: transparent; border: 0; }
+.yard-agent-list li > button:not(.yard-agent-icon-button) span { min-width: 0; overflow-wrap: anywhere; }
+.yard-agent-list small { display: block; color: var(--yard-muted); margin-top: 4px; }
+.yard-agent-prompts-row { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0 12px; }
+.yard-agent-prompts-row button { flex: 0 0 auto; max-width: 240px; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.yard-agent-field { display: grid; gap: 6px; margin-top: 15px; min-width: 0; }
+.yard-agent-field input, .yard-agent-field textarea, .yard-agent-field select { width: 100%; min-width: 0; padding: 8px 10px; color: var(--yard-fg); background: var(--yard-surface); border: 1px solid var(--yard-border); border-radius: 5px; }
+.yard-agent-field textarea { resize: vertical; line-height: 1.5; }
+.yard-agent-field textarea.instructions { min-height: 180px; font-family: var(--yard-content-font); }
+.yard-agent-fields-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.yard-agent-form-head { justify-content: flex-start; align-items: end; }
+.yard-agent-form-head .yard-agent-field { flex: 1 1 200px; }
+.yard-agent-picker { position: relative; flex: none; }
+.yard-agent-picker summary { display: grid; place-items: center; width: 52px; height: 52px; cursor: pointer; list-style: none; border: 1px solid var(--yard-border); border-radius: 5px; background: var(--yard-surface); }
+.yard-agent-picker summary::-webkit-details-marker { display: none; }
+.yard-agent-picker-panel { position: absolute; z-index: 4; top: 58px; left: 0; width: min(330px, calc(100vw - 36px)); max-height: 280px; overflow: auto; padding: 12px; background: var(--yard-bg); border: 1px solid var(--yard-border); border-radius: 6px; box-shadow: 0 4px 14px rgb(0 0 0 / 20%); }
+.yard-agent-swatches, .yard-agent-icon-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; }
+.yard-agent-swatches { margin-bottom: 12px; }
+.yard-agent-swatches button { width: 24px; height: 24px; border: 2px solid var(--yard-bg); border-radius: 50%; }
+.yard-agent-icon-grid button { height: 34px; padding: 0; background: transparent; border: 1px solid transparent; border-radius: 4px; }
+.yard-agent-swatches button[aria-pressed=true], .yard-agent-icon-grid button[aria-pressed=true] { outline: 2px solid var(--yard-accent); }
+.yard-agent-menu { position: relative; }
+.yard-agent-menu summary { list-style: none; }
+.yard-agent-menu summary::-webkit-details-marker { display: none; }
+.yard-agent-menu-items { position: absolute; z-index: 3; right: 0; top: 40px; min-width: 190px; padding: 5px; border: 1px solid var(--yard-border); border-radius: 5px; background: var(--yard-bg); box-shadow: 0 4px 14px rgb(0 0 0 / 20%); }
+.yard-agent-menu-items button { display: flex; gap: 8px; align-items: center; width: 100%; padding: 8px; text-align: left; background: transparent; border: 0; border-radius: 4px; }
+.yard-agent-menu-items button:hover { background: var(--yard-surface); }
+.yard-agent-modal { width: min(500px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; padding: 22px; color: var(--yard-fg); background: var(--yard-bg); border: 1px solid var(--yard-border); border-radius: 8px; font: var(--yard-font-size) var(--yard-ui-font); }
+.yard-agent-modal::backdrop { background: rgb(0 0 0 / 45%); }
+.yard-agent-modal h2 { font-size: 18px; margin: 0; overflow-wrap: anywhere; }
+.yard-agent-modal p { line-height: 1.5; }
+.yard-agent-modal footer { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+.yard-agent-modal .yard-agent-section { padding: 16px 0; }
+.yard-agent-modal .yard-agent-field { display: grid; gap: 6px; margin-top: 12px; }
+.yard-agent-modal input[type=search], .yard-agent-modal select { min-width: 0; max-width: 100%; padding: 7px; color: var(--yard-fg); background: var(--yard-surface); border: 1px solid var(--yard-border); border-radius: 5px; font: inherit; }
+.yard-agent-share-toggle { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
+.yard-agent-share-recipient { margin: 8px 6px 0 0; max-width: 100%; overflow-wrap: anywhere; }
+.yard-agent-permission { display: flex; align-items: center; gap: 8px; padding: 10px 0; }
+.yard-agent-permission > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.yard-agent-permission small { display: block; color: var(--yard-muted); }
+@media (max-width: 500px) { .yard-agent-content { padding: 18px 16px 40px; } .yard-agent-fields-pair { grid-template-columns: minmax(0, 1fr); } .yard-agent-toolbar { align-items: flex-start; } }
+.yard-agent-legacy { display: grid; justify-items: center; align-content: center; gap: 12px; min-height: 50vh; text-align: center; }
+.yard-agent-legacy h1 { margin: 0; font-size: 20px; }
+.yard-agent-legacy p { margin: 0; color: var(--yard-muted); }
+.yard-agent-legacy a { color: var(--yard-bg); background: var(--yard-fg); border-radius: 6px; padding: 9px 14px; text-decoration: none; }
+.yard-agent-legacy a:focus-visible { outline: 2px solid var(--yard-accent); outline-offset: 2px; }

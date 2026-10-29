@@ -1,0 +1,29 @@
+.yard-workspace { display: grid; min-width: 0; min-height: 100%; place-items: center; padding: 32px 20px; color: var(--yard-fg, #202926); background: var(--yard-bg, #fff); font: var(--yard-font-size, 14px)/1.5 var(--yard-ui-font, system-ui, sans-serif); }
+.yard-workspace * { box-sizing: border-box; }
+.yard-workspace-content { width: min(100%, 480px); }
+.yard-workspace-content > svg { color: var(--yard-accent, #087a70); }
+.yard-workspace h1 { margin: 18px 0 8px; font-size: 23px; line-height: 1.25; overflow-wrap: anywhere; }
+.yard-workspace p { font-family: var(--yard-content-font, system-ui, sans-serif); overflow-wrap: anywhere; }
+.yard-workspace-muted { color: var(--yard-muted, #626c68); }
+.yard-workspace-list { display: grid; max-height: 300px; overflow-y: auto; margin: 24px 0; padding: 0; border: 1px solid var(--yard-border, #cbd4d1); border-radius: 6px; }
+.yard-workspace-list label { display: flex; align-items: flex-start; gap: 12px; min-width: 0; padding: 12px; cursor: pointer; }
+.yard-workspace-list label + label { border-top: 1px solid var(--yard-border, #cbd4d1); }
+.yard-workspace-list input { flex: none; margin: 3px 0 0; accent-color: var(--yard-accent, #087a70); }
+.yard-workspace-row > span { display: grid; min-width: 0; overflow-wrap: anywhere; }
+.yard-workspace-row > span > span { color: var(--yard-muted, #626c68); font-family: var(--yard-code-font, monospace); font-size: var(--yard-code-size, 12px); }
+.yard-workspace-actions { display: flex; gap: 12px; margin-top: 24px; }
+.yard-workspace button { min-height: 40px; padding: 8px 14px; border: 1px solid var(--yard-border, #cbd4d1); border-radius: 5px; color: inherit; background: var(--yard-surface, #f4f7f6); font: inherit; cursor: pointer; }
+.yard-workspace-actions > button, .yard-workspace-add { flex: 1 1 0; min-width: 0; }
+.yard-workspace-actions > button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.yard-workspace-add { position: relative; }
+.yard-workspace-add summary { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 8px 14px; border: 1px solid var(--yard-border, #cbd4d1); border-radius: 5px; background: var(--yard-surface, #f4f7f6); cursor: pointer; list-style: none; }
+.yard-workspace-add summary::-webkit-details-marker { display: none; }
+.yard-workspace-add summary[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
+.yard-workspace-add > div { position: absolute; z-index: 1; top: calc(100% + 4px); left: 0; min-width: max(100%, 210px); padding: 4px; border: 1px solid var(--yard-border, #cbd4d1); border-radius: 5px; background: var(--yard-surface, #f4f7f6); box-shadow: 0 5px 14px #0002; }
+.yard-workspace-add > div button { display: block; width: 100%; border: 0; text-align: left; background: transparent; }
+.yard-workspace-actions .yard-workspace-primary { color: var(--yard-bg, #fff); background: var(--yard-accent, #087a70); border-color: var(--yard-accent, #087a70); }
+.yard-workspace .yard-workspace-skip { width: 100%; margin-top: 10px; background: transparent; border-color: transparent; }
+.yard-workspace button:disabled { opacity: .55; cursor: not-allowed; }
+.yard-workspace :focus-visible { outline: 2px solid var(--yard-accent, #087a70); outline-offset: 2px; }
+.yard-workspace-error { color: var(--yard-fg, #202926); border-left: 3px solid #b94a48; padding-left: 10px; overflow-wrap: anywhere; }
+.yard-workspace-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

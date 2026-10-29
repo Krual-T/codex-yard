@@ -1,0 +1,44 @@
+.yard-skills { min-width: 0; min-height: 100%; color: var(--yard-fg, #222926); background: var(--yard-bg, #fff); font: var(--yard-font-size, 14px)/1.5 var(--yard-ui-font, system-ui, sans-serif); }
+.yard-skills *, .yard-skill-dialog * { box-sizing: border-box; }
+.yard-skills-content { width: min(100%, 960px); margin: auto; padding: 36px 32px 64px; }
+.yard-skills-header, .yard-skill-dialog header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.yard-skills h1 { margin: 0; font-size: 24px; line-height: 1.25; }
+.yard-skills-header p, .yard-skill-dialog header p { margin: 5px 0 0; color: var(--yard-muted, #626c68); }
+.yard-skills button, .yard-skills input, .yard-skill-dialog button, .yard-skill-dialog input { font: inherit; }
+.yard-skills button, .yard-skill-dialog button { color: inherit; cursor: pointer; }
+.yard-skills :focus-visible, .yard-skill-dialog :focus-visible { outline: 2px solid var(--yard-accent, #087a70); outline-offset: 2px; }
+.yard-skills button:disabled, .yard-skill-dialog button:disabled, .yard-skills input:disabled, .yard-skill-dialog input:disabled { opacity: .55; cursor: not-allowed; }
+.yard-skills .yard-skills-icon, .yard-skill-dialog .yard-skills-icon { display: grid; place-items: center; flex: 0 0 36px; width: 36px; height: 36px; border: 0; border-radius: 5px; background: transparent; }
+.yard-skills-icon:hover:not(:disabled) { background: var(--yard-surface, #eef2f1); }
+.yard-skills-search { display: flex; align-items: center; gap: 9px; width: min(100%, 420px); margin: 26px 0 18px; padding: 8px 10px; border: 1px solid var(--yard-border, #d4dcda); border-radius: 5px; color: var(--yard-muted, #626c68); background: var(--yard-surface, #f7f9f8); }
+.yard-skills-search input { width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; color: var(--yard-fg, #222926); background: transparent; }
+.yard-skills-search:focus-within { outline: 2px solid var(--yard-accent, #087a70); outline-offset: 2px; }
+.yard-skills-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.yard-skills-muted, .yard-skills-empty, .yard-skills-warning { color: var(--yard-muted, #626c68); overflow-wrap: anywhere; }
+.yard-skills-error { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 0; overflow-wrap: anywhere; }
+.yard-skills-error button, .yard-skill-dialog-actions button, .yard-skill-confirm button { border: 1px solid var(--yard-border, #d4dcda); border-radius: 5px; padding: 5px 10px; background: var(--yard-surface, #f7f9f8); }
+.yard-skills-group h2 { margin: 24px 0 8px; color: var(--yard-muted, #626c68); font-size: 13px; overflow-wrap: anywhere; }
+.yard-skills-group ul { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--yard-border, #d4dcda); }
+.yard-skill-row { display: flex; align-items: center; gap: 14px; min-height: 68px; padding: 8px 0; border-bottom: 1px solid var(--yard-border, #d4dcda); }
+.yard-skills .yard-skill-details { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; gap: 12px; border: 0; padding: 0; text-align: left; background: transparent; }
+.yard-skill-icon { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border-radius: 5px; color: var(--yard-accent, #087a70); background: var(--yard-surface, #f1f4f3); }
+.yard-skill-copy { display: grid; gap: 2px; min-width: 0; }
+.yard-skill-copy strong, .yard-skill-copy span { overflow-wrap: anywhere; }
+.yard-skill-copy span, .yard-skill-scope { color: var(--yard-muted, #626c68); font-size: .9em; }
+.yard-skill-toggle { flex: none; padding: 7px; }
+.yard-skill-toggle input, .yard-skill-dialog input { width: 17px; height: 17px; accent-color: var(--yard-accent, #087a70); }
+.yard-skill-dialog { width: min(680px, calc(100% - 32px)); max-height: min(85vh, 800px); overflow: auto; padding: 24px; border: 1px solid var(--yard-border, #d4dcda); border-radius: 7px; color: var(--yard-fg, #222926); background: var(--yard-bg, #fff); font: var(--yard-font-size, 14px)/1.5 var(--yard-ui-font, system-ui, sans-serif); }
+.yard-skill-dialog::backdrop { background: rgb(0 0 0 / .48); }
+.yard-skill-dialog h2 { margin: 0; font-size: 19px; line-height: 1.3; }
+.yard-skill-dialog h3 { margin: 24px 0 8px; font-size: 14px; }
+.yard-skill-dialog > p { font-family: var(--yard-content-font, system-ui, sans-serif); overflow-wrap: anywhere; }
+.yard-skill-dialog .yard-skill-path, .yard-skill-dialog pre { font: var(--yard-code-size, 13px)/1.5 var(--yard-code-font, monospace); overflow-wrap: anywhere; }
+.yard-skill-path { color: var(--yard-muted, #626c68); }
+.yard-skill-dialog pre { max-height: 360px; overflow: auto; white-space: pre-wrap; padding: 12px; background: var(--yard-surface, #f7f9f8); border: 1px solid var(--yard-border, #d4dcda); border-radius: 4px; }
+.yard-skill-dialog-actions, .yard-skill-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.yard-skill-dialog-actions label { display: flex; align-items: center; gap: 6px; margin-right: auto; }
+.yard-skill-confirm { border-top: 1px solid var(--yard-border, #d4dcda); padding-top: 12px; }
+.yard-skill-confirm span { margin-right: auto; }
+.yard-recommended { margin-top: 34px; }
+.yard-recommended .yard-skill-row > button:not(.yard-skill-details) { flex: none; border: 1px solid var(--yard-border, #d4dcda); border-radius: 5px; padding: 6px 10px; background: var(--yard-surface, #f7f9f8); }
+@media (max-width: 600px) { .yard-skills-content { padding: 24px 18px 40px; } .yard-skill-row { gap: 8px; } .yard-skill-scope { display: none; } .yard-skill-dialog { padding: 18px; } }
