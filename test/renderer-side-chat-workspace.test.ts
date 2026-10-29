@@ -243,6 +243,216 @@ async function setupRoot(browser: Browser, script: string, url: string): Promise
   return { context, page };
 }
 
+test('SideChatRoot cancel owner lease', { timeout: 100_000 }, async t => {
+  const bundle = await build({ entryPoints: ['test/renderer-side-chat-root-fixture.tsx'], bundle: true, write: false,
+    format: 'iife', loader: { '.css': 'empty' } });
+  const browser = await chromium.launch({ executablePath: process.env.YARD_VALIDATION_CHROME_BIN || '/usr/bin/google-chrome',
+    headless: true, args: ['--no-sandbox', '--disable-background-networking'] });
+  const setupCancel = async (injected = false) => {
+    const p = await peer(), { context, page } = await setupRoot(browser, bundle.outputFiles[0]!.text, p.url);
+    const identity = await page.evaluate(() => window.sideChatRootFixture.open());
+    const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+    await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && window.sideChatRootFixture.canAcquireDraft());
+    await input.fill('original retained draft');
+    await page.waitForFunction(() => window.sideChatRootFixture.child()?.snapshot.draft.text === 'original retained draft');
+    assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+    const intent = await page.evaluate(value => window.sideChatRootFixture.prepareSend(value), injected);
+    await page.getByRole('button', { name: 'Keep draft and cancel send' }).waitFor();
+    return { p, context, page, identity, intent };
+  };
+  try {
+    await t.test('drains original draft and sender without waiting on its own cancellation', async () => {
+      const { p, context, page, identity, intent } = await setupCancel();
+      try {
+        const sendButton = await page.getByRole('button', { name: '发送', exact: true }).elementHandle();
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.holdDraftOperation()), true);
+        await page.evaluate(() => window.sideChatRootFixture.holdOwnerWork());
+        await page.getByRole('button', { name: 'Keep draft and cancel send' }).click();
+        await page.waitForFunction(id => !window.sideChatRootFixture.canAttachOwner(id), identity.draftId);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.canAcquireDraft()), false);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.updateDraftWhileFrozen()), false);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), false);
+        await sendButton!.dispatchEvent('click');
+        assert.equal(p.fake.calls('turn/start').length, 0);
+        assert.ok((await page.evaluate(() => window.sideChatRootFixture.sends())).requests[intent.id]);
+        await page.evaluate(() => window.sideChatRootFixture.releaseDraftOperation());
+        await page.waitForTimeout(80);
+        assert.ok((await page.evaluate(() => window.sideChatRootFixture.sends())).requests[intent.id]);
+        await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork());
+        await page.waitForFunction(async id => !(await window.sideChatRootFixture.sends()).requests[id], intent.id);
+        await page.waitForFunction(id => window.sideChatRootFixture.canAttachOwner(id) && window.sideChatRootFixture.canAcquireDraft(), identity.draftId);
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.snapshot.draft.text, 'original retained draft');
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await eventually(() => p.fake.calls('turn/start').length === 1);
+      } finally {
+        await page.evaluate(() => { window.sideChatRootFixture.releaseDraftOperation(); window.sideChatRootFixture.releaseOwnerWork(); });
+        await context.close(); await p.close();
+      }
+    });
+    await t.test('drains a real in-flight shared sender and preserves its changed receipt', async () => {
+      const p = await peer(), { context, page } = await setupRoot(browser, bundle.outputFiles[0]!.text, p.url);
+      try {
+        const identity = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && window.sideChatRootFixture.canAcquireDraft());
+        await input.fill('in-flight original draft');
+        await page.waitForFunction(() => window.sideChatRootFixture.child()?.snapshot.draft.text === 'in-flight original draft');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await page.evaluate(() => window.sideChatRootFixture.holdCollaboration());
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.waitForFunction(() => window.sideChatRootFixture.collaborationWaiting());
+        await page.getByRole('button', { name: 'Keep draft and cancel send' }).click();
+        await page.waitForFunction(id => !window.sideChatRootFixture.canAttachOwner(id), identity.draftId);
+        assert.equal(p.fake.calls('turn/start').length, 0);
+        await page.evaluate(() => window.sideChatRootFixture.releaseCollaboration());
+        await page.waitForFunction(id => window.sideChatRootFixture.canAttachOwner(id), identity.draftId);
+        const requests = Object.values((await page.evaluate(() => window.sideChatRootFixture.sends())).requests);
+        assert.equal(requests.length, 1); assert.equal(requests[0]?.stage, 'failed');
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.snapshot.draft.text, 'in-flight original draft');
+        assert.equal(p.fake.calls('turn/start').length, 0); assert.equal(p.nativeWrites.length, 0);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseCollaboration()); await context.close(); await p.close(); }
+    });
+    await t.test('a change to the clicked intent while draining preserves the newer IDB record', async () => {
+      const { p, context, page, identity, intent } = await setupCancel();
+      try {
+        await page.evaluate(() => window.sideChatRootFixture.holdOwnerWork());
+        await page.getByRole('button', { name: 'Keep draft and cancel send' }).click();
+        await page.waitForFunction(id => !window.sideChatRootFixture.canAttachOwner(id), identity.draftId);
+        await page.evaluate(id => window.sideChatRootFixture.changeIntentModel(id), intent.id);
+        await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork());
+        await page.getByText('原发送记录已改变，请重新读取核对。').waitFor();
+        const current = (await page.evaluate(() => window.sideChatRootFixture.sends())).requests[intent.id];
+        assert.equal(current?.options.model, 'changed-model'); assert.equal(current?.attemptId, intent.attemptId);
+        await page.waitForFunction(() => window.sideChatRootFixture.canAcquireDraft());
+        assert.equal(p.fake.calls('turn/start').length, 0);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork()); await context.close(); await p.close(); }
+    });
+    await t.test('the original child cannot be switched away and back during cancellation', async () => {
+      const { p, context, page, identity, intent } = await setupCancel();
+      try {
+        const second = await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.waitForFunction(id => window.sideChatRootFixture.child()?.identity.draftId === id, second.draftId);
+        await page.evaluate(id => window.sideChatRootFixture.show(id), identity.draftId);
+        await page.getByRole('button', { name: 'Keep draft and cancel send' }).waitFor();
+        await page.evaluate(() => window.sideChatRootFixture.holdOwnerWork());
+        await page.getByRole('button', { name: 'Keep draft and cancel send' }).click();
+        await page.waitForFunction(id => !window.sideChatRootFixture.canAttachOwner(id), identity.draftId);
+        assert.equal(await page.getByRole('button', { name: '侧聊 2' }).isDisabled(), true);
+        assert.equal(await page.evaluate(id => { try { window.sideChatRootFixture.show(id); return false; } catch { return true; } }, second.draftId), true);
+        assert.equal(await page.evaluate(() => { try { window.sideChatRootFixture.open(); return false; } catch { return true; } }), true);
+        assert.equal(await page.evaluate(async value => { try { await window.sideChatRootFixture.restore(value); return false; } catch { return true; } }, second), true);
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.identity.draftId, identity.draftId);
+        assert.ok((await page.evaluate(() => window.sideChatRootFixture.sends())).requests[intent.id]);
+        await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork());
+        await page.waitForFunction(async id => !(await window.sideChatRootFixture.sends()).requests[id], intent.id);
+        await page.waitForFunction(id => window.sideChatRootFixture.canAttachOwner(id), identity.draftId);
+        await page.evaluate(id => window.sideChatRootFixture.show(id), second.draftId);
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.identity.draftId, second.draftId);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork()); await context.close(); await p.close(); }
+    });
+    await t.test('the original grant is checked inside the queued IndexedDB cancellation transaction', async () => {
+      const { p, context, page, identity, intent } = await setupCancel();
+      const writer = await context.newPage();
+      try {
+        await writer.goto(p.url);
+        await page.evaluate(() => window.sideChatRootFixture.holdCancel());
+        await page.getByRole('button', { name: 'Keep draft and cancel send' }).click();
+        await page.waitForFunction(() => window.sideChatRootFixture.cancelWaiting());
+        await writer.evaluate(async () => {
+          const w = window as any;
+          let release = false;
+          w.releaseWriter = () => { release = true; };
+          await new Promise<void>((resolve, reject) => {
+            const open = indexedDB.open('codex-yard.ui-atoms.v1', 1);
+            open.onerror = () => reject(open.error);
+            open.onsuccess = () => {
+              const db = open.result, tx = db.transaction('atoms', 'readwrite'), atoms = tx.objectStore('atoms');
+              let started = false;
+              w.writerDone = new Promise<void>((done, fail) => { tx.oncomplete = () => { db.close(); done(); }; tx.onabort = () => fail(tx.error); });
+              const pump = () => {
+                const request = atoms.get('native-atoms');
+                request.onerror = () => reject(request.error);
+                request.onsuccess = () => { if (!started) { started = true; resolve(); } if (!release) pump(); };
+              };
+              pump();
+            };
+          });
+        });
+        await page.evaluate(() => window.sideChatRootFixture.releaseCancel());
+        await page.waitForTimeout(80);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.cancelGuardCalls()), 0);
+        assert.equal(await page.evaluate(id => window.sideChatRootFixture.canAttachOwner(id), identity.draftId), false);
+        await page.evaluate(() => window.sideChatRootFixture.changeParent());
+        await writer.evaluate(async () => { const w = window as any; w.releaseWriter(); await w.writerDone; });
+        await page.waitForFunction(id => window.sideChatRootFixture.canAttachOwner(id), identity.draftId);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.cancelGuardCalls()), 1);
+        assert.deepEqual((await page.evaluate(() => window.sideChatRootFixture.sends())).requests[intent.id], intent);
+        assert.equal(p.fake.calls('turn/start').length, 0);
+      } finally {
+        await page.evaluate(() => window.sideChatRootFixture.releaseCancel());
+        await writer.evaluate(() => (window as any).releaseWriter?.()).catch(() => {});
+        await context.close(); await p.close();
+      }
+    });
+    for (const mode of ['unknown', 'native-pending'] as const) await t.test(`retains ${mode} observed during the drain`, async () => {
+      const { p, context, page, identity, intent } = await setupCancel(mode === 'native-pending');
+      try {
+        await page.evaluate(() => window.sideChatRootFixture.holdOwnerWork());
+        await page.getByRole('button', { name: 'Keep draft and cancel send' }).click();
+        await page.waitForFunction(id => !window.sideChatRootFixture.canAttachOwner(id), identity.draftId);
+        if (mode === 'unknown') await page.evaluate(({ id, attempt }) => window.sideChatRootFixture.markUnknown(id, attempt),
+          { id: intent.id, attempt: intent.attemptId! });
+        else await page.evaluate(id => window.sideChatRootFixture.markNativePending(id), intent.id);
+        await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork());
+        await page.getByText('原发送记录已改变，请重新读取核对。').waitFor();
+        const current = (await page.evaluate(() => window.sideChatRootFixture.sends())).requests[intent.id];
+        assert.equal(current?.stage, 'unknown');
+        if (mode === 'native-pending') assert.equal(current?.injection?.native?.status?.pendingPersistence?.step, 'injection');
+        assert.equal(p.fake.calls('turn/start').length, 0); assert.equal(p.nativeWrites.length, 0);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork()); await context.close(); await p.close(); }
+    });
+    for (const mode of ['parent', 'connection'] as const) await t.test(`original ${mode} revocation cannot cancel`, async () => {
+      const { p, context, page, identity, intent } = await setupCancel();
+      try {
+        await page.evaluate(() => window.sideChatRootFixture.holdOwnerWork());
+        await page.getByRole('button', { name: 'Keep draft and cancel send' }).click();
+        await page.waitForFunction(id => !window.sideChatRootFixture.canAttachOwner(id), identity.draftId);
+        if (mode === 'parent') await page.evaluate(() => window.sideChatRootFixture.changeParent());
+        else { p.signalGeneration(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === 'generation-b'); }
+        await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork());
+        await page.waitForFunction(id => window.sideChatRootFixture.canAttachOwner(id), identity.draftId);
+        assert.deepEqual((await page.evaluate(() => window.sideChatRootFixture.sends())).requests[intent.id], intent);
+        assert.equal(p.fake.calls('turn/start').length, 0);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork()); await context.close(); await p.close(); }
+    });
+    await t.test('a completed cancellation leaves the original close drain intact', async () => {
+      const { p, context, page, intent } = await setupCancel();
+      try {
+        await page.getByRole('button', { name: 'Keep draft and cancel send' }).click();
+        await page.waitForFunction(async id => !(await window.sideChatRootFixture.sends()).requests[id], intent.id);
+        await page.waitForFunction(() => window.sideChatRootFixture.canAcquireDraft());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.holdDraftOperation()), true);
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.canAcquireDraft()), false);
+        assert.equal(p.order.includes('close'), false); assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+        await page.evaluate(() => window.sideChatRootFixture.releaseDraftOperation());
+        await page.waitForFunction(() => window.sideChatRootFixture.closed === 1);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 1);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseDraftOperation()); await context.close(); await p.close(); }
+    });
+    await t.test('a pending send still prevents the original close', async () => {
+      const { p, context, page, intent } = await setupCancel();
+      try {
+        await page.evaluate(({ id, attempt }) => window.sideChatRootFixture.markUnknown(id, attempt), { id: intent.id, attempt: intent.attemptId! });
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        await page.getByText(/侧聊草稿或发送结果尚未确认/).waitFor();
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.sends())).requests[intent.id]?.stage, 'unknown');
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 0); assert.equal(p.order.includes('close'), false);
+      } finally { await context.close(); await p.close(); }
+    });
+  } finally { await browser.close(); }
+});
+
 test('SideChatRoot composes the original workspace, shared sender and child draft', { timeout: 100_000 }, async t => {
   const bundle = await build({ entryPoints: ['test/renderer-side-chat-root-fixture.tsx'], bundle: true, write: false,
     format: 'iife', loader: { '.css': 'empty' } });

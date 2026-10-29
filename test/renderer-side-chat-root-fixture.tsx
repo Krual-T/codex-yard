@@ -2,7 +2,8 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserWorkbenchClient } from '../src/renderer/app/client.ts';
 import { ConversationSessions } from '../src/renderer/app/conversation-sessions.ts';
-import { SendRecoveryStore } from '../src/renderer/app/send-recovery.ts';
+import { SendRecoveryStore, sendsAtom } from '../src/renderer/app/send-recovery.ts';
+import type { SendRecoverySnapshot } from '../src/renderer/app/send-recovery.ts';
 import { MessageEditRecoveryStore } from '../src/renderer/app/message-edit-recovery.ts';
 import { ApprovalRequestsController } from '../src/renderer/app/approval-requests.ts';
 import { SideChatRoot } from '../src/renderer/side-chat/SideChatRoot.tsx';
@@ -10,6 +11,7 @@ import type { SideChatRootChild, SideChatRootController } from '../src/renderer/
 import type { SideChatWorkspaceNavigationLease } from '../src/renderer/app/SideChatWorkspace.tsx';
 import { addBrowserCommentToDraft, readBrowserCommentsSnapshot } from '../src/renderer/browser/comments.ts';
 import { browserDraftOwner, removeBrowserDraftReference } from '../src/renderer/app/browser-draft.ts';
+import { updateBrowserAtoms } from '../src/renderer/storage/ui-atoms.ts';
 import type { ComposerDraftOwner } from '../src/renderer/composer/StandaloneComposer.tsx';
 import type { ComposerDraftExternalOperation } from '../src/renderer/composer/use-composer-draft.ts';
 
@@ -26,7 +28,14 @@ const removed: ComposerDraftOwner[] = [];
 const observedChildren = new Map<string, SideChatRootChild>();
 const frozenOwners = new Map<string, object>();
 let ownerWork: Promise<void> | null = null, finishOwnerWork: (() => void) | null = null;
+let cancelGate: Promise<void> | null = null, releaseCancel: (() => void) | null = null, cancelWaiting = false, cancelGuardCalls = 0;
+let collaborationGate: Promise<void> | null = null, releaseCollaboration: (() => void) | null = null, collaborationWaiting = false;
 const host = client.host.bind(client);
+const resolvedCollaboration = sends.resolvedCollaboration.bind(sends);
+sends.resolvedCollaboration = async (...args) => {
+  if (collaborationGate) { collaborationWaiting = true; await collaborationGate; collaborationWaiting = false; }
+  return resolvedCollaboration(...args);
+};
 client.host = async <T,>(endpoint: string, params?: Record<string, unknown>, options?: { assertBeforeSend?: () => void }): Promise<T> => {
   if (endpoint === 'send-injection' && params?.action === 'inject' && nativeGate) {
     nativeWaiting = true; await nativeGate; nativeWaiting = false;
@@ -44,14 +53,17 @@ function render() {
       child = value; if (value) observedChildren.set(value.identity.draftId, value);
     }}
     onClosed={() => { closed++; }} onExitObservation={() => { exited++; }} cleanupChild={async () => { cleanups++; }}
-    freezeChildOwner={(owner, identity) => {
+    freezeChildOwner={(owner, identity, _draft, assertOriginal) => {
       if (owner.draftId !== identity.draftId || frozenOwners.has(owner.draftId)) throw new Error('Synthetic owner unavailable.');
       const token = {}; frozenOwners.set(owner.draftId, token);
-      const assertCurrent = () => { if (frozenOwners.get(owner.draftId) !== token) throw new Error('Synthetic owner lease changed.'); };
+      const assertCurrent = () => { if (frozenOwners.get(owner.draftId) !== token) throw new Error('Synthetic owner lease changed.'); assertOriginal(); };
       return { async drain() { assertCurrent(); if (ownerWork) await ownerWork; assertCurrent(); }, assertCurrent,
-        release() { assertCurrent(); frozenOwners.delete(owner.draftId); } };
+        release() { if (frozenOwners.get(owner.draftId) !== token) throw new Error('Synthetic owner lease changed.'); frozenOwners.delete(owner.draftId); } };
     }}
-    cancelSend={async () => { throw new Error('Synthetic atomic cancellation is not provided.'); }}
+    cancelSend={async (intent, guard) => {
+      if (cancelGate) { cancelWaiting = true; await cancelGate; cancelWaiting = false; }
+      await sends.cancelOriginal(intent, () => { cancelGuardCalls++; guard(); });
+    }}
     onRemoveReference={(current, owner, reference, operation) => {
       if (child?.draft !== current.draft || child.owner.threadId !== owner.threadId) throw new Error('Synthetic child changed.');
       removed.push(structuredClone(owner));
@@ -97,11 +109,48 @@ const fixture = {
   canAttachOwner(draftId: string) { return !frozenOwners.has(draftId); },
   holdOwnerWork() { ownerWork = new Promise<void>(resolve => { finishOwnerWork = resolve; }); },
   releaseOwnerWork() { finishOwnerWork?.(); finishOwnerWork = null; ownerWork = null; },
+  holdCancel() { cancelGate = new Promise<void>(resolve => { releaseCancel = resolve; }); cancelGuardCalls = 0; },
+  releaseCancel() { releaseCancel?.(); releaseCancel = null; cancelGate = null; },
+  cancelWaiting() { return cancelWaiting; },
+  cancelGuardCalls() { return cancelGuardCalls; },
+  holdCollaboration() { collaborationGate = new Promise<void>(resolve => { releaseCollaboration = resolve; }); },
+  releaseCollaboration() { releaseCollaboration?.(); releaseCollaboration = null; collaborationGate = null; },
+  collaborationWaiting() { return collaborationWaiting; },
   flushDraft() { const value = current(); return value.draft.flush(value.owner); },
   holdNative() { nativeGate = new Promise<void>(resolve => { releaseNative = resolve; }); },
   releaseNative() { releaseNative?.(); releaseNative = null; nativeGate = null; },
   nativeWaiting() { return nativeWaiting; },
   sends() { return sends.read(); },
+  async prepareSend(injected = false) {
+    const value = current(), snapshot = value.draft.snapshot();
+    if (!snapshot || !snapshot.owner.threadId) throw Error('Original child draft is not ready.');
+    const injection = injected ? { callId: 'synthetic-call', input: [{ type: 'text', text: 'original context input' }],
+      responseItems: [{ type: 'function_call_output', call_id: 'synthetic-call', output: 'original context' }] } : undefined;
+    return sends.prepare({ owner: snapshot.owner, revision: snapshot.revision }, window.fixtureCwd, snapshot.draft,
+      { model: 'original-model' }, {}, undefined, undefined, { type: 'send' }, injection);
+  },
+  async changeIntentModel(id: string) {
+    await updateBrowserAtoms(atoms => {
+      const state = structuredClone(atoms[sendsAtom]) as SendRecoverySnapshot;
+      state.requests[id]!.options.model = 'changed-model';
+      return { value: null, updates: { [sendsAtom]: state } };
+    });
+  },
+  async markUnknown(id: string, attemptId: string) {
+    await sends.sending(id, attemptId);
+    await sends.failed(id, Object.assign(new Error('synthetic lost reply'), { uncertain: true }), attemptId);
+  },
+  async markNativePending(id: string) {
+    const original = (await sends.read()).requests[id]!;
+    const reserved = await sends.reserveNativeInjection(original, original.threadId!,
+      { threadId: original.threadId, clientUserMessageId: original.clientUserMessageId, input: original.injection!.input }, 'generation-a');
+    const native = reserved.injection!.native!;
+    await sends.applyNativeStatus(id, native, { reference: native.reference, injection: { phase: 'sending' },
+      turn: { phase: 'waiting', attempts: [] }, pendingPersistence: { step: 'injection', attemptId: native.reference.injectionAttemptId, terminal: null } });
+  },
+  async updateDraftWhileFrozen() {
+    const value = current(); return value.draft.update(value.owner, draft => ({ ...draft, text: 'not authorized' }));
+  },
   async structuredDraft() {
     const value = current(), text = 'Respond to the user input in the context of our conversation.';
     const input = { type: 'text', text, text_elements: [{ byteRange: { start: 0, end: new TextEncoder().encode(text).length },

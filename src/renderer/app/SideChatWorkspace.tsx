@@ -50,7 +50,7 @@ export interface SideChatWorkspaceProps {
   /** Fixed original page, parent, socket generation, and owner; synchronous and valid while its lease is held. */
   assertCurrent(): void;
   /** Blocks new same-draft owners and sends across views synchronously; drains their real pending work. */
-  freezeSending(owner: ComposerDraftOwner): SideChatSendLease;
+  freezeSending(owner: ComposerDraftOwner, purpose?: 'cancel'): SideChatSendLease;
   /** Captures the original owner and connection synchronously at the input action. */
   captureSubmissionAuthority(owner: ComposerDraftOwner): () => void;
   /** Resolve the same synchronously captured grant, without obtaining a newer connection. */
@@ -65,8 +65,8 @@ export interface SideChatWorkspaceProps {
     assertBeforeSend: () => void): Promise<'deleted' | 'changed'>;
   /** Guard this exact operation, child, turn, and original daemon socket at dispatch. */
   interruptTurn(scope: SideChatInterruptScope, assertAuthority: () => void, originalAuthority: () => void): Promise<void>;
-  /** Cancel only this exact immutable intent/attempt under the shared owner fence. */
-  cancelSend(intent: SendIntent, assertAuthority: () => void): Promise<void>;
+  /** The original captured grant and this cancellation's held owner lease must both remain current. */
+  cancelSend(intent: SendIntent, assertAuthority: () => void, originalAuthority: () => void): Promise<void>;
   /** Local resources only; must not unsubscribe or change the draft association. */
   cleanupChild(identity: SideChatBrowserIdentity): Promise<void>;
   onNavigationController(controller: SideChatWorkspaceNavigationController | null): void;
@@ -391,6 +391,41 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
       || current.attemptId !== intent.attemptId || current.revision !== intent.revision) throw new Error('原发送记录已改变。');
     return current;
   };
+  const cancelIntent = async (intent: SendIntent) => {
+    const captured = structuredClone(intent), owner = currentOwner(), authority = capture(owner);
+    const originalAuthority = authorities.current.get(authority);
+    if (!originalAuthority || !sameOwner(captured.owner, owner) || captured.threadId !== owner.threadId) {
+      throw notSent('原发送记录或取消权限已改变。');
+    }
+    setLocked(true);
+    let draftLease: ComposerDraftLease | null = null, sendLease: SideChatSendLease | null = null;
+    let editLease: ReturnType<typeof freezeEdits> | null = null;
+    const originalDraft = draft.current;
+    try {
+      const snapshot = originalDraft?.snapshot();
+      if (!originalDraft || !snapshot || !sameOwner(snapshot.owner, owner) || !(draftLease = originalDraft.freeze(owner))) {
+        throw notSent('原侧聊草稿无法冻结，取消未执行。');
+      }
+      sendLease = latest.current.freezeSending(owner, 'cancel'); editLease = freezeEdits();
+      const check = () => {
+        assertOriginal();
+        const current = originalDraft.snapshot();
+        if (!locked.current || draft.current !== originalDraft || !current || !sameOwner(current.owner, owner)
+          || !sameOwner(currentOwner(), owner)) throw notSent('原侧聊取消身份已改变。');
+        sendLease!.assertCurrent();
+      };
+      check();
+      await editLease.lease?.flush();
+      if (!await draftLease.flush()) throw notSent('原侧聊草稿未能排空，取消未执行。');
+      await sendLease.drain(); await drain(); await editLease.lease?.flush();
+      if (!await draftLease.flush()) throw notSent('原侧聊草稿未能排空，取消未执行。');
+      check();
+      await latest.current.cancelSend(captured, check, originalAuthority);
+    } finally {
+      editLease?.lease?.release(); editLease?.releaseAcquisition();
+      sendLease?.release(); draftLease?.release(); setLocked(false); changed();
+    }
+  };
   const onEdit = async (value: ComposerDraft, origin: MessageEditOrigin, prepare: () => Promise<void>) => {
     const owner = currentOwner();
     if (!owner.threadId || origin.hostId !== owner.hostId || origin.threadId !== owner.threadId) throw notSent('消息编辑目标已改变。');
@@ -431,8 +466,7 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
       } }); changed(); })}
       onRetryInjectionPersistence={() => task(async () => { const current = await reloadIntent(intent);
         await sends.retryNativePersistence(current.id); changed(); })}
-      onCancel={() => task(async () => { const authority = capture(currentOwner()), current = await reloadIntent(intent); authority();
-        await latest.current.cancelSend(current, authority); changed(); })} />)}
+      onCancel={() => cancelIntent(intent)} />)}
     <SideChatPanel client={scopedClient} controller={controller} open={props.open} history={history} onClose={() => void finishClosed()}
       onBeforeClose={beforeClose} onCloseBarrierAborted={abortClose} prepareResultUnknown={runtime.needsPrepareReconciliation}
       canExitObservation={scope => !!scope.operationId && runtime.canExitObservation({ ...scope, operationId: scope.operationId })}
