@@ -116,20 +116,13 @@ test('queue marker migration, concurrent pages and UI recovery use one transacti
     await b.evaluate(() => (window as any).fixture.render());
     await a.getByText('second', {exact:true}).waitFor();
     assert.equal(await a.evaluate(() => (window as any).fixture.state.calls.some((call: any) => call.params?.cursor === '')), true);
-    await a.getByRole('button', {name:'编辑待发送消息'}).first().click();
-    await a.getByRole('textbox', {name:'编辑待发送消息'}).fill('local edit');
+    assert.equal(await a.getByRole('button', {name:'编辑待发送消息'}).first().isDisabled(), true);
     await a.evaluate(() => { const f = (window as any).fixture; f.state.queue[0].input[0].text = 'remote edit'; f.notify(); });
-    await a.getByRole('alert').filter({hasText:'队列消息已更改'}).waitFor();
-    assert.equal(await a.getByRole('textbox', {name:'编辑待发送消息'}).inputValue(), 'local edit');
-    assert.equal(await a.getByRole('button', {name:'保存',exact:true}).isDisabled(), true);
-    await a.getByRole('button', {name:'取消',exact:true}).click();
-    await a.getByRole('button', {name:'编辑待发送消息'}).first().click();
-    await a.getByRole('textbox', {name:'编辑待发送消息'}).fill('edited');
-    await a.getByRole('button', {name:'保存',exact:true}).click();
-    await a.getByText('edited',{exact:true}).waitFor();
+    await a.getByText('remote edit',{exact:true}).waitFor();
     const edited = await a.evaluate(() => (window as any).fixture.state.queue[0]);
     assert.equal(edited.clientUserMessageId, 'client1');
     assert.deepEqual(edited.input[1], {type:'image',url:'fixture'});
+    assert.equal(await a.evaluate(() => (window as any).fixture.state.calls.some((call: any) => call.method === 'thread/queue/update')), false);
     await a.evaluate(() => {
       const original = IDBObjectStore.prototype.put;
       (window as any).restorePut = () => { IDBObjectStore.prototype.put = original; };
@@ -183,11 +176,9 @@ test('queue marker migration, concurrent pages and UI recovery use one transacti
       const f = (window as any).fixture;
       f.state.queue = [{id:'q4',clientUserMessageId:'client4',input:[{type:'text',text:'original',text_elements:[]}]}]; f.notify();
     });
-    await a.getByRole('button', {name:'编辑待发送消息'}).click();
-    await a.getByRole('textbox', {name:'编辑待发送消息'}).fill('unfinished edit');
+    await a.getByText('original', {exact:true}).waitFor();
     await a.evaluate(() => {const f = (window as any).fixture; f.state.queue = []; f.notify();});
-    await a.getByRole('status').filter({hasText:'队列消息已不在列表中'}).waitFor();
-    assert.equal(await a.getByRole('textbox', {name:'编辑待发送消息'}).inputValue(), 'unfinished edit');
+    await a.getByText('original', {exact:true}).waitFor({state:'detached'});
     assert.equal(await a.evaluate(() => (window as any).fixture.state.starts.length), 0);
     const isolated = await browser.newContext();
     try {
