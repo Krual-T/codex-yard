@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ComponentType } from 'react';
+import { Archive, ArrowLeft, ArrowRight, GitBranch, GitPullRequest, Keyboard, Plug, Search, Settings, ShieldCheck, Sun, TerminalSquare, UserRound, Webhook } from 'lucide-react';
 import type { StandaloneSettingsProps } from '../workbench-contract.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
 import { AgentSection } from './AgentSection.tsx';
@@ -35,31 +36,39 @@ import './standalone-settings.css';
 
 export interface SettingsSection { id: string; title: string; group: string }
 export const settingsSections: SettingsSection[] = [
-  { id: 'general-settings', title: 'General', group: 'Preferences' },
-  { id: 'appearance', title: 'Appearance', group: 'Preferences' },
-  { id: 'personalization', title: 'Personalization', group: 'Preferences' },
-  { id: 'keyboard-shortcuts', title: 'Keyboard shortcuts', group: 'Preferences' },
-  { id: 'voice', title: 'Voice', group: 'Preferences' },
+  { id: 'general-settings', title: 'General', group: 'Personal' },
+  { id: 'appearance', title: 'Appearance', group: 'Personal' },
+  { id: 'archived-chats', title: 'Archived chats', group: 'Personal' },
+  { id: 'configuration', title: 'Configuration', group: 'Personal' },
+  { id: 'personalization', title: 'Personalization', group: 'Personal' },
+  { id: 'keyboard-shortcuts', title: 'Keyboard shortcuts', group: 'Personal' },
+  { id: 'plugins-settings', title: 'Plugins', group: 'Integrations' },
+  { id: 'hooks-settings', title: 'Hooks', group: 'Coding' },
+  { id: 'git-settings', title: 'Git', group: 'Coding' },
+  { id: 'local-environments', title: 'Environments', group: 'Coding' },
+  { id: 'worktrees', title: 'Worktrees', group: 'Coding' },
+  { id: 'voice', title: 'Voice', group: 'Codex' },
   { id: 'models', title: 'Models', group: 'Codex' },
   { id: 'agent', title: 'Agent', group: 'Codex' },
   { id: 'usage', title: 'Usage', group: 'Codex' },
   { id: 'skills-settings', title: 'Skills', group: 'Codex' },
-  { id: 'plugins-settings', title: 'Plugins', group: 'Codex' },
   { id: 'mcp-settings', title: 'MCP servers', group: 'Codex' },
-  { id: 'hooks-settings', title: 'Hooks', group: 'Codex' },
-  { id: 'git-settings', title: 'Git', group: 'Workspace' },
-  { id: 'worktrees', title: 'Worktrees', group: 'Workspace' },
-  { id: 'local-environments', title: 'Local environments', group: 'Workspace' },
   { id: 'connections', title: 'Connections', group: 'Workspace' },
   { id: 'browser-use', title: 'Browser', group: 'Workspace' },
   { id: 'file-type-handlers', title: 'File handlers', group: 'Workspace' },
-  { id: 'archived-chats', title: 'Archived chats', group: 'Data' },
   { id: 'security', title: 'Security', group: 'Data' },
   { id: 'billing', title: 'Billing', group: 'Data' },
   { id: 'time-management', title: 'Time management', group: 'Data' },
   { id: 'extension', title: 'Extension', group: 'Data' },
   { id: 'open-source-licenses', title: 'Open source licenses', group: 'Data' },
 ];
+
+const primaryGroups = ['Personal', 'Integrations', 'Coding'] as const;
+const sectionIcons: Record<string, ComponentType<{ size?: number; strokeWidth?: number; 'aria-hidden'?: boolean }>> = {
+  'general-settings': Settings, appearance: Sun, 'archived-chats': Archive, configuration: ShieldCheck,
+  personalization: UserRound, 'keyboard-shortcuts': Keyboard, 'plugins-settings': Plug,
+  'hooks-settings': Webhook, 'git-settings': GitBranch, 'local-environments': TerminalSquare, worktrees: GitPullRequest,
+};
 
 interface RemoteConnection { hostId: string; displayName?: string; sshAlias?: string }
 export interface SettingsNavigationGuard { requestLeave(): Promise<boolean> }
@@ -105,6 +114,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
   const [backdropSupported, setBackdropSupported] = useState(false);
   const [saving, setSaving] = useState(false);
   const [otherDirty, setOtherDirty] = useState(false);
+  const [appearanceInvalid, setAppearanceInvalid] = useState(false);
   const [otherSaving, setOtherSaving] = useState(false);
   const [editorRevision, setEditorRevision] = useState(0);
   const [search, setSearch] = useState('');
@@ -188,9 +198,9 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
     if (!searchTarget || searchTarget.section !== section || searchTarget.hostId !== selectedHost || !content.current) return;
     const root = content.current;
     const findTarget = () => {
-      const target = searchTarget.id === '__heading__' ? root.querySelector<HTMLElement>('h2') :
+      const target = searchTarget.id === '__heading__' ? root.querySelector<HTMLElement>('h1, h2') :
         Array.from(root.querySelectorAll<HTMLElement>('[data-setting-id]')).find(item => item.dataset.settingId === searchTarget.id);
-      if (!target) return;
+      if (!target || !target.getClientRects().length) return;
       target.scrollIntoView({ block: 'center' });
       const control = target.matches('input, select, textarea, button') ? target :
         target.querySelector<HTMLElement>('[contenteditable="true"], input:not(:disabled), select:not(:disabled), textarea:not(:disabled)') ??
@@ -200,7 +210,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
       setSearchTarget(null);
     };
     const observer = new MutationObserver(findTarget);
-    observer.observe(root, { childList: true, subtree: true });
+    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['open', 'hidden', 'class', 'style'] });
     findTarget();
     return () => observer.disconnect();
   }, [searchTarget, section, selectedHost]);
@@ -247,9 +257,12 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
   const needsScope = section === 'plugins-settings' || section === 'hooks-settings' || section === 'skills-settings';
   return <div className="yard-settings">
     <aside className="yard-settings-nav" aria-label={t('Settings navigation')}>
-      <div className="yard-settings-nav-header"><strong>{t('Settings')}</strong><button type="button" onClick={() => guard(onClose)} aria-label={t('Close settings')}>{t('Close')}</button></div>
-      {route.pathname.slice('/settings/'.length).includes('/') && <button type="button" onClick={() => guard(() => onNavigate(route.path, { delta: -1, state: location.state }))}>{t('Back')}</button>}
-      <label className="yard-host-label">{t('Host')}
+      <div className="yard-settings-history">
+        <button type="button" aria-label={t('Back')} title={t('Back')} onClick={() => guard(() => onNavigate(route.path, { delta: -1, state: location.state }))}><ArrowLeft size={16} /></button>
+        <button type="button" aria-label="Forward" title="Forward" onClick={() => guard(() => onNavigate(route.path, { delta: 1, state: location.state }))}><ArrowRight size={16} /></button>
+      </div>
+      <button type="button" className="yard-settings-back" onClick={() => guard(onClose)}><ArrowLeft size={16} />{translateKnown(t, 'Back to app')}</button>
+      {(hosts.some(host => host.hostId !== 'local') || selectedHost !== 'local') && <label className="yard-host-label">{t('Host')}
         <select aria-label={t('Settings host')} value={selectedHost} onChange={event => {
           const next = event.target.value;
           if (next === selectedHost) return;
@@ -260,10 +273,10 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
           {selectedHost !== 'local' && !hosts.some(host => host.hostId === selectedHost) && <option value={selectedHost}>{selectedHost}</option>}
           {hosts.filter(host => host.hostId !== 'local').map(host => <option key={host.hostId} value={host.hostId}>{host.displayName || host.sshAlias || host.hostId}</option>)}
         </select>
-      </label>
+      </label>}
       {hostError && <p className="yard-setting-error" role="alert">{t('Could not load hosts:')} {hostError}</p>}
-      <label className="yard-settings-search">{t('Search settings')}
-        <input type="search" aria-label={t('Search settings')} value={search} onChange={event => setSearch(event.target.value)} />
+      <label className="yard-settings-search"><Search size={15} aria-hidden="true" /><span className="yard-sr-only">{t('Search settings')}</span>
+        <input type="search" placeholder={translateKnown(t, 'Search')} aria-label={t('Search settings')} value={search} onChange={event => setSearch(event.target.value)} />
       </label>
       {query && <div className="yard-search-results" aria-label={t('Settings search results')}>
         {results.length ? results.map(result => <button type="button" key={`${result.section}:${result.id}`} onClick={() => navigate(result.section, result.id)}>
@@ -275,8 +288,8 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
             <option key={item.id} value={item.id}>{translateKnown(t, item.title)}</option>)}</optgroup>)}
         </select>
       </label>
-      {!query && groups.map(group => <div className="yard-nav-group" key={group}><h2>{translateKnown(t, group)}</h2>
-        {settingsSections.filter(item => item.group === group).map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}>{translateKnown(t, item.title)}</button>)}
+      {!query && primaryGroups.map(group => <div className="yard-nav-group" key={group}><h2>{translateKnown(t, group)}</h2>
+        {settingsSections.filter(item => item.group === group).map(item => { const Icon = sectionIcons[item.id]; return <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}>{Icon && <Icon size={15} strokeWidth={1.7} aria-hidden={true} />}{translateKnown(t, item.title)}</button>; })}
       </div>)}
     </aside>
     <main className="yard-settings-main" aria-label={locale.startsWith('en') ? `${title} settings` : `${t('Settings')}: ${title}`}>
@@ -287,7 +300,8 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
             <button type="button" className="yard-link" onClick={() => scopeStatus?.retry()}>{t('Retry')}</button></p> :
           <p role="status">{t('Selected project or session')}: {t('Loading...')}</p> :
         section === 'general-settings' ? <GeneralSection preferences={preferences} snapshot={snapshot} platform={platform} navigate={navigate} /> :
-          section === 'appearance' ? <AppearanceSection key={editorRevision} preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} onDirtyChange={setOtherDirty} /> :
+          section === 'appearance' ? <AppearanceSection key={editorRevision} preferences={preferences} snapshot={snapshot} platform={platform} backdropSupported={backdropSupported} onDirtyChange={setOtherDirty} onInvalidChange={setAppearanceInvalid} revealTarget={searchTarget?.section === section ? searchTarget.id : null} /> :
+            section === 'configuration' ? <><h1>{translateKnown(t, 'Configuration')}</h1><AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /></> :
             section === 'models' ? <ModelSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
               section === 'agent' ? <AgentSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
                 section === 'personalization' ? <PersonalizationSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost} InstructionEditor={InstructionEditor} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} /> :
@@ -310,8 +324,11 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
       </div>
       <PreferenceConflicts preferences={preferences} snapshot={snapshot} />
       {(preferences.dirty || anySaving) && <div className="yard-save-bar"><span>{t('Unsaved changes')}</span><div className="yard-actions">
-        <button type="button" disabled={anySaving} onClick={() => preferences.discard()}>{t('Discard')}</button>
-        <button type="button" disabled={anySaving || !preferences.dirty || preferenceKeys.some(key => snapshot[key].conflict)} onClick={() => {
+        <button type="button" disabled={anySaving} onClick={() => {
+          preferences.discard();
+          if (section === 'appearance') { setOtherDirty(false); setEditorRevision(value => value + 1); }
+        }}>{t('Discard')}</button>
+        <button type="button" disabled={anySaving || appearanceInvalid || !preferences.dirty || preferenceKeys.some(key => snapshot[key].conflict)} onClick={() => {
           setSaving(true); void preferences.save().finally(() => setSaving(false));
         }}>{saving ? t('Saving...') : t('Save')}</button>
       </div></div>}

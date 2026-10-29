@@ -6,16 +6,9 @@ export function GeneralSection(props: PreferenceProps & { platform: string; navi
   const { t } = useI18n();
   const language = props.snapshot.localeOverride.value ?? '';
   return <>
-    <h2>{t('General')}</h2>
+    <h1>{t('General')}</h1>
+    <h3 className="yard-settings-group-title">{t('General')}</h3>
     <div className="yard-setting-group">
-      <Select {...props} setting="defaultTerminalLocation" label="Default terminal location" options={[
-        { value: 'bottom', label: 'Bottom' }, { value: 'right', label: 'Right' },
-      ]} />
-      {props.platform !== 'windows' && <Toggle {...props} setting="preventSleepWhileRunning" label="Prevent sleep while running"
-        unavailable="Keeping the computer awake is not available in this web host." />}
-      <NumberPreference {...props} setting="autoArchiveAfterDays" label="Automatically archive inactive chats" min={0} max={36500}
-        description="Days of inactivity. Set to 0 to turn off automatic archiving." />
-      <Toggle {...props} setting="ambient-suggestions-enabled" label="Suggestions" description="Show suggestions in the workspace." />
       <Row label="Language" description={<>{t('Language for the app.')}{language && !hasTranslations(language) && <> {t('Interface text is currently shown in English for this language.')}</>}</>}
         error={props.snapshot.localeOverride.error} retry={() => { void props.preferences.reload('localeOverride'); }}>
         <select aria-label={t('Language')} value={language} disabled={entryState(props.snapshot.localeOverride).disabled}
@@ -25,9 +18,20 @@ export function GeneralSection(props: PreferenceProps & { platform: string; navi
           {languageOptions.map(option => <option key={option.value} value={option.value}>{option.label}{!option.translated && ` (${t('English text')})`}</option>)}
         </select>
       </Row>
-      <Row label="Open source licenses"><button type="button" onClick={() => props.navigate('open-source-licenses')}>{t('View')}</button></Row>
+      <Row label="Default terminal location" description="Choose where the terminal shortcut and environment actions open terminal tabs"
+        error={props.snapshot.defaultTerminalLocation.error} retry={() => { void props.preferences.reload('defaultTerminalLocation'); }}>
+        <div className="yard-segmented" role="group" aria-label={t('Default terminal location')}>
+          {(['bottom', 'right'] as const).map(value => <button key={value} type="button" aria-pressed={props.snapshot.defaultTerminalLocation.value === value}
+            disabled={entryState(props.snapshot.defaultTerminalLocation).disabled} onClick={() => props.preferences.edit('defaultTerminalLocation', value)}>{t(value === 'bottom' ? 'Bottom' : 'Right')}</button>)}
+        </div>
+      </Row>
+      {props.platform !== 'windows' && <Toggle {...props} setting="preventSleepWhileRunning" label="Prevent sleep while running"
+        unavailable="Keeping the computer awake is not available in this web host." />}
+      <NumberPreference {...props} setting="autoArchiveAfterDays" label="Automatically archive inactive chats" min={0} max={36500}
+        description="Days of inactivity. Set to 0 to turn off automatic archiving." />
+      <Row label="Open source licenses" description="Third-party notices for bundled dependencies"><button type="button" onClick={() => props.navigate('open-source-licenses')}>{t('View')}</button></Row>
     </div>
-    <h3>{t('Composer')}</h3>
+    <h3 className="yard-settings-group-title">{t('Composer')}</h3>
     <div className="yard-setting-group">
       <Toggle {...props} setting="show-educational-tips" label="Educational tips" />
       <Toggle {...props} setting="composerPlainTextMode" label="Plain text composer" description="Keep code, Markdown, and links as literal text while writing." />
@@ -36,13 +40,14 @@ export function GeneralSection(props: PreferenceProps & { platform: string; navi
         { value: 'enter', label: 'Enter' }, { value: 'cmdIfMultiline', label: 'Enter, or Ctrl/Command + Enter for multiline' },
         { value: 'cmdAlways', label: 'Ctrl/Command + Enter' },
       ]} />
-      <Row label="Follow-up messages" error={props.snapshot.followUpQueueMode.error} retry={() => { void props.preferences.reload('followUpQueueMode'); }}>
-        <select aria-label={t('Follow-up messages')} value={props.snapshot.followUpQueueMode.value === 'interrupt' ? 'steer' : props.snapshot.followUpQueueMode.value}
-          disabled={entryState(props.snapshot.followUpQueueMode).disabled}
-          onChange={event => props.preferences.edit('followUpQueueMode', event.target.value as 'queue' | 'steer')}>
-          <option value="steer">{t('Steer current turn')}</option><option value="queue">{t('Queue')}</option>
-        </select>
+      <Row label="Follow-up behavior" searchId="follow-up" error={props.snapshot.followUpQueueMode.error} retry={() => { void props.preferences.reload('followUpQueueMode'); }}>
+        <div className="yard-segmented" role="group" aria-label={t('Follow-up messages')}>
+          {(['queue', 'steer'] as const).map(value => <button key={value} type="button"
+            aria-pressed={value === 'steer' ? props.snapshot.followUpQueueMode.value !== 'queue' : props.snapshot.followUpQueueMode.value === 'queue'}
+            disabled={entryState(props.snapshot.followUpQueueMode).disabled} onClick={() => props.preferences.edit('followUpQueueMode', value)}>{t(value === 'queue' ? 'Queue' : 'Steer current turn')}</button>)}
+        </div>
       </Row>
+      <Toggle {...props} setting="ambient-suggestions-enabled" label="Suggestions" description="Show suggestions in the workspace." />
     </div>
   </>;
 }

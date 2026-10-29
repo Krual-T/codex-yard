@@ -5,11 +5,11 @@ import { settingSearchId } from './search.ts';
 
 export interface PreferenceProps { preferences: Preferences; snapshot: PreferenceSnapshot }
 
-export function Row({ label, description, children, error, retry }: {
-  label: string; description?: ReactNode; children?: ReactNode; error?: string | null; retry?: () => void;
+export function Row({ label, description, children, error, retry, searchId }: {
+  label: string; description?: ReactNode; children?: ReactNode; error?: string | null; retry?: () => void; searchId?: string;
 }) {
   const { t } = useI18n();
-  return <div className="yard-setting-row" data-setting-id={settingSearchId(label)} id={label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}>
+  return <div className="yard-setting-row" data-setting-id={searchId ?? settingSearchId(label)} id={label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}>
     <div className="yard-setting-copy"><div className="yard-setting-label">{translateKnown(t, label)}</div>
       {description && <div className="yard-setting-description">{typeof description === 'string' ? translateKnown(t, description) : description}</div>}
       {error && <div className="yard-setting-error" role="alert">{error} {retry && <button type="button" className="yard-link" onClick={retry}>{t('Retry')}</button>}</div>}

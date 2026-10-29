@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
@@ -11,6 +12,7 @@ declare global {
       settings: Record<string, unknown>;
       globals: Record<string, unknown>;
       lightTheme: string;
+      copied?: string;
       requestLeave: () => Promise<boolean>;
       updateSetting: (key: string, value: unknown) => void;
     };
@@ -29,18 +31,19 @@ test('standalone settings guard navigation, locate controls and save appearance 
       import {I18nProvider, resolveLocale} from './src/renderer/i18n/index.tsx';
       import {assertPreferenceExpectation} from './src/native/protocol.ts';
       const calls = {navigation: [], writes: [], closed: 0};
-      const settings = {appearanceTheme:'system', codeFontSize:12, localeOverride:null};
+      const visualFixture = window.location.search.includes('appearance');
+      const settings = {appearanceTheme:visualFixture ? 'light' : 'system', codeFontSize:12, localeOverride:null};
       const globals = {'reduced-motion-preference':'system'};
       const atoms = {};
       const listeners = new Set();
-      let location = {pathname:'/settings/general',search:'?tab=fixture',hash:'',state:{source:'fixture'}};
+      let location = {pathname:visualFixture ? '/settings/appearance' : '/settings/general',search:'?tab=fixture',hash:'',state:{source:'fixture'}};
       let guard;
       const client = {
         rpc: async () => { throw Error('Unexpected RPC'); },
         reply: async () => { throw Error('Unexpected approval'); },
         subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); },
         host: async (endpoint, params = {}) => {
-          if (endpoint === 'refresh-remote-connections') return {remoteConnections:[{hostId:'ssh-fixture',displayName:'Fixture SSH'}]};
+          if (endpoint === 'refresh-remote-connections') return {remoteConnections:visualFixture ? [] : [{hostId:'ssh-fixture',displayName:'Fixture SSH'}]};
           if (endpoint === 'os-info') return {platform:'linux',isSystemBackdropSupported:false};
           if (endpoint === 'get-settings') return {values:{...settings}};
           const target = endpoint.endsWith('setting') ? settings : endpoint.endsWith('global-state') ? globals : atoms;
@@ -78,6 +81,58 @@ test('standalone settings guard navigation, locate controls and save appearance 
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
     args: ['--no-sandbox', '--disable-background-networking'] });
   try {
+    const visualPage = await browser.newPage({ viewport: { width: 1280, height: 900 }, locale: 'en-US', colorScheme: 'light' });
+    await visualPage.route('**/*', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<style>html,body,#root{height:100%;margin:0}</style><div id="root"></div>' }));
+    await visualPage.goto('http://settings-fixture.invalid/?appearance');
+    await visualPage.addStyleTag({ content: await readFile('src/renderer/settings/standalone-settings.css', 'utf8') });
+    await visualPage.addScriptTag({ content: bundle.outputFiles[0]!.text });
+    await visualPage.waitForFunction(() => {
+      const control = document.querySelector('[aria-label="Light code theme"]') as HTMLSelectElement | null;
+      return !!control && !control.disabled;
+    });
+    assert.equal((await visualPage.locator('.yard-settings-nav').boundingBox())?.width, 340);
+    assert.equal(await visualPage.getByRole('heading', { name: 'Appearance', exact: true }).isVisible(), true);
+    assert.equal(await visualPage.locator('.yard-mode-options label').count(), 3);
+    assert.equal(await visualPage.getByRole('button', { name: 'Advanced' }).getAttribute('aria-expanded'), 'false');
+    assert.equal(await visualPage.getByRole('spinbutton', { name: 'Code font size' }).count(), 0);
+    if (process.env.YARD_SETTINGS_SCREENSHOT) await visualPage.screenshot({ path: process.env.YARD_SETTINGS_SCREENSHOT });
+
+    await visualPage.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      writeText: async (value: string) => { window.settingsHarness.copied = value; },
+    } }));
+    await visualPage.getByRole('button', { name: 'Copy light theme' }).click();
+    await visualPage.waitForFunction(() => typeof window.settingsHarness.copied === 'string');
+    assert.equal(await visualPage.getByRole('dialog', { name: 'Export light theme' }).count(), 0);
+    await visualPage.getByRole('radio', { name: 'Dark' }).locator('..').click();
+    assert.equal(await visualPage.getByRole('radio', { name: 'Dark' }).isChecked(), true);
+    const background = visualPage.getByRole('textbox', { name: 'Dark background color value' });
+    await background.fill('#bad');
+    assert.equal(await visualPage.getByRole('button', { name: 'Save', exact: true }).isDisabled(), true);
+    assert.match(await visualPage.getByRole('alert').innerText(), /six-digit hex/);
+    await visualPage.getByRole('button', { name: 'General', exact: true }).click();
+    await visualPage.getByRole('dialog', { name: 'Discard unsaved changes?' }).waitFor();
+    await visualPage.getByRole('button', { name: 'Keep editing' }).click();
+    assert.equal(await background.inputValue(), '#bad');
+    await background.fill('#123456');
+    await visualPage.getByRole('button', { name: 'Save', exact: true }).click();
+    await visualPage.waitForFunction(() => window.settingsHarness.settings.appearanceTheme === 'dark' &&
+      (window.settingsHarness.settings.appearanceDarkChromeTheme as { surface?: string })?.surface === '#123456');
+    await visualPage.getByRole('radio', { name: 'Light' }).locator('..').click();
+    await visualPage.getByRole('textbox', { name: 'Light background color value' }).fill('#bad');
+    await visualPage.getByRole('button', { name: 'Discard', exact: true }).click();
+    assert.equal(await visualPage.getByRole('radio', { name: 'Dark' }).isChecked(), true);
+    assert.equal(await visualPage.getByRole('textbox', { name: 'Dark background color value' }).inputValue(), '#123456');
+    await visualPage.setViewportSize({ width: 320, height: 812 });
+    assert.equal(await visualPage.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+    if (process.env.YARD_SETTINGS_MOBILE_SCREENSHOT) await visualPage.screenshot({ path: process.env.YARD_SETTINGS_MOBILE_SCREENSHOT });
+    await visualPage.getByRole('combobox', { name: 'Settings section' }).selectOption('general-settings');
+    await visualPage.getByRole('heading', { name: 'General', exact: true, level: 1 }).waitFor();
+    assert.equal(await visualPage.getByRole('dialog', { name: 'Discard unsaved changes?' }).count(), 0);
+    await visualPage.setViewportSize({ width: 1280, height: 900 });
+    await visualPage.waitForFunction(() => !(document.querySelector('[aria-label="Language"]') as HTMLSelectElement).disabled);
+    if (process.env.YARD_SETTINGS_GENERAL_SCREENSHOT) await visualPage.screenshot({ path: process.env.YARD_SETTINGS_GENERAL_SCREENSHOT });
+    await visualPage.close();
+
     const page = await browser.newPage();
     await page.route('**/*', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="root"></div>' }));
     const errors: string[] = [];
@@ -88,6 +143,18 @@ test('standalone settings guard navigation, locate controls and save appearance 
     const language = page.getByRole('combobox', { name: 'Language' });
     await language.waitFor();
     await page.waitForFunction(() => !(document.querySelector('[aria-label="Language"]') as HTMLSelectElement).disabled);
+    const terminal = page.getByRole('group', { name: 'Default terminal location' });
+    await terminal.getByRole('button', { name: 'Right' }).click();
+    assert.equal(await terminal.getByRole('button', { name: 'Right' }).getAttribute('aria-pressed'), 'true');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await page.waitForFunction(() => window.settingsHarness.settings.defaultTerminalLocation === 'right');
+    await page.getByRole('button', { name: 'Save', exact: true }).waitFor({ state: 'hidden' });
+    const followUp = page.getByRole('group', { name: 'Follow-up messages' });
+    await followUp.getByRole('button', { name: 'Queue' }).click();
+    assert.equal(await followUp.getByRole('button', { name: 'Queue' }).getAttribute('aria-pressed'), 'true');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await page.waitForFunction(() => window.settingsHarness.settings.followUpQueueMode === 'queue');
+    await page.getByRole('button', { name: 'Save', exact: true }).waitFor({ state: 'hidden' });
     await language.selectOption('fr-FR');
     await page.getByRole('button', { name: 'Appearance', exact: true }).click();
     await page.getByRole('dialog', { name: 'Discard unsaved changes?' }).waitFor();
@@ -108,7 +175,7 @@ test('standalone settings guard navigation, locate controls and save appearance 
     await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Code font size');
     await codeSize.fill('18');
     await page.getByRole('combobox', { name: 'Reduce motion' }).selectOption('on');
-    await page.getByRole('button', { name: 'Import', exact: true }).click();
+    await page.getByRole('button', { name: 'Import light theme', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Import light theme' });
     await dialog.getByRole('textbox', { name: 'Theme share string' }).fill('invalid theme');
     await dialog.getByRole('button', { name: 'Import' }).click();
@@ -117,7 +184,7 @@ test('standalone settings guard navigation, locate controls and save appearance 
     await dialog.getByRole('textbox', { name: 'Theme share string' }).fill(theme);
     await dialog.getByRole('button', { name: 'Import' }).click();
     await dialog.waitFor({ state: 'hidden' });
-    assert.equal(await page.getByLabel('light Accent').inputValue(), '#123456');
+    assert.equal(await page.getByLabel('light Accent', { exact: true }).inputValue(), '#123456');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await page.waitForFunction(() => window.settingsHarness.settings.codeFontSize === 18 &&
       window.settingsHarness.globals['reduced-motion-preference'] === 'on');
@@ -135,6 +202,7 @@ test('standalone settings guard navigation, locate controls and save appearance 
     await page.getByRole('combobox', { name: 'Settings host' }).selectOption('ssh-fixture');
     await page.getByRole('button', { name: 'Discard changes' }).click();
     await page.waitForFunction(() => window.settingsHarness.calls.navigation.some(call => call.path === '/settings/appearance?hostId=ssh-fixture'));
+    await page.getByRole('button', { name: 'Advanced' }).click();
     assert.equal(await codeSize.inputValue(), '18');
 
     await codeSize.fill('20');
@@ -158,7 +226,7 @@ test('standalone settings guard navigation, locate controls and save appearance 
     await page.getByRole('button', { name: 'General', exact: true }).click();
     await page.getByRole('combobox', { name: 'Language' }).selectOption('zh-CN');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
-    await page.getByRole('heading', { name: '通用', exact: true }).waitFor();
+    await page.getByRole('heading', { name: '通用', exact: true, level: 1 }).waitFor();
     assert.equal(await page.getByRole('combobox', { name: '语言' }).inputValue(), 'zh-CN');
     assert.equal(await page.evaluate(() => window.settingsHarness.settings.localeOverride), 'zh-CN');
     assert.deepEqual(errors, []);
