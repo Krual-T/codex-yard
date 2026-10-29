@@ -15,6 +15,7 @@ import { MessageImage } from '../messages/MessageImage.tsx';
 import { resolveFileLocation, resolveToolFileLocation, safeExternalUrl } from '../messages/message-data.ts';
 import type { ImageSource } from '../messages/message-data.ts';
 import { remarkVisualizations } from './visualization-directives.ts';
+import { normalizeFileCitationEscapes, remarkFileCitations } from './file-citations.ts';
 
 const schema = {
   ...defaultSchema,
@@ -29,7 +30,7 @@ const schema = {
   protocols: { ...defaultSchema.protocols, href: [...(defaultSchema.protocols?.href ?? []), 'yard-visualization'], src: ['http', 'https', 'data'] },
 };
 
-const remarkPlugins: NonNullable<ComponentProps<typeof Markdown>['remarkPlugins']> = [remarkGfm, remarkMath, remarkVisualizations];
+const remarkPlugins: NonNullable<ComponentProps<typeof Markdown>['remarkPlugins']> = [remarkGfm, remarkMath, remarkFileCitations, remarkVisualizations];
 type RehypePlugins = NonNullable<ComponentProps<typeof Markdown>['rehypePlugins']>;
 const safeHtmlPlugins: RehypePlugins = [rehypeRaw, [rehypeSanitize, schema], rehypeKatex, rehypeHighlight];
 const textHtmlPlugins: RehypePlugins = [rehypeKatex, rehypeHighlight];
@@ -119,12 +120,14 @@ function safeBrowserUrl(value: string): boolean {
 }
 
 export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowBasicHtml = false, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage }: StandaloneMarkdownProps) {
+  const markdownText = useMemo(() => normalizeFileCitationEscapes(text), [text]);
   const components = useMemo<Components>(() => ({
     pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
     a: ({ href, children, node }) => {
       if (!href) return <span>{children}</span>;
       if (href.startsWith('yard-visualization:')) {
-        if (node?.properties?.dataYardVisualization !== 'directive') return <span>{children}</span>;
+        // Generated visualization links have no source position; raw HTML retains one.
+        if (node?.properties?.dataYardVisualization !== 'directive' || node.position) return <span>{children}</span>;
         let path = '';
         try { path = decodeURIComponent(href.slice('yard-visualization:'.length)); } catch { return <span>{children}</span>; }
         if (!path.trim()) return <span>{children}</span>;
@@ -142,6 +145,11 @@ export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowB
       if (!onOpenFile && !onOpenFileAt) return <span>{children}</span>;
       return <button type="button" className="yard-file-link" onClick={() => {
         const location = resolveFileLocation(href, cwd, hostId);
+        const encodedPath = href.replace(/#L[1-9]\d*(?:C[1-9]\d*)?(?:-L[1-9]\d*(?:C[1-9]\d*)?)?$/i, '');
+        try {
+          const decodedPath = decodeURIComponent(encodedPath);
+          if (/^(?:[a-z]:[\\/]|\\\\)/i.test(decodedPath)) location.path = resolveToolFileLocation(decodedPath, cwd, hostId).path;
+        } catch { /* resolveFileLocation preserves malformed links */ }
         if (onOpenFileAt) onOpenFileAt(location); else onOpenFile?.(location.path);
       }}>{children}</button>;
     },
@@ -159,5 +167,5 @@ export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowB
     return '';
   };
   return <div className="yard-markdown"><Markdown remarkPlugins={remarkPlugins}
-    rehypePlugins={allowBasicHtml ? safeHtmlPlugins : textHtmlPlugins} urlTransform={transformUrl} components={components}>{text}</Markdown></div>;
+    rehypePlugins={allowBasicHtml ? safeHtmlPlugins : textHtmlPlugins} urlTransform={transformUrl} components={components}>{markdownText}</Markdown></div>;
 }
