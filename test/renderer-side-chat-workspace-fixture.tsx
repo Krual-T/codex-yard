@@ -3,7 +3,11 @@ import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { BrowserWorkbenchClient } from '../src/renderer/app/client.ts';
 import { ConversationSessions } from '../src/renderer/app/conversation-sessions.ts';
+import { isThreadBusy } from '../src/renderer/app/thread-state.ts';
 import { SendRecoveryStore } from '../src/renderer/app/send-recovery.ts';
+import type { SendIntent } from '../src/renderer/app/send-recovery.ts';
+import { sendConversationDraft } from '../src/renderer/app/conversation-send.ts';
+import { SendRecoveryNotice } from '../src/renderer/app/SendRecoveryNotice.tsx';
 import { MessageEditRecoveryStore } from '../src/renderer/app/message-edit-recovery.ts';
 import { ApprovalRequestsController } from '../src/renderer/app/approval-requests.ts';
 import { SideChatWorkspace } from '../src/renderer/app/SideChatWorkspace.tsx';
@@ -28,7 +32,8 @@ let ownerCurrent = true, frozen = false, closed = 0, exited = 0, cleanups = 0, n
 let lease: SideChatWorkspaceNavigationLease | null = null, drainGate: Promise<void> | null = null, releaseDrain: (() => void) | null = null;
 let dispatchGate: Promise<void> | null = null, releaseDispatch: (() => void) | null = null, dispatchWaiting = false;
 let draftController: ComposerDraftController | null = null, draftSnapshot: ComposerDraftSnapshot | null = null;
-let mainVisible = false, mainDraft: ComposerDraftController | null = null, mainLease: ComposerDraftLease | null = null;
+let mainVisible = false, mainBusy = false, mainDraft: ComposerDraftController | null = null, mainLease: ComposerDraftLease | null = null;
+let mainIntent: SendIntent | null = null, mainRecoveryAuthority: (() => void) | null = null;
 const mainAuthorities = new WeakMap<() => void, ReturnType<BrowserWorkbenchClient['captureDaemonConnection']>>();
 let pendingQueueReads = 0;
 let openBehavior: 'success' | 'unsent' | 'unknown' = 'success';
@@ -133,8 +138,15 @@ function render() {
         removedOwners.push(structuredClone(owner));
         return removeBrowserDraftReference(browserDraftOwner(owner, {}), reference, operation, () => {}, () => {});
       }} />
-      {mainVisible ? <section aria-label="Persistent Main"><StandaloneComposer client={client}
-        context={{ hostId: 'local', threadId: 'parent-a', draftId: 'main-draft', cwd: identity.cwd }} busy={false}
+      {mainVisible ? <section aria-label="Persistent Main">{mainIntent ? <SendRecoveryNotice intent={mainIntent} canRetry={false}
+        onOpen={async () => { mainRecoveryAuthority?.(); }} onCheck={async () => { throw Error('Unexpected Main recovery check.'); }}
+        onRetry={async () => { throw Error('Unexpected Main retry.'); }} onFinish={async () => { throw Error('Unexpected Main cleanup.'); }}
+        onCancel={async () => {
+          const intent = mainIntent, authority = mainRecoveryAuthority;
+          if (!intent || !authority) throw Error('Synthetic Main recovery authority is missing.');
+          await sends.cancelOriginal(intent, authority); mainIntent = null; mainRecoveryAuthority = null; render();
+        }} /> : null}<StandaloneComposer client={client}
+        context={{ hostId: 'local', threadId: 'parent-a', draftId: 'main-draft', cwd: identity.cwd }} busy={mainBusy}
         onDraftController={value => { mainDraft = value; }} captureSubmissionAuthority={mainCapture}
         dispatchQueueMutation={async (method, params, hostId, original, guard) => {
           if (!mainAuthorities.has(original)) throw Error('Synthetic Main queue authority was replaced.');
@@ -151,11 +163,35 @@ function render() {
           const daemon = mainAuthorities.get(original); if (!daemon) throw Error('Synthetic Main edit authority is missing.');
           guard(); return client.host<'deleted' | 'changed'>('queue-edit', { hostId: 'local', threadId: 'parent-a', entry,
             daemonConnectionGeneration: daemon.generation }, { assertBeforeSend() { original(); guard(); } });
-        }} onSubmit={async () => { throw Error('Unexpected Main submission.'); }} onInterrupt={async () => {}} /></section> : null}</>);
+        }} onSubmit={async (value, selected, action, description, original) => {
+          if (!mainBusy || action.type !== 'queue' || !description || !original || !mainAuthorities.has(original)) {
+            throw Error('Unexpected Main submission.');
+          }
+          const guard = (threadId: string | null) => {
+            original(); const view = sessions.view({ hostId: 'local', threadId: 'parent-a' }).snapshot();
+            if (threadId !== 'parent-a' || !view.canSubmit || !isThreadBusy(view.thread)) throw Error('Synthetic Main target or turn changed.');
+          };
+          try {
+            await sendConversationDraft({ client, sessions, sends, guard,
+              cleanup: { controller(intent) { guard(intent.threadId); return mainDraft; } },
+              dispatch: (method, params, hostId, check) => client.rpc(method, params, hostId, mainOptions(original, check)),
+              prepareCreated: async () => { throw Error('Unexpected Main thread creation.'); },
+              selectCreated: async () => { throw Error('Unexpected Main thread selection.'); },
+              assignCreatedProject: async () => { throw Error('Unexpected Main project assignment.'); }, recoveryChanged() {},
+            }, { hostId: 'local', threadId: 'parent-a', draftId: 'main-draft', cwd: identity.cwd }, value, selected, action, description);
+          } catch (error) {
+            mainIntent = Object.values((await sends.read()).requests).find(intent => intent.owner.draftId === 'main-draft') ?? null;
+            mainRecoveryAuthority = original; render(); throw error;
+          }
+        }} onInterrupt={async () => {}} /></section> : null}</>);
 }
 const fixture = {
   identity,
   showMain() { mainVisible = true; render(); },
+  setMainBusy(value: boolean) { mainBusy = value; render(); },
+  acquireMain() { sessions.acquire({ hostId: 'local', threadId: 'parent-a' }, false); },
+  mainHistory: () => sessions.view({ hostId: 'local', threadId: 'parent-a' }).snapshot(),
+  mainSends: () => sends.read(),
   mainSnapshot() { return mainDraft?.snapshot() ?? null; },
   flushMainDraft() { const snapshot = mainDraft?.snapshot(); return snapshot ? mainDraft!.flush(snapshot.owner) : Promise.resolve(false); },
   freezeMain() { const snapshot = mainDraft?.snapshot(); mainLease = snapshot ? mainDraft!.freeze(snapshot.owner) : null; return !!mainLease; },

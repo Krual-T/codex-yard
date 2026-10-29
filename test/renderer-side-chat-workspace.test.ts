@@ -239,6 +239,10 @@ async function peer() {
       const result = fake.defaultResult('turn/start', { threadId: 'child-a', input: [] }) as { turn: unknown };
       fake.broadcast({ method: 'turn/started', params: { threadId: 'child-a', turn: result.turn } });
     },
+    emitParentTurn() {
+      const result = fake.defaultResult('turn/start', { threadId: 'parent-a', input: [] }) as { turn: unknown };
+      fake.broadcast({ method: 'turn/started', params: { threadId: 'parent-a', turn: result.turn } });
+    },
     holdChild() { holdChild = true; }, releaseChild() { holdChild = false; deliverChild?.(); }, childWaiting: () => !!deliverChild,
     holdFork() { holdFork = true; }, releaseFork() { lateFork?.(); }, forkWaiting: () => !!lateFork,
     holdPrepare() { holdPrepare = true; }, releasePrepare() { holdPrepare = false; deliverPrepare?.(); }, prepareWaiting: () => !!deliverPrepare,
@@ -257,6 +261,12 @@ async function peer() {
     },
     queueReadsWaiting: () => pendingQueueReads.length,
     failQueueReads() { fake.handlers.delete('thread/queue/list'); for (const reply of pendingQueueReads.splice(0)) reply(); },
+    failMainQueueAdd() {
+      fake.handlers.set('thread/queue/add', params => {
+        if (params.threadId !== 'parent-a') throw Error('Ephemeral child queue is unsupported.');
+        throw Error('Synthetic Main queue add rejected.');
+      });
+    },
     enableQueue() {
       fake.handlers.set('thread/queue/list', params => {
         if (params.threadId !== 'parent-a') throw Error('Ephemeral child queue is unsupported.');
@@ -1745,6 +1755,56 @@ test('real workspace, IDB, browser client and native parent/provider use one syn
         assert.ok((await page.evaluate(() => window.sideChatWorkspaceFixture.authorityDispatches()))
           .some(item => item.method === 'turn/start' && item.original));
         assert.equal(p.fake.calls('thread/start').length, 1);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('a rejected persistent Main queue add retains its original draft and send record', async () => {
+      const p = await peer(); p.enableQueue(); p.failMainQueueAdd();
+      const { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.getByRole('button', { name: '打开侧聊' }).click();
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.evaluate(() => { window.sideChatWorkspaceFixture.showMain(); window.sideChatWorkspaceFixture.acquireMain(); });
+        try {
+          await page.waitForFunction(() => window.sideChatWorkspaceFixture.mainHistory().canSubmit);
+        } catch (error) {
+          console.error('Main subscription diagnostic', JSON.stringify(await page.evaluate(() => window.sideChatWorkspaceFixture.mainHistory())),
+            JSON.stringify(p.dispatches.map(item => item.request?.method)));
+          throw error;
+        }
+        p.emitParentTurn();
+        await page.waitForFunction(() => window.sideChatWorkspaceFixture.mainHistory().thread?.turns.some(turn => turn.status === 'inProgress'));
+        await page.evaluate(() => window.sideChatWorkspaceFixture.setMainBusy(true));
+        const main = page.getByRole('region', { name: 'Persistent Main' });
+        const input = main.getByRole('textbox', { name: '和 Codex 一起工作' });
+        await input.fill('Main queue draft survives rejection');
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.flushMainDraft()), true);
+        const before = await page.evaluate(() => window.sideChatWorkspaceFixture.mainSnapshot());
+        assert.ok(before?.revision);
+        await main.getByRole('button', { name: '排队', exact: true }).click();
+        try { await eventually(() => p.fake.calls('thread/queue/add').length === 1); }
+        catch (error) {
+          console.error('Main queue add diagnostic', await main.innerText(), JSON.stringify(p.dispatches.map(item => item.request?.method)),
+            JSON.stringify(await page.evaluate(() => window.sideChatWorkspaceFixture.mainSends())));
+          throw error;
+        }
+        await main.getByText(/Synthetic Main queue add rejected/).first().waitFor();
+        const requests = Object.values((await page.evaluate(() => window.sideChatWorkspaceFixture.mainSends())).requests);
+        assert.equal(requests.length, 1); assert.equal(requests[0]?.stage, 'failed');
+        assert.deepEqual(requests[0]?.owner, { hostId: 'local', threadId: 'parent-a', draftId: 'main-draft' });
+        assert.equal(requests[0]?.revision, before.revision);
+        assert.equal(requests[0]?.draft.text, 'Main queue draft survives rejection');
+        assert.equal(requests[0]?.action?.type, 'queue');
+        const call = p.dispatches.find(message => message.request?.method === 'thread/queue/add');
+        assert.equal(call?.request.params.threadId, 'parent-a'); assert.equal(call?.daemonConnectionGeneration, 'generation-a');
+        assert.equal(call?.request.params.clientUserMessageId, requests[0]?.clientUserMessageId);
+        assert.equal(call?.request.params.input[0]?.text, 'Main queue draft survives rejection');
+        assert.equal(call?.sideChat, undefined); assert.equal(await input.inputValue(), 'Main queue draft survives rejection');
+        await main.getByRole('button', { name: 'Keep draft and cancel send' }).click();
+        await eventuallyAsync(() => page.evaluate(async () => Object.keys((await window.sideChatWorkspaceFixture.mainSends()).requests).length === 0));
+        assert.equal(await input.inputValue(), 'Main queue draft survives rejection');
+        assert.equal((await page.evaluate(() => window.sideChatWorkspaceFixture.mainSnapshot()))?.revision, before.revision);
+        assert.equal(p.fake.calls('thread/queue/add').length, 1);
+        assert.equal(p.fake.calls('thread/queue/list').filter(item => item.params.threadId === 'child-a').length, 0);
       } finally { await context.close(); await p.close(); }
     });
     await t.test('persistent Main queue-to-draft mutation keeps its owner and daemon authority', async () => {
