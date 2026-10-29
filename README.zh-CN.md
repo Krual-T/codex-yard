@@ -20,6 +20,8 @@
 
 ## 版本与运行条件
 
+对话工具由常驻宿主提供，包含创建、分叉、发送、等待、历史、标题、归档、置顶和已读等十二项；复用原版参数校验、历史投影和等待逻辑，关闭 Yard 页面后仍可执行。已加载旧对话的迁移、桌面与云端能力边界见[工具说明](docs/native-app-tools.md)。
+
 | 组件 | 版本 | 用途与验证范围 |
 | --- | --- | --- |
 | Codex CLI/daemon | `0.164.0` | 隔离协议与界面检查，包含 CLI 管理的一次性 daemon |
@@ -50,6 +52,8 @@ npm start
 `npm start` 执行项目构建，提供网页入口与本地资源，并调用 Codex CLI 启动或复用 daemon；退出网页服务会保留共享 daemon。前端根据本仓库源码和锁定的 npm 依赖构建。安装依赖与调用模型仍使用相应网络连接。
 
 打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。将 `.env.example` 复制为 `.env` 后可设置端口、数据目录、工作目录和连接地址。`AGENTS_CODEX_BIN` 指定 CLI 可执行文件；`AGENTS_CODEX_SOCKET` 直接连接已有后端并跳过自动启动；`AGENTS_APP_TOOLS_ADAPTER` 可指定兼容的自定义 Node 适配器，默认使用本项目源码。Unix socket 的完整路径上限为 107 字节，必要时设置较短的私有 `AGENTS_DATA_DIR`。
+
+要让连接同一 daemon 的桌面端共用十二项对话工具，在已部署的检出目录执行 `npm run tools:configure` 查看配置计划，确认后追加 `-- --apply`。配置备份、旧会话迁移和三端接入方式见[注册说明](docs/native-app-tools.md#explicit-registration-for-app-and-yard)。
 
 跨设备访问时，用私有隧道或带身份认证的 HTTPS 反向代理，并将 `AGENTS_PUBLIC_ORIGIN` 设为完整且精确的 HTTPS 来源。服务只监听回环地址；它可以访问文件和执行命令，没有多用户登录系统。[部署边界](SECURITY.md)
 

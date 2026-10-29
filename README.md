@@ -19,6 +19,9 @@ This branch is completing the React + TypeScript migration. The default renderer
 - Browse files and use terminals through Codex's existing host interfaces.
 - Pair an existing Chrome browser, navigate pages, and attach selected elements to a conversation.
 - Display interactive HTML visualizations.
+- Use twelve native conversation tools through a permanent host, with the original
+  argument schemas, history projection and passive wait behavior. See
+  [tool behavior and migration limits](docs/native-app-tools.md).
 
 The next product direction is a task dashboard: clarify and assign work, see which Agent is doing what, and distribute queued tasks to available workers. That scheduler and dashboard are planned features. The current source provides the conversation workspace.
 
@@ -54,6 +57,10 @@ npm start
 `npm start` runs the project build, serves the browser entry and local assets, and asks Codex CLI to start or reuse its daemon. Closing the web server leaves that shared daemon running. Frontend changes are built from this repository's source and locked npm dependencies. Package installation and model requests use their normal network connections.
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765). To customize the server, copy `.env.example` to `.env`. `AGENTS_CODEX_BIN` selects a CLI executable; `AGENTS_CODEX_SOCKET` connects directly to an existing backend and skips automatic daemon startup. `AGENTS_APP_TOOLS_ADAPTER` selects an optional compatible custom Node adapter; the default comes from this project's source. Use a short private `AGENTS_DATA_DIR` when necessary: the complete Unix socket path must fit within 107 bytes.
+
+To share the twelve conversation tools with desktop clients using that daemon,
+preview `npm run tools:configure` from the deployed checkout. Add `-- --apply`
+after reviewing the plan. See [registration and migration](docs/native-app-tools.md#explicit-registration-for-app-and-yard).
 
 For remote access, set `AGENTS_PUBLIC_ORIGIN` to the exact HTTPS origin and use a private tunnel or an authenticated reverse proxy. The server listens on loopback. It exposes file access and command execution with the connected account's permissions; it does not provide a multi-user login system. See [deployment boundaries](SECURITY.md).
 

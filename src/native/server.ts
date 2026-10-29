@@ -14,10 +14,12 @@ import { removeQueuedOriginal } from './queue-edit.ts';
 import { createSendInjection } from './send-injection.ts';
 import type { SendInjectionOriginal, SendInjectionReference, SendInjectionSource } from './send-injection.ts';
 import { createAppTools } from '../../lib/app-tools.ts';
-import { appToolCatalog, createHostToolHandler } from '../../lib/host-tools.ts';
+import { createHostToolHandler } from '../../lib/host-tools.ts';
 import { projectRoot, rendererVersion } from '../../lib/app-resources.ts';
 import type { ConfigReadSource } from '../../lib/config-write-protocol.ts';
 import { ApprovalRequestRegistry } from './approval-requests.ts';
+import { createNativeAppToolHost } from '../../lib/native-app-tools.ts';
+import type { NativeProject } from '../../lib/native-app-tools.ts';
 import { record, publicConfig, readMethods, writeMethods } from './protocol.ts';
 import type { HostMessage, ObjectValue } from './protocol.ts';
 import { createThreadProjects, readThreadProjectState } from './thread-projects.ts';
@@ -353,7 +355,37 @@ export async function createNativeWorkbench(options: Options = {}) {
     listThreads: async params => control.request('thread/list', { ...params, archived: false }),
     readThread: (params, options) => readToolHistory(control, params, options),
   });
-  const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'), tools: appToolCatalog, callTool: callHostTool });
+  const nativeTools = createNativeAppToolHost({ connectionFor: ownedConnectionFor, hostIds: () => ['local', ...sshHosts.keys()],
+    globals, projectlessRoot: join(dataDir, 'workspaces'), configFor: hostId => hostId === 'local' ? hostTools.config : {},
+    async listProjects() {
+      const local: NativeProject[] = Object.entries(record(globals['local-projects'])).flatMap(([id, value]) => {
+        const project = record(value), roots = Array.isArray(project.rootPaths) ? project.rootPaths : [];
+        const path = typeof roots[0] === 'string' ? roots[0] : id;
+        return [{ projectId: id, projectKind: 'local', label: typeof project.name === 'string' ? project.name : basename(path),
+          path, hostId: 'local', hostDisplayName: null, isGitRepository: false }];
+      });
+      const remote: NativeProject[] = (Array.isArray(globals['remote-projects']) ? globals['remote-projects'] : []).flatMap(value => {
+        const project = record(value), host = typeof project.hostId === 'string' ? sshHosts.get(project.hostId) : undefined;
+        if (!host || typeof project.id !== 'string' || typeof project.remotePath !== 'string') return [];
+        return [{ projectId: project.id, projectKind: 'remote', label: typeof project.label === 'string' ? project.label : basename(project.remotePath),
+          path: project.remotePath, hostId: host.hostId, hostDisplayName: host.displayName, isGitRepository: false }];
+      });
+      await Promise.all(local.map(async project => {
+        try { await promisify(execFile)('git', ['-C', project.path, 'rev-parse', '--is-inside-work-tree'], { timeout: 5000 }); project.isGitRepository = true; }
+        catch { /* A saved folder may be unavailable or outside Git. */ }
+      }));
+      return [...local, ...remote];
+    },
+    async persistGlobals(keys) { await stateMutations.run(persist); broadcast({ type: 'global-state-updated', keys }); },
+    async setMembership(threadId, hostId, project, cwd) {
+      await threadProjects('setMembership', { threadId, hostId, projectless: project === null, assignment: project === null ? null :
+        project.projectKind === 'remote' ? { projectKind: 'remote', projectId: project.projectId, hostId } : { projectKind: 'local', projectId: project.projectId } });
+      if (!project) await threadProjects('updateProjectlessThread', { threadId, hostId, outputDirectory: cwd, workspaceRoot: join(dataDir, 'workspaces') });
+    },
+  });
+  const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'),
+    tools: nativeTools.tools, callTool: nativeTools.callTool,
+  });
   const sideChatBrowserAuthority: ReturnType<typeof createSideChatNativeBrowserAuthority> = createSideChatNativeBrowserAuthority({
     assertOrigin: scope => sideChats.assertBrowserOrigin(scope),
     notify(page, request) {
@@ -1080,7 +1112,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       for (const [client, connections] of clients) { client.terminate(); for (const connection of connections.values()) connection.close(); }
       control.close(); webSockets.close(); chromeSockets.close();
       await new Promise<void>(resolve => server.close(() => resolve()));
-      await hostTools.close(); await stateMutations.flush();
+      await hostTools.close(); await nativeTools.close(); await stateMutations.flush();
     },
   };
 }
