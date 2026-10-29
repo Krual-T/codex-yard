@@ -32,7 +32,6 @@
     "test:terminal:ui": "node --use-env-proxy scripts/verify-terminal.ts"
   },
   "dependencies": {
-<<<<<<< HEAD
     "@codemirror/commands": "6.11.1",
     "@codemirror/language": "6.13.1",
     "@codemirror/language-data": "6.5.2",
@@ -44,7 +43,14 @@
     "chrome-devtools-mcp": "1.12.0",
     "katex": "0.19.1",
     "lucide-react": "0.468.0",
+    "mdast-util-directive": "3.1.1",
+    "mdast-util-from-markdown": "2.1.0",
+    "mdast-util-gfm": "3.1.0",
+    "mdast-util-to-string": "4.0.0",
     "mermaid": "11.17.2",
+    "micromark-extension-directive": "4.0.0",
+    "micromark-extension-gfm": "3.0.0",
+    "node-html-parser": "7.0.1",
     "pdfjs-dist": "6.4.299",
     "prosemirror-commands": "1.7.2",
     "prosemirror-history": "1.5.1",
@@ -65,20 +71,8 @@
     "rehype-sanitize": "6.0.0",
     "remark-gfm": "4.0.1",
     "remark-math": "6.0.0",
-    "ws": "8.21.3"
-=======
-    "mdast-util-directive": "3.1.1",
-    "mdast-util-from-markdown": "2.1.0",
-    "mdast-util-gfm": "3.1.0",
-    "mdast-util-to-string": "4.0.0",
-    "micromark-extension-directive": "4.0.0",
-    "micromark-extension-gfm": "3.0.0",
-    "node-html-parser": "7.0.1",
-    "react": "19.3.1",
-    "react-dom": "19.3.1",
     "ws": "8.21.3",
     "zod": "4.1.12"
->>>>>>> 93fc023a (Implement owned native tool kernel)
   },
   "overrides": {
     "katex": "0.19.1"
