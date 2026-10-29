@@ -113,16 +113,22 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
           linkInputBackground: style('.standalone-composer__rich-toolbar input').backgroundColor,
           controls: style('.standalone-composer select').color,
           queue: style('.standalone-queue').color, queueEditor: queueEditorColor,
+          queueControl: style('.standalone-queue__actions button[aria-label="编辑待发送消息"]').color,
+          queueControlFont: style('.standalone-queue__actions button[aria-label="编辑待发送消息"]').fontFamily,
+          queueControlSize: (() => { const rect = document.querySelector('.standalone-queue__actions button[aria-label="编辑待发送消息"]')!.getBoundingClientRect();
+            return { width: rect.width, height: rect.height }; })(),
           attachment: style('.standalone-composer__file').color,
           submitColor: style('.standalone-composer__submit').color,
           submitBackground: style('.standalone-composer__submit').backgroundColor,
+          submitSize: (() => { const rect = document.querySelector('.standalone-composer__submit')!.getBoundingClientRect();
+            return { width: rect.width, height: rect.height }; })(),
         };
       }, queueEditorColor);
       const rgb = (hex: string) => `rgb(${[1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16)).join(', ')})`;
       verify(`${theme} editor surface`, () => assert.equal(appearance.container, rgb(surface)));
       verify(`${theme} link surface`, () => assert.equal(appearance.linkInputBackground, rgb(surface)));
       for (const [name, color] of Object.entries({ rich: appearance.rich, link: appearance.linkInput, controls: appearance.controls,
-        queue: appearance.queue, queueEditor: appearance.queueEditor, attachment: appearance.attachment })) {
+        queue: appearance.queue, queueEditor: appearance.queueEditor, queueControl: appearance.queueControl, attachment: appearance.attachment })) {
         verify(`${theme} ${name} color`, () => assert.equal(color, rgb(foreground)));
       }
       verify(`${theme} submit color`, () => assert.equal(appearance.submitColor, rgb(background)));
@@ -130,6 +136,9 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
       verify(`${theme} rich font`, () => assert.match(appearance.richFont, /Georgia/));
       verify(`${theme} code font`, () => assert.match(appearance.codeFont, /Courier New/));
       verify(`${theme} UI font`, () => assert.match(appearance.uiFont, /Arial/));
+      verify(`${theme} queue control font`, () => assert.match(appearance.queueControlFont, /Arial/));
+      verify(`${theme} queue control size`, () => assert.ok(appearance.queueControlSize.width > 0 && appearance.queueControlSize.height > 0));
+      verify(`${theme} submit size`, () => assert.deepEqual(appearance.submitSize, { width: 28, height: 28 }));
       verify(`${theme} rich size`, () => assert.equal(appearance.richSize, '17px'));
       verify(`${theme} code size`, () => assert.equal(appearance.codeSize, '19px'));
       if (process.env.YARD_COMPOSER_THEME_ARTIFACT_DIR) {
