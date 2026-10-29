@@ -17,6 +17,8 @@ import { HookSection } from './HookSection.tsx';
 import type { HookSectionMemory } from './HookSection.tsx';
 import { KeyboardSection } from './KeyboardSection.tsx';
 import { ModelSection } from './ModelSection.tsx';
+import { SettingsBrowserIntegrations } from './SettingsBrowserIntegrations.tsx';
+import type { SettingsBrowserIntegrationsProps } from './SettingsBrowserIntegrations.tsx';
 import { PersonalizationSection } from './PersonalizationSection.tsx';
 import type { SettingsInstructionEditorProps } from './PersonalizationSection.tsx';
 import { PluginSection } from './PluginSection.tsx';
@@ -55,6 +57,7 @@ export const settingsSections: SettingsSection[] = [
   { id: 'mcp-settings', title: 'MCP servers', group: 'Codex' },
   { id: 'connections', title: 'Connections', group: 'Workspace' },
   { id: 'browser-use', title: 'Browser', group: 'Workspace' },
+  { id: 'computer-use', title: 'Computer use', group: 'Workspace' },
   { id: 'file-type-handlers', title: 'File handlers', group: 'Workspace' },
   { id: 'security', title: 'Security', group: 'Data' },
   { id: 'billing', title: 'Billing', group: 'Data' },
@@ -76,6 +79,7 @@ export type SettingsIntegrationProps = StandaloneSettingsProps & {
   registerNavigationGuard?: (guard: SettingsNavigationGuard | null) => void;
   onOpenArchivedThread?: (hostId: string, threadId: string) => Promise<void>;
   onOpenConfig?: Parameters<typeof AgentSection>[0]['onOpenConfig'];
+  browserIntegrations?: Pick<SettingsBrowserIntegrationsProps, 'captureAuthority' | 'navigate' | 'rawFeatureSource' | 'originalGates' | 'onTryPlugin'>;
   projectRoots: SettingsProjectRoots | null;
   sessionCwd: SettingsSessionCwd | null;
   scopeStatus?: { state: 'loading' | 'error' | 'ready'; error?: string; retry(): void };
@@ -83,7 +87,6 @@ export type SettingsIntegrationProps = StandaloneSettingsProps & {
 };
 const remainingSections: Record<string, string> = {
   'local-environments': 'Project setup scripts cannot be managed from this page yet.',
-  'browser-use': 'Browser preferences, site access, extensions, history and downloads cannot be managed from this page yet.',
   'file-type-handlers': 'File opening preferences cannot be managed from this page yet.',
   'security': 'Account security controls cannot be managed from this page yet.',
   'billing': 'Billing information cannot be managed from this page yet.',
@@ -99,7 +102,7 @@ export function StandaloneSettings(props: SettingsIntegrationProps) {
   return <SettingsPage {...props} preferences={preferences} snapshot={snapshot} />;
 }
 
-function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, onOpenArchivedThread, onOpenConfig, projectRoots, sessionCwd, scopeStatus, InstructionEditor, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
+function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, onOpenArchivedThread, onOpenConfig, browserIntegrations, projectRoots, sessionCwd, scopeStatus, InstructionEditor, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
   const { t, locale } = useI18n();
   const configurationOperations = useMemo(() => settingsConfigOperations(client), [client]);
   const recovery = useSyncExternalStore(configurationOperations.subscribe, configurationOperations.getSnapshot, configurationOperations.getSnapshot);
@@ -257,7 +260,8 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
       display: translateKnown(t, entry.label), isTitle: entry.id === '__heading__' }));
   }) : [];
   const isCatalog = (value: string): value is CatalogKind => ['skills-settings', 'hooks-settings', 'mcp-settings', 'plugins-settings'].includes(value);
-  const needsScope = section === 'plugins-settings' || section === 'hooks-settings' || section === 'skills-settings';
+  const needsScope = section === 'plugins-settings' || section === 'hooks-settings' || section === 'skills-settings'
+    || section === 'browser-use' || section === 'computer-use';
   return <div className="yard-settings">
     <aside className="yard-settings-nav" aria-label={t('Settings navigation')}>
       <div className="yard-settings-history">
@@ -319,6 +323,10 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
                   section === 'keyboard-shortcuts' ? <KeyboardSection client={client} preferences={preferences} snapshot={snapshot} platform={platform} /> :
               section === 'plugins-settings' ? <PluginSection key={`${selectedHost}:${scopeKey(projectScope)}`} client={client} hostId={selectedHost} route={route} projectScope={projectScope}
                 navigate={path => guard(() => onNavigate(path, { state: location.state }))} /> :
+              section === 'browser-use' || section === 'computer-use' ? browserIntegrations ? <SettingsBrowserIntegrations {...browserIntegrations}
+                client={client} route={route} cwd={projectScope.paths[0] ?? ''} preferences={preferences} snapshot={snapshot}
+                platform={platform === 'macOS' || platform === 'darwin' ? 'macOS' : platform === 'windows' || platform === 'win32' ? 'windows' : platform === 'linux' ? 'linux' : 'unknown'} /> :
+                <p role="alert">{translateKnown(t, 'This action is unavailable on this web host.')}</p> :
               section === 'hooks-settings' ? <HookSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
                 projectScope={projectScope} memory={hookMemory} revision={editorRevision} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
               section === 'skills-settings' ? <SkillSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}

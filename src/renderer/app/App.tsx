@@ -138,6 +138,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   }>({ key: null, state: 'ready', context: emptySettingsContext });
   const [settingsSourceRetry, setSettingsSourceRetry] = useState(0);
   const settingsContext = settingsSource.key === settingsSourceKey ? settingsSource.context : emptySettingsContext;
+  const settingsContextIdentity = useRef({ key: settingsSourceKey, context: settingsContext });
+  settingsContextIdentity.current = { key: settingsSourceKey, context: settingsContext };
   const [hosts, setHosts] = useState<Host[]>([{ hostId: 'local', displayName: 'Local' }]);
   const [hostCatalogReady, setHostCatalogReady] = useState(false);
   const hostCatalogConfirmed = useRef(false);
@@ -926,6 +928,23 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     setSelectedProject(project ?? null);
   };
   const settings = current.section !== null;
+  const captureSettingsBrowserAuthority = (hostId: string) => {
+    const original = routeRef.current, sourceKey = settingsContextIdentity.current.key;
+    const bridge = transportIdentity.current.bridgeRevision, host = transportIdentity.current.hosts[hostId]?.revision ?? 0;
+    const daemon = client.captureDaemonConnection(hostId);
+    const assertCurrent = () => {
+      daemon.assertOriginal();
+      if (!original.section || original.hostId !== hostId || routeRef.current !== original
+        || settingsContextIdentity.current.key !== sourceKey || transportIdentity.current.bridge !== 'connected'
+        || transportIdentity.current.bridgeRevision !== bridge || (transportIdentity.current.hosts[hostId]?.revision ?? 0) !== host) {
+        throw new Error('The original settings page, source or host changed.');
+      }
+    };
+    assertCurrent();
+    // The existing navigation barrier owns the pending transition. Its final
+    // guard still checks this committed page before the destination is applied.
+    return { key: JSON.stringify([navigationCommit, original.pathname, original.search, original.hash, hostId, sourceKey, bridge, host, daemon.generation]), assertCurrent };
+  };
   const productRoute = readProductRoute(current);
   const productPage = !settings && productRoute.kind !== 'other';
   const configurationWrites = useMemo(() => settingsConfigOperations(client), [client]);
@@ -1547,6 +1566,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       <div className="yard-chat-pane" inert={leaving}>
       {settings ? <InstructionEditorTheme.Provider value={panelAppearance.theme}><StandaloneSettings client={client} hostId={current.hostId}
         onOpenConfig={openSettingsConfig}
+        browserIntegrations={{ captureAuthority: captureSettingsBrowserAuthority, navigate: (path, options, assertBeforeCommit) =>
+          navigate(path, options, assertBeforeCommit), rawFeatureSource: 'unmodified' }}
         onOpenArchivedThread={async (hostId, threadId) => {
           const original = routeRef.current;
           if (!original.section || original.hostId !== hostId) throw new Error('原归档列表已改变，请重新打开。');
