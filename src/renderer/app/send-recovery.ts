@@ -31,7 +31,7 @@ export interface SendIntent extends SendVersion {
   /** Only an actual thread/start response grants this empty-history phase. */
   created?: { thread: ThreadSummary; settings: SubmitOptions };
 }
-interface CreationReceipt { owner: SendOwner; thread: ThreadSummary; settings: SubmitOptions }
+interface CreationReceipt { owner: SendOwner; thread: ThreadSummary; settings: SubmitOptions; projectId?: string | null }
 export interface SendRecoverySnapshot { requests: Record<string, SendIntent>; bindings: Record<string, string>; creations: Record<string, CreationReceipt> }
 interface Storage { read(): Promise<unknown>; update(change: (value: unknown, atoms?: Record<string, unknown>) => unknown): Promise<unknown> }
 const browserStorage: Storage = { read: () => readBrowserAtom(sendsAtom), update: change => updateBrowserAtoms(atoms => {
@@ -78,7 +78,8 @@ function snapshot(value: unknown): SendRecoverySnapshot {
   if (!object(creations) || Object.entries(creations).some(([key, receipt]) => !object(receipt) || !object(receipt.owner)
     || typeof receipt.owner.hostId !== 'string' || typeof receipt.owner.draftId !== 'string' || receipt.owner.threadId !== null
     || !object(receipt.thread) || typeof receipt.thread.id !== 'string' || key !== sendThreadKey(receipt.owner.hostId, receipt.thread.id)
-    || !object(receipt.settings))) throw new Error('新会话阶段记录无效，原值已保留。');
+    || !object(receipt.settings) || Object.hasOwn(receipt, 'projectId') && receipt.projectId !== null
+      && (typeof receipt.projectId !== 'string' || !receipt.projectId))) throw new Error('新会话阶段记录无效，原值已保留。');
   return structuredClone({ ...value, creations }) as unknown as SendRecoverySnapshot;
 }
 
@@ -146,7 +147,7 @@ export class SendRecoveryStore {
     intent.threadId = threadId; intent.stage = 'ready';
     if (created) {
       intent.created = structuredClone(created);
-      state.creations[key] = structuredClone({ ...created, owner: intent.owner });
+      state.creations[key] = structuredClone({ ...created, owner: intent.owner, projectId: intent.projectId ?? null });
     }
   }); }
   sending(id: string, attemptId: string | undefined) { return this.update(id, intent => {
@@ -232,6 +233,20 @@ export class SendRecoveryStore {
       const intent = state.requests[id];
       if (!intent) return;
       if (!['prepared', 'ready', 'failed'].includes(intent.stage)) throw new Error('发送结果尚未核对，恢复记录已保留。');
+      if (intent.threadId) {
+        const key = sendThreadKey(intent.owner.hostId, intent.threadId), receipt = state.creations[key];
+        if (receipt) {
+          if (sendOwnerKey(receipt.owner) !== sendOwnerKey(intent.owner) || state.bindings[key] !== intent.owner.draftId
+            || receipt.thread.id !== intent.threadId || intent.created && (JSON.stringify(intent.created.thread) !== JSON.stringify(receipt.thread)
+              || JSON.stringify(intent.created.settings) !== JSON.stringify(receipt.settings))
+            || Object.hasOwn(receipt, 'projectId') && receipt.projectId !== (intent.projectId ?? null)) {
+            throw new Error('新会话原项目或创建回执已改变，恢复记录已保留。');
+          }
+          // Older receipts need the still-matching intent's original project
+          // before cancellation removes its only durable source.
+          if (!Object.hasOwn(receipt, 'projectId')) receipt.projectId = intent.projectId ?? null;
+        } else if (intent.created) throw new Error('新会话创建回执无法核对，恢复记录已保留。');
+      }
       delete state.requests[id];
     });
   }

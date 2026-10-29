@@ -286,8 +286,47 @@ test('cancelling a rejected first send preserves its authoritative empty-thread 
   const state = await new SendRecoveryStore(h.client, h.storage).read(), key = sendThreadKey(version.owner.hostId, thread.id);
   assert.deepEqual(state.requests, {});
   assert.equal(state.bindings[key], version.owner.draftId);
-  assert.deepEqual(state.creations[key], { owner: version.owner, thread, settings: { model: 'created-model' } });
+  assert.deepEqual(state.creations[key], { owner: version.owner, thread, settings: { model: 'created-model' }, projectId: null });
   assert.deepEqual(h.calls, []);
+});
+
+test('creation records the original project with its binding and survives cancellation without another write', async () => {
+  const h = fixture(), intent = await h.store.prepare(version, '/fixture', draft, {}, {}, 'original-project');
+  await h.store.creating(intent.id, intent.attemptId);
+  const thread = { id: 'atomic-project', name: null, status: { type: 'idle' as const }, cwd: '/fixture', turns: [] };
+  const before = h.storage.update;
+  let writes = 0;
+  h.storage.update = async change => { writes++; return before(change); };
+  await h.store.created(intent.id, thread.id, { thread, settings: { model: 'original-model' } }, intent.attemptId);
+  assert.equal(writes, 1);
+  const key = sendThreadKey(version.owner.hostId, thread.id), created = await h.store.read();
+  assert.equal(created.bindings[key], version.owner.draftId);
+  assert.equal(created.creations[key].projectId, 'original-project');
+  await h.store.cancel(intent.id);
+  assert.equal((await h.store.read()).creations[key].projectId, 'original-project');
+  assert.deepEqual(h.calls, []);
+});
+
+test('cancelling an older creation atomically retains its matched project and rejects a changed receipt', async () => {
+  for (const mismatch of [false, true]) {
+    const h = fixture(), intent = await h.store.prepare(version, '/fixture', draft, {}, {}, 'legacy-project');
+    await h.store.creating(intent.id, intent.attemptId);
+    const thread = { id: 'legacy-project-thread', name: null, status: { type: 'idle' as const }, cwd: '/fixture', turns: [] };
+    await h.store.created(intent.id, thread.id, { thread, settings: { model: 'original-model' } }, intent.attemptId);
+    const state = await h.store.read(), key = sendThreadKey(version.owner.hostId, thread.id);
+    delete state.creations[key].projectId;
+    if (mismatch) state.creations[key].settings.model = 'another-model';
+    h.seed(state);
+    if (mismatch) {
+      await assert.rejects(h.store.cancel(intent.id), /回执已改变/);
+      assert.deepEqual(await h.store.read(), state);
+    } else {
+      await h.store.cancel(intent.id);
+      assert.deepEqual((await h.store.read()).requests, {});
+      assert.equal((await h.store.read()).creations[key].projectId, 'legacy-project');
+    }
+    assert.deepEqual(h.calls, []);
+  }
 });
 
 test('an old page preflight failure cannot downgrade a new page attempt or regain authority to send', async () => {
