@@ -19,12 +19,18 @@ import type {} from './renderer-side-chat-root-fixture.tsx';
 type Message = Record<string, any>;
 async function peer() {
   const root = await mkdtemp('/tmp/hscw-'), fake = await createFakeCodex(root), mutations = createStateMutations();
-  const parentThread = fixtureThread('parent-a', root);
+  const parentThread = fixtureThread('parent-a', root), otherParent = fixtureThread('parent-b', root);
   fake.threads.set('parent-a', parentThread); fake.loaded.add('parent-a');
-  const response = (child: string | null = null) => ({ thread: child ? { ...parentThread, id: child, ephemeral: true, forkedFromId: 'parent-a', turns: [] } : parentThread,
+  fake.threads.set('parent-b', otherParent); fake.loaded.add('parent-b');
+  const response = (child: string | null = null, parentId = 'parent-a') => {
+    const parent = parentId === 'parent-b' ? otherParent : parentThread;
+    return ({ thread: child ? { ...parent, id: child, ephemeral: true, forkedFromId: parentId, turns: [] } : parent,
     cwd: root, runtimeWorkspaceRoots: [root], model: 'peer-model', modelProvider: 'peer', reasoningEffort: null, serviceTier: null,
     approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, activePermissionProfile: null });
+  };
   fake.handlers.set('thread/start', () => response());
+  fake.handlers.set('thread/resume', params => params.threadId === 'parent-a' || params.threadId === 'parent-b'
+    ? response(null, params.threadId) : fake.defaultResult('thread/resume', params));
   fake.handlers.set('config/read', () => ({ config: { developer_instructions: null } }));
   let holdFork = false, lateFork: (() => void) | null = null, holdChild = false, deliverChild: (() => void) | null = null, forks = 0;
   let failRevoke = false, lostConfirm = 0, lostPersistence = 0, lostPrepare = 0, readPrepared = 0, generation = 'generation-a', section: any, terminalStarts = 0;
@@ -40,13 +46,14 @@ async function peer() {
   const order: string[] = [], reads: { purpose: string; token: unknown }[] = [], dispatches: Message[] = [], nativeWrites: Message[] = [];
   const authorityActions: string[] = [], queueEdits: Message[] = [], approvalInterrupts: Message[] = [];
   let injectionStatus: Message | null = null;
-  fake.handlers.set('thread/fork', (_params, context) => {
+  fake.handlers.set('thread/fork', (params, context) => {
     order.push('fork');
     const child = ++forks === 1 ? 'child-a' : 'child-' + forks;
-    fake.threads.set(child, { ...parentThread, id: child, sessionId: child, ephemeral: true, forkedFromId: 'parent-a', turns: [] });
+    const parentId = String(params.threadId), base = parentId === 'parent-b' ? otherParent : parentThread;
+    fake.threads.set(child, { ...base, id: child, sessionId: child, ephemeral: true, forkedFromId: parentId, turns: [] });
     fake.loaded.add(child);
-    if (holdFork) { lateFork = () => context.send({ id: context.message.id, result: response(child) }); return NO_REPLY; }
-    return response(child);
+    if (holdFork) { lateFork = () => context.send({ id: context.message.id, result: response(child, parentId) }); return NO_REPLY; }
+    return response(child, parentId);
   });
   fake.handlers.set('thread/inject_items', () => { order.push('inject'); return {}; });
   const server = createServer((_request, reply) => {
@@ -85,6 +92,13 @@ async function peer() {
       if (typeof message.method === 'string' && page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'mcp-notification',
         hostId: 'local', seq: connection.eventCursor, method: message.method, params: message.params }));
     });
+    connection.on('status', () => {
+      if (!connection.connected && connection.socket) {
+        receipts.forgetSocket(page, connection.socket); authority.invalidate(page, 'local');
+        if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'codex-app-server-connection-changed',
+          hostId: 'local', state: 'disconnected', isSnapshot: false }));
+      }
+    });
     const ready = connection.connect().then(() => {
       socketGenerations.set(connection.socket!, generation);
       if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'codex-app-server-connection-changed', hostId: 'local', state: 'connected',
@@ -105,7 +119,8 @@ async function peer() {
         dispatches.push(structuredClone(message));
         const request = message.request, source = { page, hostId: 'local', connection, socket: connection.socket!, connectionGeneration: generation,
           isCurrent: () => page.readyState === WebSocket.OPEN && connection.connected && socketGenerations.get(connection.socket!) === generation };
-        const attempt = request.method === 'thread/start' ? receipts.begin(source, 'thread/start', null) : null;
+        const attempt = request.method === 'thread/start' ? receipts.begin(source, 'thread/start', null)
+          : request.method === 'thread/resume' ? receipts.begin(source, 'thread/resume', request.params.threadId) : null;
         try {
           const provider = authority as typeof authority & { captureChildWrite?(page: WebSocket, value: unknown): unknown };
           const guard = parent as typeof parent & { assertChildWrite?(hostId: string, threadId: string, proof: unknown): void };
@@ -241,6 +256,26 @@ async function peer() {
         if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'codex-app-server-connection-changed',
           hostId: 'local', state: 'connected', daemonConnectionGeneration: generation }));
       }
+    },
+    async disconnectDaemon() {
+      for (const byHost of connections.values()) {
+        const socket = byHost.get('local')?.socket;
+        if (!socket || socket.readyState !== WebSocket.OPEN) throw Error('Original daemon socket is unavailable.');
+        const closed = once(socket, 'close'); socket.terminate(); await closed;
+      }
+    },
+    async reconnectDaemon() {
+      generation = 'generation-b';
+      for (const [page, byHost] of connections) {
+        const connection = byHost.get('local'); if (!connection) throw Error('Original page has no connection.');
+        await connection.connect(); socketGenerations.set(connection.socket!, generation);
+        if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'codex-app-server-connection-changed',
+          hostId: 'local', state: 'connected', isSnapshot: false, daemonConnectionGeneration: generation }));
+      }
+    },
+    signalDisconnectedSnapshot() {
+      for (const page of connections.keys()) if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({
+        type: 'codex-app-server-connection-changed', hostId: 'local', state: 'disconnected', isSnapshot: true }));
     },
     async changeInjectAttempt() { await mutations.run(() => {
       const next = structuredClone(section), operation = Object.values(next.operations)[0] as Message;
@@ -1055,6 +1090,176 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
         assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.snapshot.draft.text, 'original unresolved draft');
         assert.equal(await page.getByRole('textbox', { name: '草稿', exact: true }).inputValue(), 'original unresolved draft');
         assert.equal(p.fake.calls('thread/unsubscribe').length, 1); assert.equal(p.fake.calls('thread/fork').length, 2);
+      } finally { await context.close(); await p.close(); }
+    });
+  } finally { await browser.close(); }
+});
+
+test('SideChatRoot original daemon disconnect handoff', { timeout: 100_000 }, async t => {
+  const bundle = await build({ entryPoints: ['test/renderer-side-chat-root-fixture.tsx'], bundle: true, write: false,
+    format: 'iife', loader: { '.css': 'empty' } });
+  const browser = await chromium.launch({ executablePath: process.env.YARD_VALIDATION_CHROME_BIN || '/usr/bin/google-chrome',
+    headless: true, args: ['--no-sandbox', '--disable-background-networking'] });
+  const script = bundle.outputFiles[0]!.text;
+  try {
+    await t.test('host revocation allows a different parent to open without replaying the old child', async () => {
+      const p = await peer(); p.enableQueue();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit
+          && !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft());
+        await input.fill('old draft with unknown send');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await page.getByRole('button', { name: '删除待发送消息' }).first().click();
+        await eventually(() => p.fake.calls('thread/queue/delete').length === 1);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.capturedGuardValid(0)), true);
+        const intent = await page.evaluate(() => window.sideChatRootFixture.prepareSend());
+        await page.evaluate(({ id, attempt }) => window.sideChatRootFixture.markUnknown(id, attempt), { id: intent.id, attempt: intent.attemptId! });
+        const unknown = (await page.evaluate(() => window.sideChatRootFixture.sends())).requests[intent.id];
+        assert.equal(unknown?.stage, 'unknown');
+        const operationId = Object.keys(p.section().operations)[0]!;
+        await p.disconnectDaemon();
+        await page.waitForFunction(() => window.sideChatRootFixture.generation() === null);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.capturedGuardValid(0)), false);
+        await p.reconnectDaemon();
+        await page.waitForFunction(() => window.sideChatRootFixture.generation() === 'generation-b');
+        await page.evaluate(() => window.sideChatRootFixture.useParent('parent-b'));
+        await page.evaluate(() => window.sideChatRootFixture.holdOwnerWork());
+        await page.getByRole('button', { name: '另开侧聊' }).click();
+        await page.waitForFunction(id => !window.sideChatRootFixture.canAttachOwner(id), original.draftId);
+        assert.equal((await page.evaluate(id => window.sideChatRootFixture.draftSnapshot(id), original.draftId))?.draft.text, 'old draft with unknown send');
+        assert.equal(p.fake.calls('thread/fork').length, 1);
+        await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork());
+        await page.waitForFunction(() => window.sideChatRootFixture.child()?.identity.parentThreadId === 'parent-b'
+          && window.sideChatRootFixture.child()?.owner.threadId === 'child-2');
+        const next = await page.evaluate(() => window.sideChatRootFixture.child());
+        assert.notEqual(next?.identity.draftId, original.draftId); assert.notEqual(next?.identity.prepareId, original.prepareId);
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.listMounted())).length, 2);
+        assert.equal((await page.evaluate(id => window.sideChatRootFixture.draftSnapshot(id), original.draftId))?.draft.text, 'old draft with unknown send');
+        assert.deepEqual((await page.evaluate(() => window.sideChatRootFixture.sends())).requests[intent.id], unknown);
+        assert.ok(p.section().operations[operationId]);
+        assert.deepEqual(p.fake.calls('thread/fork').map(call => call.params.threadId), ['parent-a', 'parent-b']);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 0); assert.equal(p.fake.calls('turn/start').length, 0);
+        assert.equal(p.nativeWrites.length, 0); assert.equal(await page.evaluate(() => window.sideChatRootFixture.capturedGuardValid(0)), false);
+        await page.waitForFunction(() => window.sideChatRootFixture.history('child-2').canSubmit
+          && !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft());
+        await page.evaluate(id => window.sideChatRootFixture.show(id), original.draftId);
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.snapshot.draft.text, 'old draft with unknown send');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.capturedGuardValid(0)), false);
+        assert.equal(p.fake.calls('turn/start').length, 0);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork()); await context.close(); await p.close(); }
+    });
+    await t.test('navigation drains the old owner and retains its durable association after host revocation', async () => {
+      const p = await peer(); p.enableQueue();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit
+          && !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft());
+        await input.fill('draft retained across navigation');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await p.disconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === null);
+        await p.reconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === 'generation-b');
+        await page.evaluate(() => window.sideChatRootFixture.useParent('parent-a'));
+        await page.evaluate(() => window.sideChatRootFixture.holdOwnerWork());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), true);
+        await page.evaluate(() => window.sideChatRootFixture.beginFlush());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDone()), false);
+        assert.equal(await page.evaluate(id => window.sideChatRootFixture.canAttachOwner(id), original.draftId), false);
+        await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushResult()), true);
+        await page.evaluate(() => window.sideChatRootFixture.revokeNavigation());
+        await page.evaluate(() => { window.sideChatRootFixture.handoffNavigation(); window.sideChatRootFixture.releaseNavigation(); });
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.listMounted())).length, 0);
+        const saved = await page.evaluate(() => window.sideChatRootFixture.listRecoverable());
+        assert.ok(saved.some(item => item.draftId === original.draftId && item.prepareId === original.prepareId));
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 0); assert.equal(p.fake.calls('thread/fork').length, 1);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork()); await context.close(); await p.close(); }
+    });
+    await t.test('a snapshot or replacement generation is not proof that the old grant was revoked', async () => {
+      const p = await peer(); p.enableQueue();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && window.sideChatRootFixture.canAcquireDraft());
+        await input.fill('unproved old draft'); assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        p.signalDisconnectedSnapshot(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === null);
+        p.signalGeneration(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === 'generation-b');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), false);
+        await assert.rejects(page.evaluate(() => window.sideChatRootFixture.open()), /尚不能冻结/);
+        assert.equal((await page.evaluate(id => window.sideChatRootFixture.draftSnapshot(id), original.draftId))?.draft.text, 'unproved old draft');
+        assert.equal(p.fake.calls('thread/fork').length, 1); assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('a lost page connection cannot claim a daemon revocation proof', async () => {
+      const p = await peer(); p.enableQueue();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && window.sideChatRootFixture.canAcquireDraft());
+        await input.fill('page disconnected draft'); assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await p.disconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === null);
+        await page.evaluate(() => window.sideChatRootFixture.suspendPage());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), false);
+        assert.equal((await page.evaluate(id => window.sideChatRootFixture.draftSnapshot(id), original.draftId))?.draft.text, 'page disconnected draft');
+        assert.equal(p.fake.calls('thread/fork').length, 1); assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('losing the original page while draining prevents the proven handoff', async () => {
+      const p = await peer(); p.enableQueue();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && window.sideChatRootFixture.canAcquireDraft());
+        await input.fill('draft retained during interrupted drain');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await p.disconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === null);
+        await p.reconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === 'generation-b');
+        await page.evaluate(() => window.sideChatRootFixture.holdOwnerWork());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), true);
+        await page.evaluate(() => window.sideChatRootFixture.beginFlush());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDone()), false);
+        await page.evaluate(() => { window.sideChatRootFixture.suspendPage(); window.sideChatRootFixture.releaseOwnerWork(); });
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushResult()), false);
+        await assert.rejects(page.evaluate(() => window.sideChatRootFixture.revokeNavigation()), /尚未排空/);
+        await page.evaluate(() => window.sideChatRootFixture.releaseNavigation());
+        assert.equal(await page.evaluate(id => window.sideChatRootFixture.canAttachOwner(id), original.draftId), true);
+        assert.equal((await page.evaluate(id => window.sideChatRootFixture.draftSnapshot(id), original.draftId))?.draft.text,
+          'draft retained during interrupted drain');
+        assert.equal(p.fake.calls('thread/fork').length, 1); assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork()); await context.close(); await p.close(); }
+    });
+    await t.test('an unknown old close remains frozen while a different parent opens independently', async () => {
+      const p = await peer(); p.enableQueue(); p.holdUnsubscribe();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && window.sideChatRootFixture.canAcquireDraft());
+        await input.fill('old close unknown draft'); assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        await page.getByText(/原操作结果未知/).waitFor();
+        const oldOperationId = Object.keys(p.section().operations)[0]!;
+        const oldClose = structuredClone(p.section().operations[oldOperationId].close);
+        await p.disconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === null);
+        await p.reconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === 'generation-b');
+        await page.evaluate(() => window.sideChatRootFixture.useParent('parent-b'));
+        await page.getByRole('button', { name: '另开侧聊' }).click();
+        await page.waitForFunction(() => window.sideChatRootFixture.child()?.identity.parentThreadId === 'parent-b'
+          && window.sideChatRootFixture.child()?.owner.threadId === 'child-2');
+        assert.deepEqual(p.section().operations[oldOperationId].close, oldClose);
+        assert.equal((await page.evaluate(id => window.sideChatRootFixture.draftSnapshot(id), original.draftId))?.draft.text, 'old close unknown draft');
+        assert.equal(await page.evaluate(id => window.sideChatRootFixture.canAttachOwner(id), original.draftId), false);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), false);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 1);
+        assert.deepEqual(p.fake.calls('thread/fork').map(call => call.params.threadId), ['parent-a', 'parent-b']);
+        assert.equal(p.fake.calls('turn/start').length, 0);
       } finally { await context.close(); await p.close(); }
     });
   } finally { await browser.close(); }

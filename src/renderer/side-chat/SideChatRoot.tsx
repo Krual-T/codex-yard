@@ -129,10 +129,13 @@ export function SideChatRoot(props: SideChatRootProps) {
   };
   const publish = () => latest.current.onActiveChild(entries.current.find(item => item.identity.draftId === active.current)
     ? child(entries.current.find(item => item.identity.draftId === active.current)!) : null);
-  const assertEntry = (entry: Entry) => {
+  const assertMountedEntry = (entry: Entry) => {
     const now = latest.current;
     if (!alive.current || !entries.current.includes(entry) || now.client !== entry.client || now.sessions !== entry.sessions
       || now.sends !== entry.sends || now.edits !== entry.edits || now.approvals !== entry.approvals) throw beforeSend('原侧聊工作区已改变。');
+  };
+  const assertEntry = (entry: Entry) => {
+    assertMountedEntry(entry);
     synchronous(entry.parent.assertCurrent()); entry.daemon.assertOriginal();
   };
   const captureParent = () => {
@@ -235,14 +238,21 @@ export function SideChatRoot(props: SideChatRootProps) {
     void result.then(() => entry.pending.delete(result), () => entry.pending.delete(result));
     return result;
   };
-  const freezeSending = (entry: Entry, owner: ComposerDraftOwner, purpose?: 'cancel'): SideChatSendLease => {
-    assertEntry(entry);
+  const freezeSending = (entry: Entry, owner: ComposerDraftOwner, purpose?: 'cancel', disconnectedHandoff?: () => void): SideChatSendLease => {
+    if (disconnectedHandoff && purpose) throw beforeSend('断线撤权证明不能用于取消发送。');
+    const assertLeaseScope = () => {
+      assertMountedEntry(entry);
+      if (disconnectedHandoff) synchronous(disconnectedHandoff()); else assertEntry(entry);
+      const current = entry.draft?.snapshot();
+      if (current && !sameOwner(current.owner, owner) || !current && owner.threadId !== null) throw beforeSend('原侧聊输入身份已改变。');
+    };
+    assertLeaseScope();
     const snapshot = entry.draft?.snapshot();
     if (entry.frozen || owner.hostId !== entry.identity.hostId || owner.draftId !== entry.identity.draftId
       || snapshot && !sameOwner(snapshot.owner, owner) || !snapshot && owner.threadId !== null) throw beforeSend('原侧聊输入租约不可用。');
     const lease = { purpose }; entry.frozen = lease;
     let parentLease: SideChatSendLease;
-    try { parentLease = latest.current.freezeChildOwner(structuredClone(owner), structuredClone(entry.identity), entry.draft, () => assertEntry(entry)); }
+    try { parentLease = latest.current.freezeChildOwner(structuredClone(owner), structuredClone(entry.identity), entry.draft, assertLeaseScope); }
     catch (error) { entry.frozen = null; throw error; }
     if (!parentLease || typeof parentLease.drain !== 'function' || typeof parentLease.assertCurrent !== 'function'
       || typeof parentLease.release !== 'function') {
@@ -256,7 +266,7 @@ export function SideChatRoot(props: SideChatRootProps) {
         synchronous(parentLease.assertCurrent());
       },
       assertCurrent() {
-        assertEntry(entry); if (entry.frozen !== lease) throw beforeSend('原侧聊输入租约已改变。');
+        assertLeaseScope(); if (entry.frozen !== lease) throw beforeSend('原侧聊输入租约已改变。');
         synchronous(parentLease.assertCurrent());
       },
       release() { if (entry.frozen === lease) { parentLease.release(); entry.frozen = null; if (purpose === 'cancel' && alive.current) refresh(); } },
@@ -414,7 +424,8 @@ export function SideChatRoot(props: SideChatRootProps) {
       <SideChatWorkspace client={entry.client} identity={entry.identity}
       open={props.visible && active.current === entry.identity.draftId} startOnMount={entry.identity.mode === 'new'}
       sessions={entry.sessions} sends={entry.sends} edits={entry.edits} approvals={entry.approvals}
-      assertCurrent={() => assertEntry(entry)} freezeSending={(owner, purpose) => freezeSending(entry, owner, purpose)}
+      assertCurrent={() => assertEntry(entry)} assertMounted={() => assertMountedEntry(entry)}
+      freezeSending={(owner, purpose, disconnectedHandoff) => freezeSending(entry, owner, purpose, disconnectedHandoff)}
       captureSubmissionAuthority={(owner, authority) => capture(entry, owner, authority)}
       nativeInjectionAuthority={(original, owner) => {
         const grant = grantFor(entry, original, owner.hostId, owner.threadId);
@@ -466,8 +477,7 @@ export function SideChatRoot(props: SideChatRootProps) {
         if (!alive.current || !entries.current.includes(entry) || scope.hostId !== entry.identity.hostId
           || scope.parentThreadId !== entry.identity.parentThreadId || scope.draftId !== entry.identity.draftId) throw beforeSend('原侧聊实例已改变。');
         const { parent, daemon } = captureParent();
-        if (parent.parent.archived || parent.parent.hostId !== entry.identity.hostId || parent.parent.threadId !== entry.identity.parentThreadId
-          || parent.parent.cwd !== entry.identity.cwd) throw beforeSend('当前父会话无法打开新的侧聊。');
+        if (parent.parent.archived) throw beforeSend('当前父会话无法打开新的侧聊。');
         const identity: SideChatWorkspaceIdentity = { hostId: parent.parent.hostId, parentThreadId: parent.parent.threadId, cwd: parent.parent.cwd,
           draftId: crypto.randomUUID(), prepareId: crypto.randomUUID(), mode: 'new' };
         return switchTo(identity.draftId, () => { synchronous(parent.assertCurrent()); daemon.assertOriginal(); add(identity, parent, daemon); }, true);

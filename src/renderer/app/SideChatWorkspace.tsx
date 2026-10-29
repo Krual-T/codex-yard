@@ -63,8 +63,10 @@ export interface SideChatWorkspaceProps {
   approvals: ApprovalRequestsController;
   /** Fixed original page, parent, socket generation, and owner; synchronous and valid while its lease is held. */
   assertCurrent(): void;
+  /** Checks the original mounted workspace independently of its daemon grant. */
+  assertMounted?(): void;
   /** Blocks new same-draft owners and sends across views synchronously; drains their real pending work. */
-  freezeSending(owner: ComposerDraftOwner, purpose?: 'cancel'): SideChatSendLease;
+  freezeSending(owner: ComposerDraftOwner, purpose?: 'cancel', disconnectedHandoff?: () => void): SideChatSendLease;
   /** Captures the original owner and connection synchronously at the input action. */
   captureSubmissionAuthority(owner: ComposerDraftOwner, childAuthority?: SideChatChildDispatchAuthority): () => void;
   /** Resolve the same synchronously captured grant, without obtaining a newer connection. */
@@ -123,16 +125,26 @@ export function SideChatWorkspace(props: SideChatWorkspaceProps) {
   useEffect(() => {
     let active = true;
     const fixed = identity.current, initial = latest.current;
-    const assertCurrent = () => {
+    const assertIdentity = () => {
       const now = latest.current;
-      if (now.client !== initial.client || now.sessions !== initial.sessions || now.sends !== initial.sends || now.edits !== initial.edits
+      if (!active || now.client !== initial.client || now.sessions !== initial.sessions || now.sends !== initial.sends || now.edits !== initial.edits
         || now.approvals !== initial.approvals || now.identity.hostId !== fixed.hostId || now.identity.parentThreadId !== fixed.parentThreadId
         || now.identity.draftId !== fixed.draftId || now.identity.prepareId !== fixed.prepareId || now.identity.cwd !== fixed.cwd
         || now.identity.mode !== fixed.mode) throw notSent('原侧聊工作区已改变。');
+    };
+    const assertMounted = () => {
+      assertIdentity(); const now = latest.current;
+      if (!now.assertMounted) throw notSent('原侧聊挂载身份尚未确认。');
+      sync(now.assertMounted());
+    };
+    const assertCurrent = () => {
+      const now = latest.current;
+      if (initial.assertMounted) assertMounted(); else assertIdentity();
       sync(now.assertCurrent());
     };
     const source = new SideChatWorkspaceRuntime({ client: initial.client, identity: fixed, sessions: initial.sessions, sends: initial.sends,
-      assertCurrent, draftController: () => draft.current, freezeSending: owner => latest.current.freezeSending(owner),
+      assertCurrent, ...(initial.assertMounted ? { assertMounted } : {}),
+      draftController: () => draft.current, freezeSending: owner => latest.current.freezeSending(owner),
       cleanupChild: async child => {
         assertCurrent();
         const view = source.controller?.getSnapshot().view, receipt = view?.fork.receipt;
@@ -419,11 +431,15 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
     let draftLease: ComposerDraftLease | null = null, sendLease: SideChatSendLease | null = null;
     let releaseHost: (() => void) | null = null;
     let editLease: ReturnType<typeof freezeEdits> | null = null;
+    let disconnectedHandoff: (() => void) | null = null;
+    const assertNavigation = () => { if (disconnectedHandoff) disconnectedHandoff(); else assertOriginal();
+      if (!mounted.current) throw notSent('原侧聊工作区已卸载。'); };
     try {
-      assertOriginal(); releaseHost = runtime.freezeHostOperations('navigation');
+      disconnectedHandoff = runtime.captureDisconnectedHandoff();
+      assertNavigation(); releaseHost = runtime.freezeHostOperations('navigation', disconnectedHandoff);
       const owner = currentOwner(), snapshot = draft.current?.snapshot();
       if (draft.current && (!snapshot || !sameOwner(snapshot.owner, owner) || !(draftLease = draft.current.freeze(owner)))) throw new Error('原侧聊草稿无法冻结。');
-      sendLease = latest.current.freezeSending(owner); editLease = freezeEdits();
+      sendLease = latest.current.freezeSending(owner, undefined, disconnectedHandoff ?? undefined); editLease = freezeEdits();
     } catch (cause) {
       editLease?.lease?.release(); editLease?.releaseAcquisition(); sendLease?.release(); draftLease?.release(); releaseHost?.(); setLocked(false); report(cause); return null;
     }
@@ -435,13 +451,13 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
           flushed = false; await editLease?.lease?.flush(); if (draftLease && !await draftLease.flush()) return false;
           await sendLease!.drain(); await drain(); await editLease?.lease?.flush();
           if (draftLease && !await draftLease.flush()) return false;
-          assertOriginal(); sendLease!.assertCurrent(); flushed = valid; return flushed;
+          assertNavigation(); sendLease!.assertCurrent(); flushed = valid; return flushed;
         } catch (cause) { report(cause); return false; }
       },
       async revoke() {
         if (!valid || !flushed) throw new Error('原侧聊尚未排空。');
-        runtime.assertHandoffReady();
-        revocationAttempted = true; await runtime.revokeForHandoff(); assertOriginal(); sendLease!.assertCurrent(); revoked = true;
+        runtime.assertHandoffReady(disconnectedHandoff);
+        revocationAttempted = true; await runtime.revokeForHandoff(disconnectedHandoff); assertNavigation(); sendLease!.assertCurrent(); revoked = true;
       },
       handoff() {
         if (!valid || !flushed || !revoked || handedOff) throw new Error('原侧聊尚未确认撤权。');

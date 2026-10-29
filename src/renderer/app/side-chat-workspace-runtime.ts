@@ -15,6 +15,8 @@ export interface SideChatWorkspaceRuntimeOptions {
   sends: SendRecoveryStore;
   /** Synchronous guard captured for the original page, parent, socket and owner. */
   assertCurrent(): void;
+  /** Checks the same mounted instance without acquiring a replacement connection. */
+  assertMounted?(): void;
   freezeSending(owner: ComposerDraftOwner): SideChatSendLease;
   draftController(): ComposerDraftController | null;
   cleanupChild(identity: SideChatBrowserIdentity): Promise<void>;
@@ -42,6 +44,7 @@ export class SideChatWorkspaceRuntime {
   private invalidated = false;
   private bridgeConnected = false;
   private hostConnected = false;
+  private disconnectedHandoff: (() => void) | null = null;
   private projectionRevision = 0;
   private readonly projectionListeners = new Set<() => void>();
   private lastCall: Call | null = null;
@@ -60,10 +63,28 @@ export class SideChatWorkspaceRuntime {
     this.unsubscribe = client.subscribe(event => {
       if (event.type === 'connection-state') {
         if (event.state === 'connected') this.bridgeConnected = true;
-        else if (this.bridgeConnected) this.invalidate();
+        else if (this.bridgeConnected) {
+          this.bridgeConnected = false; this.disconnectedHandoff = null; this.invalidate();
+        }
       } else if (event.type === 'codex-app-server-connection-changed' && event.hostId === identity.hostId) {
-        if (event.state === 'connected') this.hostConnected = true;
-        else if (this.hostConnected) this.invalidate();
+        if (event.state === 'connected') {
+          if (this.original && this.generation && nonempty(event.daemonConnectionGeneration)
+            && event.daemonConnectionGeneration !== this.generation) this.invalidate();
+          this.hostConnected = true;
+        } else if (this.hostConnected) {
+          const proven = event.isSnapshot === false && this.original && !this.invalidated && this.bridgeConnected
+            && !!this.generation && !!this.options.assertMounted;
+          this.invalidate(); this.hostConnected = false;
+          if (proven) {
+            const proof = () => {
+              if (this.disconnectedHandoff !== proof || !this.invalidated || !this.bridgeConnected || !this.options.assertMounted) {
+                throw notSent('原侧聊断线撤权证明已失效。');
+              }
+              this.options.assertMounted();
+            };
+            this.disconnectedHandoff = proof;
+          }
+        }
       }
     });
   }
@@ -119,7 +140,7 @@ export class SideChatWorkspaceRuntime {
             this.options.assertCurrent(); if (this.hostFreeze) throw notSent('原侧聊正在冻结，准备操作未派发。');
           } }));
         if (!nonempty(reply.connectionGeneration) || !nonempty(reply.token)) throw new Error('原准备回执缺少连接代次或 token。');
-        this.generation = reply.connectionGeneration; this.storeToken(reply, version);
+        this.generation = reply.connectionGeneration; this.storeToken(reply, version); this.hostConnected = true;
         return reply.view;
       } catch (error) {
         if (!definitelyNotSent(error)) this.prepareUnknown = true;
@@ -332,22 +353,37 @@ export class SideChatWorkspaceRuntime {
     }
   }
   /** Freeze host actions synchronously before a close or route change can wait. */
-  freezeHostOperations(kind: 'close' | 'navigation'): () => void {
-    this.options.assertCurrent();
+  captureDisconnectedHandoff(): (() => void) | null {
+    const proof = this.disconnectedHandoff;
+    if (proof) proof();
+    return proof;
+  }
+  private assertHandoffScope(proof?: (() => void) | null): void {
+    if (proof) {
+      if (proof !== this.disconnectedHandoff) throw notSent('原侧聊断线撤权证明已改变。');
+      proof();
+    } else this.options.assertCurrent();
+  }
+  freezeHostOperations(kind: 'close' | 'navigation', proof?: (() => void) | null): () => void {
+    if (proof && kind !== 'navigation') throw notSent('断线撤权证明不能用于关闭。');
+    this.assertHandoffScope(proof);
     if (this.hostFreeze) throw notSent('原侧聊操作已经冻结。');
     this.hostFreeze = kind;
     return () => { if (this.hostFreeze === kind) this.hostFreeze = null; };
   }
-  assertHandoffReady(): void {
-    this.options.assertCurrent();
-    if (this.invalidated) throw notSent('原页面连接已失效，撤权尚未确认；草稿保持挂载。');
+  assertHandoffReady(proof?: (() => void) | null): void {
+    this.assertHandoffScope(proof);
+    if (this.invalidated && !proof) throw notSent('原页面连接已失效，撤权尚未确认；草稿保持挂载。');
     if (this.preparePending || this.prepareUnknown || this.dispatching) throw notSent('原侧聊操作尚未确定终结，不能移交。');
+    if (this.bridge.hasCloseLease) throw notSent('原侧聊关闭尚未确定终结，不能移交。');
     const view = this.controller?.getSnapshot().view;
     if (view && !this.bridge.hasLinkedOperation(view.operationId)) throw notSent('原侧聊与草稿尚未确认关联，不能移交。');
   }
   /** Parent must freeze and drain, then revoke before an actual handoff or unmount. */
-  async revokeForHandoff(): Promise<void> {
-    if (this.invalidated) throw new Error('原页面连接已失效，撤权尚未确认；草稿保持挂载。');
+  async revokeForHandoff(proof?: (() => void) | null): Promise<void> {
+    this.assertHandoffScope(proof);
+    if (this.invalidated && !proof) throw new Error('原页面连接已失效，撤权尚未确认；草稿保持挂载。');
+    if (proof) return;
     const view = this.controller?.getSnapshot().view;
     if (this.bridge.hasRegistration) {
       if (!view || !this.lastCall?.settled) throw new Error('原侧聊调用尚未核对，不能移交。');
