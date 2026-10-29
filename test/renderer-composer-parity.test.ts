@@ -24,6 +24,8 @@ test('compact composer keeps its real controls, keyboard access and original opt
     },async rpc(method){
       if(method==='model/list')return {data:[{id:'fixture-a',model:'fixture-a',displayName:'Fixture model',isDefault:true,defaultReasoningEffort:'high',supportedReasoningEfforts:[{reasoningEffort:'high'},{reasoningEffort:'low'}]},{id:'fixture-b',model:'fixture-b',displayName:'Other model',defaultReasoningEffort:'low',supportedReasoningEfforts:[{reasoningEffort:'low'}]}],nextCursor:null};
       if(method==='config/read')return {config:{model:'fixture-a',model_reasoning_effort:'high',sandbox_mode:'danger-full-access',approval_policy:'never'},layers:[{name:{type:'user',file:'/fixture/codex/config.toml',profile:null},version:'1'}],yardConfigSource:{hostId:'local',generation:'fixture',homeDirectory:'/fixture',codexHome:'/fixture/codex'}};
+      if(method==='configRequirements/read')return {requirements:null};
+      if(method==='permissionProfile/list')return {data:[{id:':workspace',allowed:true},{id:':read-only',allowed:true},{id:':danger-full-access',allowed:true}],nextCursor:null};
       if(method==='thread/queue/list')return {data:[],nextCursor:null};
       if(method==='skills/list')return {data:[]};
       throw Error('unexpected rpc '+method);
@@ -52,8 +54,8 @@ test('compact composer keeps its real controls, keyboard access and original opt
       #root { position:absolute; bottom:16px; left:0; right:0; margin:auto; width:min(736px,calc(100% - 32px)); max-height:55dvh; overflow:auto; }
     ` });
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
-    await page.waitForFunction(() => (document.querySelector('select[aria-label="Model"]') as HTMLSelectElement)?.value === 'fixture-a');
-    const access = page.locator('.standalone-composer__access summary');
+    await page.waitForFunction(() => document.querySelector('button[data-model="fixture-a"]')?.getAttribute('aria-pressed') === 'true');
+    const access = page.locator('.standalone-composer__access > summary');
     const model = page.locator('.standalone-composer__model > summary');
     const editor = page.getByRole('textbox', { name: 'Work with Codex' });
     assert.equal(await editor.getAttribute('placeholder'), 'Do anything');
@@ -61,7 +63,7 @@ test('compact composer keeps its real controls, keyboard access and original opt
     assert.match(await model.innerText(), /Fixture model High/);
     assert.match(await page.locator('.standalone-composer__target summary').innerText(), /Parity Project/);
     assert.equal(await page.getByRole('button', { name: 'Dictation' }).isDisabled(), true);
-    assert.equal(await page.getByLabel('Approval policy').isVisible(), false);
+    assert.equal(await page.locator('.standalone-composer__access .standalone-composer__menu-panel').isVisible(), false);
     assert.equal(await page.getByLabel('Send method').isVisible(), false);
     const bounds = await page.locator('.standalone-composer__editor').boundingBox();
     assert.ok(bounds && bounds.height >= 90 && bounds.height <= 120 && bounds.width === 736);
@@ -69,8 +71,9 @@ test('compact composer keeps its real controls, keyboard access and original opt
     if (artifacts) { await mkdir(artifacts, { recursive: true }); await page.screenshot({ path: join(artifacts, 'composer-light-1280.png') }); }
 
     await access.focus(); await page.keyboard.press('Enter');
+    await page.getByText('Other permission settings').click();
     await page.getByLabel('Sandbox permissions').selectOption('read-only');
-    assert.match(await access.innerText(), /Read only/);
+    await page.waitForFunction(() => document.querySelector('.standalone-composer__access summary')?.textContent?.includes('Read only'));
     await page.keyboard.press('Escape');
     assert.equal(await page.getByLabel('Sandbox permissions').isVisible(), false);
     assert.equal(await access.evaluate(element => document.activeElement === element), true);
@@ -85,7 +88,7 @@ test('compact composer keeps its real controls, keyboard access and original opt
     await page.evaluate(() => (window as any).fixture.render({busy:true}));
     await model.click();
     await page.locator('.standalone-composer__model-choices summary').click();
-    assert.equal(await page.getByLabel('Model').isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: 'Model: Fixture model' }).isDisabled(), true);
     await page.locator('.standalone-composer__add summary').click();
     assert.equal(await page.getByLabel('Send method').isEnabled(), true);
     assert.equal(await page.getByRole('button', { name: 'Rich text editor' }).isEnabled(), true);
@@ -93,7 +96,7 @@ test('compact composer keeps its real controls, keyboard access and original opt
     await model.click();
     await page.getByLabel('Effort', { exact: true }).fill('1');
     await page.locator('.standalone-composer__model-choices summary').click();
-    await page.getByLabel('Model').selectOption('fixture-b');
+    await page.getByRole('button', { name: 'Model: Other model' }).click();
     await editor.fill('retained actual draft');
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);

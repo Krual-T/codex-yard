@@ -198,7 +198,7 @@ test('rich completion and Markdown list operations survive editing, undo, refres
     await page.getByRole('option', { name: /model.*选择模型/ }).waitFor();
     const countBeforeCommand = await page.evaluate(() => (window as any).fixture.state.submissions.length);
     await page.keyboard.press('Enter');
-    await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '模型');
+    await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '模型: Fixture');
     assert.equal(await editor.textContent(), '');
     assert.equal(await page.evaluate(() => (window as any).fixture.state.submissions.length), countBeforeCommand);
 

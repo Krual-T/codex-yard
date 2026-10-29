@@ -77,7 +77,7 @@ test('workspace and skill completions use the selected host and produce real sub
     await editor.fill('/mod');
     await page.getByRole('option', { name: /model.*选择模型/ }).waitFor();
     await editor.press('Enter');
-    await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '模型');
+    await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '模型: Fixture');
     assert.equal(await editor.inputValue(), '');
     await editor.fill('$rev');
     await page.getByRole('option', { name: /review-helper/ }).click();

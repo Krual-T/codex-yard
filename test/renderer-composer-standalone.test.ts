@@ -23,6 +23,8 @@ test('standalone composer preserves drafts, routes settings and controls the aut
           state.calls.push({method, params:structuredClone(params), host});
           if (method === 'model/list') return {data:[{id:'model-a',model:'model-a',displayName:'Model A',isDefault:true,defaultReasoningEffort:'high',supportedReasoningEfforts:[{reasoningEffort:'low'},{reasoningEffort:'high'}]},{id:'model-b',model:'model-b',displayName:'Model B',supportedReasoningEfforts:[{reasoningEffort:'low'}]}],nextCursor:null};
           if (method === 'config/read') return {config:{model:'model-a',model_reasoning_effort:'high',approval_policy:'on-request',sandbox_mode:'workspace-write',service_tier:null}};
+          if (method === 'configRequirements/read') return {requirements:null};
+          if (method === 'permissionProfile/list') return {data:[{id:':workspace',allowed:true},{id:':read-only',allowed:true},{id:':danger-full-access',allowed:true},{id:'fixture-profile',allowed:true}],nextCursor:null};
           if (method === 'thread/items/list') return {data:state.history.map(item=>({item})),nextCursor:null};
           if (method === 'thread/resume') return {};
           if (method === 'fs/createDirectory' || method === 'fs/writeFile') return {};
@@ -88,14 +90,15 @@ test('standalone composer preserves drafts, routes settings and controls the aut
       const menu = page.locator('.standalone-composer__' + name);
       if (!await menu.evaluate(element => (element as HTMLDetailsElement).open)) await menu.locator(':scope > summary').click();
     };
-    await page.locator('select[aria-label="模型"] option[value="model-b"]').waitFor({ state: 'attached' });
-    assert.equal(await page.getByLabel('审批策略').inputValue(), '__granular__');
+    await page.locator('button[data-model="model-b"]').waitFor({ state: 'attached' });
     await openMenu('model');
     await page.locator('.standalone-composer__model-choices summary').click();
-    await page.getByLabel('模型').selectOption('model-b');
+    await page.getByRole('button', { name: '模型: Model B' }).click();
     await page.locator('.standalone-composer__model-advanced summary').click();
     await page.getByLabel('推理强度').selectOption('low');
     await openMenu('access');
+    await page.getByText('其他权限设置').click();
+    assert.equal(await page.getByLabel('审批策略').inputValue(), '__granular__');
     await page.getByLabel('沙箱权限').selectOption('read-only');
     await openMenu('model');
     await page.getByLabel('快速').check();
@@ -131,6 +134,9 @@ test('standalone composer preserves drafts, routes settings and controls the aut
       approvalPolicy: { granular: { sandbox_approval: false, rules: true, skill_approval: false, request_permissions: true, mcp_elicitations: false } },
       approvalsReviewer: 'user', permissionProfileId: 'external-profile', sandboxMode: 'workspace-write',
     } }));
+    await openMenu('access');
+    const advanced = page.getByText('其他权限设置');
+    if (!await advanced.evaluate(element => (element.parentElement as HTMLDetailsElement).open)) await advanced.click();
     await page.waitForFunction(() => (document.querySelector('select[aria-label="沙箱权限"]') as HTMLSelectElement)?.value === 'workspace-write');
     await page.evaluate(() => (window as any).fixture.render({ context: { threadId: 'thread-b', draftId: 'thread-b' } }));
     await editor.fill('other thread');
