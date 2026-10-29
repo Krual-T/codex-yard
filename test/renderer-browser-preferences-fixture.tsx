@@ -18,6 +18,7 @@ const settingsKey = 'fixture.browser-settings';
 const initialUrl = 'https://www.example.invalid/path?q=1#frag';
 let history = [initialUrl], historyIndex = 0;
 let holdNext = false, pending = false, release: (() => void) | undefined;
+let failRead = false, settingWriteCount = 0;
 
 function settings(): Record<string, unknown> { return JSON.parse(localStorage.getItem(settingsKey) ?? '{}') as Record<string, unknown>; }
 function setRaw(key: SettingKey, value: unknown, notify: boolean) {
@@ -37,6 +38,7 @@ const client: WorkbenchClient = {
     if (endpoint === 'get-settings') return { values: settings() } as T;
     if (endpoint === 'get-setting') {
       const key = String(params?.key), values = settings();
+      if (key === 'browser-show-full-url' && failRead) { failRead = false; throw new Error('Fixture setting read disconnected'); }
       const result = { exists: Object.hasOwn(values, key), value: values[key] };
       if (key === 'browser-show-full-url' && holdNext) {
         holdNext = false; pending = true;
@@ -47,6 +49,7 @@ const client: WorkbenchClient = {
     }
     if (endpoint === 'set-setting') {
       options?.assertBeforeSend?.();
+      settingWriteCount++;
       const key = String(params?.key), values = settings();
       const current = Object.hasOwn(values, key) ? { exists: true, value: values[key] } : { exists: false };
       if (JSON.stringify(current) !== JSON.stringify(params?.expected)) throw new Error('Fixture preference conflict');
@@ -78,6 +81,9 @@ interface Harness {
   holdNext(): void;
   pending(): boolean;
   release(): void;
+  failNextRead(): void;
+  emit(event: WorkbenchEvent): void;
+  settingWrites(): number;
   calls(): { operation: unknown; command: unknown }[];
   draft(): ComposerDraft;
   ready(): Promise<boolean>;
@@ -109,6 +115,9 @@ function App() {
       holdNext() { holdNext = true; },
       pending: () => pending,
       release() { release?.(); release = undefined; },
+      failNextRead() { failRead = true; },
+      emit(event) { for (const listener of listeners) listener(event); },
+      settingWrites: () => settingWriteCount,
       calls: () => calls,
       draft: () => draft,
       async ready() {

@@ -321,7 +321,7 @@ export class Preferences {
       const response = await this.client.host<unknown>(endpoint, { key }, { assertBeforeSend });
       if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) {
         this.applyRead(key, observation(response));
-        if (!this.snapshot[key].saving) this.pendingRefresh.delete(key);
+        if (!this.snapshot[key].saving && this.snapshot[key].available) this.pendingRefresh.delete(key);
       }
     } catch (error) {
       if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) this.update(key, { loading: false, error: errorText(error) });

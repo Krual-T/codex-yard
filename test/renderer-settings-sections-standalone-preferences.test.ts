@@ -213,8 +213,8 @@ test('acknowledged confirmation reads recheck the original page after dispatch w
   assert.equal(client.calls.filter(call => call.endpoint === 'set-setting').length, 1);
 });
 
-test('queued notifications survive failed or malformed follow-up reads until a successful reconnect read', async t => {
-  for (const failure of ['offline', 'malformed'] as const) await t.test(failure, async () => {
+test('queued notifications survive failed or invalid follow-up reads until a successful reconnect read', async t => {
+  for (const failure of ['offline', 'malformed', 'invalid-value'] as const) await t.test(failure, async () => {
     const client = new FakeClient(), prefs = new Preferences(client);
     const stop = prefs.start();
     try {
@@ -226,6 +226,7 @@ test('queued notifications survive failed or malformed follow-up reads until a s
           client.calls.push({ endpoint, params });
           options?.assertBeforeSend?.();
           if (failure === 'offline') throw new Error('notification read disconnected');
+          if (failure === 'invalid-value') return { exists: true, value: 'invalid' } as T;
           return { value: 'dark' } as T;
         }
         return host<T>(endpoint, params, options);
@@ -248,7 +249,9 @@ test('queued notifications survive failed or malformed follow-up reads until a s
       assert.equal(await saving, true);
       await new Promise<void>(resolve => setImmediate(resolve));
       assert.equal(reads, 2);
-      assert.match(prefs.getSnapshot().appearanceTheme.error ?? '', failure === 'offline' ? /notification read disconnected/ : /whether the value exists/);
+      assert.match(prefs.getSnapshot().appearanceTheme.error ?? '', failure === 'offline' ? /notification read disconnected/
+        : failure === 'invalid-value' ? /Saved value is invalid/ : /whether the value exists/);
+      if (failure === 'invalid-value') assert.deepEqual(prefs.getSnapshot().appearanceTheme.observation, { exists: true, value: 'invalid' });
       for (const listener of client.listeners) listener({ type: 'connection-state', state: 'connected' });
       await new Promise<void>(resolve => setImmediate(resolve));
       const restored = prefs.getSnapshot().appearanceTheme;

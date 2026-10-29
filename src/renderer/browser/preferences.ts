@@ -75,6 +75,9 @@ export function useBrowserShowFullUrl(client: WorkbenchClient): boolean {
   useEffect(() => {
     const reload = () => { void preferences.reload('browser-show-full-url'); };
     const unsubscribe = client.subscribe(event => {
+      if (event.type === 'page-resumed' || event.type === 'connection-state' && event.state === 'connected') {
+        reload(); return;
+      }
       if (event.type !== 'settings-changed') return;
       const keys = Array.isArray(event.keys) ? event.keys : typeof event.key === 'string' ? [event.key] : [];
       if (!keys.length || keys.includes('browser-show-full-url')) reload();

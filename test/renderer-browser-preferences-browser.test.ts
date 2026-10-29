@@ -115,6 +115,24 @@ test('the mounted browser consumes saved address preference without losing URL, 
     await page.evaluate(() => window.browserPreferenceFixture.setRaw('browser-show-full-url', { unknown: 'keep' }, true));
     await page.waitForFunction(() => (document.querySelector('[aria-label="网页地址"]') as HTMLInputElement)?.value === 'https://www.example.invalid/path?q=1#frag');
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('fixture.browser-settings')!)['browser-show-full-url']), { unknown: 'keep' });
+    const writes = await page.evaluate(() => window.browserPreferenceFixture.settingWrites());
+    await page.evaluate(() => {
+      window.browserPreferenceFixture.setRaw('browser-show-full-url', false);
+      window.browserPreferenceFixture.emit({ type: 'connection-state', state: 'connected', hostId: 'new-host' });
+    });
+    await page.waitForFunction(() => (document.querySelector('[aria-label="网页地址"]') as HTMLInputElement)?.value === 'example.invalid');
+    await page.evaluate(() => {
+      window.browserPreferenceFixture.failNextRead();
+      window.browserPreferenceFixture.emit({ type: 'settings-changed', keys: ['browser-show-full-url'] });
+    });
+    await page.waitForFunction(() => (document.querySelector('[aria-label="网页地址"]') as HTMLInputElement)?.value === 'https://www.example.invalid/path?q=1#frag');
+    await input.focus(); await input.fill('https://unsent.invalid/path?keep=1#draft');
+    await page.evaluate(() => window.browserPreferenceFixture.emit({ type: 'page-resumed' }));
+    assert.equal(await input.inputValue(), 'https://unsent.invalid/path?keep=1#draft', 'A resumed preference read preserves the in-progress address edit');
+    await page.locator('header strong').click();
+    await page.waitForFunction(() => (document.querySelector('[aria-label="网页地址"]') as HTMLInputElement)?.value === 'example.invalid');
+    assert.equal(await page.evaluate(() => window.browserPreferenceFixture.settingWrites()), writes, 'Read recovery does not rewrite saved settings');
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('fixture.browser-settings')!)['browser-show-full-url']), false);
     assert.deepEqual(errors, []);
     await context.close();
   } finally {
