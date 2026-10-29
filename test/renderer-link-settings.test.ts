@@ -90,12 +90,19 @@ test('failed and malformed values remain distinct from absence and can be retrie
   await flush();
   assert.deepEqual(links.getSnapshot().local, { status: 'error', message: 'host unavailable' });
   assert.deepEqual(links.getSnapshot().legacy, { status: 'invalid' });
-  assert.equal(links.getSnapshot().forceExternal, null);
-  assert.equal(links.getSnapshot().webTarget, null);
+  assert.equal(links.getSnapshot().forceExternal, false);
+  assert.equal(links.getSnapshot().webTarget, 'in-app-browser');
   assert.deepEqual(links.resolve('https://example.invalid/', { browserPaneEnabled: true }),
+    { kind: 'open', url: 'https://example.invalid/', local: false, target: 'in-app-browser' });
+  assert.deepEqual(links.resolve('http://localhost/', { browserPaneEnabled: true }),
     { kind: 'unavailable', reason: 'preference' });
   assert.deepEqual(links.resolve('https://example.invalid/', { browserPaneEnabled: null, useExternalBrowser: true }),
     { kind: 'open', url: 'https://example.invalid/', local: false, target: 'external-browser' });
+  peer.event({ type: 'settings-changed', keys: [local] });
+  assert.equal(links.getSnapshot().webTarget, 'in-app-browser', 'Refreshing the local target does not invalidate the web target');
+  peer.take(local).resolve(value('invalid-local-target')); await flush();
+  assert.equal(links.getSnapshot().local.status, 'invalid');
+  assert.equal(links.getSnapshot().webTarget, 'in-app-browser');
   links.retry();
   assert.equal(links.getSnapshot().webTarget, null, 'A retry is not a fresh initial loading gate');
   peer.take(web).resolve(value('bad-target')); peer.take(local).resolve(value('external-browser'));

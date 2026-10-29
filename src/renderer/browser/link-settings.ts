@@ -133,9 +133,13 @@ export class LinkSettings {
     const { web, local, legacy } = this.observations;
     const ready = (entry: LinkSettingObservation) => entry.status === 'value' || entry.status === 'missing';
     const invalid = (entry: LinkSettingObservation) => entry.status === 'error' || entry.status === 'invalid';
-    const settingsReady = ready(web) && ready(local);
-    const forceExternal = this.status !== 'active' || invalid(web) || invalid(local) ? null :
-      settingsReady ? false : this.initialSettings ? true : null;
+    const settingsPending = web.status === 'loading' || local.status === 'loading';
+    let forceExternal: boolean | null = null;
+    if (this.status === 'active' && !invalid(web)) {
+      if (this.initialSettings && settingsPending) {
+        if (!invalid(local)) forceExternal = true;
+      } else if (ready(web)) forceExternal = false;
+    }
     const configured = web.status === 'value' ? web.value : null;
     const legacyDefault = legacy.status === 'value' ? legacy.value : null;
     const webKnown = web.status === 'value' || web.status === 'missing' && ready(legacy);
