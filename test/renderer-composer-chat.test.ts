@@ -17,8 +17,10 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       from './src/renderer/composer/composer-draft-store.ts';
     import {updateBrowserAtoms} from './src/renderer/storage/ui-atoms.ts';
     import {createId} from './src/renderer/composer/standalone-draft.ts';
+    import {createSummaryOutputPrefill} from './src/renderer/app/summary-output-prefill.ts';
+    import {readRichDocument,serializeRichDocument} from './src/renderer/composer/rich-document.ts';
     const state={calls:[],hostCalls:[],submissions:[],snapshots:[],controller:null,grant:1,epochs:{local:1,'ssh:other':1},hold:null,pending:[],failList:false,
-      plainOverride:null,listeners:new Set()};
+      plainOverride:null,listeners:new Set(),appendPort:null,appendOperation:null,appendChecks:0,revokeAt:0};
     const pages=(host,cursor)=>host==='local' ? cursor ? {data:[{id:'same-id',name:'Review local',cwd:'/workspace'}],nextCursor:null}
       : {data:[{id:'first',name:'Other local',cwd:'/workspace'},{id:'bad/id',name:'Unsupported identifier',cwd:'/workspace'}],nextCursor:'page-2'}
       : {data:[{id:'same-id',name:'Review remote',cwd:'/remote'}],nextCursor:null};
@@ -56,6 +58,7 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       captureSubmissionAuthority(owner){const expected=JSON.stringify(owner),grant=state.grant;
         return ()=>{const c=props.context;if(grant!==state.grant || expected!==JSON.stringify({hostId:c.hostId,threadId:c.threadId,draftId:c.draftId}))throw Error('original route authority revoked');};},
       onDraftController(controller){state.controller=controller;},onDraftChange(snapshot){state.snapshots.push(structuredClone(snapshot));},
+      onPromptAppendPort(port){state.appendPort=port;},
       async onSubmit(draft,options,action,description,assertAuthority){assertAuthority?.();state.submissions.push({draft:structuredClone(draft),
         input:draftToInput(draft,props.context.hostId,{plainTextMode:description?.documentPlainTextMode}),action});throw Error('fixture send declined');},async onInterrupt(){} };
     const root=createRoot(document.getElementById('root'));
@@ -64,6 +67,24 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       read(){const {hostId,threadId,draftId}=props.context;return readComposerDraft({hostId,threadId,draftId});},
       addVersion(draft,revision){const c=state.controller;return saveComposerDraftConflict(c.snapshot().owner,{draft,revision,prefills:[]});},
       versions(){const c=state.controller;return readComposerDraftVersions(c.snapshot().owner);},
+      seedRich(document){const c=state.controller,parsed=readRichDocument(document);
+        if(!parsed)throw Error('invalid fixture document');
+        return c.update(c.snapshot().owner,draft=>({...draft,text:serializeRichDocument(parsed),document}));},
+      beginAppend(revokeAt=0){const c=state.controller,owner=c.snapshot().owner,grant=state.grant;
+        state.appendChecks=0;state.revokeAt=revokeAt;
+        state.appendOperation=state.appendPort.begin(owner,()=>{state.appendChecks++;
+          if(state.grant!==grant || state.revokeAt && state.appendChecks>=state.revokeAt)throw Error('fixture original authority revoked');});
+        return !!state.appendOperation;},
+      append(kind='document'){const c=props.context;
+        return state.appendOperation.append(createSummaryOutputPrefill({kind,context:{hostId:c.hostId,cwd:c.cwd}}).document);},
+      cancelAppend(){state.appendOperation.cancel();},
+      async holdAtoms(){const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('codex-yard.ui-atoms.v1',1);
+          req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error)});
+        const tx=db.transaction('atoms','readwrite'),store=tx.objectStore('atoms');let released=false;
+        const done=new Promise((resolve,reject)=>{tx.onabort=()=>reject(tx.error);tx.oncomplete=()=>{db.close();resolve()}});
+        await new Promise((resolve,reject)=>{let first=true;const loop=()=>{const req=store.get('native-atoms');
+          req.onerror=()=>reject(req.error);req.onsuccess=()=>{if(!released)loop();if(first){first=false;resolve()}}};loop()});
+        this.releaseAtoms=()=>{released=true;return done};},
       async commitExternal(draft){const c=state.controller,operation=c.beginExternalOperation(c.snapshot().owner);
         if(!operation)throw Error('external operation unavailable');
         try {const receipt=await operation.transaction(async(before,isCurrent)=>{
@@ -1158,6 +1179,210 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.equal((JSON.stringify(saved.document).match(/agentMention/g) ?? []).length, 1);
       assert.deepEqual(saved.skills, [{ name: 'review-skill', path: '/skills/review' }]);
       await editor.evaluate(element => element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('plugin append uses the original document, history, clipboard and submitted input', async () => {
+      const { page, errors } = await open('plugin-append-plain-mode');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('Before');
+      assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), true);
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.append()), { status: 'accepted' });
+      const node = editor.locator('[data-mention="plugin"]');
+      await node.waitFor();
+      assert.equal(await node.textContent(), '@Documents');
+      assert.equal(await node.getAttribute('contenteditable'), 'false');
+      assert.equal(await node.getAttribute('data-prompt-link-href'), 'plugin://documents@openai-primary-runtime');
+      assert.equal(await node.getAttribute('data-prompt-link-label'), '@Documents');
+      const saved = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+      assert.match(JSON.stringify(saved.document), /"type":"pluginMention"/);
+      await editor.press('Control+z'); assert.equal(await editorText(editor), 'Before');
+      await editor.press('Control+z'); assert.equal(await editorText(editor), '');
+      await editor.press('Control+Shift+z'); assert.equal(await editorText(editor), 'Before');
+      await editor.press('Control+Shift+z'); assert.equal(await node.count(), 1);
+      const copied = await editor.evaluate(element => {
+        const range = document.createRange(); range.selectNode(element.querySelector('[data-mention="plugin"]')!);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const data = new DataTransfer(); element.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: data }));
+        return { html: data.getData('text/html'), text: data.getData('text/plain') };
+      });
+      assert.match(copied.html, /plugin-mention-path="plugin:\/\/documents@openai-primary-runtime"/);
+      const target = await open('plugin-copy-empty');
+      const targetEditor = target.page.getByRole('textbox', { name: 'Work with Codex' });
+      await targetEditor.focus();
+      await targetEditor.evaluate((element, copied) => {
+        const data = new DataTransfer(); data.setData('text/html', copied.html); data.setData('text/plain', copied.text);
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+      }, copied);
+      await targetEditor.locator('[data-mention="plugin"]').waitFor();
+      assert.equal(await targetEditor.locator('[data-mention="plugin"]').getAttribute('data-prompt-link-href'), 'plugin://documents@openai-primary-runtime');
+      await targetEditor.press('Control+z'); assert.equal(await targetEditor.locator('[data-mention="plugin"]').count(), 0);
+      await targetEditor.press('Control+Shift+z'); assert.equal(await targetEditor.locator('[data-mention="plugin"]').count(), 1);
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      const sent = await page.evaluate(() => (window as any).fixture.state.submissions[0].input);
+      assert.deepEqual(sent, [{ type: 'text', text: 'Before Create a new document with [@Documents](plugin://documents@openai-primary-runtime). Start by asking me what it should be about.', text_elements: [] }]);
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.hostCalls.includes('set-setting')), false);
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      await page.reload(); await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+      await page.locator('[data-mention="plugin"]').waitFor();
+      assert.equal(await page.locator('[data-mention="plugin"]').getAttribute('data-prompt-link-href'), 'plugin://documents@openai-primary-runtime');
+      assert.deepEqual(errors, []); assert.deepEqual(target.errors, []); await target.page.close(); await page.close();
+    });
+
+    await t.test('plugin paste accepts the original reference attributes and rejects a conflicting link label', async () => {
+      const { page, errors } = await open('plugin-original-clipboard');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' }); await editor.focus();
+      const html = '<span plugin-mention-name="Documents" plugin-mention-display-name="Documents" '
+        + 'plugin-mention-path="plugin://documents@openai-primary-runtime" plugin-mention-icon="" plugin-mention-brand-color="" '
+        + 'data-prompt-link-href="plugin://documents@openai-primary-runtime" data-prompt-link-label="@Documents" '
+        + 'data-appearance="inline-mention" data-layout="inline-flow" data-font-weight="medium" data-tone="accent" '
+        + 'data-interactive="" data-underline-on-hover="" contenteditable="false"><span>Documents</span></span>';
+      const paste = (value: string) => editor.evaluate((element, source) => {
+        const data = new DataTransfer(); data.setData('text/html', source); data.setData('text/plain', '@Documents');
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+      }, value);
+      await paste(html);
+      const node = editor.locator('[data-mention="plugin"]'); await node.waitFor();
+      assert.equal(await node.getAttribute('plugin-mention-path'), 'plugin://documents@openai-primary-runtime');
+      assert.equal(await node.getAttribute('data-prompt-link-label'), '@Documents');
+      await paste(html.replace('plugin-mention-display-name="Documents"', 'plugin-mention-display-name=""'));
+      assert.equal(await node.count(), 2);
+      await paste(html.replace('data-prompt-link-label="@Documents"', 'data-prompt-link-label="@Different"'));
+      assert.equal(await node.count(), 2);
+      await page.getByRole('alert').waitFor();
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('plugin append and paste preserve the real rich document in plain preference', async () => {
+      const { page, errors } = await open('plugin-rich-plain-mode');
+      const fixtureDocument = { type: 'doc', content: [
+        { type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: 'Heading' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'Body', marks: [{ type: 'strong' }] }] },
+      ] };
+      assert.equal(await page.evaluate(value => (window as any).fixture.seedRich(value), fixtureDocument), true);
+      const editor = page.locator('[contenteditable="true"][role="textbox"]'); await editor.waitFor();
+      assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), true);
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.append('site')), { status: 'accepted' });
+      const node = editor.locator('[data-mention="plugin"]'); await node.waitFor();
+      assert.equal(await node.textContent(), '@Sites');
+      const copied = await editor.evaluate(element => {
+        const range = document.createRange(); range.selectNode(element.querySelector('[data-mention="plugin"]')!);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const data = new DataTransfer(); element.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: data }));
+        return { html: data.getData('text/html'), text: data.getData('text/plain') };
+      });
+      await editor.evaluate((element, copied) => {
+        const range = document.createRange(); range.selectNodeContents(element.querySelector('p')!); range.collapse(false);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const data = new DataTransfer(); data.setData('text/html', copied.html); data.setData('text/plain', copied.text);
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+      }, copied);
+      assert.equal(await node.count(), 2);
+      await editor.press('Control+z'); assert.equal(await node.count(), 1);
+      await editor.press('Control+z'); assert.equal(await node.count(), 0);
+      assert.equal(await editor.locator('h2').textContent(), 'Heading');
+      assert.equal(await editor.locator('strong').textContent(), 'Body');
+      await editor.press('Control+Shift+z'); await editor.press('Control+Shift+z'); assert.equal(await node.count(), 2);
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      const sent = await page.evaluate(() => (window as any).fixture.state.submissions[0].input);
+      assert.equal((JSON.stringify(sent).match(/plugin:\/\/sites@openai-curated-remote/g) ?? []).length, 2);
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.hostCalls.includes('set-setting')), false);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('plugin append preserves marked segments, reference bytes and the image input order', async () => {
+      const { page, errors } = await open('plugin-append-segmented');
+      const original = { text: '文件 @ref\nTail', images: [], files: [], references: [], skills: [], input: [
+        { type: 'text', text: '文件 @ref', text_elements: [{ byteRange: { start: 7, end: 11 }, placeholder: 'ref' }] },
+        { type: 'image', fileId: 'file-1', detail: 'high' }, { type: 'text', text: 'Tail', text_elements: [] },
+      ], document: { type: 'doc', content: [
+        { type: 'paragraph', content: [{ type: 'text', text: '文件 @ref', marks: [{ type: 'strong' }] }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'Tail', marks: [{ type: 'em' }] }] },
+      ] } };
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const editor = page.getByRole('textbox', { name: 'Work with Codex 2' }); await editor.waitFor();
+      assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), true);
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.append('presentation')), { status: 'accepted' });
+      await editor.locator('[data-mention="plugin"]').waitFor();
+      const draft = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+      assert.deepEqual(draft.input[0], original.input[0]); assert.deepEqual(draft.input[1], original.input[1]);
+      assert.deepEqual(draft.document.content[0], original.document.content[0]);
+      await editor.press('Control+z'); assert.equal(await editor.locator('[data-mention="plugin"]').count(), 0,
+        JSON.stringify({ alerts: await page.getByRole('alert').allTextContents(), draft: await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft) }));
+      await editor.press('Control+Shift+z'); assert.equal(await editor.locator('[data-mention="plugin"]').count(), 1);
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      const input = await page.evaluate(() => (window as any).fixture.state.submissions[0].input);
+      assert.deepEqual(input[1], original.input[1]);
+      assert.equal(new TextDecoder().decode(new TextEncoder().encode(input[0].text).slice(input[0].text_elements[0].byteRange.start, input[0].text_elements[0].byteRange.end)), '@ref');
+      assert.match(input[2].text, /\[@Presentations\]\(plugin:\/\/presentations@openai-primary-runtime\)/);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('plugin append rejects a replaced owner and an active composition', async () => {
+      const { page, errors } = await open('plugin-append-authority');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' }); await editor.fill('Original');
+      await editor.evaluate(element => element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })));
+      assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), false);
+      await editor.evaluate(element => element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), true);
+      await page.evaluate(() => (window as any).fixture.render({ context: { hostId: 'ssh:other', threadId: 'new', draftId: 'new', cwd: '/remote' } }));
+      const next = page.getByRole('textbox', { name: 'Work with Codex' }); await next.fill('New owner');
+      assert.match(await page.evaluate(async () => { try { await (window as any).fixture.append(); return 'accepted'; } catch (error) { return String(error); } }), /原输入区已变化|草稿外部操作已结束|原输入|owner|authority/i);
+      assert.equal(await next.inputValue(), 'New owner');
+      assert.doesNotMatch(JSON.stringify(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft)), /pluginMention/);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('plugin append cannot replace a newer version from another page of the same owner', async () => {
+      const source = await open('plugin-concurrent'), target = await open('plugin-concurrent');
+      const original = source.page.getByRole('textbox', { name: 'Work with Codex' }); await original.fill('Original');
+      assert.equal(await source.page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      await target.page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.draft.text === 'Original');
+      assert.equal(await source.page.evaluate(() => (window as any).fixture.beginAppend()), true);
+      const newer = target.page.getByRole('textbox', { name: 'Work with Codex' }); await newer.fill('Newer version');
+      assert.equal(await target.page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      assert.match(await source.page.evaluate(async () => { try { await (window as any).fixture.append(); return 'accepted'; } catch (error) { return String(error); } }), /版本|changed|草稿/i);
+      assert.equal(await original.inputValue(), 'Original');
+      assert.equal((await target.page.evaluate(() => (window as any).fixture.read())).draft.text, 'Newer version');
+      assert.doesNotMatch(JSON.stringify(await target.page.evaluate(() => (window as any).fixture.read())), /pluginMention/);
+      assert.deepEqual(source.errors, []); assert.deepEqual(target.errors, []); await target.page.close(); await source.page.close();
+    });
+
+    await t.test('plugin append freezes input and cancellation prevents a delayed root write', async () => {
+      const { page, errors } = await open('plugin-append-cancel');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' }); await editor.fill('Original'); await editor.focus();
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      await page.evaluate(() => (window as any).fixture.holdAtoms());
+      assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), true);
+      await page.evaluate(() => { const f = (window as any).fixture; f.appendResult = f.append().then((value: any) => ({ value }), (error: unknown) => ({ error: String(error) })); });
+      await page.waitForFunction(() => !!document.querySelector('[aria-busy="true"][inert]'));
+      await page.keyboard.type('unwanted');
+      assert.equal(await editor.inputValue(), 'Original');
+      await page.evaluate(() => { (window as any).fixture.cancelAppend(); });
+      await page.evaluate(() => (window as any).fixture.releaseAtoms());
+      assert.match(await page.evaluate(async () => (await (window as any).fixture.appendResult).error), /original|草稿|authority/i);
+      await page.waitForFunction(() => !document.querySelector('[aria-busy="true"][inert]'));
+      assert.equal(await editor.inputValue(), 'Original');
+      assert.doesNotMatch(JSON.stringify(await page.evaluate(() => (window as any).fixture.read())), /pluginMention/);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('plugin append keeps the committed version when original authority expires during acceptance', async () => {
+      const { page, errors } = await open('plugin-append-committed');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' }); await editor.fill('Keep original');
+      assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend(4)), true);
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.append()), { status: 'committed-unaccepted' });
+      assert.equal(await editor.inputValue(), 'Keep original');
+      const versions = await page.evaluate(() => (window as any).fixture.versions());
+      assert.match(JSON.stringify(versions), /pluginMention/);
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.submissions.length), 0);
       assert.deepEqual(errors, []); await page.close();
     });
 

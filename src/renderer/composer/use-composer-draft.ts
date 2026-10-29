@@ -18,7 +18,7 @@ export interface ComposerDraftController {
   /** Use the same projection guard for parent recovery and the local submit path. */
   clearSubmittedVersion(revision: string, guard?: (atoms: Readonly<Record<string, unknown>>) => boolean): Promise<void>;
   /** Adopt an independently committed active version only if this projection still matches. */
-  acceptCommittedVersion(before: ComposerDraftSnapshot, after: ComposerDraftSnapshot): Promise<boolean>;
+  acceptCommittedVersion(before: ComposerDraftSnapshot, after: ComposerDraftSnapshot, applyProjection?: () => boolean): Promise<boolean>;
   /** Register before the first await of an external owner-bound draft operation. */
   beginExternalOperation(owner: ComposerDraftOwner): ComposerDraftExternalOperation | null;
 }
@@ -29,6 +29,9 @@ export interface ComposerDraftLease {
 export interface ComposerDraftExternalOperation {
   transaction<T>(work: (before: ComposerDraftSnapshot, isCurrent: () => boolean) =>
     Promise<{ after: ComposerDraftSnapshot; value: T }>):
+    Promise<{ before: ComposerDraftSnapshot; after: ComposerDraftSnapshot; value: T; accepted: boolean }>;
+  transaction<T>(work: (before: ComposerDraftSnapshot, isCurrent: () => boolean) =>
+    Promise<{ after: ComposerDraftSnapshot; value: T }>, applyProjection: () => boolean):
     Promise<{ before: ComposerDraftSnapshot; after: ComposerDraftSnapshot; value: T; accepted: boolean }>;
   /** Merge and durably mark an asynchronously obtained prefill exactly once. */
   applyPrefill(prefill: { id: string; draft: ComposerDraft }): Promise<boolean>;
@@ -233,7 +236,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
         if (active.current !== result || !clearVersion.current) throw new Error('原输入区已改变，已发送版本尚未清理。');
         await clearVersion.current(revision, guard);
       },
-      async acceptCommittedVersion(before, after) {
+      async acceptCommittedVersion(before, after, applyProjection) {
         const reject = () => {
           if (active.current === result && frozen.current && operations.current.size) failedOperations.current++;
           return false;
@@ -273,6 +276,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
           // Closing it may re-read; applying it must still write from the original
           // revision. Only a real version/read conflict needs unresolved mode.
           if (pendingLink?.current || pendingComposition?.current) { deferredForLink = true; return false; }
+          if (applyProjection?.() === false) return false;
           const next = candidates[0]!;
           current.current = next; setStored(next); setVersions(view.versions);
           durableRevision.current = next.revision; dirty.current = false; preserveProjection.current = false; setUnresolved(false); setSaving(false);
@@ -309,7 +313,8 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
           gate.phase = 'working';
         };
         return {
-          async transaction(work) {
+          async transaction<T>(work: (before: ComposerDraftSnapshot, isCurrent: () => boolean) =>
+            Promise<{ after: ComposerDraftSnapshot; value: T }>, applyProjection?: () => boolean) {
             if (!live() || used) throw new Error('草稿外部操作已结束或已使用。');
             used = true; running = true;
             let before: ComposerDraftSnapshot | null = null;
@@ -321,7 +326,8 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
               const isCurrent = () => live() && !dirty.current && !preserveProjection.current
                 && current.current.revision === original.revision && samePersistedDraft(current.current.draft, original.draft);
               const response = await work(structuredClone(original), isCurrent);
-              accepted = isCurrent() && await result.acceptCommittedVersion(original, response.after);
+              accepted = isCurrent() && await result.acceptCommittedVersion(original, response.after,
+                applyProjection ? () => isCurrent() && applyProjection() : undefined);
               return { before: original, after: response.after, value: response.value, accepted };
             } catch (reason) {
               if (before && live()) {

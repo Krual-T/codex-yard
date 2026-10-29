@@ -2,7 +2,7 @@ import type { ComposerContext, ComposerDocument, ComposerDraft, ComposerImage } 
 import { applyTextEdits, canRemoveImageAttachment, textEdits } from '../messages/message-edit.ts';
 import { composerSchema, isOrdinaryRichText, readRichDocument, richDocumentSkills, serializePlainDocument, serializeRichDocument } from './rich-document.ts';
 import type { Node as ProseMirrorNode } from 'prosemirror-model';
-import { documentFromText, isPlainTextAgentDocument, projectTextAgentDocument, serializeTextAgentSegments, textAgentSegments } from './text-agent-document.ts';
+import { documentFromText, isPlainTextAgentDocument, projectTextAgentDocument, serializeTextAgentSegments, textAgentSegments, textInlineNode } from './text-agent-document.ts';
 import type { TextAgentSpan } from './text-agent-document.ts';
 
 export { documentFromText } from './text-agent-document.ts';
@@ -582,7 +582,7 @@ function remapAgentRanges(item: Record<string, unknown>, before: string, after: 
   if (!agents.length || !Array.isArray(item.text_elements) || !item.text_elements.length) return null;
   const encoder = new TextEncoder();
   const replacements = agents.map(agent => {
-    const node = composerSchema.nodes.agentMention!.create(agent.attrs);
+    const node = textInlineNode(agent);
     const document = composerSchema.nodes.doc!.create(null, composerSchema.nodes.paragraph!.create(null, node));
     return { ...agent, replacement: serializePlainDocument(document) };
   });

@@ -1,5 +1,5 @@
 import { EditorState } from 'prosemirror-state';
-import type { Node as ProseMirrorNode } from 'prosemirror-model';
+import type { Node as ProseMirrorNode, Schema } from 'prosemirror-model';
 import type { ComposerDocument } from '../workbench-contract.ts';
 import { documentChanges } from '../messages/message-edit.ts';
 import { composerSchema, readRichDocument, serializePlainDocument, serializeRichDocument } from './rich-document.ts';
@@ -9,12 +9,31 @@ export function documentFromText(text: string): ComposerDocument {
     ...(line ? { content: [{ type: 'text', text: line }] } : {}) })) };
 }
 
-export interface TextAgentSpan {
-  start: number;
-  end: number;
-  attrs: { name: string; displayName: string; conversationId: string | null; path: string };
-}
+export type TextAgentSpan = { start: number; end: number } & (
+  | { kind?: 'agent'; attrs: { name: string; displayName: string; conversationId: string | null; path: string } }
+  | { kind: 'plugin'; attrs: { name: string; displayName: string; path: string; description: string;
+      iconSmall: string; brandColor: string; computerUseAppMentionPath: string } });
 export interface TextMarkSpan { start: number; end: number; marks: { type: string; attrs?: Record<string, unknown> }[] }
+
+export function textInlineLabel(span: TextAgentSpan): string {
+  return (span.kind === 'plugin' ? '@' : '') + (span.attrs.displayName || span.attrs.name);
+}
+export function textInlineNode(span: TextAgentSpan, schema: Schema = composerSchema): ProseMirrorNode {
+  return schema.nodes[span.kind === 'plugin' ? 'pluginMention' : 'agentMention']!.create(span.attrs);
+}
+export function textInlineSpan(node: ProseMirrorNode, start: number, end: number): TextAgentSpan | null {
+  const attrs = node.attrs;
+  if (typeof attrs.name !== 'string' || typeof attrs.displayName !== 'string' || typeof attrs.path !== 'string') return null;
+  if (node.type.name === 'agentMention') {
+    if (attrs.conversationId !== null && typeof attrs.conversationId !== 'string') return null;
+    return { start, end, attrs: { name: attrs.name, displayName: attrs.displayName, conversationId: attrs.conversationId, path: attrs.path } };
+  }
+  if (node.type.name !== 'pluginMention' || typeof attrs.description !== 'string' || typeof attrs.iconSmall !== 'string'
+    || typeof attrs.brandColor !== 'string' || typeof attrs.computerUseAppMentionPath !== 'string') return null;
+  return { start, end, kind: 'plugin', attrs: { name: attrs.name, displayName: attrs.displayName, path: attrs.path,
+    description: attrs.description, iconSmall: attrs.iconSmall, brandColor: attrs.brandColor,
+    computerUseAppMentionPath: attrs.computerUseAppMentionPath } };
+}
 
 interface Token { start: number; end: number; from: number; to: number; node?: ProseMirrorNode }
 export interface TextAgentProjection { text: string; agents: TextAgentSpan[]; tokens: Token[] }
@@ -37,14 +56,12 @@ export function projectTextAgentDocument(doc: ProseMirrorNode): TextAgentProject
       let value: string;
       if (child.isText) value = child.text ?? '';
       else if (child.type === composerSchema.nodes.hard_break) value = '\n';
-      else if (child.type === composerSchema.nodes.agentMention) {
-        const attrs = child.attrs;
-        if (typeof attrs.name !== 'string' || typeof attrs.displayName !== 'string' || typeof attrs.path !== 'string'
-          || attrs.conversationId !== null && typeof attrs.conversationId !== 'string') return null;
-        value = attrs.displayName || attrs.name;
-        if (!value) return null;
-        agents.push({ start: text.length, end: text.length + value.length,
-          attrs: { name: attrs.name, displayName: attrs.displayName, conversationId: attrs.conversationId, path: attrs.path } });
+      else if (child.type === composerSchema.nodes.agentMention || child.type === composerSchema.nodes.pluginMention) {
+        const label = (child.type === composerSchema.nodes.pluginMention ? '@' : '') + (child.attrs.displayName || child.attrs.name);
+        const span = textInlineSpan(child, text.length, text.length + label.length);
+        if (!span || !label) return null;
+        value = label;
+        agents.push(span);
       } else return null;
       tokens.push({ start: text.length, end: text.length + value.length, from: childPos, to: childPos + child.nodeSize, node: child });
       text += value;
@@ -91,19 +108,21 @@ function positionAt(doc: ProseMirrorNode, projection: TextAgentProjection, offse
 
 /** Apply visible text edits and reinsert the exact agent atoms without flattening marks. */
 export function updateTextAgentDocument(original: ComposerDocument | undefined, before: string, after: string,
-  agents: readonly TextAgentSpan[]): ComposerDocument | null {
+  agents: readonly TextAgentSpan[], verifiedSuffixDeletion = false): ComposerDocument | null {
   const source = readRichDocument(original ?? documentFromText(before));
   const projected = source && projectTextAgentDocument(source);
   if (!source || !projected || projected.text !== before) return null;
   let state = EditorState.create({ doc: source });
   let flatten = state.tr;
-  for (const token of [...projected.tokens].reverse()) if (token.node?.type === composerSchema.nodes.agentMention) {
+  for (const token of [...projected.tokens].reverse()) if (token.node?.type === composerSchema.nodes.agentMention
+    || token.node?.type === composerSchema.nodes.pluginMention) {
     flatten = flatten.replaceWith(token.from, token.to, composerSchema.text(projected.text.slice(token.start, token.end), token.node.marks));
   }
   if (flatten.docChanged) state = state.apply(flatten);
   const styles = projected.tokens.flatMap(token => Array.from(projected.text.slice(token.start, token.end),
     () => JSON.stringify(token.node?.marks.map(mark => mark.toJSON()) ?? [])));
-  const changes = documentChanges(before, after, styles);
+  const changes = verifiedSuffixDeletion && before.startsWith(after) && before.length > after.length
+    ? [{ start: after.length, oldEnd: before.length, replacement: '' }] : documentChanges(before, after, styles);
   if (!changes) return null;
   for (const change of [...changes].reverse()) {
     const current = projectTextAgentDocument(state.doc);
@@ -114,7 +133,7 @@ export function updateTextAgentDocument(original: ComposerDocument | undefined, 
   }
   let previous = after.length;
   for (const agent of [...agents].sort((a, b) => b.start - a.start)) {
-    const label = agent.attrs.displayName || agent.attrs.name;
+    const label = textInlineLabel(agent);
     if (!label || agent.start < 0 || agent.end > previous || agent.end - agent.start !== label.length
       || after.slice(agent.start, agent.end) !== label) return null;
     previous = agent.start;
@@ -132,7 +151,7 @@ export function updateTextAgentDocument(original: ComposerDocument | undefined, 
     });
     if (!valid || !marks || marks.some(mark => mark.type.name === 'code' || mark.type.name === 'link')) return null;
     try {
-      const node = composerSchema.nodes.agentMention!.create(agent.attrs, null, marks);
+      const node = textInlineNode(agent).mark(marks);
       state = state.apply(state.tr.replaceWith(from, to, node));
     } catch { return null; }
   }

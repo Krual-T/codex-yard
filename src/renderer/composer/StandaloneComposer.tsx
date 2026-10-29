@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { ComposerDraft, StandaloneComposerProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
+import type { ComposerDocument, ComposerDraft, StandaloneComposerProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
-import { activatePending, canEditStructuredDraft, createId, documentFromText, draftToInput, editStructuredDraftText, hasContent, isStructuredAppInput, mergePrefill, prepareDraftInput, recoverLegacyDraft, removeStructuredImage, removeStructuredSkill, richEditIssue, structuredEditIssue, textEditIssue, updateDraftText, updateRichDraft } from './standalone-draft.ts';
+import { activatePending, canEditStructuredDraft, createId, documentFromText, draftToInput, editStructuredDraftText, hasContent, isStructuredAppInput, mergePrefill, normalizeDraft, prepareDraftInput, recoverLegacyDraft, removeStructuredImage, removeStructuredSkill, richEditIssue, structuredEditIssue, textEditIssue, updateDraftText, updateRichDraft } from './standalone-draft.ts';
 import { localizeDraftIssue } from './standalone-draft-issues.ts';
 import { useComposerDraft } from './use-composer-draft.ts';
 import type { ComposerDraftController, ComposerDraftExternalOperation, ComposerDraftLease } from './use-composer-draft.ts';
 import type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescription } from './composer-draft-store.ts';
+import { composerDraftAtomKey, updateComposerDraftVersionInRoot } from './composer-draft-store.ts';
+import { updateBrowserAtoms } from '../storage/ui-atoms.ts';
 import { importAttachments } from './standalone-files.ts';
 import { useCompletions } from './standalone-completions.tsx';
 import type { Completion } from './standalone-completions.tsx';
@@ -23,7 +25,7 @@ import type { FollowUpAction } from './standalone-follow-up.ts';
 import { StandaloneTarget } from './standalone-target.tsx';
 import type { ComposerHost, ComposerProjectChoice, ComposerProjectDisplay, ComposerTarget } from './standalone-target.tsx';
 import { StandalonePlainInputEditor, StandaloneRichEditor, StandaloneStructuredInputEditor } from './StandaloneRichEditor.tsx';
-import type { RichEditorHandle, StructuredInputEditorHandle, TextAgentChange, TextMarkSpan, TextPasteEvent, TextSkillChange } from './StandaloneRichEditor.tsx';
+import type { PreparedPromptAppend, RichEditorHandle, StructuredInputEditorHandle, TextAgentChange, TextAgentSegment, TextMarkSpan, TextPasteEvent, TextSkillChange } from './StandaloneRichEditor.tsx';
 import type { RichCompletionContext } from './rich-editor-actions.ts';
 import { readRichDocument, serializePlainDocument, serializeRichDocument } from './rich-document.ts';
 import { applyTextAgentMarks, isPlainTextAgentDocument, projectTextAgentDocument, textAgentSegments, updateTextAgentDocument } from './text-agent-document.ts';
@@ -40,12 +42,28 @@ export type { QueueEditEntry } from './standalone-queue-storage.ts';
 export type { DispatchQueueMutation, QueueMutationMethod } from './standalone-queue.tsx';
 export type { ComposerProjectChoice } from './standalone-target.tsx';
 export type ComposerReference = NonNullable<ComposerDraft['references']>[number];
+export interface ComposerPromptAppendPort {
+  begin(owner: ComposerDraftOwner, assertOriginal: () => void): {
+    append(document: ComposerDocument): Promise<{ status: 'accepted' | 'committed-unaccepted' }>;
+    cancel(): void;
+  } | null;
+}
 interface ChatSelection {
   controller: ComposerDraftController; isCurrentEditor(): boolean; insert(choice: ChatChoice): boolean;
   owner: ComposerDraftOwner; revision: string; cwd: string;
 }
 interface ChatLookup {
   id: number; selection: ChatSelection; client: WorkbenchClient; hostId: string; search: string; assertOwner(): void; assertOriginal(): void;
+}
+interface PromptAppendRuntime {
+  controller: ComposerDraftController;
+  owner: ComposerDraftOwner;
+  cwd: string;
+  enabled: boolean;
+  editor(): RichEditorHandle | StructuredInputEditorHandle | null;
+  prepare(before: ComposerDraft, addition: ComposerDocument, editor: RichEditorHandle | StructuredInputEditorHandle): {
+    draft: ComposerDraft; stage: PreparedPromptAppend; textControl: boolean; index?: number;
+  } | null;
 }
 export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSubmit'> & {
   /** An archived conversation keeps its draft without reading a mutable CLI queue. */
@@ -76,6 +94,7 @@ export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSu
   onPrefillConsumed?: (id: string) => void;
   onDraftController?: (controller: ComposerDraftController | null) => void;
   onDraftChange?: (snapshot: ComposerDraftSnapshot) => void;
+  onPromptAppendPort?: (port: ComposerPromptAppendPort | null) => void;
   onRemoveReference?: (owner: ComposerDraftOwner, reference: ComposerReference, operation: ComposerDraftExternalOperation) => Promise<'handled' | void>;
 };
 
@@ -87,6 +106,26 @@ function sandboxKey(policy: SubmitOptions['sandboxPolicy']): string | undefined 
 function completionEnd(text: string, end: number, token: string): number {
   const suffix = text.slice(end).match(token.startsWith('@') ? /^[^\s@$\ufffc]*/ : /^[^\s@$\/\ufffc]*/)?.[0] ?? '';
   return end + suffix.length;
+}
+function unchangedHistoryPrefix(before: TextAgentSegment, after: TextAgentSegment): boolean {
+  if (before.index !== after.index || !before.text.startsWith(after.text)) return false;
+  const limit = after.text.length;
+  const atoms = (value: TextAgentSegment) => {
+    const retained = value.agents.filter(agent => agent.start < limit);
+    return retained.some(agent => agent.end > limit) ? null : JSON.stringify(retained);
+  };
+  const marks = (value: TextAgentSegment) => {
+    const result: { start: number; end: number; marks: string }[] = [];
+    for (const span of value.marks) {
+      if (span.start >= limit) break;
+      const end = Math.min(span.end, limit), serialized = JSON.stringify(span.marks), last = result.at(-1);
+      if (last && last.end === span.start && last.marks === serialized) last.end = end;
+      else result.push({ start: span.start, end, marks: serialized });
+    }
+    return JSON.stringify(result);
+  };
+  const oldAtoms = atoms(before), newAtoms = atoms(after);
+  return oldAtoms !== null && oldAtoms === newAtoms && marks(before) === marks(after);
 }
 function referenceLabel(reference: ComposerReference): string {
   const browser = reference.context?.localBrowserContext;
@@ -107,7 +146,7 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
   }}><summary>{name}</summary>{preview == null ? t('Reading...') : <pre>{preview}</pre>}</details>;
 }
 
-function ComposerSession({ client, context, busy, readOnly = false, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, removeQueuedOriginal, dispatchQueueMutation, prefill, activeTurnId, initialOptions, hosts, projectDisplay, projectChoices, selectedProjectId, onProjectChange, onOpenGoal, fullAccessVisible, onEffectiveOptionsChange, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
+function ComposerSession({ client, context, busy, readOnly = false, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, removeQueuedOriginal, dispatchQueueMutation, prefill, activeTurnId, initialOptions, hosts, projectDisplay, projectChoices, selectedProjectId, onProjectChange, onOpenGoal, fullAccessVisible, onEffectiveOptionsChange, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onPromptAppendPort, onRemoveReference }: StandaloneComposerRuntimeProps) {
   const { t, locale } = useI18n('zh-CN');
   const inputRoot = useRef<HTMLDivElement>(null);
   const projectSource = useRef({ context, projectChoices, selectedProjectId, onProjectChange });
@@ -199,6 +238,8 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
   const editor = useRef<StructuredInputEditorHandle>(null);
   const richEditor = useRef<RichEditorHandle>(null);
   const structuredEditor = useRef<StructuredInputEditorHandle>(null);
+  const promptAppendRuntime = useRef<PromptAppendRuntime | null>(null);
+  const promptAppendPort = useRef<ComposerPromptAppendPort | null>(null);
   // Keep the original text control and its history after its first agent insertion.
   const composerOwnerKey = JSON.stringify([owner.hostId, owner.threadId, owner.draftId]);
   const textAgentView = useRef<string | null>(null);
@@ -624,7 +665,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
     return result;
   };
   const markSegments = richActive ? new Map<number, TextMarkSpan[]>() : marksForDraft(draft);
-  const projectAgentEdit = (before: typeof draft, next: typeof draft, agents?: TextAgentChange): typeof draft | null => {
+  const projectAgentEdit = (before: typeof draft, next: typeof draft, agents?: TextAgentChange, inputType?: string): typeof draft | null => {
     if (!agents || ![...agents.before, ...agents.after].some(segment => segment.agents.length)) return next;
     const entries = segmented && next.input ? next.input.flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
       ? [{ index, text: entry.text }] : []) : [{ index: -1, text: next.text }];
@@ -653,10 +694,136 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
       marks.push(...segment.marks.map(mark => ({ ...mark, start: mark.start + offset, end: mark.end + offset })));
       offset += entry.text.length + 1;
     }
-    const document = updateTextAgentDocument(before.document, before.text, next.text, spans);
+    const originalAgents = agentsForDraft(before), originalMarks = marksForDraft(before);
+    const verifiedSuffixDeletion = inputType === 'historyUndo' && !!before.document && before.text.startsWith(next.text)
+      && before.text.length > next.text.length && agents.before.length === agents.after.length && agents.after.every(after => {
+        const previous = agents.before.find(segment => segment.index === after.index);
+        const item = segmented ? before.input?.[after.index] : undefined;
+        const originalText = segmented ? item?.type === 'text' && typeof item.text === 'string' ? item.text : null : before.text;
+        const marks = originalMarks.get(after.index);
+        return !!previous && originalText !== null && !!marks && unchangedHistoryPrefix(previous, after)
+          && unchangedHistoryPrefix(previous, { index: after.index, text: originalText,
+            agents: originalAgents.get(after.index) ?? [], marks });
+      });
+    const document = updateTextAgentDocument(before.document, before.text, next.text, spans, verifiedSuffixDeletion);
     const marked = document && applyTextAgentMarks(document, marks);
     return marked ? { ...next, document: marked } : null;
   };
+  promptAppendRuntime.current = {
+    controller, owner, cwd: context.cwd, enabled: !readOnly && loaded && !editIssue && !unresolved,
+    editor: () => richActive ? richEditor.current : segmented ? structuredEditor.current : editor.current,
+    prepare(beforeValue, addition, originalEditor) {
+      const before = normalizeDraft(beforeValue), source = before.document ?? documentFromText(before.text);
+      if (segmented) {
+        if (!canEditStructuredDraft(before) || !('visibleText' in originalEditor)) return null;
+        const entries = before.input?.flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
+          ? [{ index, text: entry.text }] : []) ?? [];
+        const last = entries.at(-1);
+        if (!last) return null;
+        const stage = originalEditor.preparePromptAppend(source, addition, last.index);
+        if (!stage?.agents) return null;
+        const expectedAgents = agentsForDraft(before), expectedMarks = marksForDraft(before);
+        for (const entry of entries) {
+          const displayed = stage.agents.before.find(segment => segment.index === entry.index);
+          if (!displayed || displayed.text !== entry.text
+            || JSON.stringify(displayed.agents) !== JSON.stringify(expectedAgents.get(entry.index) ?? [])) return null;
+          const marks = expectedMarks.get(entry.index);
+          if (marks ? JSON.stringify(displayed.marks) !== JSON.stringify(marks)
+            : displayed.marks.some(mark => mark.marks.length)) return null;
+        }
+        const { document: _document, ...withoutDocument } = before;
+        const edited = editStructuredDraftText(withoutDocument, last.index, last.text, stage.text);
+        const projected = edited.draft && projectAgentEdit(before, edited.draft, stage.agents);
+        return projected ? { draft: projected, stage, textControl: false, index: last.index } : null;
+      }
+      if (before.document ? richEditIssue(before) : textEditIssue(before)) return null;
+      const stage = originalEditor.preparePromptAppend(source, addition);
+      if (!stage?.document) return null;
+      const updated = updateRichDraft(before.document ? before : { ...before, document: source }, stage.document);
+      if (updated.document !== stage.document) return null;
+      return { draft: updated, stage, textControl: 'visibleText' in originalEditor };
+    },
+  };
+  if (!promptAppendPort.current) {
+    promptAppendPort.current = { begin(requestedOwner, assertOriginal) {
+      const runtime = promptAppendRuntime.current;
+      if (!runtime?.enabled || frozenRef.current || activeController.current !== runtime.controller
+        || requestedOwner.hostId !== runtime.owner.hostId || requestedOwner.threadId !== runtime.owner.threadId
+        || requestedOwner.draftId !== runtime.owner.draftId) return null;
+      const source = runtime.editor();
+      if (!source) return null;
+      assertOriginal();
+      const capturedOwner = structuredClone(runtime.owner), capturedCwd = runtime.cwd;
+      const operation = runtime.controller.beginExternalOperation(capturedOwner);
+      if (!operation) return null;
+      let ended = false, running = false, used = false, cancelled = false;
+      const verify = () => {
+        assertOriginal();
+        const next = promptAppendRuntime.current, location = projectSource.current.context;
+        if (cancelled || !next?.enabled || next.controller !== runtime.controller || next.editor() !== source
+          || activeController.current !== runtime.controller || location.hostId !== capturedOwner.hostId || location.cwd !== capturedCwd
+          || next.owner.threadId !== capturedOwner.threadId || next.owner.draftId !== capturedOwner.draftId) {
+          throw new Error('The original composer or its authority changed.');
+        }
+      };
+      return {
+        async append(addition) {
+          if (ended || used) throw new Error('This prompt append has already ended.');
+          used = true; running = true;
+          let accepted = false;
+          try {
+            const captured = structuredClone(addition);
+            let prepared: ReturnType<PromptAppendRuntime['prepare']> = null;
+            const receipt = await operation.transaction(async (before, isCurrent) => {
+              verify();
+              if (!isCurrent()) throw new Error('The original draft changed before the append.');
+              prepared = runtime.prepare(before.draft, captured, source);
+              if (!prepared) throw new Error('This prompt cannot be appended without changing the original draft.');
+              const nextDraft = prepared.draft;
+              const after = await updateBrowserAtoms(atoms => {
+                verify();
+                if (!isCurrent()) throw new Error('The original draft changed before it was saved.');
+                const result = updateComposerDraftVersionInRoot(atoms[composerDraftAtomKey], before, () => nextDraft, createId());
+                if (!result.changed) throw new Error('The prompt append did not change the draft.');
+                return { value: result.after, updates: { [composerDraftAtomKey]: result.root } };
+              });
+              return { after, value: null };
+            }, () => {
+              verify();
+              if (!prepared || !prepared.stage.apply()) return false;
+              if (prepared.textControl) {
+                textAgentView.current = composerOwnerKey;
+                setTextFormattingOwner(composerOwnerKey);
+                setTextFormatValue(prepared.stage.text);
+              }
+              return true;
+            });
+            accepted = receipt.accepted;
+            if (accepted) requestAnimationFrame(() => {
+              if (activeController.current !== runtime.controller || promptAppendRuntime.current?.editor() !== source) return;
+              if ('visibleText' in source) source.focus(prepared?.index); else source.focus();
+            });
+            return { status: accepted ? 'accepted' as const : 'committed-unaccepted' as const };
+          } catch (reason) {
+            if (activeController.current === runtime.controller) setError(t('Could not switch drafts:') + message(reason));
+            throw reason;
+          } finally {
+            running = false;
+            if (!ended) { ended = true; operation.finish(accepted); }
+          }
+        },
+        cancel() {
+          cancelled = true;
+          if (!running && !ended) { ended = true; operation.finish(false); }
+        },
+      };
+    } };
+  }
+  useLayoutEffect(() => {
+    const port = promptAppendPort.current;
+    if (port) onPromptAppendPort?.(port);
+    return () => onPromptAppendPort?.(null);
+  }, [onPromptAppendPort]);
   const editSegment = (index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange) => {
     if (frozenRef.current) return false;
     if (expected !== text || inputType === 'historyUndo' || inputType === 'historyRedo') completions.show();
@@ -665,7 +832,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
     const { document: _document, ...withoutDocument } = before;
     const result = editStructuredDraftText(hasAgents ? withoutDocument : before, index, expected, text);
     if (!result.draft) { setError(translateKnown(t, result.error)); return false; }
-    const next = projectAgentEdit(before, projectCompletionSkills(result.draft, skills), agents);
+    const next = projectAgentEdit(before, projectCompletionSkills(result.draft, skills), agents, inputType);
     if (!next) { setError('The chat reference cannot be inserted without changing retained formatting or input.'); return false; }
     setError('');
     void changeDraft(value => value === before ? next : value);

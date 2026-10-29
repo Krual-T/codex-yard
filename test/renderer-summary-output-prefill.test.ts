@@ -37,6 +37,9 @@ test('the four original actions retain their distinct full prompts and plugin no
       result.mention,
       { type: 'text', text: '. Start by asking me what it should be about.' },
     ]);
+    assert.ok(readRichDocument(result.document));
+    assert.deepEqual(draftToInput({ text: result.prompt, images: [], files: [], document: result.document }, context.hostId),
+      [{ type: 'text', text: result.prompt, text_elements: [] }]);
     assert.deepEqual(result.observation, { status: 'unknown', warnings: [] });
   }
 });
@@ -102,11 +105,11 @@ test('translated templates preserve the reference position and reject lossy subs
   }
 });
 
-test('current composer protects a plugin node and keeps an existing structured draft intact', () => {
+test('composer serializes the real plugin node and keeps the existing pending-prefill contract', () => {
   const result = createSummaryOutputPrefill({ kind: 'document', context });
   const incoming: ComposerDraft = { text: result.prompt, images: [], files: [], document: result.document };
-  assert.equal(readRichDocument(result.document), null);
-  assert.throws(() => draftToInput(incoming, context.hostId), /无损/);
+  assert.ok(readRichDocument(result.document));
+  assert.deepEqual(draftToInput(incoming, context.hostId), [{ type: 'text', text: result.prompt, text_elements: [] }]);
   const current = normalizeDraft({ text: 'existing', images: [{ id: 'image', src: 'data:image/png;base64,AA==' }],
     files: [], document: { type: 'doc', content: [{ type: 'paragraph', content: [
       { type: 'text', text: 'existing', marks: [{ type: 'strong' }] },
