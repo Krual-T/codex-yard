@@ -1824,7 +1824,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           onController={receiveSideChatController} onActiveChild={receiveSideChatChild}
           freezeChildOwner={freezeSideChatOwner} cancelSend={(intent, guard) => sendStore.cancelOriginal(intent, guard)}
           cleanupChild={cleanupSideChat}
-          onClosed={identity => { if (sideChatActive.current?.identity.prepareId === identity.prepareId) setPanelOpen(false); }}
+          onClosed={identity => {
+            const location = routeRef.current;
+            if (!location.section && location.hostId === identity.hostId && location.threadId === identity.parentThreadId
+              && sideChats.current?.listMounted().some(value => value.active && sameSummarySideChat(value.identity, identity))) setPanelOpen(false);
+          }}
           onExitObservation={() => setPanelOpen(false)}
           onRemoveReference={(_child, owner, reference, operation) => removeBrowserDraftReference(browserDraftOwner(owner, sendBindings.current), reference,
             operation, retainBrowserProjection, releaseBrowserProjection)}
