@@ -406,7 +406,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const generation = ++projectGeneration.current;
     const response = ++projectResponseGeneration.current;
     const state = await client.host<ProjectState>('thread-project-state');
-    if (generation === projectGeneration.current && response === projectResponseGeneration.current) setProjectState(state);
+    if (generation === projectGeneration.current && response === projectResponseGeneration.current) {
+      projectStateRef.current = state; setProjectState(state);
+    }
   }, [client]);
 
   const navigate = useCallback((path: string, options?: { replace?: boolean; delta?: number; state?: unknown }, assertBeforeCommit?: () => void) => {
@@ -583,7 +585,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       }
       if (event.type === 'settings-changed' || event.type === 'global-state-updated') void reloadPreferences().catch(cause => setError(String(cause)));
       if (event.type === 'thread-project-memberships-updated' || event.type === 'global-state-updated'
-        && (!Array.isArray(event.keys) || !event.keys.length || event.keys.some(key => ['local-projects', 'remote-projects', 'thread-project-assignments', 'projectless-thread-ids'].includes(String(key))))) {
+        && (!Array.isArray(event.keys) || !event.keys.length || event.keys.some(key => ['local-projects', 'remote-projects', 'thread-project-assignments', 'projectless-thread-ids',
+          'thread-projectless-output-directories', 'thread-workspace-root-hints'].includes(String(key))))) {
+        // Revoke the old directory before awaiting replacement project facts.
+        projectStateRef.current = null; setProjectState(null);
         setSettingsSourceEpoch(value => value + 1);
         void reloadProjects().catch(cause => setError(String(cause)));
       }
@@ -1255,7 +1260,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     setSideChatSource(child);
     setVisualization(source); setPanelKind('visualization'); setPanelOpen(true);
   };
-  const showPanel = (request?: { kind: 'terminal'; reuse?: boolean } | { kind: 'file'; path: string; line?: number; column?: number } | { kind: 'diff'; path?: string; diff?: string }, child: SideChatPanelSource | null = null) => {
+  const showPanel = (request?: { kind: 'terminal'; reuse?: boolean } | { kind: 'file'; path: string; line?: number; column?: number; assertCurrent?: () => void } | { kind: 'diff'; path?: string; diff?: string }, child: SideChatPanelSource | null = null) => {
+    if (request?.kind === 'file') request.assertCurrent?.();
     if (child) checkPanelChild(child);
     const hostId = child?.owner.hostId ?? current.hostId, threadId = child?.owner.threadId ?? current.threadId;
     const scopeId = JSON.stringify([hostId, child?.owner.draftId ?? threadId ?? newDraftId]);
@@ -1269,8 +1275,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     setPanelMounted(true); setPanelKind('workspace'); setPanelOpen(true);
     if (request) setPanelRequest({ ...request, id: crypto.randomUUID(), scopeId, hostId, cwd: targetCwd });
   };
-  const openFile = (path: string, line?: number, column?: number, fileCwd = thread?.cwd || cwd || workspace) =>
-    showPanel({ kind: 'file', path: resolveFilePath(fileCwd, path), line, column });
+  const openFile = (path: string, line?: number, column?: number, fileCwd = thread?.cwd || cwd || workspace, assertCurrent?: () => void) =>
+    showPanel({ kind: 'file', path: resolveFilePath(fileCwd, path), line, column, assertCurrent });
   const openSettingsConfig = (hostId: string, file: string, input: ConfigReadSource) => {
     void (async () => {
       const original = routeRef.current, generation = navigationGeneration.current;
@@ -1449,17 +1455,18 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       throw new Error('The original summary conversation changed.');
   };
   const messageOutputPage = current;
+  const messageOutputProjectGeneration = projectGeneration.current;
   let messageOutputDaemon: ReturnType<BrowserWorkbenchClient['captureDaemonConnection']> | null = null;
   try { messageOutputDaemon = client.captureDaemonConnection(current.hostId); } catch { /* The existing connection projection will retry. */ }
   const messageOutputAuthority = (hostId: string, threadId: string, cwd: string): MessageOutputPreviewAuthority => {
     const directory = threadOutputDirectory(projectState, hostId, threadId), directoryKey = JSON.stringify(directory);
     return {
-      sourceKey: JSON.stringify([summarySourceKey, navigationFactsEpoch, hostId, threadId, cwd, directoryKey]),
+      sourceKey: JSON.stringify([summarySourceKey, navigationFactsEpoch, messageOutputProjectGeneration, hostId, threadId, cwd, directoryKey]),
       outputDirectory: directory,
       assertCurrent() {
         if (!messageOutputDaemon) throw new Error('The original output connection is unavailable.');
         messageOutputDaemon.assertOriginal(); assertSummaryCurrent();
-        if (routeRef.current !== messageOutputPage || hostId !== messageOutputPage.hostId
+        if (projectGeneration.current !== messageOutputProjectGeneration || routeRef.current !== messageOutputPage || hostId !== messageOutputPage.hostId
           || JSON.stringify(threadOutputDirectory(projectStateRef.current, hostId, threadId)) !== directoryKey)
           throw new Error('The original output conversation or directory changed.');
       },
@@ -1765,7 +1772,10 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
             onEditDraftChange={(value, origin, version, authority) => editStore.save(value, origin, version, authority)}
             onOpenFile={openFile} onOpenFileAt={location => {
               if (location.hostId !== current.hostId) { setError('文件所属主机已改变，请返回原会话打开。'); return; }
-              openFile(location.path, location.line, location.column, location.cwd ?? panelCwd);
+              if (!current.threadId || !thread) throw new Error('The original file conversation is unavailable.');
+              const authority = messageOutputAuthority(current.hostId, current.threadId, thread.cwd);
+              const assertCurrent = () => { location.assertCurrent?.(); authority.assertCurrent(); };
+              openFile(location.path, location.line, location.column, location.cwd ?? panelCwd, assertCurrent);
             }} onOpenVisualization={showVisualization} onOpenBrowser={showBrowser}
             onEdit={current.readOnly ? undefined : (draft, origin, prepare?: () => Promise<void>) => submit(draft, {}, { type: 'send' }, origin, undefined, undefined, undefined, prepare)} onFork={turnId => action('fork', turnId)} /> : <div className="yard-home-heading"><img src="/brand/icon.svg" alt="" /><h1>{activeProject
               ? <>{chinese ? '我们应该在' : 'What should we work on in'}{' '}<button aria-haspopup="menu" aria-expanded={projectPickerOpen} onClick={() => setProjectPickerOpen(value => !value)}>{activeProject.name}</button>{chinese ? '中做些什么？' : '?'}</>
@@ -1867,7 +1877,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           onOpenFile={value => {
             const child = sideChatActive.current;
             if (!child || child.owner.hostId !== value.hostId || child.owner.threadId !== value.threadId) throw new Error('原侧聊文件来源已改变。');
-            showPanel({ kind: 'file', path: resolveFilePath(value.cwd ?? child.identity.cwd, value.path), line: value.line, column: value.column }, child);
+            const authority = messageOutputAuthority(child.owner.hostId, child.owner.threadId!, value.cwd ?? child.identity.cwd);
+            const assertCurrent = () => { value.assertCurrent?.(); checkPanelChild(child); authority.assertCurrent(); };
+            showPanel({ kind: 'file', path: resolveFilePath(value.cwd ?? child.identity.cwd, value.path), line: value.line, column: value.column, assertCurrent }, child);
           }}
           onOpenBrowser={value => {
             const child = sideChatActive.current;

@@ -497,9 +497,16 @@ export function SideChatRoot(props: SideChatRootProps) {
           || !current || !sameOwner(current.owner, owner)) throw beforeSend('原侧聊草稿已改变。');
         return latest.current.onRemoveReference(current, owner, reference, operation);
       }}
-      onOpenFile={value => { assertEntry(entry); if (navigating.current || entry.frozen || active.current !== entry.identity.draftId
-        || value.hostId !== entry.identity.hostId || value.threadId !== child(entry)?.owner.threadId)
-        throw beforeSend('原侧聊文件目标已改变。'); latest.current.onOpenFile(value); }}
+      onOpenFile={value => {
+        const activation = entry.activation;
+        const assertCurrent = () => {
+          assertEntry(entry); value.assertCurrent?.();
+          if (navigating.current || entry.frozen || entry.activation !== activation || active.current !== entry.identity.draftId
+            || value.hostId !== entry.identity.hostId || value.threadId !== child(entry)?.owner.threadId)
+            throw beforeSend('原侧聊文件目标已改变。');
+        };
+        assertCurrent(); latest.current.onOpenFile({ ...value, assertCurrent });
+      }}
       onOpenBrowser={value => { assertEntry(entry); if (navigating.current || entry.frozen || active.current !== entry.identity.draftId
         || value.hostId !== entry.identity.hostId || value.threadId !== child(entry)?.owner.threadId)
         throw beforeSend('原侧聊浏览器目标已改变。'); latest.current.onOpenBrowser(value); }}

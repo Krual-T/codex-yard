@@ -2,7 +2,7 @@
 
 2026-10-29 用户范围修订：Mini/Pets 本次禁用，移除实际 App 挂载、入口和对主输入的租约控制；旧启用偏好不再唤起界面。保留已有草稿、身份指针、偏好数据与 Git 历史，不添加功能开关框架。SideChat 是独立临时侧聊能力，继续使用共享会话/草稿服务和真实主界面。
 
-实施设计 v24，2026-10-30。原稿恢复、协议来源、正常消息引用及 Main/SideChat 文件预览使用实际页面消费者；输入历史在事务前核对权威稿与技能归属，外部删除不能由旧 undo/redo 恢复。整个 `vendor/codex-app/` 已删除，覆盖当前 Yard Web 的 F00–F23 功能账，Mini/Pets 按上述用户裁决禁用。干净来源的安装、构建、实际启动和验收必须对应同一已提交来源；具体结果在独立交付材料记录。本设计替代固定函数注入方案，Git 历史只作为行为研究依据。
+实施设计 v25，2026-10-30。原稿恢复、协议来源、正常消息引用及 Main/SideChat 文件预览使用实际页面消费者；输入历史在事务前核对权威稿与技能归属，外部删除不能由旧 undo/redo 恢复。整个 `vendor/codex-app/` 已删除，覆盖当前 Yard Web 的 F00–F23 功能账，Mini/Pets 按上述用户裁决禁用。干净来源的安装、构建、实际启动和验收必须对应同一已提交来源；具体结果在独立交付材料记录。本设计替代固定函数注入方案，Git 历史只作为行为研究依据。
 
 ## 入口与现有能力
 
@@ -38,6 +38,8 @@
 Summary Outputs 从当前 ConversationSessions 的完整消息、原 thread-projects 输出和可读文件投影产生。资源结果和旧 MCP Google/Figma/Notion 结构按同一事件/别名规则去重；缺失文件不显示为可打开产物，后端不支持或元数据不完整时保留真实 notice/错误和重试。hook 捕获当前 host/thread、导航及连接，打开前复核原 entry 和来源；本地文件交原 workspace-files，HTTP(S) 交既有链接动作，不创建产物后端。四种 Create 入口按原插件 mention 追加到当前 Main 富文档和历史，不能将追加称为已发送或产物已生成。
 
 消息中的本地文件产物按同一 turn 的输出引用合并，完成或失败后才检查原 host 的 paths-exist；读取中不把候选当成存在，失败保留原候选与重试，明确缺失则不展示卡片。App 捕获当前页面和原 daemon，复用 Summary 对现有项目状态的 threadOutputDirectory 纯投影，向 Main 和 SideChat 传递原 host/thread/cwd、目录事实和导航/连接来源；没有第二份目录状态。SideChat 再叠加其原挂载、child 和冻结检查，打开仍走既有父文件回调。目录未知显示未核实，已知目录只允许其内文件；导航、连接或目录变化使旧读取与打开失效。外部应用发现没有对应 Web host 端点，Open in 保留明确不可用说明，不添加伪造应用列表。公共 turn 协议未提供独立 cwd 时，相对路径沿用真实 thread.cwd，不能承诺恢复不可读的历史 turn 工作目录。
+
+项目归属、工作目录提示及输出目录通知同步清除旧目录事实，沿现有项目读取代次重新查询；替代事实未返回或读取失败时保持未知。消息文件动作把本次卡片的同步核查闭包作为可选 `assertCurrent`，经 Main 或 SideChat 的原 activation、openFile/showPanel 传至 `FilePanelRequest`。文件服务在原 host 的两次读取派发与回包及接收新标签前核查；失效只移除本次尚未成功的占位，不删除已有标签、草稿或恢复记录。成功标签和普通文件树、Reload 沿原生命周期，不永久携带本次卡片的授权。
 
 WorkbenchClient 提供 `rpc(method,params,hostId)`、`host(endpoint,params)`、事件 `subscribe` 和审批 `reply(ref,response)`。它使用 `/native-host` WebSocket，关联请求id、超时及响应错误，建立后发送ready。reply为必需方法，反向请求有必填ServerRequestEvent.requestRef；浏览器验证后才交UI。审批ref由服务端产生，包含hostId、每个请求唯一的generation和原请求id，并在宿主绑定原连接。generation不是host代次，同host的不同请求可有不同值。只向收到请求的原连接发送，禁止回复时自动重连；resolved/取消/断开使原ref失效，同ID新请求不能接受旧ref。服务端发送回执表示已转发，不能声称daemon已完成业务处理；发送不确定时保留未知结果，不能自动再次批准。
 

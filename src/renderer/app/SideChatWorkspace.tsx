@@ -98,7 +98,8 @@ export interface SideChatWorkspaceProps {
   onProjectionChange?(projection: SideChatWorkspaceProjection): void;
   onRemoveReference?: StandaloneComposerRuntimeProps['onRemoveReference'];
   onEditNavigationController?(controller: MessageEditNavigationController | null): void;
-  onOpenFile?(location: { hostId: string; threadId: string; path: string; cwd?: string; line?: number; column?: number }): void;
+  onOpenFile?(location: { hostId: string; threadId: string; path: string; cwd?: string; line?: number; column?: number;
+    assertCurrent?: () => void }): void;
   /** Read-only project facts and the original page/connection; the workspace adds its own child guard. */
   outputPreviewAuthority?(identity: SideChatWorkspaceIdentity, threadId: string, cwd: string): MessageOutputPreviewAuthority;
   onOpenBrowser?(value: { hostId: string; threadId: string; url?: string; source?: 'link' }): void;
