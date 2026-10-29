@@ -9,6 +9,7 @@ import { sessionOptions } from './session-options.ts';
 import { captureDraftInjection, submitDraft } from './submission.ts';
 import { sendsAtom, sendThreadKey } from './send-recovery.ts';
 import type { SendIntent, SendRecoveryStore } from './send-recovery.ts';
+import type { SendInjectionAuthority } from './send-injection-client.ts';
 import { readVisualizationModelContext } from '../visualizations/state.ts';
 import { isThreadBusy } from './thread-state.ts';
 
@@ -33,6 +34,8 @@ export interface ConversationSendServices {
   /** Synchronously check the original owner, connection, and writable session. */
   guard(threadId: string | null, allowFirstTurn: boolean): void;
   dispatch: ConversationWriteDispatch;
+  /** Captured with the same original submission grant, before this function awaits. */
+  nativeInjectionAuthority?: SendInjectionAuthority;
   /** Freeze and drain the original owner before its created-thread binding. */
   prepareCreated(): Promise<void>;
   selectCreated(thread: ThreadSummary): Promise<void>;
@@ -112,6 +115,10 @@ export async function sendConversationDraft(services: ConversationSendServices, 
   draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, description: ComposerSubmissionDescription,
   retry?: SendIntent) {
   const { client, sessions, sends, guard } = services;
+  const nativeAuthority = services.nativeInjectionAuthority && {
+    daemonConnectionGeneration: services.nativeInjectionAuthority.daemonConnectionGeneration,
+    assertBeforeSend: services.nativeInjectionAuthority.assertBeforeSend,
+  };
   const captured = structuredClone({ scope, draft, options, action, description, retry });
   const original = captured.scope;
   ({ draft, options, action, description, retry } = captured);
@@ -200,7 +207,7 @@ export async function sendConversationDraft(services: ConversationSendServices, 
         }
         return client.rpc<T>(method, params, hostId, options);
       },
-      host: (endpoint, params) => client.host(endpoint, params),
+      host: (endpoint, params, options) => client.host(endpoint, params, options),
       subscribe: listener => client.subscribe(listener),
       reply: (ref, response) => client.reply(ref, response),
     };
@@ -210,6 +217,7 @@ export async function sendConversationDraft(services: ConversationSendServices, 
       documentPlainTextMode: intent.documentPlainTextMode, additionalContext: intent.additionalContext,
       collaborationMode: intent.collaborationMode, createdOptions: intent.created?.settings,
       injection: intent.injection,
+      ...(intent.injection && nativeAuthority ? { nativeInjection: { store: sends, intent, authority: nativeAuthority } } : {}),
       assertInjectionAuthority: target => {
         guard(target, allowFirstTurn);
         if (isThreadBusy(sessions.view({ hostId: original.hostId, threadId: target }).snapshot().thread)) throw Object.assign(new Error('当前任务仍在运行，原 app 上下文未发送。'), { uncertain: false });
@@ -236,6 +244,13 @@ export async function sendConversationDraft(services: ConversationSendServices, 
         resolvedCollaboration: async mode => { await sends.resolvedCollaboration(intent!.id, mode, intent!.attemptId); },
       },
     }, draft, options, action, selectCreated);
+    if (intent.injection && result.turn) {
+      const settled = (await sends.read()).requests[intent.id];
+      confirmed = !!settled && settled.stage === 'confirmed' && settled.attemptId === intent.attemptId
+        && settled.revision === intent.revision && same(settled.owner, intent.owner)
+        && settled.clientUserMessageId === intent.clientUserMessageId && settled.turnId === result.turn.id;
+      if (!confirmed) throw new Error('原上下文消息的持久发送回执尚未核对，原稿已保留。');
+    }
     if (result.turn) sessions.started({ hostId: original.hostId, threadId: result.threadId }, result.turn);
     try { await finishConversationSend(sends, intent, services.cleanup); }
     catch (cause) {

@@ -487,6 +487,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     read();
     const unsubscribe = client.subscribe(event => {
       if (event.type === 'persisted-atom-updated' && (!Array.isArray(event.keys) || !event.keys.length || event.keys.includes(sendsAtom))) read();
+      if (event.type === 'send-injection-updated') void sendStore.checkNativeHint(event).then(read).catch(cause => {
+        if (active) setError(String(cause));
+      });
     });
     return () => { active = false; sendReadGeneration.current++; unsubscribe(); };
   }, [client, reloadSends]);
@@ -675,6 +678,14 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         overrides: origin ? {} : description?.overrides, additionalContext: intent ? intent.additionalContext : additionalContext,
         collaborationMode: intent?.collaborationMode, createdOptions: intent?.created?.settings,
         injection: intent?.injection,
+        ...(intent?.injection ? { nativeInjection: { store: sendStore, intent, authority: {
+          daemonConnectionGeneration: daemon.generation, assertBeforeSend: (target: string) => {
+            requireCurrent(target);
+            if (isThreadBusy(sessions.view({ hostId, threadId: target }).snapshot().thread)) {
+              throw Object.assign(new Error('当前任务仍在运行，原 app 上下文未发送。'), { uncertain: false, sendPhase: 'before-send' });
+            }
+          },
+        } } } : {}),
         assertInjectionAuthority: target => {
           requireCurrent(target);
           if (isThreadBusy(sessions.view({ hostId, threadId: target }).snapshot().thread)) throw Object.assign(new Error('当前任务仍在运行，原 app 上下文未发送。'), { uncertain: false });
@@ -989,6 +1000,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         }} onCheck={async () => { await sendStore.check(intent.id); await reloadSends(); }}
         onRetry={() => submit(intent.draft, intent.options, intent.action ?? { type: 'send' }, undefined,
           { owner: intent.owner, revision: intent.revision, overrides: intent.overrides }, intent)}
+        onRetryInjectionPersistence={async () => { await sendStore.retryNativePersistence(intent.id); await reloadSends(); }}
         onFinish={() => finishSend(intent)} onCancel={async () => { await sendStore.cancel(intent.id); await reloadSends(); }} />)}
       </div>
       <div className="yard-workspace" data-panel-open={panelOpen && !settings}>
