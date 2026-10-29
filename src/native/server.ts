@@ -249,11 +249,11 @@ export async function createNativeWorkbench(options: Options = {}) {
       try { send(client, message); } catch { /* The state owner must remain available to other pages. */ }
     }
   }
-  function publishUnconfirmedState() {
-    broadcastRecovery({ type: 'settings-changed' });
-    broadcastRecovery({ type: 'global-state-updated' });
-    broadcastRecovery({ type: 'shared-object-updated', key: 'remote_ssh_connections' });
-    broadcastRecovery({ type: 'workbench-pet-error', error: '宠物设置尚未核实，请重新读取后重试。', stateUnconfirmed: true });
+  function publishUnconfirmedState(sendEvent = broadcastRecovery) {
+    sendEvent({ type: 'settings-changed' });
+    sendEvent({ type: 'global-state-updated' });
+    sendEvent({ type: 'shared-object-updated', key: 'remote_ssh_connections' });
+    sendEvent({ type: 'workbench-pet-error', error: '宠物设置尚未核实，请重新读取后重试。', stateUnconfirmed: true });
   }
   function publishRecoveredState() {
     broadcastRecovery({ type: 'settings-changed' });
@@ -582,7 +582,11 @@ export async function createNativeWorkbench(options: Options = {}) {
     validHost(hostId);
     if (message.type === 'ready') {
       for (const key of ['host_config', 'remote_ssh_connections', 'remote_wsl_connections', 'remote_control_connections']) {
-        send(client, { type: 'shared-object-updated', key, value: await sharedObject(key) });
+        try { send(client, { type: 'shared-object-updated', key, value: await sharedObject(key) }); }
+        catch (error) {
+          if (key !== 'remote_ssh_connections') throw error;
+          publishUnconfirmedState(value => send(client, value));
+        }
       }
       await connectedFor(client, connections, 'local');
       // Initialization RPCs can connect before React subscribes to host events.
