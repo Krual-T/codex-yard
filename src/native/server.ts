@@ -897,7 +897,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         const result = await files.rpc(method, params, hostId, hostPaths.get(hostId)?.codexHome);
         send(client, { type: 'mcp-response', hostId, message: { id, result } }); return;
       }
-      const readsConfigurationSource = method === 'config/read' || method === 'skills/list' || method === 'hooks/list';
+      const readsConfigurationSource = method === 'config/read' || method === 'skills/list' || method === 'hooks/list' || method === 'plugin/installed';
       if (!readMethods.has(method) && !writeMethods.has(method)) { unsupported.add(method); throw new Error('Web 宿主尚未接入：' + method); }
       if (method === 'thread/unsubscribe' && typeof params.threadId === 'string' && await sideChats.ownsChild(hostId, params.threadId)) {
         throw Object.assign(new Error('侧聊会话由侧聊操作负责关闭。'), { uncertain: false });

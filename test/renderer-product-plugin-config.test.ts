@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 import type { PluginSummary } from '../src/renderer/pages/plugins/catalog.ts';
 import { WorkbenchError } from '../src/renderer/app/client.ts';
-import { reconcilePluginConfig, writePluginConfig } from '../src/renderer/app/ProductPluginConfig.ts';
+import { pluginConfigBlocksScope, reconcilePluginConfig, writePluginConfig } from '../src/renderer/app/ProductPluginConfig.ts';
 import type { ProductConfigurationWrites } from '../src/renderer/app/ProductPluginConfig.ts';
 import { SettingsConfigOperations } from '../src/renderer/settings/config-operations.ts';
 import type { SettingsWriteStorage, WriteStatus } from '../src/renderer/settings/config-operations.ts';
@@ -14,14 +14,14 @@ const source = { hostId: 'local', generation: 'generation-1', homeDirectory: '/h
 const originalOrigin = { section: 'plugins-settings' as const, scope: ['/workspace'], draft: { pluginId: 'demo', enabled: false }, source };
 
 function fixture() {
-  let current = true, enabled = false;
+  let current = true, enabled = false, inventorySource: unknown = source;
   let snapshot: ReturnType<ProductConfigurationWrites['getSnapshot']> = { records: [], loading: false, error: null, inFlight: [] };
   const calls: { method: string; value?: unknown }[] = [];
   const client = { async rpc(method: string) {
     calls.push({ method });
     if (method === 'config/read') return { layers: [{ name: { type: 'user', file: '/codex/config.toml' }, version: 'v1' }],
       yardConfigSource: { hostId: 'local', generation: 'generation-1', homeDirectory: '/home', codexHome: '/codex' } };
-    if (method === 'plugin/installed') return { marketplaces: [{ name: 'Local', path: '/market', plugins: [{ ...plugin, enabled }] }] };
+    if (method === 'plugin/installed') return { marketplaces: [{ name: 'Local', path: '/market', plugins: [{ ...plugin, enabled }] }], yardConfigSource: inventorySource };
     throw new Error(`Unexpected RPC ${method}`);
   } } as unknown as WorkbenchClient;
   const operations: ProductConfigurationWrites = {
@@ -39,7 +39,8 @@ function fixture() {
     async finishSuccessfulGroup(ids) { calls.push({ method: 'finish-success', value: ids }); },
   };
   return { client, operations, calls, current: () => current, setCurrent: (value: boolean) => { current = value; },
-    setEnabled: (value: boolean) => { enabled = value; }, setSnapshot: (value: typeof snapshot) => { snapshot = value; } };
+    setEnabled: (value: boolean) => { enabled = value; }, setSnapshot: (value: typeof snapshot) => { snapshot = value; },
+    setInventorySource: (value: unknown) => { inventorySource = value; } };
 }
 
 test('plugin settings require the shared controller and keep the original source and owner', async () => {
@@ -131,7 +132,7 @@ function recoveryFixture() {
   }, async rpc(_method: string, _params: unknown, _hostId: string, options?: Parameters<WorkbenchClient['rpc']>[3]) {
     options?.assertBeforeSend?.();
     assert.equal(_method, 'plugin/installed'); calls.push({ method: _method });
-    return { marketplaces: [{ name: 'Local', plugins: [{ ...plugin, enabled: false }] }] };
+    return { marketplaces: [{ name: 'Local', plugins: [{ ...plugin, enabled: false }] }], yardConfigSource: source };
   } } as unknown as WorkbenchClient;
   const operations = new SettingsConfigOperations(client, storage, () => `original-${++sequence}`);
   const submit = (cwd: string, canDispatch = () => true) => operations.submit('local', 'config/batchWrite', {
@@ -186,4 +187,54 @@ test('a current inventory cannot close an original plugin edit with a different 
     origin: originalOrigin, operation: { state: 'succeeded' } }], loading: false, error: null, inFlight: [] });
   await assert.rejects(reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', item.current, 'original-op'), /differs/);
   assert.equal(item.calls.some(call => call.method === 'finish-success' || call.method === 'finish'), false);
+});
+
+test('plugin receipts cannot be confirmed by another home, missing provenance or an automatic reconnect', async () => {
+  for (const inventorySource of [undefined, { ...source, codexHome: '/other-codex' }, { ...source, homeDirectory: '/other-home' }, { ...source, generation: 'reconnected' }]) {
+    const item = fixture(); item.setInventorySource(inventorySource);
+    await assert.rejects(writePluginConfig(item.operations, item.client, target, item.current), /different configuration source/);
+    assert.equal(item.calls.filter(call => call.method === 'submit').length, 1);
+    assert.equal(item.calls.some(call => call.method === 'finish-success'), false);
+  }
+  for (const inventorySource of [undefined, { ...source, codexHome: '/other-codex' }, { ...source, homeDirectory: '/other-home' }]) {
+    const item = fixture(); item.setInventorySource(inventorySource);
+    item.setSnapshot({ records: [{ operationId: 'original-op', hostId: 'local', phase: 'finished', origin: originalOrigin,
+      operation: { state: 'succeeded' } }], loading: false, error: null, inFlight: [] });
+    await assert.rejects(reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', item.current), /different configuration source/);
+    assert.equal(item.calls.some(call => call.method === 'finish-success' || call.method === 'submit'), false);
+  }
+});
+
+test('an explicit receipt check accepts the same target after reconnect and preserves overridden receipts until review', async () => {
+  const item = fixture(); item.setInventorySource({ ...source, generation: 'reconnected' });
+  item.setSnapshot({ records: [{ operationId: 'original-op', hostId: 'local', phase: 'finished', origin: originalOrigin,
+    operation: { state: 'succeeded' } }], loading: false, error: null, inFlight: [] });
+  await reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', item.current);
+  assert.deepEqual(item.calls.filter(call => call.method === 'finish-success').map(call => call.value), [['original-op']]);
+  const overridden = fixture();
+  overridden.operations.submit = async () => ({ operationId: 'overridden', result: { status: 'okOverridden' } });
+  await assert.rejects(writePluginConfig(overridden.operations, overridden.client, target, overridden.current), /overrides it/);
+  assert.equal(overridden.calls.some(call => call.method === 'finish-success'), false);
+});
+
+test('known plugin edits fence their original scope while unknown writes continue to fence the shared target', () => {
+  const snapshot = { records: [{ operationId: 'old', hostId: 'local', phase: 'not-started' as const, origin: originalOrigin }],
+    loading: false, error: null, inFlight: [] };
+  assert.equal(pluginConfigBlocksScope(snapshot, 'local', '/other-workspace'), false);
+  assert.equal(pluginConfigBlocksScope(snapshot, 'local', '/workspace'), true);
+  assert.equal(pluginConfigBlocksScope({ ...snapshot, records: [{ ...snapshot.records[0]!, phase: 'unknown' }] }, 'local', '/other-workspace'), true);
+});
+
+test('an original status read cannot dispatch after its page becomes stale while reading the atom', async () => {
+  const item = recoveryFixture(); item.behavior('lost');
+  await assert.rejects(item.submit('/workspace'), /could not be confirmed/);
+  const originalRead = item.storage.read.bind(item.storage); let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  item.storage.read = async () => { await waiting; return originalRead(); };
+  let current = true;
+  const check = item.operations.check('original-1', false, () => { if (!current) throw new Error('Original page changed'); });
+  current = false; release();
+  await assert.rejects(check, /Original page changed/);
+  assert.equal(item.calls.filter(call => call.method === 'status').length, 0);
+  assert.equal(item.operations.getSnapshot().records.length, 1);
 });

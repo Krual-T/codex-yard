@@ -537,16 +537,17 @@ export class SettingsConfigOperations {
     const operation = object(response) ? status(response.operation, operationId, hostId, method) : null;
     return !!operation && completed(operation);
   }
-  async check(id: string, retryPersistence = false): Promise<void> {
+  async check(id: string, retryPersistence = false, assertBeforeSend?: () => void): Promise<void> {
     if (this.localPending.has(id)) throw new Error('Retry saving the browser receipt before checking the host operation.');
     const list = data(await this.storage.read()).operations, entry = list.find(item => item.operationId === id);
     if (!entry) throw new Error('The original local configuration record is missing.');
     const blocker = entry.phase === 'blocked' ? entry.blocker : undefined;
     const targetId = blocker?.operationId ?? id, targetHost = blocker?.hostId ?? entry.hostId;
     const savedReceipt = blocker ? entry.blockerReceipt : entry.recoveryReceipt;
+    assertBeforeSend?.();
     const response = await this.client.host<unknown>('configuration-write', { hostId: targetHost,
       action: retryPersistence ? 'retry-persistence' : 'status', operationId: targetId,
-      ...(retryPersistence && savedReceipt ? { receipt: savedReceipt } : {}) });
+      ...(retryPersistence && savedReceipt ? { receipt: savedReceipt } : {}) }, { assertBeforeSend });
     const operation = object(response) ? status(response.operation, targetId, targetHost, blocker?.method ?? entry.method) : null;
     if (!operation) {
       const missing = object(response) && response.operation === null;

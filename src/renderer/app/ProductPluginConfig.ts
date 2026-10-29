@@ -19,7 +19,7 @@ export interface ProductConfigurationWrites {
   submit(hostId: string, method: 'config/batchWrite', params: Record<string, unknown>, origin: {
     section: 'plugins-settings'; scope?: readonly string[]; draft: unknown; source: ConfigSource;
   }, canDispatch: () => boolean): Promise<{ operationId: string; result: unknown }>;
-  check(operationId: string): Promise<void>;
+  check(operationId: string, retryPersistence?: boolean, assertBeforeSend?: () => void): Promise<void>;
   finish(operationId: string): Promise<void>;
   finishSuccessfulGroup(operationIds: readonly string[]): Promise<void>;
 }
@@ -35,10 +35,24 @@ function sourceFor(value: unknown, hostId: string): ConfigSource | null {
   return { hostId, generation: value.generation, homeDirectory: value.homeDirectory, codexHome: value.codexHome };
 }
 
+function assertInventorySource(value: unknown, original: ConfigSource, allowReconnect: boolean): void {
+  const actual = sourceFor(value, original.hostId);
+  if (!actual || actual.homeDirectory !== original.homeDirectory || actual.codexHome !== original.codexHome
+    || !allowReconnect && actual.generation !== original.generation) {
+    throw new Error('The plugin inventory belongs to a different configuration source. The original edit and receipt are preserved.');
+  }
+}
+
 export function pluginConfigRecords(snapshot: ConfigSnapshot, hostId: string, cwd?: string, pluginId?: string): ConfigRecord[] {
   return snapshot.records.filter(entry => entry.hostId === hostId && entry.origin.section === 'plugins-settings'
     && (cwd === undefined || entry.origin.scope?.length === 1 && entry.origin.scope[0] === cwd)
     && (pluginId === undefined || object(entry.origin.draft) && entry.origin.draft.pluginId === pluginId));
+}
+
+export function pluginConfigBlocksScope(snapshot: ConfigSnapshot, hostId: string, cwd: string): boolean {
+  return snapshot.loading || !!snapshot.error || snapshot.inFlight.length > 0 || pluginConfigRecords(snapshot, hostId).some(entry =>
+    entry.phase === 'pending' || entry.phase === 'unknown' || entry.phase === 'blocked'
+    || entry.origin.scope?.length === 1 && entry.origin.scope[0] === cwd);
 }
 
 export async function writePluginConfig(operations: ProductConfigurationWrites | undefined, client: WorkbenchClient,
@@ -64,9 +78,11 @@ export async function writePluginConfig(operations: ProductConfigurationWrites |
     }
     if (!current()) throw new Error('The selected page changed after the save. Check the original operation.');
     const inventory = await listInstalledPlugins(client, value.hostId, value.cwd, { assertBeforeSend: assertCurrent });
+    assertInventorySource(inventory.source, source, false);
     const matches = inventory.entries.filter(entry => entry.plugin.id === value.plugin.id && entry.plugin.source.type === value.plugin.source.type);
     if (matches.length !== 1 || matches[0]!.plugin.enabled !== value.enabled) throw new Error('The saved plugin state differs from the current inventory.');
     if (!current()) throw new Error('The selected page changed after the save. Check the original operation.');
+    if (submitted.result.status === 'okOverridden') throw new Error('The save succeeded but another configuration layer overrides it. Review the original receipt before closing it.');
     await operations.finishSuccessfulGroup([submitted.operationId]);
   } catch (error) {
     const notSent = !received && error instanceof Error && 'uncertain' in error && error.uncertain === false;
@@ -85,14 +101,15 @@ export async function reconcilePluginConfig(operations: ProductConfigurationWrit
   if (entries.length !== 1) throw new Error(entries.length
     ? 'Choose the original plugin operation in configuration recovery.' : 'The original plugin operation is not available for this scope.');
   const original = entries[0]!, origin = JSON.stringify(original.origin);
-  if (!sourceFor(original.origin.source, hostId) || !object(original.origin.draft)
+  const originalSource = sourceFor(original.origin.source, hostId);
+  if (!originalSource || !object(original.origin.draft)
     || typeof original.origin.draft.pluginId !== 'string' || typeof original.origin.draft.enabled !== 'boolean') {
     throw new Error('Review the preserved original plugin edit in configuration recovery.');
   }
   const { pluginId, enabled } = original.origin.draft;
   assertCurrent();
   if (snapshot.inFlight.includes(original.operationId)) throw new Error('The original plugin save is still in progress.');
-  if (original.phase === 'pending' || original.phase === 'unknown' || original.phase === 'blocked') await operations.check(original.operationId);
+  if (original.phase === 'pending' || original.phase === 'unknown' || original.phase === 'blocked') await operations.check(original.operationId, false, assertCurrent);
   await operations.refresh(); snapshot = operations.getSnapshot();
   const entry = pluginConfigRecords(snapshot, hostId, cwd).find(item => item.operationId === original.operationId);
   if (snapshot.error || !entry || JSON.stringify(entry.origin) !== origin || snapshot.inFlight.includes(original.operationId)
@@ -104,6 +121,7 @@ export async function reconcilePluginConfig(operations: ProductConfigurationWrit
     throw new Error('The original plugin edit was not saved. Review the preserved edit in configuration recovery.');
   }
   const inventory = await listInstalledPlugins(client, hostId, cwd, { assertBeforeSend: assertCurrent });
+  assertInventorySource(inventory.source, originalSource, true);
   const matches = inventory.entries.filter(item => item.plugin.id === pluginId);
   if (matches.length !== 1 || matches[0]!.plugin.enabled !== enabled) throw new Error('The saved plugin state differs from the original edit.');
   assertCurrent();

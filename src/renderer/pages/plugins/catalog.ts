@@ -6,7 +6,7 @@ export interface PluginSummary {
   interface?: { displayName?: string | null; shortDescription?: string | null; longDescription?: string | null; logoUrl?: string | null } | null;
 }
 export interface PluginEntry { marketplaceName: string; marketplacePath: string | null; plugin: PluginSummary }
-export interface PluginCatalog { entries: PluginEntry[]; warnings: string[] }
+export interface PluginCatalog { entries: PluginEntry[]; warnings: string[]; source?: unknown }
 export interface PluginPage { entries: PluginEntry[]; nextCursor: string | null }
 export interface PluginPublicSection { id: string; title: string; categorySlug: string | null; entries: PluginEntry[] }
 export interface PluginRef { pluginName: string; marketplacePath?: string; remoteMarketplaceName?: string }
@@ -93,7 +93,8 @@ export async function searchPlugins(client: WorkbenchClient, hostId: string, cwd
 
 export async function listInstalledPlugins(client: WorkbenchClient, hostId: string, cwd: string,
   options?: WorkbenchDispatchOptions): Promise<PluginCatalog> {
-  return catalog(await client.rpc('plugin/installed', cwd ? { cwds: [cwd] } : {}, hostId, options));
+  const result = await client.rpc('plugin/installed', cwd ? { cwds: [cwd] } : {}, hostId, options);
+  return { ...catalog(result), source: object(result) ? result.yardConfigSource : undefined };
 }
 
 export function pluginRef(entry: PluginEntry): PluginRef {

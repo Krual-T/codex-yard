@@ -98,6 +98,17 @@ test('native feature reads preserve the backend browser value and pagination', a
   assert.deepEqual(requests, [{}, { cursor: 'second-page' }, {}]);
 });
 
+test('native plugin inventory carries the same owned configuration source as configuration reads', async t => {
+  const { fake, connect } = await fixture(t);
+  const inventory = { marketplaces: [{ name: 'Local', path: '/market', plugins: [] }], marketplaceLoadErrors: [] };
+  fake.handlers.set('plugin/installed', () => inventory);
+  const { rpc } = await connect();
+  const config = (await rpc(1010, 'config/read')).result;
+  const installed = (await rpc(1011, 'plugin/installed', { cwds: ['/workspace'] })).result;
+  assert.ok(config.yardConfigSource?.generation);
+  assert.deepEqual(installed, { ...inventory, yardConfigSource: config.yardConfigSource });
+});
+
 async function callNativeTool(root: string, tool: string, args: Record<string, unknown>, callId: string) {
   const socket = createConnection(join(root, 'data', 'app-tools.sock'));
   let buffer = Buffer.alloc(0);
