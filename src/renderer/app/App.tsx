@@ -25,6 +25,8 @@ import { projectForThread, projectsForHost } from './projects.ts';
 import type { Project, ProjectState } from './projects.ts';
 import { StandaloneSidebar } from '../sidebar/StandaloneSidebar.tsx';
 import { useThreadList } from '../sidebar/use-thread-list.ts';
+import { useSidebarBehavior } from './use-sidebar-behavior.ts';
+import { commitSidebarProjectMembership, createSidebarProjectInventory } from './sidebar-project-inventory.ts';
 import { WorkspacePanels } from '../panels/WorkspacePanels.tsx';
 import type { WorkspacePanelAppearance, WorkspacePanelRequest, WorkspacePanelsHandle } from '../panels/WorkspacePanels.tsx';
 import { resolveFilePath } from '../files/file-service.ts';
@@ -337,11 +339,13 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const selectedProjectRef = useRef(selectedProject); selectedProjectRef.current = selectedProject;
   const routeRef = useRef(current); routeRef.current = current;
   const projectGeneration = useRef(0);
+  const projectResponseGeneration = useRef(0);
   const preferenceGeneration = useRef(0);
   const reloadProjects = useCallback(async () => {
     const generation = ++projectGeneration.current;
+    const response = ++projectResponseGeneration.current;
     const state = await client.host<ProjectState>('thread-project-state');
-    if (generation === projectGeneration.current) setProjectState(state);
+    if (generation === projectGeneration.current && response === projectResponseGeneration.current) setProjectState(state);
   }, [client]);
 
   const navigate = useCallback((path: string, options?: { replace?: boolean; delta?: number; state?: unknown }, assertBeforeCommit?: () => void) => {
@@ -1249,6 +1253,31 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   });
   const shortcutSidebarHints = new Map(shortcuts.hints === 'sidebar' ? shortcuts.sidebarHintKeys.map((key, index) =>
     [key, shortcuts.label('sidebar', index + 1 as NumberShortcutSlot)] as const) : []);
+  const sidebarInventoryKey = JSON.stringify([current.hostId, navigationGeneration.current, connectionReadGeneration.current,
+    projectGeneration.current, refresh, list.rows.map(row => row.id)]);
+  const sidebarInventoryScope = useRef({ key: sidebarInventoryKey, hostId: current.hostId, threadIds: list.rows.map(row => row.id) });
+  sidebarInventoryScope.current = { key: sidebarInventoryKey, hostId: current.hostId, threadIds: list.rows.map(row => row.id) };
+  const resolveSidebarThreadHosts = useMemo(() => createSidebarProjectInventory(client, () => sidebarInventoryScope.current,
+    state => { projectResponseGeneration.current++; projectStateRef.current = state; setProjectState(state); }), [client]);
+  const sidebarBehavior = useSidebarBehavior({
+    client, hostId: current.hostId, rows: list.rows, projectState,
+    threadHostResolutionEpoch: sidebarInventoryKey, resolveThreadHosts: resolveSidebarThreadHosts,
+    captureAuthority: hostId => {
+      const original = routeRef.current, generation = navigationGeneration.current;
+      const daemon = client.captureDaemonConnection(hostId);
+      return { daemonConnectionGeneration: daemon.generation, assertBeforeSend: () => {
+        daemon.assertOriginal();
+        if (navigationLocked.current || navigationGeneration.current !== generation || routeRef.current !== original || original.hostId !== hostId)
+          throw new Error('The original sidebar page or host changed.');
+      } };
+    },
+    readStateWriteAvailable: true,
+    commitProjectMembership: (request, authority) => commitSidebarProjectMembership(client, request, authority),
+    requestProjectName: async project => window.prompt('Project name', project.name),
+    onProjectsChanged: () => { void reloadProjects().catch(cause => setError(String(cause))); },
+  });
+  const { error: sidebarError, ...sidebarBehaviorProps } = sidebarBehavior;
+  useEffect(() => { if (sidebarError) setError(sidebarError); }, [sidebarError]);
   const activeProject = current.threadId && thread && projectState
     ? projectForThread(projectState, projectsForHost(projectState, current.hostId), current.hostId, thread) : selectedProject;
   const switchHomeTarget = async (target: { hostId: string; cwd: string }, lease: ComposerDraftLease, project: Project | null) => {
@@ -1284,7 +1313,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   };
   const chinese = previewAppearance.locale.startsWith('zh');
   return <I18nProvider locale={previewAppearance.locale}><div className="yard-app" data-sidebar-open={sidebar && !settings} data-settings={settings} data-owned-renderer="true">
-    {sidebar && !settings && <StandaloneSidebar hostId={current.hostId} currentThread={current.threadId ? { hostId: current.hostId, threadId: current.threadId } : null}
+    {sidebar && !settings && <StandaloneSidebar {...sidebarBehaviorProps} hostId={current.hostId} currentThread={current.threadId ? { hostId: current.hostId, threadId: current.threadId } : null}
       projectState={projectState} fallbackWorkspace={workspace} rows={list.rows} nextCursor={list.nextCursor} loading={list.loading} error={list.error}
       search={search} archived={archived} shortcutHints={shortcutSidebarHints} onSearchChange={setSearch} onArchivedChange={setArchived} onClose={() => setSidebar(false)}
       onOpenThread={row => { void openThread(row.id, row.hostId, row.archived); }}
