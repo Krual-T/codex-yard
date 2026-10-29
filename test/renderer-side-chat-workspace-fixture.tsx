@@ -8,6 +8,7 @@ import { MessageEditRecoveryStore } from '../src/renderer/app/message-edit-recov
 import { ApprovalRequestsController } from '../src/renderer/app/approval-requests.ts';
 import { SideChatWorkspace } from '../src/renderer/app/SideChatWorkspace.tsx';
 import { SideChatWorkspaceRuntime } from '../src/renderer/app/side-chat-workspace-runtime.ts';
+import { StandaloneComposer } from '../src/renderer/composer/StandaloneComposer.tsx';
 import type { SideChatChildDispatchAuthority } from '../src/renderer/side-chat/browser-authority.ts';
 import type { SideChatWorkspaceNavigationController, SideChatWorkspaceNavigationLease } from '../src/renderer/app/SideChatWorkspace.tsx';
 import { readSideChatDraftAssociation } from '../src/renderer/side-chat/browser-authority.ts';
@@ -15,6 +16,7 @@ import { readBrowserAtoms } from '../src/renderer/storage/ui-atoms.ts';
 import { addBrowserCommentToDraft, readBrowserCommentsSnapshot } from '../src/renderer/browser/comments.ts';
 import { browserDraftOwner, removeBrowserDraftReference } from '../src/renderer/app/browser-draft.ts';
 import type { ComposerDraftController, ComposerDraftOwner, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
+import type { ComposerDraftLease } from '../src/renderer/composer/use-composer-draft.ts';
 import type { SideChatChildScope } from '../src/renderer/side-chat/SideChatPanel.tsx';
 import type { WorkbenchDispatchOptions } from '../src/renderer/workbench-contract.ts';
 
@@ -26,6 +28,8 @@ let ownerCurrent = true, frozen = false, closed = 0, exited = 0, cleanups = 0, n
 let lease: SideChatWorkspaceNavigationLease | null = null, drainGate: Promise<void> | null = null, releaseDrain: (() => void) | null = null;
 let dispatchGate: Promise<void> | null = null, releaseDispatch: (() => void) | null = null, dispatchWaiting = false;
 let draftController: ComposerDraftController | null = null, draftSnapshot: ComposerDraftSnapshot | null = null;
+let mainVisible = false, mainDraft: ComposerDraftController | null = null, mainLease: ComposerDraftLease | null = null;
+const mainAuthorities = new WeakMap<() => void, ReturnType<BrowserWorkbenchClient['captureDaemonConnection']>>();
 let pendingQueueReads = 0;
 let openBehavior: 'success' | 'unsent' | 'unknown' = 'success';
 let presentedIdentity = { ...identity, mode: 'new' as 'new' | 'restore' };
@@ -54,8 +58,22 @@ function options(original: (() => void) | null, guard: () => void, onLateTermina
   return { daemonConnectionGeneration: child.proof.identity.connectionGeneration, sideChat: structuredClone(child.proof),
     assertBeforeSend: () => { child.assertCurrent(); guard(); }, onLateTerminal };
 }
+function mainCapture(owner: ComposerDraftOwner) {
+  if (owner.hostId !== 'local' || owner.threadId !== 'parent-a' || owner.draftId !== 'main-draft') throw Error('Synthetic Main owner changed.');
+  const daemon = client.captureDaemonConnection(owner.hostId);
+  const check = () => {
+    daemon.assertOriginal();
+    if (!mainVisible || JSON.stringify(mainDraft?.snapshot()?.owner) !== JSON.stringify(owner)) throw Error('Synthetic Main owner changed.');
+  };
+  check(); mainAuthorities.set(check, daemon); return check;
+}
+function mainOptions(original: () => void, guard: () => void): WorkbenchDispatchOptions {
+  const daemon = mainAuthorities.get(original);
+  if (!daemon) throw Error('Synthetic Main original authority is missing.');
+  return { daemonConnectionGeneration: daemon.generation, assertBeforeSend() { original(); guard(); } };
+}
 function render() {
-    root.render(<SideChatWorkspace client={client} identity={presentedIdentity} open sessions={sessions} sends={sends} edits={edits} approvals={approvals}
+    root.render(<><SideChatWorkspace client={client} identity={presentedIdentity} open sessions={sessions} sends={sends} edits={edits} approvals={approvals}
       assertCurrent={assertCurrent} freezeSending={owner => {
         assertCurrent(); if (frozen || owner.draftId !== identity.draftId || owner.hostId !== identity.hostId) throw Error('Synthetic lease unavailable.');
         frozen = true;
@@ -114,10 +132,37 @@ function render() {
       onRemoveReference={(owner, reference, operation) => {
         removedOwners.push(structuredClone(owner));
         return removeBrowserDraftReference(browserDraftOwner(owner, {}), reference, operation, () => {}, () => {});
-      }} />);
+      }} />
+      {mainVisible ? <section aria-label="Persistent Main"><StandaloneComposer client={client}
+        context={{ hostId: 'local', threadId: 'parent-a', draftId: 'main-draft', cwd: identity.cwd }} busy={false}
+        onDraftController={value => { mainDraft = value; }} captureSubmissionAuthority={mainCapture}
+        dispatchQueueMutation={async (method, params, hostId, original, guard) => {
+          if (!mainAuthorities.has(original)) throw Error('Synthetic Main queue authority was replaced.');
+          authorityDispatches.push({ method, original: true }); queueDispatches.push({ method, hostId, threadId: params.threadId });
+          guard(); if (dispatchGate) { dispatchWaiting = true; await dispatchGate; dispatchWaiting = false; }
+          guard(); return client.rpc(method, params, hostId, mainOptions(original, guard));
+        }}
+        onStartQueued={async (id, guard, original) => {
+          if (!original || !guard) throw Error('Synthetic Main start authority is missing.');
+          authorityDispatches.push({ method: 'thread/queue/start', original: mainAuthorities.has(original) });
+          await client.rpc('thread/queue/start', { threadId: 'parent-a', queuedSubmissionId: id }, 'local', mainOptions(original, guard));
+        }}
+        removeQueuedOriginal={async (entry, original, guard) => {
+          const daemon = mainAuthorities.get(original); if (!daemon) throw Error('Synthetic Main edit authority is missing.');
+          guard(); return client.host<'deleted' | 'changed'>('queue-edit', { hostId: 'local', threadId: 'parent-a', entry,
+            daemonConnectionGeneration: daemon.generation }, { assertBeforeSend() { original(); guard(); } });
+        }} onSubmit={async () => { throw Error('Unexpected Main submission.'); }} onInterrupt={async () => {}} /></section> : null}</>);
 }
 const fixture = {
   identity,
+  showMain() { mainVisible = true; render(); },
+  mainSnapshot() { return mainDraft?.snapshot() ?? null; },
+  flushMainDraft() { const snapshot = mainDraft?.snapshot(); return snapshot ? mainDraft!.flush(snapshot.owner) : Promise.resolve(false); },
+  freezeMain() { const snapshot = mainDraft?.snapshot(); mainLease = snapshot ? mainDraft!.freeze(snapshot.owner) : null; return !!mainLease; },
+  updateMainWhileFrozen() { const snapshot = mainDraft?.snapshot(); return snapshot
+    ? mainDraft!.update(snapshot.owner, draft => ({ ...draft, text: 'not authorized' })) : Promise.resolve(false); },
+  flushMain() { return mainLease?.flush() ?? Promise.resolve(false); },
+  releaseMain() { mainLease?.release(); mainLease = null; },
   async mount(restore = false) {
     await client.connect();
     await client.rpc('thread/start', { cwd: identity.cwd }, identity.hostId);
