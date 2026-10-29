@@ -4,12 +4,14 @@ import type { ChildProcess } from 'node:child_process';
 import { chmod, lstat, mkdir, readdir, readFile, readlink, realpath, symlink, writeFile } from 'node:fs/promises';
 import { connect, createServer } from 'node:net';
 import { dirname, join } from 'node:path';
+import { userInfo } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import type { SshHost } from '../src/native/ssh.ts';
 
 const run = promisify(execFile);
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+type ExistingTerminalIsolation = { parentUserNamespace: string; parentNetworkNamespace: string };
 
 async function assertIsolatedWorkspace(workspace: string) {
   let directory = await realpath(workspace);
@@ -40,6 +42,7 @@ export class TerminalSshFixture {
   version?: string;
   identity?: { username: string; namespaceUid: number; hostUid: number; uidMap: string; userNamespace: string };
   daemonNetworkNamespace?: string;
+  outerIsolation?: { userNamespace: string; networkNamespace: string };
   cleanup?: { listenerPid?: number; listenerStopped: boolean; daemonStopped: boolean; remainingFixtureProcesses: number[] };
   private sshd?: ChildProcess;
   private sshdExited?: Promise<void>;
@@ -47,11 +50,14 @@ export class TerminalSshFixture {
   private listenerPid?: number;
   private listenerNamespace?: string;
   private daemonAttempted = false;
+  private readonly existingIsolation: ExistingTerminalIsolation | undefined;
 
-  constructor(root: string, workspace: string, binary: string) {
+  constructor(root: string, workspace: string, binary: string,
+    existingIsolation?: ExistingTerminalIsolation) {
     this.root = root;
     this.workspace = workspace;
     this.binary = binary;
+    this.existingIsolation = existingIsolation;
     this.home = join(root, 'home');
     this.codexHome = join(root, 'codex');
     this.bin = join(root, 'bin');
@@ -63,6 +69,22 @@ export class TerminalSshFixture {
 
   async start() {
     await assertIsolatedWorkspace(this.workspace);
+    if (this.existingIsolation) {
+      const { parentUserNamespace, parentNetworkNamespace } = this.existingIsolation;
+      assert.match(parentUserNamespace, /^user:\[\d+\]$/, 'Provide the invoking parent user namespace');
+      assert.match(parentNetworkNamespace, /^net:\[\d+\]$/, 'Provide the invoking parent network namespace');
+      assert.equal(process.getuid?.(), 10000, 'Existing isolation must map the disposable fixture UID');
+      assert.equal(userInfo().username, 'yard-fixture', 'Existing isolation must install the disposable fixture account');
+      assert.match((await readFile('/proc/self/uid_map', 'utf8')).trim(), /^10000\s+\d+\s+1$/,
+        'Existing isolation must have a single-UID mapping');
+      const userNamespace = await readlink('/proc/self/ns/user');
+      const networkNamespace = await readlink('/proc/self/ns/net');
+      assert.notEqual(userNamespace, parentUserNamespace, 'Existing isolation must have its own user namespace');
+      assert.notEqual(networkNamespace, parentNetworkNamespace, 'Existing isolation must have its own network namespace');
+      const interfaces = (await readFile('/proc/net/dev', 'utf8')).trim().split('\n').slice(2);
+      assert.ok(interfaces.length === 1 && /^\s*lo:/.test(interfaces[0]!), 'Existing isolation must expose only loopback');
+      this.outerIsolation = { userNamespace, networkNamespace };
+    }
     await mkdir(this.bin, { recursive: true, mode: 0o700 });
     const binary = await realpath(this.binary);
     this.version = (await run(binary, ['--version'], { cwd: this.workspace, env: this.env, timeout: 10_000 })).stdout.trim();
@@ -70,16 +92,20 @@ export class TerminalSshFixture {
     await symlink(process.execPath, join(this.bin, 'node'));
     await writeFile(join(this.codexHome, 'config.toml'), 'model_provider="yard_fixture"\nmodel="fixture-model"\napproval_policy="never"\n[analytics]\nenabled=false\n[model_providers.yard_fixture]\nname="Local disabled fixture"\nbase_url="http://127.0.0.1:9/v1"\nwire_api="responses"\nrequires_openai_auth=false\nrequest_max_retries=0\nstream_max_retries=0\n', { mode: 0o600 });
     this.daemonAttempted = true;
-    const started = await run('/usr/bin/bwrap', ['--unshare-net', '--bind', '/', '/', '--bind', this.root, this.root,
-      '--dev', '/dev', '--proc', '/proc', '--chdir', this.workspace, '--', binary, 'app-server', 'daemon', 'start'],
-    { cwd: this.workspace, env: this.env, timeout: 20_000 });
+    const started = this.outerIsolation
+      ? await run(binary, ['app-server', 'daemon', 'start'], { cwd: this.workspace, env: this.env, timeout: 20_000 })
+      : await run('/usr/bin/bwrap', ['--unshare-net', '--bind', '/', '/', '--bind', this.root, this.root,
+        '--dev', '/dev', '--proc', '/proc', '--chdir', this.workspace, '--', binary, 'app-server', 'daemon', 'start'],
+      { cwd: this.workspace, env: this.env, timeout: 20_000 });
     const daemon = JSON.parse(started.stdout) as { pid: number; socketPath: string; cliVersion?: string; appServerVersion?: string };
     const canonicalHome = await realpath(this.codexHome);
     assert.ok(Number.isInteger(daemon.pid) && daemon.pid > 1 && typeof daemon.socketPath === 'string'
       && [this.codexHome, canonicalHome].some(home => daemon.socketPath.startsWith(home + '/')), 'CLI daemon must belong to the disposable CODEX_HOME');
     this.daemon = daemon;
     this.daemonNetworkNamespace = await readlink(`/proc/${daemon.pid}/ns/net`);
-    assert.notEqual(this.daemonNetworkNamespace, await readlink('/proc/self/ns/net'), 'Daemon must use the isolated network namespace');
+    if (this.outerIsolation) assert.equal(this.daemonNetworkNamespace, this.outerIsolation.networkNamespace,
+      'Daemon must retain the existing isolated network namespace');
+    else assert.notEqual(this.daemonNetworkNamespace, await readlink('/proc/self/ns/net'), 'Daemon must use the isolated network namespace');
 
     for (const name of ['host-key', 'client-key']) await run('/usr/bin/ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', join(this.root, name)], { env: this.env });
     await writeFile(join(this.root, 'authorized_keys'), await readFile(join(this.root, 'client-key.pub')), { mode: 0o600 });
@@ -97,9 +123,11 @@ export class TerminalSshFixture {
     const username = 'yard-fixture';
     const namespaceUid = 10000;
     const passwd = join(this.root, 'passwd'), shadow = join(this.root, 'shadow'), group = join(this.root, 'group');
-    await writeFile(passwd, `${username}:x:${namespaceUid}:${namespaceUid}:Disposable fixture:${this.home}:/bin/bash\nsshd:x:${namespaceUid}:${namespaceUid}:SSH privilege separation:/nonexistent:/usr/sbin/nologin\n`, { mode: 0o600 });
-    await writeFile(shadow, `${username}:x:0:0:99999:7:::\nsshd:!:0:0:99999:7:::\n`, { mode: 0o600 });
-    await writeFile(group, `${username}:x:${namespaceUid}:\n`, { mode: 0o600 });
+    if (!this.outerIsolation) {
+      await writeFile(passwd, `${username}:x:${namespaceUid}:${namespaceUid}:Disposable fixture:${this.home}:/bin/bash\nsshd:x:${namespaceUid}:${namespaceUid}:SSH privilege separation:/nonexistent:/usr/sbin/nologin\n`, { mode: 0o600 });
+      await writeFile(shadow, `${username}:x:0:0:99999:7:::\nsshd:!:0:0:99999:7:::\n`, { mode: 0o600 });
+      await writeFile(group, `${username}:x:${namespaceUid}:\n`, { mode: 0o600 });
+    }
     const options = ['-D', '-e', '-f', '/dev/null', '-h', join(this.root, 'host-key'), '-p', String(port),
       '-o', 'ListenAddress=127.0.0.1', '-o', `PidFile=${this.root}/sshd.pid`, '-o', `AuthorizedKeysFile=${this.root}/authorized_keys`,
       '-o', 'StrictModes=no', '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no', '-o', 'UsePAM=no',
@@ -107,10 +135,12 @@ export class TerminalSshFixture {
       '-o', 'PrintLastLog=no', '-o', 'PrintMotd=no', '-o', 'UseDNS=no', '-o', 'LogLevel=ERROR',
       '-o', `SetEnv=HOME=${this.home} CODEX_HOME=${this.codexHome} CODEX_INSTALL_DIR=${this.bin} TMPDIR=${this.root}/tmp SHELL=/bin/bash ENV=/dev/null BASH_ENV=/dev/null`,
       '-o', `AllowUsers=${username}`];
-    const sshd = this.sshd = spawn('/usr/bin/bwrap', ['--die-with-parent', '--unshare-user', '--uid', String(namespaceUid), '--gid', String(namespaceUid),
-      '--ro-bind', '/', '/', '--bind', this.root, this.root, '--ro-bind', passwd, '/etc/passwd',
-      '--ro-bind', shadow, '/etc/shadow', '--ro-bind', group, '/etc/group', '--dev', '/dev', '--proc', '/proc',
-      '--', '/usr/sbin/sshd', ...options], { env: this.env, stdio: ['ignore', 'ignore', 'pipe'] });
+    const sshd = this.sshd = this.outerIsolation
+      ? spawn('/usr/sbin/sshd', options, { env: this.env, stdio: ['ignore', 'ignore', 'pipe'] })
+      : spawn('/usr/bin/bwrap', ['--die-with-parent', '--unshare-user', '--uid', String(namespaceUid), '--gid', String(namespaceUid),
+        '--ro-bind', '/', '/', '--bind', this.root, this.root, '--ro-bind', passwd, '/etc/passwd',
+        '--ro-bind', shadow, '/etc/shadow', '--ro-bind', group, '/etc/group', '--dev', '/dev', '--proc', '/proc',
+        '--', '/usr/sbin/sshd', ...options], { env: this.env, stdio: ['ignore', 'ignore', 'pipe'] });
     this.sshdExited = new Promise(resolve => {
       sshd.once('exit', () => resolve());
       sshd.once('error', error => { this.sshdError = String(error); resolve(); });
@@ -148,7 +178,9 @@ export class TerminalSshFixture {
       'SSH must use the disposable identity and homes');
     assert.equal((await lstat(this.root)).uid, hostUid, 'Fixture owner must map to the invoking host UID');
     assert.match(uidMap ?? '', new RegExp(`^\\s*${namespaceUid}\\s+\\d+\\s+1\\s*$`), 'SSH must use the disposable user namespace');
-    assert.notEqual(userNamespace, await readlink('/proc/self/ns/user'), 'SSH must not use the host user namespace');
+    if (this.outerIsolation) assert.equal(userNamespace, this.outerIsolation.userNamespace,
+      'SSH must retain the existing disposable user namespace');
+    else assert.notEqual(userNamespace, await readlink('/proc/self/ns/user'), 'SSH must not use the host user namespace');
     this.identity = { username, namespaceUid, hostUid: hostUid!, uidMap: uidMap!, userNamespace: userNamespace! };
     return this.host;
   }

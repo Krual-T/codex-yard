@@ -1,6 +1,7 @@
 // Run under /tmp/agents-workbench-heavy.lock. All processes and data are disposable.
 // --ssh uses a disposable loopback sshd and the actual CLI proxy, not a synthetic SSH peer.
 // --project selects fixture-local or, with --ssh, fixture-ssh; no user catalog is read.
+// --existing-isolation reuses a caller-provisioned disposable UID and loopback-only namespace.
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -25,6 +26,8 @@ import { TerminalSshFixture } from './verify-terminal-ssh.ts';
 
 const inheritedEnv = { ...process.env };
 const requestedSsh = process.argv.includes('--ssh');
+const requestedExistingIsolation = process.argv.includes('--existing-isolation');
+assert.ok(!requestedExistingIsolation || requestedSsh, '--existing-isolation requires --ssh');
 const requestedBinary = process.env.AGENTS_TERMINAL_CODEX_BIN;
 const chromePath = process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome';
 const requestedOutput = process.env.AGENTS_TERMINAL_EVIDENCE_DIR;
@@ -196,13 +199,17 @@ try {
       catch (error) { throw new Error('--ssh requires an actual Codex CLI; set AGENTS_TERMINAL_CODEX_BIN: ' + String(error)); }
     }
     assert.ok(binary, '--ssh requires an actual Codex CLI; set AGENTS_TERMINAL_CODEX_BIN to its executable');
-    sshFixture = new TerminalSshFixture(root, remoteRoot, binary);
+    sshFixture = new TerminalSshFixture(root, remoteRoot, binary, requestedExistingIsolation ? {
+      parentUserNamespace: inheritedEnv.AGENTS_TERMINAL_PARENT_USER_NAMESPACE ?? '',
+      parentNetworkNamespace: inheritedEnv.AGENTS_TERMINAL_PARENT_NETWORK_NAMESPACE ?? '',
+    } : undefined);
     try { await sshFixture.start(); }
     catch (error) { throw new Error('Actual --ssh CLI/sshd setup failed: ' + String(error)); }
     report.cliVersion = sshFixture.version;
     report.daemon = sshFixture.daemon;
     report.sshIdentity = sshFixture.identity;
     report.daemonNetworkNamespace = sshFixture.daemonNetworkNamespace;
+    report.outerIsolation = sshFixture.outerIsolation;
     process.env.PATH = `${sshFixture.bin}:${fixtureEnv.PATH}`;
   }
   app = await createNativeWorkbench({ port: 0, workspace: root, dataDir: join(root, 'data'), codexHome: join(root, 'codex'),
