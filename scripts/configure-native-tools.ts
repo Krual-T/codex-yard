@@ -78,7 +78,7 @@ try {
   const alreadyInstalled = isDeepStrictEqual(previous, definition);
   const plan = { server: 'codex_app', configPath: user.name.file, definition, hostReady, tools, hostError,
     existingDefinition: previous === undefined ? 'absent' : alreadyInstalled ? 'same' : 'different',
-    migration: 'Loaded per-thread definitions remain until an idle unload and resume. No thread or daemon is restarted.' };
+    migration: 'New and cold-resumed threads read the saved definition. Loaded per-thread definitions remain until an idle unload and resume. No thread or daemon is restarted.' };
   if (!values.apply) console.log(JSON.stringify({ success: true, mode: 'plan', ...plan }));
   else {
     if (!hostReady) throw new Error('Start the twelve-tool host before applying this plan.');
@@ -95,9 +95,10 @@ try {
         filePath: user.name.file, expectedVersion: user.version, reloadUserConfig: false }, { mutating: true });
       writeState = 'installed';
     }
-    await connection.request('config/mcpServer/reload', null, { mutating: true });
+    // New sessions read the saved config. Keep existing per-thread transports;
+    // a global reload can merge historical HTTP fields with this stdio default.
     console.log(JSON.stringify({ success: true, mode: 'apply', ...plan, alreadyInstalled, backupPath, writeState,
-      rollback: 'codex mcp remove codex_app, then config/mcpServer/reload. Restore only this entry from the private backup if needed.' }));
+      rollback: 'codex mcp remove codex_app using the same Codex home. Restore only this entry from the private backup if needed. New and cold-resumed threads adopt the configuration.' }));
   }
 } catch (cause) {
   console.error(JSON.stringify({ success: false, message: errorMessage(cause), writeState, backupPath }));
