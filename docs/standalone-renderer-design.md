@@ -2,7 +2,7 @@
 
 2026-10-29 用户范围修订：Mini/Pets 本次禁用，移除实际 App 挂载、入口和对主输入的租约控制；旧启用偏好不再唤起界面。保留已有草稿、身份指针、偏好数据与历史源码，不添加功能开关框架。以下 Mini 设计只保留历史依据，不再作为本批实现或验收要求。SideChat 是独立临时侧聊能力，继续接入共享会话/草稿服务和真实主界面。
 
-状态：实施设计 v21，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v22，2026-10-30，当前完成原稿恢复、协议来源与页面消费者收口；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账，Mini/Pets 按上述用户裁决禁用。删除快照后仍须在同一已提交来源安装、构建、实际启动和验收。本设计替代固定函数注入方案，Git 历史只作为行为研究依据。
 
 ## 入口与现有能力
 
@@ -23,7 +23,15 @@
 
 ## 状态、路由与模块契约
 
-Manager 负责入口、shell/路由、WorkbenchClient、会话 reducer、共享契约、服务集成和构建。A 负责 composer/草稿/提交控件/队列，B 负责消息/Markdown/工具展示，D 负责设置/主题/自有控件。共享契约在 `src/renderer/workbench-contract.ts`；组件通过 props 接收真实客户端和当前 host/thread/cwd，直接使用 npm React。没有注入 framework 或第二套业务服务。
+`app` 负责 shell、路由、WorkbenchClient、会话 reducer 和父级服务集成；`composer` 负责草稿、富文档、提交控件和持久 Main 队列；`messages`/`markdown` 负责消息与工具展示；`settings` 负责配置、主题和原编辑恢复。共享契约在 `src/renderer/workbench-contract.ts`；组件通过 props 接收真实客户端和当前 host/thread/cwd，直接使用 npm React。旧 renderer-migration 及资源注入入口已删除。
+
+配置读取和写入共用 `config-write-targets.ts` 的实际 daemon home 校验。`server.ts` 在请求前后核对原连接、generation、home；实际 daemon home 与选定 host 不匹配时拒绝读取，避免把另一套配置标成当前来源。插件操作在原 operation 的 origin 中保留 source type；显示值相同的另一个来源不能消费旧回执，`okOverridden` 保留待用户核查。
+
+恢复插件稿仍保存在现有 native-atoms 根事务和 `SettingsConfigOperations` 中。已知未发送或拒绝的操作先保存完整原稿和来源，再关闭原记录；未知结果继续保留围栏。修改恢复目标按完整 host/section/scope/editorId/revision 与原稿比较后生成新 revision。组件只保留尚未确认的选择，原稿已变时保留复制和明确放弃出口，并经现有设置离页守卫保持挂载。只有显式 Save 读取原目标的新版本并创建新操作；已持久化但编辑器未接纳不回写旧副本。
+
+`Preferences` 是宿主设置的只读观察与当前编辑投影。通知和失败重读保留 pendingRefresh，只有当前合法响应成功应用后清除；成功写入后的确认读继续使用原页面 guard。Hooks、Skills 和跨 host blocker 的状态读也在实际派发前检查原页面、原 host 与连接。浏览器 feature 只有父级已验证来源可提供 true/false，缺项或来源未验证保持 unknown，叶子不自行二次读取来升级可信度。
+
+普通消息链接由 `LinkSettings` 观察现有两项打开目标及 legacy atom，再由 App 的 Main/SideChat 原 owner 和 daemon guard 执行导航。投影仅做只读观察，不写偏好；设置变更立即失效旧值，断线或换页永久撤销原实例。Web 的内嵌浏览器能力来自同一构建中实际注册的 StandaloneBrowser 与 chrome-browser router；设备未配对由该面板处理，与浏览器 agent 的私有 rollout 条件分开。原 Web 的 setAnnotationPresentation 即 no-op，保留真实元素 Quote 和整帧预览及原偏好数据，不增加桌面 region/crop 后端。
 
 WorkbenchClient 提供 `rpc(method,params,hostId)`、`host(endpoint,params)`、事件 `subscribe` 和审批 `reply(ref,response)`。它使用 `/native-host` WebSocket，关联请求id、超时及响应错误，建立后发送ready。reply为必需方法，反向请求有必填ServerRequestEvent.requestRef；浏览器验证后才交UI。审批ref由服务端产生，包含hostId、每个请求唯一的generation和原请求id，并在宿主绑定原连接。generation不是host代次，同host的不同请求可有不同值。只向收到请求的原连接发送，禁止回复时自动重连；resolved/取消/断开使原ref失效，同ID新请求不能接受旧ref。服务端发送回执表示已转发，不能声称daemon已完成业务处理；发送不确定时保留未知结果，不能自动再次批准。
 
