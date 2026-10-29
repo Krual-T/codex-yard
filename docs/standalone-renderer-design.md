@@ -1,14 +1,14 @@
 # 自有 React + TypeScript Web 前端
 
-2026-10-29 用户范围修订：Mini/Pets 本次禁用，移除实际 App 挂载、入口和对主输入的租约控制；旧启用偏好不再唤起界面。保留已有草稿、身份指针、偏好数据与历史源码，不添加功能开关框架。以下 Mini 设计只保留历史依据，不再作为本批实现或验收要求。SideChat 是独立临时侧聊能力，继续接入共享会话/草稿服务和真实主界面。
+2026-10-29 用户范围修订：Mini/Pets 本次禁用，移除实际 App 挂载、入口和对主输入的租约控制；旧启用偏好不再唤起界面。保留已有草稿、身份指针、偏好数据与 Git 历史，不添加功能开关框架。SideChat 是独立临时侧聊能力，继续使用共享会话/草稿服务和真实主界面。
 
-状态：实施设计 v22，2026-10-30，当前完成原稿恢复、协议来源与页面消费者收口；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账，Mini/Pets 按上述用户裁决禁用。删除快照后仍须在同一已提交来源安装、构建、实际启动和验收。本设计替代固定函数注入方案，Git 历史只作为行为研究依据。
+状态：实施设计 v23，2026-10-30，原稿恢复、协议来源与页面消费者已分批接入；当前收口编辑器事务前来源核对、正常消息文件引用与最终同源验收。整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账，Mini/Pets 按上述用户裁决禁用。删除快照后仍须在同一已提交来源安装、构建、实际启动和验收。本设计替代固定函数注入方案，Git 历史只作为行为研究依据。
 
 ## 入口与现有能力
 
 浏览器加载自有 HTML、CSS 和 `src/native/browser-entry.ts` 生成的 bundle。入口直接从 npm 导入 React、`react-dom/client`，挂载 `src/renderer/app/App.tsx`。应用自己管理路由、页面树、交互和浏览器状态。最终构建、服务器静态路由和部署产物均没有 App 快照路径或回退。
 
-原入口调用 `Ag/jg`，`browser-host.ts` 动态导入快照 RPC 基类；这些不再用于自有入口。自有 HTML 位于 `public/index.html`，构建由 npm React 生成 `.local/renderer`，服务器的自有页面静态资源只从该目录服务；文件API、受限可视化iframe、Chrome companion下载分别沿用既有路由及权限边界。旧 `renderer-migration.ts`、资源元数据和原工厂在替代消费者上线后定向删除；最终检查从源码导入、bundle metafile、打包清单及运行网络四处排除加载路径。
+原入口曾调用 `Ag/jg`，`browser-host.ts` 曾动态导入快照 RPC 基类；这些依赖和注入入口已删除。自有 HTML 位于 `public/index.html`，构建由 npm React 生成 `.local/renderer`，服务器的自有页面静态资源只从该目录服务；文件API、受限可视化iframe、Chrome companion下载分别沿用既有路由及权限边界。旧 `renderer-migration.ts`、资源注入元数据和源码工厂已退休；最终检查从源码导入、bundle metafile、打包清单及运行网络四处排除加载路径。
 
 | 已有能力与仓库证据 | 本次处理与实际消费者 |
 | --- | --- |
@@ -27,21 +27,23 @@
 
 配置读取和写入共用 `config-write-targets.ts` 的实际 daemon home 校验。`server.ts` 在请求前后核对原连接、generation、home；实际 daemon home 与选定 host 不匹配时拒绝读取，避免把另一套配置标成当前来源。插件操作在原 operation 的 origin 中保留 source type；显示值相同的另一个来源不能消费旧回执，`okOverridden` 保留待用户核查。
 
-恢复插件稿仍保存在现有 native-atoms 根事务和 `SettingsConfigOperations` 中。已知未发送或拒绝的操作先保存完整原稿和来源，再关闭原记录；未知结果继续保留围栏。修改恢复目标按完整 host/section/scope/editorId/revision 与原稿比较后生成新 revision。组件只保留尚未确认的选择，原稿已变时保留复制和明确放弃出口，并经现有设置离页守卫保持挂载。只有显式 Save 读取原目标的新版本并创建新操作；已持久化但编辑器未接纳不回写旧副本。
+恢复插件稿仍保存在现有 native-atoms 根事务和 `SettingsConfigOperations` 中。已知未发送或拒绝的操作先保存完整原稿和来源，再关闭原记录；未知结果继续保留宿主写围栏。修改恢复目标按完整 host/section/scope/editorId/revision 与原稿比较后生成新 revision。本地编辑和明确删除不调用宿主，不受其他 scope 的未知写阻塞；仍受原稿存储错误、事务在途、当前未确认选择及完整 revision 核对约束。组件保留尚未确认的选择，原稿已变时保留复制和明确放弃出口，并经现有设置离页守卫保持挂载。只有显式 Save 读取原目标的新版本并创建新操作；已持久化但编辑器未接纳不回写旧副本。
 
 `Preferences` 是宿主设置的只读观察与当前编辑投影。通知和失败重读保留 pendingRefresh，只有当前合法响应成功应用后清除；成功写入后的确认读继续使用原页面 guard。Hooks、Skills 和跨 host blocker 的状态读也在实际派发前检查原页面、原 host 与连接。浏览器 feature 只有父级已验证来源可提供 true/false，缺项或来源未验证保持 unknown，叶子不自行二次读取来升级可信度。
 
-普通消息链接由 `LinkSettings` 观察现有两项打开目标及 legacy atom，再由 App 的 Main/SideChat 原 owner 和 daemon guard 执行导航。投影仅做只读观察，不写偏好；设置变更立即失效旧值，断线或换页永久撤销原实例。Web 的内嵌浏览器能力来自同一构建中实际注册的 StandaloneBrowser 与 chrome-browser router；设备未配对由该面板处理，与浏览器 agent 的私有 rollout 条件分开。原 Web 的 setAnnotationPresentation 即 no-op，保留真实元素 Quote 和整帧预览及原偏好数据，不增加桌面 region/crop 后端。
+普通 Markdown 与工具消息链接由 `LinkSettings` 观察现有两项打开目标及 legacy atom，再由 App 的 Main/SideChat 原 owner 和 daemon guard 执行导航。投影仅做只读观察，不写偏好；设置变更立即失效旧值，断线或换页永久撤销原实例。取消导航、无关归档和 child 解冻通过已有导航事实刷新当前页面的新实例，不复活旧授权。Browser 地址栏的 URL 展示偏好在连接恢复和页面恢复后重读。Web 的内嵌浏览器能力来自同一构建中实际注册的 StandaloneBrowser 与 chrome-browser router；设备未配对由该面板处理，与浏览器 agent 的私有 rollout 条件分开。原 Web 的 setAnnotationPresentation 即 no-op，保留真实元素 Quote 和整帧预览及原偏好数据，不增加桌面 region/crop 后端。
+
+Summary Outputs 从当前 ConversationSessions 的完整消息、原 thread-projects 输出和可读文件投影产生。资源结果和旧 MCP Google/Figma/Notion 结构按同一事件/别名规则去重；缺失文件不显示为可打开产物，后端不支持或元数据不完整时保留真实 notice/错误和重试。hook 捕获当前 host/thread、导航及连接，打开前复核原 entry 和来源；本地文件交原 workspace-files，HTTP(S) 交既有链接动作，不创建产物后端。四种 Create 入口按原插件 mention 追加到当前 Main 富文档和历史，不能将追加称为已发送或产物已生成。
 
 WorkbenchClient 提供 `rpc(method,params,hostId)`、`host(endpoint,params)`、事件 `subscribe` 和审批 `reply(ref,response)`。它使用 `/native-host` WebSocket，关联请求id、超时及响应错误，建立后发送ready。reply为必需方法，反向请求有必填ServerRequestEvent.requestRef；浏览器验证后才交UI。审批ref由服务端产生，包含hostId、每个请求唯一的generation和原请求id，并在宿主绑定原连接。generation不是host代次，同host的不同请求可有不同值。只向收到请求的原连接发送，禁止回复时自动重连；resolved/取消/断开使原ref失效，同ID新请求不能接受旧ref。服务端发送回执表示已转发，不能声称daemon已完成业务处理；发送不确定时保留未知结果，不能自动再次批准。
 
 App 以 `/`、`/local/:threadId`、`/settings/:section` 和已存在的独立页面路由为入口，并兼容当前host查询参数、旧会话别名和分享后的直接链接。页面历史使用History API；模块不另存一份当前会话。设置接收必填的pathname/search/hash/history state及onNavigate，导航携带replace/back语义，不保留initialSection或第二份section权威状态；内部切换、重定向、host更换、关闭和back/forward均经过同一个未保存守卫。非默认路由逐项按F20/F23实证恢复，未核实分支保持打开。
 
-App 的 ConversationSessions 按实际host/thread复用现有loadThread和thread-state reducer，只维护CLI数据的界面投影。主页面、Mini和侧聊可以同时引用同一会话，首次可写消费者以thread/resume(excludeTurns:true)订阅，最后一个消费者离开才unsubscribe；归档消费者不resume，最后一个可写消费者离开时解除订阅，保留只读投影。每个key串行处理原订阅、读取与释放，旧代次结果不发布到新连接。读取先取元数据，再完整分页thread/turns/list(itemsView:full)，非full（含summary/notLoaded/缺省或未知值）turn继续分页thread/items/list；重复游标或失败显示真实错误，不静默截断。
+App 的 ConversationSessions 按实际host/thread复用现有loadThread和thread-state reducer，只维护CLI数据的界面投影。主页面与临时侧聊使用各自实际身份；首次可写消费者以thread/resume(excludeTurns:true)订阅，最后一个消费者离开才unsubscribe；归档消费者不resume，最后一个可写消费者离开时解除订阅，保留只读投影。每个key串行处理原订阅、读取与释放，旧代次结果不发布到新连接。读取先取元数据，再完整分页thread/turns/list(itemsView:full)，非full（含summary/notLoaded/缺省或未知值）turn继续分页thread/items/list；重复游标或失败显示真实错误，不静默截断。
 
-上述完整分页适用于后端支持的持久会话。两版CLI的临时侧聊不支持turns/list；其消费者必须沿原fork回执和原连接事件保留投影，不能将分页失败当空历史，也不能将metadata可读当新连接已订阅。该侧聊接线仍在实施。
+上述完整分页适用于后端支持的持久会话。两版CLI的临时侧聊不支持turns/list；已接入的侧聊消费者沿原fork回执和原连接事件保留投影，不能将分页失败当空历史，也不能将metadata可读当新连接已订阅。
 
-首次进入无投影的会话可显示加载页。后台历史核对、完成事件、revert和断线恢复保留已挂载编辑器；历史完整标记先失效，只有完整读取后恢复。不能以加载占位卸载正在等待回执的编辑器，丢掉错误或内存稿。桥断线使全部实际host投影失效，单host daemon断线只影响该host；重连重新订阅，不能把旧连接回执作为新订阅证明。该服务没有第二套传输、发送账本或会话业务状态；CLI仍为历史权威。当前主页面已经接入，Mini和侧聊的真实消费者接线仍须验收。
+首次进入无投影的会话可显示加载页。后台历史核对、完成事件、revert和断线恢复保留已挂载编辑器；历史完整标记先失效，只有完整读取后恢复。不能以加载占位卸载正在等待回执的编辑器，丢掉错误或内存稿。桥断线使全部实际host投影失效，单host daemon断线只影响该host；重连重新订阅，不能把旧连接回执作为新订阅证明。该服务没有第二套传输、发送账本或会话业务状态；CLI仍为历史权威。Main 与 SideChat 已接入，同一最终冻结来源的实际消费者验收另行记录。
 
 订阅权限与历史完整性分开：缓存的 options/thread 不授权写入。最后一个 owner 离开时立即撤销权限、使读取代次和连续性失效；所有缓存项（含无 owner 的创建投影）在桥或所属 host 断线时失效。resume/unsubscribe 的结果未知时保持原操作围栏，复用 WorkbenchClient 既有 pending request 和 CodexConnection 的原请求迟到终态观察；仅同一原连接的终态能解除，观察超时不算终态，不重复订阅。重连另起实际订阅。被切走的活动区间保持缺口提示，后续 item/started 不抹掉已丢区间，直到完整终态历史核对。回退只使历史完整性失效，不清空已挂载编辑器的 thread。外部 archive 同步撤销 canSubmit，同时保持原 composer 挂载并 inert；恢复归档后可继续原稿。队列启动及发送在等待 ready 后再次核对实际 host/thread、导航代次、归档及活动 turn。
 
@@ -91,11 +93,11 @@ v17修订：文件与可视化预填必须在来源回调的首await前登记原
 
 导航收尾只消费 router 真正提交的本次代次和目标；等待期间的归档、cwd 或只读元数据变化不能触发handoff。同一消息视图的只读变化仍保留原编辑器。当前URL同步和初始History replace的异常就地显示，保留原URL与当前只读事实；它们不伪装为一次导航完成。
 
-主页面和Mini使用同一个MessageEditRecoveryStore，各自稳定创建独立的createAccess句柄，同一host/thread同时只有一个可写消息编辑器。取得使用权后重读现有IDB恢复记录；只有本次明确接纳read结果时才更新CAS基线，后台读取不替正在编辑的旧稿接受新基线。事务开始与完成都核对原observed对象及授予身份，撤权再授予不能放行旧写。pending acquisition也参与导航freeze：同步取消本次取得流程并等待已有写排空，迟到读取不能重开编辑器；导航取消时允许重新核对恢复。
+主页面使用共享MessageEditRecoveryStore，并为消息视图稳定创建独立的createAccess句柄，同一host/thread同时只有一个可写消息编辑器。取得使用权后重读现有IDB恢复记录；只有本次明确接纳read结果时才更新CAS基线，后台读取不替正在编辑的旧稿接受新基线。事务开始与完成都核对原observed对象及授予身份，撤权再授予不能放行旧写。pending acquisition也参与导航freeze：同步取消本次取得流程并等待已有写排空，迟到读取不能重开编辑器；导航取消时允许重新核对恢复。Mini 不再挂载或取得该使用权。
 
 已挂载但尚无编辑或获取流程的消息视图同样建立host/thread冻结token，阻止等待中到达的恢复记录获取权限；取消时重新核对，真正离开后移交。取消和恢复写在排队前捕获原授予，沿原atom条件更新复核，旧排队取消不能借后来owner的新基线删除其稿件。
 
-消息hook调用onEdit(draft,origin,prepare)时先同步进入父回调；prepare是本次不可变编辑快照的幂等保存函数，父在首次await前捕获原access、目标、导航和connectionRevision，再实际调用并等待prepare。保存完成与宿主调用前复核原host/thread/turn/item、连接及目标；消息编辑没有模型选择控件，overrides为空，由当前会话核对真实设置。WorkbenchClient的assertBeforeSend将同一断言带到连接准备的最后等待之后、原socket.send前；明确未派发才按原operationId条件恢复之前阶段，已派发或未知仍保留原恢复证据。取消、重取权和提交完成只能操作本次原身份，不能删除后来保存的新稿。该使用权仅协调同一renderer的双视图；跨页仍由现有IDB事务冲突检查负责。主页面已接v20合同，v21在离页首等待前按原路由host/thread冻结本视图的后续acquire，即使消息数据仍在loading、组件未挂载；现有编辑权仍可排空。消息组件接收独立于loaded thread的route threadId，失败离页只释放本次冻结并唤醒恢复。通用Retry重试实际当前History状态和URL事实同步，History写失败继续保持局部错误。真实daemon原socket/generation与Mini父消费者仍待后续接线，v20页面socket证明不替代它们。
+消息hook调用onEdit(draft,origin,prepare)时先同步进入父回调；prepare是本次不可变编辑快照的幂等保存函数，父在首次await前捕获原access、目标、导航和connectionRevision，再实际调用并等待prepare。保存完成与宿主调用前复核原host/thread/turn/item、连接及目标；消息编辑没有模型选择控件，overrides为空，由当前会话核对真实设置。WorkbenchClient的assertBeforeSend将同一断言带到连接准备的最后等待之后、原socket.send前；明确未派发才按原operationId条件恢复之前阶段，已派发或未知仍保留原恢复证据。取消、重取权和提交完成只能操作本次原身份，不能删除后来保存的新稿。该使用权仅协调同一renderer内实际持有access的视图；跨页仍由现有IDB事务冲突检查负责。主页面在离页首等待前按原路由host/thread冻结本视图的后续acquire，即使消息数据仍在loading、组件未挂载；现有编辑权仍可排空。消息组件接收独立于loaded thread的route threadId，失败离页只释放本次冻结并唤醒恢复。通用Retry重试实际当前History状态和URL事实同步，History写失败继续保持局部错误。真实daemon原socket/generation证据单列，不由合成页面socket检查外推；Mini不再作为待接消费者。
 
 浏览器选择、保存、附加和删除先取得原owner外部句柄，根atom事务共用既有composer版本更新。父级用实际home/thread binding核对browser owner；composer删除借用同一句柄，完整after在投影接收前保留，根事务已提交时返回handled，不再进行第二次删除。接收失败保留完整快照及复制、另存、核对与明确放弃出口，阻止静默离页；已持久版本不会被旧投影二次写回。跨页删除watcher也经同一外部操作队列和根事务，只处理精确删除标记。发送确认仍从不可变intent记录实际完整引用后按精确revision清理。
 
@@ -148,7 +150,7 @@ Chrome和可视化通过App实际工具栏及消息链接进入同一侧面板�
 
 ## 当前交付顺序与验收
 
-共享会话组先证明主页面使用同一服务且不回归输入、消息编辑、首发空历史、队列和断线。Mini与侧聊随后使用各自不可变host/thread/draft及实际controller，复用同一SendRecoveryStore、submitDraft和原revision清理。它们不能调用主route闭包冒充自己的提交，也不能因隐藏面板而卸载有未保存数据的输入。Mini审批消费完整pending refs和父级结果状态；复杂表单、URL和高风险请求打开完整对话，简单审批才就地处理。内置pet资源保留原notice和MIT排除，自定义资源沿现有宿主来源。
+共享会话组先证明主页面使用同一服务且不回归输入、消息编辑、首发空历史、队列和断线。临时侧聊使用各自不可变host/thread/draft及实际controller，复用同一SendRecoveryStore、submitDraft和原revision清理；不能调用主route闭包冒充child提交，也不能因隐藏面板而卸载有未保存数据的输入。Mini/Pets 已取消实际挂载、入口、快捷键及租约控制；旧数据不删除，保留的非代码pet图片仍保留原notice和MIT排除，不作为功能验收项。
 
 临时侧聊由自有native/side-chat服务持久冻结原操作和fork/inject/unsubscribe回执，浏览器只消费安全投影。实际CLI0.164与0.163拒绝ephemeral+deferGoalContinuation组合；采用已验证的ephemeral fork、明确host-config或已知thread override来源的隔离developer指令，以及developer/user双条边界注入。null effort不作为model_reasoning_effort写入。父运行时私有override无法从普通config/read推断，不能声称已恢复不可见值；也不能因此永久隐藏原Web入口。边界失败保留child，未知不重发；关闭先协调原child输入和共享发送，再按原连接回执清理。新连接read可读或notSubscribed不证明原订阅恢复/停止，不能据此丢弃草稿。首轮模型是否实际消费指令、活动goal及SSH边界仍须分别记录证据，真实额外推理须Leader裁定。
 
@@ -158,6 +160,6 @@ C/core-v11冻结6d15的开放问题按真实归属修订：批注显示/编辑�
 
 各功能关闭须有自有入口、状态/服务/资产归属、真实消费者使用证据、针对失败和并发的检查，以及必要npm run typecheck/npm test。CLI证据、合成peer实际App和组件测试分别记录。旧vendor oracle仅作过渡研究，最终测试不得读取快照；不能以静态页面、默认隐藏、空实现或改变既有断言来关闭功能。共享会话组首次整页发现后台loading卸载编辑器的实际回归；修订保留挂载后，原断言的实际App19组/errors=[]、21项定向及typecheck通过。完整442项441通过、唯一旧Language textbox驱动失败由设置组修订，零跳过；这不是全量迁移或最终无vendor验收。
 
-最终逐条退休app-resources、旧configuration/bootstrap、私有工厂和oracle、静态路由、验证脚本和文档中的真实快照消费者，再删除整个vendor/codex-app。第三方库通过包管理使用；部署保留自有stdio适配器及必要notice。无快照干净检出执行npm ci、构建、typecheck、完整测试、实际启动及功能验收；检查bundle metafile、部署文件和运行网络，证明没有快照代码、动态加载或回退。Codex CLI0.164.0、既有daemon0.163.0、隔离桌面CLI0.163.0-alpha.10.2和历史UI参考26.1013.40934分开记录。
+快照资源导出、旧configuration/bootstrap、私有工厂和oracle及其静态路由、验证脚本消费者已退休，整个vendor/codex-app已删除。第三方库通过包管理使用；部署保留自有stdio适配器及必要notice。最终在同一无快照干净检出执行npm ci、构建、typecheck、完整测试、实际启动及功能验收；检查bundle metafile、部署文件和运行网络，证明没有快照代码、动态加载或回退。Codex CLI0.164.0、既有daemon0.163.0、隔离桌面CLI0.163.0-alpha.10.2和历史UI参考26.1013.40934分开记录；历史通过不替代最终候选结果。
 
 设计与实际来源按稳定提交独立审阅。C是原持久审阅会话按technical_design_reviewer职责执行的只读协议委派，不声称原生命名角色加载。最终F00–F23及无vendor干净来源尚未关闭；本地提交和PR材料由Leader收口，不推送、发布远端PR、合入main或正式部署。正式8765、App、共享daemon、个人会话/配置/默认模型保持既有状态。

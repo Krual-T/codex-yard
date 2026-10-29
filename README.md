@@ -12,6 +12,8 @@ This is an experimental, independent project. **Codex App 26.1013.40934** is its
 
 This branch is completing the React + TypeScript migration. The default renderer is project-authored and the reference snapshot has been removed. Final feature integration and validation from a clean checkout are still in progress. See the [current implementation design](docs/standalone-renderer-design.md).
 
+Mini/Pets is disabled. Existing drafts and saved state are retained; its old enabled preference cannot reopen it. Temporary side chats remain available in the main workspace.
+
 ## Current capabilities
 
 - Continue conversations through the existing Codex daemon, including registered SSH hosts.
