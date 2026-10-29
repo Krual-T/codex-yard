@@ -8,7 +8,9 @@ export async function completeFirstRun(client: WorkbenchClient, hostId: string, 
   if (variant === 'apiKey') keys.push('viewed2025-09-15-apikey-auth-nux');
   for (const key of keys) {
     if (!isCurrent()) return false;
-    const result = await client.host<{ success?: unknown }>('set-global-state', { hostId, key, value: true });
+    const result = await client.host<{ success?: unknown }>('set-global-state', { hostId, key, value: true }, { assertBeforeSend: () => {
+      if (!isCurrent()) throw Object.assign(new Error('The first-run page changed before saving.'), { uncertain: false, sendPhase: 'before-send' });
+    } });
     if (!isCurrent()) return false;
     if (result?.success !== true) throw new Error('Could not save first-run progress');
   }

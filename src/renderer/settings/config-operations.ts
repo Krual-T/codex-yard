@@ -4,7 +4,7 @@ import type { ConfigReadSource, ConfigWriteMethod, ConfigWriteErrorCategory, Con
 import { configReadSource } from './config-source.ts';
 
 export type SettingsWriteMethod = ConfigWriteMethod;
-export type SettingsWriteSection = 'models' | 'agent' | 'worktrees' | 'hooks-settings' | 'skills-settings';
+export type SettingsWriteSection = 'models' | 'agent' | 'worktrees' | 'hooks-settings' | 'skills-settings' | 'plugins-settings';
 export interface SettingsWriteOrigin { section: SettingsWriteSection; scope?: readonly string[]; draft: unknown; source?: ConfigReadSource; editorId?: string; revision?: number }
 export type WriteErrorCategory = ConfigWriteErrorCategory;
 export type WriteTerminal = ConfigWriteTerminal;
@@ -41,7 +41,7 @@ const object = (value: unknown): value is Record<string, unknown> => !!value && 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const methods = new Set(['config/batchWrite', 'skills/config/write']);
 const categories = new Set(['configVersionConflict', 'configValidationError', 'configLayerReadonly']);
-const sections = new Set(['models', 'agent', 'worktrees', 'hooks-settings', 'skills-settings']);
+const sections = new Set(['models', 'agent', 'worktrees', 'hooks-settings', 'skills-settings', 'plugins-settings']);
 const phases = new Set(['pending', 'unknown', 'finished', 'not-started', 'blocked']);
 
 export function createSettingsWriteId(): string {
@@ -471,7 +471,11 @@ export class SettingsConfigOperations {
       throw new SettingsWriteError('The save was interrupted before it was sent.', false, operationId);
     }
     let response: unknown;
-    try { response = await this.client.host('configuration-write', { hostId, action: 'submit', operationId, method, params: entry.params, source: entry.origin.source }); }
+    try { response = await this.client.host('configuration-write', { hostId, action: 'submit', operationId, method, params: entry.params, source: entry.origin.source }, {
+      assertBeforeSend: () => {
+        if (!canDispatch()) throw Object.assign(new Error('The save was interrupted before it was sent.'), { uncertain: false, sendPhase: 'before-send' });
+      },
+    }); }
     catch (error) {
       if (error instanceof Error && 'uncertain' in error && error.uncertain === false && 'sendPhase' in error && error.sendPhase === 'before-send') {
         await this.saveObservation(operationId, { phase: 'not-started', error: message(error), notSentEvidence: {

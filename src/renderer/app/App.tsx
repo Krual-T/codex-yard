@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { flushSync } from 'react-dom';
+import { Folder, Globe, ListTodo, MoreHorizontal, PanelLeftOpen, PanelRight, Terminal } from 'lucide-react';
 import type { ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { ComposerDraft, MessageEditOrigin, ServerRequestRef, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
 import { StandaloneComposer, bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from '../composer/StandaloneComposer.tsx';
@@ -33,6 +34,7 @@ import type { SettingsContext, SettingsOrigin } from './settings-origin.ts';
 import { SendRecoveryStore, sendsAtom, sendThreadKey } from './send-recovery.ts';
 import type { SendIntent, SendRecoverySnapshot } from './send-recovery.ts';
 import { SendRecoveryNotice } from './SendRecoveryNotice.tsx';
+import { FullAccessNotice } from './FullAccessNotice.tsx';
 import { StandaloneBrowser } from '../browser/index.tsx';
 import { browserOwnerKey } from '../browser/comments.ts';
 import { acknowledgeSubmittedBrowserReferences, browserDraftOwner, removeBrowserDraftReference, syncBrowserDraftDeletions, watchBrowserDraftDeletions } from './browser-draft.ts';
@@ -45,6 +47,12 @@ import { themeFontFamily } from './theme-fonts.ts';
 import { readSettingsRoute } from '../settings/routing.ts';
 import { readThreadArchived } from './thread-archive.ts';
 import { useWorkbenchShortcuts } from './use-workbench-shortcuts.ts';
+import { ProductWorkspace } from './ProductWorkspace.tsx';
+import { readProductRoute } from './product-routes.ts';
+import type { ProductRouteOwner } from './ProductRoutePage.tsx';
+import { settingsConfigOperations } from '../settings/config-operations.ts';
+import { saveComposerDraftConflict } from '../composer/composer-draft-store.ts';
+import { normalizeDraft } from '../composer/standalone-draft.ts';
 import type { NumberShortcutSlot } from './workbench-shortcuts.ts';
 import './app.css';
 
@@ -94,6 +102,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     acceptCreated(threadId: string, navigation: number): void;
   }>());
   const [error, setError] = useState('');
+  const conversationError = useRef('');
   const [refresh, setRefresh] = useState(0);
   const [workspace, setWorkspace] = useState('');
   const [projectState, setProjectState] = useState<ProjectState | null>(null);
@@ -134,6 +143,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     ?? requests.find(entry => entry.current) ?? requests[0];
   const approvalDialog = selectedRequestEntry && !requestViewHidden ? approvals.dialog(selectedRequestEntry.request.ref) : null;
   const [menu, setMenu] = useState(false);
+  const [goalOpen, setGoalOpen] = useState(false);
+  const [goalMounted, setGoalMounted] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [fullAccessDismissed, setFullAccessDismissed] = useState(false);
+  const [messageSearchOpen, setMessageSearchOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [navigationCommit, setNavigationCommit] = useState(0);
@@ -257,7 +271,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     if (generation === projectGeneration.current) setProjectState(state);
   }, [client]);
 
-  const navigate = useCallback((path: string, options?: { replace?: boolean; delta?: number; state?: unknown }) => {
+  const navigate = useCallback((path: string, options?: { replace?: boolean; delta?: number; state?: unknown }, assertBeforeCommit?: () => void) => {
     navigationGeneration.current++;
     const previous = routeRef.current;
     if (!options?.delta && new URL(path, location.href).pathname.split('/')[1] === 'settings') {
@@ -265,7 +279,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         : captureSettingsOrigin(previous, selectedProjectRef.current);
       if (!new URL(path, location.href).searchParams.has(settingsOriginParameter)) path = settingsOriginURL(path, origin);
     }
-    return navigation.current?.navigate(path, options) ?? Promise.resolve(false);
+    return navigation.current?.navigate(path, options, assertBeforeCommit) ?? Promise.resolve(false);
   }, []);
   const registerNavigationGuard = useCallback((guard: { requestLeave(): Promise<boolean> } | null) => { settingsGuard.current = guard; }, []);
   const openThread = (id: string, hostId = current.hostId, readOnly = false) => {
@@ -525,11 +539,16 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       selectionReady.current.reject(new Error('会话已切换，草稿已保留，未发送。')); selectionReady.current = null;
     }
     if (conversation.error) {
+      conversationError.current = conversation.error;
       setError(conversation.error);
       if (selectionReady.current?.key === selectionKey) {
         selectionReady.current.reject(new Error(conversation.error)); selectionReady.current = null;
       }
       return;
+    }
+    if (conversationError.current) {
+      const previous = conversationError.current; conversationError.current = '';
+      setError(value => value === previous ? '' : value);
     }
     if (!thread || loading || thread.id !== current.threadId) return;
     setCwd(thread.cwd ?? workspace);
@@ -765,15 +784,30 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   };
   const action = async (name: string, lastTurnId?: string) => {
     setMenu(false); if (!current.threadId) return;
+    const hostId = current.hostId, threadId = current.threadId, generation = navigationGeneration.current;
     try {
+      if (name === 'copy') { await navigator.clipboard.writeText(location.href); return; }
+      const daemon = client.captureDaemonConnection(hostId);
+      const assertBeforeSend = () => {
+        daemon.assertOriginal();
+        if (navigationGeneration.current !== generation || routeRef.current.hostId !== hostId || routeRef.current.threadId !== threadId) {
+          throw new Error('The original conversation changed before the action was sent.');
+        }
+      };
+      const dispatch = <T,>(method: string, params: Record<string, unknown>) => client.rpc<T>(method, params, hostId,
+        { daemonConnectionGeneration: daemon.generation, assertBeforeSend });
       if (name === 'rename') {
         const value = prompt('Conversation name', thread?.name ?? ''); if (value == null) return;
-        await client.rpc('thread/name/set', { threadId: current.threadId, name: value }, current.hostId);
+        await dispatch('thread/name/set', { threadId, name: value });
       } else if (name === 'fork') {
-        const value = await client.rpc<{ thread: ThreadSummary }>('thread/fork', { threadId: current.threadId, ...(lastTurnId ? { lastTurnId } : {}) }, current.hostId); openThread(value.thread.id, current.hostId, false);
-      } else if (name === 'archive') {
-        await client.rpc('thread/archive', { threadId: current.threadId }, current.hostId); navigate('/');
-      } else if (name === 'copy') await navigator.clipboard.writeText(location.href);
+        const value = await dispatch<{ thread: ThreadSummary }>('thread/fork', { threadId, ...(lastTurnId ? { lastTurnId } : {}) });
+        assertBeforeSend(); await openThread(value.thread.id, hostId, false);
+      } else if (name === 'archive' || name === 'restore') {
+        await dispatch(name === 'archive' ? 'thread/archive' : 'thread/unarchive', { threadId });
+        assertBeforeSend();
+        if (name === 'archive') await navigate('/' + (hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(hostId)));
+        else await openThread(threadId, hostId, false);
+      }
       await refreshList(); setRefresh(value => value + 1);
     } catch (cause) { setError((cause as Error).message); }
   };
@@ -788,6 +822,51 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     setSelectedProject(project ?? null);
   };
   const settings = current.section !== null;
+  const productRoute = readProductRoute(current);
+  const productPage = !settings && productRoute.kind !== 'other';
+  const configurationWrites = useMemo(() => settingsConfigOperations(client), [client]);
+  const productIdentity = useRef({ authorityKey: '', locationKey: '' });
+  const productAuthorityKey = () => JSON.stringify([transportIdentity.current.bridgeRevision, transportIdentity.current.hosts[current.hostId]?.revision ?? 0]);
+  const productLocationKey = JSON.stringify([current.pathname, current.search, current.hash, navigationCommit]);
+  const productAuthority = { hostId: current.hostId, authorityKey: productAuthorityKey(), locationKey: productLocationKey };
+  productIdentity.current = productAuthority;
+  const originalProductOwner = (owner: Pick<ProductRouteOwner, 'hostId' | 'authorityKey' | 'locationKey'>) => owner.hostId === routeRef.current.hostId
+    && owner.authorityKey === productAuthorityKey() && owner.authorityKey === productIdentity.current.authorityKey
+    && owner.locationKey === productIdentity.current.locationKey && transportIdentity.current.bridge === 'connected'
+    && transportIdentity.current.hosts[owner.hostId]?.state === 'connected';
+  const productCurrent = (owner: Pick<ProductRouteOwner, 'hostId' | 'authorityKey' | 'locationKey'>) => !navigationLocked.current && originalProductOwner(owner);
+  const navigateProduct = (path: string, options: Parameters<typeof navigate>[1], owner: ProductRouteOwner) => {
+    if (!productCurrent(owner)) return Promise.resolve(false);
+    const originalNavigation = navigationGeneration.current, daemon = client.captureDaemonConnection(owner.hostId);
+    return navigate(path, options, () => {
+      daemon.assertOriginal();
+      if (!originalProductOwner(owner) || navigationGeneration.current !== originalNavigation + 1) {
+        throw new Error('The original product page changed before navigation completed.');
+      }
+    });
+  };
+  const productPath = (path: string, hostId: string) => path + (hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(hostId));
+  const productCheck = (owner: ProductRouteOwner) => {
+    if (!productCurrent(owner)) throw new Error('The original product page changed.');
+  };
+  const createProductProject = async (owner: ProductRouteOwner) => {
+    productCheck(owner);
+    const path = prompt('Project directory'); if (!path) return false;
+    const name = path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+    await client.host('project-add', { hostId: owner.hostId, path, name }, { assertBeforeSend: () => productCheck(owner) });
+    await reloadProjects(); productCheck(owner); return true;
+  };
+  const tryProductDraft = async (owner: ProductRouteOwner, targetCwd: string, draft: ComposerDraft) => {
+    productCheck(owner);
+    const draftId = crypto.randomUUID();
+    await saveComposerDraftConflict({ hostId: owner.hostId, threadId: null, draftId }, { revision: crypto.randomUUID(), draft: normalizeDraft(draft), prefills: [] });
+    productCheck(owner);
+    if (!await navigateProduct(productPath('/', owner.hostId), undefined, owner)) throw new Error('Navigation was not completed.');
+    selectHomeDraftIdentity(owner.hostId, draftId);
+    const project = projectStateRef.current ? projectsForHost(projectStateRef.current, owner.hostId).find(value => value.rootPaths.includes(targetCwd)) : null;
+    rememberNewDraftLocation(owner.hostId, draftId, targetCwd, project?.id);
+    setHomeGeneration(value => value + 1); setCwd(targetCwd); setSelectedProject(project ?? null);
+  };
   const busy = submitting || isThreadBusy(thread);
   const canRetryAction = (intent: SendIntent) => {
     const action = intent.action;
@@ -947,39 +1026,53 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   });
   const shortcutSidebarHints = new Map(shortcuts.hints === 'sidebar' ? shortcuts.sidebarHintKeys.map((key, index) =>
     [key, shortcuts.label('sidebar', index + 1 as NumberShortcutSlot)] as const) : []);
-  return <I18nProvider locale={previewAppearance.locale}><div className="yard-app" data-sidebar-open={sidebar} data-owned-renderer="true">
-    {sidebar && <StandaloneSidebar hostId={current.hostId} currentThread={current.threadId ? { hostId: current.hostId, threadId: current.threadId } : null}
+  const activeProject = current.threadId && thread && projectState
+    ? projectForThread(projectState, projectsForHost(projectState, current.hostId), current.hostId, thread) : selectedProject;
+  const chinese = previewAppearance.locale.startsWith('zh');
+  return <I18nProvider locale={previewAppearance.locale}><div className="yard-app" data-sidebar-open={sidebar && !settings} data-settings={settings} data-owned-renderer="true">
+    {sidebar && !settings && <StandaloneSidebar hostId={current.hostId} currentThread={current.threadId ? { hostId: current.hostId, threadId: current.threadId } : null}
       projectState={projectState} fallbackWorkspace={workspace} rows={list.rows} nextCursor={list.nextCursor} loading={list.loading} error={list.error}
       search={search} archived={archived} shortcutHints={shortcutSidebarHints} onSearchChange={setSearch} onArchivedChange={setArchived} onClose={() => setSidebar(false)}
       onOpenThread={row => { void openThread(row.id, row.hostId, row.archived); }}
       onNewChat={(project, fallback) => { void newChat(project?.rootPaths[0] ?? cwd, fallback ? undefined : project ?? undefined); }}
       onAddProject={addProject} onOpenSettings={() => { void navigate('/settings/general' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId))); }}
+      activeProjectId={activeProject?.id ?? null}
+      onNavigateHistory={direction => { void navigate('/', { delta: direction }); }}
+      canNavigateBack={Number(history.state?.__yardIndex ?? 0) > 0}
+      onOpenPlugins={() => { void navigate('/plugins' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId))); }}
       onRefresh={() => { void list.refresh(); }} onLoadMore={() => { void list.loadMore(); }} onRetryProjectLookup={() => { void reloadProjects().catch(cause => setError(String(cause))); }} />}
     <main className="yard-main">
-      <header className="yard-toolbar"><button aria-label="Toggle sidebar" onClick={() => setSidebar(value => !value)}>◧</button>
-        <div className="yard-tab-strip" role="tablist" aria-label="Workspace tabs">{tabs.map((tab, index) => {
+      {!settings && <header className="yard-toolbar">
+        {!sidebar && <button className="yard-icon-button" aria-label="Toggle sidebar" onClick={() => setSidebar(true)}><PanelLeftOpen aria-hidden="true" /></button>}
+        {current.threadId && <div className="yard-thread-title"><Folder aria-hidden="true" /><strong>{thread?.name || threads.find(item => item.id === current.threadId)?.name || 'Conversation'}</strong></div>}
+        <div className="yard-toolbar-spacer" />
+        {current.threadId && <div className="yard-conversation-actions"><button className="yard-icon-button" aria-label="Conversation menu" aria-expanded={menu} onClick={() => setMenu(value => !value)}><MoreHorizontal aria-hidden="true" /></button>
+          {menu && <div className="yard-menu" role="menu">{['rename', 'fork', 'copy', current.readOnly ? 'restore' : 'archive'].map(name => <button role="menuitem" key={name} onClick={() => { void action(name); }}>{name === 'copy' ? 'Copy conversation link' : name[0]!.toUpperCase() + name.slice(1)}</button>)}
+          <button role="menuitem" onClick={() => { setMenu(false); setMessageSearchOpen(true); }}>Search messages</button>
+          <button role="menuitem" onClick={() => { setMenu(false); setGoalMounted(true); setGoalOpen(value => !value); }}>Goal</button></div>}
+        </div>}
+        {requests.length > 0 && <details className="yard-toolbar-menu"><summary aria-label="Inspect approval request"><ListTodo aria-hidden="true" /></summary><div className="yard-menu">
+          {requests.map(entry => <button key={JSON.stringify(entry.request.ref)} onClick={() => { setSelectedRequest(entry.request.ref); setRequestViewHidden(false); }}>
+            {entry.request.hostId}: {entry.request.method} · {entry.outcome}</button>)}
+        </div></details>}
+        <button className="yard-icon-button" aria-label="Open terminal" onClick={() => showPanel({ kind: 'terminal' })}><Terminal aria-hidden="true" /></button>
+        <details className="yard-toolbar-menu"><summary aria-label="Open side panel"><PanelRight aria-hidden="true" /></summary><div className="yard-menu" role="menu">
+          <button role="menuitem" aria-label="Workspace files" onClick={() => showPanel()}>Files</button>
+          <button role="menuitem" aria-label="Open Chrome panel" disabled={!sendState} onClick={() => showBrowser()}><Globe aria-hidden="true" />Chrome</button>
+          {visualization?.hostId === current.hostId && visualization.threadId === current.threadId && <button role="menuitem" aria-label="Open visualization" onClick={() => showVisualization(visualization)}>Preview</button>}
+          {turnDiff !== undefined && <button role="menuitem" aria-label="Open turn changes" onClick={() => showPanel({ kind: 'diff', diff: turnDiff })}>Changes</button>}
+          <label>Execution host<select aria-label="Execution host" value={current.hostId} disabled={!hostCatalogReady} onChange={event => { void navigate('/?hostId=' + encodeURIComponent(event.target.value)); }}>{hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.displayName}</option>)}</select></label>
+          {!hostCatalogReady && <button type="button" onClick={() => { void reloadHosts().catch(cause => setError(String(cause))); }}>Retry hosts</button>}
+        </div></details>
+      </header>}
+      {!settings && tabs.length > 1 && <div className="yard-tab-strip" role="tablist" aria-label="Workspace tabs">{tabs.map((tab, index) => {
           const slot = document.documentElement.dir === 'rtl' ? tabs.length - index : index + 1;
           return <div className="yard-tab" key={tab.hostId + ':' + tab.id}><button role="tab" aria-selected={tab.id === current.threadId && tab.hostId === current.hostId} onClick={() => { void openTab(tab); }}>{tab.title}{shortcuts.hints === 'tabs' && slot <= 9 && <kbd>{shortcuts.label('tabs', slot as NumberShortcutSlot)}</kbd>}</button><button aria-label={'Close ' + tab.title} onClick={() => setTabs(previous => previous.filter(item => item !== tab))}>×</button></div>;
-        })}</div>
-        <select aria-label="Execution host" value={current.hostId} disabled={!hostCatalogReady} onChange={event => navigate('/?hostId=' + encodeURIComponent(event.target.value))}>{hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.displayName}</option>)}</select>
-        {!hostCatalogReady && <button type="button" onClick={() => { void reloadHosts().catch(cause => setError(String(cause))); }}>Retry hosts</button>}
-        <span className="yard-connection" title={'Browser: ' + bridgeStatus + '; Host: ' + (hostStatuses[current.hostId] ?? 'connecting')} data-state={status}>●</span>
-        {requests.length > 0 && <label>Requests <select aria-label="Inspect approval request" value={selectedRequestEntry ? JSON.stringify(selectedRequestEntry.request.ref) : ''}
-          onChange={event => { setSelectedRequest(JSON.parse(event.target.value) as ServerRequestRef); setRequestViewHidden(false); }}>
-          {requests.map(entry => <option key={JSON.stringify(entry.request.ref)} value={JSON.stringify(entry.request.ref)}>
-            {entry.request.hostId}: {entry.request.method} · {entry.outcome}
-          </option>)}
-        </select><button type="button" onClick={() => setRequestViewHidden(false)}>Open request</button></label>}
-        {bridgeStatus === 'connected' && hostStatuses[current.hostId] === 'disconnected' && <button onClick={() => {
+        })}</div>}
+        {!settings && bridgeStatus === 'connected' && hostStatuses[current.hostId] === 'disconnected' && <div className="yard-error" role="status"><span>Host disconnected</span><button onClick={() => {
           const hostId = current.hostId;
           void client.rpc('thread/list', { limit: 1 }, hostId).catch(cause => setError(String(cause)));
-        }}>Reconnect host</button>}
-        <button aria-label="Workspace files" aria-pressed={panelOpen && panelKind === 'workspace'} onClick={() => showPanel()}>Files</button>
-        <button aria-label="Open terminal" onClick={() => showPanel({ kind: 'terminal' })}>Terminal</button>
-        <button aria-label="Open Chrome panel" disabled={!sendState} aria-pressed={panelOpen && panelKind === 'browser'} onClick={() => showBrowser()}>Chrome</button>
-        {visualization?.hostId === current.hostId && visualization.threadId === current.threadId && <button aria-label="Open visualization" onClick={() => showVisualization(visualization)}>Preview</button>}
-        {turnDiff !== undefined && <button aria-label="Open turn changes" onClick={() => showPanel({ kind: 'diff', diff: turnDiff })}>Changes</button>}
-      </header>
+        }}>Reconnect host</button></div>}
       {error && <div role="alert" className="yard-error">{error}<button onClick={() => { setError(''); navigation.current?.replaceCurrentURL(location.href); setRefresh(value => value + 1); setNavigationFactsEpoch(value => value + 1); }}>Retry</button><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
       {browserSyncError && <div role="alert" className="yard-error">{browserSyncError}<button onClick={() => setBrowserSyncRetry(value => value + 1)}>Retry browser reference sync</button></div>}
       <div inert={leaving}>
@@ -1010,11 +1103,52 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         scopeStatus={{ state: settingsSource.key === settingsSourceKey ? settingsSource.state : 'loading',
           error: settingsSource.key === settingsSourceKey ? settingsSource.error : undefined, retry: () => setSettingsSourceRetry(value => value + 1) }}
         location={{ pathname: current.pathname, search: current.search, hash: current.hash, state: current.state }} onNavigate={navigate}
-        registerNavigationGuard={registerNavigationGuard} onClose={() => navigate(settingsOrigin?.returnTo ?? '/')} /></InstructionEditorTheme.Provider> : <>
-        {current.threadId && <header className="yard-conversation-header"><strong>{thread?.name || threads.find(item => item.id === current.threadId)?.name || 'Conversation'}</strong><span>{thread?.cwd}</span><button aria-label="Conversation menu" onClick={() => setMenu(value => !value)}>•••</button>{menu && <div className="yard-menu" role="menu">{['rename', 'fork', 'copy', 'archive'].map(name => <button role="menuitem" key={name} onClick={() => { void action(name); }}>{name === 'copy' ? 'Copy conversation link' : name[0]!.toUpperCase() + name.slice(1)}</button>)}</div>}</header>}
+        registerNavigationGuard={registerNavigationGuard} onClose={() => navigate(settingsOrigin?.returnTo ?? '/')} /></InstructionEditorTheme.Provider> : productPage ? <ProductWorkspace
+        client={client} location={current} {...productAuthority} cwd={cwd || workspace} isCurrent={productCurrent}
+        configurationWrites={configurationWrites} navigate={navigateProduct}
+        renderUnresolved={(value, reason) => <section className="yard-product-unresolved" role="alert"><p>{value.kind === 'invalid' ? value.message : `This page cannot be opened on the current host (${reason}).`}</p><button onClick={() => { void navigate(productPath('/', current.hostId)); }}>Back</button></section>}
+        onAuthenticated={async owner => { if (!await navigateProduct(productPath('/first-run', owner.hostId), undefined, owner)) throw new Error('Navigation was not completed.'); }}
+        onFirstRunContinue={async owner => { if (!await navigateProduct(productPath('/select-workspace', owner.hostId), undefined, owner)) throw new Error('Navigation was not completed.'); }}
+        workspace={{
+          onCreateProject: createProductProject,
+          onCommitSelection: async (owner, roots) => {
+            productCheck(owner);
+            const state = await client.host<ProjectState>('thread-project-state'); productCheck(owner);
+            const existing = projectsForHost(state, owner.hostId);
+            for (const path of roots) {
+              if (existing.some(project => project.rootPaths.includes(path))) continue;
+              productCheck(owner);
+              await client.host('project-add', { hostId: owner.hostId, path, name: path.split(/[\\/]/).filter(Boolean).at(-1) ?? path }, { assertBeforeSend: () => productCheck(owner) });
+            }
+            await reloadProjects(); productCheck(owner); return true;
+          },
+          onComplete: async owner => { if (!await navigateProduct(productPath('/', owner.hostId), undefined, owner)) throw new Error('Navigation was not completed.'); },
+        }}
+        projects={{ hasUnresolvedChanges: !!projectState && (!projectState.inventory.complete || Object.keys(projectState.unresolved.assignments).length > 0 || projectState.unresolved.projectless.length > 0 || projectState.unresolved.qualified.length > 0),
+          onCreateProject: createProductProject,
+          onComposeProject: async (owner, project) => {
+            productCheck(owner);
+            if (project.hostId !== owner.hostId || !project.rootPaths[0]) throw new Error('The selected project has changed.');
+            if (!await navigateProduct(productPath('/', owner.hostId), undefined, owner)) throw new Error('Navigation was not completed.');
+            const draftId = crypto.randomUUID(); selectHomeDraftIdentity(owner.hostId, draftId);
+            rememberNewDraftLocation(owner.hostId, draftId, project.rootPaths[0], project.id);
+            setHomeGeneration(value => value + 1); setCwd(project.rootPaths[0]); setSelectedProject(project);
+          },
+          onOpenThread: async (owner, target) => {
+            productCheck(owner);
+            if (target.hostId !== owner.hostId) throw new Error('The selected host changed.');
+            if (!await navigateProduct(productPath('/local/' + encodeURIComponent(target.threadId), target.hostId), undefined, owner)) throw new Error('Navigation was not completed.');
+          },
+        }}
+        plan={{ cwd: typeof record(current.state).cwd === 'string' ? record(current.state).cwd as string : null }}
+        onOpenFile={(owner, target) => { productCheck(owner); if (target.hostId !== owner.hostId) throw new Error('The selected host changed.'); openFile(target.path, undefined, undefined, target.cwd); }}
+        onTrySkill={(owner, target) => tryProductDraft(owner, target.cwd, { text: '', images: [], files: [], skills: [target.skill] })}
+        onTryPlugin={(owner, target) => tryProductDraft(owner, target.cwd, { text: '$' + target.plugin.name + ' ', images: [], files: [] })}
+      /> : <>
         <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')} inert={leaving}>
           {streamGap && <p role="status" className="yard-stream-gap">此页面未收到连续的活动内容，正在核对会话记录。{isThreadBusy(thread) && '任务正在运行；完成后将重新读取完整记录。'}</p>}
           {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} threadId={current.threadId} thread={thread} editRecovery={editState?.recovery ?? null} editEnabled={!leaving} editAccess={editAccess} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
+            searchOpen={messageSearchOpen} onSearchOpenChange={setMessageSearchOpen}
             editRebase={messageEditRebaseMarker(editState)} onPrepareEditRebase={(origin, version) => editStore.prepareRebase(origin, version)}
             onCommitEditRebase={async candidate => {
               const recovered = await editStore.commitRebase(candidate);
@@ -1027,16 +1161,25 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
               if (location.hostId !== current.hostId) { setError('文件所属主机已改变，请返回原会话打开。'); return; }
               openFile(location.path, location.line, location.column, location.cwd ?? panelCwd);
             }} onOpenVisualization={showVisualization} onOpenBrowser={showBrowser}
-            onEdit={current.readOnly ? undefined : (draft, origin, prepare?: () => Promise<void>) => submit(draft, {}, { type: 'send' }, origin, undefined, undefined, undefined, prepare)} onFork={turnId => action('fork', turnId)} /> : <div className="yard-home-heading"><img src="/brand/icon.svg" alt="" /><h1>What would you like to work on?</h1><p>{cwd || workspace}</p></div>}
+            onEdit={current.readOnly ? undefined : (draft, origin, prepare?: () => Promise<void>) => submit(draft, {}, { type: 'send' }, origin, undefined, undefined, undefined, prepare)} onFork={turnId => action('fork', turnId)} /> : <div className="yard-home-heading"><img src="/brand/icon.svg" alt="" /><h1>{activeProject
+              ? <>{chinese ? '我们应该在' : 'What should we work on in'}{' '}<button aria-haspopup="menu" aria-expanded={projectPickerOpen} onClick={() => setProjectPickerOpen(value => !value)}>{activeProject.name}</button>{chinese ? '中做些什么？' : '?'}</>
+              : chinese ? '我们来做些什么？' : 'What should we work on?'}</h1>
+              {projectPickerOpen && <div className="yard-menu yard-home-project-menu" role="menu">
+                {(projectState ? projectsForHost(projectState, current.hostId) : []).map(project => <button key={project.id} role="menuitem" onClick={() => { setProjectPickerOpen(false); void newChat(project.rootPaths[0], project); }}><Folder aria-hidden="true" />{project.name}</button>)}
+                <button role="menuitem" onClick={() => { setProjectPickerOpen(false); addProject(); }}>{chinese ? '添加项目' : 'Add project'}</button>
+              </div>}</div>}
         </section>
         <div className="yard-composer-container" inert={leaving}>
-          {current.threadId && !loading && <StandaloneGoal client={client} hostId={current.hostId} threadId={current.threadId} readOnly={current.readOnly} />}
+          {current.threadId && !loading && goalMounted && <div hidden={!goalOpen}><StandaloneGoal client={client} hostId={current.hostId} threadId={current.threadId} readOnly={current.readOnly} /></div>}
+          <FullAccessNotice client={client} options={initialOptions} sessionDismissed={fullAccessDismissed} onDismissSession={() => setFullAccessDismissed(true)} />
           {current.readOnly && <p role="status">此会话已归档，原输入已保留。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p>}
           <div inert={current.readOnly}>
           {!sendState || current.threadId && (loading || !initialOptions) && !(composerIsCurrent || current.readOnly && thread) ? current.readOnly ? null : <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
           onRemoveReference={(owner, reference, operation) => removeBrowserDraftReference(browserDraftOwner(owner, sendBindings.current), reference,
             operation, retainBrowserProjection, releaseBrowserProjection)}
-          onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} initialOptions={initialOptions ?? undefined} hosts={hosts} onTargetChange={async (target, lease) => {
+          onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} initialOptions={initialOptions ?? undefined} hosts={hosts}
+          projectDisplay={activeProject && activeProject.hostId === current.hostId && activeProject.rootPaths.includes(thread?.cwd ?? cwd) ? { hostId: current.hostId, cwd: thread?.cwd ?? cwd, name: activeProject.name } : null}
+          onTargetChange={async (target, lease) => {
           const controller = composerController.current, snapshot = controller?.snapshot();
           if (!controller || !snapshot || targetChange.current) throw new Error('原输入区不能切换目标。');
           if (!hostCatalogConfirmed.current) throw new Error('执行主机列表尚未核实，请重新连接后重试。');

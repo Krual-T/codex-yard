@@ -25,7 +25,7 @@ export interface ProductWorkspaceProps {
   isCurrent(authority: Authority): boolean;
   navigate: ProductPagesProps['navigate'];
   renderUnresolved: ProductPagesProps['renderUnresolved'];
-  firstRunVariant: FirstRunVariant;
+  firstRunVariant?: FirstRunVariant;
   onAuthenticated: ProductPagesProps['onAuthenticated'];
   onFirstRunContinue: ProductPagesProps['firstRun']['onContinue'];
   workspace: ProductPagesProps['workspace'];
@@ -190,7 +190,7 @@ function ProductWorkspaceScope(props: ProductWorkspaceProps) {
     accountKey={null} userKey={null} authorityKey={authority.authorityKey} locationKey={authority.locationKey}
     auth={value.authenticated ? { state: 'ready' } : { state: 'required', onAuthenticated: () => {} }} access={access}
     isCurrent={ownerCurrent} navigate={props.navigate} renderUnresolved={props.renderUnresolved}
-    firstRun={{ authMethod: value.method, variant: props.firstRunVariant, onContinue: props.onFirstRunContinue }} onAuthenticated={props.onAuthenticated}
+    firstRun={{ authMethod: value.method, variant: props.firstRunVariant ?? (value.method === 'chatgpt' || value.method === 'apiKey' ? value.method : 'none'), onContinue: props.onFirstRunContinue }} onAuthenticated={props.onAuthenticated}
     workspace={props.workspace} projects={{ ...props.projects, cloudAccess: value.method === 'chatgpt' ? 'unknown' : 'denied' }}
     agents={{ identity: null, enabled: false, canBuild: false, canShare: false }} plan={props.plan}
     skills={{ hasUnresolvedChanges: skillChanges, onTrackChange: track('skills'), onTry: props.onTrySkill }}
