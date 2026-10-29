@@ -63,6 +63,18 @@ test('genuine initial settings loading ends independently of delayed link reads'
   links.close();
 });
 
+test('global initial loading still governs after the projection reads finish', async () => {
+  const peer = new Peer(); let loading = true;
+  const links = new LinkSettings(peer, { assertCurrent() {} }, () => loading);
+  links.start();
+  peer.take(web).resolve(value('in-app-browser')); peer.take(local).resolve(missing); peer.take(legacy).resolve(missing); await flush();
+  assert.equal(links.getSnapshot().webTarget, 'external-browser');
+  loading = false;
+  assert.equal(links.getSnapshot().webTarget, 'in-app-browser');
+  assert.equal(peer.calls.length, 3, 'Observing the global query does not read settings again');
+  links.close();
+});
+
 test('read-only link preferences preserve explicit, legacy and proven missing values', async () => {
   const peer = new Peer(); let initialLoading = true;
   const links = new LinkSettings(peer, { assertCurrent() {} }, () => initialLoading);
