@@ -264,7 +264,7 @@ test('standalone messages render CLI items and retain interactions while streami
       [{ hostId: 'ssh-test', threadId: 'thread', path: '/work/reports/view.html' },
         { hostId: 'ssh-test', threadId: 'thread', path: '/work/view.html' }]);
     await page.evaluate(() => window.standaloneHarness.clipboard('missing'));
-    await assistant.getByRole('button', { name: 'Copy message' }).click();
+    await assistant.getByRole('button', { name: 'Copy', exact: true }).click();
     assert.match((await page.evaluate(() => window.standaloneHarness.calls.copies)).at(-1) ?? '', /^# Result\n\nA \[source\]/);
     await page.evaluate(() => window.standaloneHarness.clipboard('denied'));
     await user.getByRole('button', { name: 'Copy message' }).click();
@@ -321,6 +321,7 @@ test('standalone messages render CLI items and retain interactions while streami
     await futureOutput.getByText('Visible future output', { exact: false }).waitFor();
     assert.match(await page.locator('[data-message-id="unknown"]').innerText(), /Unknown item: futureWidget/);
     await command.locator('summary').click();
+    await command.locator('summary').press('Control+f');
     await page.getByRole('textbox', { name: 'Search messages' }).fill('needle-output');
     await page.getByRole('textbox', { name: 'Search messages' }).press('Enter');
     assert.equal(await command.getAttribute('open'), '');

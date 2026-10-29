@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Check, Clipboard } from 'lucide-react';
+import { Check, Copy } from 'lucide-react';
 import { writeClipboardText } from '../../native/browser-clipboard.ts';
 import { writeMessageClipboard } from './message-copy.ts';
 import type { MessageCopyContent } from './message-copy.ts';
@@ -22,7 +22,7 @@ export function CopyButton({ text, label, content }: { text: string; label: stri
   }
   const description = state === 'copied' ? 'Copied' : state === 'error' ? 'Copy failed' : label;
   return <button type="button" className="yard-icon-button" aria-label={description} title={description} onClick={() => void copy()}>
-    {state === 'copied' ? <Check size={16} /> : <Clipboard size={16} />}
+    {state === 'copied' ? <Check size={14} /> : <Copy size={14} />}
     <span className="yard-screen-reader" role="status">{state === 'error' ? 'Copy failed' : ''}</span>
   </button>;
 }

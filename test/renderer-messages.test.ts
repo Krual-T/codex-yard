@@ -40,9 +40,14 @@ test('standalone long messages are searchable and expand for print', {
 
     const message = page.locator('[data-message-id="user"]');
     const body = message.locator('.yard-user-text');
-    await message.getByRole('button', { name: 'Show more' }).waitFor();
+    const expand = message.getByRole('button', { name: 'Show more' });
+    await expand.waitFor();
     assert.equal(await body.evaluate(element => element.classList.contains('is-collapsed')), true);
+    assert.equal(await page.getByRole('textbox', { name: 'Search messages' }).count(), 0);
+    await expand.focus();
+    await page.keyboard.press('Control+f');
     const search = page.getByRole('textbox', { name: 'Search messages' });
+    assert.equal(await search.evaluate(element => document.activeElement === element), true);
     await search.fill('unique-end-marker');
     await search.press('Enter');
     await page.waitForFunction(() => document.querySelector('[data-message-id="user"]')?.hasAttribute('data-search-current'));
@@ -50,6 +55,9 @@ test('standalone long messages are searchable and expand for print', {
     assert.equal(await body.getByText('unique-end-marker', { exact: false }).count(), 1);
     await page.getByRole('button', { name: 'Clear search' }).click();
     assert.equal(await body.evaluate(element => element.classList.contains('is-collapsed')), true);
+    await page.getByRole('button', { name: 'Close search' }).press('Escape');
+    assert.equal(await search.count(), 0);
+    assert.equal(await expand.evaluate(element => document.activeElement === element), true);
 
     await page.emulateMedia({ media: 'print' });
     assert.equal(await body.evaluate(element => getComputedStyle(element).maxHeight), 'none');

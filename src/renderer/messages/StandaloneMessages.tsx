@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowDown, ChevronDown, ChevronLeft, ChevronRight, GitFork, Pencil, Search, Undo2, X } from 'lucide-react';
+import { ArrowDown, ChevronDown, ChevronLeft, ChevronRight, GitFork, MoreHorizontal, Pencil, Search, Undo2, X } from 'lucide-react';
 import type { ThreadItemSummary, TurnSummary } from '../../../lib/codex-protocol.ts';
 import type { StandaloneMessagesProps, WorkbenchClient } from '../workbench-contract.ts';
 import { StandaloneMarkdown } from '../markdown/StandaloneMarkdown.tsx';
@@ -211,13 +211,13 @@ function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFo
     if (part.kind === 'reference') return <div className="yard-reference" data-reference-type={part.referenceType} key={index}>{part.referenceType}: {part.name} <span>{part.path}</span></div>;
     return <details className="yard-unsupported-input" key={index}><summary>Unsupported message content</summary><pre>{displayJson(part.value)}</pre></details>;
   });
-  return <div className="yard-user-message"><div className="yard-message-label">You</div>
+  return <div className="yard-user-message"><h4 className="yard-screen-reader">You said:</h4>
     <div className="yard-user-bubble">{editing ? <UserMessageEditor item={item} editing={editing} onUpdateEdit={onUpdateEdit}
       restriction={onEdit ? editRestriction : 'Message editing is unavailable.'} onEdit={onEdit ?? unavailableEdit}
       onCancel={() => { restoreFocus.current = true; onEndEdit(editing.id); }} onSubmitEdit={onSubmitEdit}
       recoveryNote={recoveryNote} renderPart={(index) => renderedParts[index]} renderContext={renderContext}
       rebaseRequired={rebaseRequired} canRebase={canRebase} onStartRebase={onStartRebase} onCancelRebase={onCancelRebase} /> : <>
-      <div ref={body} className="yard-user-body">{renderedParts}</div>{long && !searchMatch && <button className="yard-expand" type="button" onClick={() => setExpanded(!expanded)}
+      <div ref={body} className="yard-user-body">{renderedParts}</div>{long && <button className="yard-expand" type="button" hidden={searchMatch} onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}>{expanded ? 'Show less' : 'Show more'} <ChevronDown size={15} /></button>}</>}</div>
     {!editing && <div className="yard-message-actions">{text.trim() && <CopyButton text={text} label="Copy message" content={() => body.current ? messageCopyContent(body.current) : { plainText: text, htmlText: '' }} />}
       {onEdit && <button ref={editButton} type="button" className="yard-icon-button" title={editRestriction ?? (draft ? 'Edit message' : 'This message cannot be edited without losing content')}
@@ -229,7 +229,7 @@ function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFo
             origin: { hostId, threadId, turnId, itemId: item.id,
               ...(typeof item.format === 'string' ? { format: item.format } : {}),
               ...(draft.hints !== undefined ? { hints: structuredClone(draft.hints) } : {}) } });
-        }}><Pencil size={16} /></button>}
+        }}><Pencil size={14} /></button>}
       {onFork && <button type="button" className="yard-icon-button" title="Fork from this turn" aria-label="Fork from this turn" onClick={() => {
         setActionError('');
         void Promise.resolve().then(() => onFork(turnId)).catch((reason: unknown) => setActionError(reason instanceof Error ? reason.message : 'Fork failed.'));
@@ -237,6 +237,36 @@ function UserMessage({ item, turnId, threadId, client, hostId, cwd, onEdit, onFo
     </div>}
     {!editing && editNote && <div className="yard-edit-note" role="status">{editNote}</div>}
     {actionError && <div className="yard-action-error" role="alert">{actionError}</div>}
+  </div>;
+}
+
+function MessageMoreActions({ turnId, onFork, onError }: {
+  turnId: string; onFork: NonNullable<StandaloneMessagesProps['onFork']>; onError: (message: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const container = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const choice = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    choice.current?.focus();
+    function outside(event: PointerEvent) {
+      if (event.target instanceof Node && !container.current?.contains(event.target)) setOpen(false);
+    }
+    document.addEventListener('pointerdown', outside);
+    return () => document.removeEventListener('pointerdown', outside);
+  }, [open]);
+  return <div className="yard-message-action-menu" ref={container} onKeyDown={(event) => {
+    if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); button.current?.focus(); }
+  }}>
+    <button ref={button} type="button" className="yard-icon-button" title="More actions" aria-label="More actions"
+      aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((current) => !current)}><MoreHorizontal size={16} /></button>
+    {open && <div className="yard-message-menu" role="menu" aria-label="More actions">
+      <button ref={choice} type="button" role="menuitem" aria-label="Fork chat from here" onClick={() => {
+        setOpen(false); button.current?.focus(); onError('');
+        void Promise.resolve().then(() => onFork(turnId)).catch((reason: unknown) => onError(reason instanceof Error ? reason.message : 'Fork failed.'));
+      }}><GitFork size={14} aria-hidden="true" />Branch in new chat</button>
+    </div>}
   </div>;
 }
 
@@ -248,7 +278,8 @@ function MessageItem(props: RenderItemProps) {
   if (item.type === 'userMessage') return <UserMessage {...props} />;
   if (item.type === 'agentMessage' || item.type === 'plan') {
     const text = asString(item.text);
-    return <div className="yard-assistant-message"><div className="yard-message-label">{item.type === 'plan' ? 'Plan' : 'Codex'}</div>
+    return <div className="yard-assistant-message">{item.type === 'plan'
+      ? <div className="yard-message-label">Plan</div> : <h4 className="yard-screen-reader">ChatGPT said:</h4>}
       <StandaloneMarkdown text={text} {...markdownProps} />
       {asArray(item.questions).map((value, index) => {
         const question = asRecord(value);
@@ -256,11 +287,8 @@ function MessageItem(props: RenderItemProps) {
           <ul>{asArray(question.options).map((option, optionIndex) => <li key={optionIndex}>{displayJson(option)}</li>)}</ul></section>;
       })}
       {item.memoryCitation != null && <details className="yard-citation"><summary>Memory citations</summary><pre>{displayJson(item.memoryCitation)}</pre></details>}
-      <div className="yard-message-actions"><CopyButton text={text} label="Copy message" />
-        {onFork && <button type="button" className="yard-icon-button" title="Fork from this turn" aria-label="Fork from this turn" onClick={() => {
-          setActionError('');
-          void Promise.resolve().then(() => onFork(turnId)).catch((reason: unknown) => setActionError(reason instanceof Error ? reason.message : 'Fork failed.'));
-        }}><GitFork size={16} /></button>}</div>
+      <div className="yard-message-actions"><CopyButton text={text} label="Copy" />
+        {onFork && <MessageMoreActions turnId={turnId} onFork={onFork} onError={setActionError} />}</div>
       {actionError && <div className="yard-action-error" role="alert">{actionError}</div>}
     </div>;
   }
@@ -295,6 +323,10 @@ function TurnStatus({ turn }: { turn: TurnSummary }) {
 
 type SearchHit = { key: string; text: string };
 type ViewerState = { images: ImageSource[]; index: number };
+export interface StandaloneMessagesSearchProps {
+  searchOpen?: boolean;
+  onSearchOpenChange?(open: boolean): void;
+}
 const itemKey = (turnId: string, itemId: string | null) => JSON.stringify([turnId, itemId]);
 
 function searchText(value: unknown): string {
@@ -311,7 +343,9 @@ function searchText(value: unknown): string {
 
 export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser,
   editEnabled, editRecovery, editAccess, onEditDraftChange, onEditNavigationController, editRebase, onPrepareEditRebase, onCommitEditRebase,
-  editHistory }: StandaloneMessagesProps & StandaloneMessagesRecoveryProps & { editHistory?: MessageEditHistory }) {
+  editHistory, searchOpen, onSearchOpenChange }: StandaloneMessagesProps & StandaloneMessagesRecoveryProps & StandaloneMessagesSearchProps & { editHistory?: MessageEditHistory }) {
+  const [localSearchOpen, setLocalSearchOpen] = useState(false);
+  const searchVisible = searchOpen ?? localSearchOpen;
   const [query, setQuery] = useState('');
   const [matchIndex, setMatchIndex] = useState(-1);
   const [following, setFollowing] = useState(true);
@@ -319,6 +353,9 @@ export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, o
   const scroller = useRef<HTMLDivElement>(null);
   const nodes = useRef(new Map<string, HTMLElement>());
   const searchOpened = useRef(new Set<HTMLDetailsElement>());
+  const searchInput = useRef<HTMLInputElement>(null);
+  const searchReturnFocus = useRef<HTMLElement | null>(null);
+  const searchWasOpen = useRef(false);
   const followRef = useRef(true);
   const requestedThreadId = threadId ?? thread?.id ?? null;
   const threadIdentity = JSON.stringify([hostId, requestedThreadId]);
@@ -385,9 +422,29 @@ export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, o
     window.addEventListener('afterprint', afterPrint);
     return () => { window.removeEventListener('beforeprint', beforePrint); window.removeEventListener('afterprint', afterPrint); };
   }, []);
-  function restoreSearchDetails() {
+  const restoreSearchDetails = useCallback(() => {
     for (const details of searchOpened.current) if (details.isConnected) details.open = false;
     searchOpened.current.clear();
+  }, []);
+  useLayoutEffect(() => {
+    if (searchVisible && !searchWasOpen.current) {
+      searchReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      searchWasOpen.current = true;
+      searchInput.current?.focus();
+    } else if (!searchVisible && searchWasOpen.current) {
+      restoreSearchDetails(); setQuery(''); setMatchIndex(-1);
+      const element = scroller.current;
+      if (element && element.scrollHeight - element.scrollTop - element.clientHeight < 80) {
+        followRef.current = true; setFollowing(true);
+      }
+      if (searchReturnFocus.current?.isConnected) searchReturnFocus.current.focus();
+      searchReturnFocus.current = null;
+      searchWasOpen.current = false;
+    }
+  }, [searchVisible, restoreSearchDetails]);
+  function setSearchVisible(open: boolean) {
+    if (searchOpen === undefined) setLocalSearchOpen(open);
+    onSearchOpenChange?.(open);
   }
   function scrollToMatch(index: number) {
     if (!hits.length) return;
@@ -412,16 +469,25 @@ export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, o
     const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
     if (nearBottom !== followRef.current) { followRef.current = nearBottom; setFollowing(nearBottom); }
   }
-  return <div className="yard-messages-root">
+  return <div className="yard-messages-root" onKeyDownCapture={(event) => {
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'f'
+      && !event.nativeEvent.isComposing && event.keyCode !== 229) {
+      event.preventDefault();
+      if (searchVisible) searchInput.current?.focus(); else setSearchVisible(true);
+    }
+  }}>
     {accessError && <p role="alert">{accessError}</p>}
-    <div className="yard-message-search"><Search size={16} aria-hidden="true" /><input aria-label="Search messages" value={query}
+    {searchVisible && <div className="yard-message-search" onKeyDown={(event) => {
+      if (event.key === 'Escape' && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); setSearchVisible(false); }
+    }}><Search size={16} aria-hidden="true" /><input ref={searchInput} aria-label="Search messages" value={query}
       placeholder="Search messages" onChange={(event) => { restoreSearchDetails(); setQuery(event.target.value); setMatchIndex(-1); }}
       onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); scrollToMatch(event.shiftKey && matchIndex < 0 ? hits.length - 1 : matchIndex + (event.shiftKey ? -1 : 1)); } }} />
       {query && <><span aria-live="polite">{hits.length ? `${matchIndex < 0 ? 0 : Math.min(matchIndex, hits.length - 1) + 1} / ${hits.length}` : '0 results'}</span>
         <button type="button" className="yard-icon-button" title="Previous result" aria-label="Previous result" disabled={!hits.length} onClick={() => scrollToMatch(matchIndex < 0 ? hits.length - 1 : matchIndex - 1)}><ChevronLeft size={16} /></button>
         <button type="button" className="yard-icon-button" title="Next result" aria-label="Next result" disabled={!hits.length} onClick={() => scrollToMatch(matchIndex + 1)}><ChevronRight size={16} /></button>
         <button type="button" className="yard-icon-button" title="Clear search" aria-label="Clear search" onClick={() => { restoreSearchDetails(); setQuery(''); setMatchIndex(-1); }}><X size={16} /></button></>}
-    </div>
+      <button type="button" className="yard-icon-button" title="Close search" aria-label="Close search" onClick={() => setSearchVisible(false)}><X size={16} /></button>
+    </div>}
     <div className="yard-message-scroll" ref={scroller} onScroll={onScroll} onClickCapture={(event) => {
       const target = event.target;
       if (target instanceof Element) {
@@ -448,7 +514,8 @@ export function StandaloneMessages({ client, hostId, threadId, thread, onEdit, o
               ? 'The original message is no longer available. The recovered edit will be checked before sending.' : null;
             return <article className="yard-message-item" key={duplicateId ? `${item.id}:edit-draft` : item.id} data-message-id={item.id} data-search-current={selected?.key === key || undefined}
               ref={(node) => { if (node) nodes.current.set(key, node); else nodes.current.delete(key); }}>
-              <MemoMessageItem item={item} turnId={turn.id} threadId={thread.id} client={client} hostId={hostId} cwd={thread.cwd} onEdit={onEdit} onFork={onFork}
+              <MemoMessageItem item={item} turnId={turn.id} threadId={thread.id} client={client} hostId={hostId} cwd={thread.cwd} onEdit={onEdit}
+                onFork={item.type === 'userMessage' && turn.items.some((entry) => entry.type === 'agentMessage' || entry.type === 'plan') ? undefined : onFork}
                 onOpenFile={onOpenFile} onOpenFileAt={onOpenFileAt} onOpenVisualization={onOpenVisualization} onOpenBrowser={onOpenBrowser}
                 onOpenImages={openImages} editRestriction={editRestriction} editing={itemEditing} identity={threadIdentity}
                 turnIndex={turnIndex} itemIndex={itemIndex} onStartEdit={startEdit} onUpdateEdit={updateEdit} onEndEdit={endEdit}

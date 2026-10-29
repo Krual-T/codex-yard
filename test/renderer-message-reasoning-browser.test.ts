@@ -76,9 +76,10 @@ test('standalone reasoning retains disclosure and updates as the turn changes', 
     await citation.locator('summary').click();
     assert.match(await citation.locator('pre').textContent() ?? '', /\/notes\/memory\.md/);
     assert.match(await citation.locator('pre').textContent() ?? '', /saved detail/);
-    await answer.getByRole('button', { name: 'Copy message' }).click();
+    await answer.getByRole('button', { name: 'Copy', exact: true }).click();
     assert.deepEqual(await page.evaluate(() => window.reasoningHarness.copies), ['Partial answer']);
-    await answer.getByRole('button', { name: 'Fork from this turn' }).click();
+    await answer.getByRole('button', { name: 'More actions' }).click();
+    await answer.getByRole('menuitem', { name: 'Fork chat from here' }).click();
     await page.waitForFunction(() => window.reasoningHarness.forks.length === 1);
     assert.deepEqual(await page.evaluate(() => window.reasoningHarness.forks), ['turn']);
 
