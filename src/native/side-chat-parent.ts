@@ -114,9 +114,12 @@ async function findInDirectory(port: SideChatParentPort, revision: string, threa
   let cursor: string | null = null;
   const seen = new Set<string>();
   for (let pageNumber = 0; pageNumber < 1000; pageNumber++) {
-    const page = await port.runScoped(async () => {
+    const pending = await port.runScoped(() => {
       port.assertCurrent(revision);
-      const result = await port.request('thread/list', { archived, limit: 100, cursor, sourceKinds: [...sourceKinds] });
+      return { reply: port.request('thread/list', { archived, limit: 100, cursor, sourceKinds: [...sourceKinds] }) };
+    });
+    const result = await pending.reply;
+    const page = await port.runScoped(() => {
       port.assertCurrent(revision);
       return structuredClone(result);
     });

@@ -290,47 +290,55 @@ export function createNativeSideChatParent(options: Options) {
     const { hostId, parentThreadId, action } = params;
     if (!id(hostId) || !id(parentThreadId) || !id(action)) throw new BeforeSend('侧聊身份无效。');
     options.validateHost(hostId);
+    if (action === 'readPrepared') {
+      if (!id(params.prepareId)) throw new BeforeSend('侧聊准备身份无效。');
+      return endpoint.readPrepared({ hostId, parentThreadId, prepareId: params.prepareId });
+    }
     if (action === 'prepare') {
       if (!id(params.prepareId) || !id(params.draftId)) throw new BeforeSend('侧聊草稿或准备身份无效。');
-      const binding = await options.mutations.run(() => {
-        const previous = prepareBindings.get(params.prepareId as string);
-        if (previous) {
-          if (previous.page !== page || previous.hostId !== hostId || previous.parentThreadId !== parentThreadId
-            || previous.draftId !== params.draftId) throw new BeforeSend('原侧聊准备身份已属于另一页面。');
-          assertBinding(previous);
-          return previous;
-        }
-        const receipt = options.receipts.current(page, hostId, parentThreadId);
-        const connection = options.connections(page)?.get(hostId), socket = connection?.socket;
-        if (!receipt || !connection || !socket || options.generation(socket) !== receipt.connectionGeneration) {
-          throw new BeforeSend('原父会话尚未确认。');
-        }
-        const result: Binding = { page, hostId, parentThreadId, draftId: params.draftId as string, connection, socket,
-          connectionGeneration: receipt.connectionGeneration, revision: receipt.revision,
-          projectRevision: options.projectRevision(), project: project(hostId, parentThreadId),
-          forkConfig: structuredClone(options.forkConfig(hostId)) };
-        assertBinding(result);
-        prepareBindings.set(params.prepareId as string, result);
-        return result;
-      });
-      return context.run({ page, binding }, async () => {
-        const result = await endpoint.prepare({ hostId, parentThreadId, prepareId: params.prepareId as string });
-        const saved = await store.read(result.view.operationId);
-        return options.mutations.run(() => {
-          assertBinding(binding);
-          const previous = bindings.get(result.view.operationId);
-          if (!saved || saved.parent.connectionGeneration !== binding.connectionGeneration
-            || !isDeepStrictEqual(saved.parent.project, binding.project)
-            || !isDeepStrictEqual(saved.parent.forkConfig, binding.forkConfig)
-            || record(record(saved).endpointFence).ownerId !== ownerId || previous &&
-            (previous.page !== page || previous.revision !== binding.revision || previous.draftId !== binding.draftId
-              || previous.projectRevision !== binding.projectRevision)) {
-            throw new BeforeSend('原侧聊准备身份已属于另一页面。');
+      try {
+        const binding = await options.mutations.run(() => {
+          const previous = prepareBindings.get(params.prepareId as string);
+          if (previous) {
+            if (previous.page !== page || previous.hostId !== hostId || previous.parentThreadId !== parentThreadId
+              || previous.draftId !== params.draftId) throw new BeforeSend('原侧聊准备身份已属于另一页面。');
+            assertBinding(previous);
+            return previous;
           }
-          bindings.set(result.view.operationId, binding);
+          const receipt = options.receipts.current(page, hostId, parentThreadId);
+          const connection = options.connections(page)?.get(hostId), socket = connection?.socket;
+          if (!receipt || !connection || !socket || options.generation(socket) !== receipt.connectionGeneration) {
+            throw new BeforeSend('原父会话尚未确认。');
+          }
+          const result: Binding = { page, hostId, parentThreadId, draftId: params.draftId as string, connection, socket,
+            connectionGeneration: receipt.connectionGeneration, revision: receipt.revision,
+            projectRevision: options.projectRevision(), project: project(hostId, parentThreadId),
+            forkConfig: structuredClone(options.forkConfig(hostId)) };
+          assertBinding(result);
+          prepareBindings.set(params.prepareId as string, result);
           return result;
         });
-      });
+        return await context.run({ page, binding }, async () => {
+          const result = await endpoint.prepare({ hostId, parentThreadId, prepareId: params.prepareId as string });
+          const saved = await store.read(result.view.operationId);
+          return options.mutations.run(() => {
+            assertBinding(binding);
+            const previous = bindings.get(result.view.operationId);
+            if (!saved || saved.parent.connectionGeneration !== binding.connectionGeneration
+              || !isDeepStrictEqual(saved.parent.project, binding.project)
+              || !isDeepStrictEqual(saved.parent.forkConfig, binding.forkConfig)
+              || record(record(saved).endpointFence).ownerId !== ownerId || previous &&
+              (previous.page !== page || previous.revision !== binding.revision || previous.draftId !== binding.draftId
+                || previous.projectRevision !== binding.projectRevision)) {
+              throw new BeforeSend('原侧聊准备身份已属于另一页面。');
+            }
+            bindings.set(result.view.operationId, binding);
+            return { ...result, connectionGeneration: binding.connectionGeneration };
+          });
+        });
+      } catch (error) {
+        throw Object.assign(new Error('侧聊准备结果尚未确认，请核对原准备身份。', { cause: error }), { uncertain: true });
+      }
     }
     if (!id(params.operationId)) throw new BeforeSend('侧聊操作身份无效。');
     const input = { hostId, parentThreadId, operationId: params.operationId };

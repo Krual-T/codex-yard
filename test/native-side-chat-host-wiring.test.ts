@@ -101,6 +101,12 @@ test('real host prepares and restores the same native-state operation but requir
   const first = await a.host('side-chat', prepared);
   assert.equal(first.responseType, 'success');
   assert.equal(first.body.view.fork.status, 'waiting');
+  assert.equal(typeof first.body.connectionGeneration, 'string');
+  const lookup = await a.host('side-chat', { ...identity, action: 'readPrepared', prepareId: prepared.prepareId });
+  assert.equal(lookup.body.view.operationId, first.body.view.operationId);
+  assert.equal(lookup.body.connectionGeneration, first.body.connectionGeneration);
+  assert.equal(Object.hasOwn(lookup.body, 'token'), false);
+  assert.equal((await a.host('side-chat', { ...identity, action: 'readPrepared', prepareId: 'missing' })).body, null);
   const duplicate = await a.host('side-chat', prepared);
   assert.equal(duplicate.body.view.operationId, first.body.view.operationId);
   const state = JSON.parse(await readFile(join(f.dataDir, 'native-state.json'), 'utf8'));
@@ -153,9 +159,14 @@ test('a lost prepare cannot gain new project authority but its original operatio
   assert.equal(first.responseType, 'error'); assert.equal(first.uncertain, true);
   assert.equal((await a.host('project-add', { hostId: 'local', path: f.root, name: 'Fixture' })).responseType, 'success');
   const repeated = await a.host('side-chat', prepared);
-  assert.equal(repeated.responseType, 'error'); assert.equal(repeated.uncertain, false);
+  assert.equal(repeated.responseType, 'error'); assert.equal(repeated.uncertain, true);
   const state = JSON.parse(await readFile(join(f.dataDir, 'native-state.json'), 'utf8'));
-  const operationId = state.sideChats.prepared['prepare-a'];
+  const b = await f.connect();
+  const lookup = await b.host('side-chat', { ...identity, action: 'readPrepared', prepareId: 'prepare-a' });
+  assert.equal(lookup.responseType, 'success');
+  const operationId = lookup.body.view.operationId;
+  assert.equal(state.sideChats.prepared['prepare-a'], operationId);
+  assert.equal((await b.host('side-chat', { hostId: 'local', parentThreadId: 'wrong', action: 'readPrepared', prepareId: 'prepare-a' })).responseType, 'error');
   assert.equal(Object.keys(state.sideChats.operations).length, 1);
   const original = await a.host('side-chat', { ...identity, action: 'read', operationId });
   assert.equal(original.responseType, 'success');
@@ -163,6 +174,22 @@ test('a lost prepare cannot gain new project authority but its original operatio
   const denied = await a.host('side-chat', action(original.body, 'start', { forkDispatchId: 'after-project-change' }));
   assert.equal(denied.responseType, 'error'); assert.equal(denied.uncertain, false);
   assert.equal(f.fake.calls('thread/fork').length, 0);
+});
+
+test('a slow original directory request does not block other native-state operations', async t => {
+  const f = await fixture(t), a = await f.connect(), b = await f.connect();
+  await a.rpc('thread/start', { cwd: f.root });
+  let delayed: { id: string | number; send(value: unknown): void } | undefined;
+  f.fake.handlers.set('thread/list', (_params, context) => {
+    delayed = { id: context.message.id!, send: context.send }; return NO_REPLY;
+  });
+  const pending = a.host('side-chat', prepared);
+  await f.fake.waitForCall('thread/list');
+  assert.ok(delayed);
+  const setting = await b.host('get-setting', { key: 'pet-visibility' });
+  assert.equal(setting.responseType, 'success');
+  delayed.send({ id: delayed.id, result: { data: [{ id: 'parent-a' }], nextCursor: null } });
+  assert.equal((await pending).responseType, 'success');
 });
 
 test('real endpoint checks page, draft and fork identity at dispatch and closes with one unsubscribe', async t => {
@@ -246,7 +273,7 @@ test('dispatch rechecks the parent project and the original socket after prepara
   const changed = await a.host('side-chat', action(first.body, 'start', { forkDispatchId: 'project-changed' }));
   assert.equal(changed.responseType, 'error'); assert.equal(changed.uncertain, false);
   const reprepare = await a.host('side-chat', prepared);
-  assert.equal(reprepare.responseType, 'error'); assert.equal(reprepare.uncertain, false);
+  assert.equal(reprepare.responseType, 'error'); assert.equal(reprepare.uncertain, true);
   assert.equal(f.fake.calls('thread/fork').length, 0);
   assert.equal((await a.host('thread-projects', { operation: 'setMembership', value: { hostId: 'local', threadId: 'parent-a',
     assignment: { projectKind: 'local', projectId: f.root }, projectless: false } })).responseType, 'success');

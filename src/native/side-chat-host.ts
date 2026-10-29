@@ -412,6 +412,16 @@ export function createSideChatEndpointHost(deps: SideChatEndpointDependencies) {
     } catch { throw new SideChatEndpointError('无法准备侧聊，请检查原主机和父会话。'); }
   }
 
+  async function readPrepared(input: { hostId: string; parentThreadId: string; prepareId: string }) {
+    if (!input || !nonempty(input.hostId) || !nonempty(input.parentThreadId) || !nonempty(input.prepareId)) {
+      throw new SideChatEndpointError('无法读取原侧聊准备记录。');
+    }
+    const saved = await deps.store.readPrepared(input.prepareId);
+    if (!saved) return null;
+    const operation = await original({ hostId: input.hostId, parentThreadId: input.parentThreadId, operationId: saved.operationId });
+    return { view: reply(operation).view, connectionGeneration: operation.parent.connectionGeneration };
+  }
+
   async function read(input: SideChatEndpointInput): Promise<SideChatEndpointReply> {
     try {
       const before = await original(input);
@@ -507,7 +517,7 @@ export function createSideChatEndpointHost(deps: SideChatEndpointDependencies) {
     }
   }
 
-  return { prepare, read,
+  return { prepare, readPrepared, read,
     start: (input: SideChatEndpointActionInput) => dispatch('start', input),
     retry: (input: SideChatEndpointActionInput) => dispatch('retry', input),
     close: (input: SideChatEndpointActionInput) => dispatch('close', input),

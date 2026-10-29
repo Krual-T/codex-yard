@@ -195,6 +195,29 @@ test('a late original response cannot revive a snapshot after an intervening set
   assert.equal(f.fake.calls('thread/resume').length, 1);
 });
 
+test('pending start checks invalidation against its returned thread instead of unrelated threads', async t => {
+  const f = await fixture(t), a = await f.connect(), b = await f.connect();
+  const pending: { id: string | number; send(value: unknown): void }[] = [];
+  f.fake.handlers.set('thread/start', (_params, context) => {
+    pending.push({ id: context.message.id!, send: context.send }); return NO_REPLY;
+  });
+  f.fake.handlers.set('thread/settings/update', () => ({}));
+  const first = a.rpc('thread/start', { cwd: f.root });
+  await f.fake.waitForCall('thread/start');
+  assert.ok((await b.rpc('thread/settings/update', { threadId: 'other-thread' })).message.result);
+  pending[0]!.send({ id: pending[0]!.id, result: f.response('parent-a') });
+  assert.ok((await first).message.result);
+  const source = f.receipts.sources.at(-1)!;
+  assert.ok(f.receipts.current(source.page, 'local', 'parent-a'));
+
+  const second = a.rpc('thread/start', { cwd: f.root });
+  await f.fake.waitForCall('thread/start', 2);
+  assert.ok((await b.rpc('thread/settings/update', { threadId: 'parent-a' })).message.result);
+  pending[1]!.send({ id: pending[1]!.id, result: f.response('parent-a') });
+  assert.ok((await second).message.result);
+  assert.equal(f.receipts.current(source.page, 'local', 'parent-a'), null);
+});
+
 test('an older resume reply cannot replace a newer original response on the same page', async t => {
   const f = await fixture(t), a = await f.connect();
   const pending: { id: string | number; send(value: unknown): void }[] = [];

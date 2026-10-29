@@ -29,6 +29,7 @@ export interface SideChatReceiptAttempt {
   sequence: number;
   stale: boolean;
   active: boolean;
+  invalidatedThreads: Set<string>;
 }
 interface StoredReceipt {
   source: SideChatReceiptSource;
@@ -53,7 +54,8 @@ export class SideChatParentReceipts {
         if (prior.source.page === source.page && prior.source.hostId === source.hostId && prior.expectedThreadId === expectedThreadId) prior.stale = true;
       }
     }
-    const attempt = { source, method, expectedThreadId, sequence: ++this.sequence, stale: false, active: true };
+    const attempt = { source, method, expectedThreadId, sequence: ++this.sequence, stale: false, active: true,
+      invalidatedThreads: new Set<string>() };
     this.attempts.add(attempt);
     return attempt;
   }
@@ -71,7 +73,7 @@ export class SideChatParentReceipts {
     if (!entries) { entries = new Map(); this.pages.set(source.page, entries); }
     const key = this.key(source.hostId, threadId), previous = entries.get(key);
     if (previous && previous.sequence > attempt.sequence) return;
-    entries.set(key, { source, sequence: attempt.sequence, stale: attempt.stale, receipt: {
+    entries.set(key, { source, sequence: attempt.sequence, stale: attempt.stale || attempt.invalidatedThreads.has(threadId), receipt: {
       hostId: source.hostId, threadId, connectionGeneration: source.connectionGeneration,
       revision: randomUUID(), response: structuredClone(response), eventCursor,
     } });
@@ -96,7 +98,9 @@ export class SideChatParentReceipts {
       if (stored) stored.stale = true;
     }
     for (const attempt of this.attempts) {
-      if (attempt.source.hostId === hostId && (attempt.expectedThreadId === null || attempt.expectedThreadId === threadId)) attempt.stale = true;
+      if (attempt.source.hostId !== hostId) continue;
+      if (attempt.expectedThreadId === null) attempt.invalidatedThreads.add(threadId);
+      else if (attempt.expectedThreadId === threadId) attempt.stale = true;
     }
   }
 
