@@ -1,7 +1,7 @@
 export interface NavigationOptions { replace?: boolean; delta?: number; state?: unknown }
 
 /** Keep the committed URL visible while an asynchronous leave guard is open. */
-export function createRouteNavigation(changed: () => void, requestLeave: () => Promise<boolean>, settled?: () => void) {
+export function createRouteNavigation(changed: () => void, requestLeave: () => Promise<boolean>, settled?: (committed: boolean, error?: unknown) => void) {
   let index = Number(history.state?.__yardIndex ?? 0), position = index;
   let committed = { url: location.href, state: history.state };
   let pending = false, approvedPop = false, disposed = false;
@@ -18,18 +18,24 @@ export function createRouteNavigation(changed: () => void, requestLeave: () => P
     if (disposed || target === position) return;
     const next = new Promise<void>(resolve => { arrived = resolve; });
     moving = next;
-    history.go(target - position);
+    try { history.go(target - position); }
+    catch (error) { arrived = null; moving = null; throw error; }
     await next;
     if (moving === next) moving = null;
   };
   const pop = () => {
     position = Number(history.state?.__yardIndex ?? 0);
     if (arrived) { const resolve = arrived; arrived = null; resolve(); return; }
-    if (approvedPop) { approvedPop = false; commit(); return; }
+    if (approvedPop) {
+      approvedPop = false;
+      try { commit(); } finally { settled?.(true); }
+      return;
+    }
     if (pending) { void moveTo(index); return; }
     const target = { url: location.href, state: history.state, index: position };
     pending = true;
     void (async () => {
+      let didCommit = false, failure: unknown;
       try {
         await moveTo(index);
         if (target.index === index) history.replaceState(committed.state, '', committed.url);
@@ -38,8 +44,9 @@ export function createRouteNavigation(changed: () => void, requestLeave: () => P
         await moveTo(target.index);
         if (disposed) return;
         if (target.index === index) history.replaceState(target.state, '', target.url);
-        commit();
-      } finally { pending = false; settled?.(); }
+        commit(); didCommit = true;
+      } catch (error) { failure = error; }
+      finally { pending = false; settled?.(didCommit, failure); }
     })();
   };
   window.addEventListener('popstate', pop);
@@ -56,14 +63,18 @@ export function createRouteNavigation(changed: () => void, requestLeave: () => P
     async navigate(path: string, options: NavigationOptions = {}): Promise<boolean> {
       if (pending || disposed) return false;
       pending = true;
+      let didCommit = false, failure: unknown;
       try {
         if (!await requestLeave() || disposed) return false;
-        if (options.delta) { approvedPop = true; history.go(options.delta); return true; }
-        if (!options.replace) index++;
-        const state = { __yardIndex: index, __yardState: options.state ?? null };
-        if (options.replace) history.replaceState(state, '', path); else history.pushState(state, '', path);
-        position = index; commit(); return true;
-      } finally { pending = false; if (!approvedPop) settled?.(); }
+        if (options.delta && index + options.delta >= 0) { approvedPop = true; history.go(options.delta); return true; }
+        // A directly opened nested settings page has no earlier Yard entry.
+        const replace = options.replace || !!options.delta;
+        const nextIndex = replace ? index : index + 1;
+        const state = { __yardIndex: nextIndex, __yardState: options.state ?? null };
+        if (replace) history.replaceState(state, '', path); else history.pushState(state, '', path);
+        position = nextIndex; commit(); didCommit = true; return true;
+      } catch (error) { approvedPop = false; failure = error; return false; }
+      finally { pending = false; if (!approvedPop) settled?.(didCommit, failure); }
     },
     dispose() { disposed = true; arrived?.(); arrived = null; window.removeEventListener('popstate', pop); },
   };

@@ -154,10 +154,16 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     if (pending && (current.hostId !== pending.target.hostId || current.threadId !== null || current.section
       || cwd !== pending.target.cwd || composerController.current?.snapshot()?.owner.hostId !== pending.target.hostId)) return;
     // Keep the original editor frozen until the new route actually commits.
-    navigationLease.current?.release(); navigationLease.current = null;
+    const editLease = navigationLease.current;
+    if (editLease) {
+      if (!current.section && !current.readOnly && current.hostId === editLease.origin.hostId && current.threadId === editLease.origin.threadId) editLease.release();
+      else editLease.handoff();
+      navigationLease.current = null;
+    }
     composerNavigationLease.current?.release(); composerNavigationLease.current = null; navigationLocked.current = false;
-    if (pending) { targetChange.current = null; setLeaving(false); pending.committed(); }
-  }, [navigationCommit, current.hostId, current.threadId, current.section, cwd]);
+    setLeaving(false);
+    if (pending) { targetChange.current = null; pending.committed(); }
+  }, [navigationCommit, current.hostId, current.threadId, current.section, current.readOnly, cwd]);
   const editStore = useMemo(() => new MessageEditRecoveryStore(client, undefined, { hostChecksRebasedSourceBeforeRevert: true }), [client]);
   const editAccess = useMemo(() => editStore.createAccess(), [editStore]);
   const sendStore = useMemo(() => new SendRecoveryStore(client), [client]);
@@ -274,9 +280,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   useEffect(() => {
     const controller = createRouteNavigation(() => {
       const next = route();
-      navigationLease.current?.handoff(); navigationLease.current = null;
       if (next.section && !routeRef.current.section) setSettingsSourceEpoch(value => value + 1);
-      navigationGeneration.current++; setLeaving(Boolean(targetChange.current)); setCurrent(next); setNavigationCommit(value => value + 1); setError(''); setMenu(false);
+      navigationGeneration.current++; setLeaving(true); setCurrent(next); setNavigationCommit(value => value + 1); setError(''); setMenu(false);
     }, async () => {
       navigationLocked.current = true;
       let accepted = false;
@@ -305,7 +310,15 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         navigationLease.current?.release(); navigationLease.current = null;
         composerNavigationLease.current?.release(); composerNavigationLease.current = null; navigationLocked.current = false; setLeaving(false);
       } }
-    }, () => setNavigationFactsEpoch(value => value + 1));
+    }, (committed, cause) => {
+      if (!committed) {
+        navigationLease.current?.release(); navigationLease.current = null;
+        composerNavigationLease.current?.release(); composerNavigationLease.current = null;
+        navigationLocked.current = false; setLeaving(false);
+        if (cause) setError(cause instanceof Error ? cause.message : String(cause));
+      }
+      setNavigationFactsEpoch(value => value + 1);
+    });
     navigation.current = controller;
     setNavigationFactsEpoch(value => value + 1);
     const unsubscribe = client.subscribe(event => {
@@ -492,7 +505,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   };
   const submit = async (draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, origin?: MessageEditOrigin,
     description?: ComposerSubmissionDescription, retry?: SendIntent,
-    visualizationSubmission?: { hostId: string; threadId: string; path: string; signal: AbortSignal }) => {
+    visualizationSubmission?: { hostId: string; threadId: string; path: string; signal: AbortSignal }, prepareEdit?: () => Promise<void>) => {
     if (inFlight.current) throw new Error('正在提交，请稍候。');
     if (loading) throw new Error('会话仍在加载，请稍候。');
     origin = origin && structuredClone(origin);
@@ -524,6 +537,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       }
     };
     try {
+      if (origin) { await prepareEdit?.(); assertEditAuthority?.(); requireCurrent(origin.threadId); }
       if (current.threadId) await sessions.ready({ hostId, threadId: current.threadId }, allowFirstTurn);
       requireCurrent(current.threadId);
       const additionalContext = retry ? retry.additionalContext : (!origin && current.threadId && action.type !== 'queue'
@@ -562,7 +576,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       const active = current.threadId ? sessions.view({ hostId, threadId: current.threadId }).snapshot() : conversation;
       const result = await submitDraft(client, { hostId, threadId: current.threadId, cwd: activeCwd, initialOptions: active.options ?? undefined,
         documentPlainTextMode: intent ? intent.documentPlainTextMode : description?.documentPlainTextMode,
-        overrides: description?.overrides, additionalContext: intent ? intent.additionalContext : additionalContext,
+        overrides: origin ? {} : description?.overrides, additionalContext: intent ? intent.additionalContext : additionalContext,
         collaborationMode: intent?.collaborationMode, createdOptions: intent?.created?.settings,
         ...(intent ? { send: { clientUserMessageId: intent.clientUserMessageId,
           creating: async () => { requireCurrent(null); await sendStore.creating(intent!.id, intent!.attemptId); },
@@ -847,7 +861,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
               if (location.hostId !== current.hostId) { setError('文件所属主机已改变，请返回原会话打开。'); return; }
               openFile(location.path, location.line, location.column, location.cwd ?? panelCwd);
             }} onOpenVisualization={showVisualization} onOpenBrowser={showBrowser}
-            onEdit={current.readOnly ? undefined : (draft, origin) => submit(draft, initialOptions ?? {}, { type: 'send' }, origin)} onFork={turnId => action('fork', turnId)} /> : <div className="yard-home-heading"><img src="/brand/icon.svg" alt="" /><h1>What would you like to work on?</h1><p>{cwd || workspace}</p></div>}
+            onEdit={current.readOnly ? undefined : (draft, origin, prepare?: () => Promise<void>) => submit(draft, {}, { type: 'send' }, origin, undefined, undefined, undefined, prepare)} onFork={turnId => action('fork', turnId)} /> : <div className="yard-home-heading"><img src="/brand/icon.svg" alt="" /><h1>What would you like to work on?</h1><p>{cwd || workspace}</p></div>}
         </section>
         <div className="yard-composer-container" inert={leaving}>
           {current.threadId && !loading && <StandaloneGoal client={client} hostId={current.hostId} threadId={current.threadId} readOnly={current.readOnly} />}
