@@ -11,8 +11,10 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
   const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'js', contents: `
     import React from 'react';
     import {createRoot} from 'react-dom/client';
+    import {flushSync} from 'react-dom';
     import {I18nProvider} from './src/renderer/i18n/index.tsx';
     import {StandaloneComposer,draftToInput,readComposerDraft} from './src/renderer/composer/StandaloneComposer.tsx';
+    import {StandaloneStructuredInputEditor} from './src/renderer/composer/StandaloneRichEditor.tsx';
     import {composerDraftAtomKey,saveComposerDraftConflict,readComposerDraftVersions,updateComposerDraftVersionInRoot}
       from './src/renderer/composer/composer-draft-store.ts';
     import {updateBrowserAtoms} from './src/renderer/storage/ui-atoms.ts';
@@ -57,7 +59,17 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       hosts:[{hostId:'local',displayName:'Local'},{hostId:'ssh:other',displayName:'Remote'}],
       captureSubmissionAuthority(owner){const expected=JSON.stringify(owner),grant=state.grant;
         return ()=>{const c=props.context;if(grant!==state.grant || expected!==JSON.stringify({hostId:c.hostId,threadId:c.threadId,draftId:c.draftId}))throw Error('original route authority revoked');};},
-      onDraftController(controller){state.controller=controller;},onDraftChange(snapshot){state.snapshots.push(structuredClone(snapshot));},
+      onDraftController(controller){state.controller=controller;},onDraftChange(snapshot){state.snapshots.push(structuredClone(snapshot));
+        const pending=state.precommit;if(!pending || pending.revision!==snapshot.revision)return;
+        state.precommit=null;const element=document.querySelector('[data-composer-input-index="0"]');
+        element.focus();if(element instanceof HTMLTextAreaElement)element.setSelectionRange(element.value.length,element.value.length);
+        const before=element instanceof HTMLTextAreaElement?element.value:element.textContent;
+        const dispatched=pending.action==='view-undo'
+          ? element.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'z',ctrlKey:true}))
+          : pending.action==='undo'
+          ? element.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:'historyUndo'}))
+          : document.execCommand('insertText',false,'Q');
+        state.precommitResult={before,dispatched,after:element instanceof HTMLTextAreaElement?element.value:element.textContent,snapshot:state.controller.snapshot()};},
       onPromptAppendPort(port){state.appendPort=port;},
       async onSubmit(draft,options,action,description,assertAuthority){assertAuthority?.();state.submissions.push({draft:structuredClone(draft),
         input:draftToInput(draft,props.context.hostId,{plainTextMode:description?.documentPlainTextMode}),action});throw Error('fixture send declined');},async onInterrupt(){} };
@@ -67,6 +79,13 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       read(){const {hostId,threadId,draftId}=props.context;return readComposerDraft({hostId,threadId,draftId});},
       addVersion(draft,revision){const c=state.controller;return saveComposerDraftConflict(c.snapshot().owner,{draft,revision,prefills:[]});},
       versions(){const c=state.controller;return readComposerDraftVersions(c.snapshot().owner);},
+      mountSegmentProbe(draft){const host=document.createElement('div');document.body.append(host);
+        const directRoot=createRoot(host),ref=React.createRef();let current=draft;
+        const render=()=>flushSync(()=>directRoot.render(React.createElement(I18nProvider,{locale:'en-US'},
+          React.createElement(StandaloneStructuredInputEditor,{ref,draft:current,currentDraft:()=>current,onEdit:()=>false,onKeyDown:()=>false}))));
+        render();state.segmentProbe={set(value){current=value;},render,
+          prepare(){return !!ref.current.preparePromptAppend(current.document,{type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'append'}]}]},2,current);},
+          close(){directRoot.unmount();host.remove();}};},
       seedRich(document){const c=state.controller,parsed=readRichDocument(document);
         if(!parsed)throw Error('invalid fixture document');
         return c.update(c.snapshot().owner,draft=>({...draft,text:serializeRichDocument(parsed),document}));},
@@ -943,6 +962,146 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       await first.press('Control+z'); assert.equal(await first.inputValue(), 'AB');
       await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'ABC');
       assert.deepEqual(errors, []); await page.close();
+    });
+
+    for (const action of ['undo', 'type', 'type-marks', 'type-different', 'type-different-plain'] as const) await t.test(`C precommit segmented ${action} uses the accepted document`, async () => {
+      const { page, errors } = await open(`c-precommit-${action}`);
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      const original = { text: 'A\nB\nTail', images: [], files: [], references: [], skills: [], input: [
+        { type: 'text', text: 'A\nB', text_elements: [] }, { type: 'image', fileId: 'image-one', detail: 'high' },
+        { type: 'text', text: 'Tail', text_elements: [] },
+      ], document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'B' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'Tail' }] }] } };
+      const { document: _document, ...withoutDocument } = original;
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); },
+        action === 'type-different-plain' ? withoutDocument : original), true);
+      const first = page.getByRole('textbox', { name: 'Work with Codex 1' });
+      const second = page.getByRole('textbox', { name: 'Work with Codex 2' });
+      await second.focus(); await second.press('End'); await second.pressSequentially('Y');
+      await first.focus(); await first.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(element.value.length, element.value.length));
+      await first.pressSequentially('X');
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const alternate = await page.evaluate(action => {
+        const draft = structuredClone((window as any).fixture.state.controller.snapshot().draft);
+        const changedText = action.startsWith('type-different') ? 'BXY' : 'BX';
+        draft.input[0].text = 'A\n' + changedText;
+        draft.text = 'A\n' + changedText + '\nTailY';
+        if (draft.document) draft.document.content = [{ type: 'paragraph', content: [{ type: 'text', text: 'A', ...(action === 'type-marks' ? { marks: [{ type: 'strong' }] } : {}) }, { type: 'hard_break' },
+          { type: 'text', text: changedText }] }, { type: 'paragraph', content: [{ type: 'text', text: 'TailY' }] }];
+        return draft;
+      }, action);
+      const revision = `c-precommit-${action}`;
+      await page.evaluate(({ draft, revision }) => (window as any).fixture.addVersion(draft, revision), { draft: alternate, revision });
+      await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
+      await page.evaluate(({ action, revision }) => { (window as any).fixture.state.precommit = { action, revision }; }, { action, revision });
+      await page.getByRole('button', { name: action.startsWith('type-different') ? 'A BXY TailY' : 'A BX TailY', exact: true }).click();
+      await page.waitForFunction(() => (window as any).fixture.state.precommitResult);
+      const observed = await page.evaluate(() => (window as any).fixture.state.precommitResult);
+      assert.equal(observed.before, 'A\nBX');
+      assert.equal(observed.dispatched, action !== 'undo');
+      if (action.startsWith('type-different')) {
+        assert.equal(observed.snapshot.draft.input[0].text, 'A\nBXQ');
+        assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), false);
+        await page.getByRole('button', { name: 'Save as a separate draft' }).click();
+        await page.getByRole('button', { name: 'Save as a separate draft' }).waitFor({ state: 'hidden' });
+      }
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const current = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+      const versions = await page.evaluate(() => (window as any).fixture.versions());
+      const saved = versions.versions.find((version: any) => version.revision === current.revision);
+      t.diagnostic(JSON.stringify({ action, revision: current.revision, input: current.draft.input[0].text,
+        storedInput: saved?.draft.input[0].text, firstParagraph: current.draft.document?.content[0] }));
+      if (action === 'undo') {
+        assert.equal(observed.snapshot.revision, revision);
+        assert.deepEqual(observed.snapshot.draft, alternate);
+        assert.equal(current.revision, revision);
+        assert.deepEqual(current.draft, alternate);
+        assert.equal(await first.inputValue(), 'A\nBX');
+      } else {
+        assert.equal(current.draft.input[0].text, 'A\nBXQ');
+        if (!action.startsWith('type-different')) assert.equal(current.draft.document.content[0].content[1].type, 'hard_break');
+        if (action === 'type-marks') assert.deepEqual(current.draft.document.content[0].content[0].marks, [{ type: 'strong' }]);
+        assert.equal(await first.inputValue(), 'A\nBXQ');
+        if (!action.startsWith('type-different')) {
+          await first.press('Control+z'); assert.equal(await first.inputValue(), 'A\nBX');
+          await first.press('Control+z'); assert.equal(await first.inputValue(), 'A\nBX');
+          await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'A\nBXQ');
+        } else assert.deepEqual(versions.versions.find((version: any) => version.revision === revision)?.draft, alternate);
+      }
+      assert.deepEqual(saved?.draft, current.draft);
+      assert.deepEqual(current.draft.input[1], original.input[1]);
+      await second.focus(); await second.press('Control+z'); assert.equal(await second.inputValue(), 'Tail');
+      await second.press('Control+Shift+z'); assert.equal(await second.inputValue(), 'TailY');
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('C precommit view history preserves the original agent and accepted document', async () => {
+      const { page, errors } = await open('c-precommit-view');
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      const mention = { type: 'agentMention', attrs: { name: 'Review remote', displayName: 'Review remote',
+        conversationId: 'same-id', path: 'thread://same-id?hostId=ssh%3Aother' } };
+      const original = { text: 'A\nB Review remote\nTail', images: [], files: [], references: [], skills: [], input: [
+        { type: 'text', text: 'A\nB Review remote', text_elements: [] }, { type: 'image', fileId: 'image-one', detail: 'high' },
+        { type: 'text', text: 'Tail', text_elements: [] },
+      ], document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'B ' }, mention] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'Tail' }] }] } };
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const first = page.getByRole('textbox', { name: 'Work with Codex 1' });
+      await first.locator('[data-mention="agent"]').waitFor(); await first.focus(); await first.press('End'); await first.pressSequentially('X');
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const alternate = await page.evaluate(() => {
+        const draft = structuredClone((window as any).fixture.state.controller.snapshot().draft);
+        const [first, second, tail] = draft.document.content;
+        draft.document.content = [{ type: 'paragraph', content: [...first.content, { type: 'hard_break' }, ...second.content] }, tail];
+        return draft;
+      });
+      const revision = 'c-precommit-view';
+      await page.evaluate(({ draft, revision }) => (window as any).fixture.addVersion(draft, revision), { draft: alternate, revision });
+      await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
+      await page.evaluate(revision => { (window as any).fixture.state.precommit = { action: 'view-undo', revision }; }, revision);
+      await page.getByRole('button', { name: alternate.text.replace(/\s+/g, ' '), exact: true }).click();
+      await page.waitForFunction(() => (window as any).fixture.state.precommitResult);
+      const observed = await page.evaluate(() => (window as any).fixture.state.precommitResult);
+      assert.equal(observed.dispatched, false);
+      assert.equal(observed.snapshot.revision, revision);
+      assert.deepEqual(observed.snapshot.draft, alternate);
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const versions = await page.evaluate(() => (window as any).fixture.versions());
+      assert.deepEqual(versions.versions.find((version: any) => version.revision === revision)?.draft, alternate);
+      assert.equal(await first.locator('[data-mention="agent"]').count(), 1);
+      assert.equal(await first.locator('[data-mention="agent"]').getAttribute('agent-mention-path'), mention.attrs.path);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('C precommit append rejects stale segment and separator sources', async () => {
+      for (const separator of [false, true]) {
+        const { page, errors } = await open(separator ? 'c-precommit-append-separator' : 'c-precommit-append-segment');
+        const first = separator ? 'A' : 'A\nB';
+        const original = { text: `${first}\nTail`, images: [], files: [], references: [], skills: [], input: [
+          { type: 'text', text: first, text_elements: [] }, { type: 'image', fileId: 'image-one', detail: 'high' },
+          { type: 'text', text: 'Tail', text_elements: [] },
+        ], document: { type: 'doc', content: separator
+          ? [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'Tail' }] }]
+          : [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'B' }] },
+            { type: 'paragraph', content: [{ type: 'text', text: 'Tail' }] }] } };
+        const replacement = { ...structuredClone(original), document: { type: 'doc', content: separator
+          ? [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }, { type: 'hard_break' }, { type: 'text', text: 'Tail' }] }]
+          : [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }, { type: 'hard_break' }, { type: 'text', text: 'B' }] },
+            { type: 'paragraph', content: [{ type: 'text', text: 'Tail' }] }] } };
+        await page.evaluate(value => (window as any).fixture.mountSegmentProbe(value), original);
+        const result = await page.evaluate(value => {
+          const probe = (window as any).fixture.state.segmentProbe;
+          probe.set(value);
+          const beforeLayout = probe.prepare();
+          probe.render();
+          const afterLayout = probe.prepare();
+          probe.close();
+          return { beforeLayout, afterLayout };
+        }, replacement);
+        assert.deepEqual(result, { beforeLayout: false, afterLayout: true });
+        assert.deepEqual(errors, []); await page.close();
+      }
     });
 
     await t.test('C final segmented structure adoption discards only the prior version history', async () => {

@@ -156,6 +156,16 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   }, [markUnresolved, persist]);
   const changeDraft = useCallback((update: (draft: Draft) => Draft, prefillId?: string): Promise<boolean> =>
     apply(update, prefillId)?.saved ?? Promise.resolve(false), [apply]);
+  const preserveVisibleDraft = useCallback((rendered: StoredDraft, draft: Draft): boolean => {
+    if (!mounted.current || !active.current || frozen.current || external.current || initializing.current || dirty.current
+      || preserveProjection.current || pendingLink?.current || pendingComposition?.current || current.current.revision === rendered.revision) return false;
+    current.current = { ...rendered, revision: createId(), draft };
+    dirty.current = true;
+    setStored(current.current);
+    markUnresolved();
+    setSaving(false);
+    return true;
+  }, [markUnresolved, pendingLink, pendingComposition]);
   const changeDraftFromOperation = useCallback((update: (draft: Draft) => Draft): Promise<boolean> =>
     apply(update, undefined, true)?.saved ?? Promise.resolve(false), [apply]);
   const updateDraftFromOperation = useCallback(async (expected: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft) => {
@@ -554,7 +564,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     window.addEventListener('beforeunload', beforeUnload);
     return () => window.removeEventListener('beforeunload', beforeUnload);
   }, [pendingLink]);
-  return { owner, controller, current, stored, changeDraft, changeDraftFromOperation, updateDraftFromOperation, beginOperation, retain, clear, selectVersion,
+  return { owner, controller, current, stored, changeDraft, preserveVisibleDraft, changeDraftFromOperation, updateDraftFromOperation, beginOperation, retain, clear, selectVersion,
     conflicts: versions.filter(value => value.revision !== stored.revision && !pendingAncestors.current.has(value.revision)),
     storageError, saving, loaded, unresolved, saveUnresolved,
     recheckProjection: () => refreshVersions.current?.(),

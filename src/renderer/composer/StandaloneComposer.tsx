@@ -99,6 +99,16 @@ export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSu
 };
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function sameTextMarks(left: readonly TextMarkSpan[], right: readonly TextMarkSpan[]): boolean {
+  const spans = [...left, ...right].filter(span => span.marks.length);
+  const boundaries = [...new Set(spans.flatMap(span => [span.start, span.end]))].sort((a, b) => a - b);
+  return boundaries.every((start, index) => {
+    const end = boundaries[index + 1];
+    if (end === undefined) return true;
+    const at = (items: readonly TextMarkSpan[]) => JSON.stringify(items.find(span => span.start <= start && span.end >= end)?.marks ?? []);
+    return at(left) === at(right);
+  });
+}
 function sandboxKey(policy: SubmitOptions['sandboxPolicy']): string | undefined {
   return JSON.stringify(policy, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
     ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : value);
@@ -163,7 +173,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
     setFrozen(value);
     if (!value) { for (const resolve of thawWaiters.current) resolve(); thawWaiters.current.clear(); }
   }, []);
-  const { owner, controller, current, stored, changeDraft, changeDraftFromOperation, updateDraftFromOperation, beginOperation,
+  const { owner, controller, current, stored, changeDraft, preserveVisibleDraft, changeDraftFromOperation, updateDraftFromOperation, beginOperation,
     retain, clear, selectVersion, conflicts, storageError, saving, loaded, unresolved, saveUnresolved, retry, lastWrite, recheckProjection }
     = useComposerDraft(context, onDraftController, onDraftChange, freezeGuard, setInputFrozen, pendingLink, pendingComposition);
   const optionsListener = useRef(onEffectiveOptionsChange);
@@ -720,7 +730,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
           ? [{ index, text: entry.text }] : []) ?? [];
         const last = entries.at(-1);
         if (!last) return null;
-        const stage = originalEditor.preparePromptAppend(source, addition, last.index);
+        const stage = originalEditor.preparePromptAppend(source, addition, last.index, before);
         if (!stage?.agents) return null;
         const expectedAgents = agentsForDraft(before), expectedMarks = marksForDraft(before);
         for (const entry of entries) {
@@ -842,6 +852,23 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
     setError('');
     void changeDraft(value => value === before ? next : value);
     return current.current.draft === next;
+  };
+  const preserveStaleSegment = (index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange) => {
+    if (frozenRef.current || current.current.revision === stored.revision || !agents) return false;
+    const expectedAgents = agentsForDraft(draft), expectedMarks = marksForDraft(draft);
+    const entries = (draft.input ?? []).flatMap((entry, entryIndex) => entry.type === 'text' && typeof entry.text === 'string'
+      ? [{ index: entryIndex, text: entry.text }] : []);
+    if (entries.length !== agents.before.length || entries.some(entry => {
+      const displayed = agents.before.find(segment => segment.index === entry.index), marks = expectedMarks.get(entry.index);
+      return !displayed || displayed.text !== entry.text
+        || JSON.stringify(displayed.agents) !== JSON.stringify(expectedAgents.get(entry.index) ?? [])
+        || !sameTextMarks(displayed.marks, marks ?? []);
+    })) return false;
+    const hasAgents = [...agents.before, ...agents.after].some(segment => segment.agents.length);
+    const { document: _document, ...withoutDocument } = draft;
+    const edited = editStructuredDraftText(hasAgents ? withoutDocument : draft, index, expected, text);
+    const next = edited.draft && projectAgentEdit(draft, projectCompletionSkills(edited.draft, skills), agents, inputType);
+    return !!next && preserveVisibleDraft(stored, next);
   };
   const removeImage = (id: string) => {
     const before = current.current.draft;
@@ -1140,7 +1167,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
         onInvalid={message => setError(message ?? t('Unsupported document changes were not saved.'))} /> :
       segmented ? <>
         <StandaloneStructuredInputEditor key={composerOwnerKey} ref={structuredEditor} draft={draft} currentDraft={() => current.current.draft}
-          onEdit={editSegment} agentMentions={index => agentSegments.get(index) ?? []}
+          onEdit={editSegment} onStaleEdit={preserveStaleSegment} agentMentions={index => agentSegments.get(index) ?? []}
           sourceMarks={index => markSegments.get(index) ?? []}
           placeholder={context.threadId ? t('Work with Codex') : locale.toLowerCase().startsWith('en') ? 'Do anything' : t('Message')}
           activeIndex={segmentSelection?.index} completionListId={completions.query ? completions.listId : undefined}
