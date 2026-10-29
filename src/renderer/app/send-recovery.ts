@@ -8,6 +8,11 @@ export const sendsAtom = 'codex-yard.send-recovery.v1';
 export interface SendOwner { hostId: string; threadId: string | null; draftId: string }
 export interface SendVersion { owner: SendOwner; revision: string; documentPlainTextMode?: boolean }
 export type SendStage = 'prepared' | 'creating' | 'ready' | 'sending' | 'unknown' | 'failed' | 'confirmed';
+export interface SendInjectedInput {
+  callId: string;
+  input: Record<string, unknown>[];
+  responseItems: Record<string, unknown>[];
+}
 export interface SendIntent extends SendVersion {
   id: string;
   /** Preflight ownership changes on every explicit attempt, before any write. */
@@ -19,6 +24,8 @@ export interface SendIntent extends SendVersion {
   cwd: string;
   projectId?: string;
   additionalContext?: Record<string, { kind: 'untrusted'; value: string }>;
+  /** The captured Codex app context is injected once before this intent's turn. */
+  injection?: SendInjectedInput & { phase: 'prepared' | 'sending' | 'confirmed' | 'unknown' };
   /** undefined is a legacy/unresolved request; null records an omitted override. */
   collaborationMode?: SubmissionCollaborationMode | null;
   /** Immutable submitted version, not another editable draft. */
@@ -61,6 +68,11 @@ function snapshot(value: unknown): SendRecoverySnapshot {
       || Object.values(request.additionalContext).some(entry => !object(entry) || entry.kind !== 'untrusted' || typeof entry.value !== 'string'))) {
       throw new Error('发送上下文无法安全读取，原值已保留。');
     }
+    if (request.injection !== undefined && (!object(request.injection) || typeof request.injection.callId !== 'string' || !request.injection.callId
+      || !Array.isArray(request.injection.input) || !request.injection.input.length || !request.injection.input.every(object)
+      || !Array.isArray(request.injection.responseItems) || !request.injection.responseItems.length || !request.injection.responseItems.every(object)
+      || !['prepared', 'sending', 'confirmed', 'unknown'].includes(String(request.injection.phase))
+      || object(request.action) && request.action.type !== 'send')) throw new Error('原注入上下文无法安全读取，原值已保留。');
     if (request.action !== undefined && (!object(request.action) || !['send', 'queue', 'steer'].includes(String(request.action.type))
       || request.action.type === 'steer' && (typeof request.action.turnId !== 'string' || !request.action.turnId))) {
       throw new Error('提交动作无法安全读取，原值已保留。');
@@ -87,6 +99,8 @@ function snapshot(value: unknown): SendRecoverySnapshot {
 export class SendRecoveryStore {
   private readonly client: WorkbenchClient;
   private readonly storage: Storage;
+  /** Only an already received injection success awaiting its local atom commit. */
+  private readonly confirmedInjections = new Set<string>();
   constructor(client: WorkbenchClient, storage: Storage = browserStorage) {
     this.client = client;
     this.storage = storage;
@@ -98,11 +112,13 @@ export class SendRecoveryStore {
     return result;
   }
   async prepare(version: SendVersion, cwd: string, draft: ComposerDraft, options: SubmitOptions, overrides: Partial<SubmitOptions>, projectId?: string,
-    additionalContext?: SendIntent['additionalContext'], action: SubmitAction = { type: 'send' }) {
+    additionalContext?: SendIntent['additionalContext'], action: SubmitAction = { type: 'send' }, injectedInput?: SendInjectedInput) {
+    if (injectedInput && action.type !== 'send') throw new Error('此 app 上下文须在会话空闲时发送，不能排队或追加当前任务。');
     const intent: SendIntent & { attemptId: string } = { ...structuredClone(version), id: crypto.randomUUID(), attemptId: crypto.randomUUID(), clientUserMessageId: crypto.randomUUID(),
       threadId: version.owner.threadId, cwd, draft: structuredClone(draft), options: structuredClone(options), action: structuredClone(action),
       overrides: structuredClone(overrides), stage: 'prepared', ...(projectId ? { projectId } : {}),
-      additionalContext: structuredClone(additionalContext ?? {}) };
+      additionalContext: structuredClone(additionalContext ?? {}),
+      ...(injectedInput ? { injection: { ...structuredClone(injectedInput), phase: 'prepared' as const } } : {}) };
     const hasBrowserReferences = (draft.references ?? []).some(reference => reference.kind === 'browser');
     if (hasBrowserReferences) await ensureBrowserCommentStore();
     await this.change((state, atoms) => {
@@ -127,7 +143,9 @@ export class SendRecoveryStore {
   }
   /** An old preflight may finish later, but cannot retain authority to write. */
   attempt(id: string) { return this.update(id, intent => {
-    if (!['prepared', 'ready', 'failed'].includes(intent.stage)) throw new Error('原发送结果尚未核对，未重复发送。');
+    if (!['prepared', 'ready', 'failed'].includes(intent.stage) || intent.injection && ['sending', 'unknown'].includes(intent.injection.phase)) {
+      throw new Error('原发送结果尚未核对，未重复发送。');
+    }
     intent.attemptId = crypto.randomUUID();
   }); }
   private assertAttempt(intent: SendIntent, attemptId: string | undefined) {
@@ -152,8 +170,40 @@ export class SendRecoveryStore {
   }); }
   sending(id: string, attemptId: string | undefined) { return this.update(id, intent => {
     this.assertAttempt(intent, attemptId);
+    if (intent.injection && intent.injection.phase !== 'confirmed') throw new Error('原 app 上下文尚未确认，未发送消息。');
     if (!intent.threadId || !['prepared', 'ready', 'failed'].includes(intent.stage)) throw new Error('发送阶段尚未核对，未重复发送。');
     intent.stage = 'sending'; delete intent.error;
+  }); }
+  injecting(id: string, attemptId: string | undefined) { return this.update(id, intent => {
+    this.assertAttempt(intent, attemptId);
+    if (!intent.threadId || !intent.injection || intent.injection.phase !== 'prepared'
+      || !['prepared', 'ready', 'failed'].includes(intent.stage)) throw new Error('原上下文注入阶段尚未核对，未重复注入。');
+    intent.injection.phase = 'sending'; delete intent.error;
+  }); }
+  async injected(id: string, attemptId: string | undefined) {
+    if (!attemptId) throw new Error('原上下文注入回执缺少发送尝试身份。');
+    const receipt = JSON.stringify([id, attemptId]);
+    this.confirmedInjections.add(receipt);
+    const result = await this.update(id, intent => {
+      this.assertAttempt(intent, attemptId);
+      if (!intent.injection || !['sending', 'unknown', 'confirmed'].includes(intent.injection.phase)) throw new Error('原上下文注入回执无法关联，原记录已保留。');
+      intent.injection.phase = 'confirmed';
+      if (intent.stage === 'unknown') {
+        intent.stage = 'failed'; intent.error = '原 app 上下文已确认，消息尚未发送；可继续原发送，无需再次注入。';
+      }
+    });
+    this.confirmedInjections.delete(receipt);
+    return result;
+  }
+  injectionFailed(id: string, error: unknown, attemptId: string | undefined) { return this.update(id, intent => {
+    if (!attemptId || intent.attemptId !== attemptId || !intent.injection || intent.injection.phase !== 'sending') return;
+    // Called only around the actual RPC: an explicit protocol rejection or a
+    // synchronous transport before-send error cannot have committed injection.
+    const rejected = object(error) && (error.sendPhase === 'before-send'
+      || error.uncertain === false && [-32600, -32601, -32602].includes(Number(error.code)));
+    intent.injection.phase = rejected ? 'prepared' : 'unknown';
+    if (rejected && intent.stage === 'unknown') intent.stage = 'failed';
+    intent.error = error instanceof Error ? error.message : String(error);
   }); }
   resolvedCollaboration(id: string, mode: SubmissionCollaborationMode | null, attemptId: string | undefined) {
     return this.update(id, intent => {
@@ -168,7 +218,8 @@ export class SendRecoveryStore {
   failed(id: string, error: unknown, attemptId: string | undefined) { return this.update(id, intent => {
     // A prior page's error cannot downgrade the new attempt or a known success.
     if (!attemptId || intent.attemptId !== attemptId || intent.stage === 'confirmed') return;
-    const uncertain = ['creating', 'sending', 'unknown'].includes(intent.stage) && (!object(error) || error.uncertain !== false);
+    const uncertain = intent.injection && ['sending', 'unknown'].includes(intent.injection.phase)
+      || ['creating', 'sending', 'unknown'].includes(intent.stage) && (!object(error) || error.uncertain !== false);
     intent.stage = uncertain ? 'unknown' : 'failed';
     intent.error = error instanceof Error ? error.message : String(error);
   }); }
@@ -191,6 +242,12 @@ export class SendRecoveryStore {
   async check(id: string) {
     const intent = (await this.read()).requests[id];
     if (!intent) throw new Error('发送恢复记录已处理。');
+    if (intent.attemptId && this.confirmedInjections.has(JSON.stringify([id, intent.attemptId]))) return this.injected(id, intent.attemptId);
+    if (intent.injection && ['sending', 'unknown'].includes(intent.injection.phase)) return this.update(id, current => {
+      if (current.attemptId !== intent.attemptId || current.injection?.phase !== intent.injection!.phase) return;
+      current.injection.phase = 'unknown'; current.stage = 'unknown';
+      current.error = '原 app 上下文注入结果仍未知，原内容已保留；不会重新注入或发送消息。';
+    });
     if (!['creating', 'sending', 'unknown'].includes(intent.stage)) return intent;
     if (!intent.threadId) throw new Error('创建会话的结果尚未确认。请核对会话列表；不会重新创建或发送。');
     const result = await this.client.host<{ turnId: string | null; queuedSubmissionId?: string | null }>('message-send-status', {
@@ -232,7 +289,9 @@ export class SendRecoveryStore {
     await this.change(state => {
       const intent = state.requests[id];
       if (!intent) return;
-      if (!['prepared', 'ready', 'failed'].includes(intent.stage)) throw new Error('发送结果尚未核对，恢复记录已保留。');
+      if (!['prepared', 'ready', 'failed'].includes(intent.stage) || intent.injection && intent.injection.phase !== 'prepared') {
+        throw new Error('发送或上下文注入结果尚未核对，恢复记录已保留。');
+      }
       if (intent.threadId) {
         const key = sendThreadKey(intent.owner.hostId, intent.threadId), receipt = state.creations[key];
         if (receipt) {
