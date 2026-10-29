@@ -12,7 +12,7 @@ export const composerMessageKeys = [
   'Could not switch workspace:', 'Image upload failed:', 'Could not remove reference; draft retained:',
   'The content cannot be pasted together with images.', 'Text and images cannot be pasted together.', 'Select model', 'This draft cannot be sent without losing content.',
   'The queue cannot retain this draft context.', 'The conversation has not been created yet.',
-  'Could not persist the submitted version.', 'Sent, but draft cleanup failed:', 'Send unconfirmed; draft retained:', 'Send result:',
+  'Could not persist the submitted version.', 'Could not send; draft retained:', 'Sent, but draft cleanup failed:', 'Send unconfirmed; draft retained:', 'Send result:',
   'Could not stop:', 'Could not switch drafts:', 'Images are not supported for this structured draft.',
   'Unsupported document changes were not saved.', 'File is binary and cannot be previewed as text.', 'Could not preview:',
   'Queue message', 'Effort', 'Approval', 'Sandbox', 'Local target', 'Reading...', 'Ctrl/Command + Enter for multiline',
@@ -75,7 +75,7 @@ const simplified: Catalog = {
   'Link text': '链接文字', 'Edit link text': '编辑链接文字', 'Edit link URL': '编辑链接地址', 'Save link text': '保存链接文字',
   'Save link URL': '保存链接地址', 'Remove link': '移除链接', 'Source': '来源', 'Link text cannot be empty.': '链接文字不能为空。',
   'Enter an HTTP, HTTPS, or mailto link.': '请输入 HTTP、HTTPS 或 mailto 链接。', 'This link changed. Open it again before saving.': '链接已更改，请重新打开后保存。',
-  'Apply or close the link editor first.': '请先应用或关闭链接编辑。', 'Send result:': '发送结果：',
+  'Apply or close the link editor first.': '请先应用或关闭链接编辑。', 'Could not send; draft retained:': '无法发送，草稿已保留：', 'Send result:': '发送结果：',
   'This link edit cannot safely preserve formatting.': '无法安全保留此链接文字修改中的格式。',
   'Apply': '应用', 'Run location': '运行位置', 'No workspace selected': '未选择工作区', 'Could not read workspaces:': '无法读取工作区：',
   'Could not switch workspace:': '无法切换工作区：', 'Image upload failed:': '附件上传失败：',
@@ -89,7 +89,7 @@ const simplified: Catalog = {
   'File is binary and cannot be previewed as text.': '此文件是二进制文件，无法以文本预览。', 'Could not preview:': '无法预览：',
 };
 const traditional: Catalog = {
-  'Apply or close the link editor first.': '請先套用或關閉連結編輯。', 'Send result:': '傳送結果：',
+  'Apply or close the link editor first.': '請先套用或關閉連結編輯。', 'Could not send; draft retained:': '無法傳送，草稿已保留：', 'Send result:': '傳送結果：',
   'This link edit cannot safely preserve formatting.': '無法安全保留此連結文字修改中的格式。',
   'This draft contains formatting or context that cannot be edited without loss.': '此草稿包含格式或上下文，目前無法無損編輯。',
   'The saved draft contains unreadable content. The original data has been retained.': '已儲存的草稿包含無法讀取的內容，原始資料已保留。',

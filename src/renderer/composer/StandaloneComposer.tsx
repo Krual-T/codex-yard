@@ -31,7 +31,10 @@ export type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescr
 export type { ComposerDraftController, ComposerDraftExternalOperation, ComposerDraftLease } from './use-composer-draft.ts';
 export type ComposerReference = NonNullable<ComposerDraft['references']>[number];
 export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSubmit'> & {
-  onSubmit(draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, description?: ComposerSubmissionDescription): Promise<void>;
+  onSubmit(draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, description?: ComposerSubmissionDescription,
+    assertAuthority?: () => void): Promise<void>;
+  /** Capture the original owner, connection and navigation authority before any submission wait. */
+  captureSubmissionAuthority?: (owner: ComposerDraftOwner) => () => void;
   /** The app's authoritative active turn, used as the steer precondition. */
   activeTurnId?: string | null;
   initialOptions?: SubmitOptions;
@@ -68,7 +71,7 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
   }}><summary>{name}</summary>{preview == null ? t('Reading...') : <pre>{preview}</pre>}</details>;
 }
 
-function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
+function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, prefill, activeTurnId, initialOptions, hosts, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
   const { t, locale } = useI18n('zh-CN');
   const inputRoot = useRef<HTMLDivElement>(null);
   const freezeGuard = useRef<(afterDrain: boolean) => boolean>(() => false);
@@ -314,6 +317,9 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     const documentPlainTextMode = readyPlainTextMode ?? plainTextSetting.value;
     try { draftToInput(current.current.draft, context.hostId, { plainTextMode: documentPlainTextMode }); }
     catch (reason) { setError(message(reason)); return; }
+    let assertAuthority: (() => void) | undefined;
+    try { assertAuthority = captureSubmissionAuthority?.(structuredClone(owner)); }
+    catch (reason) { setError(t('Could not send; draft retained:') + message(reason)); return; }
     const captured = structuredClone(current.current);
     const submittedOptions = structuredClone(options), submittedOverrides = structuredClone(overrides);
     const finishPreparation = beginOperation();
@@ -327,9 +333,11 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       if (!retained) throw new Error(t('Could not persist the submitted version.'));
       if (activeController.current !== controller) return;
       if (pendingLink.current) { setError(t('Apply or close the link editor first.')); return; }
+      try { assertAuthority?.(); }
+      catch (reason) { setError(t('Could not send; draft retained:') + message(reason)); return; }
       submittedToParent = true;
       await onSubmit(submitted, submittedOptions, action, { owner: structuredClone(owner), revision: captured.revision,
-        overrides: submittedOverrides, ...(submitted.document ? { documentPlainTextMode } : {}) });
+        overrides: submittedOverrides, ...(submitted.document ? { documentPlainTextMode } : {}) }, assertAuthority);
       confirmed = true;
       while (frozenRef.current && activeController.current === controller) {
         await new Promise<void>(resolve => thawWaiters.current.add(resolve));
@@ -489,6 +497,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   return <div className="standalone-composer">
     <div ref={inputRoot} inert={frozen} aria-busy={frozen || undefined}>
     {context.threadId ? <StandaloneQueue key={JSON.stringify([context.hostId, context.threadId])} client={client} hostId={context.hostId} threadId={context.threadId} busy={busy} refreshVersion={queueVersion} onStartQueued={onStartQueued} frozen={frozen}
+      captureAuthority={captureSubmissionAuthority ? () => captureSubmissionAuthority(structuredClone(owner)) : undefined}
       beginOperation={beginOperation} onEditStateChange={(editing, pending) => { queueEditState.current = { editing, pending }; }}
       onCompositionChange={value => setComposition('queue', value)} /> : null}
     <div className="standalone-composer__editor" inert={switchingTarget} aria-busy={switchingTarget || undefined}>
