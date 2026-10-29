@@ -2,9 +2,9 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { flushSync } from 'react-dom';
 import { Folder, Globe, ListTodo, MoreHorizontal, PanelLeftOpen, PanelRight, Terminal } from 'lucide-react';
 import type { ThreadSettingsResponse, ThreadSummary } from '../../../lib/codex-protocol.ts';
-import type { ComposerDraft, MessageEditOrigin, ServerRequestRef, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
+import type { ComposerDocument, ComposerDraft, MessageEditOrigin, ServerRequestRef, SubmitAction, SubmitOptions, WorkbenchEvent } from '../workbench-contract.ts';
 import { StandaloneComposer, bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from '../composer/StandaloneComposer.tsx';
-import type { ComposerDraftController, ComposerDraftLease, ComposerDraftOwner, ComposerDraftSnapshot, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
+import type { ComposerDraftController, ComposerDraftLease, ComposerDraftOwner, ComposerDraftSnapshot, ComposerPromptAppendPort, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
 import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
 import type { MessageEditNavigationController, MessageEditNavigationLease } from '../messages/use-message-editing.ts';
 import { StandaloneGoal } from '../composer/StandaloneGoal.tsx';
@@ -28,6 +28,9 @@ import { useThreadList } from '../sidebar/use-thread-list.ts';
 import { useSidebarBehavior } from './use-sidebar-behavior.ts';
 import { createSidebarActionService } from './sidebar-action-service.ts';
 import { ThreadSummaryPanel } from './ThreadSummaryPanel.tsx';
+import type { ThreadSummaryCreateKind } from './ThreadSummaryPanel.tsx';
+import { createSummaryOutputPrefill } from './summary-output-prefill.ts';
+import { HomeSubagentsBanner } from './HomeSubagentsBanner.tsx';
 import { projectCreatedChats } from './thread-summary-created-chats.ts';
 import { sameSummarySideChat, useSummarySideChats } from './use-summary-side-chats.ts';
 import { commitSidebarProjectMembership, createSidebarProjectInventory } from './sidebar-project-inventory.ts';
@@ -294,6 +297,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     return () => { alive = false; sequence++; unsubscribe(); };
   }, [client, current.hostId]);
   const composerController = useRef<ComposerDraftController | null>(null);
+  const mainPromptAppendPort = useRef<ComposerPromptAppendPort | null>(null);
+  const receivePromptAppendPort = useCallback((port: ComposerPromptAppendPort | null) => { mainPromptAppendPort.current = port; }, []);
   const [composerSnapshot, setComposerSnapshot] = useState<ComposerDraftSnapshot | null>(null);
   const [effectiveComposerOptions, setEffectiveComposerOptions] = useState<{ owner: ComposerDraftOwner; options: SubmitOptions } | null>(null);
   const [browserSyncError, setBrowserSyncError] = useState('');
@@ -1391,6 +1396,46 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       || route.hostId !== current.hostId || route.threadId !== current.threadId)
       throw new Error('The original summary conversation changed.');
   };
+  const captureMainPrompt = () => {
+    const controller = composerController.current, snapshot = controller?.snapshot(), route = routeRef.current;
+    if (!controller || !snapshot || route.section || route.readOnly || navigationLocked.current
+      || snapshot.owner.hostId !== route.hostId || snapshot.owner.threadId !== route.threadId)
+      throw new Error('The original Main composer is not ready.');
+    const owner = structuredClone(snapshot.owner), navigation = navigationGeneration.current;
+    const connection = client.captureDaemonConnection(owner.hostId);
+    const assertOriginal = () => {
+      connection.assertOriginal();
+      const actual = controller.snapshot(), location = routeRef.current;
+      if (navigationLocked.current || navigationGeneration.current !== navigation || location.section || location.readOnly
+        || location.hostId !== owner.hostId || location.threadId !== owner.threadId
+        || composerController.current !== controller || !actual || !sameComposerOwner(actual.owner, owner))
+        throw new Error('The original Main composer changed.');
+    };
+    assertOriginal();
+    return assertOriginal;
+  };
+  const appendMainPrompt = async (document: ComposerDocument, prefillId: string, assertOriginal: () => void) => {
+    assertOriginal();
+    const controller = composerController.current, snapshot = controller?.snapshot(), port = mainPromptAppendPort.current;
+    if (!controller || !snapshot || !port) throw new Error('The original Main prompt editor is not ready.');
+    const mainGuard = captureMainPrompt();
+    const verify = () => {
+      assertOriginal(); mainGuard();
+      if (mainPromptAppendPort.current !== port) throw new Error('The original Main prompt editor changed.');
+    };
+    const operation = port.begin(snapshot.owner, verify);
+    if (!operation) throw new Error('The original Main composer is handling another edit.');
+    try {
+      const receipt = await operation.append(document, prefillId);
+      if (receipt.status !== 'accepted') throw new Error('The prompt was saved, but the original editor could not accept it. Review the saved draft before continuing.');
+    } finally { operation.cancel(); }
+  };
+  const createSummaryOutput = async (kind: ThreadSummaryCreateKind) => {
+    assertSummaryCurrent();
+    const assertMain = captureMainPrompt();
+    const prefill = createSummaryOutputPrefill({ kind, context: { hostId: current.hostId, cwd: thread?.cwd ?? cwd } });
+    await appendMainPrompt(prefill.document, crypto.randomUUID(), () => { assertSummaryCurrent(); assertMain(); });
+  };
   const summarySideChats = useSummarySideChats({ controller: sideChats, hostId: current.hostId, threadId: current.threadId,
     enabled: summaryOpen && !loading && !!thread && !current.section, sourceKey: summarySourceKey,
     fallbackTitle: previewAppearance.locale.startsWith('zh') ? '侧聊' : 'Side chat', assertCurrent: assertSummaryCurrent });
@@ -1513,7 +1558,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
                 throw new Error('The original summary conversation changed.');
             });
           }}
-          projectless={!activeProject} outputs={{ entries: [], loading: false, showWhenEmpty: true, canCreate: false }}
+          projectless={!activeProject} outputs={{ entries: [], loading: false, showWhenEmpty: true,
+            canCreate: !current.readOnly && composerIsCurrent && !!mainPromptAppendPort.current }}
+          onCreateOutput={createSummaryOutput}
           onOpenPlan={async plan => { assertSummaryCurrent();
             if (plan.hostId !== current.hostId || plan.threadId !== current.threadId) throw new Error('The plan belongs to another conversation.');
             await navigate('/plan-summary' + (plan.hostId === 'local' ? '' : '?' + new URLSearchParams({ hostId: plan.hostId })),
@@ -1649,6 +1696,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
               </div>}</div>}
         </section>
         <div className="yard-composer-container" inert={leaving}>
+          {!current.threadId && !loading && composerIsCurrent && <HomeSubagentsBanner key={composerOwnerKey(composerOwner)}
+            client={client} hostId={current.hostId} cwd={cwd} captureMain={captureMainPrompt} onError={setError}
+            onTryNow={(text, prefillId, assertOriginal) => appendMainPrompt({ type: 'doc', content: [
+              { type: 'paragraph', content: [{ type: 'text', text }] },
+            ] }, prefillId, assertOriginal)} />}
           {current.threadId && !loading && goalMounted && <div hidden={!goalOpen}><StandaloneGoal client={client} hostId={current.hostId} threadId={current.threadId} readOnly={current.readOnly} /></div>}
           {current.threadId && <FullAccessNotice client={client} options={effectiveComposerOptions?.owner.hostId === composerOwner.hostId
             && effectiveComposerOptions.owner.threadId === composerOwner.threadId && effectiveComposerOptions.owner.draftId === composerOwner.draftId
@@ -1659,7 +1711,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           readOnly={current.readOnly}
           onRemoveReference={(owner, reference, operation) => removeBrowserDraftReference(browserDraftOwner(owner, sendBindings.current), reference,
             operation, retainBrowserProjection, releaseBrowserProjection)}
-          onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} initialOptions={initialOptions ?? undefined} hosts={hosts}
+          onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} onPromptAppendPort={receivePromptAppendPort}
+          initialOptions={initialOptions ?? undefined} hosts={hosts}
           onEffectiveOptionsChange={receiveEffectiveOptions}
           fullAccessVisible={fullAccessVisible(shellPreferences.values['composer-permission-mode-visibility'])}
           onOpenGoal={current.threadId && !current.readOnly ? () => { setGoalMounted(true); setGoalOpen(true); } : undefined}
