@@ -16,6 +16,7 @@ import { brandAssets } from '../src/native/visual-feedback.ts';
 import type { HostCatalog } from '../src/native/hosts.ts';
 import type { createSshProxyStream } from '../src/native/ssh.ts';
 import type { RemoteFileCommand } from '../src/native/files.ts';
+import type { NativeStateCheckpoint } from '../src/native/native-state.ts';
 import { createFakeCodex, fixtureThread, NO_REPLY } from './fake-codex.ts';
 import { fileDaemonFixture } from './file-daemon-fixture.ts';
 import { fileMethods } from '../src/native/files.ts';
@@ -23,6 +24,7 @@ import { nativeFixture } from './native-fixture.ts';
 
 async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fetch, snapshot?: { data: string; metadata: unknown },
   remote: { hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand;
+    nativeStateCheckpoint?: (step: NativeStateCheckpoint) => void | Promise<void>;
     beforeStart?(fake: Awaited<ReturnType<typeof createFakeCodex>>, root: string): Promise<void> } = {}) {
   const root = await mkdtemp('/tmp/aw-native-test-');
   const fake = await createFakeCodex(root);
@@ -75,6 +77,56 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
   }
   return { root, fake, app, connect };
 }
+
+test('native state recovery precedes settings, project, Mini and configuration consumers', async t => {
+  let loseCommit = true, recoveryBlocked = true;
+  const initial = JSON.parse('{"globals":{"keep":"global"},"settings":{"selected-avatar-id":"old"},"sideChats":{"version":1,"operations":{},"prepared":{}},"future":{"nested":[1,{"keep":true}]},"__proto__":{"keep":"ordinary-key"}}');
+  const h = await fixture(t, undefined, undefined, { hostCatalog: { hosts: [], projects: [], assignments: {} },
+    async beforeStart(_fake, root) {
+      await mkdir(join(root, 'data'));
+      await writeFile(join(root, 'data', 'native-state.json'), JSON.stringify(initial));
+    },
+    nativeStateCheckpoint(step) {
+      if (step === 'directory-sync' && loseCommit) { loseCommit = false; throw new Error('Lost directory sync confirmation'); }
+      if (step === 'recovery-file-sync' && recoveryBlocked) throw new Error('Original file recovery is unavailable');
+    },
+  });
+  const client = await h.connect();
+  let sequence = 0;
+  async function host(endpoint: string, params: Record<string, unknown> = {}) {
+    const requestId = 'native-owner-' + ++sequence;
+    client.send({ type: 'fetch', requestId, url: 'vscode://codex/' + endpoint, body: JSON.stringify(params) });
+    return client.until(message => message.type === 'fetch-response' && message.requestId === requestId);
+  }
+  const failed = await host('set-setting', { key: 'selected-avatar-id', value: 'new' });
+  assert.equal(failed.responseType, 'error'); assert.equal(failed.uncertain, true);
+  assert.equal(client.messages.filter(message => message.type === 'settings-changed' || message.type === 'workbench-pet-state').length, 0);
+  const committed = JSON.parse(await readFile(join(h.root, 'data', 'native-state.json'), 'utf8'));
+  assert.equal(committed.settings['selected-avatar-id'], 'new');
+  for (const endpoint of ['get-settings', 'get-setting', 'get-global-state', 'codex-command-keymap-state', 'thread-project-state']) {
+    assert.equal((await host(endpoint, { key: 'keep' })).responseType, 'error', endpoint);
+  }
+  const configReads = h.fake.calls('config/read').length;
+  assert.equal((await host('configuration-write', { action: 'status', operationId: 'never-sent', hostId: 'local' })).responseType, 'error');
+  assert.equal(h.fake.calls('config/read').length, configReads);
+  assert.equal((await host('set-global-state', { key: 'must-not-write', value: true })).responseType, 'error');
+  client.send({ type: 'avatar-overlay-open-state-request' });
+  await client.until(message => message.type === 'workbench-pet-error');
+  assert.equal(client.messages.filter(message => message.type === 'workbench-pet-state').length, 0);
+  assert.deepEqual(JSON.parse(await readFile(join(h.root, 'data', 'native-state.json'), 'utf8')), committed);
+  recoveryBlocked = false;
+  const settings = await host('get-settings');
+  assert.equal(settings.responseType, 'success'); assert.equal(settings.body.values['selected-avatar-id'], 'new');
+  assert.equal((await host('set-global-state', { key: 'after-recovery', value: 'saved' })).responseType, 'success');
+  const recovered = JSON.parse(await readFile(join(h.root, 'data', 'native-state.json'), 'utf8'));
+  assert.equal(recovered.settings['selected-avatar-id'], 'new');
+  assert.equal(recovered.globals['after-recovery'], 'saved'); assert.equal(recovered.globals.keep, 'global');
+  for (const key of ['sideChats', 'future', '__proto__']) assert.deepEqual(recovered[key], initial[key]);
+  assert.equal(Object.hasOwn(recovered, '__proto__'), true);
+  client.send({ type: 'avatar-overlay-open-state-request' });
+  await client.until(message => message.type === 'workbench-pet-state');
+  assert.equal(h.fake.calls('config/batchWrite').length, 0);
+});
 
 test('the renderer file endpoints browse and read real bytes, preserve empty directories and reject traversal', async t => {
   const h = await fixture(t), client = await h.connect();

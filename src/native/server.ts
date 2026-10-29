@@ -4,7 +4,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
-import { readFile, writeFile, mkdir, mkdtemp, open, rename, realpath, chmod } from 'node:fs/promises';
+import { readFile, mkdir, mkdtemp, realpath, chmod } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +30,8 @@ import type { HostPaths } from './ssh.ts';
 import { createQueuedSendLocks } from './queued-send-locks.ts';
 import { createPreferenceWrites } from './preference-writes.ts';
 import { createStateMutations } from './state-mutations.ts';
+import { createNativeState } from './native-state.ts';
+import type { NativeStateCheckpoint } from './native-state.ts';
 import { createConfigWrites } from './config-writes.ts';
 import { createConfigWriteTargets } from './config-write-targets.ts';
 import { createConfigWriteHost } from './config-write-host.ts';
@@ -55,7 +57,7 @@ import type { ChromeConnection } from '../browser-reuse/chrome-mcp.ts';
 import type { ChromeRequest } from '../browser-reuse/protocol.ts';
 import { visualizationSandboxPolicy } from './visualizations.ts';
 
-interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; httpFetch?: typeof fetch; hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection }
+interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; httpFetch?: typeof fetch; hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection; nativeStateCheckpoint?: (step: NativeStateCheckpoint) => void | Promise<void> }
 const mime: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript',
   '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
@@ -100,8 +102,29 @@ export async function createNativeWorkbench(options: Options = {}) {
     try { return JSON.parse(await readFile(join(dataDir, name), 'utf8')); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallback; throw error; }
   }
-  const state = record(await load('native-state.json', {}));
-  const globals = record(state.globals), settings = record(state.settings);
+  const state: ObjectValue = {}, globals: ObjectValue = {}, settings: ObjectValue = {};
+  function replaceObject(target: ObjectValue, next: ObjectValue) {
+    for (const key of Object.keys(target)) delete target[key];
+    for (const [key, value] of Object.entries(next)) {
+      Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+    }
+  }
+  function publishState(root: ObjectValue) {
+    replaceObject(globals, record(root.globals));
+    replaceObject(settings, record(root.settings));
+    replaceObject(state, { ...root, globals, settings });
+  }
+  const nativeState = createNativeState({ dataDir, publish: publishState, checkpoint: options.nativeStateCheckpoint,
+    validate(root) {
+      for (const key of ['globals', 'settings']) {
+        const value = root[key];
+        if (value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value))) {
+          throw new Error(`native-state 的 ${key} 无法读取，原文件已保留。`);
+        }
+      }
+    },
+  });
+  publishState(await nativeState.load());
   // Full workspace view presents the official chat/content tab strip.
   settings['default-workspace-full-view'] ??= true;
   const catalog = options.hostCatalog ?? await loadHostCatalog(codexHome);
@@ -109,7 +132,7 @@ export async function createNativeWorkbench(options: Options = {}) {
   const hostPaths = new Map<string, HostPaths>([['local', { homeDirectory: homedir(), codexHome }]]);
   const fileConnections = new Map<string, CodexConnection>();
   const control = new CodexConnection(socketPath, { cwd: workspace });
-  const stateMutations = createStateMutations();
+  const stateMutations = createStateMutations(nativeState.beforeAction);
   const ownedPaths = new WeakMap<CodexConnection, { paths?: HostPaths; sshHost: typeof catalog.hosts[number] }>();
   const connectionSnapshots = new WeakMap<WebSocket, { connection: CodexConnection; hostId: string; paths: HostPaths; sshHost?: typeof catalog.hosts[number] }>();
   const connectionGenerations = new WeakMap<WebSocket, string>();
@@ -175,24 +198,15 @@ export async function createNativeWorkbench(options: Options = {}) {
   const createdThreads = new Set<string>();
   const unsupported = new Set<string>();
   const httpRequests = new Set<AbortController>();
-  let persistQueue = Promise.resolve();
   function persist() {
-    const snapshot = JSON.stringify({ ...state, globals, settings }, null, 2) + '\n';
-    persistQueue = persistQueue.catch(() => {}).then(async () => {
-      const temporary = join(dataDir, `native-state.${crypto.randomUUID()}.tmp`);
-      const file = await open(temporary, 'wx', 0o600);
-      try { await file.writeFile(snapshot); await file.sync(); } finally { await file.close(); }
-      await rename(temporary, join(dataDir, 'native-state.json'));
-      const directory = await open(dataDir, 'r');
-      try { await directory.sync(); } finally { await directory.close(); }
-    });
-    return persistQueue;
+    return nativeState.persist({ ...state, globals, settings });
   }
   function send(client: WebSocket, message: unknown) {
     if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(message));
   }
   function broadcast(message: unknown) { for (const client of clients.keys()) send(client, message); }
   const configurationWrites = createConfigWrites({ state, persist, mutations: stateMutations,
+    assertStateAvailable: nativeState.assertAvailable,
     findFileBlocker: () => files.hasUnresolvedSaves(),
     resolveTarget: createConfigWriteTargets({
       getConnectionSnapshot: ({ hostId, connection, socket }) => {
@@ -205,13 +219,15 @@ export async function createNativeWorkbench(options: Options = {}) {
   const configurationWriteHost = createConfigWriteHost<{ client: WebSocket; connections: Map<string, CodexConnection> }>({
     writes: configurationWrites, validateHost: validHost,
     async connect(hostId, _context, source) {
-      const connection = await ownedConnectionFor(hostId), socket = connection.socket;
-      const current = configurationSource(hostId, connection, socket);
-      if (source.hostId !== current.hostId || source.generation !== current.generation
-        || source.homeDirectory !== current.homeDirectory || source.codexHome !== current.codexHome) {
-        throw new Error('The original settings source changed. Reload the settings before saving.');
-      }
-      return { connection, socket };
+      return stateMutations.run(async () => {
+        const connection = await ownedConnectionFor(hostId), socket = connection.socket;
+        const current = configurationSource(hostId, connection, socket);
+        if (source.hostId !== current.hostId || source.generation !== current.generation
+          || source.homeDirectory !== current.homeDirectory || source.codexHome !== current.codexHome) {
+          throw new Error('The original settings source changed. Reload the settings before saving.');
+        }
+        return { connection, socket };
+      });
     },
   });
   const addProject = createProjectCatalogWrites(globals, stateMutations, persist, broadcast);
@@ -668,12 +684,14 @@ export async function createNativeWorkbench(options: Options = {}) {
         return { state: connection?.connected ? 'connected' : connection?.connecting ? 'connecting' : 'disconnected', error: connection?.lastError ?? null };
       }
       case 'thread-project-state': {
-        await stateMutations.flush();
-        const unresolved = readThreadProjectState(globals, {}).unresolved;
-        const needsInventory = unresolved.projectless.length > 0 || ['assignments', 'outputDirectories', 'workspaceRoots']
-          .some(key => Object.keys(unresolved[key as 'assignments' | 'outputDirectories' | 'workspaceRoots']).length > 0);
-        if (!needsInventory) return { ...readThreadProjectState(globals, compatibility), inventory: { complete: true, errors: {} },
-          catalog: { local: globals['local-projects'], remote: globals['remote-projects'] } };
+        const initial = await stateMutations.run(() => {
+          const unresolved = readThreadProjectState(globals, {}).unresolved;
+          const needsInventory = unresolved.projectless.length > 0 || ['assignments', 'outputDirectories', 'workspaceRoots']
+            .some(key => Object.keys(unresolved[key as 'assignments' | 'outputDirectories' | 'workspaceRoots']).length > 0);
+          return { needsInventory, snapshot: structuredClone({ ...readThreadProjectState(globals, compatibility),
+            inventory: { complete: true, errors: {} }, catalog: { local: globals['local-projects'], remote: globals['remote-projects'] } }) };
+        });
+        if (!initial.needsInventory) return initial.snapshot;
         const generation = ++projectInventoryGeneration;
         const inventory = createThreadProjectInventory(['local', ...sshHosts.keys()], async id => {
           const connection = id === 'local' ? control : connections.get(id) ?? fileConnections.get(id);
@@ -681,10 +699,11 @@ export async function createNativeWorkbench(options: Options = {}) {
           return connection;
         });
         const status = await inventory.refresh();
-        if (generation === projectInventoryGeneration) projectCompatibility = inventory.compatibility;
-        await stateMutations.flush();
-        return { ...readThreadProjectState(globals, inventory.compatibility), inventory: status,
-          catalog: { local: globals['local-projects'], remote: globals['remote-projects'] } };
+        return stateMutations.run(() => {
+          if (generation === projectInventoryGeneration) projectCompatibility = inventory.compatibility;
+          return structuredClone({ ...readThreadProjectState(globals, inventory.compatibility), inventory: status,
+            catalog: { local: globals['local-projects'], remote: globals['remote-projects'] } });
+        });
       }
       case 'thread-projects': return threadProjects(params.operation as ThreadProjectOperation, params.value);
       case 'project-add': return addProject(hostId, params.path, params.name);
@@ -716,8 +735,8 @@ export async function createNativeWorkbench(options: Options = {}) {
         const values = structuredClone(settings);
         return { values, configuredValues: values };
       });
-      case 'codex-command-keymap-state': return { bindings: [], keymapPath: null, supported: false,
-        primaryNumberShortcutTarget: settings['primary-number-shortcut-target'] ?? 'tabs' };
+      case 'codex-command-keymap-state': return stateMutations.run(() => ({ bindings: [], keymapPath: null, supported: false,
+        primaryNumberShortcutTarget: settings['primary-number-shortcut-target'] ?? 'tabs' }));
       case 'get-setting': return stateMutations.run(() => ({ value: structuredClone(settings[String(params.key)]), exists: Object.hasOwn(settings, String(params.key)) }));
       case 'set-setting': return writePreference('setting', String(params.key ?? ''), params.value, params.expected);
       case 'get-global-state': return stateMutations.run(() => ({ value: structuredClone(globals[String(params.key)]), exists: Object.hasOwn(globals, String(params.key)) }));
@@ -774,7 +793,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       for (const [client, connections] of clients) { client.terminate(); for (const connection of connections.values()) connection.close(); }
       control.close(); webSockets.close(); chromeSockets.close();
       await new Promise<void>(resolve => server.close(() => resolve()));
-      await hostTools.close(); await stateMutations.flush(); await persistQueue;
+      await hostTools.close(); await stateMutations.flush();
     },
   };
 }
