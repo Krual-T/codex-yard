@@ -1,0 +1,14 @@
+.yard-integration-control-row { display: flex; align-items: center; gap: 12px; }
+.yard-integration-control-row > .yard-setting-row { flex: 1 1 auto; min-width: 0; border-bottom: 0; }
+.yard-integration-icon { display: flex; align-items: center; justify-content: center; flex: 0 0 40px; width: 40px; height: 40px; border: 1px solid var(--yard-settings-border, #e8e8e8); border-radius: 8px; color: var(--yard-muted, #717171); }
+.yard-integration-restricted .yard-integration-icon, .yard-integration-restricted .yard-setting-copy { opacity: .55; }
+.yard-settings .yard-integration-secondary { border: 0; border-radius: 8px; padding: 5px 10px; background: color-mix(in srgb, var(--yard-fg, #1a1c1f) 6%, var(--yard-bg, #fff)); }
+.yard-integration-select { position: relative; max-width: 100%; }
+.yard-settings .yard-integration-select-trigger { display: flex; align-items: center; justify-content: space-between; gap: 12px; max-width: 100%; border-color: var(--yard-settings-border, #e8e8e8); border-radius: 9px; padding: 4px 9px; }
+.yard-integration-select-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 10; min-width: 190px; max-width: min(280px, 80vw); padding: 4px; border: 1px solid var(--yard-border, #d8dde1); border-radius: 8px; background: var(--yard-bg, #fff); box-shadow: 0 6px 20px rgb(0 0 0 / .15); }
+.yard-settings .yard-integration-select-menu button { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; border: 0; background: transparent; text-align: left; }
+.yard-settings .yard-integration-select-menu button:hover, .yard-settings .yard-integration-select-menu button:focus-visible { background: var(--yard-surface, #f3f3f3); }
+.yard-settings .yard-integration-plugin-label { display: flex; flex-direction: column; align-items: flex-start; border: 0; padding: 0; background: transparent; text-align: left; }
+.yard-integration-more { position: relative; }
+.yard-integration-more summary { display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; cursor: pointer; list-style: none; }
+.yard-integration-more summary::-webkit-details-marker { display: none; }
