@@ -4,7 +4,7 @@ import type { MessageEditOrigin, WorkbenchClient } from '../workbench-contract.t
 import { draftToInput } from '../composer/standalone-draft.ts';
 import { editableDraft } from '../messages/message-data.ts';
 import { applyTextEdits, editSourceSignature, latestEditTarget } from '../messages/message-edit.ts';
-import type { MessageEditRebaseCandidate, MessageEditRebaseMarker, MessageEditRecovery, MessageEditRecoveryVersion } from '../messages/use-message-editing.ts';
+import type { MessageEditAccess, MessageEditRebaseCandidate, MessageEditRebaseMarker, MessageEditRecovery, MessageEditRecoveryVersion } from '../messages/use-message-editing.ts';
 import { readBrowserAtom, updateBrowserAtom } from '../storage/ui-atoms.ts';
 import { loadThread } from './load-thread.ts';
 
@@ -186,11 +186,52 @@ async function readRebaseHistory(client: WorkbenchClient, origin: MessageEditOri
 /** Recovery is UI data in native-atoms. Codex remains the conversation authority. */
 export class MessageEditRecoveryStore {
   private observed = new Map<string, string | undefined>();
+  private readonly editOwners = new Map<string, { owner: symbol }>();
+  private readonly accessListeners = new Map<symbol, Set<() => void>>();
   private readonly client: WorkbenchClient;
   private readonly storage: EditRecoveryStorage;
   private readonly options: MessageEditRecoveryOptions;
   constructor(client: WorkbenchClient, storage: EditRecoveryStorage = browserStorage, options: MessageEditRecoveryOptions = {}) {
     this.client = client; this.storage = storage; this.options = options;
+  }
+
+  createAccess(): MessageEditAccess {
+    const owner = Symbol('message-edit-view');
+    const notifyPeers = () => {
+      for (const [peer, listeners] of this.accessListeners) {
+        if (peer !== owner) for (const listener of listeners) listener();
+      }
+    };
+    const owns = (identity: Pick<MessageEditOrigin, 'hostId' | 'threadId'>) => this.editOwners.get(keyFor(identity))?.owner === owner;
+    return {
+      acquire: identity => {
+        const key = keyFor(identity), current = this.editOwners.get(key);
+        if (current) return current.owner === owner;
+        this.editOwners.set(key, { owner });
+        notifyPeers();
+        return true;
+      },
+      owns,
+      available: identity => !this.editOwners.has(keyFor(identity)) || owns(identity),
+      capture: identity => {
+        const key = keyFor(identity), current = this.editOwners.get(key);
+        if (!current || current.owner !== owner) throw new Error('此消息编辑已由另一视图持有，未发送。');
+        return () => {
+          if (this.editOwners.get(key) !== current) throw new Error('消息编辑使用权已改变，未发送。');
+        };
+      },
+      read: async identity => (await this.read(identity.hostId, identity.threadId))?.recovery ?? null,
+      subscribe: listener => {
+        const listeners = this.accessListeners.get(owner) ?? new Set<() => void>();
+        listeners.add(listener); this.accessListeners.set(owner, listeners);
+        return () => { listeners.delete(listener); if (!listeners.size) this.accessListeners.delete(owner); };
+      },
+      release: identity => {
+        if (!owns(identity)) return;
+        this.editOwners.delete(keyFor(identity));
+        notifyPeers();
+      },
+    };
   }
 
   async read(hostId: string, threadId: string): Promise<StoredMessageEdit | null> {
@@ -276,7 +317,7 @@ export class MessageEditRecoveryStore {
     return structuredClone(next!.recovery);
   }
 
-  async submit(origin: MessageEditOrigin, expectedTurnIds: string[], turnParams: Record<string, unknown>) {
+  async submit(origin: MessageEditOrigin, expectedTurnIds: string[], turnParams: Record<string, unknown>, assertCanDispatch?: () => void) {
     const existing = await this.read(origin.hostId, origin.threadId);
     let checkedRecovery: MessageEditRecovery | undefined;
     if (existing?.recovery.editor?.requiresCurrentSource && (!existing.submission || existing.submission.stage === 'prepared')) {
@@ -288,6 +329,7 @@ export class MessageEditRecoveryStore {
       checkedRecovery = existing.recovery;
     }
     const operationId = crypto.randomUUID();
+    let previousSubmission: StoredMessageEdit['submission'];
     const state = await this.change(origin, previous => {
       if (!previous || !sameOrigin(previous.recovery.origin, origin)) throw new Error('编辑恢复尚未保存，未修改会话。');
       const old = previous.submission;
@@ -296,6 +338,7 @@ export class MessageEditRecoveryStore {
         throw new Error('恢复编辑在核对期间发生变化；草稿已保留，未发送。');
       }
       if (old?.stage === 'started') return previous;
+      previousSubmission = old && structuredClone(old);
       const editor = previous.recovery.editor;
       if (!editor) throw new Error('编辑版本尚未保存，未修改会话。');
       const sameVersion = old?.editorVersion?.sessionId === editor.sessionId && old.editorVersion.revision === editor.revision;
@@ -328,6 +371,26 @@ export class MessageEditRecoveryStore {
     const operation = pending.request.operation;
     if (pending.stage === 'started') return this.confirmStarted(state!);
     // The uncertain phase is durable before crossing the browser/host boundary.
+    try {
+      const assertion: unknown = assertCanDispatch?.();
+      if (assertion && (typeof assertion === 'object' || typeof assertion === 'function')
+        && typeof (assertion as { then?: unknown }).then === 'function') {
+        void Promise.resolve(assertion).catch(() => {});
+        throw new Error('派发前检查必须同步完成，未发送。');
+      }
+    } catch (reason) {
+      try {
+        await this.change(origin, previous => {
+          if (previous?.submission?.operationId !== operationId) throw new Error('编辑恢复记录已改变，未覆盖。');
+          if (previousSubmission) return { ...previous, submission: previousSubmission };
+          const { submission: _submission, ...withoutSubmission } = previous;
+          return withoutSubmission;
+        });
+      } catch (restoreError) {
+        throw new Error('派发前检查失败，恢复阶段未能写回；原记录已保留，请先核对。', { cause: restoreError });
+      }
+      throw reason;
+    }
     const response = await this.client.host<EditMessageResult>('message-edit', { hostId: origin.hostId, threadId: origin.threadId,
       ...pending.request });
     if (!['prepared', 'reverted', 'revertUnknown', 'startUnknown', 'started', 'conflict'].includes(response.stage)) {

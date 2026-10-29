@@ -16,7 +16,7 @@ import { useMessageEditing } from './use-message-editing.ts';
 import type { EditingSession, StandaloneMessagesRecoveryProps, StartEdit, UpdateEdit } from './use-message-editing.ts';
 import './standalone-messages.css';
 
-export type { MessageEditNavigationController, MessageEditNavigationLease, MessageEditRebaseCandidate, MessageEditRebaseMarker, MessageEditRecovery, MessageEditRecoveryVersion, StandaloneMessagesRecoveryProps } from './use-message-editing.ts';
+export type { MessageEditAccess, MessageEditNavigationController, MessageEditNavigationLease, MessageEditRebaseCandidate, MessageEditRebaseMarker, MessageEditRecovery, MessageEditRecoveryVersion, StandaloneMessagesRecoveryProps } from './use-message-editing.ts';
 export type { MessageEditHistory } from './message-edit.ts';
 
 type RenderItemProps = {
@@ -310,7 +310,7 @@ function searchText(value: unknown): string {
 }
 
 export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser,
-  editRecovery, onEditDraftChange, onEditNavigationController, editRebase, onPrepareEditRebase, onCommitEditRebase,
+  editRecovery, editAccess, onEditDraftChange, onEditNavigationController, editRebase, onPrepareEditRebase, onCommitEditRebase,
   editHistory }: StandaloneMessagesProps & StandaloneMessagesRecoveryProps & { editHistory?: MessageEditHistory }) {
   const [query, setQuery] = useState('');
   const [matchIndex, setMatchIndex] = useState(-1);
@@ -321,8 +321,8 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
   const searchOpened = useRef(new Set<HTMLDetailsElement>());
   const followRef = useRef(true);
   const threadIdentity = JSON.stringify([hostId, thread?.id]);
-  const { editingHere, recoveryAvailable, rebaseRequired, canRebase, startRebase, cancelRebase, startEdit, updateEdit, endEdit, submitEdit } = useMessageEditing({
-    hostId, thread, threadIdentity, editRecovery, onEditDraftChange, onEditNavigationController, editRebase, onPrepareEditRebase, onCommitEditRebase,
+  const { editingHere, recoveryAvailable, rebaseRequired, canRebase, startRebase, cancelRebase, startEdit, updateEdit, endEdit, submitEdit, accessRestricted, accessError } = useMessageEditing({
+    hostId, thread, threadIdentity, editRecovery, editAccess, onEditDraftChange, onEditNavigationController, editRebase, onPrepareEditRebase, onCommitEditRebase,
   });
   const currentThread = useRef(threadIdentity);
   const openImages = useCallback((images: ImageSource[], index: number) => setViewer({ images, index }), []);
@@ -412,6 +412,7 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
     if (nearBottom !== followRef.current) { followRef.current = nearBottom; setFollowing(nearBottom); }
   }
   return <div className="yard-messages-root">
+    {accessError && <p role="alert">{accessError}</p>}
     <div className="yard-message-search"><Search size={16} aria-hidden="true" /><input aria-label="Search messages" value={query}
       placeholder="Search messages" onChange={(event) => { restoreSearchDetails(); setQuery(event.target.value); setMatchIndex(-1); }}
       onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); scrollToMatch(event.shiftKey && matchIndex < 0 ? hits.length - 1 : matchIndex + (event.shiftKey ? -1 : 1)); } }} />
@@ -437,7 +438,7 @@ export function StandaloneMessages({ client, hostId, thread, onEdit, onFork, onO
             const itemEditing = editingHere?.turnId === turn.id && editingHere.itemId === item.id
               && (!sourceMissing || syntheticDraft) ? editingHere : null;
             const isTarget = editTarget?.turnId === turn.id && editTarget.itemId === item.id;
-            const editRestriction = itemEditing && sourceMissing ? (itemEditing.requiresCurrentSource
+            const editRestriction = accessRestricted ? 'This message is being edited in another view.' : itemEditing && sourceMissing ? (itemEditing.requiresCurrentSource
               ? 'Reload the complete conversation before sending this recovered edit.'
               : recoveryAvailable ? null : 'The original message is no longer available. The edited draft is retained.')
               : !isTarget ? 'Only the latest user message can be edited.'
