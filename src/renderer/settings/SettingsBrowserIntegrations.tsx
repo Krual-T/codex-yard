@@ -198,13 +198,13 @@ export function SettingsBrowserIntegrations(props: SettingsBrowserIntegrationsPr
   const rawInAppBrowserFeature = scope.rawFeatureSource === 'unmodified' ? values.get('in_app_browser') ?? null : null;
   const original = gates?.authorityKey === scope.lease?.key ? gates : undefined;
   const notWsl = original?.runCodexInWsl == null ? null : !original.runCodexInWsl;
-  const browserAvailability = availability([currentRead.policy, values.get('browser_use') ?? true, rawInAppBrowserFeature,
+  const browserAvailability = availability([currentRead.policy, values.get('browser_use') ?? null, rawInAppBrowserFeature,
     original?.browserAgentRollout ?? null, notWsl]);
-  const externalBrowserAvailability = availability([currentRead.policy, values.get('browser_use_external') ?? true,
+  const externalBrowserAvailability = availability([currentRead.policy, values.get('browser_use_external') ?? null,
     original?.externalBrowserRollout ?? null, notWsl]);
   const platform = scope.platform === 'unknown' ? null : scope.platform === 'macOS' || scope.platform === 'windows';
   const windowsAllowed = scope.platform !== 'windows' || currentRead.account !== 'chatgpt' ? true : original?.windowsComputerUseAllowed ?? null;
-  const computerAvailability = availability([currentRead.policy, values.get('computer_use') ?? true,
+  const computerAvailability = availability([currentRead.policy, values.get('computer_use') ?? null,
     original?.computerUseRollout ?? null, platform, windowsAllowed]);
   const extensionsAvailability = availability([rawInAppBrowserFeature, original?.extensionsRollout ?? null]);
   const common = { client: scope.client, route: props.route, cwd: scope.cwd, authorityKey: `${scope.lease!.key}:${scope.serial}`,
@@ -225,7 +225,7 @@ export function SettingsBrowserIntegrations(props: SettingsBrowserIntegrationsPr
   const preferences: BrowserPreferencePort = { snapshot: props.snapshot, edit: (key, value) => {
     assertCurrent(); props.preferences.edit(key as BrowserPreferenceKey, value as BrowserPreferenceValues[BrowserPreferenceKey]);
   },
-    reload: async key => { assertCurrent(); await props.preferences.reload(key); },
+    reload: async key => { assertCurrent(); await props.preferences.reload(key, assertCurrent); },
     saveOne: (key, guard) => { assertCurrent(); return props.preferences.saveOne(key, () => { assertCurrent(); guard(); }); } };
   return <BrowserSection {...common} preferences={preferences} rawInAppBrowserFeature={rawInAppBrowserFeature}
     pluginAvailability={browserAvailability} extensionsAvailability={extensionsAvailability} />;

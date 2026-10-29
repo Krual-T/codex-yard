@@ -264,8 +264,8 @@ export class Preferences {
         for (const key of keys) if (typeof key === 'string' && key in preferenceDefinitions &&
           preferenceDefinitions[key as PreferenceKey].source === source) {
           const preferenceKey = key as PreferenceKey;
-          if (this.snapshot[preferenceKey].saving) this.pendingRefresh.add(preferenceKey);
-          else void this.reload(preferenceKey);
+          this.pendingRefresh.add(preferenceKey);
+          if (!this.snapshot[preferenceKey].saving) void this.reload(preferenceKey);
         }
       }
     });
@@ -311,6 +311,7 @@ export class Preferences {
   }
   async reload(key: PreferenceKey, assertBeforeSend?: () => void): Promise<void> {
     if (this.snapshot[key].saving) { this.pendingRefresh.add(key); return; }
+    this.pendingRefresh.add(key);
     const revision = (this.revisions.get(key) ?? 0) + 1;
     const lifecycle = this.lifecycle;
     this.revisions.set(key, revision);
@@ -319,8 +320,8 @@ export class Preferences {
     try {
       const response = await this.client.host<unknown>(endpoint, { key }, { assertBeforeSend });
       if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) {
-        if (!this.snapshot[key].saving) this.pendingRefresh.delete(key);
         this.applyRead(key, observation(response));
+        if (!this.snapshot[key].saving) this.pendingRefresh.delete(key);
       }
     } catch (error) {
       if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) this.update(key, { loading: false, error: errorText(error) });
@@ -406,7 +407,7 @@ export class Preferences {
       const response = await this.client.host<{ success?: boolean }>(endpoint, { key, value, expected }, { assertBeforeSend });
       if (response?.success !== true) throw new Error('The host did not confirm the write');
       acknowledged = true;
-      const read = observation(await this.client.host<unknown>(getEndpoint, { key }));
+      const read = observation(await this.client.host<unknown>(getEndpoint, { key }, { assertBeforeSend }));
       const actual = read.exists ? read.value : preferenceDefinitions[key].defaultValue;
       if (!preferenceDefinitions[key].valid(actual)) throw new Error('The saved value could not be verified');
       const current = this.snapshot[key];
@@ -415,7 +416,7 @@ export class Preferences {
       this.update(key, { observation: read, saved: clone(actual) as never, value: (matches && !newer ? clone(actual) : current.value) as never,
         editBase: matches && !newer ? null : written, baseValue: clone(sent) as never, conflict: !matches, saving: false,
         error: matches ? null : 'The value changed while saving. Review the current value before saving.' });
-      if (this.pendingRefresh.delete(key)) void this.reload(key);
+      if (this.pendingRefresh.has(key)) void this.reload(key, assertBeforeSend);
       return matches;
     } catch (error) {
       if (acknowledged) {

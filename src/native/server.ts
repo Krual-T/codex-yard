@@ -42,7 +42,7 @@ import { createStateMutations } from './state-mutations.ts';
 import { createNativeState, NativeStateCommitError } from './native-state.ts';
 import type { NativeStateCheckpoint } from './native-state.ts';
 import { createConfigWrites } from './config-writes.ts';
-import { createConfigWriteTargets } from './config-write-targets.ts';
+import { assertDaemonConfigHome, createConfigWriteTargets } from './config-write-targets.ts';
 import { createConfigWriteHost } from './config-write-host.ts';
 import { createRemoteConnectionPreferences } from './remote-connection-preferences.ts';
 import { createProjectCatalogWrites } from './project-catalog-writes.ts';
@@ -257,6 +257,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     const snapshot = socket && connectionSnapshots.get(socket);
     if (!socket || !connection.connected || connection.socket !== socket || socket.readyState !== WebSocket.OPEN
       || snapshot?.hostId !== hostId || snapshot.connection !== connection) throw new Error('The original settings connection changed. Reload the settings.');
+    assertDaemonConfigHome(connection.server?.codexHome, snapshot.paths.codexHome);
     const generation = connectionGeneration(socket);
     return { hostId, generation, homeDirectory: snapshot.paths.homeDirectory, codexHome: snapshot.paths.codexHome };
   }
@@ -981,7 +982,9 @@ export async function createNativeWorkbench(options: Options = {}) {
       if (method === 'thread/start' && record(record(result).thread).id) createdThreads.add(hostId + ':' + String(record(record(result).thread).id));
       if (method === 'thread/delete') createdThreads.delete(hostId + ':' + String(params.threadId));
       if (readSource) {
-        const current = configurationSource(hostId, connection, sourceSocket);
+        let current: ConfigReadSource;
+        try { current = configurationSource(hostId, connection, sourceSocket); }
+        catch { throw new Error('The settings source changed while reading. Reload the settings.'); }
         if (current.generation !== readSource.generation || current.homeDirectory !== readSource.homeDirectory || current.codexHome !== readSource.codexHome) {
           throw new Error('The settings source changed while reading. Reload the settings.');
         }

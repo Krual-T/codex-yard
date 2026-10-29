@@ -8,7 +8,7 @@ interface ConfigSource { hostId: string; generation: string; homeDirectory: stri
 interface ConfigRecord {
   operationId: string; hostId: string; phase: 'pending' | 'unknown' | 'finished' | 'not-started' | 'blocked';
   origin: { section: string; scope?: readonly string[]; draft?: unknown; source?: ConfigSource };
-  operation?: { state: string; storageError?: true };
+  operation?: { state: string; storageError?: true; terminal?: { kind: string }; observedTerminal?: { kind: string } };
 }
 interface ConfigSnapshot { records: ConfigRecord[]; loading: boolean; error: string | null; inFlight: string[] }
 
@@ -73,7 +73,7 @@ export async function writePluginConfig(operations: ProductConfigurationWrites |
   try {
     const submitted = await operations.submit(value.hostId, 'config/batchWrite', prepared.params, {
       section: 'plugins-settings', scope: [value.cwd], source,
-      draft: { pluginId: value.plugin.id, enabled: value.enabled },
+      draft: { pluginId: value.plugin.id, enabled: value.enabled, sourceType: value.plugin.source.type },
       ...(restored ? { editorId: restored.editorId, revision: restored.revision } : {}),
     }, current);
     received = true;
@@ -114,7 +114,8 @@ export async function saveRecoveredPluginEdit(operations: SettingsConfigOperatio
   const inventory = await listInstalledPlugins(client, saved.hostId, saved.scope[0]!, { assertBeforeSend: assertCurrent });
   assertCurrent(); assertInventorySource(inventory.source, source, true);
   const matches = inventory.entries.filter(entry => entry.plugin.id === edit.pluginId);
-  if (matches.length !== 1 || matches[0]!.plugin.source.type === 'remote') throw new Error('The original local plugin cannot be identified uniquely. Keep or copy this saved edit.');
+  if (matches.length !== 1 || matches[0]!.plugin.source.type === 'remote'
+    || edit.sourceType !== undefined && matches[0]!.plugin.source.type !== edit.sourceType) throw new Error('The original local plugin cannot be identified uniquely. Keep or copy this saved edit.');
   await writePluginConfig(operations, client, { hostId: saved.hostId, cwd: saved.scope[0]!, plugin: matches[0]!.plugin,
     enabled: edit.enabled as boolean }, current, { editorId: saved.editorId, revision: saved.revision, source });
 }
@@ -149,10 +150,16 @@ export async function reconcilePluginConfig(operations: ProductConfigurationWrit
   if (entry.phase !== 'finished' || entry.operation?.state !== 'succeeded') {
     throw new Error('The original plugin edit was not saved. Review the preserved edit in configuration recovery.');
   }
+  if (entry.operation.terminal?.kind === 'okOverridden' || entry.operation.observedTerminal?.kind === 'okOverridden') {
+    throw new Error('The host saved the original plugin edit with an override. Review the preserved receipt in configuration recovery.');
+  }
   const inventory = await listInstalledPlugins(client, hostId, cwd, { assertBeforeSend: assertCurrent });
   assertInventorySource(inventory.source, originalSource, true);
   const matches = inventory.entries.filter(item => item.plugin.id === pluginId);
-  if (matches.length !== 1 || matches[0]!.plugin.enabled !== enabled) throw new Error('The saved plugin state differs from the original edit.');
+  if (matches.length !== 1 || matches[0]!.plugin.enabled !== enabled || matches[0]!.plugin.source.type === 'remote'
+    || original.origin.draft.sourceType !== undefined && matches[0]!.plugin.source.type !== original.origin.draft.sourceType) {
+    throw new Error('The saved plugin identity or state differs from the original edit.');
+  }
   assertCurrent();
   await operations.finishSuccessfulGroup([original.operationId]);
 }

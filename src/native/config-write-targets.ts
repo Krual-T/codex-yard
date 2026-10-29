@@ -24,6 +24,12 @@ function absolute(value: unknown): string {
   return value;
 }
 
+export function assertDaemonConfigHome(reported: unknown, expected: unknown): string {
+  const home = absolute(expected);
+  if (absolute(reported) !== home) throw new Error('The original daemon configuration home does not match the selected host.');
+  return home;
+}
+
 async function localTarget(binding: string): Promise<string> {
   let entry;
   try { entry = await lstat(binding); }
@@ -84,8 +90,7 @@ export function createConfigWriteTargets(options: Options) {
       const name = typeof params.name === 'string' && params.name.length > 0 && !params.name.includes('\0');
       if (typeof params.enabled !== 'boolean' || path === name) throw new Error('The skill selector is invalid.');
     }
-    const home = absolute(snapshot?.paths.codexHome);
-    if (absolute(connection.server?.codexHome) !== home) throw new Error('The original daemon configuration home does not match the selected host.');
+    const home = assertDaemonConfigHome(connection.server?.codexHome, snapshot?.paths.codexHome);
     const response = await connection.requestWithCursor('config/read', { includeLayers: true });
     checkConnection();
     const layers = record(response?.result) ? response.result.layers : null;

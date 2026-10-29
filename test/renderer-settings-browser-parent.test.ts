@@ -31,7 +31,11 @@ test('settings parent scopes real host reads, guarded actions and unavailable or
       if (holdPolicy) { holdPolicy = false; policyEntered?.(); await new Promise<void>(resolve => { releasePolicy = resolve; }); }
       return { requirements: { allowBrowserAndComputerUse: captured } };
     });
-    peer.handlers.set('experimentalFeature/list', params => params.cursor === 'next' ?
+    let featureMode: 'normal' | 'duplicate' | 'malformed' | 'cycle' = 'normal';
+    peer.handlers.set('experimentalFeature/list', params => featureMode === 'duplicate' ?
+      { data: [{ name: 'in_app_browser', enabled: true }, { name: 'in_app_browser', enabled: false }], nextCursor: null } :
+      featureMode === 'malformed' ? { data: [{ name: 'in_app_browser', enabled: 'yes' }], nextCursor: null } :
+      featureMode === 'cycle' ? { data: [], nextCursor: 'same' } : params.cursor === 'next' ?
       { data: includeRaw ? [{ name: 'in_app_browser', enabled: raw }] : [], nextCursor: null } :
       { data: [{ name: 'browser_use', enabled: browser }, { name: 'browser_use_external', enabled: external },
         { name: 'computer_use', enabled: false }], nextCursor: 'next' });
@@ -75,7 +79,8 @@ test('settings parent scopes real host reads, guarded actions and unavailable or
     await page.waitForFunction(() => !document.body.textContent?.includes('Loading browser settings...'));
     assert.ok(peer.calls('experimentalFeature/list').some(call => call.params.cursor === 'next'));
     assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
-    assert.equal(await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).count(), 0);
+    assert.equal(await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).count(), 1,
+      'An unverified parent source must remain unknown even when a second host read could report false.');
 
     includeRaw = false;
     await page.evaluate(() => window.browserParentHarness.renew());
@@ -86,6 +91,16 @@ test('settings parent scopes real host reads, guarded actions and unavailable or
         'The parent must not treat a missing in_app_browser feature as enabled.');
       await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
     });
+    for (const [mode, message] of [
+      ['duplicate', 'Duplicate experimental feature.'], ['malformed', 'Invalid experimental feature.'],
+      ['cycle', 'Experimental feature pagination did not advance.'],
+    ] as const) {
+      featureMode = mode;
+      await page.evaluate(() => window.browserParentHarness.renew());
+      await page.getByRole('alert').filter({ hasText: message }).first().waitFor();
+      assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
+    }
+    featureMode = 'normal';
     includeRaw = true; browser = true; policy = false;
     await page.evaluate(() => window.browserParentHarness.renew());
     await page.getByText('Disabled by your organization or unavailable in your region').waitFor();

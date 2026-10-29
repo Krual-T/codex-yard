@@ -121,6 +121,9 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
   const [otherDirty, setOtherDirty] = useState(false);
   const [appearanceInvalid, setAppearanceInvalid] = useState(false);
   const [otherSaving, setOtherSaving] = useState(false);
+  const [recoveryEditing, setRecoveryEditing] = useState(false);
+  const recoveryEditingRef = useRef(false);
+  const onRecoveryPending = useCallback((value: boolean) => { recoveryEditingRef.current = value; setRecoveryEditing(value); }, []);
   const [editorRevision, setEditorRevision] = useState(0);
   const [search, setSearch] = useState('');
   const [searchTarget, setSearchTarget] = useState<{ section: string; id: string; hostId: string } | null>(null);
@@ -135,7 +138,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
   const transition = useRef(0);
   const dirty = preferences.dirty || otherDirty || !!recovery.localRetry.length || !!recovery.draftRetry.length
     || recovery.records.some(item => item.phase === 'pending' || item.phase === 'unknown' || item.phase === 'blocked');
-  const anySaving = saving || otherSaving || recovery.draftPending > 0 || recovery.inFlight.length > 0 || preferenceKeys.some(key => snapshot[key].saving);
+  const anySaving = saving || otherSaving || recoveryEditing || recovery.draftPending > 0 || recovery.inFlight.length > 0 || preferenceKeys.some(key => snapshot[key].saving);
   const flags = useRef({ dirty, saving: anySaving });
   flags.current = { dirty, saving: anySaving };
 
@@ -145,7 +148,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
   }, [section]);
 
   const requestLeave = useCallback((): Promise<boolean> => {
-    if (flags.current.saving || preferences.saving) return Promise.resolve(false);
+    if (recoveryEditingRef.current || flags.current.saving || preferences.saving) return Promise.resolve(false);
     if (!preferences.dirty && !flags.current.dirty) return Promise.resolve(true);
     if (pending.current) return pending.current.promise;
     let resolve: (allowed: boolean) => void = () => {};
@@ -155,7 +158,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
     return promise;
   }, [preferences]);
   const finishLeave = async (allowed: boolean) => {
-    if (discardInFlight.current || allowed && (flags.current.saving || preferences.saving)) return;
+    if (discardInFlight.current || allowed && (recoveryEditingRef.current || flags.current.saving || preferences.saving)) return;
     const current = pending.current;
     if (!current) return;
     if (allowed) {
@@ -195,7 +198,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
     return () => { active = false; };
   }, [client]);
   useEffect(() => {
-    const preventUnload = (event: BeforeUnloadEvent) => { if (dirty || anySaving) { event.preventDefault(); event.returnValue = ''; } };
+    const preventUnload = (event: BeforeUnloadEvent) => { if (recoveryEditingRef.current || dirty || anySaving) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', preventUnload);
     return () => window.removeEventListener('beforeunload', preventUnload);
   }, [dirty, anySaving]);
@@ -301,7 +304,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
     </aside>
     <main className="yard-settings-main" aria-label={locale.startsWith('en') ? `${title} settings` : `${t('Settings')}: ${title}`}>
       <div className="yard-settings-content" ref={content}>
-        <ConfigurationRecovery client={client} hostId={selectedHost} captureAuthority={browserIntegrations ? host => browserIntegrations.captureAuthority(host).assertCurrent : undefined} />
+        <ConfigurationRecovery client={client} hostId={selectedHost} onPendingChange={onRecoveryPending} captureAuthority={browserIntegrations ? host => browserIntegrations.captureAuthority(host).assertCurrent : undefined} />
         {needsScope && scopeState !== 'ready' ? scopeState === 'error' ?
           <p className="yard-setting-error" role="alert">{t('Selected project or session')}: {t('Unavailable')}{scopeStatus?.error ? `: ${scopeStatus.error}` : ''}{' '}
             <button type="button" className="yard-link" onClick={() => scopeStatus?.retry()}>{t('Retry')}</button></p> :
@@ -328,8 +331,10 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
                 platform={platform === 'macOS' || platform === 'darwin' ? 'macOS' : platform === 'windows' || platform === 'win32' ? 'windows' : platform === 'linux' ? 'linux' : 'unknown'} /> :
                 <p role="alert">{translateKnown(t, 'This action is unavailable on this web host.')}</p> :
               section === 'hooks-settings' ? <HookSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
+                captureReadAuthority={browserIntegrations ? () => browserIntegrations.captureAuthority(selectedHost).assertCurrent : undefined}
                 projectScope={projectScope} memory={hookMemory} revision={editorRevision} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
               section === 'skills-settings' ? <SkillSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
+                captureReadAuthority={browserIntegrations ? () => browserIntegrations.captureAuthority(selectedHost).assertCurrent : undefined}
                 projectScope={projectScope} memory={skillMemory} revision={editorRevision} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
               isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
                 section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving}

@@ -3,7 +3,7 @@ import { Check, ChevronDown } from 'lucide-react';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
 import type { PreferenceEntry } from './preferences.ts';
 import { Row, entryState } from './PreferenceControls.tsx';
-import { assertCurrent, AvailabilityRow, BundledPluginControl, current, effectivePath, NavigationFailureNotice, useInAppBrowserFeature, useIntegrationNavigation } from './integration-settings.tsx';
+import { assertCurrent, AvailabilityRow, BundledPluginControl, current, effectivePath, NavigationFailureNotice, useIntegrationNavigation } from './integration-settings.tsx';
 import type { IntegrationAvailability, IntegrationSettingsProps } from './integration-settings.tsx';
 import type { PluginEntry } from '../pages/plugins/catalog.ts';
 
@@ -83,7 +83,9 @@ export function BrowserSection(props: BrowserSectionProps) {
 }
 
 function BrowserSectionScope(props: BrowserSectionProps) {
-  const { t } = useI18n(), feature = useInAppBrowserFeature(props, props.rawInAppBrowserFeature), path = effectivePath(props.route).replace(/\/$/, '');
+  const { t } = useI18n(), path = effectivePath(props.route).replace(/\/$/, '');
+  const feature = { enabled: props.rawInAppBrowserFeature, loading: false,
+    error: props.rawInAppBrowserFeature === null ? 'In-app browser availability cannot be verified for this connection.' : null };
   const navigation = useIntegrationNavigation(props);
   const subpage = subpages[path], validSubpage = !!subpage && (path !== '/settings/browser-use/extensions' || props.extensionsAvailability !== 'restricted');
   const [expanded, setExpanded] = useState(false);
@@ -105,7 +107,6 @@ function BrowserSectionScope(props: BrowserSectionProps) {
   const manage = (target: string) => navigation.navigate(`/settings/browser-use/${target}`);
   const retryFeature = () => {
     setSaveError(null);
-    feature.retry();
     if (current(props)) void props.refreshAvailability().catch(cause => {
       if (mounted.current && current(props)) setSaveError(cause instanceof Error ? cause.message : String(cause));
     });

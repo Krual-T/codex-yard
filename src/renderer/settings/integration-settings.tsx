@@ -74,53 +74,6 @@ export function NavigationFailureNotice({ failure, retry }: { failure: Navigatio
     <button type="button" className="yard-link" onClick={retry}>{t('Retry')}</button></p>;
 }
 
-interface FeatureState { loading: boolean; error: string | null; enabled: boolean | null }
-export function useInAppBrowserFeature(props: IntegrationSettingsProps, rawFeature: boolean | null) {
-  const [revision, setRevision] = useState(0);
-  const [state, setState] = useState<FeatureState>({ loading: true, error: null, enabled: null });
-  const sequence = useRef(0);
-  useEffect(() => {
-    let alive = true;
-    const version = ++sequence.current;
-    const valid = () => alive && sequence.current === version && current(props);
-    if (rawFeature !== null) {
-      setState({ loading: false, error: null, enabled: rawFeature });
-      return () => { alive = false; };
-    }
-    setState({ loading: true, error: null, enabled: null });
-    void (async () => {
-      const seen = new Set<string>(); let cursor: string | null = null, enabled: boolean | undefined;
-      do {
-        if (!valid()) return;
-        const page: unknown = await props.client.rpc('experimentalFeature/list', { cursor, limit: 100 }, props.route.hostId,
-          { assertBeforeSend: () => { if (!valid()) throw new DOMException('The selected settings page changed.', 'AbortError'); } });
-        if (!valid()) return;
-        if (!page || typeof page !== 'object' || !('data' in page) || !Array.isArray(page.data)) throw new Error('Invalid experimental features response.');
-        const response = page as { data: unknown[]; nextCursor?: unknown };
-        if (response.nextCursor != null && (typeof response.nextCursor !== 'string' || !response.nextCursor)) throw new Error('Invalid experimental features cursor.');
-        for (const item of response.data) {
-          if (!item || typeof item !== 'object' || !('name' in item) || !('enabled' in item) || typeof item.name !== 'string' || typeof item.enabled !== 'boolean') throw new Error('Invalid experimental feature.');
-          if (item.name === 'in_app_browser') { if (enabled !== undefined) throw new Error('Duplicate browser feature.'); enabled = item.enabled; }
-        }
-        cursor = typeof response.nextCursor === 'string' ? response.nextCursor : null;
-        if (cursor && (seen.has(cursor) || seen.size >= 100)) throw new Error('Experimental feature pagination did not advance.');
-        if (cursor) seen.add(cursor);
-      } while (cursor);
-      if (valid()) setState(enabled === undefined ?
-        { loading: false, error: 'In-app browser availability cannot be verified for this connection.', enabled: null } :
-        { loading: false, error: null, enabled });
-    })().catch(error => { if (valid()) setState({ loading: false, error: error instanceof Error ? error.message : String(error), enabled: null }); });
-    return () => { alive = false; };
-  }, [props.client, props.route.hostId, props.authorityKey, rawFeature, revision]);
-  useEffect(() => props.client.subscribe(event => {
-    if (event.type !== 'connection-state' && !(event.type === 'codex-app-server-connection-changed' && event.hostId === props.route.hostId && event.isSnapshot !== true)) return;
-    ++sequence.current;
-    if (event.state === 'connected') setRevision(value => value + 1);
-    else setState({ loading: false, error: 'The connection was lost. Reconnect and try again.', enabled: null });
-  }), [props.client, props.route.hostId, props.authorityKey]);
-  return { ...state, retry: () => setRevision(value => value + 1) };
-}
-
 export function IntegrationControlRow({ label, children, restricted = false }: { label: string; children: ReactNode; restricted?: boolean }) {
   return <div className={`yard-integration-control-row${restricted ? ' yard-integration-restricted' : ''}`}><span className="yard-integration-icon" aria-hidden="true">
     {label === 'Google Chrome' ? <Chrome size={24} /> : <AppWindow size={24} />}</span>{children}</div>;

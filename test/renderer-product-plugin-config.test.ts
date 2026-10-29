@@ -14,14 +14,14 @@ const source = { hostId: 'local', generation: 'generation-1', homeDirectory: '/h
 const originalOrigin = { section: 'plugins-settings' as const, scope: ['/workspace'], draft: { pluginId: 'demo', enabled: false }, source };
 
 function fixture() {
-  let current = true, enabled = false, inventorySource: unknown = source;
+  let current = true, enabled = false, inventorySource: unknown = source, pluginSource = plugin.source;
   let snapshot: ReturnType<ProductConfigurationWrites['getSnapshot']> = { records: [], loading: false, error: null, inFlight: [] };
   const calls: { method: string; value?: unknown }[] = [];
   const client = { async rpc(method: string) {
     calls.push({ method });
     if (method === 'config/read') return { layers: [{ name: { type: 'user', file: '/codex/config.toml' }, version: 'v1' }],
       yardConfigSource: { hostId: 'local', generation: 'generation-1', homeDirectory: '/home', codexHome: '/codex' } };
-    if (method === 'plugin/installed') return { marketplaces: [{ name: 'Local', path: '/market', plugins: [{ ...plugin, enabled }] }], yardConfigSource: inventorySource };
+    if (method === 'plugin/installed') return { marketplaces: [{ name: 'Local', path: '/market', plugins: [{ ...plugin, enabled, source: pluginSource }] }], yardConfigSource: inventorySource };
     throw new Error(`Unexpected RPC ${method}`);
   } } as unknown as WorkbenchClient;
   const operations: ProductConfigurationWrites = {
@@ -40,6 +40,7 @@ function fixture() {
   };
   return { client, operations, calls, current: () => current, setCurrent: (value: boolean) => { current = value; },
     setEnabled: (value: boolean) => { enabled = value; }, setSnapshot: (value: typeof snapshot) => { snapshot = value; },
+    setPluginSource: (value: PluginSummary['source']) => { pluginSource = value; },
     setInventorySource: (value: unknown) => { inventorySource = value; } };
 }
 
@@ -57,7 +58,7 @@ test('plugin settings require the shared controller and keep the original source
   };
   assert.equal(submission.hostId, 'local'); assert.equal(submission.dispatchAllowed, true);
   assert.deepEqual(submission.origin, { section: 'plugins-settings', scope: ['/workspace'],
-    draft: { pluginId: 'demo', enabled: false }, source: { hostId: 'local', generation: 'generation-1', homeDirectory: '/home', codexHome: '/codex' } });
+    draft: { pluginId: 'demo', enabled: false, sourceType: 'local' }, source: { hostId: 'local', generation: 'generation-1', homeDirectory: '/home', codexHome: '/codex' } });
   assert.deepEqual(submission.params, { edits: [{ keyPath: 'plugins.demo.enabled', value: false, mergeStrategy: 'upsert' }],
     filePath: '/codex/config.toml', expectedVersion: 'v1', reloadUserConfig: true });
   assert.deepEqual(item.calls.filter(call => call.method === 'finish-success').map(call => call.value), [['original-op']]);
@@ -229,6 +230,55 @@ test('known plugin edits fence their original scope while unknown writes continu
   assert.equal(pluginConfigBlocksScope(snapshot, 'local', '/other-workspace'), false);
   assert.equal(pluginConfigBlocksScope(snapshot, 'local', '/workspace'), true);
   assert.equal(pluginConfigBlocksScope({ ...snapshot, records: [{ ...snapshot.records[0]!, phase: 'unknown' }] }, 'local', '/other-workspace'), true);
+});
+
+test('receipt review preserves overridden results and rejects a same-ID plugin from another source', async () => {
+  for (const terminal of [{ terminal: { kind: 'okOverridden' } }, { observedTerminal: { kind: 'okOverridden' } }]) {
+    const item = fixture();
+    item.setSnapshot({ records: [{ operationId: 'original-op', hostId: 'local', phase: 'finished', origin: originalOrigin,
+      operation: { state: 'succeeded', ...terminal } }], loading: false, error: null, inFlight: [] });
+    await assert.rejects(reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', item.current), /override/);
+    assert.equal(item.calls.some(call => call.method === 'finish-success'), false);
+  }
+  for (const sourceType of [undefined, 'local']) {
+    const item = fixture(); item.setPluginSource({ type: 'remote' });
+    item.setSnapshot({ records: [{ operationId: 'original-op', hostId: 'local', phase: 'finished',
+      origin: { ...originalOrigin, draft: { ...originalOrigin.draft, ...(sourceType ? { sourceType } : {}) } },
+      operation: { state: 'succeeded' } }], loading: false, error: null, inFlight: [] });
+    await assert.rejects(reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', item.current), /identity or state differs/);
+    assert.equal(item.calls.some(call => call.method === 'finish-success'), false);
+  }
+});
+
+test('editing a recovered target changes only its exact revision and keeps source and foreign drafts', async () => {
+  const item = recoveryFixture();
+  await assert.rejects(item.submit('/workspace', () => false), /before it was sent/);
+  await assert.rejects(item.submit('/other-workspace', () => false), /before it was sent/);
+  await item.operations.restoreOriginalPluginEdit(item.operations.getSnapshot().records[0]!);
+  const original = structuredClone(item.operations.getSnapshot().drafts[0]!);
+  const foreign = structuredClone(item.operations.getSnapshot().records[0]!);
+  await item.operations.editRecoveredPluginDraft(original, true);
+  const edited = structuredClone(item.operations.getSnapshot().drafts[0]!);
+  assert.notEqual(edited.revision, original.revision);
+  assert.deepEqual({ ...edited, revision: original.revision }, { ...original, draft: { ...(original.draft as object), enabled: true } });
+  await assert.rejects(item.operations.editRecoveredPluginDraft(original, false), /saved plugin edit changed/);
+  assert.deepEqual(item.operations.getSnapshot().drafts, [edited]);
+  assert.deepEqual(item.operations.getSnapshot().records, [foreign]);
+  assert.equal(item.calls.some(call => call.method === 'submit'), false);
+});
+
+test('originalFinished checks the captured page after the browser atom finishes reading', async () => {
+  const item = recoveryFixture();
+  const read = item.storage.read.bind(item.storage); let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  item.storage.read = async () => { await gate; return read(); };
+  let current = true;
+  const pending = item.operations.originalFinished('local', 'unknown-original', 'config/batchWrite', () => {
+    if (!current) throw new Error('Original page changed');
+  });
+  current = false; release();
+  await assert.rejects(pending, /Original page changed/);
+  assert.deepEqual(item.calls, []);
 });
 
 test('an original status read cannot dispatch after its page becomes stale while reading the atom', async () => {

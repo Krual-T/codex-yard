@@ -21,17 +21,7 @@ test('browser and computer settings use the real host bridge, retain gates and i
     const codexHome = join(directory, 'codex'), dataDir = join(directory, 'data');
     await mkdir(codexHome); await mkdir(dataDir);
     peer.handlers.set('initialize', () => ({ userAgent: 'codex/fixture', codexHome }));
-    let failFeature = false, holdFeature = false, browserFeature: boolean | null = null;
-    let featureMode: 'normal' | 'duplicate' | 'malformed' | 'cycle' = 'normal';
-    let entered: (() => void) | undefined, release: (() => void) | undefined;
-    peer.handlers.set('experimentalFeature/list', async params => {
-      if (failFeature) throw new Error('Synthetic feature read failure');
-      const feature = browserFeature, mode = featureMode;
-      if (holdFeature && params.cursor === 'next') { holdFeature = false; entered?.(); await new Promise<void>(resolve => { release = resolve; }); }
-      if (params.cursor === 'next') return { data: mode === 'malformed' ? [{ name: 'in_app_browser', enabled: 'bad' }] :
-        feature === null ? [] : [{ name: 'in_app_browser', enabled: feature }], nextCursor: mode === 'cycle' ? 'next' : null };
-      return { data: mode === 'duplicate' ? [{ name: 'in_app_browser', enabled: true }] : [{ name: 'other', enabled: true }], nextCursor: 'next' };
-    });
+    peer.handlers.set('experimentalFeature/list', () => { throw new Error('The leaf must use its parent observation.'); });
     const plugin = { id: 'browser@openai-bundled', name: 'browser', installed: true, enabled: true,
       installPolicy: 'AVAILABLE', availability: 'AVAILABLE', source: { type: 'local' } };
     const plugins = () => ({ marketplaces: [{ name: 'openai-bundled', path: '/fixture/bundled', plugins: [plugin] }] });
@@ -202,24 +192,26 @@ test('browser and computer settings use the real host bridge, retain gates and i
     await page.getByRole('button', { name: 'Retry' }).click();
     assert.equal(await page.evaluate(() => window.integrationSettingsHarness.refreshes()), 1);
 
-    failFeature = true;
     const readsBeforeKnown = peer.calls('experimentalFeature/list').length;
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use'));
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
     assert.equal(peer.calls('experimentalFeature/list').length, readsBeforeKnown);
     await page.evaluate(() => window.integrationSettingsHarness.rawFeature(null));
-    await page.getByRole('alert').filter({ hasText: 'Synthetic feature read failure' }).waitFor();
-    failFeature = false;
+    await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
+    assert.equal(peer.calls('experimentalFeature/list').length, readsBeforeKnown,
+      'The leaf must not turn an unverified parent observation into a trusted second read.');
     await page.getByRole('alert').getByRole('button', { name: 'Retry' }).click();
     await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
-    assert.ok(peer.calls('experimentalFeature/list').some(call => call.params.cursor === 'next'));
+    assert.equal(peer.calls('experimentalFeature/list').length, readsBeforeKnown);
     assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
     await page.evaluate(() => window.integrationSettingsHarness.rawFeature(true));
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
     const writesBeforeReconnect = peer.calls('config/batchWrite').length;
+    await page.evaluate(() => window.integrationSettingsHarness.rawFeature(null));
     await page.evaluate(() => window.integrationSettingsHarness.suspend());
-    await page.getByRole('alert').filter({ hasText: 'The connection was lost' }).waitFor();
+    await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
     await page.evaluate(() => window.integrationSettingsHarness.resume());
+    await page.evaluate(() => window.integrationSettingsHarness.rawFeature(true));
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
     assert.equal(peer.calls('config/batchWrite').length, writesBeforeReconnect);
     await page.evaluate(() => window.integrationSettingsHarness.rawFeature(null));
@@ -231,38 +223,23 @@ test('browser and computer settings use the real host bridge, retain gates and i
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?step=feature'));
     await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
     assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
-    browserFeature = false;
+    await page.evaluate(() => window.integrationSettingsHarness.rawFeature(false));
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use/history?step=false'));
     await page.waitForURL(url => url.pathname === '/settings/browser-use' && url.searchParams.get('step') === 'false');
     assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
     assert.equal(await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).count(), 0);
 
-    browserFeature = true;
+    await page.evaluate(() => window.integrationSettingsHarness.rawFeature(true));
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?step=true'));
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
     await page.evaluate(() => window.integrationSettingsHarness.rawFeature(false));
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor({ state: 'hidden' });
     await page.evaluate(() => window.integrationSettingsHarness.rawFeature(null));
-    await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
-    for (const [mode, error] of [
-      ['duplicate', 'Duplicate browser feature.'], ['malformed', 'Invalid experimental feature.'],
-      ['cycle', 'Experimental feature pagination did not advance.'],
-    ] as const) {
-      featureMode = mode;
-      await page.evaluate(value => window.integrationSettingsHarness.show(`/settings/browser-use?step=${value}`), mode);
-      await page.getByRole('alert').filter({ hasText: error }).waitFor();
-      assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
-    }
-    featureMode = 'normal';
-    browserFeature = true;
-    holdFeature = true;
-    const connectionPending = new Promise<void>(resolve => { entered = resolve; });
+    await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?step=connection'));
-    await connectionPending;
     await page.evaluate(() => window.integrationSettingsHarness.suspend());
-    await page.getByRole('alert').filter({ hasText: 'The connection was lost' }).waitFor();
-    browserFeature = false;
-    assert.ok(release); release();
+    await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
+    await page.evaluate(() => window.integrationSettingsHarness.rawFeature(false));
     await page.evaluate(() => window.integrationSettingsHarness.resume());
     await page.waitForFunction(() => !document.body.textContent?.includes('Loading browser settings...') &&
       !document.body.textContent?.includes('The connection was lost'));
@@ -270,15 +247,11 @@ test('browser and computer settings use the real host bridge, retain gates and i
     assert.equal(await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).count(), 0);
     assert.equal(peer.calls('config/batchWrite').length, writesBeforeReconnect);
 
-    browserFeature = true;
-    holdFeature = true;
-    const pending = new Promise<void>(resolve => { entered = resolve; });
+    await page.evaluate(() => window.integrationSettingsHarness.rawFeature(true));
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?step=delayed'));
-    await pending;
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/computer-use?step=next'));
     await page.getByRole('heading', { name: 'Computer use' }).waitFor();
-    assert.ok(release); (release as () => void)();
-    await page.waitForTimeout(100);
+    assert.equal(peer.calls('experimentalFeature/list').length, readsBeforeKnown);
     assert.equal(await page.getByRole('heading', { name: 'Browser', exact: true }).count(), 0);
     assert.equal(new URL(page.url()).searchParams.get('step'), 'next');
 

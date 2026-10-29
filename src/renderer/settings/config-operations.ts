@@ -316,6 +316,25 @@ export class SettingsConfigOperations {
     this.localDraftPending.delete(editorId);
     return this.persistDraft(editorId, pending);
   }
+  async editRecoveredPluginDraft(original: SettingsDraftRecord, enabled: boolean): Promise<void> {
+    const expected = structuredClone(original);
+    if (typeof enabled !== 'boolean') throw new Error('The plugin target is invalid.');
+    await this.queueDraft(expected.editorId, async () => {
+      await this.storage.update(value => {
+        const current = data(value), key = draftKey(expected), index = current.drafts.findIndex(item => draftKey(item) === key);
+        const item = current.drafts[index];
+        if (!item || JSON.stringify(item) !== JSON.stringify(expected) || item.section !== 'plugins-settings'
+          || !item.editorId.startsWith('recovered:') || !object(item.draft) || typeof item.draft.enabled !== 'boolean') {
+          throw new Error('The saved plugin edit changed. Review its original copy before editing.');
+        }
+        if (item.draft.enabled === enabled) return current;
+        if (!Number.isSafeInteger(current.nextRevision + 1)) throw new Error('Configuration draft revisions are exhausted.');
+        current.drafts[index] = { ...item, revision: current.nextRevision++, draft: { ...item.draft, enabled } };
+        return current;
+      });
+      await this.refresh();
+    });
+  }
   async retryDraft(editorId: string): Promise<void> {
     const pending = this.localDraftPending.get(editorId);
     if (!pending) throw new Error('The newer browser edit is no longer available.');
@@ -535,9 +554,10 @@ export class SettingsConfigOperations {
     const closed = data(await this.storage.read()).closedNotSent;
     return closed.some(item => item.operationId === operationId && item.hostId === hostId && item.method === method);
   }
-  async originalFinished(hostId: string, operationId: string, method: SettingsWriteMethod): Promise<boolean> {
+  async originalFinished(hostId: string, operationId: string, method: SettingsWriteMethod, assertBeforeSend?: () => void): Promise<boolean> {
     if (await this.originalNotSentClosed(hostId, operationId, method)) return true;
-    const response = await this.client.host<unknown>('configuration-write', { hostId, action: 'status', operationId });
+    assertBeforeSend?.();
+    const response = await this.client.host<unknown>('configuration-write', { hostId, action: 'status', operationId }, { assertBeforeSend });
     const operation = object(response) ? status(response.operation, operationId, hostId, method) : null;
     return !!operation && completed(operation);
   }
