@@ -44,7 +44,7 @@ interface Mutation { saved: Promise<boolean> }
 
 export function useComposerDraft(context: ComposerContext, onController?: (controller: ComposerDraftController | null) => void,
   onChange?: (snapshot: ComposerDraftSnapshot) => void, freezeGuard?: RefObject<((afterDrain: boolean) => boolean)>,
-  onFreeze?: (frozen: boolean) => void) {
+  onFreeze?: (frozen: boolean) => void, pendingLink?: RefObject<boolean>) {
   const owner = useMemo<ComposerDraftOwner>(() => ({ hostId: context.hostId, threadId: context.threadId, draftId: context.draftId }),
     [context.hostId, context.threadId, context.draftId]);
   const [initial] = useState<StoredDraft>(() => ({ revision: createId(), draft: emptyDraft(), prefills: [] }));
@@ -235,7 +235,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
           return false;
         };
         if (active.current !== result || !sameOwner(owner, before.owner) || !sameOwner(owner, after.owner)
-          || !before.revision || !after.revision || initializing.current) return reject();
+          || !before.revision || !after.revision || initializing.current || pendingLink?.current) return reject();
         if (dirty.current || pendingProjection.current) {
           if (dirty.current) { markUnresolved(); setSaving(false); refreshVersions.current?.(); }
           return reject();
@@ -261,7 +261,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
           await waiting;
           if (!await saved || saved !== lastWrite.current || waiting !== queue.current) return false;
           const view = await readComposerDraftVersions(owner);
-          if (active.current !== result || current.current !== observed || dirty.current || pendingProjection.current !== 1
+          if (active.current !== result || current.current !== observed || dirty.current || pendingLink?.current || pendingProjection.current !== 1
             || saved !== lastWrite.current || waiting !== queue.current) return false;
           const candidates = view.versions.filter(version => version.revision === target.revision);
           if (candidates.length !== 1 || !sameComposerDraftValue(candidates[0]!.draft, target.draft)) return false;
@@ -392,7 +392,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     }
     operationUpdate.current = updateFromOperation;
     return result;
-  }, [beginOperation, enqueue, freezeGuard, markUnresolved, owner, publish]);
+  }, [beginOperation, enqueue, freezeGuard, markUnresolved, owner, pendingLink, publish]);
 
   const legacyIdentity = JSON.stringify([context.hostId, context.threadId, context.draftId, context.placement ?? null, context.legacyDraftKey ?? null]);
   useLayoutEffect(() => {
@@ -426,11 +426,11 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     }).catch(reason => { if (valid()) setStorageError('无法恢复草稿，当前内容已保留：' + message(reason)); });
     const refresh = () => {
       if (dirty.current && !preserveProjection.current) return;
-      const serial = ++versionRead, observed = current.current, mayAdopt = !pendingProjection.current && !preserveProjection.current;
+      const serial = ++versionRead, observed = current.current, mayAdopt = !pendingProjection.current && !preserveProjection.current && !pendingLink?.current;
       void readComposerDraftVersions(owner).then(view => {
         if (!valid() || serial !== versionRead || dirty.current && !preserveProjection.current || current.current !== observed) return;
         setVersions(view.versions);
-        if (mayAdopt && !pendingProjection.current && !preserveProjection.current && !frozen.current && !external.current && finished
+        if (mayAdopt && !pendingProjection.current && !preserveProjection.current && !pendingLink?.current && !frozen.current && !external.current && finished
           && !view.versions.some(value => value.revision === observed.revision) && view.versions.length === 1) {
           const next = view.versions[0]!;
           current.current = next; setStored(next); durableRevision.current = next.revision;
@@ -444,7 +444,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       if (keys.includes(composerDraftAtomKey)) refresh();
     });
     return () => { disposed = true; if (refreshVersions.current === refresh) refreshVersions.current = null; unsubscribe(); };
-  }, [controller, legacyIdentity, retry, initial, owner, persist, publish]);
+  }, [controller, legacyIdentity, retry, initial, owner, pendingLink, persist, publish]);
   useLayoutEffect(() => { onController?.(controller); return () => onController?.(null); }, [controller, onController]);
 
   const retain = useCallback((captured: StoredDraft): Promise<boolean> => {
@@ -470,14 +470,15 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     const view = await readComposerDraftVersions(owner);
     if (active.current !== controller) return;
     setVersions(view.versions);
-    if (!preserveProjection.current && current.current.revision === revision && view.versions[0]) {
+    if (!preserveProjection.current && !pendingLink?.current && current.current.revision === revision && view.versions[0]) {
       const next = view.versions[0];
       current.current = next; setStored(next); lastWrite.current = Promise.resolve(true); durableRevision.current = next.revision;
       dirty.current = false; preserveProjection.current = false; setUnresolved(false); setSaving(false); publish(controller, next);
     }
-  }, [controller, owner, publish]);
+  }, [controller, owner, pendingLink, publish]);
   clearVersion.current = clear;
   const selectVersion = useCallback(async (revision: string): Promise<void> => {
+    if (pendingLink?.current) { setStorageError('请先应用或关闭链接编辑。'); return; }
     if (preserveProjection.current) return;
     const finish = beginOperation();
     if (!finish) return;
@@ -489,13 +490,14 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       const previous = current.current;
       const view = await readComposerDraftVersions(owner);
       if (active.current !== controller || current.current !== previous || preserveProjection.current) return;
+      if (pendingLink?.current) { setStorageError('请先应用或关闭链接编辑。'); return; }
       const selected = view.versions.find(value => value.revision === revision);
       if (!selected) { setStorageError('该草稿版本已变化，请重新选择。'); setVersions(view.versions); return; }
       current.current = selected; setStored(selected); setVersions(view.versions); lastWrite.current = Promise.resolve(true);
       durableRevision.current = selected.revision; dirty.current = false; preserveProjection.current = false; setUnresolved(false); setSaving(false);
       setStorageError(''); publish(controller, selected); success = true;
     } finally { pendingProjection.current--; finish(success); }
-  }, [beginOperation, controller, owner, publish]);
+  }, [beginOperation, controller, owner, pendingLink, publish]);
   const saveUnresolved = useCallback(async (): Promise<boolean> => {
     if (!preserveProjection.current) return true;
     if (savingConflict.current) return false;
@@ -525,13 +527,14 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   useEffect(() => () => { generation.current += 1; }, []);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (dirty.current || preserveProjection.current || external.current || frozen.current || operations.current.size) event.preventDefault();
+      if (dirty.current || preserveProjection.current || pendingLink?.current || external.current || frozen.current || operations.current.size) event.preventDefault();
     };
     window.addEventListener('beforeunload', beforeUnload);
     return () => window.removeEventListener('beforeunload', beforeUnload);
-  }, []);
+  }, [pendingLink]);
   return { owner, controller, current, stored, changeDraft, changeDraftFromOperation, updateDraftFromOperation, beginOperation, retain, clear, selectVersion,
     conflicts: versions.filter(value => value.revision !== stored.revision && !pendingAncestors.current.has(value.revision)),
     storageError, saving, loaded, unresolved, saveUnresolved,
-    retry: () => { if (!preserveProjection.current) { initializing.current = true; setRetry(value => value + 1); } }, lastWrite };
+    recheckProjection: () => refreshVersions.current?.(),
+    retry: () => { if (!preserveProjection.current && !pendingLink?.current) { initializing.current = true; setRetry(value => value + 1); } }, lastWrite };
 }
