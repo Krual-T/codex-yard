@@ -79,13 +79,13 @@ test('summary consumes the shared conversation and host read with scoped actions
     await page.getByRole('button', { name: 'Saved side chat' }).click();
     await page.getByRole('alert').filter({ hasText: 'synthetic association read failure' }).getByRole('button', { name: 'Retry' }).click();
     assert.equal(await page.getByText('synthetic association read failure').count(), 0);
-    await page.getByRole('button', { name: 'Side chats 2' }).click();
+    await page.getByRole('button', { name: 'Side chats', exact: true }).click();
     assert.equal(await page.getByRole('button', { name: 'Current side chat' }).count(), 0);
     await page.getByRole('button', { name: 'Side chats 2' }).click();
     assert.equal(await page.getByText('Wrong host side chat').count(), 0);
     assert.equal(await page.getByText('Wrong thread side chat').count(), 0);
     assert.equal(await page.getByText('Duplicate saved association').count(), 0);
-    const outputs = page.locator('section').filter({ has: page.getByRole('button', { name: 'Outputs 4' }) });
+    const outputs = page.locator('section').filter({ has: page.getByRole('button', { name: 'Outputs', exact: true }) });
     assert.equal(await outputs.getByText('output-four.txt').count(), 0);
     await outputs.getByRole('button', { name: 'View all' }).click();
     await outputs.getByRole('button', { name: 'output-four.txt' }).click();
@@ -96,7 +96,6 @@ test('summary consumes the shared conversation and host read with scoped actions
     await page.getByRole('button', { name: 'Stop all background terminals' }).click();
     await page.getByRole('button', { name: 'Created chat', exact: true }).click();
     await page.getByRole('button', { name: 'Add sources' }).click();
-    await page.getByRole('button', { name: 'Close summary' }).click();
     const calls = await page.evaluate(() => window.threadSummaryFixture.calls);
     assert.deepEqual(calls.find(call => call.kind === 'show')?.value,
       { hostId: 'local', parentThreadId: 'thread-a', draftId: 'active-draft', prepareId: 'active-prepare' });
@@ -114,14 +113,14 @@ test('summary consumes the shared conversation and host read with scoped actions
       const value = call.value as { kind: string; entry: { sourceKey: string; item: { id: string } } };
       return [value.kind, value.entry.sourceKey, value.entry.item.id];
     }), [['goal', 'local', 'saved-goal'], ['scheduled', 'local', 'scheduled-task']]);
-    for (const kind of ['tool', 'output', 'retry-outputs', 'retry-side-chats', 'agent', 'process', 'stop-processes', 'created', 'add-source', 'close']) {
+    for (const kind of ['tool', 'output', 'retry-outputs', 'retry-side-chats', 'agent', 'process', 'stop-processes', 'created', 'add-source']) {
       assert.ok(calls.some(call => call.kind === kind), kind);
     }
     await page.evaluate(() => window.threadSummaryFixture.locale('zh-CN'));
-    await page.getByRole('button', { name: '侧聊 2' }).waitFor();
+    await page.getByRole('button', { name: '侧聊', exact: true }).waitFor();
     await page.getByText('网页搜索').waitFor();
     await page.evaluate(() => window.threadSummaryFixture.locale('zh-TW'));
-    await page.getByRole('button', { name: '側聊 2' }).waitFor();
+    await page.getByRole('button', { name: '側聊', exact: true }).waitFor();
     await page.evaluate(() => window.threadSummaryFixture.locale('en-US'));
     await page.locator('.yard-thread-summary__content').evaluate(element => { element.scrollTop = 0; });
     const overflow = await page.locator('.yard-thread-summary').evaluate(element => element.scrollWidth > element.clientWidth);

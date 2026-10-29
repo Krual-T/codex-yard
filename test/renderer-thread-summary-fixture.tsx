@@ -42,7 +42,7 @@ const automation = (id: string, name: string): AutomationEntry => ({
 function View() {
   const snapshot = useConversationSession(sessions, { hostId, threadId }, true, true, null);
   const props: ThreadSummaryPanelProps = {
-    hostId, threadId, snapshot,
+    client, hostId, threadId, snapshot,
     sideChats: [
       { kind: 'active', title: 'Current side chat', working: true,
         identity: { hostId: 'local', parentThreadId: 'thread-a', draftId: 'active-draft', prepareId: 'active-prepare' } },
@@ -80,7 +80,7 @@ function View() {
     backgroundProcesses: [{ id: 'process-a', command: 'npm test', working: true }], onOpenBackgroundProcess: value => note('process', value),
     onStopBackgroundProcesses: () => note('stop-processes'),
     createdChats: [{ threadId: 'created-a', label: 'Created chat' }], onOpenCreatedChat: value => note('created', value),
-    onAddSource: () => note('add-source'), onClose: () => note('close'),
+    onAddSource: () => note('add-source'),
   };
   return <I18nProvider locale={locale}><div style={{ height: '100dvh' }}><ThreadSummaryPanel {...props} /></div></I18nProvider>;
 }
