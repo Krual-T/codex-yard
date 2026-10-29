@@ -1,5 +1,19 @@
-import { defaultThemes, isChromeTheme } from '../settings/preferences.ts';
+import { defaultThemes, isChromeTheme, type ChromeTheme } from '../settings/preferences.ts';
 import { applyThemeFontFaces, themeFontFamily } from './theme-fonts.ts';
+
+function composerBackground(theme: ChromeTheme, dark: boolean): string {
+  const baseline = defaultThemes[dark ? 'dark' : 'light'].contrast;
+  const adjusted = theme.contrast / 100 + (theme.contrast - baseline) / 60 * 0.7;
+  const contrast = theme.contrast <= baseline ? adjusted : baseline / 100 + (adjusted - baseline / 100) * 2;
+  const weight = Math.max(0, Math.min(1, dark ? 0.08 + contrast * 0.08 : 0.09 + contrast * 0.04));
+  const target = dark ? theme.ink : '#ffffff';
+  const channels = [1, 3, 5].map(offset => {
+    const from = parseInt(theme.surface.slice(offset, offset + 2), 16);
+    const to = parseInt(target.slice(offset, offset + 2), 16);
+    return Math.round(from + (to - from) * weight);
+  });
+  return `rgb(${channels.join(', ')})`;
+}
 
 /** Apply the same persisted theme edited by Appearance, clearing previous-mode values. */
 export function applyAppearance(values: Record<string, unknown>, dark: boolean, root = document.documentElement) {
@@ -10,6 +24,7 @@ export function applyAppearance(values: Record<string, unknown>, dark: boolean, 
   const contrast = theme.contrast / 100;
   const variables: Record<string, string> = {
     '--yard-bg': theme.surface, '--yard-fg': theme.ink, '--yard-accent': theme.accent,
+    '--yard-composer-bg': composerBackground(theme, dark),
     '--yard-surface': `color-mix(in srgb, ${theme.ink} 4%, ${theme.surface})`,
     '--yard-panel': `color-mix(in srgb, ${theme.ink} 6%, ${theme.surface})`,
     '--yard-sidebar': `color-mix(in srgb, ${theme.ink} 3%, ${theme.surface})`,

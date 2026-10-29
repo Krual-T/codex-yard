@@ -13,6 +13,8 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
     import { createRoot } from 'react-dom/client';
     import { StandaloneComposer } from './src/renderer/composer/StandaloneComposer.tsx';
     import { readRichDocument, serializeRichDocument } from './src/renderer/composer/rich-document.ts';
+    import { applyAppearance } from './src/renderer/app/appearance.ts';
+    import { defaultThemes } from './src/renderer/settings/preferences.ts';
     const state={controller:null,queue:[{id:'q',clientUserMessageId:'message',input:[{type:'text',text:'Queued message',text_elements:[]}]},
       {id:'q2',clientUserMessageId:'message2',input:[{type:'text',text:'Remaining queue',text_elements:[]}]}],calls:[]};
     const authorities=new WeakMap();
@@ -49,7 +51,12 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
         if(!owner)throw Error('original authority lost');
         return client.host('queue-edit',{hostId:owner.hostId,threadId:owner.threadId,entry},{assertBeforeSend});}
     }));
-    window.fixture={state};
+    window.fixture={state,applyTheme(variant,background,foreground){
+      const theme={...defaultThemes[variant],surface:background,ink:foreground,
+        fonts:{ui:'Arial',content:'Georgia',code:'Courier New'}};
+      applyAppearance({[variant==='dark'?'appearanceDarkChromeTheme':'appearanceLightChromeTheme']:theme,
+        sansFontSize:17,codeFontSize:19},variant==='dark');
+    }};
   ` }, bundle: true, write: false, format: 'iife', outfile: 'fixture.js' });
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] });
   const context = await browser.newContext({ viewport: { width: 800, height: 800 } });
@@ -83,14 +90,15 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
     const verify = (label: string, check: () => void) => {
       try { check(); } catch (error) { failures.push(`${label}: ${error instanceof Error ? error.message : String(error)}`); }
     };
-    for (const [theme, background, surface, foreground] of [
-      ['dark', '#101419', '#20262c', '#f0f5f2'], ['light', '#ffffff', '#f2f4f6', '#202524'],
+    for (const [theme, background, surface, foreground, composerSurface] of [
+      ['dark', '#101419', '#20262c', '#f0f5f2', '#2d3135'], ['light', '#ffffff', '#f2f4f6', '#202524', '#ffffff'],
     ] as const) {
-      await page.evaluate(({ background, surface, foreground }) => {
+      await page.evaluate(({ theme, background, surface, foreground }) => {
+        (window as any).fixture.applyTheme(theme,background,foreground);
         const style = document.documentElement.style;
         style.setProperty('--yard-bg', background); style.setProperty('--yard-surface', surface); style.setProperty('--yard-fg', foreground);
         style.setProperty('--yard-muted', foreground); style.setProperty('--yard-border', foreground); style.setProperty('--yard-accent', foreground);
-      }, { background, surface, foreground });
+      }, { theme, background, surface, foreground });
       await page.getByRole('button', { name: '切换草稿' }).click();
       const queueEditor = page.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作)$/ });
       assert.equal(await queueEditor.inputValue(), 'Queued message edited');
@@ -125,7 +133,7 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
         };
       }, queueEditorColor);
       const rgb = (hex: string) => `rgb(${[1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16)).join(', ')})`;
-      verify(`${theme} editor surface`, () => assert.equal(appearance.container, rgb(surface)));
+      verify(`${theme} editor surface`, () => assert.equal(appearance.container, rgb(composerSurface)));
       verify(`${theme} link surface`, () => assert.equal(appearance.linkInputBackground, rgb(surface)));
       for (const [name, color] of Object.entries({ rich: appearance.rich, link: appearance.linkInput, controls: appearance.controls,
         queue: appearance.queue, queueEditor: appearance.queueEditor, queueControl: appearance.queueControl, attachment: appearance.attachment })) {
