@@ -988,7 +988,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     setVisualization(source); setPanelKind('visualization'); setPanelOpen(true);
   };
   const showPanel = (request?: { kind: 'terminal'; reuse?: boolean } | { kind: 'file'; path: string; line?: number; column?: number } | { kind: 'diff'; path?: string; diff?: string }) => {
-    if (request?.kind === 'terminal' && status !== 'connected') {
+    const connection = transportIdentity.current;
+    if (request?.kind === 'terminal' && (connection.bridge !== 'connected' || connection.hosts[current.hostId]?.state !== 'connected')) {
       setError('终端当前不可用：主机连接已断开或尚未就绪，请先重新连接。');
       return;
     }
@@ -1317,6 +1318,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       <aside className="yard-workspace-panel" hidden={!panelOpen || settings} aria-label="Workspace panel" inert={leaving}>
         <div hidden={panelKind !== 'workspace'} style={{ height: '100%' }}>{panelMounted && <WorkspacePanels ref={workspacePanels} client={client} scopeId={panelScope} hostId={current.hostId} threadId={current.threadId ?? undefined} cwd={panelCwd}
           appearance={panelAppearance} request={panelRequest} onRequestConsumed={id => setPanelRequest(previous => previous?.id === id ? null : previous)}
+          onNewTerminal={() => showPanel({ kind: 'terminal' })}
           onRecoveryBarrier={receivePanelRecoveryBarrier}
           onClose={() => setPanelOpen(false)} onReference={addReference} onDirtyChange={dirty => { panelsDirty.current = dirty; }} />}</div>
         {browserMounted && <StandaloneBrowser client={client} {...browserOwner} browserTabId="primary"

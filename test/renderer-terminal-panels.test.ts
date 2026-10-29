@@ -65,12 +65,12 @@ test('terminal panels use the page-owned host session and never replay input aft
       import { WorkspacePanels } from './src/renderer/panels/WorkspacePanels.tsx';
       import { TerminalPanel } from './src/renderer/terminal/TerminalPanel.tsx';
       import { I18nProvider } from './src/renderer/i18n/index.tsx';
-      const state = { calls: [], events: [], consumed: [], hidden: false, failClose: false, delayClose: false, releaseClose: null }, listeners = new Set(), pending = new Map();
+      const state = { calls: [], events: [], consumed: [], hidden: false, connected: false, newTerminalRequests: 0, failClose: false, delayClose: false, releaseClose: null }, listeners = new Set(), pending = new Map();
       let socket, opened, seq = 0;
       function connect() {
         const next = new WebSocket(location.origin.replace('http', 'ws') + '/native-host');
         socket = next;
-        opened = new Promise((resolve, reject) => { next.onopen = resolve; next.onerror = reject; });
+        opened = new Promise((resolve, reject) => { next.onopen = () => { state.connected = true; resolve(); }; next.onerror = reject; });
         next.onmessage = ({data}) => {
           const message = JSON.parse(data);
           if (message.type === 'fetch-response' && pending.has(message.requestId)) {
@@ -79,6 +79,7 @@ test('terminal panels use the page-owned host session and never replay input aft
           } else { state.events.push(message); for (const listener of listeners) listener(message); }
         };
         next.onclose = () => {
+          state.connected = false;
           for (const item of pending.values()) item.reject(new Error('disconnected'));
           pending.clear();
           for (const listener of listeners) listener({type:'connection-state',state:'disconnected'});
@@ -102,6 +103,7 @@ test('terminal panels use the page-owned host session and never replay input aft
       let locale = 'en-US';
       let props = {client,scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},appearance:{theme:'dark',codeFontSize:13,codeLineHeight:20},
         request:{id:'one',scopeId:'thread-a',hostId:'local',cwd:${JSON.stringify(root)},kind:'terminal',reuse:true},onRequestConsumed:id=>state.consumed.push(id),
+        onNewTerminal:()=>{ state.newTerminalRequests++; if (state.connected) window.fixture.render({request:{id:crypto.randomUUID(),kind:'terminal'}}); },
         onClose:()=>{state.hidden = true; window.fixture.render({});}};
       window.fixture = { state, disconnect() { socket.close(); }, reconnect: connect,
         failCurrent() { const calls = state.calls.filter(call => call.params.operation === 'create');
@@ -180,6 +182,11 @@ test('terminal panels use the page-owned host session and never replay input aft
   assert.ok(fake.calls('process/resizePty').length > previousSize);
   await page.evaluate(() => (window as any).fixture.disconnect());
   await page.getByRole('status').filter({ hasText: 'Connection lost' }).waitFor();
+  const createsBeforeDisconnectedClick = await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.params.operation === 'create').length);
+  await page.getByRole('button', { name: 'Create terminal tab', exact: true }).click();
+  assert.equal(await page.evaluate(() => (window as any).fixture.state.newTerminalRequests), 1, 'New terminal must go through the parent authority');
+  assert.equal(await page.getByRole('tab', { name: 'Terminal', exact: true }).count(), 1);
+  assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.filter((call: any) => call.params.operation === 'create').length), createsBeforeDisconnectedClick);
   await page.keyboard.type('discard');
   await page.evaluate(() => (window as any).fixture.reconnect());
   await page.evaluate(() => (window as any).fixture.render({request:{id:'explicit-reconnect',kind:'terminal',reuse:true}}));

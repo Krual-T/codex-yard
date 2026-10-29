@@ -45,6 +45,8 @@ export interface WorkspacePanelsProps {
   appearance: WorkspacePanelAppearance;
   request: WorkspacePanelRequest | null;
   onRequestConsumed(id: string): void;
+  /** Route explicit creation through the parent's current host/connection guard. */
+  onNewTerminal?(): void;
   /** Hide the outer panel while keeping this component mounted; explicit close has already cleaned its tabs. */
   onClose(): void;
   /** Selected tab in the current scope, or null when none is selected. */
@@ -89,7 +91,7 @@ function mergeStoredRecovery(tab: FileTab, stored: FileSaveRecovery): FileTab {
     ...(different ? { storageError: true, storageConflict: true, error: recoveryConflict } : {}) };
 }
 
-export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appearance, request, onRequestConsumed, onClose, onReference, onDirtyChange, onRecoveryBarrier, onActiveKindChange, ref }: WorkspacePanelsProps) {
+export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appearance, request, onRequestConsumed, onNewTerminal, onClose, onReference, onDirtyChange, onRecoveryBarrier, onActiveKindChange, ref }: WorkspacePanelsProps) {
   const t = usePanelText();
   const [tabs, setTabs] = useState<FileTab[]>([]);
   const [terminals, setTerminals] = useState<TerminalTab[]>([]);
@@ -646,12 +648,10 @@ export function WorkspacePanels({ client, scopeId, hostId, threadId, cwd, appear
           <button type="button" className="yard-panel-tab-close" title={t('Close diff')} aria-label={t('Close diff')} onClick={() => closeDiff(tab.key)}><X /></button>
         </div>)}
       </div>
-      {visibleTerminals.length > 0 && <button type="button" className="yard-panel-icon" title={t('New terminal')} aria-label={t('Create terminal tab')}
+      {visibleTerminals.length > 0 && onNewTerminal && <button type="button" className="yard-panel-icon" title={t('New terminal')} aria-label={t('Create terminal tab')}
         disabled={closing} onClick={() => {
           if (closingRef.current) return;
-          const key = JSON.stringify(['terminal', scopeId, hostId, cwd, crypto.randomUUID()]);
-          setTerminals(previous => [...previous, { key, scopeId, hostId, cwd, threadId }]);
-          select(key);
+          onNewTerminal();
         }}><Plus /></button>}
       {activeTerminal ? <button type="button" className="yard-panel-icon" title={t('Hide panel')} aria-label={t('Hide panel')}
         disabled={closing} onClick={onClose}><PanelRightClose /></button> : null}
