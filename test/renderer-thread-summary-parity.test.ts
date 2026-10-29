@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
+import { success } from '../lib/native-tool-kernel.ts';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn } from './fake-codex.ts';
 import { nativeFixture } from './native-fixture.ts';
@@ -26,6 +27,8 @@ test('summary original create card, shared expansion atoms, and scoped generated
   const remote = await createFakeCodex(remoteRoot); cleanup.push(() => remote.close());
   let releaseSlow!: () => void;
   const slow = new Promise<void>(resolve => { releaseSlow = resolve; });
+  let releaseSlowChild!: () => void;
+  const slowChild = new Promise<void>(resolve => { releaseSlowChild = resolve; });
   let failRead = true;
   local.handlers.set('fs/getMetadata', async params => {
     if (params.path === '/fixture/project/slow.png') { await slow; return metadata; }
@@ -33,6 +36,10 @@ test('summary original create card, shared expansion atoms, and scoped generated
     return metadata;
   });
   remote.handlers.set('fs/getMetadata', () => metadata);
+  remote.handlers.set('thread/read', async params => {
+    if (params.threadId === 'slow-child') await slowChild;
+    return remote.defaultResult('thread/read', params);
+  });
   local.threads.set('empty', fixtureThread('empty', '/fixture/project'));
   local.threads.set('local-image', fixtureThread('local-image', '/fixture/project', { turns: [fixtureTurn('turn-local', [
     { id: 'image', type: 'imageGeneration', status: 'completed', savedPath: '/fixture/project/slow.png' },
@@ -47,6 +54,18 @@ test('summary original create card, shared expansion atoms, and scoped generated
   remote.threads.set('local-image', fixtureThread('local-image', '/remote/project', { turns: [fixtureTurn('turn-remote', [
     { id: 'remote', type: 'imageGeneration', status: 'completed', savedPath: '/remote/project/remote.png' },
   ])] }));
+  const created = success({ threadId: 'remote-child', hostId: 'remote-fixture' });
+  local.threads.set('creator', fixtureThread('creator', '/fixture/project', { turns: [fixtureTurn('turn-create', [
+    { id: 'failed', type: 'dynamicToolCall', namespace: 'codex_app', tool: 'create_thread', status: 'completed', success: false,
+      contentItems: success({ threadId: 'failed-child', hostId: 'remote-fixture' }).contentItems },
+    { id: 'wrong-tool', type: 'dynamicToolCall', namespace: 'codex_app', tool: 'read_thread', status: 'completed',
+      ...success({ threadId: 'wrong-child', hostId: 'remote-fixture' }) },
+    { id: 'slow-created', type: 'dynamicToolCall', namespace: 'codex_app', tool: 'create_thread', status: 'completed',
+      ...success({ threadId: 'slow-child', hostId: 'remote-fixture' }) },
+    { id: 'created', type: 'dynamicToolCall', namespace: 'codex_app', tool: 'create_thread', status: 'completed', ...created },
+  ])] }));
+  remote.threads.set('remote-child', fixtureThread('remote-child', '/remote/project', { name: 'Actual child title' }));
+  remote.threads.set('slow-child', fixtureThread('slow-child', '/remote/project', { name: 'Late child title' }));
   const resources = await nativeFixture(root);
   const bundle = await build({ entryPoints: ['test/renderer-thread-summary-parity-fixture.tsx'], bundle: true, write: false,
     outdir: 'summary-parity-fixture-output', format: 'iife', jsx: 'automatic' });
@@ -71,11 +90,14 @@ test('summary original create card, shared expansion atoms, and scoped generated
   const errors: string[] = [];
   let observedSlowReply!: () => void;
   const slowReply = new Promise<void>(resolve => { observedSlowReply = resolve; });
+  let observedSlowChildReply!: () => void;
+  const slowChildReply = new Promise<void>(resolve => { observedSlowChildReply = resolve; });
   page.on('websocket', socket => socket.on('framereceived', frame => {
     try {
-      const message = JSON.parse(String(frame.payload)) as { type?: string; body?: { existingPaths?: unknown } };
+      const message = JSON.parse(String(frame.payload)) as { type?: string; body?: { existingPaths?: unknown }; message?: { result?: { thread?: { id?: string } } } };
       if (message.type === 'fetch-response' && Array.isArray(message.body?.existingPaths)
         && message.body.existingPaths.includes('/fixture/project/slow.png')) observedSlowReply();
+      if (message.type === 'mcp-response' && message.message?.result?.thread?.id === 'slow-child') observedSlowChildReply();
     } catch { /* Other socket messages need not contain JSON. */ }
   }));
   for (const target of [page, other]) {
@@ -154,7 +176,24 @@ test('summary original create card, shared expansion atoms, and scoped generated
     });
     assert.deepEqual(local.calls('fs/getMetadata').map(call => call.params.path), ['/fixture/project/slow.png']);
     assert.deepEqual(remote.calls('fs/getMetadata').map(call => call.params.path), ['/remote/project/remote.png']);
+    await page.evaluate(() => window.summaryParityFixture.select('local', 'creator', false));
+    await page.getByRole('button', { name: 'Actual child title' }).click();
+    assert.deepEqual((await page.evaluate(() => window.summaryParityFixture.calls)).at(-1), {
+      kind: 'created', hostId: 'local', threadId: 'creator', value: {
+        hostId: 'remote-fixture', threadId: 'remote-child', label: 'Actual child title',
+        source: { hostId: 'local', threadId: 'creator', turnId: 'turn-create', itemId: 'created' },
+      },
+    });
+    assert.ok(remote.calls('thread/read').some(call => call.params.threadId === 'remote-child'));
+    assert.equal(remote.calls('thread/read').some(call => ['failed-child', 'wrong-child'].includes(String(call.params.threadId))), false);
+    await remote.waitFor(message => message.method === 'thread/read' && message.params.threadId === 'slow-child');
     await page.evaluate(() => window.summaryParityFixture.select('local', 'retry-image', true));
+    releaseSlowChild();
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(Error('No late child response')), 10_000);
+      void slowChildReply.then(() => { clearTimeout(timeout); resolve(); }, error => { clearTimeout(timeout); reject(error); });
+    });
+    assert.equal(await page.getByText('Late child title').count(), 0);
     await page.getByRole('alert').filter({ hasText: 'controlled metadata failure' }).waitFor();
     failRead = false;
     await page.getByRole('alert').filter({ hasText: 'controlled metadata failure' }).getByRole('button', { name: 'Retry' }).click();
@@ -167,6 +206,7 @@ test('summary original create card, shared expansion atoms, and scoped generated
     await other.evaluate(() => window.summaryParityFixture.close());
   } catch (error) {
     releaseSlow();
+    releaseSlowChild();
     if (artifactDir) { await mkdir(artifactDir, { recursive: true }); await page.screenshot({ path: join(artifactDir, 'failure.png') }); }
     throw error;
   }
