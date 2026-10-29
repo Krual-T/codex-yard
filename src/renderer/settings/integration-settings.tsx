@@ -2,10 +2,10 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import type { ReactNode } from 'react';
 import { AppWindow, Chrome, Ellipsis } from 'lucide-react';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
-import { listPlugins, pluginRef } from '../pages/plugins/catalog.ts';
+import { listPlugins } from '../pages/plugins/catalog.ts';
 import type { PluginEntry } from '../pages/plugins/catalog.ts';
 import { pluginConfigRecords, reconcilePluginConfig, writePluginConfig } from '../app/ProductPluginConfig.ts';
-import { trackProductChange, useProductChanges } from '../app/ProductPageChanges.ts';
+import { useProductChanges } from '../app/ProductPageChanges.ts';
 import type { WorkbenchClient } from '../workbench-contract.ts';
 import { settingsConfigOperations } from './config-operations.ts';
 import { Row } from './PreferenceControls.tsx';
@@ -13,7 +13,7 @@ import type { SettingsRoute } from './routing.ts';
 import { pluginDetailPath } from './plugins.ts';
 import './integration-settings.css';
 
-export type IntegrationAvailability = 'available' | 'restricted' | 'unknown';
+export type IntegrationAvailability = 'available' | 'restricted' | 'unknown' | 'unsupported';
 export interface IntegrationSettingsProps {
   client: WorkbenchClient;
   route: SettingsRoute;
@@ -84,6 +84,10 @@ export function useInAppBrowserFeature(props: IntegrationSettingsProps, rawFeatu
     let alive = true;
     const version = ++sequence.current;
     const valid = () => alive && sequence.current === version && current(latest.current);
+    if (rawFeature !== null) {
+      setState({ loading: false, error: null, enabled: rawFeature });
+      return () => { alive = false; };
+    }
     setState({ loading: true, error: null, enabled: null });
     void (async () => {
       const seen = new Set<string>(); let cursor: string | null = null, enabled: boolean | undefined;
@@ -104,9 +108,7 @@ export function useInAppBrowserFeature(props: IntegrationSettingsProps, rawFeatu
         if (cursor) seen.add(cursor);
       } while (cursor);
       if (valid()) {
-        const resolved = rawFeature ?? (enabled === undefined ? true : null);
-        setState(resolved === null ? { loading: false, error: 'In-app browser availability cannot be verified for this connection.', enabled: null } :
-          { loading: false, error: null, enabled: resolved });
+        setState({ loading: false, error: 'In-app browser availability cannot be verified for this connection.', enabled: null });
       }
     })().catch(error => { if (valid()) setState({ loading: false, error: error instanceof Error ? error.message : String(error), enabled: null }); });
     return () => { alive = false; };
@@ -128,7 +130,8 @@ export function IntegrationControlRow({ label, children, restricted = false }: {
 export function AvailabilityRow({ props, availability, label }: { props: IntegrationSettingsProps; availability: IntegrationAvailability; label: string }) {
   const { t } = useI18n();
   const [error, setError] = useState<string | null>(null);
-  const description = availability === 'restricted' ? 'Disabled by your organization or unavailable in your region' : 'Availability could not be determined for this connection.';
+  const description = availability === 'restricted' ? 'Disabled by your organization or unavailable in your region' :
+    availability === 'unsupported' ? 'This action is unavailable on this web host.' : 'Availability could not be determined for this connection.';
   return <IntegrationControlRow label={label} restricted={availability === 'restricted'}><Row label={label} description={description} error={error}>
     {availability === 'unknown' && <button type="button" onClick={() => { if (current(props)) { setError(null); void props.refreshAvailability().catch(cause => {
       if (current(props)) setError(cause instanceof Error ? cause.message : String(cause));
@@ -154,7 +157,10 @@ export function BundledPluginControl({ props, name, label, description, onTry }:
   useEffect(() => {
     let alive = true;
     setLoading(true); setEntry(null); setError(null);
-    void listPlugins(props.client, props.route.hostId, props.cwd, revision > 0).then(result => {
+    void listPlugins(props.client, props.route.hostId, props.cwd, revision > 0, { assertBeforeSend: () => {
+      if (!alive) throw new DOMException('The selected settings page changed.', 'AbortError');
+      assertCurrent(props);
+    } }).then(result => {
       if (!alive || !current(latest.current)) return;
       const matches = result.entries.filter(item => item.marketplaceName === 'openai-bundled' && item.plugin.name === name ||
         name === 'browser' && (item.plugin.id === 'plugin_connector_1p_51c1ba70f47481919149861084681943' || item.plugin.name === 'plugin_connector_1p_51c1ba70f47481919149861084681943'));
@@ -165,7 +171,7 @@ export function BundledPluginControl({ props, name, label, description, onTry }:
       .finally(() => { if (alive && current(latest.current)) setLoading(false); });
     return () => { alive = false; };
   }, [props.client, props.route.hostId, props.cwd, props.authorityKey, name, revision]);
-  const records = pluginConfigRecords(snapshot, props.route.hostId);
+  const records = pluginConfigRecords(snapshot, props.route.hostId, props.cwd, entry?.plugin.id);
   const locked = busy || changePending || snapshot.loading || !!snapshot.error || snapshot.inFlight.length > 0 || records.length > 0;
   const update = async (enabled: boolean) => {
     if (!entry || locked || busyRef.current || !current(props)) return;
@@ -177,34 +183,11 @@ export function BundledPluginControl({ props, name, label, description, onTry }:
     } catch (cause) { if (current(props)) setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { busyRef.current = false; if (current(props)) setBusy(false); }
   };
-  const changeInstallation = async (action: 'install' | 'uninstall') => {
-    if (!entry || locked || busyRef.current || !current(props)) return;
-    busyRef.current = true;
-    setBusy(true); setError(null);
-    try {
-      await trackProductChange('plugins', props.route.hostId, async () => {
-        const result = await props.client.rpc<{ appsNeedingAuth?: unknown; authPolicy?: unknown }>(`plugin/${action}`,
-          action === 'install' ? { ...pluginRef(entry) } : { pluginId: entry.plugin.id }, props.route.hostId,
-          { assertBeforeSend: () => assertCurrent(props) });
-        if (!result || typeof result !== 'object' || action === 'install' && (!Array.isArray(result.appsNeedingAuth)
-          || result.appsNeedingAuth.some(app => !app || typeof app !== 'object' || typeof app.id !== 'string' || typeof app.name !== 'string')
-          || !['ON_INSTALL', 'ON_USE'].includes(String(result.authPolicy)))) {
-          throw new Error('The plugin change receipt could not be verified.');
-        }
-        if (current(props) && Array.isArray(result.appsNeedingAuth) && result.appsNeedingAuth.length) setError('The plugin requires additional sign-in.');
-      });
-      if (current(props)) setRevision(value => value + 1);
-    } catch (cause) {
-      if (current(props)) {
-        setError(cause instanceof Error ? cause.message : String(cause));
-      }
-    } finally { busyRef.current = false; if (current(props)) setBusy(false); }
-  };
-  const recover = async () => {
-    if (busyRef.current || snapshot.loading || snapshot.error || snapshot.inFlight.length || !records.length || !current(props)) return;
+  const recover = async (operationId: string) => {
+    if (busyRef.current || snapshot.loading || snapshot.error || snapshot.inFlight.length || !records.some(record => record.operationId === operationId) || !current(props)) return;
     busyRef.current = true; setBusy(true); setError(null);
     try {
-      await reconcilePluginConfig(operations, props.client, props.route.hostId, props.cwd, () => current(props));
+      await reconcilePluginConfig(operations, props.client, props.route.hostId, props.cwd, () => current(props), operationId);
       if (current(props)) setRevision(value => value + 1);
     } catch (cause) { if (current(props)) setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { busyRef.current = false; if (current(props)) setBusy(false); }
@@ -224,23 +207,26 @@ export function BundledPluginControl({ props, name, label, description, onTry }:
       <span className="yard-setting-label">{translateKnown(t, label)}</span><span className="yard-setting-description">{translateKnown(t, description)}</span>
     </button> : <><div className="yard-setting-label">{translateKnown(t, label)}</div><div className="yard-setting-description">{translateKnown(t, loading ? 'Loading...' : 'In-app plugin unavailable')}</div></>}
       {issue && <div className="yard-setting-error" role="alert">{translateKnown(t, issue)} {error && !locked && <button type="button" className="yard-link" onClick={() => setRevision(value => value + 1)}>{t('Retry')}</button>}
-        {records.length > 0 && <button type="button" className="yard-link" disabled={busy || snapshot.loading || !!snapshot.error || snapshot.inFlight.length > 0}
-          onClick={() => { void recover(); }}>{translateKnown(t, 'Check original operation')}</button>}</div>}
+        {snapshot.error && <button type="button" className="yard-link" disabled={busy || snapshot.loading}
+          onClick={() => { if (current(props)) void operations.refresh(); }}>{t('Retry')}</button>}
+        {records.map(record => <span key={record.operationId}> <code>{record.operationId}</code>{' '}
+          <button type="button" className="yard-link" disabled={busy || snapshot.loading || !!snapshot.error || snapshot.inFlight.length > 0}
+            onClick={() => { void recover(record.operationId); }}>{translateKnown(t, 'Check original operation')}</button></span>)}</div>}
       <NavigationFailureNotice failure={navigation.failure} retry={navigation.retry} />
     </div>
     <div className="yard-setting-control">{entry?.plugin.installed ? <>
       <details className="yard-integration-more" onKeyDown={event => { if (event.key === 'Escape') { event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus(); } }}>
         <summary aria-label={translateKnown(t, 'More actions')} title={translateKnown(t, 'More actions')}><Ellipsis size={18} aria-hidden="true" /></summary>
         <div role="menu" className="yard-integration-select-menu">
-          <button type="button" role="menuitem" onClick={event => { event.currentTarget.closest('details')!.open = false; if (!current(props)) return;
-            if (!onTry) { setError('Starting a chat with this plugin is unavailable.'); return; }
-            void onTry(entry).catch(cause => { if (current(props)) setError(cause instanceof Error ? cause.message : String(cause)); }); }}>{translateKnown(t, 'Try now')}</button>
-          <button type="button" role="menuitem" disabled={locked || !!denied || entry.plugin.installPolicy === 'INSTALLED_BY_DEFAULT'} onClick={event => { event.currentTarget.closest('details')!.open = false; void changeInstallation('uninstall'); }}>{translateKnown(t, 'Delete')}</button>
+          <button type="button" role="menuitem" disabled={!onTry || locked} title={!onTry ? translateKnown(t, 'Starting a chat with this plugin is unavailable.') : undefined}
+            onClick={event => { event.currentTarget.closest('details')!.open = false; if (!onTry || !current(props)) return;
+              void onTry(entry).catch(cause => { if (current(props)) setError(cause instanceof Error ? cause.message : String(cause)); }); }}>{translateKnown(t, 'Try now')}</button>
+          <button type="button" role="menuitem" disabled title={translateKnown(t, 'Plugin installation and removal are unavailable on this web host.')}>{translateKnown(t, 'Delete')}</button>
         </div>
       </details>
       <input type="checkbox" role="switch" aria-label={translateKnown(t, label)} checked={entry.plugin.enabled} disabled={locked || !!denied || loading}
         onChange={event => { void update(event.target.checked); }} />
-    </> : entry && <button type="button" disabled={loading || locked || !!denied || entry.plugin.installPolicy === 'NOT_AVAILABLE'} onClick={() => { void changeInstallation('install'); }}>
+    </> : entry && <button type="button" disabled title={translateKnown(t, 'Plugin installation and removal are unavailable on this web host.')}>
       {translateKnown(t, 'Install')}</button>}</div>
   </div></IntegrationControlRow>;
 }

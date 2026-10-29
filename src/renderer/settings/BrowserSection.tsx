@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
 import { translateKnown, useI18n } from '../i18n/index.tsx';
-import type { WorkbenchClient } from '../workbench-contract.ts';
 import type { PreferenceEntry } from './preferences.ts';
 import { Row, entryState } from './PreferenceControls.tsx';
 import { assertCurrent, AvailabilityRow, BundledPluginControl, current, effectivePath, NavigationFailureNotice, useInAppBrowserFeature, useIntegrationNavigation } from './integration-settings.tsx';
@@ -33,32 +32,11 @@ export interface BrowserSectionProps extends IntegrationSettingsProps {
 }
 
 type DataType = 'cookies' | 'siteData' | 'cache' | 'downloads' | 'history';
-interface ClearState { pending: boolean; unknown: boolean; error: string | null; success: string | null; owner: string | null }
-interface ClearSlot { getSnapshot(): ClearState; subscribe(listener: () => void): () => void; set(state: ClearState): void }
-const clearStates = new WeakMap<WorkbenchClient, ClearSlot>();
-function clearSlot(client: WorkbenchClient): ClearSlot {
-  let slot = clearStates.get(client);
-  if (!slot) {
-    let value: ClearState = { pending: false, unknown: false, error: null, success: null, owner: null };
-    const listeners = new Set<() => void>();
-    slot = { getSnapshot: () => value, subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-      set: state => { value = state; for (const listener of listeners) listener(); } };
-    clearStates.set(client, slot);
-  }
-  return slot;
-}
 const clearTypes: readonly [DataType, string, string][] = [
   ['cookies', 'Cookies', 'Delete cookies'], ['siteData', 'Site data', 'Delete site data'],
   ['cache', 'Cached images and files', 'Delete cached images and files'],
   ['downloads', 'Download history', 'Delete download history'], ['history', 'Browsing history', 'Delete browsing history'],
 ];
-const clearMessages: Record<DataType, { success: string; error: string }> = {
-  cookies: { success: 'Browser cookies cleared', error: 'Unable to clear browser cookies' },
-  siteData: { success: 'Browser site data cleared', error: 'Unable to clear browser site data' },
-  cache: { success: 'Browser cache cleared', error: 'Unable to clear browser cache' },
-  downloads: { success: 'Browser download history cleared', error: 'Unable to clear browser download history' },
-  history: { success: 'Browser history cleared', error: 'Unable to clear browser history' },
-};
 const subpages: Record<string, { title: string; message: string }> = {
   '/settings/browser-use/history': { title: 'Browsing history', message: 'Browser history is unavailable on this web host.' },
   '/settings/browser-use/passwords': { title: 'Password manager', message: 'The built-in browser password manager is unavailable on this web host.' },
@@ -109,9 +87,6 @@ function BrowserSectionScope(props: BrowserSectionProps) {
   const navigation = useIntegrationNavigation(props);
   const subpage = subpages[path], validSubpage = !!subpage && (path !== '/settings/browser-use/extensions' || props.extensionsAvailability !== 'restricted');
   const [expanded, setExpanded] = useState(false);
-  const slot = useMemo(() => clearSlot(props.client), [props.client]);
-  const clear = useSyncExternalStore(slot.subscribe, slot.getSnapshot, slot.getSnapshot);
-  const clearOwner = JSON.stringify([props.route.hostId, props.authorityKey]);
   const [saveError, setSaveError] = useState<string | null>(null);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -126,22 +101,6 @@ function BrowserSectionScope(props: BrowserSectionProps) {
     void props.preferences.saveOne(key, () => assertCurrent(props)).catch(cause => {
       if (mounted.current && current(props)) setSaveError(cause instanceof Error ? cause.message : String(cause));
     });
-  };
-  const clearData = async (dataTypes: DataType[]) => {
-    const previous = slot.getSnapshot();
-    if (!current(props) || previous.pending || previous.unknown) return;
-    const pending = { pending: true, unknown: false, error: null, success: null, owner: clearOwner };
-    slot.set(pending);
-    try {
-      await props.client.host('browser-browsing-data-clear', { dataTypes }, { assertBeforeSend: () => assertCurrent(props) });
-      slot.set({ pending: false, unknown: false, error: null,
-        success: dataTypes.length === 1 ? clearMessages[dataTypes[0]!].success : 'Browsing data cleared', owner: clearOwner });
-    } catch (cause) {
-      const known = !!cause && typeof cause === 'object' && 'uncertain' in cause && cause.uncertain === false;
-      const next = { pending: false, unknown: !known, success: null, owner: clearOwner,
-        error: known ? dataTypes.length === 1 ? clearMessages[dataTypes[0]!].error : 'Unable to clear browsing data' : 'The result of clearing browsing data could not be confirmed.' };
-      slot.set(next);
-    }
   };
   const manage = (target: string) => navigation.navigate(`/settings/browser-use/${target}`);
   const retryFeature = () => {
@@ -194,14 +153,13 @@ function BrowserSectionScope(props: BrowserSectionProps) {
             onChange={event => setPreference('browser-show-full-url', event.target.checked)} />
         </Row>
         <Row label="Browsing data" description="Clear browsing history, site data, cache, and download history from the in-app browser"
-          error={(clear.owner === clearOwner || clear.unknown) && clear.error ? text(clear.error) : null}>
-          <button type="button" className="yard-integration-secondary" disabled={clear.pending || clear.unknown} onClick={() => { void clearData(clearTypes.map(([key]) => key)); }}>{text('Clear all browsing data')}</button>
+          error={text('Clearing browsing data is unavailable on this web host.')}>
+          <button type="button" className="yard-integration-secondary" disabled title={text('Clearing browsing data is unavailable on this web host.')}>{text('Clear all browsing data')}</button>
           <button type="button" aria-expanded={expanded} aria-controls="yard-browser-data-options" aria-label={text(expanded ? 'Hide individual browsing data options' : 'Show individual browsing data options')}
             onClick={() => setExpanded(value => !value)}><ChevronDown size={16} aria-hidden="true" /></button>
         </Row>
         {expanded && <div id="yard-browser-data-options">{clearTypes.map(([key, label, action]) => <Row key={key} label={label}>
-          <button type="button" disabled={clear.pending || clear.unknown} onClick={() => { void clearData([key]); }}>{text(action)}</button></Row>)}</div>}
-        {clear.success && clear.owner === clearOwner && <p role="status">{text(clear.success)}</p>}
+          <button type="button" disabled title={text('Clearing browsing data is unavailable on this web host.')}>{text(action)}</button></Row>)}</div>}
         <Row label="Browsing history" description="View and manage pages visited in the built-in browser"><button type="button" className="yard-integration-secondary" onClick={() => manage('history')}>{text('Manage')}</button></Row>
         {preferenceSelect('browser-annotation-screenshots-mode', 'Annotation screenshots', 'Screenshots help ChatGPT better understand and address comments, but increase plan usage',
           [['always', 'Always include'], ['necessary', 'Only on drag selection']])}

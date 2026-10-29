@@ -67,7 +67,6 @@ test('browser and computer settings use the real host bridge, retain gates and i
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
     assert.equal(await page.getByRole('switch', { name: 'Browser', exact: true }).isDisabled(), true);
     if (process.env.YARD_SETTINGS_SHOTS) await page.screenshot({ path: join(process.env.YARD_SETTINGS_SHOTS, 'browser.png'), fullPage: true });
-    assert.ok(peer.calls('experimentalFeature/list').some(call => call.params.cursor === 'next'));
     await page.getByRole('switch', { name: 'Show full URL' }).check();
     await page.waitForFunction(() => window.integrationSettingsHarness.saved('browser-show-full-url'));
     assert.equal(JSON.parse(await readFile(join(dataDir, 'native-state.json'), 'utf8')).settings['browser-show-full-url'], true);
@@ -79,15 +78,11 @@ test('browser and computer settings use the real host bridge, retain gates and i
     await page.getByRole('button', { name: 'Always include', exact: true }).click();
     await page.keyboard.press('Escape');
     assert.equal(await page.getByRole('menu', { name: 'Annotation screenshots' }).count(), 0);
-    await page.getByRole('button', { name: 'Clear all browsing data' }).click();
-    await page.getByRole('alert').filter({ hasText: 'Unable to clear browsing data' }).waitFor();
-    const clear = sent.map(value => { try { return JSON.parse(value) as { url?: string; body?: string }; } catch { return {}; } })
-      .find(value => value.url === 'vscode://codex/browser-browsing-data-clear');
-    assert.deepEqual(JSON.parse(clear!.body!), { dataTypes: ['cookies', 'siteData', 'cache', 'downloads', 'history'] });
+    assert.equal(await page.getByRole('button', { name: 'Clear all browsing data' }).isDisabled(), true);
+    await page.getByRole('alert').filter({ hasText: 'Clearing browsing data is unavailable on this web host.' }).waitFor();
     await page.getByRole('button', { name: 'Show individual browsing data options' }).click();
-    await page.getByRole('button', { name: 'Delete cookies' }).click();
-    await page.getByRole('alert').filter({ hasText: 'Unable to clear browser cookies' }).waitFor();
-    assert.equal(sent.filter(value => value.includes('browser-browsing-data-clear')).length, 2);
+    assert.equal(await page.getByRole('button', { name: 'Delete cookies' }).isDisabled(), true);
+    assert.equal(sent.filter(value => value.includes('browser-browsing-data-clear')).length, 0);
     await page.evaluate(() => window.integrationSettingsHarness.failNextNavigation());
     await page.getByText('Browsing history', { exact: true }).locator('..').locator('..').getByRole('button', { name: 'Manage' }).click();
     const navigationFailure = page.getByRole('alert').filter({ hasText: 'Synthetic navigation failure' });
@@ -144,8 +139,9 @@ test('browser and computer settings use the real host bridge, retain gates and i
     plugin.installPolicy = 'AVAILABLE';
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?phase=uninstall'));
     await page.getByLabel('More actions').click();
-    await page.getByRole('menuitem', { name: 'Delete' }).click();
-    await page.getByRole('alert').filter({ hasText: 'plugin/uninstall' }).waitFor();
+    assert.equal(await page.getByRole('menuitem', { name: 'Delete' }).isDisabled(), true);
+    assert.equal(await page.getByRole('menuitem', { name: 'Delete' }).getAttribute('title'), 'Plugin installation and removal are unavailable on this web host.');
+    assert.equal(await page.getByRole('menuitem', { name: 'Try now' }).isDisabled(), true);
     assert.equal(peer.calls('plugin/uninstall').length, 0);
 
     plugin.installed = false;
@@ -162,9 +158,10 @@ test('browser and computer settings use the real host bridge, retain gates and i
     assert.equal(peer.calls('plugin/install').length, 0);
     plugin.availability = 'AVAILABLE';
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?phase=install'));
-    await page.getByRole('button', { name: 'Install' }).click();
-    await page.getByRole('alert').filter({ hasText: 'plugin/install' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Install' }).isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: 'Install' }).getAttribute('title'), 'Plugin installation and removal are unavailable on this web host.');
     assert.equal(peer.calls('plugin/install').length, 0);
+    assert.equal(sent.filter(value => value.includes('"method":"plugin/install"') || value.includes('"method":"plugin/uninstall"')).length, 0);
     plugin.installed = true;
 
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?phase=revoked'));
@@ -197,10 +194,18 @@ test('browser and computer settings use the real host bridge, retain gates and i
     assert.equal(await page.evaluate(() => window.integrationSettingsHarness.refreshes()), 1);
 
     failFeature = true;
+    const readsBeforeKnown = peer.calls('experimentalFeature/list').length;
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use'));
+    await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
+    assert.equal(peer.calls('experimentalFeature/list').length, readsBeforeKnown);
+    await page.evaluate(() => window.integrationSettingsHarness.rawFeature(null));
     await page.getByRole('alert').filter({ hasText: 'Synthetic feature read failure' }).waitFor();
     failFeature = false;
     await page.getByRole('alert').getByRole('button', { name: 'Retry' }).click();
+    await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
+    assert.ok(peer.calls('experimentalFeature/list').some(call => call.params.cursor === 'next'));
+    assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
+    await page.evaluate(() => window.integrationSettingsHarness.rawFeature(true));
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
     const writesBeforeReconnect = peer.calls('config/batchWrite').length;
     await page.evaluate(() => window.integrationSettingsHarness.suspend());
@@ -209,6 +214,7 @@ test('browser and computer settings use the real host bridge, retain gates and i
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
     assert.equal(peer.calls('config/batchWrite').length, writesBeforeReconnect);
     listBrowserFeature = true;
+    await page.evaluate(() => window.integrationSettingsHarness.rawFeature(null));
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use/history?step=feature'));
     await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
     await page.evaluate(() => window.integrationSettingsHarness.failNextRefresh());
@@ -223,7 +229,8 @@ test('browser and computer settings use the real host bridge, retain gates and i
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor({ state: 'hidden' });
     listBrowserFeature = false;
     await page.evaluate(() => window.integrationSettingsHarness.rawFeature(null));
-    await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
+    await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
+    assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
     holdFeature = true;
     const pending = new Promise<void>(resolve => { entered = resolve; });
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?step=delayed'));

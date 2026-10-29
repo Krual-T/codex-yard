@@ -1,4 +1,4 @@
-import type { WorkbenchClient } from '../../workbench-contract.ts';
+import type { WorkbenchClient, WorkbenchDispatchOptions } from '../../workbench-contract.ts';
 
 export interface PluginSummary {
   id: string; name: string; installed: boolean; enabled: boolean; installPolicy: string;
@@ -51,11 +51,12 @@ function catalog(value: unknown): PluginCatalog {
   return { entries, warnings: (warnings ?? []).map((warning: { marketplacePath: string; message: string }) => `${warning.marketplacePath}: ${warning.message}`) };
 }
 
-export async function listPlugins(client: WorkbenchClient, hostId: string, cwd: string, refresh: boolean): Promise<PluginCatalog> {
+export async function listPlugins(client: WorkbenchClient, hostId: string, cwd: string, refresh: boolean,
+  options?: WorkbenchDispatchOptions): Promise<PluginCatalog> {
   return catalog(await client.rpc('plugin/list', {
     ...(cwd ? { cwds: [cwd] } : {}),
     ...(refresh ? { forceRefetch: true } : {}),
-  }, hostId));
+  }, hostId, options));
 }
 
 export function pluginPage(value: unknown): PluginPage {
@@ -90,8 +91,9 @@ export async function searchPlugins(client: WorkbenchClient, hostId: string, cwd
   return pluginPage({ entries: response?.data, nextCursor: response?.nextCursor });
 }
 
-export async function listInstalledPlugins(client: WorkbenchClient, hostId: string, cwd: string): Promise<PluginCatalog> {
-  return catalog(await client.rpc('plugin/installed', cwd ? { cwds: [cwd] } : {}, hostId));
+export async function listInstalledPlugins(client: WorkbenchClient, hostId: string, cwd: string,
+  options?: WorkbenchDispatchOptions): Promise<PluginCatalog> {
+  return catalog(await client.rpc('plugin/installed', cwd ? { cwds: [cwd] } : {}, hostId, options));
 }
 
 export function pluginRef(entry: PluginEntry): PluginRef {
@@ -128,9 +130,10 @@ export async function uninstallPlugin(client: WorkbenchClient, hostId: string, p
   if (!object(value)) throw new Error('Invalid plugin uninstall response');
 }
 
-export async function prepareLocalPluginEnabled(client: WorkbenchClient, hostId: string, plugin: PluginSummary, enabled: boolean): Promise<{ params: Record<string, unknown>; source: unknown }> {
+export async function prepareLocalPluginEnabled(client: WorkbenchClient, hostId: string, plugin: PluginSummary, enabled: boolean,
+  options?: WorkbenchDispatchOptions): Promise<{ params: Record<string, unknown>; source: unknown }> {
   if (plugin.source.type === 'remote') throw new Error('Remote plugins require workspace enablement');
-  const config = await client.rpc<{ layers?: unknown; yardConfigSource?: unknown }>('config/read', { includeLayers: true }, hostId);
+  const config = await client.rpc<{ layers?: unknown; yardConfigSource?: unknown }>('config/read', { includeLayers: true }, hostId, options);
   if (!config || !Object.hasOwn(config, 'layers')) throw new Error('Configuration layers are unavailable');
   if (config?.layers != null && !Array.isArray(config.layers)) throw new Error('Invalid configuration layers');
   const layers = (config?.layers ?? []) as unknown[];

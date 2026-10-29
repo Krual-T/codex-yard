@@ -30,7 +30,7 @@ const savedKeys = new Set<BrowserPreferenceKey>();
 
 function Fixture() {
   const [locationKey, setLocationKey] = useState(0), [gate, changeGate] = useState<IntegrationAvailability>('restricted');
-  const [rawFeature, changeRawFeature] = useState<boolean | null>(null);
+  const [rawFeature, changeRawFeature] = useState<boolean | null>(true);
   const [snapshot, setSnapshot] = useState(initial);
   const currentSnapshot = useRef(snapshot); currentSnapshot.current = snapshot;
   const owner = authority;

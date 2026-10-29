@@ -15,7 +15,8 @@ export function ConfigurationRecovery({ client }: { client: WorkbenchClient }) {
   if (!state.records.length && !state.error && !error && !state.localRetry.length && !state.draftRetry.length) return null;
   return <section className="yard-setting-error" aria-label="Configuration save recovery">
     <h3>Configuration save recovery</h3>
-    {state.error && <p role="alert">{state.error}</p>}
+    {state.error && <p role="alert">{state.error} <button type="button" disabled={busy !== null || state.loading}
+      onClick={() => run('refresh', () => operations.refresh())}>Retry reading original operations</button></p>}
     {error && <p role="alert">{error}</p>}
     {state.draftRetry.map(editorId => <p key={editorId}>A newer edit is still in this page.{' '}
       <button type="button" disabled={busy !== null} onClick={() => run(editorId, () => operations.retryDraft(editorId))}>Retry saving browser edit</button></p>)}
