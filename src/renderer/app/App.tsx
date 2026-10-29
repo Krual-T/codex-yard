@@ -104,6 +104,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [current, setCurrent] = useState(route);
   const [bridgeStatus, setBridgeStatus] = useState('connecting');
   const [hostStatuses, setHostStatuses] = useState<Record<string, string>>({});
+  const [sidebarAccount, setSidebarAccount] = useState<{ hostId: string; label: string } | null>(null);
   const status = bridgeStatus === 'connected' ? hostStatuses[current.hostId] ?? 'connecting' : bridgeStatus;
   const connectionReadGeneration = useRef(0);
   const transportIdentity = useRef({ bridge: 'connecting', bridgeRevision: 0, hosts: {} as Record<string, { state: string; revision: number }> });
@@ -248,6 +249,29 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     current.readOnly, sendState !== null, refresh);
   const { thread, loading, historyComplete, streamGap, options: initialOptions } = conversation;
   useEffect(() => () => sessions.dispose(), [sessions]);
+  useEffect(() => {
+    const hostId = current.hostId;
+    let alive = true, sequence = 0;
+    const reset = () => { sequence++; setSidebarAccount(null); };
+    const read = async () => {
+      const request = ++sequence;
+      try {
+        const daemon = client.captureDaemonConnection(hostId);
+        const result = await client.rpc('account/read', { refreshToken: false }, hostId,
+          { daemonConnectionGeneration: daemon.generation, assertBeforeSend: daemon.assertOriginal });
+        daemon.assertOriginal();
+        const email = record(record(result).account).email;
+        if (alive && request === sequence) setSidebarAccount({ hostId, label: typeof email === 'string' ? email.trim() : '' });
+      } catch { if (alive && request === sequence) setSidebarAccount(null); }
+    };
+    const unsubscribe = client.subscribe(event => {
+      if (event.type === 'connection-state' || event.type === 'codex-app-server-connection-changed' && event.hostId === hostId) {
+        if (event.state === 'connected') void read(); else reset();
+      } else if (event.type === 'mcp-notification' && event.hostId === hostId && event.method === 'account/updated') void read();
+    });
+    reset(); void read();
+    return () => { alive = false; sequence++; unsubscribe(); };
+  }, [client, current.hostId]);
   const composerController = useRef<ComposerDraftController | null>(null);
   const [composerSnapshot, setComposerSnapshot] = useState<ComposerDraftSnapshot | null>(null);
   const [effectiveComposerOptions, setEffectiveComposerOptions] = useState<{ owner: ComposerDraftOwner; options: SubmitOptions } | null>(null);
@@ -1266,7 +1290,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       onOpenThread={row => { void openThread(row.id, row.hostId, row.archived); }}
       onNewChat={(project, fallback) => { void newChat(project?.rootPaths[0] ?? cwd, fallback ? undefined : project ?? undefined); }}
       onAddProject={addProject} onOpenSettings={() => { void navigate('/settings/general' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId))); }}
-      activeProjectId={activeProject?.id ?? null}
+      activeProjectId={current.threadId ? null : activeProject?.id ?? null}
+      accountLabel={sidebarAccount?.hostId === current.hostId ? sidebarAccount.label : ''}
       onNavigateHistory={direction => { void navigate('/', { delta: direction }); }}
       canNavigateBack={Number(history.state?.__yardIndex ?? 0) > 0}
       onOpenPlugins={() => { void navigate('/plugins' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId))); }}

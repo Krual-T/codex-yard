@@ -461,7 +461,9 @@ export function StandaloneSidebar({ hostId, currentThread, projectState, fallbac
       {unresolved && <p className="yard-owned-sidebar-message" role="status">{t('Some legacy project associations are unresolved. Original records are retained.')}
         {onRetryProjectLookup && <button type="button" onClick={onRetryProjectLookup}>{t('Retry project lookup')}</button>}
       </p>}
-      {visibleRecent.map(row => <ThreadRow key={JSON.stringify([row.hostId, row.id])} row={row} currentThread={currentThread} onOpenThread={onOpenThread} shortcutHints={shortcutHints}
+      {visibleRecent.map(row => <ThreadRow key={JSON.stringify([row.hostId, row.id])} row={row}
+        currentThread={options.organization === 'by-project' && projectForThread(projectState, projects, hostId, row) ? null : currentThread}
+        onOpenThread={onOpenThread} shortcutHints={shortcutHints}
         availableThreadActions={availableThreadActions} onThreadAction={onThreadAction} onMoveThreadToProject={onMoveThreadToProject}
         isThreadPinned={isThreadPinned} isThreadUnread={isThreadUnread} projects={projects} projectState={projectState}
         busyThreadActions={busyThreadActions} dispatchThreadAction={dispatchThreadAction} />)}
