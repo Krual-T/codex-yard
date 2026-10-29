@@ -198,6 +198,10 @@ function status(value: unknown, id: string, hostId: string, method?: SettingsWri
   return value as unknown as WriteStatus;
 }
 function active(record: SettingsWriteRecord) { return record.phase === 'pending' || record.phase === 'unknown' || record.phase === 'blocked'; }
+export function pluginEditNeedsRecovery(record: SettingsWriteRecord): boolean {
+  return record.origin.section === 'plugins-settings' && (!record.origin.editorId || !record.origin.revision)
+    && (record.phase === 'not-started' || record.operation?.state === 'failed');
+}
 function completed(operation: WriteStatus) {
   return !operation.storageError && (operation.state === 'succeeded' || operation.state === 'failed');
 }
@@ -311,6 +315,25 @@ export class SettingsConfigOperations {
     const pending = { hostId, section, scope: scope && [...scope], draft: structuredClone(draft), sequence: this.nextDraftSequence(editorId) };
     this.localDraftPending.delete(editorId);
     return this.persistDraft(editorId, pending);
+  }
+  async editRecoveredPluginDraft(original: SettingsDraftRecord, enabled: boolean): Promise<void> {
+    const expected = structuredClone(original);
+    if (typeof enabled !== 'boolean') throw new Error('The plugin target is invalid.');
+    await this.queueDraft(expected.editorId, async () => {
+      await this.storage.update(value => {
+        const current = data(value), key = draftKey(expected), index = current.drafts.findIndex(item => draftKey(item) === key);
+        const item = current.drafts[index];
+        if (!item || JSON.stringify(item) !== JSON.stringify(expected) || item.section !== 'plugins-settings'
+          || !item.editorId.startsWith('recovered:') || !object(item.draft) || typeof item.draft.enabled !== 'boolean') {
+          throw new Error('The saved plugin edit changed. Review its original copy before editing.');
+        }
+        if (item.draft.enabled === enabled) return current;
+        if (!Number.isSafeInteger(current.nextRevision + 1)) throw new Error('Configuration draft revisions are exhausted.');
+        current.drafts[index] = { ...item, revision: current.nextRevision++, draft: { ...item.draft, enabled } };
+        return current;
+      });
+      await this.refresh();
+    });
   }
   async retryDraft(editorId: string): Promise<void> {
     const pending = this.localDraftPending.get(editorId);
@@ -531,22 +554,24 @@ export class SettingsConfigOperations {
     const closed = data(await this.storage.read()).closedNotSent;
     return closed.some(item => item.operationId === operationId && item.hostId === hostId && item.method === method);
   }
-  async originalFinished(hostId: string, operationId: string, method: SettingsWriteMethod): Promise<boolean> {
+  async originalFinished(hostId: string, operationId: string, method: SettingsWriteMethod, assertBeforeSend?: () => void): Promise<boolean> {
     if (await this.originalNotSentClosed(hostId, operationId, method)) return true;
-    const response = await this.client.host<unknown>('configuration-write', { hostId, action: 'status', operationId });
+    assertBeforeSend?.();
+    const response = await this.client.host<unknown>('configuration-write', { hostId, action: 'status', operationId }, { assertBeforeSend });
     const operation = object(response) ? status(response.operation, operationId, hostId, method) : null;
     return !!operation && completed(operation);
   }
-  async check(id: string, retryPersistence = false): Promise<void> {
+  async check(id: string, retryPersistence = false, assertBeforeSend?: () => void): Promise<void> {
     if (this.localPending.has(id)) throw new Error('Retry saving the browser receipt before checking the host operation.');
     const list = data(await this.storage.read()).operations, entry = list.find(item => item.operationId === id);
     if (!entry) throw new Error('The original local configuration record is missing.');
     const blocker = entry.phase === 'blocked' ? entry.blocker : undefined;
     const targetId = blocker?.operationId ?? id, targetHost = blocker?.hostId ?? entry.hostId;
     const savedReceipt = blocker ? entry.blockerReceipt : entry.recoveryReceipt;
+    assertBeforeSend?.();
     const response = await this.client.host<unknown>('configuration-write', { hostId: targetHost,
       action: retryPersistence ? 'retry-persistence' : 'status', operationId: targetId,
-      ...(retryPersistence && savedReceipt ? { receipt: savedReceipt } : {}) });
+      ...(retryPersistence && savedReceipt ? { receipt: savedReceipt } : {}) }, { assertBeforeSend });
     const operation = object(response) ? status(response.operation, targetId, targetHost, blocker?.method ?? entry.method) : null;
     if (!operation) {
       const missing = object(response) && response.operation === null;
@@ -577,11 +602,35 @@ export class SettingsConfigOperations {
     });
     await this.refresh();
   }
-  async finish(id: string, options: { consumeSubmittedDraft?: boolean } = {}): Promise<void> {
+  async restoreOriginalPluginEdit(original: SettingsWriteRecord): Promise<void> {
+    const expected = structuredClone(original);
+    await this.storage.update(value => {
+      const current = data(value), item = current.operations.find(record => record.operationId === expected.operationId);
+      if (!item || JSON.stringify(item) !== JSON.stringify(expected) || !pluginEditNeedsRecovery(item) || active(item)
+        || item.operation?.storageError || this.draftPending || this.localPending.has(item.operationId) || this.observationWrites.has(item.operationId)
+        || !object(item.origin.draft) || typeof item.origin.draft.pluginId !== 'string' || !item.origin.draft.pluginId
+        || typeof item.origin.draft.enabled !== 'boolean') throw new Error('The original plugin edit changed or still needs confirmation.');
+      const editorId = `recovered:${item.operationId}`, key = draftKey({ hostId: item.hostId, section: item.origin.section, scope: item.origin.scope, editorId });
+      if (current.drafts.some(draft => draftKey(draft) === key)) throw new Error('This original edit already has a saved copy. Review that copy first.');
+      if (!Number.isSafeInteger(current.nextRevision + 1)) throw new Error('Configuration draft revisions are exhausted.');
+      current.drafts.push({ hostId: item.hostId, section: item.origin.section, scope: item.origin.scope,
+        editorId, revision: current.nextRevision++, draft: { ...structuredClone(item.origin.draft), originalSource: item.origin.source ?? null } });
+      if (item.phase === 'not-started' || item.operation?.terminal?.kind === 'not-sent') {
+        current.closedNotSent.push({ operationId: item.operationId, hostId: item.hostId, method: item.method });
+      }
+      current.operations = current.operations.filter(record => record.operationId !== item.operationId);
+      return current;
+    });
+    await this.refresh();
+  }
+  async finish(id: string, options: { consumeSubmittedDraft?: boolean; discardOriginalEdit?: boolean } = {}): Promise<void> {
     await this.storage.update(value => {
       const current = data(value), list = current.operations, item = list.find(record => record.operationId === id);
       if (!item || active(item) || item.operation?.storageError || this.draftPending || this.localPending.has(id) || this.observationWrites.has(id)
         ) throw new Error('The original operation is not ready to close.');
+      if (pluginEditNeedsRecovery(item) && !options.discardOriginalEdit) {
+        throw new Error('Restore the original plugin edit or explicitly discard it before closing this operation.');
+      }
       if (options.consumeSubmittedDraft && item.operation?.state === 'succeeded' && item.origin.editorId && item.origin.revision) {
         const key = draftKey({ hostId: item.hostId, section: item.origin.section, scope: item.origin.scope, editorId: item.origin.editorId });
         current.drafts = current.drafts.filter(draft => draftKey(draft) !== key || draft.revision !== item.origin.revision);

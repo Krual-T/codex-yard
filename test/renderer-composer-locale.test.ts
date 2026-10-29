@@ -17,8 +17,11 @@ test('locale changes update composer controls without replacing the draft or ric
     const state={submissions:[]};
     const client={async rpc(method) {
       if(method==='model/list') return {data:[{id:'fixture-model',model:'fixture-model',displayName:'Fixture Model',isDefault:true,supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};
-      if(method==='config/read') return {config:{model:'fixture-model',sandbox_mode:'workspace-write'},
+      if(method==='config/read') return {config:{model:'fixture-model',sandbox_mode:'workspace-write',
+        sandbox_workspace_write:{writable_roots:[],network_access:false,exclude_tmpdir_env_var:false,exclude_slash_tmp:false}},
         layers:[{name:{type:'user',file:'/fixture/codex/config.toml',profile:null},version:'1'}]};
+      if(method==='configRequirements/read') return {requirements:null};
+      if(method==='permissionProfile/list') return {data:[],nextCursor:null};
       throw Error('unexpected RPC '+method);
     },async host(endpoint){if(endpoint==='get-setting') return {exists:false};
       if(endpoint==='codex-home') return {codexHome:'/fixture/codex'}; throw Error('unexpected host '+endpoint);},
@@ -46,12 +49,15 @@ test('locale changes update composer controls without replacing the draft or ric
     await english.waitFor();
     assert.equal(await english.inputValue(), 'draft stays');
     assert.equal(await page.evaluate(() => document.activeElement === (window as any).originalEditor), true);
+    await page.locator('.standalone-composer__model > summary').filter({ hasText: 'Fixture Model' }).waitFor();
     await page.waitForFunction(() => {
-      const model = document.querySelector('[aria-label="Model"]') as HTMLSelectElement | null;
-      return model?.value === 'fixture-model' && model.title === 'Fixture Model';
+      const model = document.querySelector<HTMLButtonElement>('[data-model="fixture-model"]');
+      return model && !model.disabled;
     });
     await page.locator('.standalone-composer__access summary').click();
+    await page.getByText('Other permission settings', { exact: true }).click();
     await page.getByLabel('Sandbox permissions').selectOption('read-only');
+    await page.locator('.standalone-composer__access > summary').click();
     await page.locator('.standalone-composer__add summary').click();
     await page.getByRole('button', { name: 'Rich text editor' }).click();
     const rich = page.getByRole('textbox', { name: 'Work with Codex' });
@@ -91,20 +97,48 @@ test('goal and queue controls follow the same locale while retaining edits and u
     import {createRoot} from 'react-dom/client';
     import {I18nProvider} from './src/renderer/i18n/index.tsx';
     import {StandaloneGoal} from './src/renderer/composer/StandaloneGoal.tsx';
-    import {StandaloneQueue} from './src/renderer/composer/standalone-queue.tsx';
+    import {StandaloneComposer,draftToInput} from './src/renderer/composer/StandaloneComposer.tsx';
     const state={goal:{threadId:'fixture',objective:'User goal',status:'paused',tokenBudget:10000,tokensUsed:1234,timeUsedSeconds:75,createdAt:1,updatedAt:2},
-      queue:[{id:'queued',clientUserMessageId:'client',input:[{type:'text',text:'User queue',text_elements:[]}]}],calls:[]};
-    const client={async rpc(method,params){state.calls.push({method,params});
+      queue:[{id:'queued',clientUserMessageId:'client',input:[{type:'text',text:'User queue',text_elements:[]}]}],calls:[],submissions:[],controller:null};
+    const authorities=new WeakMap();
+    const client={async rpc(method,params={},host='local'){state.calls.push({method,params:structuredClone(params),host});
       if(method==='thread/goal/get')return {goal:state.goal};
       if(method==='thread/goal/set'){state.goal={...state.goal,...params};return {goal:state.goal};}
-      if(method==='thread/queue/list')return {data:state.queue,nextCursor:null};
-      if(method==='thread/queue/update'){state.queue=state.queue.map(item=>item.id===params.queuedSubmissionId?{...item,input:params.input}:item);return {};}
+      if(method==='thread/queue/list')return {data:structuredClone(state.queue),nextCursor:null};
+      if(method==='thread/queue/delete'){const index=state.queue.findIndex(item=>item.id===params.queuedSubmissionId);
+        if(index<0)return {deleted:false};state.queue.splice(index,1);return {deleted:true};}
+      if(method==='thread/queue/add'){state.queue.push({id:'requeued',clientUserMessageId:params.clientUserMessageId,input:structuredClone(params.input)});return {};}
+      if(method==='model/list')return {data:[],nextCursor:null};
+      if(method==='config/read')return {config:{}};
       throw Error('unexpected RPC '+method);
-    },async host(){throw Error('unexpected host')},subscribe(){return ()=>{}},async reply(){throw Error('unexpected approval')}};
+    },async host(endpoint,params={},options={}){
+      if(endpoint==='get-setting')return {value:params.key==='followUpQueueMode'?'queue':undefined};
+      if(endpoint==='queue-edit'){
+        options.assertBeforeSend();state.calls.push({endpoint,params:structuredClone(params)});
+        const page=await client.rpc('thread/queue/list',{threadId:params.threadId},params.hostId);
+        const entry=page.data.find(item=>item.id===params.entry.id);
+        if(!entry||JSON.stringify(entry)!==JSON.stringify(params.entry))return 'changed';
+        options.assertBeforeSend();const result=await client.rpc('thread/queue/delete',{threadId:params.threadId,queuedSubmissionId:entry.id},params.hostId);
+        return result.deleted?'deleted':'changed';
+      }
+      throw Error('unexpected host '+endpoint);
+    },subscribe(){return ()=>{}},async reply(){throw Error('unexpected approval')}};
+    const composer={client,context:{hostId:'local',threadId:'fixture',draftId:'locale-queue',cwd:'/fixture'},busy:true,activeTurnId:'turn',
+      onDraftController(controller){state.controller=controller},
+      captureSubmissionAuthority(owner){const captured=structuredClone(owner);const authority=()=>{
+        if(JSON.stringify(state.controller?.snapshot()?.owner)!==JSON.stringify(captured))throw Error('owner changed');};
+        authority();authorities.set(authority,captured);return authority;},
+      async removeQueuedOriginal(entry,authority,assertBeforeSend){const owner=authorities.get(authority);
+        if(!owner)throw Error('original authority lost');
+        return client.host('queue-edit',{hostId:owner.hostId,threadId:owner.threadId,entry},{assertBeforeSend});},
+      async onSubmit(draft,options,action,description,authority){authority();state.submissions.push({action,owner:description.owner});
+        if(action.type!=='queue')throw Error('expected an explicit queue action');
+        await client.rpc('thread/queue/add',{threadId:description.owner.threadId,input:draftToInput(draft,description.owner.hostId),clientUserMessageId:'edited'},description.owner.hostId);},
+      async onInterrupt(){}};
     const root=createRoot(document.getElementById('root'));
     window.fixture={state,render(locale){root.render(React.createElement(I18nProvider,{locale},React.createElement(React.Fragment,null,
       React.createElement(StandaloneGoal,{client,hostId:'local',threadId:'fixture',readOnly:false}),
-      React.createElement(StandaloneQueue,{client,hostId:'local',threadId:'fixture',busy:false,refreshVersion:0}))));}};
+      React.createElement(StandaloneComposer,composer))));}};
     window.fixture.render('en-US');
   ` }, bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' } });
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] });
@@ -120,19 +154,28 @@ test('goal and queue controls follow the same locale while retaining edits and u
     await page.getByRole('button', { name: 'Resume goal' }).click();
     await page.getByText('Active', { exact: true }).waitFor();
     await page.getByRole('button', { name: 'Edit queued message' }).click();
-    await page.getByRole('textbox', { name: 'Edit queued message' }).fill('Edited user queue');
+    await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.draft.text === 'User queue');
+    await page.getByRole('textbox', { name: 'Work with Codex' }).fill('Edited user queue');
     await page.evaluate(() => (window as any).fixture.render('zh-CN'));
-    assert.equal(await page.getByRole('textbox', { name: '编辑待发送消息' }).inputValue(), 'Edited user queue');
+    assert.equal(await page.getByRole('textbox', { name: '与 Codex 协作' }).inputValue(), 'Edited user queue');
     assert.equal(await page.getByText('进行中', { exact: true }).count(), 1);
-    await page.getByRole('button', { name: '保存', exact: true }).click();
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.queue), []);
+    await page.getByRole('button', { name: '排队', exact: true }).click();
     await page.getByText('Edited user queue').waitFor();
+    await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot()?.draft.text === '');
     await page.evaluate(() => (window as any).fixture.render('ja-JP'));
     await page.getByRole('region', { name: '会話の目標' }).waitFor();
     await page.getByRole('region', { name: '送信待ちのメッセージ' }).waitFor();
     assert.equal(await page.getByText('User goal').count(), 1);
-    assert.equal(await page.getByText('Edited user queue').count(), 1);
+    assert.equal(await page.getByRole('region', { name: '送信待ちのメッセージ' }).getByText('Edited user queue', { exact: true }).count(), 1);
     assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.queue[0].input[0]),
       { type: 'text', text: 'Edited user queue', text_elements: [] });
+    const actions = await page.evaluate(() => ({ calls: (window as any).fixture.state.calls,
+      submissions: (window as any).fixture.state.submissions }));
+    assert.deepEqual(actions.submissions, [{ action: { type: 'queue' }, owner: { hostId: 'local', threadId: 'fixture', draftId: 'locale-queue' } }]);
+    assert.equal(actions.calls.filter((call: any) => call.endpoint === 'queue-edit').length, 1);
+    assert.equal(actions.calls.filter((call: any) => call.method === 'thread/queue/delete').length, 1);
+    assert.equal(actions.calls.filter((call: any) => call.method === 'thread/queue/add').length, 1);
   } finally { await browser.close(); }
 });
 

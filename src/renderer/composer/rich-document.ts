@@ -61,6 +61,11 @@ export function parseAgentThreadPath(path: string): { threadId: string; hostId?:
   } catch { return null; }
 }
 
+/** Plugin references are identifiers passed in prompt text, not web destinations. */
+export function validPluginMentionPath(path: unknown): path is string {
+  return typeof path === 'string' && /^plugin:\/\/[A-Za-z0-9][A-Za-z0-9._-]*(?:@[A-Za-z0-9][A-Za-z0-9._-]*)?$/.test(path);
+}
+
 /** Allocate identities only for explicitly created or copied link occurrences. */
 export function linkOccurrenceAllocator(document: ProseMirrorNode): () => number {
   const used = new Set<number>();
@@ -125,6 +130,28 @@ export const composerSchema = new Schema({
         ...(node.attrs.conversationId === null ? {} : { 'agent-mention-conversation-id': node.attrs.conversationId }),
         contenteditable: 'false' },
       (parseAgentThreadPath(node.attrs.path) ? '' : '@') + (node.attrs.displayName || node.attrs.name)] },
+    pluginMention: { attrs: { name: string, displayName: { default: '', validate: 'string' }, path: string, description: string,
+      iconSmall: { default: '', validate: 'string' }, brandColor: { default: '', validate: 'string' },
+      computerUseAppMentionPath: { default: '', validate: 'string' } }, inline: true, group: 'inline', atom: true, draggable: false, selectable: false,
+      leafText: node => '@' + (node.attrs.displayName || node.attrs.name),
+      parseDOM: [{ tag: 'span[data-mention="plugin"]', getAttrs: dom => copiedAttrs(dom as HTMLElement, ['name', 'path', 'description']) },
+        { tag: 'span[plugin-mention-name][plugin-mention-path]', getAttrs: dom => {
+          const element = dom as HTMLElement, name = element.getAttribute('plugin-mention-name');
+          return { name, displayName: element.getAttribute('plugin-mention-display-name') ?? name,
+            path: element.getAttribute('plugin-mention-path'), description: element.getAttribute('title') ?? '',
+            iconSmall: element.getAttribute('plugin-mention-icon') ?? '', brandColor: element.getAttribute('plugin-mention-brand-color') ?? '',
+            computerUseAppMentionPath: '' };
+        } }],
+      toDOM: node => ['span', { class: 'standalone-composer__mention', 'data-mention': 'plugin', 'data-composer-attrs': JSON.stringify(node.attrs),
+        'plugin-mention-name': node.attrs.name, 'plugin-mention-display-name': node.attrs.displayName || node.attrs.name,
+        'plugin-mention-path': node.attrs.path, 'plugin-mention-icon': node.attrs.iconSmall, 'plugin-mention-brand-color': node.attrs.brandColor,
+        'data-prompt-link-href': node.attrs.path, 'data-prompt-link-label': '@' + (node.attrs.displayName || node.attrs.name),
+        title: node.attrs.description, contenteditable: 'false' },
+      ['http://www.w3.org/2000/svg svg', { width: '16', height: '16', viewBox: '0 0 16 16', fill: 'none',
+        stroke: 'currentColor', 'stroke-width': '1.25', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false' },
+        ['path', { d: 'M13.2 10.5A6 6 0 1 0 10.5 13' }],
+        ['path', { d: 'M6 4.5v2M9 4.5v2M5.25 6.5h4.5v1.25a2.25 2.25 0 0 1-4.5 0zM7.5 10v1.5' }]],
+      node.attrs.displayName || node.attrs.name] },
     pageReferenceMention: { attrs: { path: string, projectId: { default: '', validate: 'string' },
       spaceId: { default: '', validate: 'string' }, title: string }, inline: true, group: 'inline', atom: true, selectable: false,
       parseDOM: [{ tag: 'span[data-mention="page-reference"]', getAttrs: dom => copiedAttrs(dom as HTMLElement, ['path', 'title']) },
@@ -285,6 +312,8 @@ const serializer = new MarkdownSerializer({
     + markdownDestination(node.attrs.path) + ')'),
   agentMention: (state, node) => state.write('[' + state.esc('@' + (node.attrs.displayName || node.attrs.name)) + ']('
     + markdownDestination(node.attrs.path) + ')'),
+  pluginMention: (state, node) => state.write('[' + state.esc('@' + (node.attrs.displayName || node.attrs.name)) + ']('
+    + markdownDestination(node.attrs.path) + ')'),
   pageReferenceMention: (state, node) => state.write('[' + state.esc(node.attrs.title) + '](' + markdownDestination(node.attrs.path) + ')'),
   richLink: (state, node) => state.write(verifiedLiteralLink(node.attrs.literalMarkdownSource, node.attrs.displayText, node.attrs.href)
     ?? '[' + state.esc(node.attrs.displayText) + '](' + markdownDestination(node.attrs.href) + ')'),
@@ -321,6 +350,8 @@ function validJSON(node: ComposerDocument): boolean {
     && (!Number.isInteger(node.attrs.startingNumber) || (node.attrs.startingNumber as number) < 1)) return false;
   if (node.type === 'skillMention' && (!node.attrs?.path || !node.attrs?.name)) return false;
   if (node.type === 'agentMention' && node.marks?.some(mark => mark.type === 'code' || mark.type === 'link')) return false;
+  if (node.type === 'pluginMention' && (!node.attrs?.name || !validPluginMentionPath(node.attrs?.path)
+    || node.marks?.some(mark => mark.type === 'code' || mark.type === 'link'))) return false;
   if (node.type === 'pageReferenceMention' && !validPageReference(node.attrs?.path)) return false;
   if (node.type === 'richLink') {
     const attrs = node.attrs;
@@ -418,6 +449,7 @@ export function serializePlainDocument(document: ProseMirrorNode, preserveTextLi
       else if (child.type.name === 'atMention') output += plainLink(child.attrs.label, child.attrs.path);
       else if (child.type.name === 'skillMention') output += plainLink(child.attrs.promptLinkLabel || '$' + child.attrs.name, child.attrs.path);
       else if (child.type.name === 'agentMention') output += plainLink('@' + (child.attrs.displayName || child.attrs.name), child.attrs.path);
+      else if (child.type.name === 'pluginMention') output += plainLink('@' + (child.attrs.displayName || child.attrs.name), child.attrs.path);
       else if (child.type.name === 'pageReferenceMention') output += plainLink(child.attrs.title, child.attrs.path);
       else if (child.type.name === 'richLink') output += plainLink(child.attrs.displayText, child.attrs.href);
       else if (child.type.name === 'chatGptSystemHint') output += plainLink(child.attrs.label, 'chatgpt-system-hint://' + child.attrs.systemHint);

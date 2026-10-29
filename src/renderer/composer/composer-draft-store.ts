@@ -67,10 +67,12 @@ export function sameComposerDraftValue(left: unknown, right: unknown): boolean {
   return same(left, right);
 }
 
-/** Prepare one exact active-version replacement for an existing root atom transaction. */
+/** Prepare an exact active-version replacement, optionally recording a prefill in the same root transaction. */
 export function updateComposerDraftVersionInRoot(root: unknown, before: ComposerDraftSnapshot,
-  change: (draft: ComposerDraft) => ComposerDraft, nextRevision: string): { root: unknown; after: ComposerDraftSnapshot; changed: boolean } {
-  return changeComposerDraftVersionInRoot(root, before, change, nextRevision, true);
+  change: (draft: ComposerDraft) => ComposerDraft, nextRevision: string, prefillId?: string): {
+    root: unknown; after: ComposerDraftSnapshot; changed: boolean; duplicate: boolean;
+  } {
+  return changeComposerDraftVersionInRoot(root, before, change, nextRevision, true, prefillId);
 }
 
 /** Move a confirmed queue item to the active draft while parking the previous draft. */
@@ -85,27 +87,35 @@ export function replaceComposerDraftWithQueuedInRoot(root: unknown, before: Comp
 }
 
 function changeComposerDraftVersionInRoot(root: unknown, before: ComposerDraftSnapshot,
-  change: (draft: ComposerDraft) => ComposerDraft, nextRevision: string, merge: boolean): { root: unknown; after: ComposerDraftSnapshot; changed: boolean } {
+  change: (draft: ComposerDraft) => ComposerDraft, nextRevision: string, merge: boolean, prefillId?: string): {
+    root: unknown; after: ComposerDraftSnapshot; changed: boolean; duplicate: boolean;
+  } {
   if (!before || !isOwner(before.owner) || typeof before.revision !== 'string' || !before.revision
-    || typeof nextRevision !== 'string' || !nextRevision) throw new Error('草稿版本或身份无效。');
+    || typeof nextRevision !== 'string' || !nextRevision
+    || prefillId !== undefined && (typeof prefillId !== 'string' || !prefillId.trim())) throw new Error('草稿版本或身份无效。');
   const store = repository(root), entry = entryFor(store, before.owner);
   const matches = entry.versions.flatMap((version, index) =>
     sameOwner(entry, version.owner, before.owner) && version.revision === before.revision ? [index] : []);
   if (matches.length !== 1) throw new Error('草稿版本已改变，请核对后重试。');
   const index = matches[0]!, previous = entry.versions[index]!;
   if (!sameComposerDraftValue(previous.draft, before.draft)) throw new Error('草稿内容已改变，请核对后重试。');
+  if (prefillId !== undefined && previous.prefills.includes(prefillId)) {
+    return { root, after: snapshot(previous, before.owner), changed: false, duplicate: true };
+  }
   const changed = change(structuredClone(previous.draft));
   if (!record(changed)) throw new Error('草稿更新无法无损保存。');
   const draft = merge ? { ...previous.draft, ...structuredClone(changed) } : structuredClone(changed);
-  const candidate = { ...previous, draft };
+  const candidate = { ...previous, draft, prefills: prefillId === undefined ? previous.prefills : [...previous.prefills, prefillId] };
   if (!isVersion(candidate)) throw new Error('草稿更新无法无损保存。');
-  if (sameComposerDraftValue(previous.draft, draft)) return { root, after: snapshot(previous, before.owner), changed: false };
+  if (prefillId === undefined && sameComposerDraftValue(previous.draft, draft)) {
+    return { root, after: snapshot(previous, before.owner), changed: false, duplicate: false };
+  }
   if ([...entry.versions, ...entry.retained].some(version => version.revision === nextRevision)) {
     throw new Error('草稿新版本已存在，请重新核对。');
   }
   const next: Version = { ...candidate, revision: nextRevision, placeholder: false };
   const versions = [...entry.versions]; versions[index] = next;
-  return { root: replaceEntry(store, before.owner, { ...entry, versions }), after: snapshot(next, before.owner), changed: true };
+  return { root: replaceEntry(store, before.owner, { ...entry, versions }), after: snapshot(next, before.owner), changed: true, duplicate: false };
 }
 
 function importArchive(): Repository {

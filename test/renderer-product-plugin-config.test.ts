@@ -3,21 +3,25 @@ import { test } from 'node:test';
 import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 import type { PluginSummary } from '../src/renderer/pages/plugins/catalog.ts';
 import { WorkbenchError } from '../src/renderer/app/client.ts';
-import { reconcilePluginConfig, writePluginConfig } from '../src/renderer/app/ProductPluginConfig.ts';
+import { pluginConfigBlocksScope, reconcilePluginConfig, saveRecoveredPluginEdit, writePluginConfig } from '../src/renderer/app/ProductPluginConfig.ts';
 import type { ProductConfigurationWrites } from '../src/renderer/app/ProductPluginConfig.ts';
+import { SettingsConfigOperations } from '../src/renderer/settings/config-operations.ts';
+import type { SettingsWriteStorage, WriteStatus } from '../src/renderer/settings/config-operations.ts';
 
 const plugin: PluginSummary = { id: 'demo', name: 'demo', installed: true, enabled: true, installPolicy: 'AVAILABLE', source: { type: 'local' } };
 const target = { hostId: 'local', cwd: '/workspace', plugin, enabled: false };
+const source = { hostId: 'local', generation: 'generation-1', homeDirectory: '/home', codexHome: '/codex' };
+const originalOrigin = { section: 'plugins-settings' as const, scope: ['/workspace'], draft: { pluginId: 'demo', enabled: false }, source };
 
 function fixture() {
-  let current = true, enabled = false;
+  let current = true, enabled = false, inventorySource: unknown = source, pluginSource = plugin.source;
   let snapshot: ReturnType<ProductConfigurationWrites['getSnapshot']> = { records: [], loading: false, error: null, inFlight: [] };
   const calls: { method: string; value?: unknown }[] = [];
   const client = { async rpc(method: string) {
     calls.push({ method });
     if (method === 'config/read') return { layers: [{ name: { type: 'user', file: '/codex/config.toml' }, version: 'v1' }],
       yardConfigSource: { hostId: 'local', generation: 'generation-1', homeDirectory: '/home', codexHome: '/codex' } };
-    if (method === 'plugin/installed') return { marketplaces: [{ name: 'Local', path: '/market', plugins: [{ ...plugin, enabled }] }] };
+    if (method === 'plugin/installed') return { marketplaces: [{ name: 'Local', path: '/market', plugins: [{ ...plugin, enabled, source: pluginSource }] }], yardConfigSource: inventorySource };
     throw new Error(`Unexpected RPC ${method}`);
   } } as unknown as WorkbenchClient;
   const operations: ProductConfigurationWrites = {
@@ -35,7 +39,9 @@ function fixture() {
     async finishSuccessfulGroup(ids) { calls.push({ method: 'finish-success', value: ids }); },
   };
   return { client, operations, calls, current: () => current, setCurrent: (value: boolean) => { current = value; },
-    setEnabled: (value: boolean) => { enabled = value; }, setSnapshot: (value: typeof snapshot) => { snapshot = value; } };
+    setEnabled: (value: boolean) => { enabled = value; }, setSnapshot: (value: typeof snapshot) => { snapshot = value; },
+    setPluginSource: (value: PluginSummary['source']) => { pluginSource = value; },
+    setInventorySource: (value: unknown) => { inventorySource = value; } };
 }
 
 test('plugin settings require the shared controller and keep the original source and owner', async () => {
@@ -52,7 +58,7 @@ test('plugin settings require the shared controller and keep the original source
   };
   assert.equal(submission.hostId, 'local'); assert.equal(submission.dispatchAllowed, true);
   assert.deepEqual(submission.origin, { section: 'plugins-settings', scope: ['/workspace'],
-    draft: { pluginId: 'demo', enabled: false }, source: { hostId: 'local', generation: 'generation-1', homeDirectory: '/home', codexHome: '/codex' } });
+    draft: { pluginId: 'demo', enabled: false, sourceType: 'local' }, source: { hostId: 'local', generation: 'generation-1', homeDirectory: '/home', codexHome: '/codex' } });
   assert.deepEqual(submission.params, { edits: [{ keyPath: 'plugins.demo.enabled', value: false, mergeStrategy: 'upsert' }],
     filePath: '/codex/config.toml', expectedVersion: 'v1', reloadUserConfig: true });
   assert.deepEqual(item.calls.filter(call => call.method === 'finish-success').map(call => call.value), [['original-op']]);
@@ -85,15 +91,274 @@ test('plugin settings keep the original receipt on mismatched or unknown outcome
 
 test('plugin recovery checks the original operation and rereads the inventory before closing', async () => {
   const item = fixture();
-  item.setSnapshot({ records: [{ operationId: 'original-op', hostId: 'local', phase: 'unknown', origin: { section: 'plugins-settings' } },
-    { operationId: 'other-op', hostId: 'other', phase: 'unknown', origin: { section: 'plugins-settings' } }], loading: false, error: null, inFlight: [] });
+  item.setSnapshot({ records: [{ operationId: 'original-op', hostId: 'local', phase: 'unknown', origin: originalOrigin },
+    { operationId: 'other-op', hostId: 'other', phase: 'unknown', origin: originalOrigin }], loading: false, error: null, inFlight: [] });
   await reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', item.current);
-  assert.deepEqual(item.calls.map(call => call.method), ['check', 'plugin/installed', 'finish']);
-  assert.deepEqual(item.calls.filter(call => call.method === 'check' || call.method === 'finish').map(call => call.value), ['original-op', 'original-op']);
+  assert.deepEqual(item.calls.map(call => call.method), ['check', 'plugin/installed', 'finish-success']);
+  assert.deepEqual(item.calls.filter(call => call.method === 'check' || call.method === 'finish-success').map(call => call.value), ['original-op', ['original-op']]);
   const stale = fixture();
-  stale.setSnapshot({ records: [{ operationId: 'old', hostId: 'local', phase: 'unknown', origin: { section: 'plugins-settings' } }], loading: false, error: null, inFlight: [] });
+  stale.setSnapshot({ records: [{ operationId: 'old', hostId: 'local', phase: 'unknown', origin: originalOrigin }], loading: false, error: null, inFlight: [] });
   const originalCheck = stale.operations.check;
   stale.operations.check = async id => { await originalCheck(id); stale.setCurrent(false); };
   await assert.rejects(reconcilePluginConfig(stale.operations, stale.client, 'local', '/workspace', stale.current), { name: 'AbortError' });
-  assert.equal(stale.calls.some(call => call.method === 'finish'), false);
+  assert.equal(stale.calls.some(call => call.method === 'finish-success'), false);
+});
+
+class MemoryStorage implements SettingsWriteStorage {
+  value: unknown;
+  fail = false;
+  async read() { return structuredClone(this.value); }
+  async update(change: (value: unknown) => unknown) {
+    if (this.fail) throw new Error('fixture draft persistence failed');
+    this.value = structuredClone(change(structuredClone(this.value)));
+    return structuredClone(this.value);
+  }
+  subscribe() { return () => {}; }
+}
+
+function recoveryFixture() {
+  const storage = new MemoryStorage(), calls: { method: string; id?: string }[] = [], receipts = new Map<string, WriteStatus>();
+  const submissions: Record<string, unknown>[] = [];
+  let sequence = 0, behavior: 'success' | 'rejected' | 'lost' = 'success';
+  const client = { async host(endpoint: string, params: Record<string, unknown>) {
+    assert.equal(endpoint, 'configuration-write');
+    const id = String(params.operationId); calls.push({ method: String(params.action), id });
+    if (params.action === 'status') return { operation: receipts.get(id) ?? null };
+    assert.equal(params.action, 'submit');
+    submissions.push(structuredClone(params));
+    const operation: WriteStatus = behavior === 'rejected'
+      ? { operationId: id, hostId: 'local', method: 'config/batchWrite', state: 'failed', terminal: { kind: 'rejected', code: -32000 } }
+      : behavior === 'lost' ? { operationId: id, hostId: 'local', method: 'config/batchWrite', state: 'pending' }
+        : { operationId: id, hostId: 'local', method: 'config/batchWrite', state: 'succeeded', terminal: { kind: 'ok' } };
+    receipts.set(id, operation);
+    if (behavior === 'lost') throw new Error('Original reply lost');
+    return behavior === 'rejected' ? { outcome: 'error', operation, error: { message: 'Rejected', uncertain: false } }
+      : { outcome: 'success', operation, result: { status: 'ok' } };
+  }, async rpc(_method: string, _params: unknown, _hostId: string, options?: Parameters<WorkbenchClient['rpc']>[3]) {
+    options?.assertBeforeSend?.();
+    calls.push({ method: _method });
+    if (_method === 'config/read') return { layers: [{ name: { type: 'user', file: '/codex/config.toml' }, version: 'fresh-version' }], yardConfigSource: source };
+    assert.equal(_method, 'plugin/installed');
+    return { marketplaces: [{ name: 'Local', plugins: [{ ...plugin, enabled: false }] }], yardConfigSource: source };
+  } } as unknown as WorkbenchClient;
+  const operations = new SettingsConfigOperations(client, storage, () => `original-${++sequence}`);
+  const submit = (cwd: string, canDispatch = () => true) => operations.submit('local', 'config/batchWrite', {
+    edits: [{ keyPath: 'plugins.demo.enabled', value: false, mergeStrategy: 'upsert' }],
+  }, { ...originalOrigin, scope: [cwd] }, canDispatch);
+  return { storage, operations, client, calls, receipts, submissions, submit, behavior(value: typeof behavior) { behavior = value; } };
+}
+
+test('checking a not-sent plugin edit preserves both original scope drafts with the real controller', async () => {
+  const item = recoveryFixture();
+  await assert.rejects(item.submit('/workspace', () => false), /before it was sent/);
+  await assert.rejects(item.submit('/other-workspace', () => false), /before it was sent/);
+  const before = structuredClone(item.storage.value);
+  await assert.rejects(reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', () => true, 'original-1'), /preserved edit/);
+  assert.deepEqual(item.storage.value, before);
+  assert.deepEqual(item.operations.getSnapshot().records.map(record => [record.operationId, record.origin.scope, record.origin.draft]), [
+    ['original-1', ['/workspace'], originalOrigin.draft], ['original-2', ['/other-workspace'], originalOrigin.draft],
+  ]);
+  await assert.rejects(reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', () => true, 'original-2'), /this scope/);
+  assert.deepEqual(item.storage.value, before);
+  assert.deepEqual(item.calls, []);
+});
+
+test('a rejected plugin receipt keeps its original edit and another scope without another write', async () => {
+  const item = recoveryFixture(); item.behavior('rejected');
+  await assert.rejects(item.submit('/workspace'), /configuration write was rejected/);
+  await assert.rejects(item.submit('/other-workspace', () => false), /before it was sent/);
+  const before = structuredClone(item.storage.value);
+  await assert.rejects(reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', () => true, 'original-1'), /preserved edit/);
+  assert.deepEqual(item.storage.value, before);
+  assert.deepEqual(item.calls, [{ method: 'submit', id: 'original-1' }]);
+});
+
+test('unknown and late successful plugin receipts close only the original confirmed operation', async () => {
+  const item = recoveryFixture();
+  await assert.rejects(item.submit('/other-workspace', () => false), /before it was sent/);
+  item.behavior('lost'); await assert.rejects(item.submit('/workspace'), /could not be confirmed/);
+  const foreign = structuredClone(item.operations.getSnapshot().records[0]);
+  await assert.rejects(reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', () => true, 'original-2'), /needs confirmation/);
+  assert.equal(item.operations.getSnapshot().records.length, 2);
+  item.receipts.set('original-2', { operationId: 'original-2', hostId: 'local', method: 'config/batchWrite', state: 'succeeded', terminal: { kind: 'ok' } });
+  await reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', () => true, 'original-2');
+  assert.deepEqual(item.operations.getSnapshot().records, [foreign]);
+  assert.equal(item.calls.filter(call => call.method === 'submit').length, 1);
+  assert.equal(item.calls.filter(call => call.method === 'status').length, 2);
+  assert.equal(item.calls.filter(call => call.method === 'plugin/installed').length, 1);
+});
+
+test('a current inventory cannot close an original plugin edit with a different desired value', async () => {
+  const item = fixture(); item.setEnabled(true);
+  item.setSnapshot({ records: [{ operationId: 'original-op', hostId: 'local', phase: 'finished',
+    origin: originalOrigin, operation: { state: 'succeeded' } }], loading: false, error: null, inFlight: [] });
+  await assert.rejects(reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', item.current, 'original-op'), /differs/);
+  assert.equal(item.calls.some(call => call.method === 'finish-success' || call.method === 'finish'), false);
+});
+
+test('plugin receipts cannot be confirmed by another home, missing provenance or an automatic reconnect', async () => {
+  for (const inventorySource of [undefined, { ...source, codexHome: '/other-codex' }, { ...source, homeDirectory: '/other-home' }, { ...source, generation: 'reconnected' }]) {
+    const item = fixture(); item.setInventorySource(inventorySource);
+    await assert.rejects(writePluginConfig(item.operations, item.client, target, item.current), /different configuration source/);
+    assert.equal(item.calls.filter(call => call.method === 'submit').length, 1);
+    assert.equal(item.calls.some(call => call.method === 'finish-success'), false);
+  }
+  for (const inventorySource of [undefined, { ...source, codexHome: '/other-codex' }, { ...source, homeDirectory: '/other-home' }]) {
+    const item = fixture(); item.setInventorySource(inventorySource);
+    item.setSnapshot({ records: [{ operationId: 'original-op', hostId: 'local', phase: 'finished', origin: originalOrigin,
+      operation: { state: 'succeeded' } }], loading: false, error: null, inFlight: [] });
+    await assert.rejects(reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', item.current), /different configuration source/);
+    assert.equal(item.calls.some(call => call.method === 'finish-success' || call.method === 'submit'), false);
+  }
+});
+
+test('an explicit receipt check accepts the same target after reconnect and preserves overridden receipts until review', async () => {
+  const item = fixture(); item.setInventorySource({ ...source, generation: 'reconnected' });
+  item.setSnapshot({ records: [{ operationId: 'original-op', hostId: 'local', phase: 'finished', origin: originalOrigin,
+    operation: { state: 'succeeded' } }], loading: false, error: null, inFlight: [] });
+  await reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', item.current);
+  assert.deepEqual(item.calls.filter(call => call.method === 'finish-success').map(call => call.value), [['original-op']]);
+  const overridden = fixture();
+  overridden.operations.submit = async () => ({ operationId: 'overridden', result: { status: 'okOverridden' } });
+  await assert.rejects(writePluginConfig(overridden.operations, overridden.client, target, overridden.current), /overrides it/);
+  assert.equal(overridden.calls.some(call => call.method === 'finish-success'), false);
+});
+
+test('known plugin edits fence their original scope while unknown writes continue to fence the shared target', () => {
+  const snapshot = { records: [{ operationId: 'old', hostId: 'local', phase: 'not-started' as const, origin: originalOrigin }],
+    loading: false, error: null, inFlight: [] };
+  assert.equal(pluginConfigBlocksScope(snapshot, 'local', '/other-workspace'), false);
+  assert.equal(pluginConfigBlocksScope(snapshot, 'local', '/workspace'), true);
+  assert.equal(pluginConfigBlocksScope({ ...snapshot, records: [{ ...snapshot.records[0]!, phase: 'unknown' }] }, 'local', '/other-workspace'), true);
+});
+
+test('receipt review preserves overridden results and rejects a same-ID plugin from another source', async () => {
+  for (const terminal of [{ terminal: { kind: 'okOverridden' } }, { observedTerminal: { kind: 'okOverridden' } }]) {
+    const item = fixture();
+    item.setSnapshot({ records: [{ operationId: 'original-op', hostId: 'local', phase: 'finished', origin: originalOrigin,
+      operation: { state: 'succeeded', ...terminal } }], loading: false, error: null, inFlight: [] });
+    await assert.rejects(reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', item.current), /override/);
+    assert.equal(item.calls.some(call => call.method === 'finish-success'), false);
+  }
+  for (const sourceType of [undefined, 'local']) {
+    const item = fixture(); item.setPluginSource({ type: 'remote' });
+    item.setSnapshot({ records: [{ operationId: 'original-op', hostId: 'local', phase: 'finished',
+      origin: { ...originalOrigin, draft: { ...originalOrigin.draft, ...(sourceType ? { sourceType } : {}) } },
+      operation: { state: 'succeeded' } }], loading: false, error: null, inFlight: [] });
+    await assert.rejects(reconcilePluginConfig(item.operations, item.client, 'local', '/workspace', item.current), /identity or state differs/);
+    assert.equal(item.calls.some(call => call.method === 'finish-success'), false);
+  }
+});
+
+test('editing a recovered target changes only its exact revision and keeps source and foreign drafts', async () => {
+  const item = recoveryFixture();
+  await assert.rejects(item.submit('/workspace', () => false), /before it was sent/);
+  await assert.rejects(item.submit('/other-workspace', () => false), /before it was sent/);
+  await item.operations.restoreOriginalPluginEdit(item.operations.getSnapshot().records[0]!);
+  const original = structuredClone(item.operations.getSnapshot().drafts[0]!);
+  const foreign = structuredClone(item.operations.getSnapshot().records[0]!);
+  await item.operations.editRecoveredPluginDraft(original, true);
+  const edited = structuredClone(item.operations.getSnapshot().drafts[0]!);
+  assert.notEqual(edited.revision, original.revision);
+  assert.deepEqual({ ...edited, revision: original.revision }, { ...original, draft: { ...(original.draft as object), enabled: true } });
+  await assert.rejects(item.operations.editRecoveredPluginDraft(original, false), /saved plugin edit changed/);
+  assert.deepEqual(item.operations.getSnapshot().drafts, [edited]);
+  assert.deepEqual(item.operations.getSnapshot().records, [foreign]);
+  assert.equal(item.calls.some(call => call.method === 'submit'), false);
+});
+
+test('originalFinished checks the captured page after the browser atom finishes reading', async () => {
+  const item = recoveryFixture();
+  const read = item.storage.read.bind(item.storage); let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  item.storage.read = async () => { await gate; return read(); };
+  let current = true;
+  const pending = item.operations.originalFinished('local', 'unknown-original', 'config/batchWrite', () => {
+    if (!current) throw new Error('Original page changed');
+  });
+  current = false; release();
+  await assert.rejects(pending, /Original page changed/);
+  assert.deepEqual(item.calls, []);
+});
+
+test('an original status read cannot dispatch after its page becomes stale while reading the atom', async () => {
+  const item = recoveryFixture(); item.behavior('lost');
+  await assert.rejects(item.submit('/workspace'), /could not be confirmed/);
+  const originalRead = item.storage.read.bind(item.storage); let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  item.storage.read = async () => { await waiting; return originalRead(); };
+  let current = true;
+  const check = item.operations.check('original-1', false, () => { if (!current) throw new Error('Original page changed'); });
+  current = false; release();
+  await assert.rejects(check, /Original page changed/);
+  assert.equal(item.calls.filter(call => call.method === 'status').length, 0);
+  assert.equal(item.operations.getSnapshot().records.length, 1);
+});
+
+test('restoring a not-sent plugin edit atomically preserves its original scope before closing and explicitly saves with a fresh version', async () => {
+  const item = recoveryFixture();
+  await assert.rejects(item.submit('/workspace', () => false), /before it was sent/);
+  await assert.rejects(item.submit('/other-workspace', () => false), /before it was sent/);
+  const original = structuredClone(item.operations.getSnapshot().records[0]!);
+  await assert.rejects(item.operations.finish(original.operationId), /Restore the original plugin edit/);
+  const before = structuredClone(item.storage.value);
+  item.storage.fail = true;
+  await assert.rejects(item.operations.restoreOriginalPluginEdit(original), /persistence failed/);
+  assert.deepEqual(item.storage.value, before);
+  item.storage.fail = false;
+  await item.operations.restoreOriginalPluginEdit(original);
+  const draft = item.operations.getSnapshot().drafts[0]!;
+  assert.equal(draft.hostId, 'local'); assert.deepEqual(draft.scope, ['/workspace']);
+  assert.equal(draft.editorId, 'recovered:original-1');
+  assert.deepEqual(draft.draft, { pluginId: 'demo', enabled: false, originalSource: source });
+  assert.deepEqual(item.operations.getSnapshot().records.map(record => record.operationId), ['original-2']);
+  assert.equal(await item.operations.originalNotSentClosed('local', 'original-1', 'config/batchWrite'), true);
+  assert.deepEqual(item.calls, []);
+  await saveRecoveredPluginEdit(item.operations, item.client, draft, () => true);
+  assert.equal(item.submissions.length, 1);
+  assert.equal(item.submissions[0]!.operationId, 'original-3');
+  assert.equal((item.submissions[0]!.params as Record<string, unknown>).expectedVersion, 'fresh-version');
+  assert.deepEqual(item.operations.getSnapshot().drafts, []);
+  assert.deepEqual(item.operations.getSnapshot().records.map(record => record.operationId), ['original-2']);
+});
+
+test('unknown plugin writes cannot become resubmittable edits; explicit discard is scoped to the known rejected original', async () => {
+  const item = recoveryFixture(); item.behavior('rejected');
+  await assert.rejects(item.submit('/workspace'), /rejected/);
+  const rejected = structuredClone(item.operations.getSnapshot().records[0]!);
+  await assert.rejects(item.operations.finish(rejected.operationId), /Restore/);
+  await item.operations.restoreOriginalPluginEdit(rejected);
+  item.behavior('lost'); await assert.rejects(item.submit('/other-workspace'), /could not be confirmed/);
+  const unknown = structuredClone(item.operations.getSnapshot().records[0]!);
+  await assert.rejects(item.operations.restoreOriginalPluginEdit(unknown), /needs confirmation/);
+  await assert.rejects(item.operations.finish(unknown.operationId, { discardOriginalEdit: true }), /not ready/);
+  assert.equal(item.operations.getSnapshot().drafts.length, 1);
+  assert.equal(item.calls.filter(call => call.method === 'submit').length, 2);
+  const known = recoveryFixture();
+  await assert.rejects(known.submit('/workspace', () => false), /before it was sent/);
+  await assert.rejects(known.submit('/other-workspace', () => false), /before it was sent/);
+  await known.operations.finish('original-1', { discardOriginalEdit: true });
+  assert.deepEqual(known.operations.getSnapshot().records.map(record => record.operationId), ['original-2']);
+});
+
+test('a recovered plugin edit stays intact when its source changes or its same editor gains a newer revision during review', async () => {
+  const item = recoveryFixture();
+  await assert.rejects(item.submit('/workspace', () => false), /before it was sent/);
+  await item.operations.restoreOriginalPluginEdit(item.operations.getSnapshot().records[0]!);
+  const draft = structuredClone(item.operations.getSnapshot().drafts[0]!);
+  const rpc = item.client.rpc.bind(item.client);
+  item.client.rpc = async <T>(method: string, params: Record<string, unknown>, hostId: string, options?: Parameters<WorkbenchClient['rpc']>[3]) => {
+    const response = await rpc<Record<string, unknown>>(method, params, hostId, options);
+    return { ...response, yardConfigSource: { ...source, codexHome: '/different-home' } } as T;
+  };
+  await assert.rejects(saveRecoveredPluginEdit(item.operations, item.client, draft, () => true), /different configuration source/);
+  assert.deepEqual(item.operations.getSnapshot().drafts, [draft]);
+  item.client.rpc = async <T>(method: string, params: Record<string, unknown>, hostId: string, options?: Parameters<WorkbenchClient['rpc']>[3]) => {
+    if (method === 'plugin/installed') await item.operations.saveDraft(draft.hostId, draft.section, draft.scope, draft.editorId, { pluginId: 'demo', enabled: true, originalSource: source });
+    return rpc<T>(method, params, hostId, options);
+  };
+  await assert.rejects(saveRecoveredPluginEdit(item.operations, item.client, draft, () => true), /draft revision changed/);
+  assert.equal(item.calls.filter(call => call.method === 'submit').length, 0);
+  assert.equal((item.operations.getSnapshot().drafts[0]!.draft as { enabled: boolean }).enabled, true);
+  assert.ok(item.operations.getSnapshot().drafts[0]!.revision > draft.revision);
 });

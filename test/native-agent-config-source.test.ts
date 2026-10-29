@@ -119,13 +119,14 @@ test('missing layers or unknown version never invent a base', async t => {
     network_access: true, exclude_tmpdir_env_var: true, exclude_slash_tmp: false });
 });
 
-test('a daemon home that differs from the selected host is not a verified base', async t => {
+test('an unverified daemon home cannot be labelled as the selected configuration source', async t => {
   for (const daemonHome of ['/different/codex', undefined]) await t.test(String(daemonHome), async t => {
     const h = await fixture(t);
     h.remote.handlers.set('initialize', () => ({ userAgent: 'codex/0.164.0', codexHome: daemonHome }));
     const changed = await h.rpc('config/read', { includeLayers: true }, remoteId);
-    assert.equal(changed.result.yardAgentConfiguration.base, null);
-    assert.equal(changed.result.yardConfigSource.codexHome, h.remoteHome);
+    assert.equal(changed.result, undefined);
+    assert.ok(changed.error, JSON.stringify(changed));
+    assert.equal(h.remote.calls('config/read').length, 0);
   });
 });
 
@@ -183,6 +184,23 @@ test('a changed daemon version or home during a held read is rejected', async t 
     assert.equal(reply.result, undefined);
     h.app.control.server = original;
   }
+});
+
+test('a daemon with another actual home cannot label configuration or plugin reads with the selected home', async t => {
+  const h = await fixture(t), original = h.app.control.server;
+  assert.ok(original);
+  h.app.control.server = { ...original, codexHome: '/different/codex' };
+  for (const method of ['config/read', 'hooks/list', 'skills/list', 'plugin/installed']) {
+    const before = h.local.calls(method).length;
+    const reply = await h.rpc(method, method === 'config/read' ? { includeLayers: true } : { cwds: ['/fixture/project'] });
+    assert.match(reply.error?.message ?? '', /home does not match the selected host/);
+    assert.equal(reply.result, undefined);
+    assert.equal(h.local.calls(method).length, before);
+  }
+  h.app.control.server = original;
+  const valid = await h.rpc('config/read', { includeLayers: true });
+  assert.equal(valid.error, undefined, JSON.stringify(valid));
+  assert.equal(valid.result.yardConfigSource.codexHome, h.localHome);
 });
 
 test('a disconnected original read cannot authorize a write after reconnection', async t => {

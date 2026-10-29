@@ -1,6 +1,6 @@
 import { Children, isValidElement, useEffect, useId, useMemo, useState } from 'react';
 import type { ComponentProps, ReactNode } from 'react';
-import { Check, Clipboard, Code2, Eye } from 'lucide-react';
+import { Check, Clipboard, Code2, Eye, File } from 'lucide-react';
 import Markdown from 'react-markdown';
 import type { Components, UrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -15,6 +15,7 @@ import { MessageImage } from '../messages/MessageImage.tsx';
 import { resolveFileLocation, resolveToolFileLocation, safeExternalUrl } from '../messages/message-data.ts';
 import type { ImageSource } from '../messages/message-data.ts';
 import { remarkVisualizations } from './visualization-directives.ts';
+import { normalizeFileCitationEscapes, remarkFileCitations } from './file-citations.ts';
 
 const schema = {
   ...defaultSchema,
@@ -29,7 +30,7 @@ const schema = {
   protocols: { ...defaultSchema.protocols, href: [...(defaultSchema.protocols?.href ?? []), 'yard-visualization'], src: ['http', 'https', 'data'] },
 };
 
-const remarkPlugins: NonNullable<ComponentProps<typeof Markdown>['remarkPlugins']> = [remarkGfm, remarkMath, remarkVisualizations];
+const remarkPlugins: NonNullable<ComponentProps<typeof Markdown>['remarkPlugins']> = [remarkGfm, remarkMath, remarkFileCitations, remarkVisualizations];
 type RehypePlugins = NonNullable<ComponentProps<typeof Markdown>['rehypePlugins']>;
 const safeHtmlPlugins: RehypePlugins = [rehypeRaw, [rehypeSanitize, schema], rehypeKatex, rehypeHighlight];
 const textHtmlPlugins: RehypePlugins = [rehypeKatex, rehypeHighlight];
@@ -107,16 +108,39 @@ export type StandaloneMarkdownProps = {
   onOpenFile?: (path: string) => void;
   onOpenFileAt?: StandaloneMessagesProps['onOpenFileAt'];
   onOpenVisualization?: StandaloneMessagesProps['onOpenVisualization'];
+  onOpenBrowser?: StandaloneMessagesProps['onOpenBrowser'];
   onOpenImage?: (image: ImageSource) => void;
 };
 
-export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowBasicHtml = false, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenImage }: StandaloneMarkdownProps) {
+function safeBrowserUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
+  } catch { return false; }
+}
+
+function GoogleDocumentLinkIcon({ url }: { url: string }) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== 'docs.google.com' || !/^\/(?:document|spreadsheets|presentation)\/d\/[^/]+(?:\/|$)/.test(parsed.pathname)) return null;
+  } catch { return null; }
+  return <svg className="yard-markdown-file-icon" width="13" height="13" viewBox="0 0 84 72"
+    aria-hidden="true" focusable="false" data-markdown-copy="exclude">
+    <path fill="#0f9d58" d="M28 0 42 24 14 72 0 48Z" />
+    <path fill="#fbbc04" d="M28 0H56L84 48H56Z" />
+    <path fill="#4285f4" d="M14 72 28 48H84L70 72Z" />
+  </svg>;
+}
+
+export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowBasicHtml = false, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage }: StandaloneMarkdownProps) {
+  const markdownText = useMemo(() => normalizeFileCitationEscapes(text), [text]);
   const components = useMemo<Components>(() => ({
     pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
     a: ({ href, children, node }) => {
       if (!href) return <span>{children}</span>;
       if (href.startsWith('yard-visualization:')) {
-        if (node?.properties?.dataYardVisualization !== 'directive') return <span>{children}</span>;
+        // Generated visualization links have no source position; raw HTML retains one.
+        if (node?.properties?.dataYardVisualization !== 'directive' || node.position) return <span>{children}</span>;
         let path = '';
         try { path = decodeURIComponent(href.slice('yard-visualization:'.length)); } catch { return <span>{children}</span>; }
         if (!path.trim()) return <span>{children}</span>;
@@ -125,19 +149,29 @@ export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowB
       }
       const external = safeExternalUrl(href);
       if (external) return <a href={external} target={external.startsWith('#') ? undefined : '_blank'}
-        rel={external.startsWith('#') ? undefined : 'noreferrer noopener'}>{children}</a>;
+        rel={external.startsWith('#') ? undefined : 'noreferrer noopener'} onClick={event => {
+          if (!threadId?.trim() || !onOpenBrowser || !safeBrowserUrl(external) || event.defaultPrevented || event.button !== 0
+            || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          onOpenBrowser({ hostId, threadId, url: external, source: 'link' });
+        }}><GoogleDocumentLinkIcon url={external} />{children}</a>;
       if (!onOpenFile && !onOpenFileAt) return <span>{children}</span>;
-      return <button type="button" className="yard-file-link" onClick={() => {
+      return <button type="button" className="yard-file-link yard-markdown-file-link" onClick={() => {
         const location = resolveFileLocation(href, cwd, hostId);
+        const encodedPath = href.replace(/#L[1-9]\d*(?:C[1-9]\d*)?(?:-L[1-9]\d*(?:C[1-9]\d*)?)?$/i, '');
+        try {
+          const decodedPath = decodeURIComponent(encodedPath);
+          if (/^(?:[a-z]:[\\/]|\\\\)/i.test(decodedPath)) location.path = resolveToolFileLocation(decodedPath, cwd, hostId).path;
+        } catch { /* resolveFileLocation preserves malformed links */ }
         if (onOpenFileAt) onOpenFileAt(location); else onOpenFile?.(location.path);
-      }}>{children}</button>;
+      }}><File className="yard-markdown-file-icon" size={13} strokeWidth={1.5} aria-hidden="true" />{children}</button>;
     },
     img: ({ src, alt }) => {
       if (typeof src !== 'string' || !src) return <span>Image unavailable</span>;
       const source: ImageSource = { kind: /^(?:https?:|data:)/i.test(src) ? 'url' : 'path', value: src, label: alt || 'Image' };
       return <MessageImage source={source} client={client} hostId={hostId} cwd={cwd} onOpen={onOpenImage ? () => onOpenImage(source) : undefined} />;
     },
-  }), [client, cwd, hostId, threadId, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenImage]);
+  }), [client, cwd, hostId, threadId, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenImage]);
   const transformUrl: UrlTransform = (value, _key) => {
     const trimmed = value.trim();
     if (_key === 'href' && trimmed.startsWith('yard-visualization:')) return trimmed;
@@ -146,5 +180,5 @@ export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowB
     return '';
   };
   return <div className="yard-markdown"><Markdown remarkPlugins={remarkPlugins}
-    rehypePlugins={allowBasicHtml ? safeHtmlPlugins : textHtmlPlugins} urlTransform={transformUrl} components={components}>{text}</Markdown></div>;
+    rehypePlugins={allowBasicHtml ? safeHtmlPlugins : textHtmlPlugins} urlTransform={transformUrl} components={components}>{markdownText}</Markdown></div>;
 }

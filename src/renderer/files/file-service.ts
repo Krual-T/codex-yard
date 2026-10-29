@@ -31,13 +31,17 @@ export function previewMimeType(path: string, mimeType: string): string {
   return extension && media[extension] || mimeType;
 }
 
-export async function readWorkspaceFile(client: WorkbenchClient, hostId: string, path: string): Promise<FileContents> {
+export async function readWorkspaceFile(client: WorkbenchClient, hostId: string, path: string, assertCurrent?: () => void): Promise<FileContents> {
+  assertCurrent?.();
+  const options = assertCurrent ? { assertBeforeSend: assertCurrent } : undefined;
   const result = await client.host<{ text?: unknown; blob?: unknown }>('workspace-files', {
     operation: 'read', hostId, path, representation: 'auto',
-  });
+  }, options);
+  assertCurrent?.();
   if (typeof result?.text !== 'string' && typeof result?.blob !== 'string') throw new Error('Invalid file response');
   // Auto detection samples only a prefix; validate all bytes before allowing editing.
-  const binary = await client.host<{ contentsBase64?: unknown; mimeType?: unknown }>('read-file-binary', { hostId, path });
+  const binary = await client.host<{ contentsBase64?: unknown; mimeType?: unknown }>('read-file-binary', { hostId, path }, options);
+  assertCurrent?.();
   if (typeof binary?.contentsBase64 !== 'string' || typeof binary.mimeType !== 'string') throw new Error('File is too large to preview');
   if (typeof result.text === 'string') {
     const bytes = base64Bytes(binary.contentsBase64);

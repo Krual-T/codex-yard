@@ -1,14 +1,13 @@
 import { Fragment as ReactFragment, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import { Bold, Code2, FileText, Italic, Link as LinkIcon, MessageSquare, X } from 'lucide-react';
 import { toggleMark } from 'prosemirror-commands';
-import { closeHistory, history, redo, undo } from 'prosemirror-history';
-import { DOMSerializer, Fragment, Schema, Slice } from 'prosemirror-model';
-import type { Mark, Node as ProseMirrorNode } from 'prosemirror-model';
-import { EditorState, Plugin, TextSelection } from 'prosemirror-state';
+import { closeHistory, history, isHistoryTransaction, redo, redoDepth, redoNoScroll, undo, undoDepth, undoNoScroll } from 'prosemirror-history';
+import { DOMParser as ProseMirrorDOMParser, DOMSerializer, Fragment, Mark, Schema, Slice } from 'prosemirror-model';
+import type { Node as ProseMirrorNode } from 'prosemirror-model';
+import { EditorState, Plugin, Selection, TextSelection } from 'prosemirror-state';
 import type { Transaction } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
-import type { ClipboardEvent } from 'react';
-import type { ComposerDocument } from '../workbench-contract.ts';
+import type { ComposerDocument, ComposerDraft } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
 import { documentChanges } from '../messages/message-edit.ts';
 import { composerSchema, httpAutolinkHref, linkOccurrenceAllocator, parseAgentThreadPath, readRichDocument, safeRichLinkHref } from './rich-document.ts';
@@ -17,35 +16,57 @@ import type { AgentMentionChoice, AgentMentionCurrent, AgentMentionTarget, RichC
 import type { Completion } from './standalone-completions.tsx';
 import { isStructuredAppInput } from './standalone-draft.ts';
 import type { Draft } from './standalone-draft.ts';
-import type { TextAgentSpan } from './text-agent-document.ts';
+import { projectTextAgentDocument, textInlineLabel, textInlineNode, textInlineSpan, textSegmentDocuments, updateTextAgentDocument } from './text-agent-document.ts';
+import type { TextAgentSpan, TextMarkSpan } from './text-agent-document.ts';
+export type { TextMarkSpan } from './text-agent-document.ts';
 
 export interface RichEditorHandle {
   focus(): void;
+  matchesDocument(document: ComposerDocument): boolean;
+  preparePromptAppend(source: ComposerDocument, addition: ComposerDocument): PreparedPromptAppend | null;
   insertCompletion(context: RichCompletionContext, query: RichCompletionQuery, item: Completion, cwd: string): boolean;
   captureAgentMentionTarget(readCurrent: () => AgentMentionCurrent | null, query?: RichCompletionQuery): AgentMentionTarget | null;
   insertAgentMention(target: AgentMentionTarget, choice: AgentMentionChoice): boolean;
 }
 export type { AgentMentionChoice, AgentMentionCurrent, AgentMentionTarget } from './rich-editor-actions.ts';
 export interface StructuredInputEditorHandle {
+  advanceRevision(before: string, after: string): void;
   focus(index?: number, position?: number): void;
+  matchesDocument(document: ComposerDocument): boolean;
+  preparePromptAppend(source: ComposerDocument, addition: ComposerDocument, index?: number, before?: ComposerDraft): PreparedPromptAppend | null;
+  activateFormatting(document: ComposerDocument, commit?: () => boolean): boolean;
+  visibleText(): string;
+  insertRichCompletion(query: RichCompletionQuery, item: Completion, cwd: string): boolean;
   replace(index: number, start: number, end: number, text: string, skill?: TextCompletionSkill): boolean;
   removeSkill(name: string, path: string): void;
   skills(): TextCompletionSkill[];
   captureAgentMentionTarget(index: number, readCurrent: () => AgentMentionCurrent | null, query?: RichCompletionQuery): TextAgentTarget | null;
   insertAgentMention(target: TextAgentTarget, choice: AgentMentionChoice): boolean;
 }
+export interface PreparedPromptAppend {
+  document: ComposerDocument | null;
+  text: string;
+  agents?: TextAgentChange;
+  apply(draft: ComposerDraft): boolean;
+}
 export interface TextCompletionSkill { name: string; path: string; managed: boolean }
 export interface TextSkillChange { before: TextCompletionSkill[]; after: TextCompletionSkill[] }
-export interface TextAgentSegment { index: number; text: string; agents: TextAgentSpan[] }
-export interface TextAgentChange { before: TextAgentSegment[]; after: TextAgentSegment[] }
+export interface TextAgentSegment { index: number; text: string; agents: TextAgentSpan[]; marks: TextMarkSpan[] }
+export interface TextAgentChange { before: TextAgentSegment[]; after: TextAgentSegment[]; document?: ComposerDocument }
 export interface StructuredInputEditorProps {
   draft: Draft;
+  currentDraft(): Draft;
+  sourceRevision?: string;
+  currentSourceRevision?(): string;
   onEdit(index: number, expectedText: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
+  onStaleEdit?(index: number, expectedText: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange, composing?: boolean): boolean;
   agentMentions?(index: number): readonly TextAgentSpan[];
-  onSelection?(index: number, cursor: number): void;
+  sourceMarks?(index: number): readonly TextMarkSpan[];
+  onSelection?(index: number, cursor: number, text?: string): void;
   onKeyDown(event: KeyboardEvent): boolean;
   onCompositionChange?(composing: boolean): void;
-  onPaste?(event: ClipboardEvent<HTMLTextAreaElement>): void;
+  onInvalid?(message?: string): void;
+  onPaste?(event: TextPasteEvent): void;
   readOnly?: boolean;
   ariaLabel?: string;
   placeholder?: string;
@@ -55,43 +76,183 @@ export interface StructuredInputEditorProps {
 }
 
 // The draft remains authoritative; this editor history joins each skill marker to its text replacement.
-const textHistorySchema = new Schema({ nodes: {
-  doc: { content: 'paragraph' }, paragraph: { content: 'inline*' },
-  text: { group: 'inline' }, skill: { inline: true, group: 'inline', atom: true, attrs: { name: {}, path: {}, managed: {} } },
-  agentMention: { inline: true, group: 'inline', atom: true, attrs: { name: {}, displayName: {}, conversationId: {}, path: {} } },
-} });
+const textHistorySchema = new Schema({ nodes: composerSchema.spec.nodes.update('paragraph', {
+  ...composerSchema.nodes.paragraph!.spec, whitespace: 'pre', parseDOM: [{ tag: 'p', preserveWhitespace: 'full' }],
+}).addToEnd('skill', { inline: true, group: 'inline', atom: true, selectable: false, attrs: { name: {}, path: {}, managed: {} },
+    toDOM: node => ['span', { 'data-text-skill': JSON.stringify(node.attrs), contenteditable: 'false', hidden: 'true' }],
+    parseDOM: [{ tag: 'span[data-text-skill]', getAttrs: dom => {
+      try { return JSON.parse((dom as HTMLElement).getAttribute('data-text-skill') ?? 'null'); } catch { return false; }
+    } }] }), marks: composerSchema.spec.marks });
 function textHistoryState(text: string, agents: readonly TextAgentSpan[] = []): EditorState {
   const children: ProseMirrorNode[] = [];
   let offset = 0;
   for (const agent of agents) {
-    if (agent.start < offset || agent.end > text.length || text.slice(agent.start, agent.end) !== (agent.attrs.displayName || agent.attrs.name)) {
+    if (agent.start < offset || agent.end > text.length || text.slice(agent.start, agent.end) !== textInlineLabel(agent)) {
       throw new Error('The saved chat references cannot be mapped to this input.');
     }
     if (agent.start > offset) children.push(textHistorySchema.text(text.slice(offset, agent.start)));
-    children.push(textHistorySchema.nodes.agentMention!.create(agent.attrs));
+    children.push(textInlineNode(agent, textHistorySchema));
     offset = agent.end;
   }
   if (offset < text.length) children.push(textHistorySchema.text(text.slice(offset)));
   const paragraph = textHistorySchema.nodes.paragraph!.create(null, children);
   return EditorState.create({ doc: textHistorySchema.nodes.doc!.create(null, paragraph), plugins: [history()] });
 }
-const agentLabel = (node: ProseMirrorNode): string => node.attrs.displayName || node.attrs.name;
+const textInline = (node: ProseMirrorNode): boolean => node.type.name === 'agentMention' || node.type.name === 'pluginMention';
+const agentLabel = (node: ProseMirrorNode): string => (node.type.name === 'pluginMention' ? '@' : '') + (node.attrs.displayName || node.attrs.name);
+interface HistoryToken { start: number; end: number; from: number; to: number; node?: ProseMirrorNode }
+function historyProjection(state: EditorState): { text: string; tokens: HistoryToken[]; agents: TextAgentSpan[]; firstPosition: number } {
+  let text = '', previousEnd: number | undefined, firstPosition: number | undefined;
+  const tokens: HistoryToken[] = [], agents: TextAgentSpan[] = [];
+  state.doc.descendants((block, position) => {
+    if (!block.isTextblock) return;
+    firstPosition ??= position + 1;
+    if (previousEnd !== undefined) {
+      tokens.push({ start: text.length, end: text.length + 1, from: previousEnd, to: position + 1 });
+      text += '\n';
+    }
+    block.forEach((node, offset) => {
+      const from = position + 1 + offset;
+      let value = '';
+      if (node.isText) value = node.text ?? '';
+      else if (textInline(node)) value = agentLabel(node);
+      else if (node.type.name === 'hard_break') value = '\n';
+      else if (node.type.name !== 'skill') value = '\ufffc';
+      if (!value) return;
+      const start = text.length;
+      text += value;
+      tokens.push({ start, end: text.length, from, to: from + node.nodeSize, node });
+      if (textInline(node)) { const span = textInlineSpan(node, start, text.length); if (span) agents.push(span); }
+    });
+    previousEnd = position + block.nodeSize - 1;
+    return false;
+  });
+  return { text, tokens, agents, firstPosition: firstPosition ?? 1 };
+}
+function simpleHistory(state: EditorState): boolean {
+  const block = state.doc.firstChild;
+  if (state.doc.childCount !== 1 || block?.type.name !== 'paragraph') return false;
+  let simple = true;
+  block.forEach(node => { if (!node.isText && !textInline(node) && node.type.name !== 'skill') simple = false; });
+  return simple;
+}
 function historyText(state: EditorState): string {
-  return state.doc.textBetween(0, state.doc.content.size, '', node => node.type.name === 'agentMention' ? agentLabel(node) : '');
+  return simpleHistory(state)
+    ? state.doc.textBetween(0, state.doc.content.size, '', node => textInline(node) ? agentLabel(node) : '')
+    : historyProjection(state).text;
 }
 function historyAgents(state: EditorState): TextAgentSpan[] {
+  if (!simpleHistory(state)) return historyProjection(state).agents;
   const agents: TextAgentSpan[] = [];
   let offset = 0;
   state.doc.descendants(node => {
     if (node.isText) offset += node.text?.length ?? 0;
-    else if (node.type.name === 'agentMention') {
+    else if (textInline(node)) {
       const label = agentLabel(node), start = offset;
       offset += label.length;
-      agents.push({ start, end: offset, attrs: { name: node.attrs.name, displayName: node.attrs.displayName,
-        conversationId: node.attrs.conversationId, path: node.attrs.path } });
+      const span = textInlineSpan(node, start, offset); if (span) agents.push(span);
     }
   });
   return agents;
+}
+function historyMarks(state: EditorState): TextMarkSpan[] {
+  return historyProjection(state).tokens.flatMap(token => token.node && token.node.type.name !== 'hard_break'
+    ? [{ start: token.start, end: token.end, marks: token.node.marks.map(mark => mark.toJSON()) }] : []);
+}
+function historyDocument(state: EditorState, source: ComposerDocument): ComposerDocument | null {
+  const original = readRichDocument(source), before = original && projectTextAgentDocument(original);
+  if (!before) return null;
+  const updated = updateTextAgentDocument(source, before.text, historyText(state), historyAgents(state));
+  const document = updated && readRichDocument(updated), projection = document && projectTextAgentDocument(document);
+  if (!document || !projection) return null;
+  const ranges: { start: number; end: number; marks: readonly Mark[] }[] = [];
+  let offset = 0;
+  state.doc.firstChild?.forEach(node => {
+    const length = node.isText ? node.text?.length ?? 0 : textInline(node) ? agentLabel(node).length : 0;
+    if (length) ranges.push({ start: offset, end: offset + length, marks: node.marks });
+    offset += length;
+  });
+  let transaction = EditorState.create({ doc: document }).tr;
+  let firstRange = 0;
+  for (const token of projection.tokens) {
+    if (!token.node || token.node.type.name === 'hard_break') continue;
+    while (firstRange < ranges.length && ranges[firstRange]!.end <= token.start) firstRange++;
+    for (let index = firstRange; index < ranges.length && ranges[index]!.start < token.end; index++) {
+      const range = ranges[index]!;
+      const start = Math.max(token.start, range.start), end = Math.min(token.end, range.end);
+      if (start >= end) continue;
+      const from = token.node.isText ? token.from + start - token.start : token.from;
+      const to = token.node.isText ? token.from + end - token.start : token.to;
+      transaction = transaction.removeMark(from, to);
+      for (const mark of range.marks) {
+        const type = composerSchema.marks[mark.type.name];
+        if (!type) return null;
+        transaction = transaction.addMark(from, to, type.create(mark.attrs));
+      }
+    }
+  }
+  const result = transaction.doc.toJSON() as ComposerDocument;
+  return readRichDocument(result) ? result : null;
+}
+function copiedWithoutSkillMarkers(slice: Slice): Slice {
+  const filter = (fragment: Fragment): Fragment => {
+    const nodes: ProseMirrorNode[] = [];
+    fragment.forEach(node => {
+      if (node.type.name !== 'skill') nodes.push(node.isLeaf ? node : node.copy(filter(node.content)));
+    });
+    return Fragment.fromArray(nodes);
+  };
+  return new Slice(filter(slice.content), slice.openStart, slice.openEnd);
+}
+function fullHistoryDocument(state: EditorState): ComposerDocument | null {
+  const content = copiedWithoutSkillMarkers(new Slice(state.doc.content, 0, 0)).content;
+  const result = state.doc.copy(content).toJSON() as ComposerDocument;
+  return readRichDocument(result) ? result : null;
+}
+function activateRichHistory(state: EditorState, source: ComposerDocument, editable: () => boolean): EditorState | null {
+  const original = readRichDocument(source), projection = original && projectTextAgentDocument(original);
+  const current = historyDocument(state, source), reconstructed = current && readRichDocument(current);
+  if (!original || !projection || !reconstructed || !original.eq(reconstructed)) return null;
+  let transaction = state.tr;
+  try {
+    for (const token of [...projection.tokens].reverse()) {
+      if (token.node && token.node.type.name !== 'hard_break') continue;
+      const from = historyPosition(state, token.start), to = historyPosition(state, token.end);
+      let onlyText = true;
+      state.doc.nodesBetween(from, to, node => { if (node.isInline && !node.isText) onlyText = false; });
+      if (!onlyText || state.doc.textBetween(from, to) !== '\n') return null;
+      transaction = transaction.delete(from, to);
+      if (token.node) transaction = transaction.insert(from, textHistorySchema.nodeFromJSON(token.node.toJSON()));
+      else transaction = transaction.split(from);
+    }
+    const next = state.apply(closeHistory(transaction.setMeta('addToHistory', false)));
+    const actual = fullHistoryDocument(next), document = actual && readRichDocument(actual);
+    if (!document || !document.eq(original)) return null;
+    const plugins = richEditorPlugins(textHistorySchema, state.plugins[0]).rich;
+    plugins.unshift(richAutolinkPlugin(editable));
+    return next.reconfigure({ plugins });
+  } catch { return null; }
+}
+function applySourceMarks(state: EditorState, spans: readonly TextMarkSpan[]): EditorState {
+  let transaction = state.tr, offset = 0, firstSpan = 0;
+  state.doc.firstChild?.forEach((node, position) => {
+    const length = node.isText ? node.text?.length ?? 0 : textInline(node) ? agentLabel(node).length : 0;
+    if (!length) return;
+    const from = position + 1, end = offset + length;
+    transaction = transaction.removeMark(from, from + node.nodeSize);
+    while (firstSpan < spans.length && spans[firstSpan]!.end <= offset) firstSpan++;
+    for (let index = firstSpan; index < spans.length && spans[index]!.start < end; index++) {
+      const span = spans[index]!, start = Math.max(offset, span.start), stop = Math.min(end, span.end);
+      if (start >= stop || !node.isText && (start !== offset || stop !== end)) continue;
+      const left = node.isText ? from + start - offset : from, right = node.isText ? from + stop - offset : from + node.nodeSize;
+      for (const mark of span.marks) {
+        const type = textHistorySchema.marks[mark.type];
+        if (type) transaction = transaction.addMark(left, right, type.create(mark.attrs));
+      }
+    }
+    offset = end;
+  });
+  return transaction.doc.eq(state.doc) ? state : state.apply(transaction.setMeta('addToHistory', false));
 }
 function historySkills(state: EditorState): TextCompletionSkill[] {
   const result: TextCompletionSkill[] = [];
@@ -100,21 +261,57 @@ function historySkills(state: EditorState): TextCompletionSkill[] {
   });
   return result;
 }
+function historyContainsManagedSkills(state: EditorState, isStale: (skill: TextCompletionSkill) => boolean): boolean {
+  const contains = (value: EditorState) => historySkills(value).some(item => item.managed && isStale(item));
+  if (contains(state)) return true;
+  // Inspect reachable history on immutable states without dispatching to the live editor.
+  for (const [command, depth] of [[undoNoScroll, undoDepth(state)], [redoNoScroll, redoDepth(state)]] as const) {
+    let current = state;
+    for (let index = 0; index < depth; index++) {
+      let next: EditorState | undefined;
+      if (!command(current, transaction => { next = current.apply(transaction); }) || !next) break;
+      current = next;
+      if (contains(current)) return true;
+    }
+  }
+  return false;
+}
 function textOffset(state: EditorState, position: number): number {
+  if (!simpleHistory(state)) {
+    let offset = 0;
+    for (const token of historyProjection(state).tokens) {
+      if (position <= token.from) break;
+      offset = token.node?.isText ? token.start + Math.min(token.end - token.start, position - token.from)
+        : position >= token.to ? token.end : token.start;
+    }
+    return offset;
+  }
   let offset = 0;
   state.doc.descendants((node, pos) => {
     if (node.isText && pos < position) offset += Math.min(node.nodeSize, position - pos);
-    else if (node.type.name === 'agentMention' && pos < position) offset += agentLabel(node).length;
+    else if (textInline(node) && pos < position) offset += agentLabel(node).length;
   });
   return offset;
 }
 function historyPosition(state: EditorState, offset: number): number {
+  if (!simpleHistory(state)) {
+    const projection = historyProjection(state);
+    let previous = projection.firstPosition;
+    for (const token of projection.tokens) {
+      if (offset < token.start) return previous;
+      if (offset === token.start) return token.from;
+      if (offset < token.end) return token.node?.isText ? token.from + offset - token.start
+        : offset - token.start < (token.end - token.start) / 2 ? token.from : token.to;
+      previous = token.to;
+    }
+    return previous;
+  }
   let seen = 0, position = 1;
   state.doc.firstChild!.forEach(node => {
     if (node.isText) {
       position += Math.max(0, Math.min(offset - seen, node.nodeSize));
       seen += node.nodeSize;
-    } else if (node.type.name === 'agentMention') {
+    } else if (textInline(node)) {
       const length = agentLabel(node).length;
       if (offset >= seen + length || offset > seen && offset - seen >= length / 2) position += node.nodeSize;
       seen += length;
@@ -123,12 +320,17 @@ function historyPosition(state: EditorState, offset: number): number {
   return position;
 }
 function replaceHistoryText(state: EditorState, start: number, end: number, inserted: string): Transaction {
+  if (!simpleHistory(state)) {
+    const from = historyPosition(state, start), to = historyPosition(state, end);
+    if (!state.doc.resolve(from).sameParent(state.doc.resolve(to))) throw new Error('The selection crosses text blocks.');
+    return state.tr.insertText(inserted, from, to);
+  }
   // Expand only touched agent atoms so edits inside a visible label become ordinary text.
   let transaction = state.tr, offset = 0;
   const expanded: { position: number; label: string }[] = [];
   state.doc.descendants((node, position) => {
     if (node.isText) offset += node.text?.length ?? 0;
-    else if (node.type.name === 'agentMention') {
+    else if (textInline(node)) {
       const label = agentLabel(node), from = offset, to = from + label.length;
       if (start < to && end > from || start === end && start > from && start < to) expanded.push({ position, label });
       offset = to;
@@ -143,7 +345,7 @@ function replaceHistoryText(state: EditorState, start: number, end: number, inse
       const from = Math.max(start, offset), to = Math.min(end, offset + node.nodeSize);
       if (from < to) ranges.push({ from: pos + from - offset, to: pos + to - offset });
       offset += node.nodeSize;
-    } else if (node.type.name === 'agentMention') offset += agentLabel(node).length;
+    } else if (textInline(node)) offset += agentLabel(node).length;
   });
   let edit = working.tr;
   for (const range of ranges.reverse()) edit = edit.delete(range.from, range.to);
@@ -164,51 +366,221 @@ function textChange(state: EditorState, before: string, after: string): Transact
   return replaceHistoryText(state, start, end, inserted);
 }
 
+type SegmentBoundary = { kind: 'paragraph' } | { kind: 'inline'; node: ProseMirrorNode };
+interface SegmentDocument { document: ProseMirrorNode; before: SegmentBoundary | null; after: SegmentBoundary | null }
+interface SegmentSnapshot { text: string; source: SegmentDocument | null; agents: TextAgentSpan[]; marks: TextMarkSpan[] }
 interface TextControlModel {
   state: EditorState; element: HTMLTextAreaElement | null; index: number;
-  composing: boolean; canEdit(): boolean;
+  sourceDocument: SegmentDocument | null;
+  authoritySkills: readonly { name: string; path: string }[] | null;
+  authorityRevision: string | null;
+  view: EditorView | null; activateView(): void;
+  historyPlugin: Plugin; composing: boolean; rich: boolean; plainMode: boolean; applyMode(): void; canEdit(): boolean;
+  synchronize(): boolean; renderedSourceMatches(): boolean; refreshSource(): void; observeAuthority(): void;
   apply(transaction: Transaction, inputType?: string): boolean;
 }
 export interface TextAgentTarget {
   control: TextControlModel; doc: ProseMirrorNode; selectionStart: number; selectionEnd: number;
+  view: EditorView | null; selection: EditorState['selection']; marks: readonly Mark[] | null;
   current: AgentMentionCurrent; readCurrent(): AgentMentionCurrent | null; from: number; to: number; used: boolean;
 }
+export type TextPasteEvent = { clipboardData: DataTransfer; preventDefault(): void };
 interface TextControlProps {
   index: number; text: string; readOnly: boolean; label: string; placeholder: string;
   controls: Map<number, TextControlModel>;
   onEdit(index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
+  onStaleEdit?(index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange, composing?: boolean): boolean;
   agentMentions?: readonly TextAgentSpan[];
-  onSelection?(index: number, cursor: number): void;
+  sourceMarks?: readonly TextMarkSpan[];
+  sourceDocument?: SegmentDocument | null;
+  currentSourceDocument?(): SegmentDocument | null;
+  currentSegment?(): SegmentSnapshot | null;
+  sourceSkills?: readonly { name: string; path: string }[];
+  currentSkills?(): readonly { name: string; path: string }[];
+  sourceRevision?: string;
+  currentSourceRevision?(): string;
+  onSelection?(index: number, cursor: number, text?: string): void;
   onKeyDown(event: KeyboardEvent): boolean;
-  onPaste?(event: ClipboardEvent<HTMLTextAreaElement>): void;
+  onPaste?(event: TextPasteEvent): void;
   onCompositionChange?(composing: boolean): void;
+  formatting?: boolean;
+  plainTextMode?: boolean;
+  document?: ComposerDocument;
+  currentDocument?(): ComposerDocument | undefined;
+  onPendingLinkChange?(pending: boolean): void;
+  onInvalid?(message?: string): void;
   canEdit?(): boolean;
   completionListId?: string; completionSelectedId?: string;
 }
 function TextControl(props: TextControlProps) {
+  const { t } = useI18n('zh-CN');
   const model = useRef<TextControlModel | null>(null);
-  if (!model.current) model.current = { state: textHistoryState(props.text, props.agentMentions), element: null, index: props.index,
-    composing: false, canEdit: () => false, apply: () => false };
+  if (!model.current) {
+    const state = applySourceMarks(textHistoryState(props.text, props.agentMentions), props.sourceMarks ?? []);
+    model.current = { state, element: null, index: props.index, sourceDocument: props.sourceDocument ?? null,
+      authoritySkills: props.sourceSkills?.map(({ name, path }) => ({ name, path })) ?? null,
+      authorityRevision: props.sourceRevision ?? null, historyPlugin: state.plugins[0]!,
+      view: null, activateView: () => {}, composing: false, rich: false, plainMode: false,
+      applyMode: () => {}, canEdit: () => false, synchronize: () => false, renderedSourceMatches: () => false,
+      refreshSource: () => {}, observeAuthority: () => {}, apply: () => false };
+  }
   const control = model.current;
+  const [showView, setShowView] = useState(() => !!props.agentMentions?.length);
+  const [linkOpen, setLinkOpen] = useState(false), [href, setHref] = useState(''), [linkError, setLinkError] = useState('');
+  const [openedLink, setOpenedLink] = useState<LinkOccurrence | null>(null);
+  const [linkEdit, setLinkEdit] = useState<'text' | 'url' | null>(null), [linkValue, setLinkValue] = useState('');
+  const host = useRef<HTMLDivElement>(null), icon = useRef<SVGSVGElement>(null), pageIcon = useRef<SVGSVGElement>(null);
+  const linkIcon = useRef<SVGSVGElement>(null), focusView = useRef(false);
   const latest = useRef(props); latest.current = props;
   const composing = useRef(false);
   const compositionGeneration = useRef(0);
+  control.activateView = () => { focusView.current = true; setShowView(true); };
   control.canEdit = () => !latest.current.readOnly && latest.current.canEdit?.() !== false && !composing.current;
-  const publish = (transaction: Transaction, inputType?: string): boolean => {
-    const previous = control.state, next = previous.apply(transaction);
-    const beforeText = historyText(previous), afterText = historyText(next);
+  control.applyMode = () => {
+    const plain = !!latest.current.plainTextMode;
+    if (!control.rich || composing.current || control.view?.composing || control.plainMode === plain) return;
+    const modes = richEditorPlugins(textHistorySchema, control.historyPlugin);
+    const plugins = plain ? modes.plain : modes.rich;
+    plugins.unshift(richAutolinkPlugin(() => control.canEdit()));
+    control.state = control.state.reconfigure({ plugins });
+    control.plainMode = plain;
+    control.view?.updateState(control.state);
+  };
+  control.renderedSourceMatches = () => latest.current.sourceDocument !== undefined
+    && sameSegmentDocument(control.sourceDocument, latest.current.sourceDocument);
+  control.refreshSource = () => { if (latest.current.currentSourceDocument) control.sourceDocument = latest.current.currentSourceDocument(); };
+  control.observeAuthority = () => {
+    const skills = latest.current.currentSkills?.();
+    control.authoritySkills = skills?.map(({ name, path }) => ({ name, path })) ?? null;
+    control.authorityRevision = latest.current.currentSourceRevision?.() ?? null;
+  };
+  control.synchronize = () => {
+    if (!latest.current.currentSourceDocument || !latest.current.currentSegment) return true;
+    const currentSource = latest.current.currentSourceDocument();
+    const sameSource = sameSegmentDocument(control.sourceDocument, currentSource);
+    const skills = latest.current.currentSkills?.();
+    const removedSkills = skills && control.authoritySkills?.filter(previous =>
+      !skills.some(skill => skill.name === previous.name && skill.path === previous.path));
+    const revision = latest.current.currentSourceRevision?.();
+    const changedSource = revision !== undefined && revision !== control.authorityRevision;
+    const staleHistory = !!skills && (changedSource || !!removedSkills?.length) && historyContainsManagedSkills(control.state, skill =>
+      changedSource ? !skills.some(item => item.name === skill.name && item.path === skill.path)
+        : !!removedSkills?.some(item => item.name === skill.name && item.path === skill.path));
+    const staleSkills: number[] = [];
+    // A marker and its undo history belong only to skills still present in the authoritative draft.
+    if (skills) control.state.doc.descendants((node, position) => {
+      if (node.type.name === 'skill' && node.attrs.managed && !skills.some(skill => skill.name === node.attrs.name && skill.path === node.attrs.path)) {
+        staleSkills.push(position);
+      }
+    });
+    if (sameSource && currentSource && !staleSkills.length && !staleHistory) { control.observeAuthority(); return true; }
+    const current = latest.current.currentSegment();
+    if (!current || !sameSegmentDocument(current.source, currentSource)) return false;
+    if (sameSource && current.text === historyText(control.state) && !staleSkills.length && !staleHistory) { control.observeAuthority(); return true; }
+    const previous = control.state;
+    // Retain inline nodes and selection when the new source has the same visible projection, but discard its old history.
+    const authoritative = applySourceMarks(textHistoryState(current.text, current.agents), current.marks);
+    let cleaned = previous.tr;
+    for (const position of staleSkills.reverse()) cleaned = cleaned.delete(position, position + 1);
+    const valid = staleSkills.length ? previous.apply(cleaned.setMeta('addToHistory', false)) : previous;
+    const skillPositions: number[] = [];
+    valid.doc.descendants((node, position) => { if (node.type.name === 'skill') skillPositions.push(position); });
+    let comparable = valid.tr;
+    for (const position of skillPositions.reverse()) comparable = comparable.delete(position, position + 1);
+    const sameContent = comparable.doc.eq(authoritative.doc);
+    const doc = sameContent ? valid.doc : authoritative.doc;
+    const plugin = history();
+    const plugins = previous.plugins.map(item => item === control.historyPlugin ? plugin : item);
+    if (!plugins.includes(plugin)) return false;
+    const selection = sameContent ? valid.selection : TextSelection.create(doc,
+      historyPosition(authoritative, Math.min(current.text.length, textOffset(previous, previous.selection.anchor))),
+      historyPosition(authoritative, Math.min(current.text.length, textOffset(previous, previous.selection.head))));
+    control.state = EditorState.create({ doc, selection, storedMarks: sameContent ? valid.storedMarks : null, plugins });
+    control.historyPlugin = plugin;
+    control.sourceDocument = currentSource;
+    control.observeAuthority();
+    control.view?.updateState(control.state);
+    if (control.element && historyText(previous) !== current.text) control.element.value = current.text;
+    return true;
+  };
+  const synchronize = () => Array.from(latest.current.controls.values()).every(item => item.synchronize());
+  const publish = (originalTransaction: Transaction, inputType?: string): boolean => {
+    const previous = control.state, proposed = previous.apply(originalTransaction);
+    const snapshots = Array.from(latest.current.controls.values()).map(item => ({ item, state: item.state,
+      historyPlugin: item.historyPlugin, rendered: item.renderedSourceMatches() }));
+    // A non-replayable input remains a separate unresolved draft, never a write over the accepted version.
+    const preserveInput = () => {
+      if (!originalTransaction.docChanged || isHistoryTransaction(originalTransaction) || !snapshots.every(item => item.rendered)
+        || !latest.current.onStaleEdit) return false;
+      const segment = (item: TextControlModel, state: EditorState): TextAgentSegment => ({ index: item.index, text: historyText(state),
+        agents: historyAgents(state), marks: historyMarks(state) });
+      const skills: TextSkillChange = { before: snapshots.flatMap(item => historySkills(item.state)),
+        after: snapshots.flatMap(item => historySkills(item.item === control ? proposed : item.state)) };
+      const agents: TextAgentChange = { before: snapshots.map(item => segment(item.item, item.state)),
+        after: snapshots.map(item => segment(item.item, item.item === control ? proposed : item.state)) };
+      if (!latest.current.onStaleEdit(control.index, historyText(previous), historyText(proposed), inputType, skills, agents, composing.current)) return false;
+      for (const snapshot of snapshots) {
+        snapshot.item.state = snapshot.item === control ? proposed : snapshot.state;
+        snapshot.item.historyPlugin = snapshot.historyPlugin;
+        snapshot.item.refreshSource();
+        snapshot.item.observeAuthority();
+        snapshot.item.view?.updateState(snapshot.item.state);
+        if (snapshot.item.element) snapshot.item.element.value = historyText(snapshot.item.state);
+      }
+      return true;
+    };
+    if (!synchronize()) {
+      if (preserveInput()) return true;
+      latest.current.onInvalid?.(); return false;
+    }
+    let transaction = originalTransaction;
+    if (previous !== control.state && isHistoryTransaction(transaction)) return false;
+    if (!previous.doc.eq(control.state.doc)) {
+      const beforeText = historyText(previous), afterText = historyText(proposed);
+      if (!transaction.docChanged || beforeText !== historyText(control.state) || beforeText === afterText
+        || !textChange(previous, beforeText, afterText).doc.eq(proposed.doc)) {
+        if (preserveInput()) return true;
+        latest.current.onInvalid?.(); return false;
+      }
+      transaction = textChange(control.state, beforeText, afterText);
+      const interim = control.state.apply(transaction);
+      transaction.setSelection(TextSelection.create(transaction.doc,
+        historyPosition(interim, textOffset(proposed, proposed.selection.anchor)),
+        historyPosition(interim, textOffset(proposed, proposed.selection.head))));
+      const composition = originalTransaction.getMeta('composition');
+      if (composition !== undefined) transaction.setMeta('composition', composition);
+    }
+    const current = control.state, next = current.apply(transaction);
+    if (latest.current.formatting && transaction.docChanged) {
+      const saved = latest.current.currentDocument?.(), projected = saved && (control.rich ? fullHistoryDocument(current) : historyDocument(current, saved));
+      const source = saved && readRichDocument(saved), projectedSource = projected && readRichDocument(projected);
+      if (!source || !projectedSource || !source.eq(projectedSource)) { latest.current.onInvalid?.(); return false; }
+    }
+    const beforeText = historyText(current), afterText = historyText(next);
     const all = Array.from(latest.current.controls.values());
     const before = all.flatMap(item => historySkills(item.state));
     const after = all.flatMap(item => historySkills(item === control ? next : item.state));
-    const segment = (item: TextControlModel, state: EditorState): TextAgentSegment => ({ index: item.index, text: historyText(state), agents: historyAgents(state) });
-    const agents = { before: all.map(item => segment(item, item.state)), after: all.map(item => segment(item, item === control ? next : item.state)) };
+    const segment = (item: TextControlModel, state: EditorState): TextAgentSegment => ({ index: item.index, text: historyText(state),
+      agents: historyAgents(state), marks: historyMarks(state) });
+    const source = latest.current.currentDocument?.();
+    const document = latest.current.formatting && transaction.docChanged && source
+      ? control.rich ? fullHistoryDocument(next) : historyDocument(next, source) : undefined;
+    if (document === null) { latest.current.onInvalid?.(); return false; }
+    const agents: TextAgentChange = { before: all.map(item => segment(item, item.state)),
+      after: all.map(item => segment(item, item === control ? next : item.state)), ...(document ? { document } : {}) };
     if (transaction.docChanged && latest.current.onEdit(control.index, beforeText, afterText, inputType, { before, after }, agents) === false) return false;
     control.state = next;
+    if (transaction.docChanged) {
+      if (latest.current.currentSourceDocument) control.sourceDocument = latest.current.currentSourceDocument();
+      for (const item of all) item.observeAuthority();
+    }
+    if (control.view && !control.view.isDestroyed) control.view.updateState(next);
     return true;
   };
   control.apply = publish;
   const runHistory = (direction: 'undo' | 'redo') => {
     if (latest.current.readOnly || latest.current.canEdit?.() === false || composing.current) return false;
+    if (!synchronize()) { latest.current.onInvalid?.(); return false; }
     let applied = false;
     (direction === 'undo' ? undo : redo)(control.state, transaction => { applied = publish(transaction, direction === 'undo' ? 'historyUndo' : 'historyRedo'); });
     if (applied && control.element) {
@@ -217,6 +589,7 @@ function TextControl(props: TextControlProps) {
       control.element.setSelectionRange(start, end);
       latest.current.onSelection?.(control.index, end);
     }
+    if (applied && control.view) latest.current.onSelection?.(control.index, textOffset(control.state, control.state.selection.head), historyText(control.state));
     return applied;
   };
   const syncSelection = (element: HTMLTextAreaElement) => {
@@ -226,7 +599,7 @@ function TextControl(props: TextControlProps) {
       const head = element.selectionDirection === 'backward' ? start : end;
       control.state = control.state.apply(control.state.tr.setSelection(TextSelection.create(control.state.doc, anchor, head)));
     }
-    latest.current.onSelection?.(control.index, element.selectionStart);
+    latest.current.onSelection?.(control.index, element.selectionStart, historyText(control.state));
   };
   useLayoutEffect(() => {
     control.index = props.index;
@@ -234,10 +607,45 @@ function TextControl(props: TextControlProps) {
     return () => { if (props.controls.get(props.index) === control) props.controls.delete(props.index); };
   }, [control, props.controls, props.index]);
   useLayoutEffect(() => {
-    if (historyText(control.state) !== props.text || JSON.stringify(historyAgents(control.state)) !== JSON.stringify(props.agentMentions ?? [])) {
-      control.state = textHistoryState(props.text, props.agentMentions);
+    if (composing.current || control.view?.composing) return;
+    if (props.sourceDocument !== undefined && props.currentSourceDocument
+      && !sameSegmentDocument(props.sourceDocument, props.currentSourceDocument())) return;
+    if (control.rich && props.formatting && props.document && props.currentDocument?.() === props.document) {
+      const source = readRichDocument(props.document), projected = fullHistoryDocument(control.state);
+      const displayed = projected && readRichDocument(projected);
+      if (source && displayed && !source.eq(displayed)) {
+        const doc = textHistorySchema.nodeFromJSON(source.toJSON());
+        const historyPlugin = history(), modes = richEditorPlugins(textHistorySchema, historyPlugin);
+        const plugins = props.plainTextMode ? modes.plain : modes.rich;
+        plugins.unshift(richAutolinkPlugin(() => control.canEdit()));
+        control.state = EditorState.create({ doc, plugins });
+        control.historyPlugin = historyPlugin;
+        control.plainMode = !!props.plainTextMode;
+        control.view?.updateState(control.state);
+      }
+      return;
     }
-  }, [control, props.text, props.agentMentions]);
+    if (control.rich && !props.formatting) {
+      control.rich = false;
+      control.state = applySourceMarks(textHistoryState(props.text, props.agentMentions), props.sourceMarks ?? []);
+      control.historyPlugin = control.state.plugins[0]!;
+      control.plainMode = false;
+      control.view?.updateState(control.state);
+      return;
+    }
+    const sourceMarksChanged = !props.formatting
+      && !applySourceMarks(control.state, props.sourceMarks ?? []).doc.eq(control.state.doc);
+    const sourceDocumentChanged = props.sourceDocument !== undefined && !sameSegmentDocument(control.sourceDocument, props.sourceDocument);
+    if (!control.rich && (historyText(control.state) !== props.text
+      || JSON.stringify(historyAgents(control.state)) !== JSON.stringify(props.agentMentions ?? []) || sourceMarksChanged || sourceDocumentChanged)) {
+      control.state = applySourceMarks(textHistoryState(props.text, props.agentMentions), props.sourceMarks ?? []);
+      control.historyPlugin = control.state.plugins[0]!;
+      control.view?.updateState(control.state);
+    }
+    if (props.sourceDocument !== undefined) control.sourceDocument = props.sourceDocument;
+  }, [control, props.text, props.agentMentions, props.sourceMarks, props.sourceDocument, props.currentSourceDocument,
+    props.formatting, props.document, props.currentDocument, props.plainTextMode]);
+  useLayoutEffect(() => { control.applyMode(); }, [control, props.formatting, props.plainTextMode]);
   useLayoutEffect(() => {
     const element = control.element;
     const beforeInput = (event: InputEvent) => {
@@ -255,11 +663,196 @@ function TextControl(props: TextControlProps) {
     element?.addEventListener('beforeinput', beforeInput);
     element?.addEventListener('input', nativeInput);
     return () => { element?.removeEventListener('beforeinput', beforeInput); element?.removeEventListener('input', nativeInput); };
-  }, [control]);
+  }, [control, showView]);
+  useLayoutEffect(() => {
+    if (!showView || !host.current) return;
+    const editor = new EditorView(host.current, {
+      state: control.state,
+      nodeViews: { agentMention: node => {
+        const dom = DOMSerializer.fromSchema(textHistorySchema).serializeNode(node) as HTMLElement;
+        if (parseAgentThreadPath(node.attrs.path) && icon.current) dom.prepend(icon.current.cloneNode(true));
+        return { dom };
+      }, pageReferenceMention: node => {
+        const dom = DOMSerializer.fromSchema(textHistorySchema).serializeNode(node) as HTMLElement;
+        if (pageIcon.current) dom.prepend(pageIcon.current.cloneNode(true));
+        return { dom };
+      }, richLink: node => {
+        const dom = DOMSerializer.fromSchema(textHistorySchema).serializeNode(node) as HTMLElement;
+        if (linkIcon.current) dom.prepend(linkIcon.current.cloneNode(true));
+        return { dom };
+      } },
+      editable: () => !latest.current.readOnly && latest.current.canEdit?.() !== false,
+      attributes: { role: 'textbox', 'aria-label': latest.current.label, 'aria-multiline': 'true',
+        'data-composer-input-index': String(control.index), 'data-placeholder': latest.current.placeholder,
+        'aria-placeholder': latest.current.placeholder, 'aria-autocomplete': 'list' },
+      handleDOMEvents: {
+        focus: view => { latest.current.onSelection?.(control.index, textOffset(view.state, view.state.selection.head), historyText(view.state)); return false; },
+        compositionstart: () => {
+          compositionGeneration.current++;
+          if (!composing.current) { control.composing = true; composing.current = true; latest.current.onCompositionChange?.(true); }
+          return false;
+        },
+        compositionend: view => {
+          const generation = compositionGeneration.current;
+          requestAnimationFrame(() => {
+            if (control.view !== view || view.isDestroyed || generation !== compositionGeneration.current) return;
+            control.composing = false; composing.current = false; latest.current.onCompositionChange?.(false);
+            control.applyMode();
+            if (view.hasFocus()) latest.current.onSelection?.(control.index, textOffset(view.state, view.state.selection.head), historyText(view.state));
+          });
+          return false;
+        },
+      },
+      dispatchTransaction(transaction) {
+        if (!publish(transaction)) { editor.updateState(control.state); return; }
+        if (editor.hasFocus() && !composing.current) latest.current.onSelection?.(control.index, textOffset(control.state, control.state.selection.head), historyText(control.state));
+      },
+      handleKeyDown: (view, event) => {
+        if (view.composing || composing.current || event.isComposing || event.keyCode === 229) return false;
+        if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key.toLowerCase() === 'z' || event.key.toLowerCase() === 'y')) {
+          event.preventDefault(); return runHistory(event.key.toLowerCase() === 'y' || event.shiftKey ? 'redo' : 'undo');
+        }
+        if (latest.current.onKeyDown(event)) return true;
+        if (control.rich) return false;
+        if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          event.preventDefault(); view.dispatch(view.state.tr.insertText('\n').scrollIntoView()); return true;
+        }
+        return false;
+      },
+      handlePaste: (view, event) => {
+        const data = event.clipboardData;
+        if (!data) return false;
+        latest.current.onPaste?.({ clipboardData: data, preventDefault: () => event.preventDefault() });
+        if (event.defaultPrevented) return true;
+        const html = data.getData('text/html');
+        const containsInline = /data-mention\s*=\s*["'](?:agent|plugin)["']|(?:agent|plugin)-mention-name\s*=/i.test(html);
+        if (containsInline) {
+          const supported = control.rich ? supportedClipboardHTML(html, true) : supportedTextHistoryClipboard(html, true);
+          if (!supported) { latest.current.onInvalid?.(); return true; }
+          return false;
+        }
+        if (control.rich && latest.current.plainTextMode) {
+          const text = data.getData('text/plain').replace(/\r\n?/g, '\n');
+          if (text) {
+            if (view.state.selection.$from.parent.type.spec.code) view.dispatch(view.state.tr.insertText(text).scrollIntoView());
+            else {
+              const paragraph = view.state.schema.nodes.paragraph!;
+              const nodes = text.split('\n').map(line => paragraph.create(null, line ? view.state.schema.text(line) : undefined));
+              view.dispatch(view.state.tr.replaceSelection(new Slice(Fragment.fromArray(nodes), 1, 1)).scrollIntoView());
+            }
+          }
+          return true;
+        }
+        if (html && latest.current.formatting) {
+          const supported = control.rich ? supportedClipboardHTML(html, true) : supportedTextHistoryClipboard(html, !!latest.current.formatting);
+          if (!supported) { latest.current.onInvalid?.(); return true; }
+          return false;
+        }
+        const text = data.getData('text/plain').replace(/\r\n?/g, '\n');
+        if (text) view.dispatch(view.state.tr.insertText(text).scrollIntoView());
+        return true;
+      },
+      transformCopied: copiedWithoutSkillMarkers,
+      transformPastedHTML: html => remapClipboardLinkOccurrences(html, control.state.doc),
+    });
+    control.view = editor;
+    if (focusView.current) { focusView.current = false; editor.focus(); }
+    return () => { if (control.view === editor) control.view = null; editor.destroy(); };
+  }, [control, showView]);
+  useLayoutEffect(() => {
+    control.view?.setProps({ editable: () => !latest.current.readOnly && latest.current.canEdit?.() !== false,
+      attributes: { role: 'textbox', 'aria-label': props.label, 'aria-multiline': 'true',
+        'data-composer-input-index': String(props.index), 'data-placeholder': props.placeholder, 'aria-placeholder': props.placeholder,
+        'aria-autocomplete': 'list', ...(props.completionListId ? { 'aria-controls': props.completionListId } : {}),
+        ...(props.completionSelectedId ? { 'aria-activedescendant': props.completionSelectedId } : {}) } });
+  }, [control, props.label, props.index, props.placeholder, props.readOnly, props.completionListId, props.completionSelectedId, showView]);
   useEffect(() => () => {
     compositionGeneration.current++;
     if (composing.current) { control.composing = false; composing.current = false; latest.current.onCompositionChange?.(false); }
+    latest.current.onPendingLinkChange?.(false);
   }, []);
+  useEffect(() => {
+    if (openedLink && !openedLink.element.isConnected && !linkEdit) setOpenedLink(null);
+    else openedLink?.element.setAttribute('aria-expanded', 'true');
+    return () => { openedLink?.element.setAttribute('aria-expanded', 'false'); };
+  }, [props.text, openedLink, linkEdit]);
+  const mark = (name: 'strong' | 'em' | 'code') => {
+    const view = control.view, type = textHistorySchema.marks[name];
+    if (!view || !type || !control.canEdit() || view.composing) return;
+    syncRichSelection(view);
+    toggleMark(type)(view.state, transaction => { control.apply(closeHistory(transaction)); }, view);
+    view.focus();
+  };
+  const openLink = (target: EventTarget | null): boolean => {
+    if (!props.formatting || !(target instanceof Element)) return false;
+    const element = target.closest<HTMLElement>('[data-mention="rich-link"][role="button"], a[data-composer-attrs]');
+    if (!element || !host.current?.contains(element)) return false;
+    if (openedLink?.element === element) { closeLink(); return true; }
+    const link = element && control.view && linkOccurrence(control.view, element);
+    if (!link || linkEdit || linkOpen) return true;
+    setOpenedLink(link); setLinkEdit(null); setLinkError('');
+    return true;
+  };
+  const closeLink = () => { if (linkEdit) props.onPendingLinkChange?.(false); setOpenedLink(null); setLinkEdit(null); setLinkError(''); };
+  if (showView) return <><span hidden aria-hidden="true"><MessageSquare ref={icon} size={14} aria-hidden="true" focusable="false" />
+    <FileText ref={pageIcon} size={14} aria-hidden="true" focusable="false" /><LinkIcon ref={linkIcon} size={14} aria-hidden="true" focusable="false" /></span>
+    {props.formatting && (!props.plainTextMode || linkOpen) ? <div className="standalone-composer__rich-toolbar" role="toolbar" aria-label={t('Text formatting')}>
+      {!props.plainTextMode ? <>
+      <button type="button" title={t('Bold')} aria-label={t('Bold')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('strong')}><Bold size={16} /></button>
+      <button type="button" title={t('Italic')} aria-label={t('Italic')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('em')}><Italic size={16} /></button>
+      <button type="button" title={t('Inline code')} aria-label={t('Inline code')} disabled={props.readOnly} onMouseDown={event => event.preventDefault()} onClick={() => mark('code')}><Code2 size={16} /></button>
+      </> : null}
+      <button type="button" title={t('Link')} aria-label={t('Link')} disabled={props.readOnly} onMouseDown={event => {
+        event.preventDefault(); if (control.view) syncRichSelection(control.view);
+      }} onClick={() => {
+        if (!control.canEdit()) return;
+        setOpenedLink(null); setLinkEdit(null); props.onPendingLinkChange?.(!linkOpen); setLinkOpen(!linkOpen); setLinkError('');
+      }}><LinkIcon size={16} /></button>
+      {linkOpen ? <form onSubmit={event => {
+        event.preventDefault();
+        const view = control.view, safe = safeRichLinkHref(href), type = textHistorySchema.marks.link;
+        if (!safe) { setLinkError(t('Enter an HTTP, HTTPS, or mailto link.')); return; }
+        if (!view || !type || !control.canEdit() || view.state.selection.empty) return;
+        const { from, to } = view.state.selection;
+        const transaction = view.state.tr.addMark(from, to, type.create({ href: safe, literalMarkdownOccurrenceId: linkOccurrenceAllocator(view.state.doc)() }));
+        if (!control.apply(closeHistory(transaction))) return;
+        control.state = control.state.apply(closeHistory(control.state.tr)); view.updateState(control.state);
+        props.onPendingLinkChange?.(false); setLinkOpen(false); setHref(''); setLinkError(''); view.focus();
+      }}><input aria-label={t('Link address')} aria-invalid={!!linkError} value={href} disabled={props.readOnly}
+        onChange={event => { setHref(event.target.value); setLinkError(''); }} /><button type="submit" disabled={props.readOnly}>{t('Apply')}</button>
+        {linkError ? <span role="alert">{linkError}</span> : null}</form> : null}
+    </div> : null}
+    <div ref={host} className="standalone-composer__rich" onClickCapture={event => {
+      if (openLink(event.target)) { event.preventDefault(); event.stopPropagation(); }
+    }} onKeyDownCapture={event => {
+      if ((event.key === 'Enter' || event.key === ' ') && openLink(event.target)) { event.preventDefault(); event.stopPropagation(); }
+    }} />
+    {openedLink ? <div role="dialog" aria-label={t('Link')}>
+      {linkEdit ? <form onSubmit={event => {
+        event.preventDefault();
+        if (!control.canEdit() || !control.view) return;
+        const label = linkEdit === 'text' ? linkValue : openedLink.label;
+        const address = linkEdit === 'url' ? linkValue : openedLink.href, safe = address.trim() ? safeRichLinkHref(address) : null;
+        if (!label) { setLinkError(t('Link text cannot be empty.')); return; }
+        if (address.trim() && !safe) { setLinkError(t('Enter an HTTP, HTTPS, or mailto link.')); return; }
+        if (label !== openedLink.label || safe !== openedLink.href) {
+          const before = control.view.state.doc, result = replaceLink(control.view, openedLink, label, safe);
+          if (result !== 'saved' || control.view.state.doc.eq(before)) {
+            setLinkError(t(result === 'unmappable' ? 'This link edit cannot safely preserve formatting.' : 'This link changed. Open it again before saving.')); return;
+          }
+        }
+        closeLink(); control.view.focus();
+      }}><input autoFocus aria-label={linkEdit === 'text' ? t('Link text') : t('Link address')} aria-invalid={!!linkError}
+        value={linkValue} onChange={event => { setLinkValue(event.target.value); setLinkError(''); }} />
+        <button type="submit">{linkEdit === 'text' ? t('Save link text') : linkValue.trim() ? t('Save link URL') : t('Remove link')}</button>
+        {linkError ? <span role="alert">{linkError}</span> : null}</form> : <>
+        <span>{openedLink.label}</span>{' '}{safeRichLinkHref(openedLink.href)
+          ? <a href={safeRichLinkHref(openedLink.href)!} target="_blank" rel="noopener noreferrer">{openedLink.href}</a> : <span>{openedLink.href}</span>}
+        <button type="button" disabled={props.readOnly} onClick={() => { props.onPendingLinkChange?.(true); setLinkEdit('text'); setLinkValue(openedLink.label); }}>{t('Edit link text')}</button>
+        <button type="button" disabled={props.readOnly} onClick={() => { props.onPendingLinkChange?.(true); setLinkEdit('url'); setLinkValue(openedLink.href); }}>{t('Edit link URL')}</button>
+      </>}
+      <button type="button" title={t('Close')} aria-label={t('Close')} onClick={closeLink}><X size={16} /></button>
+    </div> : null}</>;
   return <textarea ref={element => { control.element = element; }} data-composer-input-index={props.index}
     aria-label={props.label} aria-autocomplete="list" aria-controls={props.completionListId}
     aria-activedescendant={props.completionSelectedId} placeholder={props.placeholder} value={props.text} readOnly={props.readOnly}
@@ -271,12 +864,13 @@ function TextControl(props: TextControlProps) {
         return;
       }
       const transaction = textChange(control.state, before, after);
+      if (composing.current) transaction.setMeta('composition', compositionGeneration.current);
       const provisional = control.state.apply(transaction), position = historyPosition(provisional, element.selectionStart);
       transaction.setSelection(TextSelection.create(transaction.doc, position));
       if (!publish(transaction, inputType)) {
         element.value = before; element.setSelectionRange(Math.min(before.length, element.selectionStart), Math.min(before.length, element.selectionStart));
       }
-      latest.current.onSelection?.(control.index, element.selectionStart);
+      latest.current.onSelection?.(control.index, element.selectionStart, historyText(control.state));
     }}
     onFocus={event => syncSelection(event.currentTarget)}
     onSelect={event => syncSelection(event.currentTarget)}
@@ -286,19 +880,39 @@ function TextControl(props: TextControlProps) {
           event.preventDefault(); runHistory(event.key.toLowerCase() === 'y' || event.shiftKey ? 'redo' : 'undo');
         } else latest.current.onKeyDown(event.nativeEvent);
       }
-    }} onPaste={props.onPaste}
+    }} onPaste={event => {
+      props.onPaste?.(event);
+      if (event.defaultPrevented) return;
+      const html = event.clipboardData.getData('text/html');
+      if (!/data-mention\s*=\s*["'](?:agent|plugin)["']|(?:agent|plugin)-mention-name\s*=/i.test(html)) return;
+      event.preventDefault();
+      if (!control.canEdit() || !supportedTextHistoryClipboard(html, true)) { latest.current.onInvalid?.(); return; }
+      try {
+        const element = event.currentTarget, parsed = new DOMParser().parseFromString(remapClipboardLinkOccurrences(html, control.state.doc), 'text/html');
+        const slice = ProseMirrorDOMParser.fromSchema(textHistorySchema).parseSlice(parsed.body, { preserveWhitespace: 'full' });
+        const from = historyPosition(control.state, element.selectionStart), to = historyPosition(control.state, element.selectionEnd);
+        const transaction = control.state.tr.setSelection(TextSelection.create(control.state.doc, from, to)).replaceSelection(slice);
+        if (!publish(closeHistory(transaction), 'insertFromPaste')) return;
+        control.state = control.state.apply(closeHistory(control.state.tr));
+        control.activateView();
+      } catch { latest.current.onInvalid?.(); }
+    }}
     onCompositionStart={() => {
       compositionGeneration.current++;
-      if (!composing.current) { control.composing = true; composing.current = true; latest.current.onCompositionChange?.(true); }
+      if (!composing.current) {
+        control.state = control.state.apply(closeHistory(control.state.tr));
+        control.composing = true; composing.current = true; latest.current.onCompositionChange?.(true);
+      }
     }}
     onCompositionEnd={event => {
       const element = event.currentTarget, generation = compositionGeneration.current;
       requestAnimationFrame(() => {
         if (!composing.current || generation !== compositionGeneration.current) return;
+        control.state = control.state.apply(closeHistory(control.state.tr));
         control.composing = false; composing.current = false; latest.current.onCompositionChange?.(false);
         const index = Number(element.dataset.composerInputIndex);
         if (element.isConnected && element.ownerDocument.activeElement === element && Number.isSafeInteger(index)
-          && latest.current.controls.get(index) === control) latest.current.onSelection?.(index, element.selectionStart);
+          && latest.current.controls.get(index) === control) latest.current.onSelection?.(index, element.selectionStart, historyText(control.state));
       });
     }} />;
 }
@@ -348,8 +962,8 @@ function replaceLink(editor: EditorView, before: LinkOccurrence, label: string, 
   if (!current || current.from !== before.from || current.to !== before.to || current.signature !== before.signature
     || current.href !== before.href) return 'stale';
   if (current.node) {
-    const replacement = href === null ? composerSchema.text(label, current.node.marks)
-      : composerSchema.nodes.richLink!.create({ ...current.node.attrs, displayText: label, href,
+    const replacement = href === null ? editor.state.schema.text(label, current.node.marks)
+      : editor.state.schema.nodes.richLink!.create({ ...current.node.attrs, displayText: label, href,
         sourceAppId: href === current.href ? current.node.attrs.sourceAppId : '',
         literalMarkdownSource: null, literalMarkdownOccurrenceId: current.node.attrs.literalMarkdownOccurrenceId ?? linkOccurrenceAllocator(editor.state.doc)(),
         markdownSourceStart: null, markdownSourceEnd: null }, null, current.node.marks);
@@ -367,8 +981,8 @@ function replaceLink(editor: EditorView, before: LinkOccurrence, label: string, 
     let transaction = editor.state.tr;
     for (const change of changes.reverse()) transaction = transaction.insertText(change.replacement, current.from + change.start, current.from + change.oldEnd);
     const to = current.from + label.length;
-    transaction = transaction.removeMark(current.from, to, composerSchema.marks.link!);
-    if (href !== null) transaction = transaction.addMark(current.from, to, composerSchema.marks.link!.create({ ...current.mark.attrs,
+    transaction = transaction.removeMark(current.from, to, editor.state.schema.marks.link!);
+    if (href !== null) transaction = transaction.addMark(current.from, to, editor.state.schema.marks.link!.create({ ...current.mark.attrs,
       href, sourceAppId: href === current.href ? current.mark.attrs.sourceAppId : null, isAutolink: false, isGeneratedAutolink: false,
       literalMarkdownSource: null, literalMarkdownOccurrenceId: current.mark.attrs.literalMarkdownOccurrenceId ?? linkOccurrenceAllocator(editor.state.doc)() }));
     editor.dispatch(closeHistory(transaction));
@@ -377,19 +991,147 @@ function replaceLink(editor: EditorView, before: LinkOccurrence, label: string, 
   return 'saved';
 }
 
+function appendPromptState(state: EditorState, addition: ComposerDocument, inheritSegmentMarks = false): EditorState | null {
+  const incoming = readRichDocument(addition);
+  if (!incoming || incoming.childCount !== 1 || incoming.firstChild?.type.name !== 'paragraph') return null;
+  let hasPlugin = false;
+  incoming.descendants(node => { if (node.type.name === 'pluginMention') hasPlugin = true; });
+  let plainText = incoming.firstChild.childCount > 0;
+  incoming.firstChild.forEach(node => { if (!node.isText || node.marks.length) plainText = false; });
+  if (!hasPlugin && !plainText) return null;
+  try {
+    const paragraph = state.schema.nodeFromJSON(incoming.firstChild.toJSON());
+    const end = Selection.atEnd(state.doc), last = historyText(state);
+    let transaction = state.tr;
+    if (!end.$from.parent.isTextblock || end.$from.parent.type.spec.code) {
+      transaction = transaction.insert(state.doc.content.size, paragraph);
+    } else {
+      let previous = end.$from.nodeBefore;
+      if (inheritSegmentMarks && previous?.type.name === 'skill') {
+        for (let index = end.$from.parent.childCount - 1; index >= 0; index--) {
+          const child = end.$from.parent.child(index);
+          if (child.type.name !== 'skill') { previous = child; break; }
+        }
+      }
+      const marks = inheritSegmentMarks && plainText && previous?.isText ? previous.marks : [];
+      const content = inheritSegmentMarks && plainText
+        ? Fragment.fromArray(Array.from({ length: paragraph.childCount }, (_, index) => paragraph.child(index).mark(marks)))
+        : paragraph.content;
+      const separator = last && !/\s$/u.test(last) ? Fragment.from(state.schema.text(' ', marks)) : Fragment.empty;
+      transaction = transaction.insert(end.from, separator.append(content));
+    }
+    transaction = transaction.setSelection(Selection.atEnd(transaction.doc));
+    const next = state.apply(closeHistory(transaction));
+    return next.apply(closeHistory(next.tr));
+  } catch { return null; }
+}
+
 function textEditorHandle(controls: Map<number, TextControlModel>): StructuredInputEditorHandle {
   return {
+    advanceRevision(before, after) {
+      // A control on an older version must still reconcile after this local edit.
+      for (const control of controls.values()) {
+        if (control.authorityRevision === before) control.authorityRevision = after;
+      }
+    },
     focus(index, position) {
       const values = Array.from(controls.values());
-      const element = (index === undefined ? undefined : controls.get(index)?.element)
-        ?? values.find(item => !item.element?.readOnly)?.element ?? values[0]?.element;
+      const control = (index === undefined ? undefined : controls.get(index))
+        ?? values.find(item => item.canEdit()) ?? values[0];
+      const view = control?.view, element = control?.element;
+      if (view && !view.isDestroyed) {
+        if (position !== undefined) view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, historyPosition(view.state, position))));
+        view.focus(); return;
+      }
       element?.focus();
       if (element && position !== undefined) element.setSelectionRange(position, position);
     },
+    matchesDocument(document) {
+      const control = controls.get(-1), actual = control && (control.rich ? fullHistoryDocument(control.state) : historyDocument(control.state, document));
+      const source = readRichDocument(document), current = actual && readRichDocument(actual);
+      return !!source && !!current && source.eq(current);
+    },
+    preparePromptAppend(source, addition, index = -1, before) {
+      const control = controls.get(index), original = control?.state, view = control?.view, element = control?.element;
+      if (!control || !original || control.composing || view?.composing
+        || !(view && !view.isDestroyed && view.dom.isConnected || element && element.isConnected)) return null;
+      if (index !== -1) {
+        if (!before) return null;
+        const entries = (before.input ?? []).flatMap((entry, entryIndex) => entry.type === 'text' && typeof entry.text === 'string'
+          ? [entryIndex] : []);
+        const sources = structuredSegmentDocuments(before);
+        if (controls.size !== entries.length || before.document && sources.size !== entries.length
+          || entries.some(entryIndex => {
+            const item = controls.get(entryIndex);
+            return !item || !sameSegmentDocument(item.sourceDocument, sources.get(entryIndex) ?? null);
+          })) return null;
+      }
+      let base = original;
+      if (index === -1) {
+        const saved = readRichDocument(source);
+        if (!saved) return null;
+        if (control.rich) {
+          const current = fullHistoryDocument(original), parsed = current && readRichDocument(current);
+          if (!parsed || !saved.eq(parsed)) return null;
+        } else {
+          const activated = activateRichHistory(original, source, () => control.canEdit());
+          if (!activated) return null;
+          base = activated;
+        }
+      }
+      const inheritSegmentMarks = index !== -1 && !Array.from(controls.values()).some(item => historyAgents(item.state).length);
+      const next = appendPromptState(base, addition, inheritSegmentMarks);
+      if (!next) return null;
+      const document = index === -1 ? fullHistoryDocument(next) : null;
+      if (index === -1 && !document) return null;
+      const all = Array.from(controls.values());
+      const segment = (item: TextControlModel, state: EditorState): TextAgentSegment => ({ index: item.index, text: historyText(state),
+        agents: historyAgents(state), marks: historyMarks(state) });
+      return { document, text: historyText(next), agents: { before: all.map(item => segment(item, item.state)),
+        after: all.map(item => segment(item, item === control ? next : item.state)), ...(document ? { document } : {}) },
+      apply(draft) {
+        if (controls.get(index) !== control || control.state !== original || control.view !== view || control.element !== element
+          || control.composing || view?.composing || !(view && !view.isDestroyed && view.dom.isConnected || element && element.isConnected)) return false;
+        control.state = next;
+        if (index !== -1) control.sourceDocument = structuredSegmentDocuments(draft).get(index) ?? null;
+        if (index === -1) control.rich = true;
+        if (view) { view.updateState(next); view.focus(); }
+        else { if (element) element.value = historyText(next); control.activateView(); }
+        return true;
+      } };
+    },
+    activateFormatting(document, commit) {
+      const control = controls.get(-1);
+      if (!control || !control.canEdit() || control.composing || control.rich) return false;
+      const next = activateRichHistory(control.state, document, () => control.canEdit());
+      if (!next || commit?.() === false) return false;
+      control.state = next;
+      control.rich = true;
+      control.view?.updateState(next);
+      if (!control.view) control.activateView();
+      return true;
+    },
+    visibleText() { const control = controls.get(-1); return control ? historyText(control.state) : ''; },
+    insertRichCompletion(query, item, cwd) {
+      const control = controls.get(-1), view = control?.view;
+      if (!control?.rich || !control.canEdit() || !view || view.isDestroyed || view.composing) return false;
+      syncRichSelection(view);
+      const context = richCompletionContext(view);
+      if (!context) return false;
+      const from = historyPosition(view.state, query.start), to = historyPosition(view.state, query.end);
+      if (to !== context.blockStart + context.cursor || from < context.blockStart || from > to) return false;
+      const before = view.state.doc;
+      return insertRichCompletion(view, context, { start: from - context.blockStart, end: to - context.blockStart, token: query.token }, item, cwd)
+        && !view.state.doc.eq(before);
+    },
     replace(index, start, end, text, skill) {
-      const control = controls.get(index), element = control?.element;
-      if (!control || !element || element.readOnly || !element.isConnected || start < 0 || end < start
+      const control = controls.get(index), element = control?.element, view = control?.view;
+      if (!control || !control.canEdit() || !(view && !view.isDestroyed && view.dom.isConnected || element && !element.readOnly && element.isConnected)
+        || start < 0 || end < start
         || end > historyText(control.state).length) return false;
+      const left = control.state.doc.resolve(historyPosition(control.state, start));
+      const right = control.state.doc.resolve(historyPosition(control.state, end));
+      if (!left.sameParent(right) || !left.parent.isTextblock || left.parent.type.spec.code) return false;
       const selection = TextSelection.create(control.state.doc, historyPosition(control.state, start), historyPosition(control.state, end));
       control.state = control.state.apply(control.state.tr.setSelection(selection));
       let transaction = replaceHistoryText(control.state, start, end, text);
@@ -401,8 +1143,8 @@ function textEditorHandle(controls: Map<number, TextControlModel>): StructuredIn
       transaction.setSelection(TextSelection.create(transaction.doc, caret));
       if (!control.apply(closeHistory(transaction), 'insertReplacementText')) return false;
       control.state = control.state.apply(closeHistory(control.state.tr));
-      element.value = historyText(control.state);
-      element.focus(); element.setSelectionRange(start + text.length, start + text.length);
+      if (view) view.focus();
+      else if (element) { element.value = historyText(control.state); element.focus(); element.setSelectionRange(start + text.length, start + text.length); }
       return true;
     },
     removeSkill(name, path) {
@@ -419,46 +1161,107 @@ function textEditorHandle(controls: Map<number, TextControlModel>): StructuredIn
     },
     skills() { return Array.from(controls.values()).flatMap(control => historySkills(control.state)); },
     captureAgentMentionTarget(index, readCurrent, query) {
-      const control = controls.get(index), element = control?.element, current = readCurrent();
-      if (!control || !element || !element.isConnected || element.ownerDocument.activeElement !== element
-        || !control.canEdit() || control.composing || !current?.revision || !current.owner.draftId
+      const control = controls.get(index), element = control?.element, view = control?.view, current = readCurrent();
+      if (!control || !control.canEdit() || control.composing || !current?.revision || !current.owner.draftId) return null;
+      if (view) {
+        if (view.isDestroyed || !view.dom.isConnected || !view.hasFocus() || view.composing) return null;
+        syncRichSelection(view);
+      } else if (!element || !element.isConnected || element.ownerDocument.activeElement !== element
         || element.value !== historyText(control.state)) return null;
-      const selectionStart = element.selectionStart, selectionEnd = element.selectionEnd;
+      const selectionStart = view ? textOffset(control.state, control.state.selection.from) : element!.selectionStart;
+      const selectionEnd = view ? textOffset(control.state, control.state.selection.to) : element!.selectionEnd;
+      const text = historyText(control.state);
       let from = selectionStart, to = selectionEnd;
       if (query) {
         if (selectionStart !== selectionEnd || query.end !== selectionStart || !query.token.startsWith('@')
           || !Number.isSafeInteger(query.start) || !Number.isSafeInteger(query.end)
-          || query.start < 0 || query.start > query.end || element.value.slice(query.start, query.end) !== query.token) return null;
+          || query.start < 0 || query.start > query.end || text.slice(query.start, query.end) !== query.token) return null;
         from = query.start;
-        to = query.end + (element.value.slice(query.end).match(/^[^\s@$\ufffc]*/)?.[0].length ?? 0);
+        to = query.end + (text.slice(query.end).match(/^[^\s@$\ufffc]*/)?.[0].length ?? 0);
       }
-      return { control, doc: control.state.doc, selectionStart, selectionEnd,
+      return { control, doc: control.state.doc, selectionStart, selectionEnd, view: view ?? null, selection: control.state.selection, marks: control.state.storedMarks,
         current: { owner: { ...current.owner }, revision: current.revision }, readCurrent, from, to, used: false };
     },
     insertAgentMention(target, choice) {
-      const control = target?.control, element = control?.element, current = target?.readCurrent(), attrs = agentMentionAttributes(choice);
-      if (!control || !element || !attrs || target.used || controls.get(control.index) !== control || !element.isConnected
+      const control = target?.control, element = control?.element, view = control?.view, current = target?.readCurrent(), attrs = agentMentionAttributes(choice);
+      if (!control || !attrs || target.used || controls.get(control.index) !== control || (view ?? null) !== target.view
+        || !(view && !view.isDestroyed && view.dom.isConnected || element && element.isConnected)
         || !control.canEdit() || control.composing || control.state.doc !== target.doc
-        || element.value !== historyText(control.state) || element.selectionStart !== target.selectionStart
-        || element.selectionEnd !== target.selectionEnd || !current || current.revision !== target.current.revision
+        || view && (!control.state.selection.eq(target.selection) || view.composing)
+        || (control.state.storedMarks === null) !== (target.marks === null)
+        || !Mark.sameSet(control.state.storedMarks ?? [], target.marks ?? [])
+        || element && (element.value !== historyText(control.state) || element.selectionStart !== target.selectionStart
+          || element.selectionEnd !== target.selectionEnd) || !current || current.revision !== target.current.revision
         || current.owner.hostId !== target.current.owner.hostId || current.owner.threadId !== target.current.owner.threadId
         || current.owner.draftId !== target.current.owner.draftId) return false;
-      const before = historyText(control.state), label = attrs.displayName || attrs.name;
+      const before = historyText(control.state), { selection, storedMarks } = control.state;
+      const left = control.state.doc.resolve(historyPosition(control.state, target.from));
+      const right = control.state.doc.resolve(historyPosition(control.state, target.to));
+      if (!left.sameParent(right) || !left.parent.isTextblock || left.parent.type.spec.code) return false;
+      const marks = storedMarks ?? (selection.empty ? selection.$from.marks() : selection.$from.marksAcross(selection.$to) ?? []);
+      if (marks.some(mark => mark.type.name === 'code' || mark.type.name === 'link')) return false;
       let transaction = replaceHistoryText(control.state, target.from, target.to, '');
       const interim = control.state.apply(transaction), position = historyPosition(interim, target.from);
-      transaction = transaction.insert(position, textHistorySchema.nodes.agentMention!.create(attrs));
+      transaction = transaction.insert(position, textHistorySchema.nodes.agentMention!.create(attrs, null, marks));
       const space = !/^\s/u.test(before.slice(target.to));
       if (space) transaction = transaction.insertText(' ', position + 1);
       transaction = transaction.setSelection(TextSelection.create(transaction.doc, position + 1 + (space ? 1 : 0)));
       if (!control.apply(closeHistory(transaction), 'insertReplacementText')) return false;
       target.used = true;
       control.state = control.state.apply(closeHistory(control.state.tr));
-      element.value = historyText(control.state); element.focus();
-      const caret = target.from + label.length + (space ? 1 : 0);
-      element.setSelectionRange(caret, caret);
+      if (view) { view.updateState(control.state); view.focus(); }
+      else if (element) { element.value = historyText(control.state); control.activateView(); }
       return true;
     },
   };
+}
+
+function sameSegmentBoundary(left: SegmentBoundary | null, right: SegmentBoundary | null): boolean {
+  return left === right || !!left && !!right && left.kind === right.kind
+    && (left.kind === 'paragraph' || right.kind === 'inline' && left.node.eq(right.node));
+}
+
+function sameSegmentDocument(left: SegmentDocument | null, right: SegmentDocument | null): boolean {
+  return left === right || !!left && !!right && left.document.eq(right.document)
+    && sameSegmentBoundary(left.before, right.before) && sameSegmentBoundary(left.after, right.after);
+}
+
+function structuredSegmentDocuments(draft: ComposerDraft): Map<number, SegmentDocument> {
+  const entries = (draft.input ?? []).flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
+    ? [{ index, text: entry.text }] : []);
+  const document = draft.document && readRichDocument(draft.document);
+  const parts = document && textSegmentDocuments(document, entries.map(entry => entry.text));
+  const projection = document && parts && projectTextAgentDocument(document);
+  if (!parts || !projection) return new Map();
+  let offset = 0, tokenIndex = 0, previous: SegmentBoundary | null = null;
+  const result = new Map<number, SegmentDocument>();
+  for (let position = 0; position < entries.length; position++) {
+    const entry = entries[position]!;
+    const end = offset + entry.text.length;
+    let next: SegmentBoundary | null = null;
+    if (position < entries.length - 1) {
+      while (tokenIndex < projection.tokens.length && projection.tokens[tokenIndex]!.end <= end) tokenIndex++;
+      const token = projection.tokens[tokenIndex];
+      if (!token || token.start > end) return new Map();
+      // A text-item separator may be a paragraph boundary or an inline break.
+      next = token.node ? { kind: 'inline', node: token.node.isText ? token.node.cut(end - token.start, end - token.start + 1) : token.node }
+        : { kind: 'paragraph' };
+    }
+    result.set(entry.index, { document: parts[position]!, before: previous, after: next });
+    previous = next; offset = end + 1;
+  }
+  return result;
+}
+
+function currentSegmentSnapshot(draft: ComposerDraft, index: number, source: SegmentDocument | null): SegmentSnapshot | null {
+  const entry = draft.input?.[index];
+  if (entry?.type !== 'text' || typeof entry.text !== 'string') return null;
+  if (draft.document && !source) return null;
+  const projection = source && projectTextAgentDocument(source.document);
+  if (source && (!projection || projection.text !== entry.text)) return null;
+  const marks = projection?.tokens.map(token => ({ start: token.start, end: token.end,
+    marks: token.node?.marks.map(mark => mark.toJSON()) ?? [] })) ?? [];
+  return { text: entry.text, source, agents: projection?.agents ?? [], marks };
 }
 
 /** Each control corresponds to one original text item; non-text items remain in the draft. */
@@ -470,12 +1273,24 @@ export const StandaloneStructuredInputEditor = forwardRef<StructuredInputEditorH
     useImperativeHandle(ref, () => textEditorHandle(controls.current), []);
     const entries = (props.draft.input ?? []).flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
       ? [{ entry, index, text: entry.text }] : []);
+    const documents = structuredSegmentDocuments(props.draft);
+    let cachedDraft = props.draft, cachedDocuments = documents;
+    const currentDocuments = () => {
+      const current = props.currentDraft();
+      if (current !== cachedDraft) { cachedDraft = current; cachedDocuments = structuredSegmentDocuments(current); }
+      return cachedDocuments;
+    };
     return <>{entries.map(({ entry, index, text }, position) => <ReactFragment key={position}>
       {isStructuredAppInput(entry) ? <div role="status">{t('This app input contains retained context and cannot be edited here.')}</div> : null}
-      <TextControl index={index} text={text} agentMentions={props.agentMentions?.(index)} controls={controls.current} onEdit={props.onEdit} onSelection={props.onSelection}
+      <TextControl index={index} text={text} agentMentions={props.agentMentions?.(index)} sourceMarks={props.sourceMarks?.(index)} controls={controls.current} onEdit={props.onEdit} onStaleEdit={props.onStaleEdit} onSelection={props.onSelection}
+        sourceDocument={documents.get(index) ?? null} currentSourceDocument={() => currentDocuments().get(index) ?? null}
+        currentSegment={() => currentSegmentSnapshot(props.currentDraft(), index, currentDocuments().get(index) ?? null)}
+        sourceSkills={props.draft.skills}
+        currentSkills={() => props.currentDraft().skills}
+        sourceRevision={props.sourceRevision} currentSourceRevision={props.currentSourceRevision}
         label={(props.ariaLabel ?? t('Work with Codex')) + (entries.length > 1 ? ' ' + new Intl.NumberFormat(locale).format(position + 1) : '')}
         placeholder={props.placeholder ?? t('Message')} readOnly={!!props.readOnly || isStructuredAppInput(entry)} onKeyDown={props.onKeyDown}
-        onPaste={props.onPaste} onCompositionChange={value => {
+        onPaste={props.onPaste} onInvalid={props.onInvalid} onCompositionChange={value => {
           if (value) compositions.current.add(position); else compositions.current.delete(position);
           props.onCompositionChange?.(compositions.current.size > 0);
         }}
@@ -522,26 +1337,28 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
     'aria-busy', 'aria-expanded', 'aria-haspopup',
     'data-pm-slice', 'data-mention', 'data-composer-attrs', 'data-composer-autolink', 'data-system-hint-type', 'data-system-hint-label', 'data-saved-loading',
     'page-reference-mention-path', 'page-reference-mention-project-id', 'page-reference-mention-space-id', 'page-reference-mention-title',
-    'agent-mention-name', 'agent-mention-display-name', 'agent-mention-conversation-id', 'agent-mention-path', 'data-interactive', 'aria-label']);
+    'agent-mention-name', 'agent-mention-display-name', 'agent-mention-conversation-id', 'agent-mention-path',
+    'plugin-mention-name', 'plugin-mention-display-name', 'plugin-mention-path', 'plugin-mention-icon', 'plugin-mention-brand-color',
+    'data-prompt-link-href', 'data-prompt-link-label', 'data-interactive', 'aria-label']);
   const originalMentionPresentation = new Set(['data-appearance', 'data-layout', 'data-font-weight', 'data-tone', 'data-underline-on-hover']);
   if (document.querySelector('style, link, script')) return false;
   return Array.from(document.body.querySelectorAll('*')).every(element => {
     const icon = element.localName === 'svg' ? element : element.closest('svg');
     if (icon) {
-      const mention = icon.closest('span[data-mention="page-reference"], span[data-mention="rich-link"], span[data-mention="agent"], span[page-reference-mention-path][page-reference-mention-title], span[agent-mention-name][agent-mention-path]');
+      const mention = icon.closest('span[data-mention="page-reference"], span[data-mention="rich-link"], span[data-mention="agent"], span[data-mention="plugin"], span[page-reference-mention-path][page-reference-mention-title], span[agent-mention-name][agent-mention-path], span[plugin-mention-name][plugin-mention-path]');
       const allowed = element.localName === 'svg'
         ? new Set(['xmlns', 'width', 'height', 'viewbox', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'class', 'aria-hidden', 'focusable'])
         : new Set(['d', 'class', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'fill-rule', 'clip-rule', 'transform']);
       return !!mention && (element === icon || element.localName === 'path' || element.localName === 'g')
         && !element.textContent && Array.from(element.attributes).every(attribute => allowed.has(attribute.name.toLowerCase()));
     }
-    const originalAgent = element.closest('span[agent-mention-name][agent-mention-path]');
+    const originalAgent = element.closest('span[agent-mention-name][agent-mention-path], span[plugin-mention-name][plugin-mention-path]');
     if (!tags.has(element.localName) || !Array.from(element.attributes).every(attribute => attributes.has(attribute.name)
       || !!originalAgent && originalMentionPresentation.has(attribute.name))) return false;
     const mention = element.getAttribute('data-mention');
     if (mention !== null && !allowMentions) return false;
     if (mention !== null && (element.localName !== 'span' || mention !== 'file' && mention !== 'skill'
-      && mention !== 'rich-link' && mention !== 'page-reference' && mention !== 'agent')) return false;
+      && mention !== 'rich-link' && mention !== 'page-reference' && mention !== 'agent' && mention !== 'plugin')) return false;
     if (element.hasAttribute('agent-mention-name') || element.hasAttribute('agent-mention-path')
       || element.hasAttribute('agent-mention-display-name') || element.hasAttribute('agent-mention-conversation-id')) {
       if (!allowMentions || element.localName !== 'span' || mention !== null && mention !== 'agent'
@@ -559,6 +1376,27 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
         const attrs = value as Record<string, unknown>;
         if (attrs.name !== name || attrs.path !== path || (attrs.displayName || attrs.name) !== displayName
           || (attrs.conversationId ?? null) !== conversationId) return false;
+      } catch { return false; }
+    }
+    if (element.hasAttribute('plugin-mention-name') || element.hasAttribute('plugin-mention-path')
+      || element.hasAttribute('plugin-mention-display-name') || element.hasAttribute('plugin-mention-icon')
+      || element.hasAttribute('plugin-mention-brand-color')) {
+      if (!allowMentions || element.localName !== 'span' || mention !== null && mention !== 'plugin'
+        || !element.hasAttribute('plugin-mention-name') || !element.hasAttribute('plugin-mention-path')) return false;
+      const name = element.getAttribute('plugin-mention-name'), path = element.getAttribute('plugin-mention-path');
+      const displayName = element.getAttribute('plugin-mention-display-name') || name;
+      const attrs = { name, path, displayName, description: element.getAttribute('title') ?? '',
+        iconSmall: element.getAttribute('plugin-mention-icon') ?? '', brandColor: element.getAttribute('plugin-mention-brand-color') ?? '' };
+      if (!readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'pluginMention', attrs }] }] })
+        || element.hasAttribute('data-prompt-link-href') && element.getAttribute('data-prompt-link-href') !== path
+        || element.hasAttribute('data-prompt-link-label') && element.getAttribute('data-prompt-link-label') !== '@' + displayName) return false;
+      if (!element.hasAttribute('data-composer-attrs')) return mention === null;
+      try {
+        const value: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+        const saved = value as Record<string, unknown>;
+        if (saved.name !== name || saved.path !== path || (saved.displayName || saved.name) !== displayName
+          || saved.description !== attrs.description || saved.iconSmall !== attrs.iconSmall || saved.brandColor !== attrs.brandColor) return false;
       } catch { return false; }
     }
     if (element.hasAttribute('page-reference-mention-path')) {
@@ -579,6 +1417,7 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
     if (!element.hasAttribute('data-composer-attrs')) return mention === null;
     const spec = mention === 'file' ? composerSchema.nodes.atMention?.spec : mention === 'skill' ? composerSchema.nodes.skillMention?.spec
       : mention === 'agent' ? composerSchema.nodes.agentMention?.spec
+      : mention === 'plugin' ? composerSchema.nodes.pluginMention?.spec
       : mention === 'rich-link' ? composerSchema.nodes.richLink?.spec : mention === 'page-reference' ? composerSchema.nodes.pageReferenceMention?.spec
       : element.localName === 'pre' ? composerSchema.nodes.code_block?.spec
       : element.localName === 'a' || element.hasAttribute('data-composer-autolink') ? composerSchema.marks.link?.spec : null;
@@ -587,11 +1426,62 @@ function supportedClipboardHTML(html: string, allowMentions: boolean): boolean {
       const value: unknown = JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null');
       return !!value && typeof value === 'object' && !Array.isArray(value)
         && Object.keys(value).every(key => Object.hasOwn(spec.attrs ?? {}, key))
-        && (mention !== 'rich-link' && mention !== 'page-reference' && mention !== 'agent' || !!readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [
-          { type: mention === 'rich-link' ? 'richLink' : mention === 'agent' ? 'agentMention' : 'pageReferenceMention', attrs: value as Record<string, unknown> },
+        && (mention !== 'rich-link' && mention !== 'page-reference' && mention !== 'agent' && mention !== 'plugin' || !!readRichDocument({ type: 'doc', content: [{ type: 'paragraph', content: [
+          { type: mention === 'rich-link' ? 'richLink' : mention === 'agent' ? 'agentMention' : mention === 'plugin' ? 'pluginMention' : 'pageReferenceMention', attrs: value as Record<string, unknown> },
         ] }] }));
     } catch { return false; }
   });
+}
+
+function supportedTextHistoryClipboard(html: string, formatting: boolean): boolean {
+  if (!supportedClipboardHTML(html, true)) return false;
+  const body = new DOMParser().parseFromString(html, 'text/html').body;
+  if (body.querySelectorAll('p, div').length > 1 || body.querySelector('br, pre, blockquote, ul, ol, li, h1, h2, h3, h4, h5, h6')) return false;
+  if (body.querySelector('[data-mention]:not([data-mention="agent"]):not([data-mention="plugin"]), [page-reference-mention-path], [data-system-hint-type]')) return false;
+  return formatting || !body.querySelector('strong, b, em, i, code, a, [data-composer-autolink]');
+}
+
+function remapClipboardLinkOccurrences(html: string, document: ProseMirrorNode): string {
+  const parsed = new DOMParser().parseFromString(html, 'text/html');
+  const allocate = linkOccurrenceAllocator(document), occurrences = new Map<string, number>();
+  for (const element of parsed.querySelectorAll('[data-mention="rich-link"][data-composer-attrs], a[href], a[data-composer-attrs], span[data-composer-autolink][data-composer-attrs]')) {
+    try {
+      const attrs: unknown = element.hasAttribute('data-composer-attrs')
+        ? JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null')
+        : { href: element.getAttribute('href'), title: element.getAttribute('title') };
+      if (!attrs || typeof attrs !== 'object' || Array.isArray(attrs)) continue;
+      const copied = { ...attrs } as Record<string, unknown>;
+      const previous = copied.literalMarkdownOccurrenceId;
+      const key = element.matches('[data-mention="rich-link"]') || !Number.isSafeInteger(previous) || Number(previous) < 0
+        ? null : JSON.stringify(copied);
+      const occurrence = key === null ? allocate() : occurrences.get(key) ?? allocate();
+      if (key !== null) occurrences.set(key, occurrence);
+      for (const key of ['literalMarkdownSource', 'literalMarkdownOccurrenceId', 'markdownSourceStart', 'markdownSourceEnd', 'isLoading', 'loadingDisplayText']) delete copied[key];
+      copied.literalMarkdownOccurrenceId = occurrence;
+      element.setAttribute('data-composer-attrs', JSON.stringify(copied));
+    } catch { /* Invalid clipboard data is rejected by handlePaste. */ }
+  }
+  return parsed.body.innerHTML;
+}
+
+function richAutolinkPlugin(editable: () => boolean): Plugin {
+  const insertAutolink = (editor: EditorView, from: number, to: number) => {
+    if (from !== to || editor.composing || !editable()) return false;
+    const position = editor.state.doc.resolve(from), before = position.nodeBefore;
+    if (position.parent.type.spec.code || !before?.isText || before.marks.some(mark => mark.type.name === 'link')) return false;
+    const contents = before.text ?? '', candidate = contents.slice(contents.lastIndexOf(' ') + 1);
+    if (!httpAutolinkHref(candidate)) return false;
+    const mark = editor.state.schema.marks.link!.create({ href: null, sourceAppId: '', literalMarkdownOccurrenceId: linkOccurrenceAllocator(editor.state.doc)() });
+    editor.dispatch(editor.state.tr.addMark(from - candidate.length, from, mark).insertText(' ', from));
+    return true;
+  };
+  return new Plugin({ props: {
+    handleKeyDown(editor, event) {
+      return event.key === ' ' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing && event.keyCode !== 229
+        && insertAutolink(editor, editor.state.selection.from, editor.state.selection.to);
+    },
+    handleTextInput(editor, from, to, text) { return text === ' ' && insertAutolink(editor, from, to); },
+  } });
 }
 
 export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps>(function StandaloneRichEditor(props, ref) {
@@ -602,6 +1492,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
   const agentIcon = useRef<SVGSVGElement>(null);
   const view = useRef<EditorView | null>(null);
   const composing = useRef(false);
+  const compositionGeneration = useRef(0);
   const latest = useRef(props);
   latest.current = props;
   const latestTranslation = useRef(t);
@@ -675,6 +1566,23 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
   };
   useImperativeHandle(ref, () => ({
     focus: () => view.current?.focus(),
+    matchesDocument: document => {
+      const source = readRichDocument(document), editor = view.current;
+      return !!source && !!editor && source.eq(editor.state.doc);
+    },
+    preparePromptAppend: (source, addition) => {
+      const editor = view.current, original = editor?.state, saved = readRichDocument(source);
+      if (!editor || !original || !saved || !saved.eq(original.doc) || editor.isDestroyed || !editor.dom.isConnected
+        || composing.current || editor.composing) return null;
+      const next = appendPromptState(original, addition), document = next?.doc.toJSON() as ComposerDocument | undefined;
+      if (!next || !document || !readRichDocument(document)) return null;
+      return { document, text: historyText(next), apply() {
+        if (view.current !== editor || editor.state !== original || editor.isDestroyed || !editor.dom.isConnected
+          || composing.current || editor.composing) return false;
+        editor.updateState(next);
+        return true;
+      } };
+    },
     insertCompletion: (context, query, item, cwd) => {
       const editor = view.current;
       if (editor && !composing.current) syncRichSelection(editor);
@@ -696,23 +1604,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
     const doc = readRichDocument(latest.current.document);
     if (!host.current || !doc) return;
     const plugins = richEditorPlugins();
-    const insertAutolink = (editor: EditorView, from: number, to: number) => {
-      if (from !== to || composing.current || editor.composing || !editable()) return false;
-      const position = editor.state.doc.resolve(from), before = position.nodeBefore;
-      if (position.parent.type.spec.code || !before?.isText || before.marks.some(mark => mark.type.name === 'link')) return false;
-      const contents = before.text ?? '', candidate = contents.slice(contents.lastIndexOf(' ') + 1);
-      if (!httpAutolinkHref(candidate)) return false;
-      const mark = composerSchema.marks.link!.create({ href: null, sourceAppId: '', literalMarkdownOccurrenceId: linkOccurrenceAllocator(editor.state.doc)() });
-      editor.dispatch(editor.state.tr.addMark(from - candidate.length, from, mark).insertText(' ', from));
-      return true;
-    };
-    const autolink = new Plugin({ props: {
-      handleKeyDown(editor, event) {
-        return event.key === ' ' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing && event.keyCode !== 229
-          && insertAutolink(editor, editor.state.selection.from, editor.state.selection.to);
-      },
-      handleTextInput(editor, from, to, text) { return text === ' ' && insertAutolink(editor, from, to); },
-    } });
+    const autolink = richAutolinkPlugin(() => !composing.current && editable());
     plugins.rich.unshift(autolink); plugins.plain.unshift(autolink);
     const inlineNode = (icon: SVGSVGElement | null) => (node: ProseMirrorNode) => {
       const dom = DOMSerializer.fromSchema(composerSchema).serializeNode(node) as HTMLElement;
@@ -736,15 +1628,18 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
         paste: editor => { if (!composing.current) syncRichSelection(editor); return false; },
         focus: editor => { latest.current.onCompletionContext(composing.current ? null : richCompletionContext(editor)); return false; },
         blur: () => { latest.current.onCompletionContext(null); return false; },
-        compositionstart: () => { composing.current = true; latest.current.onCompositionChange?.(true); latest.current.onCompletionContext(null); return false; },
+        compositionstart: () => { compositionGeneration.current++; composing.current = true; latest.current.onCompositionChange?.(true); latest.current.onCompletionContext(null); return false; },
         compositionend: editor => {
-          requestAnimationFrame(() => {
-            if (view.current !== editor || editor.isDestroyed) return;
+          const generation = compositionGeneration.current;
+          const finish = () => {
+            if (view.current !== editor || editor.isDestroyed || generation !== compositionGeneration.current) return;
+            if (editor.composing) { requestAnimationFrame(finish); return; }
             composing.current = false;
             applyMode.current?.();
             latest.current.onCompositionChange?.(false);
             if (editor.hasFocus()) latest.current.onCompletionContext(richCompletionContext(editor));
-          });
+          };
+          requestAnimationFrame(finish);
           return false;
         },
       },
@@ -768,6 +1663,11 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
           return true;
         }
         if (files.length) { latest.current.onInvalid(latestTranslation.current('Text and images cannot be pasted together.')); return true; }
+        const html = event.clipboardData?.getData('text/html');
+        if (html && /data-mention\s*=\s*["'](?:agent|plugin)["']|(?:agent|plugin)-mention-name\s*=/i.test(html)) {
+          if (!supportedClipboardHTML(html, latest.current.allowMentions !== false)) { latest.current.onInvalid(); return true; }
+          return false;
+        }
         if (latest.current.plainTextMode) {
           const text = event.clipboardData?.getData('text/plain')?.replace(/\r\n?/g, '\n');
           if (text) {
@@ -780,32 +1680,10 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
           }
           return true;
         }
-        const html = event.clipboardData?.getData('text/html');
         if (html && !supportedClipboardHTML(html, latest.current.allowMentions !== false)) { latest.current.onInvalid(); return true; }
         return false;
       },
-      transformPastedHTML: html => {
-        const parsed = new DOMParser().parseFromString(html, 'text/html');
-        const allocate = linkOccurrenceAllocator(editor.state.doc), occurrences = new Map<string, number>();
-        for (const element of parsed.querySelectorAll('[data-mention="rich-link"][data-composer-attrs], a[href], a[data-composer-attrs], span[data-composer-autolink][data-composer-attrs]')) {
-          try {
-            const attrs: unknown = element.hasAttribute('data-composer-attrs')
-              ? JSON.parse(element.getAttribute('data-composer-attrs') ?? 'null')
-              : { href: element.getAttribute('href'), title: element.getAttribute('title') };
-            if (!attrs || typeof attrs !== 'object' || Array.isArray(attrs)) continue;
-            const copied = { ...attrs } as Record<string, unknown>;
-            const previous = copied.literalMarkdownOccurrenceId;
-            const key = element.matches('[data-mention="rich-link"]') || !Number.isSafeInteger(previous) || Number(previous) < 0
-              ? null : JSON.stringify(copied);
-            const occurrence = key === null ? allocate() : occurrences.get(key) ?? allocate();
-            if (key !== null) occurrences.set(key, occurrence);
-            for (const key of ['literalMarkdownSource', 'literalMarkdownOccurrenceId', 'markdownSourceStart', 'markdownSourceEnd', 'isLoading', 'loadingDisplayText']) delete copied[key];
-            copied.literalMarkdownOccurrenceId = occurrence;
-            element.setAttribute('data-composer-attrs', JSON.stringify(copied));
-          } catch { /* Invalid clipboard data is rejected by handlePaste. */ }
-        }
-        return parsed.body.innerHTML;
-      },
+      transformPastedHTML: (html): string => remapClipboardLinkOccurrences(html, editor.state.doc),
     });
     view.current = editor;
     let plain = !!latest.current.plainTextMode;
@@ -816,6 +1694,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
       editor.updateState(editor.state.reconfigure({ plugins: plain ? plugins.plain : plugins.rich }));
     };
     return () => {
+      compositionGeneration.current++;
       applyMode.current = null; view.current = null; editor.destroy();
       latest.current.onCompositionChange?.(false); latest.current.onPendingLinkChange?.(false);
     };
@@ -823,7 +1702,7 @@ export const StandaloneRichEditor = forwardRef<RichEditorHandle, RichEditorProps
 
   useLayoutEffect(() => { applyMode.current?.(); }, [props.plainTextMode]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (props.currentDocument() !== props.document) return;
     const editor = view.current, doc = readRichDocument(props.document);
     if (!editor || !doc || editor.state.doc.eq(doc)) return;

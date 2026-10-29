@@ -65,7 +65,8 @@ test('real settings editors restore rejected submissions and newer drafts after 
       rpc:async (method, params, hostId) => {
         const source = {hostId,generation:'fixture',homeDirectory:'/fixture',codexHome:'/fixture'};
         if (method === 'config/read') return {config:{model:'alpha',model_reasoning_effort:'high',approval_policy:'on-request',
-          sandbox_mode:'read-only',profile:null,desktop:{}},layers:[{name:{type:'user',file:'/fixture/config.toml',profile:null},version:'v1'}],yardConfigSource:source};
+          sandbox_mode:'read-only',profile:null,desktop:{}},layers:[{name:{type:'user',file:'/fixture/config.toml',profile:null},version:'v1'}],yardConfigSource:source,
+          yardAgentConfiguration:{base:{approval_policy:'on-request',sandbox_mode:'read-only'},lockedKeys:[],supportsIndexedWebSearch:true}};
         if (method === 'configRequirements/read') return {requirements:null};
         if (method === 'model/list') return {data:['alpha','beta'].map(name => ({id:name,model:name,displayName:name,
           isDefault:name === 'alpha',supportedReasoningEfforts:[{reasoningEffort:'high'},{reasoningEffort:'low'}]})),nextCursor:null};
@@ -89,7 +90,7 @@ test('real settings editors restore rejected submissions and newer drafts after 
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
     args: ['--no-sandbox', '--disable-background-networking'] });
   try {
-    for (const section of ['models', 'agent', 'worktrees', 'hooks-settings', 'skills-settings']) {
+    for (const section of ['models', 'worktrees', 'hooks-settings', 'skills-settings', 'agent']) {
       const context = await browser.newContext();
       const page = await context.newPage();
       const errors: string[] = [];
@@ -103,7 +104,7 @@ test('real settings editors restore rejected submissions and newer drafts after 
       if (section === 'worktrees') await main.getByRole('textbox', { name: 'Worktree root' }).fill('/fixture/worktree');
       if (section === 'hooks-settings') await main.getByRole('checkbox', { name: 'SessionStart hook 1' }).uncheck();
       if (section === 'skills-settings') await main.getByRole('checkbox', { name: 'first (repo, /fixture/first/SKILL.md)' }).uncheck();
-      await main.locator('.yard-inline-save').getByRole('button', { name: 'Save', exact: true }).click();
+      if (section !== 'agent') await main.locator('.yard-inline-save').getByRole('button', { name: 'Save', exact: true }).click();
       await page.waitForFunction(() => window.receiptEditorHarness.calls.some(call => call.action === 'submit'));
       if (section === 'hooks-settings' || section === 'skills-settings') {
         await page.evaluate(() => window.receiptEditorHarness.setScopeStatus('loading'));
@@ -130,7 +131,7 @@ test('real settings editors restore rejected submissions and newer drafts after 
       }
       if (section === 'agent') {
         await page.waitForFunction(() => (document.querySelector('[aria-label="Approval policy"]') as HTMLSelectElement | null)?.value === 'never');
-        await main.getByRole('combobox', { name: 'Sandbox mode' }).selectOption('workspace-write');
+        await main.getByRole('combobox', { name: 'Sandbox settings' }).selectOption('workspace-write');
       }
       if (section === 'worktrees') {
         await page.waitForFunction(() => (document.querySelector('[aria-label="Worktree root"]') as HTMLInputElement | null)?.value === '/fixture/worktree');
@@ -152,7 +153,7 @@ test('real settings editors restore rejected submissions and newer drafts after 
       }
       if (section === 'agent') {
         await page.waitForFunction(() => (document.querySelector('[aria-label="Approval policy"]') as HTMLSelectElement | null)?.value === 'never'
-          && (document.querySelector('[aria-label="Sandbox mode"]') as HTMLSelectElement | null)?.value === 'workspace-write');
+          && (document.querySelector('[aria-label="Sandbox settings"]') as HTMLSelectElement | null)?.value === 'workspace-write');
       }
       if (section === 'worktrees') {
         await page.waitForFunction(() => (document.querySelector('[aria-label="Worktree root"]') as HTMLInputElement | null)?.value === '/fixture/worktree'
@@ -165,8 +166,9 @@ test('real settings editors restore rejected submissions and newer drafts after 
         assert.equal(await main.getByRole('checkbox', { name: first }).isChecked(), false, section);
         assert.equal(await main.getByRole('checkbox', { name: second }).isChecked(), false, section);
       }
-      assert.equal((await page.evaluate(() => window.receiptEditorHarness.record()))?.operationId, original.operationId);
-      assert.equal((await page.evaluate(() => window.receiptEditorHarness.calls.filter(call => call.action === 'submit'))).length, 1);
+      const submissions = await page.evaluate(() => window.receiptEditorHarness.calls.filter(call => call.action === 'submit'));
+      assert.equal(submissions.length, 1, `${section}: ${JSON.stringify(submissions)}`);
+      assert.equal((await page.evaluate(() => window.receiptEditorHarness.record()))?.operationId, original.operationId, section);
       assert.deepEqual(errors, [], section);
       await context.close();
     }

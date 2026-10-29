@@ -10,11 +10,13 @@
   color: var(--yard-fg, #ececec);
   background: var(--yard-bg, #202020);
   border-right: 1px solid var(--yard-border, #343434);
-  font: 430 calc(var(--yard-font-size, 14px) * .93)/1.43 var(--yard-ui-font, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font: 430 calc(var(--yard-font-size, 14px) * .928571)/1.428571 var(--yard-ui-font, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
 }
 .yard-owned-sidebar *, .yard-owned-sidebar-menu * { box-sizing: border-box; }
 .yard-owned-sidebar button, .yard-owned-sidebar input, .yard-owned-sidebar-menu button { font: inherit; color: inherit; }
-.yard-owned-sidebar button, .yard-owned-sidebar-menu button { border: 0; border-radius: 6px; background: transparent; cursor: default; }
+.yard-owned-sidebar button, .yard-owned-sidebar-menu button { border: 0; background: transparent; cursor: default; }
+.yard-owned-sidebar button { border-radius: 12.5px; }
+.yard-owned-sidebar-menu button { border-radius: 6px; }
 :root[data-pointer-cursors=true] .yard-owned-sidebar button, :root[data-pointer-cursors=true] .yard-owned-sidebar-menu button { cursor: pointer; }
 .yard-owned-sidebar button:hover, .yard-owned-sidebar-menu button:hover, .yard-owned-sidebar-menu button:focus-visible {
   background: color-mix(in srgb, var(--yard-fg, #ececec) 8%, transparent);
@@ -37,13 +39,13 @@
 .yard-owned-sidebar-search input { min-width: 0; width: 100%; padding: 6px 8px; border: 1px solid var(--yard-border, #343434); border-radius: 6px; background: var(--yard-panel, #272727); }
 .yard-owned-sidebar-command { display: flex; align-items: center; gap: 9px; min-height: 34px; width: 100%; padding: 5px 8px; text-align: left; }
 .yard-owned-sidebar-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; touch-action: pan-y; }
-.yard-owned-sidebar-heading { display: flex; align-items: center; justify-content: space-between; min-height: 32px; padding-left: 8px; color: var(--yard-muted, #969696); }
+.yard-owned-sidebar-heading { display: flex; align-items: center; justify-content: space-between; min-height: 32px; padding-left: 8px; color: color-mix(in srgb, var(--yard-fg, #ececec) 49.4%, transparent); }
 .yard-owned-sidebar-projects-heading { margin-top: 15px; }
-.yard-owned-sidebar-section-toggle { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; min-height: 32px; padding: 4px 0; color: inherit; text-align: left; }
+.yard-owned-sidebar .yard-owned-sidebar-section-toggle { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; min-height: 32px; padding: 4px 0; border-radius: 10px; font-size: var(--yard-font-size, 14px); font-weight: 500; line-height: 1.5; color: inherit; text-align: left; }
 .yard-owned-sidebar-section-toggle svg { width: 12px; height: 12px; }
 .yard-owned-sidebar-section-toggle[aria-expanded=false] svg { transform: rotate(-90deg); }
-.yard-owned-sidebar-project-heading { display: flex; align-items: center; border-radius: 7px; }
-.yard-owned-sidebar-project-heading[data-active=true] { background: color-mix(in srgb, var(--yard-fg, #ececec) 7%, transparent); }
+.yard-owned-sidebar-project-heading { display: flex; align-items: center; border-radius: 12.5px; }
+.yard-owned-sidebar-project-heading:hover, .yard-owned-sidebar-project-heading[data-active=true] { background: color-mix(in srgb, var(--yard-fg, #ececec) 5.5%, transparent); }
 .yard-owned-sidebar-project-heading > .yard-owned-sidebar-thread-status { margin-left: 4px; }
 .yard-owned-sidebar-project-toggle { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; min-height: 31px; padding: 5px 8px; text-align: left; }
 .yard-owned-sidebar-project-toggle span, .yard-owned-sidebar-thread-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -52,9 +54,10 @@
 .yard-owned-sidebar-heading:hover .yard-owned-sidebar-heading-options, .yard-owned-sidebar-heading:focus-within .yard-owned-sidebar-heading-options,
 .yard-owned-sidebar-project-heading:hover .yard-owned-sidebar-project-action, .yard-owned-sidebar-project-heading:focus-within .yard-owned-sidebar-project-action,
 .yard-owned-sidebar-heading-options[aria-expanded=true], .yard-owned-sidebar-project-action[aria-expanded=true] { opacity: 1; }
-.yard-owned-sidebar-thread-line { display: flex; align-items: center; min-width: 0; border-radius: 6px; }
-.yard-owned-sidebar-thread-line:hover, .yard-owned-sidebar-thread-line:focus-within { background: color-mix(in srgb, var(--yard-fg, #ececec) 6%, transparent); }
-.yard-owned-sidebar-thread-line:has(.yard-owned-sidebar-thread-button[aria-current=page]) { background: color-mix(in srgb, var(--yard-fg, #ececec) 9%, transparent); }
+.yard-owned-sidebar-thread-line { display: flex; align-items: center; min-width: 0; border-radius: 12.5px; }
+.yard-owned-sidebar-thread-line:hover, .yard-owned-sidebar-thread-line:focus-within,
+.yard-owned-sidebar-thread-line:has(.yard-owned-sidebar-thread-button[aria-current=page]) { background: color-mix(in srgb, var(--yard-fg, #ececec) 5.5%, transparent); }
+.yard-owned-sidebar .yard-owned-sidebar-thread-button:hover, .yard-owned-sidebar .yard-owned-sidebar-project-toggle:hover { background: transparent; }
 .yard-owned-sidebar-thread-button { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; min-height: 31px; padding: 5px 8px; text-align: left; }
 .yard-owned-sidebar-project .yard-owned-sidebar-thread-button { padding-left: 32px; }
 .yard-owned-sidebar-thread-title { flex: 1; }
@@ -75,7 +78,7 @@
 .yard-owned-sidebar-error { padding: 8px; overflow-wrap: anywhere; }
 .yard-sidebar-action-error { margin: 0; padding: 4px 8px; font-size: 12px; overflow-wrap: anywhere; color: var(--yard-danger, #c33); }
 .yard-owned-sidebar-footer { flex: none; margin: 0 -8px; border-top: 1px solid var(--yard-border, #343434); padding: 7px 8px; }
-.yard-owned-sidebar-account { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 5px 8px; color: var(--yard-muted, #969696); text-align: left; }
+.yard-owned-sidebar .yard-owned-sidebar-account { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 5px 8px; font-size: var(--yard-font-size, 14px); font-weight: 400; line-height: 1; color: color-mix(in srgb, var(--yard-fg, #ececec) 49.4%, transparent); text-align: left; }
 .yard-owned-sidebar-account span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .yard-owned-sidebar-menu { position: fixed; z-index: 200; max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow: auto; padding: 5px; border: 1px solid var(--yard-border, #343434); border-radius: 10px; color: var(--yard-fg, #ececec); background: var(--yard-panel, #272727); box-shadow: 0 8px 24px #0003; font: 430 calc(var(--yard-font-size, 14px) * .86)/1.43 var(--yard-ui-font, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); }
 :root[data-theme=light] .yard-owned-sidebar-menu { background: var(--yard-bg, #fff); }

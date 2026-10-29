@@ -4,6 +4,7 @@ import type { ComposerDraftController, ComposerDraftLease, ComposerDraftOwner, C
 import { saveComposerDraftConflict } from '../composer/composer-draft-store.ts';
 import { normalizeDraft } from '../composer/standalone-draft.ts';
 import type { MessageEditNavigationController, MessageEditNavigationLease } from '../messages/StandaloneMessages.tsx';
+import type { MessageOutputPreviewAuthority } from '../messages/MessageOutputPreviews.tsx';
 import { SideChatPanel } from '../side-chat/SideChatPanel.tsx';
 import type { SideChatActiveChildScope, SideChatCloseBarrier, SideChatChildScope, SideChatInterruptScope, SideChatQueueEntry, SideChatQueueMutation } from '../side-chat/SideChatPanel.tsx';
 import type { SideChatBrowserIdentity, SideChatChildDispatchAuthority, SideChatSendLease } from '../side-chat/browser-authority.ts';
@@ -46,6 +47,11 @@ export interface SideChatWorkspaceNavigationController {
 export type { SideChatQueueMutation } from '../side-chat/SideChatPanel.tsx';
 export type SideChatWriteDispatch = <T>(method: ConversationWriteMethod, params: Record<string, unknown>, hostId: string,
   assertBeforeSend: () => void, originalAuthority: (() => void) | null) => Promise<T>;
+export interface SideChatWorkspaceProjection {
+  childThreadId: string | null;
+  title: string | null;
+  working: boolean | null;
+}
 export interface SideChatWorkspaceProps {
   client: WorkbenchClient;
   identity: SideChatWorkspaceIdentity;
@@ -58,8 +64,10 @@ export interface SideChatWorkspaceProps {
   approvals: ApprovalRequestsController;
   /** Fixed original page, parent, socket generation, and owner; synchronous and valid while its lease is held. */
   assertCurrent(): void;
+  /** Checks the original mounted workspace independently of its daemon grant. */
+  assertMounted?(): void;
   /** Blocks new same-draft owners and sends across views synchronously; drains their real pending work. */
-  freezeSending(owner: ComposerDraftOwner, purpose?: 'cancel'): SideChatSendLease;
+  freezeSending(owner: ComposerDraftOwner, purpose?: 'cancel', disconnectedHandoff?: () => void): SideChatSendLease;
   /** Captures the original owner and connection synchronously at the input action. */
   captureSubmissionAuthority(owner: ComposerDraftOwner, childAuthority?: SideChatChildDispatchAuthority): () => void;
   /** Resolve the same synchronously captured grant, without obtaining a newer connection. */
@@ -86,10 +94,15 @@ export interface SideChatWorkspaceProps {
   onOpenNew?(scope: SideChatChildScope): void | Promise<void>;
   onDraftController?: StandaloneComposerRuntimeProps['onDraftController'];
   onDraftChange?: StandaloneComposerRuntimeProps['onDraftChange'];
+  /** Read-only metadata from this workspace's existing conversation projection. */
+  onProjectionChange?(projection: SideChatWorkspaceProjection): void;
   onRemoveReference?: StandaloneComposerRuntimeProps['onRemoveReference'];
   onEditNavigationController?(controller: MessageEditNavigationController | null): void;
-  onOpenFile?(location: { hostId: string; threadId: string; path: string; cwd?: string; line?: number; column?: number }): void;
-  onOpenBrowser?(value: { hostId: string; threadId: string; url?: string }): void;
+  onOpenFile?(location: { hostId: string; threadId: string; path: string; cwd?: string; line?: number; column?: number;
+    assertCurrent?: () => void }): void;
+  /** Read-only project facts and the original page/connection; the workspace adds its own child guard. */
+  outputPreviewAuthority?(identity: SideChatWorkspaceIdentity, threadId: string, cwd: string): MessageOutputPreviewAuthority;
+  onOpenBrowser?(value: { hostId: string; threadId: string; url?: string; source?: 'link' }): void;
   onOpenVisualization?(value: { hostId: string; threadId: string; path: string }): void;
   approvalOptions?: Partial<Omit<ApprovalDialogProps, 'request' | 'onRespond' | 'onUnsupported' | 'onCloseView' | 'onInputEscape'>>;
 }
@@ -116,16 +129,26 @@ export function SideChatWorkspace(props: SideChatWorkspaceProps) {
   useEffect(() => {
     let active = true;
     const fixed = identity.current, initial = latest.current;
-    const assertCurrent = () => {
+    const assertIdentity = () => {
       const now = latest.current;
-      if (now.client !== initial.client || now.sessions !== initial.sessions || now.sends !== initial.sends || now.edits !== initial.edits
+      if (!active || now.client !== initial.client || now.sessions !== initial.sessions || now.sends !== initial.sends || now.edits !== initial.edits
         || now.approvals !== initial.approvals || now.identity.hostId !== fixed.hostId || now.identity.parentThreadId !== fixed.parentThreadId
         || now.identity.draftId !== fixed.draftId || now.identity.prepareId !== fixed.prepareId || now.identity.cwd !== fixed.cwd
         || now.identity.mode !== fixed.mode) throw notSent('原侧聊工作区已改变。');
+    };
+    const assertMounted = () => {
+      assertIdentity(); const now = latest.current;
+      if (!now.assertMounted) throw notSent('原侧聊挂载身份尚未确认。');
+      sync(now.assertMounted());
+    };
+    const assertCurrent = () => {
+      const now = latest.current;
+      if (initial.assertMounted) assertMounted(); else assertIdentity();
       sync(now.assertCurrent());
     };
     const source = new SideChatWorkspaceRuntime({ client: initial.client, identity: fixed, sessions: initial.sessions, sends: initial.sends,
-      assertCurrent, draftController: () => draft.current, freezeSending: owner => latest.current.freezeSending(owner),
+      assertCurrent, ...(initial.assertMounted ? { assertMounted } : {}),
+      draftController: () => draft.current, freezeSending: owner => latest.current.freezeSending(owner),
       cleanupChild: async child => {
         assertCurrent();
         const view = source.controller?.getSnapshot().view, receipt = view?.fork.receipt;
@@ -172,6 +195,12 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
   const identity = childId ? { hostId: original.hostId, threadId: childId } : null;
   useSyncExternalStore(runtime.subscribeProjection, runtime.projectionSnapshot, runtime.projectionSnapshot);
   const conversation = useConversationSession(sessions, identity, false, !!childId && runtime.bridge.hasLiveChild(childId), 0);
+  const projectedThread = conversation.thread?.id === childId ? conversation.thread : null;
+  const receiptThread = state.view?.child?.thread.id === childId ? state.view.child.thread : null;
+  const threadName = (projectedThread ?? receiptThread)?.name?.trim() || null;
+  const working = projectedThread && conversation.liveReady && !conversation.loading && !conversation.error && !conversation.streamGap
+    && (projectedThread.status?.type === 'idle' || projectedThread.status?.type === 'active') ? isThreadBusy(projectedThread) : null;
+  useEffect(() => { latest.current.onProjectionChange?.({ childThreadId: childId, title: threadName, working }); }, [childId, threadName, working]);
   const editAccess = useMemo(() => edits.createAccess(), [edits]);
   const editor = useRef<MessageEditNavigationController | null>(null);
   const locked = useRef(false), mounted = useRef(true), active = useRef(0), waiters = useRef<Set<() => void>>(new Set());
@@ -222,6 +251,15 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
 
   const currentOwner = (): ComposerDraftOwner => ({ hostId: original.hostId, threadId: controller.getSnapshot().view?.childId ?? null, draftId: original.draftId });
   const assertOriginal = () => { runtime.assertScope(); if (!mounted.current) throw notSent('原侧聊工作区已卸载。'); };
+  const parentOutputAuthority = childId && props.outputPreviewAuthority?.(original, childId, conversation.thread?.cwd ?? original.cwd);
+  const outputPreviewAuthority: MessageOutputPreviewAuthority | undefined = parentOutputAuthority ? {
+    ...parentOutputAuthority,
+    sourceKey: JSON.stringify([parentOutputAuthority.sourceKey, original.prepareId, original.draftId, childId]),
+    assertCurrent() {
+      parentOutputAuthority.assertCurrent(); assertOriginal();
+      if (locked.current || currentOwner().threadId !== childId) throw notSent('原侧聊文件来源已改变。');
+    },
+  } : undefined;
   const capture = (owner: ComposerDraftOwner, write = true): (() => void) => {
     if (locked.current || !sameOwner(owner, currentOwner()) || !owner.threadId) throw notSent('侧聊输入目标已改变。');
     assertOriginal();
@@ -406,11 +444,15 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
     let draftLease: ComposerDraftLease | null = null, sendLease: SideChatSendLease | null = null;
     let releaseHost: (() => void) | null = null;
     let editLease: ReturnType<typeof freezeEdits> | null = null;
+    let disconnectedHandoff: (() => void) | null = null;
+    const assertNavigation = () => { if (disconnectedHandoff) disconnectedHandoff(); else assertOriginal();
+      if (!mounted.current) throw notSent('原侧聊工作区已卸载。'); };
     try {
-      assertOriginal(); releaseHost = runtime.freezeHostOperations('navigation');
+      disconnectedHandoff = runtime.captureDisconnectedHandoff();
+      assertNavigation(); releaseHost = runtime.freezeHostOperations('navigation', disconnectedHandoff);
       const owner = currentOwner(), snapshot = draft.current?.snapshot();
       if (draft.current && (!snapshot || !sameOwner(snapshot.owner, owner) || !(draftLease = draft.current.freeze(owner)))) throw new Error('原侧聊草稿无法冻结。');
-      sendLease = latest.current.freezeSending(owner); editLease = freezeEdits();
+      sendLease = latest.current.freezeSending(owner, undefined, disconnectedHandoff ?? undefined); editLease = freezeEdits();
     } catch (cause) {
       editLease?.lease?.release(); editLease?.releaseAcquisition(); sendLease?.release(); draftLease?.release(); releaseHost?.(); setLocked(false); report(cause); return null;
     }
@@ -422,13 +464,13 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
           flushed = false; await editLease?.lease?.flush(); if (draftLease && !await draftLease.flush()) return false;
           await sendLease!.drain(); await drain(); await editLease?.lease?.flush();
           if (draftLease && !await draftLease.flush()) return false;
-          assertOriginal(); sendLease!.assertCurrent(); flushed = valid; return flushed;
+          assertNavigation(); sendLease!.assertCurrent(); flushed = valid; return flushed;
         } catch (cause) { report(cause); return false; }
       },
       async revoke() {
         if (!valid || !flushed) throw new Error('原侧聊尚未排空。');
-        runtime.assertHandoffReady();
-        revocationAttempted = true; await runtime.revokeForHandoff(); assertOriginal(); sendLease!.assertCurrent(); revoked = true;
+        runtime.assertHandoffReady(disconnectedHandoff);
+        revocationAttempted = true; await runtime.revokeForHandoff(disconnectedHandoff); assertNavigation(); sendLease!.assertCurrent(); revoked = true;
       },
       handoff() {
         if (!valid || !flushed || !revoked || handedOff) throw new Error('原侧聊尚未确认撤权。');
@@ -597,7 +639,7 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
         };
         check(); await latest.current.dispatchSubmission('thread/queue/start', { threadId: scope.childThreadId, queuedSubmissionId: id }, scope.hostId, check, originalCaptured ?? null);
       })}
-      messages={{ editAccess, editRecovery: edit?.childId === childId ? edit.value?.recovery ?? null : null,
+      messages={{ editAccess, outputPreviewAuthority, editRecovery: edit?.childId === childId ? edit.value?.recovery ?? null : null,
         editRebase: edit?.childId === childId ? messageEditRebaseMarker(edit.value) : null,
         editHistory: { order: 'ascending', tailComplete: conversation.historyComplete },
         onEditNavigationController: receiveEditController, onEditDraftChange: (value, origin, version, authority) => edits.save(value, origin, version, authority),

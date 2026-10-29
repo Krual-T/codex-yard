@@ -10,6 +10,7 @@ import { addBrowserCommentToDraft, attachBrowserComment, browserOwnerKey, browse
   subscribeBrowserComments } from './comments.ts';
 import type { BrowserOwner, BrowserReference, LegacyBrowserComments, ResolveLegacyBrowserOwner } from './comments.ts';
 import { sameBrowserValue } from './draft-transaction.ts';
+import { formatBrowserAddress, useBrowserShowFullUrl } from './preferences.ts';
 
 export { addBrowserCommentToDraft, attachBrowserComment, browserOwnerKey, browserReferences, changeBrowserComment,
   claimLegacyBrowserComment, claimProvenLegacyBrowserComments, listLegacyBrowserComments, pruneBrowserDraftDeletions, readBrowserComments,
@@ -180,6 +181,9 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
   const bridge = React.useMemo(() => new BrowserChrome((endpoint, body) => client.host(endpoint, body as Record<string, unknown>), () => {}), [client]);
   const [state, setState] = React.useState<ChromePanelState>();
   const [address, setAddress] = React.useState('');
+  const [editingAddress, setEditingAddress] = React.useState(false);
+  const openButton = React.useRef<HTMLButtonElement>(null);
+  const showFullUrl = useBrowserShowFullUrl(client);
   const [comments, setComments] = React.useState<unknown[]>([]);
   const [consumed, setConsumed] = React.useState<BrowserReference[]>([]);
   const [legacy, setLegacy] = React.useState<LegacyBrowserComments[]>([]);
@@ -221,7 +225,6 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
     }
   }, [ownerKey, edits.hold, edits.release]);
   React.useEffect(() => bridge.subscribe(target, setState), [bridge, target]);
-  React.useEffect(() => { setAddress(state?.frame?.url ?? ''); }, [state?.frame?.url]);
   const attemptedNavigation = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!visible || !allowNavigation || !navigationRequest || attemptedNavigation.current === navigationRequest.id) return;
@@ -328,9 +331,16 @@ function BrowserPanel({ client, owner, browserTabId, draft, visible, allowNaviga
         <button title="后退" aria-label="后退" disabled={!state?.frame?.canGoBack} onClick={() => command('go-back')}>←</button>
         <button title="前进" aria-label="前进" disabled={!state?.frame?.canGoForward} onClick={() => command('go-forward')}>→</button>
         <button title="重新加载" aria-label="重新加载" disabled={!state?.pageId} onClick={() => command('reload')}>↻</button>
-        <form style={{ flex: 1, display: 'flex', minWidth: 0 }} onSubmit={event => { event.preventDefault(); if (address.trim()) command('navigate', address.trim()); }}>
-          <input aria-label="网页地址" value={address} onChange={event => setAddress(event.target.value)} style={{ flex: 1, minWidth: 0 }} />
-          <button>打开</button>
+        <form style={{ flex: 1, display: 'flex', minWidth: 0 }} onSubmit={event => {
+          event.preventDefault();
+          const next = editingAddress ? address : state?.frame?.url ?? '';
+          if (next.trim()) command('navigate', next.trim());
+        }}>
+          <input aria-label="网页地址" value={editingAddress ? address : formatBrowserAddress(state?.frame?.url ?? '', showFullUrl)}
+            onFocus={() => { setAddress(state?.frame?.url ?? ''); setEditingAddress(true); }}
+            onBlur={event => { if (event.relatedTarget !== openButton.current) setEditingAddress(false); }}
+            onChange={event => setAddress(event.target.value)} style={{ flex: 1, minWidth: 0 }} />
+          <button ref={openButton} onBlur={() => setEditingAddress(false)}>打开</button>
         </form>
       </> : null}
       <button onClick={() => { void edits.barrier().then(onClose).catch(failure => setError((failure as Error).message)); }}>关闭</button>

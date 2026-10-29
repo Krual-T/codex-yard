@@ -35,9 +35,9 @@ function parseSkill(value: unknown): SkillEntry {
     description: value.description, path: value.path, scope: value.scope, pluginId: value.pluginId ?? null, enabled: value.enabled };
 }
 
-async function readSkills(client: WorkbenchClient, hostId: string, cwds: readonly string[]): Promise<SkillRead> {
+async function readSkills(client: WorkbenchClient, hostId: string, cwds: readonly string[], assertBeforeSend?: () => void): Promise<SkillRead> {
   if (!cwds.length || !cwds.every(validScopePath)) throw new Error('Select a project or session with a working directory.');
-  const result = await client.rpc<{ data: unknown; yardConfigSource?: unknown }>('skills/list', { cwds, forceReload: true }, hostId);
+  const result = await client.rpc<{ data: unknown; yardConfigSource?: unknown }>('skills/list', { cwds, forceReload: true }, hostId, { assertBeforeSend });
   if (!Array.isArray(result?.data)) throw new Error('Invalid skills response');
   const unique = new Map<string, SkillEntry>(), warnings: string[] = [];
   for (const group of result.data) {
@@ -75,8 +75,10 @@ export class SkillSettings {
   private invalidated = false;
   private writeInFlight = false;
   private discarding = false;
-  constructor(client: WorkbenchClient, hostId: string, cwds: readonly string[], operations = settingsConfigOperations(client)) {
+  private readonly captureReadAuthority?: () => () => void;
+  constructor(client: WorkbenchClient, hostId: string, cwds: readonly string[], operations = settingsConfigOperations(client), captureReadAuthority?: () => () => void) {
     this.client = client; this.hostId = hostId; this.cwds = [...cwds]; this.operations = operations;
+    this.captureReadAuthority = captureReadAuthority;
   }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -134,6 +136,12 @@ export class SkillSettings {
     const generation = ++this.generation;
     this.update({ loading: true, error: null });
     try {
+      const assertOriginal = this.captureReadAuthority?.();
+      const assertBeforeSend = () => {
+        if (generation !== this.generation) throw new Error('The original skill settings page is no longer active.');
+        assertOriginal?.();
+      };
+      assertBeforeSend();
       const previous = await this.operations.find(this.hostId, 'skills-settings', this.cwds);
       if (generation !== this.generation) return;
       const unresolved = !!previous && (previous.phase === 'pending' || previous.phase === 'unknown' || previous.phase === 'blocked' || !!previous.operation?.storageError);
@@ -144,8 +152,8 @@ export class SkillSettings {
         const blocker = this.originalBlocker;
         resolved = this.resolvedOriginalId === this.originalId
           || await this.operations.originalNotSentClosed(this.hostId, this.originalId, 'skills/config/write')
-          || !!(blocker?.method && await this.operations.originalFinished(blocker.hostId, blocker.operationId, blocker.method))
-          || !blocker && await this.operations.originalFinished(this.hostId, this.originalId, 'skills/config/write');
+          || !!(blocker?.method && blocker.hostId === this.hostId && await this.operations.originalFinished(blocker.hostId, blocker.operationId, blocker.method, assertBeforeSend))
+          || !blocker && await this.operations.originalFinished(this.hostId, this.originalId, 'skills/config/write', assertBeforeSend);
         if (generation !== this.generation) return;
       }
       if (unresolved && previous?.operationId === this.originalId) {
@@ -153,7 +161,7 @@ export class SkillSettings {
       } else if (this.snapshot.writeUncertain && resolved) {
         this.snapshot = { ...this.snapshot, writeUncertain: false, needsRefresh: true };
       }
-      const read = await readSkills(this.client, this.hostId, this.cwds);
+      const read = await readSkills(this.client, this.hostId, this.cwds, assertBeforeSend);
       if (generation !== this.generation) return;
       if (this.dirty && (this.snapshot.latest || this.snapshot.needsRefresh || this.changed(read))) {
         this.latestRead = read;

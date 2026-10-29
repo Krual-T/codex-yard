@@ -78,6 +78,37 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
   return { root, fake, app, connect };
 }
 
+test('native feature reads preserve the backend browser value and pagination', async t => {
+  const { fake, connect } = await fixture(t);
+  const replies = [
+    { data: [{ name: 'in_app_browser', enabled: false }], nextCursor: 'second-page' },
+    { data: [{ name: 'in_app_browser', enabled: true }], nextCursor: null },
+    { data: [{ name: 'another_feature', enabled: false }], nextCursor: null },
+  ];
+  const requests: Record<string, unknown>[] = [];
+  fake.handlers.set('experimentalFeature/list', params => {
+    requests.push(record(params));
+    return replies[requests.length - 1];
+  });
+  const { rpc } = await connect();
+  for (const [index, reply] of replies.entries()) {
+    const params = index === 1 ? { cursor: 'second-page' } : {};
+    assert.deepEqual((await rpc(1000 + index, 'experimentalFeature/list', params)).result, reply);
+  }
+  assert.deepEqual(requests, [{}, { cursor: 'second-page' }, {}]);
+});
+
+test('native plugin inventory carries the same owned configuration source as configuration reads', async t => {
+  const { fake, connect } = await fixture(t);
+  const inventory = { marketplaces: [{ name: 'Local', path: '/market', plugins: [] }], marketplaceLoadErrors: [] };
+  fake.handlers.set('plugin/installed', () => inventory);
+  const { rpc } = await connect();
+  const config = (await rpc(1010, 'config/read')).result;
+  const installed = (await rpc(1011, 'plugin/installed', { cwds: ['/workspace'] })).result;
+  assert.ok(config.yardConfigSource?.generation);
+  assert.deepEqual(installed, { ...inventory, yardConfigSource: config.yardConfigSource });
+});
+
 async function callNativeTool(root: string, tool: string, args: Record<string, unknown>, callId: string) {
   const socket = createConnection(join(root, 'data', 'app-tools.sock'));
   let buffer = Buffer.alloc(0);

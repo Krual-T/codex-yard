@@ -216,13 +216,28 @@ try {
     throw new Error('The owned App client was not mounted.');
   });
   await installClientProbe(page);
+  await page.evaluate(() => {
+    (window as any).originalLocalDaemonConnection = (window as any).acceptanceClient.captureDaemonConnection('local');
+  });
+  const initializesBeforeReconnect = fake.calls('initialize').length;
   const turnsBeforeReconnect = fake.calls('turn/start').length;
   fake.disconnectAll();
-  await page.getByRole('button', { name: 'Reconnect host', exact: true }).click();
+  // The native control connection retries every two seconds, so its recovery can
+  // remove the button before a real click. The remote case below holds the host
+  // unavailable to exercise an explicit reconnect separately.
+  await page.waitForFunction(() => {
+    try { (window as any).originalLocalDaemonConnection.assertOriginal(); return false; }
+    catch { return true; }
+  });
   await waitForHostConnected(page, 'local');
+  assert(fake.calls('initialize').length > initializesBeforeReconnect);
+  assert.equal(await page.evaluate(() => {
+    try { (window as any).originalLocalDaemonConnection.assertOriginal(); return true; }
+    catch { return false; }
+  }), false);
   await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).waitFor();
   assert.equal(fake.calls('turn/start').length, turnsBeforeReconnect);
-  checks.push('daemon connection loss exposes an explicit read-only reconnect action and restores the actual host without replaying input');
+  checks.push('local daemon connection loss revokes the original connection and recovers through the native control retry without replaying input');
   const remotePage = await context.newPage();
   remotePage.on('pageerror', error => errors.push('remote fixture: ' + error.message));
   await remotePage.goto(app.url + '/local/remote-connection-check?hostId=' + remoteHostId);
@@ -244,13 +259,16 @@ try {
   }, remoteHostId), false);
   assert.equal(await remoteDraft.inputValue(), 'KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
   assert.equal(remoteFake.calls('turn/start').length, 0);
-  remoteAvailable = true;
   await remotePage.getByRole('button', { name: 'Reconnect host', exact: true }).click();
+  await remotePage.getByRole('alert').filter({ hasText: 'Synthetic remote connection is unavailable' }).waitFor();
+  assert.equal(await remoteDraft.inputValue(), 'KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
+  assert.equal(remoteFake.calls('turn/start').length, 0);
+  remoteAvailable = true;
   await waitForHostConnected(remotePage, remoteHostId);
   assert.equal(await remoteDraft.inputValue(), 'KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
   assert.equal(remoteFake.calls('turn/start').length, 0);
   await remotePage.close();
-  checks.push('remote host disconnection survives a real browser bridge reconnect; its explicit reconnect preserves the draft without turn replay (synthetic remote transport)');
+  checks.push('remote host disconnection survives a real browser bridge reconnect; an explicit failed reconnect and later host recovery preserve the draft without turn replay (synthetic remote transport)');
   const retainedComposer = page.getByRole('textbox', { name: 'Work with Codex', exact: true });
   await retainedComposer.evaluate(element => { element.setAttribute('data-retained-archive-owner', 'original'); });
   await holdUiWrites(page);

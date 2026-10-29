@@ -8,7 +8,7 @@ import type { ProductAccess, ProductRouteOwner } from './ProductRoutePage.tsx';
 import { readProductBridge } from './ProductPagesBridge.ts';
 import { readProductRoute } from './product-routes.ts';
 import { trackProductChange, useProductChanges } from './ProductPageChanges.ts';
-import { emptyConfigSubscribe, getEmptyConfigSnapshot, pluginConfigRecords, reconcilePluginConfig, writePluginConfig } from './ProductPluginConfig.ts';
+import { emptyConfigSubscribe, getEmptyConfigSnapshot, pluginConfigBlocksScope, pluginConfigRecords, reconcilePluginConfig, writePluginConfig } from './ProductPluginConfig.ts';
 import type { ProductConfigurationWrites } from './ProductPluginConfig.ts';
 
 type Authority = Pick<ProductRouteOwner, 'hostId' | 'authorityKey' | 'locationKey'>;
@@ -116,8 +116,7 @@ function ProductWorkspaceScope(props: ProductWorkspaceProps) {
   const configSnapshot = useSyncExternalStore(config?.subscribe ?? emptyConfigSubscribe,
     config?.getSnapshot ?? getEmptyConfigSnapshot, getEmptyConfigSnapshot);
   useEffect(() => { if (config) void config.refresh(); }, [config]);
-  const pluginConfigBusy = !!config && (configSnapshot.loading || !!configSnapshot.error || configSnapshot.inFlight.length > 0
-    || pluginConfigRecords(configSnapshot, props.hostId).length > 0);
+  const pluginConfigBusy = !!config && pluginConfigBlocksScope(configSnapshot, props.hostId, props.cwd);
   const [account, setAccount] = useState<{ state: 'loading' } | { state: 'error'; message: string } |
     { state: 'ready'; value: Account; access: ProductAccess; sequence: number }>({ state: 'loading' });
   const authority: Authority = { hostId: props.hostId, authorityKey: props.authorityKey, locationKey: props.locationKey };
@@ -198,6 +197,14 @@ function ProductWorkspaceScope(props: ProductWorkspaceProps) {
       onSetLocalEnabled: (owner, target, client) => writePluginConfig(config, client, target, () => ownerCurrent(owner)),
       onReconcileChanges: config ? async (owner, scope, client) => {
         if (pluginChanges) throw new Error('The original plugin operation cannot be verified on this host.');
+        const records = pluginConfigRecords(config.getSnapshot(), scope.hostId, scope.cwd);
+        if (records.length !== 1 || records[0]!.phase === 'not-started' || records[0]!.operation?.state === 'failed') {
+          const target = new URL('/settings/agent', 'http://yard.invalid');
+          target.search = props.location.search; target.hash = props.location.hash;
+          target.searchParams.delete('host'); target.searchParams.set('hostId', owner.hostId);
+          if (!await props.navigate(target.pathname + target.search + target.hash, { state: props.location.state }, owner)) throw new Error('Navigation was not completed.');
+          return;
+        }
         await reconcilePluginConfig(config, client, scope.hostId, scope.cwd, () => ownerCurrent(owner));
       } : undefined }}
     onOpenFile={props.onOpenFile} onOpenImage={props.onOpenImage} />;

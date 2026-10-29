@@ -111,9 +111,11 @@ export interface StandaloneMessagesProps {
   onEdit?(draft: ComposerDraft, origin: MessageEditOrigin, prepare: () => Promise<void>): Promise<void>;
   onFork?(turnId: string): void | Promise<void>;
   onOpenFile?(path: string): void;
-  onOpenFileAt?(location: { path: string; hostId: string; cwd?: string; line?: number; column?: number }): void;
+  onOpenFileAt?(location: { path: string; hostId: string; cwd?: string; line?: number; column?: number;
+    /** One message open's captured source, used until the file is handed to its tab. */
+    assertCurrent?: () => void }): void;
   onOpenVisualization?(value: { hostId: string; threadId: string; path: string }): void;
-  onOpenBrowser?(value: { hostId: string; threadId: string; url?: string }): void;
+  onOpenBrowser?(value: { hostId: string; threadId: string; url?: string; source?: 'link' }): void;
 }
 export interface StandaloneSettingsProps {
   client: WorkbenchClient;

@@ -12,10 +12,11 @@ export interface SkillSectionMemory {
   scope: { origin: string; paths: string[] }; settings: SkillSettings;
 }
 
-export function SkillSection({ client, hostId, projectScope, memory, revision, onDirtyChange, onSavingChange, registerDiscard }: {
+export function SkillSection({ client, hostId, projectScope, memory, revision, onDirtyChange, onSavingChange, registerDiscard, captureReadAuthority }: {
   client: WorkbenchClient; hostId: string; projectScope: SettingsScope; onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
   memory: RefObject<SkillSectionMemory | null>; revision: number;
   registerDiscard?: (discard: (() => Promise<boolean>) | null) => void;
+  captureReadAuthority?: () => () => void;
 }) {
   const { t } = useI18n();
   const [retained] = useState(() => memory.current?.client === client && memory.current.hostId === hostId && memory.current.revision === revision ? memory.current : null);
@@ -25,7 +26,7 @@ export function SkillSection({ client, hostId, projectScope, memory, revision, o
   const [scopeError, setScopeError] = useState<string | null>(() => retained?.scopeError ?? null);
   const [query, setQuery] = useState(() => retained?.query ?? '');
   const settings = useMemo(() => retained?.scope === scope && retained.client === client && retained.hostId === hostId && retained.revision === revision ?
-    retained.settings : new SkillSettings(client, hostId, scope.paths), [client, hostId, revision, scope, retained]);
+    retained.settings : new SkillSettings(client, hostId, scope.paths, undefined, captureReadAuthority), [client, hostId, revision, scope, retained]);
   const state = useSyncExternalStore(settings.subscribe, settings.getSnapshot, settings.getSnapshot);
   const scopeChanged = scope.origin !== incomingKey;
   useLayoutEffect(() => { memory.current = { client, hostId, revision, cwd, scopeError, query, scope, settings }; }, [client, hostId, revision, cwd, scopeError, query, scope, settings, memory]);

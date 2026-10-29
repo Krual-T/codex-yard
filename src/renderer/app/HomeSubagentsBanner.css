@@ -1,0 +1,4 @@
+.yard-home-subagents-banner__status,.yard-home-subagents-banner__recovery{margin:6px 13px;overflow-wrap:anywhere}
+.yard-home-subagents-banner__status button,.yard-home-subagents-banner__recovery button{text-decoration:underline;text-underline-offset:2px}
+.yard-home-subagents-banner__recovery p{margin:4px 0}
+.yard-home-subagents-banner__recovery code{font-family:var(--yard-code-font,monospace);font-size:var(--yard-code-size,12px)}

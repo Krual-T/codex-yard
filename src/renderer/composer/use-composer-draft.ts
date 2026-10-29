@@ -18,7 +18,7 @@ export interface ComposerDraftController {
   /** Use the same projection guard for parent recovery and the local submit path. */
   clearSubmittedVersion(revision: string, guard?: (atoms: Readonly<Record<string, unknown>>) => boolean): Promise<void>;
   /** Adopt an independently committed active version only if this projection still matches. */
-  acceptCommittedVersion(before: ComposerDraftSnapshot, after: ComposerDraftSnapshot): Promise<boolean>;
+  acceptCommittedVersion(before: ComposerDraftSnapshot, after: ComposerDraftSnapshot, applyProjection?: () => boolean): Promise<boolean>;
   /** Register before the first await of an external owner-bound draft operation. */
   beginExternalOperation(owner: ComposerDraftOwner): ComposerDraftExternalOperation | null;
 }
@@ -30,6 +30,9 @@ export interface ComposerDraftExternalOperation {
   transaction<T>(work: (before: ComposerDraftSnapshot, isCurrent: () => boolean) =>
     Promise<{ after: ComposerDraftSnapshot; value: T }>):
     Promise<{ before: ComposerDraftSnapshot; after: ComposerDraftSnapshot; value: T; accepted: boolean }>;
+  transaction<T>(work: (before: ComposerDraftSnapshot, isCurrent: () => boolean) =>
+    Promise<{ after: ComposerDraftSnapshot; value: T }>, applyProjection: () => boolean):
+    Promise<{ before: ComposerDraftSnapshot; after: ComposerDraftSnapshot; value: T; accepted: boolean }>;
   /** Merge and durably mark an asynchronously obtained prefill exactly once. */
   applyPrefill(prefill: { id: string; draft: ComposerDraft }): Promise<boolean>;
   finish(success: boolean): void;
@@ -39,12 +42,17 @@ const legacyKeys = new Set(['composer-prompt-drafts-v2', 'composer-prompt-drafts
   'client-thread-bindings-v1', 'draft-thread-identities-v1']);
 const sameOwner = (left: ComposerDraftOwner, right: ComposerDraftOwner) => left.hostId === right.hostId
   && left.threadId === right.threadId && left.draftId === right.draftId;
+// IndexedDB and snapshots structured-clone editor JSON, including its null-prototype attrs.
+const samePersistedDraft = (left: unknown, right: unknown): boolean => {
+  try { return sameComposerDraftValue(structuredClone(left), structuredClone(right)); } catch { return false; }
+};
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 interface Mutation { saved: Promise<boolean> }
 
 export function useComposerDraft(context: ComposerContext, onController?: (controller: ComposerDraftController | null) => void,
   onChange?: (snapshot: ComposerDraftSnapshot) => void, freezeGuard?: RefObject<((afterDrain: boolean) => boolean)>,
-  onFreeze?: (frozen: boolean) => void, pendingLink?: RefObject<boolean>) {
+  onFreeze?: (frozen: boolean) => void, pendingLink?: RefObject<boolean>, pendingComposition?: RefObject<boolean>,
+  onLocalRevision?: (before: string, after: string) => void) {
   const owner = useMemo<ComposerDraftOwner>(() => ({ hostId: context.hostId, threadId: context.threadId, draftId: context.draftId }),
     [context.hostId, context.threadId, context.draftId]);
   const [initial] = useState<StoredDraft>(() => ({ revision: createId(), draft: emptyDraft(), prefills: [] }));
@@ -80,6 +88,8 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   const refreshVersions = useRef<(() => void) | null>(null);
   const changeCallback = useRef(onChange);
   changeCallback.current = onChange;
+  const localRevisionCallback = useRef(onLocalRevision);
+  localRevisionCallback.current = onLocalRevision;
   const freezeCallback = useRef(onFreeze);
   freezeCallback.current = onFreeze;
   const markUnresolved = useCallback(() => {
@@ -138,6 +148,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       prefills: prefillId ? [...previous.prefills, prefillId] : previous.prefills };
     pendingAncestors.current.add(previous.revision);
     current.current = next;
+    localRevisionCallback.current?.(previous.revision, next.revision);
     dirty.current = true;
     setStored(next);
     if (preserveProjection.current || external.current?.phase === 'working') {
@@ -149,6 +160,17 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   }, [markUnresolved, persist]);
   const changeDraft = useCallback((update: (draft: Draft) => Draft, prefillId?: string): Promise<boolean> =>
     apply(update, prefillId)?.saved ?? Promise.resolve(false), [apply]);
+  const preserveVisibleDraft = useCallback((rendered: StoredDraft, draft: Draft, composing = false): boolean => {
+    if (!mounted.current || !active.current || frozen.current || external.current || initializing.current || dirty.current
+      || preserveProjection.current || pendingLink?.current || (pendingComposition?.current && !composing) || current.current.revision === rendered.revision) return false;
+    current.current = { ...rendered, revision: createId(), draft };
+    localRevisionCallback.current?.(rendered.revision, current.current.revision);
+    dirty.current = true;
+    setStored(current.current);
+    markUnresolved();
+    setSaving(false);
+    return true;
+  }, [markUnresolved, pendingLink, pendingComposition]);
   const changeDraftFromOperation = useCallback((update: (draft: Draft) => Draft): Promise<boolean> =>
     apply(update, undefined, true)?.saved ?? Promise.resolve(false), [apply]);
   const updateDraftFromOperation = useCallback(async (expected: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft) => {
@@ -217,7 +239,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
         return lease;
       },
       async update(expected, update) {
-        if (active.current !== result || !sameOwner(owner, expected)) return false;
+        if (active.current !== result || !sameOwner(owner, expected) || pendingComposition?.current) return false;
         const finish = beginOperation();
         if (!finish) return false;
         pendingProjection.current++;
@@ -229,13 +251,13 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
         if (active.current !== result || !clearVersion.current) throw new Error('原输入区已改变，已发送版本尚未清理。');
         await clearVersion.current(revision, guard);
       },
-      async acceptCommittedVersion(before, after) {
+      async acceptCommittedVersion(before, after, applyProjection) {
         const reject = () => {
           if (active.current === result && frozen.current && operations.current.size) failedOperations.current++;
           return false;
         };
         if (active.current !== result || !sameOwner(owner, before.owner) || !sameOwner(owner, after.owner)
-          || !before.revision || !after.revision || initializing.current || pendingLink?.current) return reject();
+          || !before.revision || !after.revision || initializing.current || pendingLink?.current || pendingComposition?.current) return reject();
         if (dirty.current || pendingProjection.current) {
           if (dirty.current) { markUnresolved(); setSaving(false); refreshVersions.current?.(); }
           return reject();
@@ -244,12 +266,12 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
         try { original = structuredClone(before); target = structuredClone(after); } catch { return reject(); }
         const observed = current.current;
         const matches = (version: StoredDraft, expected: ComposerDraftSnapshot) => version.revision === expected.revision
-          && sameComposerDraftValue(version.draft, expected.draft);
+          && samePersistedDraft(version.draft, expected.draft);
         if (!matches(observed, original) && !matches(observed, target)) {
           if (original.revision !== target.revision) { markUnresolved(); refreshVersions.current?.(); }
           return reject();
         }
-        if (original.revision === target.revision && !sameComposerDraftValue(original.draft, target.draft)) return reject();
+        if (original.revision === target.revision && !samePersistedDraft(original.draft, target.draft)) return reject();
         const finish = beginOperation(true);
         if (!finish) return false;
         pendingProjection.current++;
@@ -264,13 +286,15 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
           if (active.current !== result || current.current !== observed || dirty.current || pendingProjection.current !== 1
             || saved !== lastWrite.current || waiting !== queue.current) return false;
           const candidates = view.versions.filter(version => version.revision === target.revision);
-          if (candidates.length !== 1 || !sameComposerDraftValue(candidates[0]!.draft, target.draft)) return false;
+          if (candidates.length !== 1 || !samePersistedDraft(candidates[0]!.draft, target.draft)) return false;
           // A form opened during this read owns an unchanged local projection.
           // Closing it may re-read; applying it must still write from the original
           // revision. Only a real version/read conflict needs unresolved mode.
-          if (pendingLink?.current) { deferredForLink = true; return false; }
+          if (pendingLink?.current || pendingComposition?.current) { deferredForLink = true; return false; }
+          if (applyProjection?.() === false) return false;
           const next = candidates[0]!;
           current.current = next; setStored(next); setVersions(view.versions);
+          if (applyProjection) localRevisionCallback.current?.(observed.revision, next.revision);
           durableRevision.current = next.revision; dirty.current = false; preserveProjection.current = false; setUnresolved(false); setSaving(false);
           lastWrite.current = Promise.resolve(true); setStorageError(''); publish(result, next);
           success = true;
@@ -305,7 +329,8 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
           gate.phase = 'working';
         };
         return {
-          async transaction(work) {
+          async transaction<T>(work: (before: ComposerDraftSnapshot, isCurrent: () => boolean) =>
+            Promise<{ after: ComposerDraftSnapshot; value: T }>, applyProjection?: () => boolean) {
             if (!live() || used) throw new Error('草稿外部操作已结束或已使用。');
             used = true; running = true;
             let before: ComposerDraftSnapshot | null = null;
@@ -315,9 +340,10 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
               if (!before) throw new Error('草稿身份已变化。');
               const original = before;
               const isCurrent = () => live() && !dirty.current && !preserveProjection.current
-                && current.current.revision === original.revision && sameComposerDraftValue(current.current.draft, original.draft);
+                && current.current.revision === original.revision && samePersistedDraft(current.current.draft, original.draft);
               const response = await work(structuredClone(original), isCurrent);
-              accepted = isCurrent() && await result.acceptCommittedVersion(original, response.after);
+              accepted = isCurrent() && await result.acceptCommittedVersion(original, response.after,
+                applyProjection ? () => isCurrent() && applyProjection() : undefined);
               return { before: original, after: response.after, value: response.value, accepted };
             } catch (reason) {
               if (before && live()) {
@@ -325,7 +351,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
                 try {
                   const view = await readComposerDraftVersions(owner);
                   const matches = view.versions.filter(version => version.revision === observed.revision
-                    && sameComposerDraftValue(version.draft, observed.draft));
+                    && samePersistedDraft(version.draft, observed.draft));
                   if (live()) {
                     setVersions(view.versions);
                     if (current.current !== observed || dirty.current || preserveProjection.current || matches.length !== 1) markUnresolved();
@@ -362,11 +388,12 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       },
     };
     async function updateFromOperation(expected: ComposerDraftOwner, update: (draft: ComposerDraft) => ComposerDraft, prefillId?: string): Promise<boolean> {
-        if (active.current !== result || !sameOwner(owner, expected) || preserveProjection.current) return false;
+        if (active.current !== result || !sameOwner(owner, expected) || preserveProjection.current || pendingComposition?.current) return false;
         for (;;) {
           await queue.current;
-          if (active.current !== result || preserveProjection.current) return false;
+          if (active.current !== result || preserveProjection.current || pendingComposition?.current) return false;
           if (!await lastWrite.current) throw new Error('草稿未能保存，当前内容已保留。');
+          if (pendingComposition?.current) return false;
           const previous = current.current;
           if (prefillId && previous.prefills.includes(prefillId)) return true;
           const updated = update(structuredClone(previous.draft));
@@ -379,12 +406,17 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
             const view = await enqueue(async () => {
               if (!ready.current) throw new Error('草稿存储尚未初始化。');
               await ready.current;
-              if (active.current !== result || current.current !== previous) return null;
+              if (active.current !== result || current.current !== previous || pendingComposition?.current) return null;
               return writeComposerDraftVersion(owner, previous.revision, next);
             });
             if (active.current !== result) return false;
+            if (pendingComposition?.current) {
+              if (view) { markUnresolved(); setSaving(false); refreshVersions.current?.(); }
+              return false;
+            }
             if (!view || current.current !== previous) continue;
             current.current = next; setStored(next); setVersions(view.versions);
+            localRevisionCallback.current?.(previous.revision, next.revision);
             durableRevision.current = next.revision; dirty.current = false; preserveProjection.current = false; setSaving(false);
             lastWrite.current = Promise.resolve(true); setStorageError(''); publish(result, next);
             return true;
@@ -396,7 +428,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     }
     operationUpdate.current = updateFromOperation;
     return result;
-  }, [beginOperation, enqueue, freezeGuard, markUnresolved, owner, pendingLink, publish]);
+  }, [beginOperation, enqueue, freezeGuard, markUnresolved, owner, pendingLink, pendingComposition, publish]);
 
   const legacyIdentity = JSON.stringify([context.hostId, context.threadId, context.draftId, context.placement ?? null, context.legacyDraftKey ?? null]);
   useLayoutEffect(() => {
@@ -430,11 +462,13 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     }).catch(reason => { if (valid()) setStorageError('无法恢复草稿，当前内容已保留：' + message(reason)); });
     const refresh = () => {
       if (dirty.current && !preserveProjection.current) return;
-      const serial = ++versionRead, observed = current.current, mayAdopt = !pendingProjection.current && !preserveProjection.current && !pendingLink?.current;
+      const serial = ++versionRead, observed = current.current, mayAdopt = !pendingProjection.current && !preserveProjection.current
+        && !pendingLink?.current && !pendingComposition?.current;
       void readComposerDraftVersions(owner).then(view => {
         if (!valid() || serial !== versionRead || dirty.current && !preserveProjection.current || current.current !== observed) return;
         setVersions(view.versions);
-        if (mayAdopt && !pendingProjection.current && !preserveProjection.current && !pendingLink?.current && !frozen.current && !external.current && finished
+        if (mayAdopt && !pendingProjection.current && !preserveProjection.current && !pendingLink?.current && !pendingComposition?.current
+          && !frozen.current && !external.current && finished
           && !view.versions.some(value => value.revision === observed.revision) && view.versions.length === 1) {
           const next = view.versions[0]!;
           current.current = next; setStored(next); durableRevision.current = next.revision;
@@ -448,7 +482,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       if (keys.includes(composerDraftAtomKey)) refresh();
     });
     return () => { disposed = true; if (refreshVersions.current === refresh) refreshVersions.current = null; unsubscribe(); };
-  }, [controller, legacyIdentity, retry, initial, owner, pendingLink, persist, publish]);
+  }, [controller, legacyIdentity, retry, initial, owner, pendingLink, pendingComposition, persist, publish]);
   useLayoutEffect(() => { onController?.(controller); return () => onController?.(null); }, [controller, onController]);
 
   const retain = useCallback((captured: StoredDraft): Promise<boolean> => {
@@ -470,19 +504,20 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       throw new Error('当前草稿冲突尚未处理。');
     }
     await clearComposerDraftRevision(owner, revision, atoms => active.current === controller
-      && !(preserveProjection.current && current.current.revision === revision) && (!guard || guard(atoms)));
+      && !pendingComposition?.current && !(preserveProjection.current && current.current.revision === revision) && (!guard || guard(atoms)));
     const view = await readComposerDraftVersions(owner);
     if (active.current !== controller) return;
     setVersions(view.versions);
-    if (!preserveProjection.current && !pendingLink?.current && current.current.revision === revision && view.versions[0]) {
+    if (!preserveProjection.current && !pendingLink?.current && !pendingComposition?.current && current.current.revision === revision && view.versions[0]) {
       const next = view.versions[0];
       current.current = next; setStored(next); lastWrite.current = Promise.resolve(true); durableRevision.current = next.revision;
       dirty.current = false; preserveProjection.current = false; setUnresolved(false); setSaving(false); publish(controller, next);
     }
-  }, [controller, owner, pendingLink, publish]);
+  }, [controller, owner, pendingLink, pendingComposition, publish]);
   clearVersion.current = clear;
   const selectVersion = useCallback(async (revision: string): Promise<void> => {
     if (pendingLink?.current) { setStorageError('请先应用或关闭链接编辑。'); return; }
+    if (pendingComposition?.current) { setStorageError('请先完成输入法输入。'); return; }
     if (preserveProjection.current) return;
     const finish = beginOperation();
     if (!finish) return;
@@ -494,17 +529,17 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       const previous = current.current;
       const view = await readComposerDraftVersions(owner);
       if (active.current !== controller || current.current !== previous || preserveProjection.current) return;
-      if (pendingLink?.current) { setStorageError('请先应用或关闭链接编辑。'); return; }
+      if (pendingLink?.current || pendingComposition?.current) { setStorageError('请先完成当前输入或链接编辑。'); return; }
       const selected = view.versions.find(value => value.revision === revision);
       if (!selected) { setStorageError('该草稿版本已变化，请重新选择。'); setVersions(view.versions); return; }
       current.current = selected; setStored(selected); setVersions(view.versions); lastWrite.current = Promise.resolve(true);
       durableRevision.current = selected.revision; dirty.current = false; preserveProjection.current = false; setUnresolved(false); setSaving(false);
       setStorageError(''); publish(controller, selected); success = true;
     } finally { pendingProjection.current--; finish(success); }
-  }, [beginOperation, controller, owner, pendingLink, publish]);
+  }, [beginOperation, controller, owner, pendingLink, pendingComposition, publish]);
   const saveUnresolved = useCallback(async (): Promise<boolean> => {
     if (!preserveProjection.current) return true;
-    if (savingConflict.current) return false;
+    if (savingConflict.current || pendingComposition?.current) return false;
     const finish = beginOperation();
     if (!finish) return false;
     savingConflict.current = true; setSaving(true);
@@ -512,10 +547,12 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     let success = false;
     try {
       await queue.current;
+      if (pendingComposition?.current) return false;
       const previous = current.current, next = { ...previous, revision: createId() };
       const view = await saveComposerDraftConflict(owner, next);
-      if (active.current !== controller || current.current !== previous) return false;
+      if (active.current !== controller || current.current !== previous || pendingComposition?.current) return false;
       current.current = next; setStored(next); setVersions(view.versions); durableRevision.current = next.revision;
+      localRevisionCallback.current?.(previous.revision, next.revision);
       dirty.current = false; preserveProjection.current = false; pendingAncestors.current.clear(); setUnresolved(false); setSaving(false);
       lastWrite.current = Promise.resolve(true); setStorageError(''); publish(controller, next);
       success = true; return true;
@@ -527,7 +564,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       if (active.current === controller) setSaving(false);
       pendingProjection.current--; finish(success);
     }
-  }, [beginOperation, controller, owner, publish]);
+  }, [beginOperation, controller, owner, pendingComposition, publish]);
   useEffect(() => () => { generation.current += 1; }, []);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -536,7 +573,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     window.addEventListener('beforeunload', beforeUnload);
     return () => window.removeEventListener('beforeunload', beforeUnload);
   }, [pendingLink]);
-  return { owner, controller, current, stored, changeDraft, changeDraftFromOperation, updateDraftFromOperation, beginOperation, retain, clear, selectVersion,
+  return { owner, controller, current, stored, changeDraft, preserveVisibleDraft, changeDraftFromOperation, updateDraftFromOperation, beginOperation, retain, clear, selectVersion,
     conflicts: versions.filter(value => value.revision !== stored.revision && !pendingAncestors.current.has(value.revision)),
     storageError, saving, loaded, unresolved, saveUnresolved,
     recheckProjection: () => refreshVersions.current?.(),

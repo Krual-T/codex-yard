@@ -307,8 +307,8 @@ test('standalone messages render CLI items and retain interactions while streami
     await search.getByRole('button', { name: 'https://example.test/page' }).click();
     await search.getByRole('button', { name: 'Example', exact: true }).click();
     assert.deepEqual(await page.evaluate(() => window.standaloneHarness.calls.browser), [
-      { hostId: 'ssh-test', threadId: 'thread', url: 'https://example.test/page' },
-      { hostId: 'ssh-test', threadId: 'thread', url: 'https://example.test/' },
+      { hostId: 'ssh-test', threadId: 'thread', url: 'https://example.test/page', source: 'link' },
+      { hostId: 'ssh-test', threadId: 'thread', url: 'https://example.test/', source: 'link' },
     ]);
     await page.locator('[data-message-id="collab"] summary').click();
     assert.match(await page.locator('[data-message-id="collab"]').innerText(), /agent: completed[\s\S]*Found it/);

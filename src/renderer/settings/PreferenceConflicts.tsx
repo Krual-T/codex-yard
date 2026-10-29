@@ -19,6 +19,8 @@ const labels: Record<PreferenceKey, string> = {
   'worktree-upstream-refresh-mode': 'Always fetch upstream before creating worktrees',
   'worktree-auto-cleanup-enabled': 'Automatically delete old worktrees', 'worktree-keep-count': 'Auto-delete limit',
   'external-browser-link-shortcut': 'Open web link in default browser', 'primary-number-shortcut-target': 'Number shortcuts',
+  'open-link-in-target-preference': 'Web URL and link open destination', 'open-local-url-in-target-preference': 'Local URL open destination',
+  'browser-show-full-url': 'Show full URL', 'browser-annotation-screenshots-mode': 'Annotation screenshots',
   'reduced-motion-preference': 'Reduce motion', 'dock-icon-preference': 'Dock icon',
   'ambient-suggestions-enabled': 'Suggestions', 'show-context-window-usage': 'Show context window usage',
   'show-educational-tips': 'Educational tips',

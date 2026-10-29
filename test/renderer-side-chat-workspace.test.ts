@@ -19,33 +19,43 @@ import type {} from './renderer-side-chat-root-fixture.tsx';
 type Message = Record<string, any>;
 async function peer() {
   const root = await mkdtemp('/tmp/hscw-'), fake = await createFakeCodex(root), mutations = createStateMutations();
-  const parentThread = fixtureThread('parent-a', root);
+  const parentThread = fixtureThread('parent-a', root), otherParent = fixtureThread('parent-b', root);
   fake.threads.set('parent-a', parentThread); fake.loaded.add('parent-a');
-  const response = (child: string | null = null) => ({ thread: child ? { ...parentThread, id: child, ephemeral: true, forkedFromId: 'parent-a', turns: [] } : parentThread,
+  fake.threads.set('parent-b', otherParent); fake.loaded.add('parent-b');
+  const response = (child: string | null = null, parentId = 'parent-a') => {
+    const parent = parentId === 'parent-b' ? otherParent : parentThread;
+    return ({ thread: child ? { ...parent, id: child, ephemeral: true, forkedFromId: parentId, turns: [] } : parent,
     cwd: root, runtimeWorkspaceRoots: [root], model: 'peer-model', modelProvider: 'peer', reasoningEffort: null, serviceTier: null,
     approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, activePermissionProfile: null });
+  };
   fake.handlers.set('thread/start', () => response());
+  fake.handlers.set('thread/resume', params => params.threadId === 'parent-a' || params.threadId === 'parent-b'
+    ? response(null, params.threadId) : fake.defaultResult('thread/resume', params));
   fake.handlers.set('config/read', () => ({ config: { developer_instructions: null } }));
   let holdFork = false, lateFork: (() => void) | null = null, holdChild = false, deliverChild: (() => void) | null = null, forks = 0;
   let failRevoke = false, lostConfirm = 0, lostPersistence = 0, lostPrepare = 0, readPrepared = 0, generation = 'generation-a', section: any, terminalStarts = 0;
   let holdPrepare = false, deliverPrepare: (() => void) | null = null;
   let holdChallenge = false, deliverChallenge: (() => void) | null = null;
   let holdApproval = false, deliverApproval: (() => void) | null = null;
+  const pendingQueueReads: (() => void)[] = [];
   const queue = [
     { id: 'queue-a', clientUserMessageId: 'client-a', input: [{ type: 'text', text: 'synthetic queue A', text_elements: [] }] },
     { id: 'queue-b', clientUserMessageId: 'client-b', input: [{ type: 'text', text: 'synthetic queue B', text_elements: [] }] },
   ];
   const approvalReplies: Message[] = [];
+  const settings: Record<string, unknown> = { composerPlainTextMode: false, composerEnterBehavior: 'enter', followUpQueueMode: 'queue' };
+  const settingWrites: Message[] = [];
   const order: string[] = [], reads: { purpose: string; token: unknown }[] = [], dispatches: Message[] = [], nativeWrites: Message[] = [];
   const authorityActions: string[] = [], queueEdits: Message[] = [], approvalInterrupts: Message[] = [];
   let injectionStatus: Message | null = null;
-  fake.handlers.set('thread/fork', (_params, context) => {
+  fake.handlers.set('thread/fork', (params, context) => {
     order.push('fork');
     const child = ++forks === 1 ? 'child-a' : 'child-' + forks;
-    fake.threads.set(child, { ...parentThread, id: child, sessionId: child, ephemeral: true, forkedFromId: 'parent-a', turns: [] });
+    const parentId = String(params.threadId), base = parentId === 'parent-b' ? otherParent : parentThread;
+    fake.threads.set(child, { ...base, id: child, sessionId: child, ephemeral: true, forkedFromId: parentId, turns: [] });
     fake.loaded.add(child);
-    if (holdFork) { lateFork = () => context.send({ id: context.message.id, result: response(child) }); return NO_REPLY; }
-    return response(child);
+    if (holdFork) { lateFork = () => context.send({ id: context.message.id, result: response(child, parentId) }); return NO_REPLY; }
+    return response(child, parentId);
   });
   fake.handlers.set('thread/inject_items', () => { order.push('inject'); return {}; });
   const server = createServer((_request, reply) => {
@@ -84,6 +94,13 @@ async function peer() {
       if (typeof message.method === 'string' && page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'mcp-notification',
         hostId: 'local', seq: connection.eventCursor, method: message.method, params: message.params }));
     });
+    connection.on('status', () => {
+      if (!connection.connected && connection.socket) {
+        receipts.forgetSocket(page, connection.socket); authority.invalidate(page, 'local');
+        if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'codex-app-server-connection-changed',
+          hostId: 'local', state: 'disconnected', isSnapshot: false }));
+      }
+    });
     const ready = connection.connect().then(() => {
       socketGenerations.set(connection.socket!, generation);
       if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'codex-app-server-connection-changed', hostId: 'local', state: 'connected',
@@ -104,17 +121,20 @@ async function peer() {
         dispatches.push(structuredClone(message));
         const request = message.request, source = { page, hostId: 'local', connection, socket: connection.socket!, connectionGeneration: generation,
           isCurrent: () => page.readyState === WebSocket.OPEN && connection.connected && socketGenerations.get(connection.socket!) === generation };
-        const attempt = request.method === 'thread/start' ? receipts.begin(source, 'thread/start', null) : null;
+        const attempt = request.method === 'thread/start' ? receipts.begin(source, 'thread/start', null)
+          : request.method === 'thread/resume' ? receipts.begin(source, 'thread/resume', request.params.threadId) : null;
         try {
           const provider = authority as typeof authority & { captureChildWrite?(page: WebSocket, value: unknown): unknown };
           const guard = parent as typeof parent & { assertChildWrite?(hostId: string, threadId: string, proof: unknown): void };
           const write = /^(turn\/(start|steer|interrupt)|thread\/queue\/(add|start|delete|reorder|update))$/.test(request.method);
-          if (write && (typeof provider.captureChildWrite !== 'function' || typeof guard.assertChildWrite !== 'function')) {
+          const childWrite = write && request.params.threadId !== 'parent-a';
+          if (childWrite && (typeof provider.captureChildWrite !== 'function' || typeof guard.assertChildWrite !== 'function')) {
             throw Error('The fixed native child write fence is required.');
           }
-          const proof = write ? provider.captureChildWrite!(page, message.sideChat) : undefined;
+          if (write && !childWrite && (message.sideChat || message.daemonConnectionGeneration !== generation)) throw Error('Main queue authority changed.');
+          const proof = childWrite ? provider.captureChildWrite!(page, message.sideChat) : undefined;
           const pending = await mutations.run(() => {
-            if (write) guard.assertChildWrite!('local', request.params.threadId, proof);
+            if (childWrite) guard.assertChildWrite!('local', request.params.threadId, proof);
             return { request: connection.requestWithCursor(request.method, request.params) };
           });
           const result = await pending.request;
@@ -167,8 +187,12 @@ async function peer() {
           const provider = authority as typeof authority & { captureChildWrite?(page: WebSocket, value: unknown): unknown };
           const guard = parent as typeof parent & { assertChildWrite?(hostId: string, threadId: string, proof: unknown): void };
           if (typeof provider.captureChildWrite !== 'function' || typeof guard.assertChildWrite !== 'function') throw Error('The fixed native child write fence is required.');
-          const proof = provider.captureChildWrite(page, body.sideChat);
-          await mutations.run(() => guard.assertChildWrite!(body.hostId, body.threadId, proof));
+          if (body.threadId === 'parent-a') {
+            if (body.sideChat || body.daemonConnectionGeneration !== generation) throw Error('Main queue edit authority changed.');
+          } else {
+            const proof = provider.captureChildWrite(page, body.sideChat);
+            await mutations.run(() => guard.assertChildWrite!(body.hostId, body.threadId, proof));
+          }
           const index = queue.findIndex(item => JSON.stringify(item) === JSON.stringify(body.entry));
           if (index < 0) result = 'changed'; else { queue.splice(index, 1); result = 'deleted'; }
         } else if (endpoint === 'approval-request-interrupt') {
@@ -181,7 +205,8 @@ async function peer() {
           result = null;
         } else if (endpoint === 'queued-follow-up-send-lock-acquire') result = { acquired: true };
         else if (endpoint === 'queued-follow-up-send-lock-release') result = {};
-        else if (endpoint === 'get-setting') result = { value: body.key === 'composerPlainTextMode' ? false : 'queue', exists: true };
+        else if (endpoint === 'get-setting') result = { value: settings[body.key], exists: Object.hasOwn(settings, body.key) };
+        else if (endpoint === 'set-setting') { settingWrites.push(structuredClone(body)); settings[body.key] = body.value; result = { success: true }; }
         else if (endpoint === 'get-settings') result = {};
         else if (endpoint === 'get-persisted-atom') result = {};
         else throw Error('Fixture host endpoint not implemented: ' + endpoint);
@@ -198,7 +223,26 @@ async function peer() {
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); if (!address || typeof address === 'string') throw Error('No fixture address.');
-  return { url: `http://127.0.0.1:${address.port}/`, fake, order, reads, dispatches, nativeWrites, authorityActions, queueEdits, approvalReplies, approvalInterrupts, section: () => section,
+  return { url: `http://127.0.0.1:${address.port}/`, fake, order, reads, dispatches, nativeWrites, authorityActions, queueEdits, approvalReplies, approvalInterrupts,
+    settings, settingWrites, section: () => section,
+    async childProofCurrent(proof: unknown) {
+      try {
+        await mutations.run(() => {
+          const page = connections.keys().next().value;
+          if (!page) throw Error('Original fixture page is unavailable.');
+          parent.assertChildWrite('local', 'child-a', authority.captureChildWrite(page, proof));
+        });
+        return true;
+      } catch { return false; }
+    },
+    emitChildTurn() {
+      const result = fake.defaultResult('turn/start', { threadId: 'child-a', input: [] }) as { turn: unknown };
+      fake.broadcast({ method: 'turn/started', params: { threadId: 'child-a', turn: result.turn } });
+    },
+    emitParentTurn() {
+      const result = fake.defaultResult('turn/start', { threadId: 'parent-a', input: [] }) as { turn: unknown };
+      fake.broadcast({ method: 'turn/started', params: { threadId: 'parent-a', turn: result.turn } });
+    },
     holdChild() { holdChild = true; }, releaseChild() { holdChild = false; deliverChild?.(); }, childWaiting: () => !!deliverChild,
     holdFork() { holdFork = true; }, releaseFork() { lateFork?.(); }, forkWaiting: () => !!lateFork,
     holdPrepare() { holdPrepare = true; }, releasePrepare() { holdPrepare = false; deliverPrepare?.(); }, prepareWaiting: () => !!deliverPrepare,
@@ -207,8 +251,27 @@ async function peer() {
     holdChallenge() { holdChallenge = true; }, releaseChallenge() { holdChallenge = false; deliverChallenge?.(); }, challengeWaiting: () => !!deliverChallenge,
     losePersistence(count: number) { lostPersistence = count; }, failRevoke(value: boolean) { failRevoke = value; },
     loseConfirm() { lostConfirm = 1; },
+    holdQueueReads() {
+      fake.handlers.set('thread/queue/list', (params, context) => {
+        if (params.threadId !== 'parent-a') throw Error('Ephemeral child queue is unsupported.');
+        pendingQueueReads.push(() => context.send({ id: context.message.id,
+          error: { code: -32603, message: 'Synthetic Main queue read failed' } }));
+        return NO_REPLY;
+      });
+    },
+    queueReadsWaiting: () => pendingQueueReads.length,
+    failQueueReads() { fake.handlers.delete('thread/queue/list'); for (const reply of pendingQueueReads.splice(0)) reply(); },
+    failMainQueueAdd() {
+      fake.handlers.set('thread/queue/add', params => {
+        if (params.threadId !== 'parent-a') throw Error('Ephemeral child queue is unsupported.');
+        throw Error('Synthetic Main queue add rejected.');
+      });
+    },
     enableQueue() {
-      fake.handlers.set('thread/queue/list', () => ({ data: structuredClone(queue), nextCursor: null }));
+      fake.handlers.set('thread/queue/list', params => {
+        if (params.threadId !== 'parent-a') throw Error('Ephemeral child queue is unsupported.');
+        return { data: structuredClone(queue), nextCursor: null };
+      });
       fake.handlers.set('thread/queue/delete', params => {
         const index = queue.findIndex(item => item.id === params.queuedSubmissionId);
         if (index < 0) return { deleted: false };
@@ -231,6 +294,26 @@ async function peer() {
         if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'codex-app-server-connection-changed',
           hostId: 'local', state: 'connected', daemonConnectionGeneration: generation }));
       }
+    },
+    async disconnectDaemon() {
+      for (const byHost of connections.values()) {
+        const socket = byHost.get('local')?.socket;
+        if (!socket || socket.readyState !== WebSocket.OPEN) throw Error('Original daemon socket is unavailable.');
+        const closed = once(socket, 'close'); socket.terminate(); await closed;
+      }
+    },
+    async reconnectDaemon() {
+      generation = 'generation-b';
+      for (const [page, byHost] of connections) {
+        const connection = byHost.get('local'); if (!connection) throw Error('Original page has no connection.');
+        await connection.connect(); socketGenerations.set(connection.socket!, generation);
+        if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({ type: 'codex-app-server-connection-changed',
+          hostId: 'local', state: 'connected', isSnapshot: false, daemonConnectionGeneration: generation }));
+      }
+    },
+    signalDisconnectedSnapshot() {
+      for (const page of connections.keys()) if (page.readyState === WebSocket.OPEN) page.send(JSON.stringify({
+        type: 'codex-app-server-connection-changed', hostId: 'local', state: 'disconnected', isSnapshot: true }));
     },
     async changeInjectAttempt() { await mutations.run(() => {
       const next = structuredClone(section), operation = Object.values(next.operations)[0] as Message;
@@ -565,7 +648,7 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
         assert.equal(p.fake.calls('thread/fork').length, 1);
       } finally { await context.close(); await p.close(); }
     });
-    await t.test('queue and steer carry the current child challenge on the real sender', async () => {
+    await t.test('side chat steers the current child without sending unsupported queue requests', async () => {
       const p = await peer(), { context, page } = await setupRoot(browser, script, p.url);
       try {
         const identity = await page.evaluate(() => window.sideChatRootFixture.open());
@@ -574,26 +657,22 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
         await input.fill('start original turn');
         await page.getByRole('button', { name: '发送', exact: true }).click();
         await page.getByRole('button', { name: '停止', exact: true }).waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.child()?.snapshot.draft.text === ''
+          && window.sideChatRootFixture.canAcquireDraft());
         await input.fill('queue original input');
-        await page.getByRole('button', { name: '排队', exact: true }).click();
-        await eventually(() => p.fake.calls('thread/queue/add').length === 1);
-        await page.getByText(/Ephemeral threads do not support queued messages/).first().waitFor();
         assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.snapshot.draft.text, 'queue original input');
-        assert.ok(Object.values((await page.evaluate(() => window.sideChatRootFixture.sends())).requests)
-          .some(intent => intent.action?.type === 'queue' && intent.stage === 'failed'));
-        await page.getByRole('button', { name: 'Keep draft and cancel send' }).click();
-        await page.waitForFunction(async () => !Object.values((await window.sideChatRootFixture.sends()).requests)
-          .some(intent => intent.action?.type === 'queue'));
-        await page.waitForFunction(() => window.sideChatRootFixture.canAcquireDraft());
+        assert.equal(await page.getByRole('button', { name: '排队', exact: true }).count(), 0);
         await input.fill('steer original turn');
         await page.getByRole('button', { name: '发送到当前任务', exact: true }).click();
         await eventually(() => p.fake.calls('turn/steer').length === 1);
         const messages = p.dispatches.filter(item => ['turn/start', 'thread/queue/add', 'turn/steer'].includes(item.request.method));
-        assert.deepEqual(messages.map(item => item.request.method), ['turn/start', 'thread/queue/add', 'turn/steer']);
+        assert.deepEqual(messages.map(item => item.request.method), ['turn/start', 'turn/steer']);
         assert.equal(messages[0]?.sideChat.identity.draftId, identity.draftId);
         assert.ok(messages[0]?.sideChat.challengeId);
         assert.deepEqual(messages[1]?.sideChat, messages[0]?.sideChat);
-        assert.deepEqual(messages[2]?.sideChat, messages[0]?.sideChat);
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
+        assert.equal(p.fake.calls('thread/queue/add').length, 0);
+        assert.equal(p.settings.followUpQueueMode, 'queue'); assert.deepEqual(p.settingWrites, []);
         assert.ok(messages.every(item => item.daemonConnectionGeneration === 'generation-a'));
       } finally { await context.close(); await p.close(); }
     });
@@ -693,17 +772,20 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
       } finally { await context.close(); await p.close(); }
     });
     await t.test('an unconfirmed revoke keeps the original root and draft frozen until retry succeeds', async () => {
-      const p = await peer(); p.enableQueue();
+      const p = await peer();
       const { context, page } = await setupRoot(browser, script, p.url);
       try {
         await page.evaluate(() => window.sideChatRootFixture.open());
         const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
         await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit);
-        await page.getByRole('button', { name: '删除待发送消息' }).first().click();
-        await eventually(() => p.fake.calls('thread/queue/delete').length === 1);
+        await input.fill('start before revoke');
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.getByRole('button', { name: '停止', exact: true }).waitFor();
+        await eventually(() => p.fake.calls('turn/start').length === 1);
+        await page.waitForFunction(() => window.sideChatRootFixture.child()?.snapshot.draft.text === ''
+          && window.sideChatRootFixture.canAcquireDraft());
         const captured = (await page.evaluate(() => window.sideChatRootFixture.rpcProofs()))[0]!;
         p.failRevoke(true);
-        await page.getByRole('button', { name: '删除待发送消息' }).first().waitFor();
         await input.fill('draft survives revoke failure');
         await page.waitForFunction(() => window.sideChatRootFixture.child()?.snapshot.draft.text === 'draft survives revoke failure');
         assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
@@ -722,16 +804,17 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
         await page.evaluate(() => window.sideChatRootFixture.releaseNavigation());
         await page.waitForFunction(() => window.sideChatRootFixture.canAcquireDraft());
         await eventually(() => p.authorityActions.filter(action => action === 'confirm').length === 2);
-        await page.getByRole('button', { name: '删除待发送消息' }).first().click();
-        await eventually(() => p.fake.calls('thread/queue/delete').length === 2);
+        await page.getByRole('button', { name: '停止', exact: true }).click();
+        await eventually(() => p.fake.calls('turn/interrupt').length === 1);
         const restored = (await page.evaluate(() => window.sideChatRootFixture.rpcProofs()))[1]!;
         assert.deepEqual(restored.proof.identity, captured.proof.identity);
         assert.notEqual(restored.proof.challengeId, captured.proof.challengeId);
         assert.equal(await page.evaluate(() => window.sideChatRootFixture.capturedGuardValid(0)), false);
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
       } finally { await context.close(); await p.close(); }
     });
     await t.test('an unknown reauthorization revoke retains the sender lease until explicit recovery', async () => {
-      const p = await peer(); p.enableQueue();
+      const p = await peer();
       const { context, page } = await setupRoot(browser, script, p.url);
       try {
         await page.evaluate(() => window.sideChatRootFixture.open());
@@ -751,10 +834,11 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
         p.failRevoke(false);
         await page.getByRole('button', { name: '恢复侧聊写入权限' }).click();
         await page.waitForFunction(() => window.sideChatRootFixture.canAcquireDraft());
-        await page.getByRole('button', { name: '删除待发送消息' }).first().click();
-        await eventually(() => p.fake.calls('thread/queue/delete').length === 1);
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await eventually(() => p.fake.calls('turn/start').length === 1);
         assert.ok((await page.evaluate(() => window.sideChatRootFixture.rpcProofs()))[0]?.proof.challengeId);
         assert.equal(p.fake.calls('thread/fork').length, 1);
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
       } finally { p.failRevoke(false); await context.close(); await p.close(); }
     });
     await t.test('the original child and daemon generation reach native injection and its turn', async () => {
@@ -833,7 +917,9 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
       try {
         const original = await page.evaluate(() => window.sideChatRootFixture.open());
         await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
-        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && !!window.sideChatRootFixture.child());
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit
+          && !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft());
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
         await page.evaluate(() => window.sideChatRootFixture.structuredDraft());
         await page.evaluate(() => window.sideChatRootFixture.holdNative());
         await page.getByRole('button', { name: '发送', exact: true }).click();
@@ -843,72 +929,152 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
         assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.owner.draftId, original.draftId);
         await page.evaluate(() => window.sideChatRootFixture.releaseNative());
         const next = await page.evaluate(() => (window as any).switchPromise);
-        await page.waitForFunction(id => window.sideChatRootFixture.child()?.identity.draftId === id, next.draftId);
+        await page.waitForFunction(id => window.sideChatRootFixture.child()?.identity.draftId === id
+          && !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft(), next.draftId);
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
         await eventuallyAsync(() => page.evaluate(async () => Object.values((await window.sideChatRootFixture.sends()).requests).some(item => item.stage === 'failed')));
         assert.equal(p.nativeWrites.length, 0); assert.equal(p.fake.calls('turn/start').length, 0);
         await page.evaluate(id => window.sideChatRootFixture.show(id), original.draftId);
         assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.owner.draftId, original.draftId);
       } finally { await page.evaluate(() => window.sideChatRootFixture.releaseNative()); await context.close(); await p.close(); }
     });
-    await t.test('queue deletion and start use the original child grant and daemon generation', async () => {
+    await t.test('a draft that cannot freeze blocks the visible switch until its real input is ready', async () => {
       const p = await peer(); p.enableQueue();
       const { context, page } = await setupRoot(browser, script, p.url);
       try {
-        await page.evaluate(() => window.sideChatRootFixture.open());
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
         await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.waitForFunction(() => !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft());
+        const next = await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.waitForFunction(id => window.sideChatRootFixture.child()?.identity.draftId === id
+          && !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft(), next.draftId);
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' });
+        await input.fill('second original draft');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await input.dispatchEvent('compositionstart', { data: 'a' });
+        await page.waitForFunction(() => !window.sideChatRootFixture.canAcquireDraft());
+        await page.getByRole('button', { name: '侧聊 1', exact: true }).click();
+        await page.getByText('原侧聊尚不能冻结，未切换。').waitFor();
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.identity.draftId, next.draftId);
+        assert.equal(await input.inputValue(), 'second original draft');
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+        await input.dispatchEvent('compositionend', { data: 'a' });
+        await page.waitForFunction(() => window.sideChatRootFixture.canAcquireDraft());
+        await page.getByRole('button', { name: '侧聊 1', exact: true }).click();
+        await page.waitForFunction(id => window.sideChatRootFixture.child()?.identity.draftId === id, original.draftId);
+        assert.equal(p.fake.calls('turn/start').length, 0);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('mounted summaries read real child owners, draft titles and live session status without granting authority', async () => {
+      const p = await peer(); p.enableQueue();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const first = await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.waitForFunction(() => !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' });
+        await input.fill('First real draft\nSecond line');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await page.waitForFunction(() => window.sideChatRootFixture.listMounted()[0]?.title === 'First real draft');
+        const second = await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.waitForFunction(id => window.sideChatRootFixture.child()?.identity.draftId === id
+          && !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft(), second.draftId);
+        await input.fill('Second real draft');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await page.waitForFunction(() => window.sideChatRootFixture.listMounted()[1]?.title === 'Second real draft'
+          && window.sideChatRootFixture.listMounted()[1]?.working === false);
+        const mounted = await page.evaluate(() => window.sideChatRootFixture.listMounted());
+        assert.deepEqual(mounted.map(item => item.identity), [first, second]);
+        assert.deepEqual(mounted.map(item => item.owner?.threadId), ['child-a', 'child-2']);
+        assert.deepEqual(mounted.map(item => item.title), ['First real draft', 'Second real draft']);
+        assert.deepEqual(mounted.map(item => item.active), [false, true]);
+        const publications = await page.evaluate(() => window.sideChatRootFixture.publications());
+        p.fake.send({ method: 'turn/started', params: { threadId: 'child-2', turn: { id: 'turn-visible', status: 'inProgress', items: [] } } });
+        await page.waitForFunction(() => window.sideChatRootFixture.listMounted()[1]?.working === true);
+        assert.ok(await page.evaluate(() => window.sideChatRootFixture.publications()) > publications);
+        await page.evaluate(() => { const list = window.sideChatRootFixture.listMounted();
+          (list[0]!.identity as { hostId: string }).hostId = 'changed'; (list[0]!.owner as { draftId: string }).draftId = 'changed'; });
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.listMounted()))[0]?.identity.hostId, 'local');
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.listMounted()))[0]?.owner?.draftId, first.draftId);
+        assert.equal(p.fake.calls('turn/start').length, 0);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('an unprepared mounted summary has no invented owner, title or working status', async () => {
+      const p = await peer(); p.holdFork();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const identity = await page.evaluate(() => window.sideChatRootFixture.open());
+        await eventually(p.forkWaiting);
+        assert.deepEqual(await page.evaluate(() => window.sideChatRootFixture.listMounted()),
+          [{ identity, owner: null, title: null, working: null, active: true }]);
+        assert.equal(p.fake.calls('turn/start').length, 0);
+      } finally { p.releaseFork(); await context.close(); await p.close(); }
+    });
+    await t.test('child start and interrupt use the original child grant and daemon generation', async () => {
+      const p = await peer();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
         await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit);
-        const remove = page.getByRole('button', { name: '删除待发送消息' }).first(); await remove.waitFor(); await remove.click();
-        await eventually(() => p.fake.calls('thread/queue/delete').length === 1);
-        const deletion = p.dispatches.find(message => message.request?.method === 'thread/queue/delete');
-        assert.equal(deletion?.daemonConnectionGeneration, 'generation-a'); assert.equal(deletion?.request.params.threadId, 'child-a');
-        const start = page.getByRole('button', { name: '立即发送待发送消息' }).first(); await start.waitFor(); await start.click();
-        await eventually(() => p.fake.calls('thread/queue/start').length === 1);
-        const starting = p.dispatches.find(message => message.request?.method === 'thread/queue/start');
+        await input.fill('original child turn');
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.getByRole('button', { name: '停止', exact: true }).click();
+        await eventually(() => p.fake.calls('turn/interrupt').length === 1);
+        const starting = p.dispatches.find(message => message.request?.method === 'turn/start');
         assert.equal(starting?.daemonConnectionGeneration, 'generation-a'); assert.equal(starting?.request.params.threadId, 'child-a');
+        const interrupt = p.dispatches.find(message => message.request?.method === 'turn/interrupt');
+        assert.equal(interrupt?.daemonConnectionGeneration, 'generation-a'); assert.equal(interrupt?.request.params.threadId, 'child-a');
         const proofs = await page.evaluate(() => window.sideChatRootFixture.rpcProofs());
-        assert.ok(proofs.find(item => item.method === 'thread/queue/delete')?.proof.challengeId);
-        assert.deepEqual(proofs.find(item => item.method === 'thread/queue/start')?.proof,
-          proofs.find(item => item.method === 'thread/queue/delete')?.proof);
+        assert.ok(proofs.find(item => item.method === 'turn/start')?.proof.challengeId);
+        assert.deepEqual(proofs.find(item => item.method === 'turn/interrupt')?.proof,
+          proofs.find(item => item.method === 'turn/start')?.proof);
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
       } finally { await context.close(); await p.close(); }
     });
     await t.test('a confirmed revoke and reauthorization of the same child never revives an old captured proof', async () => {
-      const p = await peer(); p.enableQueue();
+      const p = await peer();
       const { context, page } = await setupRoot(browser, script, p.url);
       try {
         await page.evaluate(() => window.sideChatRootFixture.open());
-        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
         await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit);
-        await page.getByRole('button', { name: '删除待发送消息' }).first().click();
-        await eventually(() => p.fake.calls('thread/queue/delete').length === 1);
+        await input.fill('start before reauthorization');
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.getByRole('button', { name: '停止', exact: true }).waitFor();
+        await eventually(() => p.fake.calls('turn/start').length === 1);
         const original = (await page.evaluate(() => window.sideChatRootFixture.rpcProofs()))[0]!;
-        assert.equal(await page.evaluate(() => window.sideChatRootFixture.capturedGuardValid(0)), true);
+        assert.equal(await p.childProofCurrent(original.proof), true);
         assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), true);
         assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushNavigation()), true);
         await page.evaluate(() => window.sideChatRootFixture.revokeNavigation());
         assert.equal(await page.evaluate(() => window.sideChatRootFixture.capturedGuardValid(0)), false);
+        assert.equal(await p.childProofCurrent(original.proof), false);
         await page.evaluate(() => window.sideChatRootFixture.releaseNavigation());
         await eventually(() => p.authorityActions.filter(action => action === 'confirm').length === 2);
-        await page.getByRole('button', { name: '删除待发送消息' }).first().click();
-        await eventually(() => p.fake.calls('thread/queue/delete').length === 2);
+        await page.getByRole('button', { name: '停止', exact: true }).click();
+        await eventually(() => p.fake.calls('turn/interrupt').length === 1);
         const current = (await page.evaluate(() => window.sideChatRootFixture.rpcProofs()))[1]!;
         assert.deepEqual(current.proof.identity, original.proof.identity);
         assert.notEqual(current.proof.challengeId, original.proof.challengeId);
+        assert.equal(await p.childProofCurrent(current.proof), true);
+        assert.equal(await p.childProofCurrent(original.proof), false);
         assert.equal(await page.evaluate(() => window.sideChatRootFixture.capturedGuardValid(0)), false);
         assert.equal(p.fake.calls('thread/fork').length, 1);
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
       } finally { await context.close(); await p.close(); }
     });
-    await t.test('queue-to-draft host mutation carries the original child proof', async () => {
-      const p = await peer(); p.enableQueue();
+    await t.test('temporary child exposes no queue-to-draft mutation', async () => {
+      const p = await peer();
       const { context, page } = await setupRoot(browser, script, p.url);
       try {
-        const identity = await page.evaluate(() => window.sideChatRootFixture.open());
+        await page.evaluate(() => window.sideChatRootFixture.open());
         await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
         await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && window.sideChatRootFixture.canAcquireDraft());
-        await page.getByRole('button', { name: '编辑待发送消息' }).first().click();
-        await eventually(() => p.queueEdits.length === 1);
-        assert.equal(p.queueEdits[0]?.sideChat.identity.draftId, identity.draftId);
-        assert.equal(p.queueEdits[0]?.sideChat.identity.childThreadId, 'child-a');
-        assert.ok(p.queueEdits[0]?.sideChat.challengeId);
+        assert.equal(await page.getByRole('button', { name: '编辑待发送消息' }).count(), 0);
+        assert.equal(p.queueEdits.length, 0);
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
       } finally { await context.close(); await p.close(); }
     });
     await t.test('a new daemon generation cannot authorize a send for the old child', async () => {
@@ -946,6 +1112,30 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
         assert.equal(p.fake.calls('thread/fork').length, 1); assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
       } finally { await context.close(); await p.close(); }
     });
+    await t.test('a restored closed operation can close its draft inspection without a mounted composer', async () => {
+      const p = await peer(), { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const identity = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' });
+        await input.waitFor(); await input.fill('retained closed child draft 中文🙂');
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        await page.waitForFunction(() => window.sideChatRootFixture.closed === 1);
+        const other = await context.newPage(); await other.goto(p.url); await other.addScriptTag({ content: script });
+        await other.evaluate(() => window.sideChatRootFixture.mount());
+        await other.waitForFunction(() => window.sideChatRootFixture.mounted());
+        await other.evaluate(value => window.sideChatRootFixture.restore(value), identity);
+        const inspection = other.getByRole('region', { name: '保留的侧聊草稿' });
+        await inspection.waitFor();
+        assert.equal(await inspection.getByRole('textbox', { name: '草稿', exact: true }).inputValue(), 'retained closed child draft 中文🙂');
+        assert.equal(await other.locator('.yard-side-chat__composer').count(), 0);
+        await other.getByRole('button', { name: '关闭侧聊' }).click();
+        await other.waitForFunction(() => window.sideChatRootFixture.closed === 1);
+        assert.equal(p.fake.calls('thread/fork').length, 1);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 1, 'The inspection does not close the already closed host again');
+        assert.equal(p.fake.calls('turn/start').length, 0);
+        assert.equal((await other.evaluate(() => window.sideChatRootFixture.listRecoverable()))[0]?.draftId, identity.draftId);
+      } finally { await context.close(); await p.close(); }
+    });
     await t.test('unknown close preserves the old mounted draft when a separate side chat is opened', async () => {
       const p = await peer(); p.holdUnsubscribe();
       const { context, page } = await setupRoot(browser, script, p.url);
@@ -968,6 +1158,180 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
         assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.snapshot.draft.text, 'original unresolved draft');
         assert.equal(await page.getByRole('textbox', { name: '草稿', exact: true }).inputValue(), 'original unresolved draft');
         assert.equal(p.fake.calls('thread/unsubscribe').length, 1); assert.equal(p.fake.calls('thread/fork').length, 2);
+      } finally { await context.close(); await p.close(); }
+    });
+  } finally { await browser.close(); }
+});
+
+test('SideChatRoot original daemon disconnect handoff', { timeout: 100_000 }, async t => {
+  const bundle = await build({ entryPoints: ['test/renderer-side-chat-root-fixture.tsx'], bundle: true, write: false,
+    format: 'iife', loader: { '.css': 'empty' } });
+  const browser = await chromium.launch({ executablePath: process.env.YARD_VALIDATION_CHROME_BIN || '/usr/bin/google-chrome',
+    headless: true, args: ['--no-sandbox', '--disable-background-networking'] });
+  const script = bundle.outputFiles[0]!.text;
+  try {
+    await t.test('host revocation allows a different parent to open without replaying the old child', async () => {
+      const p = await peer();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit
+          && !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft());
+        p.emitChildTurn();
+        await page.getByRole('button', { name: '停止', exact: true }).click();
+        await eventually(() => p.fake.calls('turn/interrupt').length === 1);
+        const originalProof = (await page.evaluate(() => window.sideChatRootFixture.rpcProofs()))[0]!.proof;
+        assert.equal(await p.childProofCurrent(originalProof), true);
+        await input.fill('old draft with unknown send');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        const intent = await page.evaluate(() => window.sideChatRootFixture.prepareSend());
+        await page.evaluate(({ id, attempt }) => window.sideChatRootFixture.markUnknown(id, attempt), { id: intent.id, attempt: intent.attemptId! });
+        const unknown = (await page.evaluate(() => window.sideChatRootFixture.sends())).requests[intent.id];
+        assert.equal(unknown?.stage, 'unknown');
+        const operationId = Object.keys(p.section().operations)[0]!;
+        await p.disconnectDaemon();
+        await page.waitForFunction(() => window.sideChatRootFixture.generation() === null);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.capturedGuardValid(0)), false);
+        assert.equal(await p.childProofCurrent(originalProof), false);
+        await p.reconnectDaemon();
+        await page.waitForFunction(() => window.sideChatRootFixture.generation() === 'generation-b');
+        await page.evaluate(() => window.sideChatRootFixture.useParent('parent-b'));
+        await page.evaluate(() => window.sideChatRootFixture.holdOwnerWork());
+        await page.getByRole('button', { name: '另开侧聊' }).click();
+        await page.waitForFunction(id => !window.sideChatRootFixture.canAttachOwner(id), original.draftId);
+        assert.equal((await page.evaluate(id => window.sideChatRootFixture.draftSnapshot(id), original.draftId))?.draft.text, 'old draft with unknown send');
+        assert.equal(p.fake.calls('thread/fork').length, 1);
+        await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork());
+        await page.waitForFunction(() => window.sideChatRootFixture.child()?.identity.parentThreadId === 'parent-b'
+          && window.sideChatRootFixture.child()?.owner.threadId === 'child-2');
+        const next = await page.evaluate(() => window.sideChatRootFixture.child());
+        assert.notEqual(next?.identity.draftId, original.draftId); assert.notEqual(next?.identity.prepareId, original.prepareId);
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.listMounted())).length, 2);
+        assert.equal((await page.evaluate(id => window.sideChatRootFixture.draftSnapshot(id), original.draftId))?.draft.text, 'old draft with unknown send');
+        assert.deepEqual((await page.evaluate(() => window.sideChatRootFixture.sends())).requests[intent.id], unknown);
+        assert.ok(p.section().operations[operationId]);
+        assert.deepEqual(p.fake.calls('thread/fork').map(call => call.params.threadId), ['parent-a', 'parent-b']);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 0); assert.equal(p.fake.calls('turn/start').length, 0);
+        assert.equal(p.nativeWrites.length, 0); assert.equal(await page.evaluate(() => window.sideChatRootFixture.capturedGuardValid(0)), false);
+        await page.waitForFunction(() => window.sideChatRootFixture.history('child-2').canSubmit
+          && !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft());
+        await page.evaluate(id => window.sideChatRootFixture.show(id), original.draftId);
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.child()))?.snapshot.draft.text, 'old draft with unknown send');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.capturedGuardValid(0)), false);
+        assert.equal(p.fake.calls('turn/start').length, 0);
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork()); await context.close(); await p.close(); }
+    });
+    await t.test('navigation drains the old owner and retains its durable association after host revocation', async () => {
+      const p = await peer(); p.enableQueue();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit
+          && !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft());
+        await input.fill('draft retained across navigation');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await p.disconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === null);
+        await p.reconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === 'generation-b');
+        await page.evaluate(() => window.sideChatRootFixture.useParent('parent-a'));
+        await page.evaluate(() => window.sideChatRootFixture.holdOwnerWork());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), true);
+        await page.evaluate(() => window.sideChatRootFixture.beginFlush());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDone()), false);
+        assert.equal(await page.evaluate(id => window.sideChatRootFixture.canAttachOwner(id), original.draftId), false);
+        await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushResult()), true);
+        await page.evaluate(() => window.sideChatRootFixture.revokeNavigation());
+        await page.evaluate(() => { window.sideChatRootFixture.handoffNavigation(); window.sideChatRootFixture.releaseNavigation(); });
+        assert.equal((await page.evaluate(() => window.sideChatRootFixture.listMounted())).length, 0);
+        const saved = await page.evaluate(() => window.sideChatRootFixture.listRecoverable());
+        assert.ok(saved.some(item => item.draftId === original.draftId && item.prepareId === original.prepareId));
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 0); assert.equal(p.fake.calls('thread/fork').length, 1);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork()); await context.close(); await p.close(); }
+    });
+    await t.test('a snapshot or replacement generation is not proof that the old grant was revoked', async () => {
+      const p = await peer(); p.enableQueue();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && window.sideChatRootFixture.canAcquireDraft());
+        await input.fill('unproved old draft'); assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        p.signalDisconnectedSnapshot(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === null);
+        p.signalGeneration(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === 'generation-b');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), false);
+        await assert.rejects(page.evaluate(() => window.sideChatRootFixture.open()), /尚不能冻结/);
+        assert.equal((await page.evaluate(id => window.sideChatRootFixture.draftSnapshot(id), original.draftId))?.draft.text, 'unproved old draft');
+        assert.equal(p.fake.calls('thread/fork').length, 1); assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('a lost page connection cannot claim a daemon revocation proof', async () => {
+      const p = await peer(); p.enableQueue();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && window.sideChatRootFixture.canAcquireDraft());
+        await input.fill('page disconnected draft'); assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await p.disconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === null);
+        await page.evaluate(() => window.sideChatRootFixture.suspendPage());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), false);
+        assert.equal((await page.evaluate(id => window.sideChatRootFixture.draftSnapshot(id), original.draftId))?.draft.text, 'page disconnected draft');
+        assert.equal(p.fake.calls('thread/fork').length, 1); assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('losing the original page while draining prevents the proven handoff', async () => {
+      const p = await peer(); p.enableQueue();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && window.sideChatRootFixture.canAcquireDraft());
+        await input.fill('draft retained during interrupted drain');
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await p.disconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === null);
+        await p.reconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === 'generation-b');
+        await page.evaluate(() => window.sideChatRootFixture.holdOwnerWork());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), true);
+        await page.evaluate(() => window.sideChatRootFixture.beginFlush());
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDone()), false);
+        await page.evaluate(() => { window.sideChatRootFixture.suspendPage(); window.sideChatRootFixture.releaseOwnerWork(); });
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushResult()), false);
+        await assert.rejects(page.evaluate(() => window.sideChatRootFixture.revokeNavigation()), /尚未排空/);
+        await page.evaluate(() => window.sideChatRootFixture.releaseNavigation());
+        assert.equal(await page.evaluate(id => window.sideChatRootFixture.canAttachOwner(id), original.draftId), true);
+        assert.equal((await page.evaluate(id => window.sideChatRootFixture.draftSnapshot(id), original.draftId))?.draft.text,
+          'draft retained during interrupted drain');
+        assert.equal(p.fake.calls('thread/fork').length, 1); assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+      } finally { await page.evaluate(() => window.sideChatRootFixture.releaseOwnerWork()); await context.close(); await p.close(); }
+    });
+    await t.test('an unknown old close remains frozen while a different parent opens independently', async () => {
+      const p = await peer(); p.enableQueue(); p.holdUnsubscribe();
+      const { context, page } = await setupRoot(browser, script, p.url);
+      try {
+        const original = await page.evaluate(() => window.sideChatRootFixture.open());
+        const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit && window.sideChatRootFixture.canAcquireDraft());
+        await input.fill('old close unknown draft'); assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        await page.getByText(/原操作结果未知/).waitFor();
+        const oldOperationId = Object.keys(p.section().operations)[0]!;
+        const oldClose = structuredClone(p.section().operations[oldOperationId].close);
+        await p.disconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === null);
+        await p.reconnectDaemon(); await page.waitForFunction(() => window.sideChatRootFixture.generation() === 'generation-b');
+        await page.evaluate(() => window.sideChatRootFixture.useParent('parent-b'));
+        await page.getByRole('button', { name: '另开侧聊' }).click();
+        await page.waitForFunction(() => window.sideChatRootFixture.child()?.identity.parentThreadId === 'parent-b'
+          && window.sideChatRootFixture.child()?.owner.threadId === 'child-2');
+        assert.deepEqual(p.section().operations[oldOperationId].close, oldClose);
+        assert.equal((await page.evaluate(id => window.sideChatRootFixture.draftSnapshot(id), original.draftId))?.draft.text, 'old close unknown draft');
+        assert.equal(await page.evaluate(id => window.sideChatRootFixture.canAttachOwner(id), original.draftId), false);
+        assert.equal(await page.evaluate(() => window.sideChatRootFixture.freezeNavigation()), false);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 1);
+        assert.deepEqual(p.fake.calls('thread/fork').map(call => call.params.threadId), ['parent-a', 'parent-b']);
+        assert.equal(p.fake.calls('turn/start').length, 0);
       } finally { await context.close(); await p.close(); }
     });
   } finally { await browser.close(); }
@@ -1257,7 +1621,8 @@ test('real workspace, IDB, browser client and native parent/provider use one syn
         await page.getByRole('button', { name: '打开侧聊' }).click();
         const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
         p.failRevoke(true);
-        await page.getByRole('button', { name: '删除待发送消息' }).first().waitFor();
+        await page.waitForFunction(() => window.sideChatWorkspaceFixture.history().canSubmit);
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
         await input.fill('撤权失败时保留的草稿');
         assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.freezeNavigation()), true);
         assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.flushNavigation()), true);
@@ -1285,7 +1650,11 @@ test('real workspace, IDB, browser client and native parent/provider use one syn
         await page.waitForFunction(() => window.sideChatWorkspaceFixture.history().canSubmit);
         await input.fill('原导航草稿');
         await page.getByRole('button', { name: '发送', exact: true }).waitFor({ state: 'visible' });
-        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.freezeNavigation()), true);
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.flushDraft()), true);
+        await page.waitForFunction(() => window.sideChatWorkspaceFixture.pendingQueueReads() === 0
+          && window.sideChatWorkspaceFixture.freezeNavigation());
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.frozen), true);
         await page.getByRole('button', { name: '关闭侧聊' }).click();
         await page.getByText(/原侧聊关闭身份已改变/).waitFor();
         assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.frozen), true);
@@ -1296,6 +1665,39 @@ test('real workspace, IDB, browser client and native parent/provider use one syn
         await page.evaluate(() => window.sideChatWorkspaceFixture.releaseNavigation());
         assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.frozen), false);
       } finally { await context.close(); await p.close(); }
+    });
+    await t.test('a failed in-flight Main queue read cannot be mistaken for a drained draft lease', async () => {
+      const p = await peer(); p.holdQueueReads();
+      const { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.getByRole('button', { name: '打开侧聊' }).click();
+        const input = page.locator('.yard-side-chat').getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
+        await input.fill('未排空的原稿');
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.flushDraft()), true);
+        await page.evaluate(() => window.sideChatWorkspaceFixture.showMain());
+        const mainInput = page.getByRole('region', { name: 'Persistent Main' }).getByRole('textbox', { name: '和 Codex 一起工作' });
+        await mainInput.fill('Main queue read draft');
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.flushMainDraft()), true);
+        await eventually(() => p.queueReadsWaiting() > 0);
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.freezeNavigation()), true);
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.freezeMain()), true);
+        await page.getByRole('button', { name: '关闭侧聊' }).click();
+        await page.getByText(/原侧聊关闭身份已改变/).waitFor();
+        await page.evaluate(() => { (window as any).queueDrain = window.sideChatWorkspaceFixture.flushMain(); });
+        p.failQueueReads();
+        assert.equal(await page.evaluate(() => (window as any).queueDrain), false);
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.frozen), true);
+        await assert.rejects(page.evaluate(() => window.sideChatWorkspaceFixture.revokeNavigation()), /尚未排空/);
+        assert.equal(await input.inputValue(), '未排空的原稿');
+        assert.equal(await mainInput.inputValue(), 'Main queue read draft');
+        assert.equal(await mainInput.evaluate(node => !!node.closest('[inert]')), true);
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.updateMainWhileFrozen()), false);
+        assert.equal(p.fake.calls('thread/unsubscribe').length, 0);
+        assert.equal(p.fake.calls('thread/queue/list').filter(call => call.params.threadId === 'child-a').length, 0);
+        await page.evaluate(() => window.sideChatWorkspaceFixture.releaseMain());
+        await page.evaluate(() => window.sideChatWorkspaceFixture.releaseNavigation());
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.frozen), false);
+      } finally { p.failQueueReads(); await context.close(); await p.close(); }
     });
     await t.test('navigation waits for the original prepare and its persisted draft association', async () => {
       const p = await peer(); p.holdPrepare();
@@ -1379,52 +1781,134 @@ test('real workspace, IDB, browser client and native parent/provider use one syn
         assert.equal(p.fake.calls('thread/start').length, 1);
       } finally { await context.close(); await p.close(); }
     });
-    await t.test('queue deletion goes through the original scoped dispatcher', async () => {
+    await t.test('a rejected persistent Main queue add retains its original draft and send record', async () => {
+      const p = await peer(); p.enableQueue(); p.failMainQueueAdd();
+      const { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.getByRole('button', { name: '打开侧聊' }).click();
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.evaluate(() => { window.sideChatWorkspaceFixture.showMain(); window.sideChatWorkspaceFixture.acquireMain(); });
+        try {
+          await page.waitForFunction(() => window.sideChatWorkspaceFixture.mainHistory().canSubmit);
+        } catch (error) {
+          console.error('Main subscription diagnostic', JSON.stringify(await page.evaluate(() => window.sideChatWorkspaceFixture.mainHistory())),
+            JSON.stringify(p.dispatches.map(item => item.request?.method)));
+          throw error;
+        }
+        p.emitParentTurn();
+        await page.waitForFunction(() => window.sideChatWorkspaceFixture.mainHistory().thread?.turns.some(turn => turn.status === 'inProgress'));
+        await page.evaluate(() => window.sideChatWorkspaceFixture.setMainBusy(true));
+        const main = page.getByRole('region', { name: 'Persistent Main' });
+        const input = main.getByRole('textbox', { name: '和 Codex 一起工作' });
+        await input.fill('Main queue draft survives rejection');
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.flushMainDraft()), true);
+        const before = await page.evaluate(() => window.sideChatWorkspaceFixture.mainSnapshot());
+        assert.ok(before?.revision);
+        await main.getByRole('button', { name: '排队', exact: true }).click();
+        try { await eventually(() => p.fake.calls('thread/queue/add').length === 1); }
+        catch (error) {
+          console.error('Main queue add diagnostic', await main.innerText(), JSON.stringify(p.dispatches.map(item => item.request?.method)),
+            JSON.stringify(await page.evaluate(() => window.sideChatWorkspaceFixture.mainSends())));
+          throw error;
+        }
+        await main.getByText(/Synthetic Main queue add rejected/).first().waitFor();
+        const requests = Object.values((await page.evaluate(() => window.sideChatWorkspaceFixture.mainSends())).requests);
+        assert.equal(requests.length, 1); assert.equal(requests[0]?.stage, 'failed');
+        assert.deepEqual(requests[0]?.owner, { hostId: 'local', threadId: 'parent-a', draftId: 'main-draft' });
+        assert.equal(requests[0]?.revision, before.revision);
+        assert.equal(requests[0]?.draft.text, 'Main queue draft survives rejection');
+        assert.equal(requests[0]?.action?.type, 'queue');
+        const call = p.dispatches.find(message => message.request?.method === 'thread/queue/add');
+        assert.equal(call?.request.params.threadId, 'parent-a'); assert.equal(call?.daemonConnectionGeneration, 'generation-a');
+        assert.equal(call?.request.params.clientUserMessageId, requests[0]?.clientUserMessageId);
+        assert.equal(call?.request.params.input[0]?.text, 'Main queue draft survives rejection');
+        assert.equal(call?.sideChat, undefined); assert.equal(await input.inputValue(), 'Main queue draft survives rejection');
+        await main.getByRole('button', { name: 'Keep draft and cancel send' }).click();
+        await eventuallyAsync(() => page.evaluate(async () => Object.keys((await window.sideChatWorkspaceFixture.mainSends()).requests).length === 0));
+        assert.equal(await input.inputValue(), 'Main queue draft survives rejection');
+        assert.equal((await page.evaluate(() => window.sideChatWorkspaceFixture.mainSnapshot()))?.revision, before.revision);
+        assert.equal(p.fake.calls('thread/queue/add').length, 1);
+        assert.equal(p.fake.calls('thread/queue/list').filter(item => item.params.threadId === 'child-a').length, 0);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('persistent Main queue-to-draft mutation keeps its owner and daemon authority', async () => {
       const p = await peer(); p.enableQueue();
       const { context, page } = await setup(browser, script, p.url);
       try {
         await page.getByRole('button', { name: '打开侧聊' }).click();
         await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
-        const button = page.getByRole('button', { name: '删除待发送消息' }).first();
+        await page.evaluate(() => window.sideChatWorkspaceFixture.showMain());
+        const main = page.getByRole('region', { name: 'Persistent Main' });
+        await main.getByRole('textbox', { name: '和 Codex 一起工作' }).fill('existing Main draft');
+        assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.flushMainDraft()), true);
+        await main.getByRole('button', { name: '编辑待发送消息' }).first().click();
+        await eventually(() => p.queueEdits.length === 1);
+        await page.waitForFunction(() => window.sideChatWorkspaceFixture.mainSnapshot()?.draft.text === 'synthetic queue A');
+        const edit = p.queueEdits[0]!;
+        assert.equal(edit.hostId, 'local'); assert.equal(edit.threadId, 'parent-a');
+        assert.equal(edit.daemonConnectionGeneration, 'generation-a'); assert.equal(edit.sideChat, undefined);
+        assert.deepEqual(edit.entry, { id: 'queue-a', clientUserMessageId: 'client-a', input: [{ type: 'text', text: 'synthetic queue A', text_elements: [] }] });
+        const snapshot = await page.evaluate(() => window.sideChatWorkspaceFixture.mainSnapshot());
+        assert.deepEqual(snapshot?.owner, { hostId: 'local', threadId: 'parent-a', draftId: 'main-draft' });
+        await main.getByRole('button', { name: '切换草稿' }).click();
+        await page.waitForFunction(() => window.sideChatWorkspaceFixture.mainSnapshot()?.draft.text === 'existing Main draft');
+        assert.deepEqual(p.queue().map(item => item.id), ['queue-b']);
+        assert.equal(p.fake.calls('thread/queue/list').filter(call => call.params.threadId === 'child-a').length, 0);
+      } finally { await context.close(); await p.close(); }
+    });
+    await t.test('persistent Main queue deletion goes through its original scoped dispatcher', async () => {
+      const p = await peer(); p.enableQueue();
+      const { context, page } = await setup(browser, script, p.url);
+      try {
+        await page.getByRole('button', { name: '打开侧聊' }).click();
+        await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.evaluate(() => window.sideChatWorkspaceFixture.showMain());
+        const main = page.getByRole('region', { name: 'Persistent Main' });
+        const button = main.getByRole('button', { name: '删除待发送消息' }).first();
         await button.waitFor(); await button.click();
         await eventually(() => p.fake.calls('thread/queue/delete').length === 1);
         assert.deepEqual(await page.evaluate(() => window.sideChatWorkspaceFixture.queueDispatches()),
-          [{ method: 'thread/queue/delete', hostId: 'local', threadId: 'child-a' }]);
+          [{ method: 'thread/queue/delete', hostId: 'local', threadId: 'parent-a' }]);
         assert.equal(p.fake.calls('thread/queue/delete')[0]!.params.queuedSubmissionId, 'queue-a');
         assert.ok((await page.evaluate(() => window.sideChatWorkspaceFixture.authorityDispatches()))
           .some(item => item.method === 'thread/queue/delete' && item.original));
         assert.deepEqual(p.queue().map(item => item.id), ['queue-b']);
+        assert.equal(p.fake.calls('thread/queue/list').filter(call => call.params.threadId === 'child-a').length, 0);
       } finally { await context.close(); await p.close(); }
     });
-    await t.test('queue start accepts the original captured authority through the shared composer wrapper', async () => {
+    await t.test('persistent Main queue start accepts its original authority through the composer wrapper', async () => {
       const p = await peer(); p.enableQueue();
       const { context, page } = await setup(browser, script, p.url);
       try {
         await page.getByRole('button', { name: '打开侧聊' }).click();
         await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
         await page.waitForFunction(() => window.sideChatWorkspaceFixture.history().canSubmit);
-        const start = page.getByRole('button', { name: '立即发送待发送消息' }).first(); await start.waitFor(); await start.click();
+        await page.evaluate(() => window.sideChatWorkspaceFixture.showMain());
+        const start = page.getByRole('region', { name: 'Persistent Main' }).getByRole('button', { name: '立即发送待发送消息' }).first(); await start.waitFor(); await start.click();
         await eventually(() => p.fake.calls('thread/queue/start').length === 1);
-        assert.equal(p.fake.calls('thread/queue/start')[0]!.params.threadId, 'child-a');
+        assert.equal(p.fake.calls('thread/queue/start')[0]!.params.threadId, 'parent-a');
         assert.equal(p.fake.calls('thread/queue/start')[0]!.params.queuedSubmissionId, 'queue-a');
         assert.ok((await page.evaluate(() => window.sideChatWorkspaceFixture.authorityDispatches()))
           .some(item => item.method === 'thread/queue/start' && item.original));
         assert.deepEqual(p.queue().map(item => item.id), ['queue-b']);
+        assert.equal(p.fake.calls('thread/queue/list').filter(call => call.params.threadId === 'child-a').length, 0);
       } finally { await context.close(); await p.close(); }
     });
-    await t.test('queue mutation waiting at the original dispatcher does not cross a disconnect', async () => {
+    await t.test('persistent Main queue mutation waiting at the original dispatcher does not cross a disconnect', async () => {
       const p = await peer(); p.enableQueue();
       const { context, page } = await setup(browser, script, p.url);
       try {
         await page.getByRole('button', { name: '打开侧聊' }).click();
         await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
+        await page.evaluate(() => window.sideChatWorkspaceFixture.showMain());
         await page.evaluate(() => window.sideChatWorkspaceFixture.holdDispatch());
-        const button = page.getByRole('button', { name: '删除待发送消息' }).first(); await button.waitFor(); await button.click();
+        const button = page.getByRole('region', { name: 'Persistent Main' }).getByRole('button', { name: '删除待发送消息' }).first(); await button.waitFor(); await button.click();
         await page.waitForFunction(() => window.sideChatWorkspaceFixture.dispatchWaiting());
         await page.evaluate(() => { window.sideChatWorkspaceFixture.disconnect(); window.sideChatWorkspaceFixture.releaseDispatch(); });
         await page.waitForFunction(() => !window.sideChatWorkspaceFixture.dispatchWaiting());
         assert.equal(p.fake.calls('thread/queue/delete').length, 0);
         assert.deepEqual(p.queue().map(item => item.id), ['queue-a', 'queue-b']);
+        assert.equal(p.fake.calls('thread/queue/list').filter(call => call.params.threadId === 'child-a').length, 0);
       } finally { await context.close(); await p.close(); }
     });
     await t.test('interrupt captures the original child and turn and does not cross a disconnect', async () => {

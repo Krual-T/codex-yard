@@ -4,15 +4,18 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 
-test('scoped interrupt and the real queue preserve dispatch and lock boundaries', {
+test('scoped interrupt and the persistent Main queue preserve dispatch and lock boundaries', {
   skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
 }, async () => {
   const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'jsx', contents: `
     import React from 'react'; import {createRoot} from 'react-dom/client';
     import {SideChatController} from './src/renderer/side-chat/controller.ts';
     import {SideChatPanel} from './src/renderer/side-chat/SideChatPanel.tsx';
+    import {StandaloneQueue} from './src/renderer/composer/standalone-queue.tsx';
     import {readUnknownQueueStarts} from './src/renderer/composer/standalone-queue-storage.ts';
-    const state={rpc:[],checks:[],interrupts:[],starts:[],releases:[],persistence:[],generation:'original',queueMode:'not-sent',acquires:0,showPending:false};
+    const state={rpc:[],checks:[],interrupts:[],starts:[],releases:[],persistence:[],mutations:[],generation:'original',queueMode:'not-sent',acquires:0,showPending:false,mainBusy:false,
+      queue:[{id:'queued-1',clientUserMessageId:'message-1',input:[{type:'text',text:'queued text',text_elements:[]}]},
+        {id:'queued-2',clientUserMessageId:'message-2',input:[{type:'text',text:'second text',text_elements:[]}]}]};
     let releaseAcquire;
     const thread={id:'child',name:null,cwd:'/synthetic',turns:[],status:{type:'idle'}};
     const history={hostId:'a',threadId:'child',thread,options:{},loading:false,historyComplete:true,streamGap:false,error:null,
@@ -28,7 +31,10 @@ test('scoped interrupt and the real queue preserve dispatch and lock boundaries'
     const pendingController=new SideChatController({hostId:'a',parentThreadId:'parent',draftId:'pending-draft',restored:pendingView,
       port:pendingPort,canDispatch:()=>true,onPrepared:async()=>{}});
     const client={async rpc(method,params,host){state.rpc.push({method,params,host});
-      if(method==='thread/queue/list') return {data:[{id:'queued-1',clientUserMessageId:'message-1',input:[{type:'text',text:'queued text',text_elements:[]}]}],nextCursor:null};
+      if(method.startsWith('thread/queue/') && (host!=='a'||params.threadId!=='main-thread')) throw Error('unexpected ephemeral queue request');
+      if(method==='thread/queue/list') return {data:structuredClone(state.queue),nextCursor:null};
+      if(method==='thread/queue/reorder'){state.queue=params.queuedSubmissionIds.map(id=>state.queue.find(item=>item.id===id));return {};}
+      if(method==='thread/queue/delete'){state.queue=state.queue.filter(item=>item.id!==params.queuedSubmissionId);return {deleted:true};}
       if(method==='model/list')return {data:[],nextCursor:null}; if(method==='config/read')return {config:{}};
       throw Error('unexpected RPC '+method);},
       async host(endpoint,request){if(endpoint==='get-setting')return {value:'enter'};
@@ -42,14 +48,21 @@ test('scoped interrupt and the real queue preserve dispatch and lock boundaries'
         if(state.generation!=='original'||history.thread.turns[0]?.id!==scope.turnId||history.thread.turns[0]?.status!=='inProgress')
           throw Object.assign(Error('original connection unavailable'),{uncertain:false});
         state.interrupts.push(scope);}}
-      onStartQueued={async(id,scope)=>{state.starts.push({id,scope});
-        if(state.queueMode==='not-sent')throw Object.assign(Error('sender not dispatched'),{uncertain:false});
-        throw Error('unknown sender outcome');}} />
+      />
       <SideChatPanel client={client} controller={pendingController} open={state.showPending} history={null}
-        onClose={()=>{}} onBeforeClose={async()=>{}} onSubmit={async()=>{}} onInterrupt={async()=>{}} /></>);}
-    window.peer={state,history,render,releaseAcquire:()=>releaseAcquire(),unknown:()=>readUnknownQueueStarts('a','child'),
-      busy(){history.thread={...history.thread,status:{type:'active'},turns:[{id:'turn-original',status:'inProgress',itemsView:'full',items:[]}]};render();},
-      idle(){history.thread={...history.thread,status:{type:'idle'},turns:[]};history.historyComplete=true;render();}};
+        onClose={()=>{}} onBeforeClose={async()=>{}} onSubmit={async()=>{}} onInterrupt={async()=>{}} />
+      <section aria-label="Persistent Main"><StandaloneQueue client={client} hostId="a" threadId="main-thread" busy={state.mainBusy} refreshVersion={0}
+        captureAuthority={()=>{const generation=state.generation;const original=()=>{if(state.generation!==generation)throw Error('original Main connection unavailable');};state.mainAuthority=original;return original;}}
+        dispatchQueueMutation={async(method,params,host,original,guard)=>{guard();state.mutations.push({method,params,host,original:original===state.mainAuthority});return client.rpc(method,params,host);}}
+        onStartQueued={async(id,guard,original)=>{guard();if(original!==state.mainAuthority)throw Error('original Main authority changed');
+          if(state.mainBusy)throw Object.assign(Error('Main became busy'),{uncertain:false});
+          state.starts.push({id,scope:{hostId:'a',threadId:'main-thread'}});
+          if(state.queueMode==='not-sent')throw Object.assign(Error('sender not dispatched'),{uncertain:false});
+          throw Error('unknown sender outcome');}} /></section></>);}
+    window.peer={state,history,render,releaseAcquire:()=>releaseAcquire(),unknown:()=>readUnknownQueueStarts('a','main-thread'),
+      childUnknown:()=>readUnknownQueueStarts('a','child'),
+      busy(){state.mainBusy=true;history.thread={...history.thread,status:{type:'active'},turns:[{id:'turn-original',status:'inProgress',itemsView:'full',items:[]}]};render();},
+      idle(){state.mainBusy=false;history.thread={...history.thread,status:{type:'idle'},turns:[]};history.historyComplete=true;render();}};
     render();
   ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' } });
   const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
@@ -74,8 +87,9 @@ test('scoped interrupt and the real queue preserve dispatch and lock boundaries'
       {hostId:'a',parentThreadId:'parent',operationId:'operation-a',draftId:'side-draft',childThreadId:'child',turnId:'turn-original'});
     assert.equal(await page.evaluate(() => (window as any).peer.state.rpc.filter((x:any)=>x.method==='turn/interrupt').length), 0);
     await page.evaluate(() => (window as any).peer.idle());
-    const send = page.getByRole('button', { name: '立即发送待发送消息' }); await send.waitFor();
-    await page.waitForFunction(() => !(document.querySelector('[aria-label="立即发送待发送消息"]') as HTMLButtonElement)?.disabled);
+    const mainQueue = page.getByRole('region', { name: 'Persistent Main' });
+    const send = mainQueue.getByRole('button', { name: '立即发送待发送消息' }).first(); await send.waitFor();
+    await page.waitForFunction(() => !(document.querySelector('[aria-label="Persistent Main"] [aria-label="立即发送待发送消息"]') as HTMLButtonElement)?.disabled);
     await send.click(); await page.waitForFunction(() => (window as any).peer.state.acquires === 1);
     await page.evaluate(() => { const p=(window as any).peer; p.busy(); p.history.historyComplete=false; p.render(); });
     await page.getByRole('button', { name: '停止', exact: true }).waitFor();
@@ -89,12 +103,27 @@ test('scoped interrupt and the real queue preserve dispatch and lock boundaries'
     assert.equal(await page.evaluate(() => (window as any).peer.state.releases[1].sent), false);
     assert.deepEqual(await page.evaluate(() => (window as any).peer.unknown()), []);
     assert.deepEqual(await page.evaluate(() => (window as any).peer.state.starts[0]),
-      {id:'queued-1',scope:{hostId:'a',parentThreadId:'parent',operationId:'operation-a',draftId:'side-draft',childThreadId:'child'}});
+      {id:'queued-1',scope:{hostId:'a',threadId:'main-thread'}});
+    await mainQueue.getByRole('button', { name: '下移待发送消息' }).first().click();
+    await page.waitForFunction(() => (window as any).peer.state.mutations.length === 1);
+    assert.deepEqual(await page.evaluate(() => (window as any).peer.state.mutations[0]),
+      {method:'thread/queue/reorder',params:{threadId:'main-thread',queuedSubmissionIds:['queued-2','queued-1']},host:'a',original:true});
+    await mainQueue.getByRole('button', { name: '删除待发送消息' }).first().click();
+    await page.waitForFunction(() => (window as any).peer.state.mutations.length === 2);
+    assert.deepEqual(await page.evaluate(() => (window as any).peer.state.mutations[1]),
+      {method:'thread/queue/delete',params:{threadId:'main-thread',queuedSubmissionId:'queued-2'},host:'a',original:true});
     await page.evaluate(() => { (window as any).peer.state.queueMode='unknown'; });
     await send.click(); await page.locator('.standalone-queue [role="status"]').filter({ hasText: '发送结果未知' }).waitFor();
     assert.equal(await page.evaluate(() => (window as any).peer.state.releases.length), 2);
     assert.equal((await page.evaluate(() => (window as any).peer.unknown())).length, 1);
     assert.equal(await send.isDisabled(), true);
+    const readsBeforeRetry = await page.evaluate(() => (window as any).peer.state.rpc.filter((x:any)=>x.method==='thread/queue/list').length);
+    await mainQueue.getByRole('button', { name: '重新核对' }).click();
+    await page.waitForFunction(count => (window as any).peer.state.rpc.filter((x:any)=>x.method==='thread/queue/list').length > count, readsBeforeRetry);
+    assert.equal(await page.evaluate(() => (window as any).peer.state.starts.length), 2);
+    assert.equal((await page.evaluate(() => (window as any).peer.unknown())).length, 1);
+    assert.deepEqual(await page.evaluate(() => (window as any).peer.childUnknown()), []);
+    assert.deepEqual(await page.evaluate(() => (window as any).peer.state.rpc.filter((x:any)=>x.method.startsWith('thread/queue/') && x.params.threadId==='child')), []);
     await page.evaluate(() => { const p=(window as any).peer; p.state.showPending=true; p.render(); });
     await page.getByText('正在准备侧聊…').waitFor();
     await page.getByRole('button', { name: '重试保存回执' }).click();

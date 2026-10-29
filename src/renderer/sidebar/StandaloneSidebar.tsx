@@ -5,7 +5,7 @@ import { Archive, ArchiveRestore, ArrowDownUp, ArrowLeft, ArrowRight, BookOpen, 
   PanelLeftClose, Pencil, Pin, Plug, Plus, Search, Settings, SquarePen, Trash2, X } from 'lucide-react';
 import { projectForThread, projectsForHost } from '../app/projects.ts';
 import type { Project, ProjectState } from '../app/projects.ts';
-import { useI18n } from '../i18n/index.tsx';
+import { translateKnown, useI18n } from '../i18n/index.tsx';
 import type { ThreadListError, ThreadListRow } from './use-thread-list.ts';
 import { SidebarMenu } from './SidebarMenu.tsx';
 import type { SidebarMenuEntry } from './SidebarMenu.tsx';
@@ -50,6 +50,7 @@ export interface StandaloneSidebarProps {
   canNavigateBack?: boolean;
   canNavigateForward?: boolean;
   onOpenPlugins?(): void;
+  onOpenScheduled?(): void;
   onOpenExplore?(): void;
   accountLabel?: string;
   onOpenProductModeMenu?(anchor: HTMLButtonElement): void;
@@ -293,7 +294,7 @@ type ThreadActionDispatch = (row: ThreadListRow, action: SidebarThreadAction, ta
 export function StandaloneSidebar({ hostId, currentThread, projectState, fallbackWorkspace, rows, nextCursor, loading, error,
   search, archived, onSearchChange, onArchivedChange, onOpenThread, onNewChat, onAddProject, onOpenSettings, onClose,
   onRefresh, onLoadMore, onRetryProjectLookup, shortcutHints, onNavigateHistory, canNavigateBack, canNavigateForward,
-  onOpenPlugins, onOpenExplore, accountLabel, onOpenProductModeMenu, onSwitchProductMode, activeProjectId, onProjectOptions,
+  onOpenPlugins, onOpenScheduled, onOpenExplore, accountLabel, onOpenProductModeMenu, onSwitchProductMode, activeProjectId, onProjectOptions,
   onProjectAction, availableProjectActions, isProjectPinned, availableThreadActions, onThreadAction, onMoveThreadToProject, isThreadPinned,
   isThreadUnread, sidebarOptions, onSidebarOptionChange, orderThreads, orderProjects, onHelpAction }: StandaloneSidebarProps) {
   const { t } = useI18n();
@@ -422,6 +423,9 @@ export function StandaloneSidebar({ hostId, currentThread, projectState, fallbac
     </div>}
     <button type="button" className="yard-owned-sidebar-command" onClick={() => onNewChat(null)}>
       <SquarePen aria-hidden="true" />{t('New chat')}
+    </button>
+    <button type="button" className="yard-owned-sidebar-command" disabled={!onOpenScheduled} onClick={onOpenScheduled}>
+      <Clock3 aria-hidden="true" />{translateKnown(t, 'Scheduled')}
     </button>
     <button type="button" className="yard-owned-sidebar-command" disabled={!onOpenPlugins} onClick={onOpenPlugins}>
       <Plug aria-hidden="true" />{t('Plugins')}

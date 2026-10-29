@@ -1,5 +1,5 @@
 .standalone-composer { color: var(--yard-fg, #222); font: var(--yard-font-size, 13px) var(--yard-ui-font, system-ui, sans-serif); min-width: 0; }
-.standalone-composer__editor { position: relative; border: 1px solid var(--yard-border, #c9c9c9); border-radius: 20px; background: var(--yard-bg, var(--yard-surface, #fff)); box-shadow: 0 2px 7px #0000000d; }
+.standalone-composer__editor { position: relative; border: 1px solid var(--yard-border, #c9c9c9); border-radius: 20px; background: var(--yard-composer-bg, var(--yard-bg, var(--yard-surface, #fff))); box-shadow: 0 2px 7px #0000000d; }
 .standalone-composer textarea { box-sizing: border-box; width: 100%; resize: vertical; color: inherit; background: transparent; font: inherit; font-family: var(--yard-content-font, var(--yard-ui-font, system-ui, sans-serif)); }
 @supports (field-sizing: content) { .standalone-composer__editor > textarea { field-sizing: content; resize: none; } }
 .standalone-composer textarea::placeholder { color: var(--yard-muted, #666); opacity: 1; }

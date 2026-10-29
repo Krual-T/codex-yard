@@ -73,3 +73,26 @@ test('no-op and a previously bound created thread preserve version identity', ()
   assert.equal(sameComposerDraftValue({ keep: undefined }, {}), false);
   assert.equal(sameComposerDraftValue({ a: 1, b: 2 }, { b: 2, a: 1 }), true);
 });
+
+test('stable prefill IDs are scoped to the exact active version and committed with the draft', () => {
+  const { root, before } = fixture(), original = structuredClone(root);
+  const saved = updateComposerDraftVersionInRoot(root, before, draft => ({ ...draft, text: 'appended' }), 'next', 'home-prefill');
+  const savedRoot = saved.root as typeof root;
+  assert.equal(saved.changed, true); assert.equal(saved.duplicate, false);
+  assert.deepEqual(savedRoot.entries[key]!.versions[0]!.prefills, ['first', 'home-prefill']);
+  assert.deepEqual(savedRoot.entries[key]!.versions[1], original.entries[key]!.versions[1]);
+  assert.deepEqual(savedRoot.entries[key]!.retained, original.entries[key]!.retained);
+  assert.deepEqual(root, original);
+  let called = false;
+  const duplicate = updateComposerDraftVersionInRoot(saved.root, saved.after, draft => { called = true; return draft; }, 'unused', 'home-prefill');
+  assert.equal(called, false); assert.equal(duplicate.root, saved.root);
+  assert.equal(duplicate.changed, false); assert.equal(duplicate.duplicate, true);
+  assert.deepEqual(duplicate.after, saved.after);
+  const other = { ...before, revision: 'other', draft: original.entries[key]!.versions[1]!.draft };
+  const branch = updateComposerDraftVersionInRoot(saved.root, other, draft => ({ ...draft, text: 'other appended' }), 'other-next', 'home-prefill');
+  assert.equal(branch.changed, true); assert.equal(branch.duplicate, false);
+  assert.deepEqual((branch.root as typeof root).entries[key]!.versions[0], savedRoot.entries[key]!.versions[0]);
+  assert.deepEqual((branch.root as typeof root).entries[key]!.versions[1]!.prefills, ['home-prefill']);
+  assert.throws(() => updateComposerDraftVersionInRoot(saved.root, before, draft => draft, 'unused', 'home-prefill'), /版本已改变/);
+  assert.throws(() => updateComposerDraftVersionInRoot(saved.root, saved.after, draft => draft, 'unused', '  '), /无效/);
+});

@@ -49,6 +49,10 @@ export interface PreferenceValues {
   'worktree-auto-cleanup-enabled': boolean;
   'worktree-keep-count': number;
   'external-browser-link-shortcut': 'unassigned' | 'primary' | 'alt' | 'primary-shift';
+  'open-link-in-target-preference': 'in-app-browser' | 'external-browser';
+  'open-local-url-in-target-preference': 'in-app-browser' | 'external-browser';
+  'browser-show-full-url': boolean;
+  'browser-annotation-screenshots-mode': 'always' | 'necessary';
   'primary-number-shortcut-target': 'sidebar' | 'tabs';
   'reduced-motion-preference': 'system' | 'on' | 'off';
   'dock-icon-preference': 'app-default' | 'codex-system' | 'space-system';
@@ -138,6 +142,10 @@ export const preferenceDefinitions: Definitions = {
   'worktree-auto-cleanup-enabled': { source: 'global', defaultValue: true, valid: bool },
   'worktree-keep-count': { source: 'global', defaultValue: 15, valid: numberIn(1, Number.MAX_SAFE_INTEGER) },
   'external-browser-link-shortcut': { source: 'setting', defaultValue: 'primary', valid: oneOf('unassigned', 'primary', 'alt', 'primary-shift') },
+  'open-link-in-target-preference': { source: 'setting', defaultValue: 'in-app-browser', valid: oneOf('in-app-browser', 'external-browser') },
+  'open-local-url-in-target-preference': { source: 'setting', defaultValue: 'in-app-browser', valid: oneOf('in-app-browser', 'external-browser') },
+  'browser-show-full-url': { source: 'setting', defaultValue: false, valid: bool },
+  'browser-annotation-screenshots-mode': { source: 'setting', defaultValue: 'always', valid: oneOf('always', 'necessary') },
   'primary-number-shortcut-target': { source: 'atom', defaultValue: 'tabs', valid: oneOf('sidebar', 'tabs') },
   'reduced-motion-preference': { source: 'global', defaultValue: 'system', valid: oneOf('system', 'on', 'off') },
   'dock-icon-preference': { source: 'global', defaultValue: 'app-default', valid: oneOf('app-default', 'codex-system', 'space-system') },
@@ -245,6 +253,9 @@ export class Preferences {
     this.disposed = false;
     const lifecycle = ++this.lifecycle;
     this.unsubscribe = this.client.subscribe(event => {
+      if (event.type === 'connection-state' && event.state === 'connected') {
+        for (const key of this.pendingRefresh) if (!this.snapshot[key].saving) void this.reload(key);
+      }
       const source = event.type === 'global-state-updated' ? 'global' : event.type === 'persisted-atom-updated' || event.type === 'persisted-atoms-changed' ? 'atom' :
         event.type === 'settings-changed' ? 'setting' : null;
       if (source) {
@@ -253,8 +264,8 @@ export class Preferences {
         for (const key of keys) if (typeof key === 'string' && key in preferenceDefinitions &&
           preferenceDefinitions[key as PreferenceKey].source === source) {
           const preferenceKey = key as PreferenceKey;
-          if (this.snapshot[preferenceKey].saving) this.pendingRefresh.add(preferenceKey);
-          else void this.reload(preferenceKey);
+          this.pendingRefresh.add(preferenceKey);
+          if (!this.snapshot[preferenceKey].saving) void this.reload(preferenceKey);
         }
       }
     });
@@ -298,16 +309,20 @@ export class Preferences {
     this.update(key, { observation: clone(raw), editBase, conflict, saved: clone(value),
       value: editBase ? entry.value : clone(value), available: true, loading: false, error: null });
   }
-  async reload(key: PreferenceKey): Promise<void> {
+  async reload(key: PreferenceKey, assertBeforeSend?: () => void): Promise<void> {
     if (this.snapshot[key].saving) { this.pendingRefresh.add(key); return; }
+    this.pendingRefresh.add(key);
     const revision = (this.revisions.get(key) ?? 0) + 1;
     const lifecycle = this.lifecycle;
     this.revisions.set(key, revision);
     const source = preferenceDefinitions[key].source;
     const endpoint = source === 'setting' ? 'get-setting' : source === 'global' ? 'get-global-state' : 'get-persisted-atom';
     try {
-      const response = await this.client.host<unknown>(endpoint, { key });
-      if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) this.applyRead(key, observation(response));
+      const response = await this.client.host<unknown>(endpoint, { key }, { assertBeforeSend });
+      if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) {
+        this.applyRead(key, observation(response));
+        if (!this.snapshot[key].saving && this.snapshot[key].available) this.pendingRefresh.delete(key);
+      }
     } catch (error) {
       if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) this.update(key, { loading: false, error: errorText(error) });
     }
@@ -356,12 +371,12 @@ export class Preferences {
     const results = await Promise.all(keys.map(key => this.saveKey(key)));
     return results.every(Boolean);
   }
-  async saveOne(key: PreferenceKey): Promise<boolean> {
+  async saveOne(key: PreferenceKey, assertBeforeSend?: () => void): Promise<boolean> {
     const entry = this.snapshot[key];
     if (!entry.available || entry.saving || !entry.editBase || entry.conflict) return false;
-    return this.saveKey(key);
+    return this.saveKey(key, assertBeforeSend);
   }
-  private async saveKey(key: PreferenceKey): Promise<boolean> {
+  private async saveKey(key: PreferenceKey, assertBeforeSend?: () => void): Promise<boolean> {
     const source = preferenceDefinitions[key].source;
     const endpoint = source === 'setting' ? 'set-setting' : source === 'global' ? 'set-global-state' : 'set-persisted-atom';
     const getEndpoint = source === 'setting' ? 'get-setting' : source === 'global' ? 'get-global-state' : 'get-persisted-atom';
@@ -389,10 +404,10 @@ export class Preferences {
     this.revisions.set(key, (this.revisions.get(key) ?? 0) + 1);
     this.update(key, { saving: true, error: null });
     try {
-      const response = await this.client.host<{ success?: boolean }>(endpoint, { key, value, expected });
+      const response = await this.client.host<{ success?: boolean }>(endpoint, { key, value, expected }, { assertBeforeSend });
       if (response?.success !== true) throw new Error('The host did not confirm the write');
       acknowledged = true;
-      const read = observation(await this.client.host<unknown>(getEndpoint, { key }));
+      const read = observation(await this.client.host<unknown>(getEndpoint, { key }, { assertBeforeSend }));
       const actual = read.exists ? read.value : preferenceDefinitions[key].defaultValue;
       if (!preferenceDefinitions[key].valid(actual)) throw new Error('The saved value could not be verified');
       const current = this.snapshot[key];
@@ -401,14 +416,17 @@ export class Preferences {
       this.update(key, { observation: read, saved: clone(actual) as never, value: (matches && !newer ? clone(actual) : current.value) as never,
         editBase: matches && !newer ? null : written, baseValue: clone(sent) as never, conflict: !matches, saving: false,
         error: matches ? null : 'The value changed while saving. Review the current value before saving.' });
-      if (this.pendingRefresh.delete(key)) void this.reload(key);
+      if (this.pendingRefresh.has(key)) void this.reload(key, assertBeforeSend);
       return matches;
     } catch (error) {
-      this.pendingRefresh.delete(key);
-      if (acknowledged) this.update(key, { observation: written, saved: clone(sent) as never, editBase: written, baseValue: clone(sent) as never });
+      if (acknowledged) {
+        this.pendingRefresh.add(key);
+        this.update(key, { observation: written, saved: clone(sent) as never, editBase: written, baseValue: clone(sent) as never });
+      }
       this.update(key, { saving: false, error: `Could not confirm save: ${errorText(error)}. Your edit is preserved.` });
       if (!acknowledged) {
-        await this.reload(key);
+        try { assertBeforeSend?.(); } catch { return false; }
+        await this.reload(key, assertBeforeSend);
         if (!this.snapshot[key].conflict) this.update(key, { error: `Could not confirm save: ${errorText(error)}. Your edit is preserved.` });
       }
       return false;

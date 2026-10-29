@@ -76,7 +76,11 @@ export function AgentSection({ client, hostId, onDirtyChange, onSavingChange, re
     verbosity: { '': text('Model default'), low: text('Low'), medium: text('Medium'), high: text('High') },
     reasoning: { auto: text('Auto'), concise: text('Concise'), detailed: text('Detailed'), none: text('None') } };
   const disabled = (field: AgentField) => state.loading || state.saving || !state.projectionAvailable || state.locked.includes(field);
-  const change = (field: AgentField, value: string) => { agent.edit(field, value); void agent.save(); };
+  const change = (field: AgentField, value: string) => {
+    const saveImmediately = !agent.dirty;
+    agent.edit(field, value);
+    if (saveImmediately) void agent.save();
+  };
   const select = (field: AgentField, choices: readonly string[]) => <select aria-label={text(fieldLabels[field])} value={state.values[field]}
     disabled={disabled(field) || !choices.length} onChange={event => change(field, event.target.value)}>
     {!choices.includes(state.values[field]) && <option value={state.values[field]}>{valueLabels[field][state.values[field]] ?? state.values[field]}</option>}

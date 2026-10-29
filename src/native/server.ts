@@ -42,7 +42,7 @@ import { createStateMutations } from './state-mutations.ts';
 import { createNativeState, NativeStateCommitError } from './native-state.ts';
 import type { NativeStateCheckpoint } from './native-state.ts';
 import { createConfigWrites } from './config-writes.ts';
-import { createConfigWriteTargets } from './config-write-targets.ts';
+import { assertDaemonConfigHome, createConfigWriteTargets } from './config-write-targets.ts';
 import { createConfigWriteHost } from './config-write-host.ts';
 import { createRemoteConnectionPreferences } from './remote-connection-preferences.ts';
 import { createProjectCatalogWrites } from './project-catalog-writes.ts';
@@ -257,6 +257,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     const snapshot = socket && connectionSnapshots.get(socket);
     if (!socket || !connection.connected || connection.socket !== socket || socket.readyState !== WebSocket.OPEN
       || snapshot?.hostId !== hostId || snapshot.connection !== connection) throw new Error('The original settings connection changed. Reload the settings.');
+    assertDaemonConfigHome(connection.server?.codexHome, snapshot.paths.codexHome);
     const generation = connectionGeneration(socket);
     return { hostId, generation, homeDirectory: snapshot.paths.homeDirectory, codexHome: snapshot.paths.codexHome };
   }
@@ -897,7 +898,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         const result = await files.rpc(method, params, hostId, hostPaths.get(hostId)?.codexHome);
         send(client, { type: 'mcp-response', hostId, message: { id, result } }); return;
       }
-      const readsConfigurationSource = method === 'config/read' || method === 'skills/list' || method === 'hooks/list';
+      const readsConfigurationSource = method === 'config/read' || method === 'skills/list' || method === 'hooks/list' || method === 'plugin/installed';
       if (!readMethods.has(method) && !writeMethods.has(method)) { unsupported.add(method); throw new Error('Web 宿主尚未接入：' + method); }
       if (method === 'thread/unsubscribe' && typeof params.threadId === 'string' && await sideChats.ownsChild(hostId, params.threadId)) {
         throw Object.assign(new Error('侧聊会话由侧聊操作负责关闭。'), { uncertain: false });
@@ -981,7 +982,9 @@ export async function createNativeWorkbench(options: Options = {}) {
       if (method === 'thread/start' && record(record(result).thread).id) createdThreads.add(hostId + ':' + String(record(record(result).thread).id));
       if (method === 'thread/delete') createdThreads.delete(hostId + ':' + String(params.threadId));
       if (readSource) {
-        const current = configurationSource(hostId, connection, sourceSocket);
+        let current: ConfigReadSource;
+        try { current = configurationSource(hostId, connection, sourceSocket); }
+        catch { throw new Error('The settings source changed while reading. Reload the settings.'); }
         if (current.generation !== readSource.generation || current.homeDirectory !== readSource.homeDirectory || current.codexHome !== readSource.codexHome) {
           throw new Error('The settings source changed while reading. Reload the settings.');
         }
@@ -994,13 +997,6 @@ export async function createNativeWorkbench(options: Options = {}) {
           result = publicConfig(result, agent);
         }
         result = { ...record(result), yardConfigSource: readSource };
-      }
-      // The renderer's browser.in-app capability reads experimentalFeature/list.
-      // Manual Chrome transport includes pairing an access computer, even when
-      // the optional service-machine Chrome is not configured.
-      if (method === 'experimentalFeature/list') {
-        const features = Array.isArray(record(result).data) ? record(result).data as ObjectValue[] : [];
-        result = { ...record(result), data: features.map(feature => feature.name === 'in_app_browser' ? { ...feature, enabled: true } : feature) };
       }
       if (method === 'getAuthStatus') result = { ...record(result), authToken: null };
       send(client, { type: 'mcp-response', hostId, message: { id, result }, eventCursor: response.eventCursor });

@@ -17,10 +17,11 @@ export interface HookSectionMemory {
   scope: { origin: string; paths: string[] }; settings: HookSettings;
 }
 
-export function HookSection({ client, hostId, projectScope, memory, revision, onDirtyChange, onSavingChange, registerDiscard }: {
+export function HookSection({ client, hostId, projectScope, memory, revision, onDirtyChange, onSavingChange, registerDiscard, captureReadAuthority }: {
   client: WorkbenchClient; hostId: string; projectScope: SettingsScope; onDirtyChange: (dirty: boolean) => void; onSavingChange: (saving: boolean) => void;
   memory: RefObject<HookSectionMemory | null>; revision: number;
   registerDiscard?: (discard: (() => Promise<boolean>) | null) => void;
+  captureReadAuthority?: () => () => void;
 }) {
   const { t } = useI18n();
   const [retained] = useState(() => memory.current?.client === client && memory.current.hostId === hostId && memory.current.revision === revision ? memory.current : null);
@@ -29,7 +30,7 @@ export function HookSection({ client, hostId, projectScope, memory, revision, on
   const [scope, setScope] = useState(() => retained?.scope ?? { origin: incomingKey, paths: projectScope.paths });
   const [scopeError, setScopeError] = useState<string | null>(() => retained?.scopeError ?? null);
   const settings = useMemo(() => retained?.scope === scope && retained.client === client && retained.hostId === hostId && retained.revision === revision ?
-    retained.settings : new HookSettings(client, hostId, scope.paths), [client, hostId, revision, scope, retained]);
+    retained.settings : new HookSettings(client, hostId, scope.paths, undefined, captureReadAuthority), [client, hostId, revision, scope, retained]);
   const state = useSyncExternalStore(settings.subscribe, settings.getSnapshot, settings.getSnapshot);
   const scopeChanged = scope.origin !== incomingKey;
   useLayoutEffect(() => { memory.current = { client, hostId, revision, cwd, scopeError, scope, settings }; }, [client, hostId, revision, cwd, scopeError, scope, settings, memory]);

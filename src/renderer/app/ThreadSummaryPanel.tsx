@@ -21,12 +21,15 @@ export interface ThreadSummarySideChat {
 }
 export type ThreadSummaryOutput = { id: string; label: string; kind: 'file'; path: string;
   source?: { hostId: string; threadId: string; cwd: string; turnId: string; itemId: string } }
-  | { id: string; label: string; kind: 'link'; url: string };
+  | { id: string; label: string; kind: 'link'; url: string;
+    source?: { hostId: string; threadId: string; cwd?: string; turnId: string; itemId: string } };
 export type ThreadSummaryCreateKind = 'document' | 'presentation' | 'spreadsheet' | 'site';
 export interface ThreadSummaryOutputs {
   entries: readonly ThreadSummaryOutput[];
   loading: boolean;
   error?: string | null;
+  /** Known source/history gaps are distinct from retryable host failures. */
+  notice?: string | null;
   /** The parent has explicitly requested the original empty outputs view. */
   showWhenEmpty?: boolean;
   /** The original create-output gate has been checked by the parent. */
@@ -321,21 +324,25 @@ function SummaryContents(props: ThreadSummaryPanelProps) {
       {plan && <Section client={props.client} sectionKey="plan" storageError={labels.storageError} title={t('Plan')}><Row icon={<ListChecks size={16} aria-hidden="true" />}
         label={plan.text.match(/^\s{0,3}#{1,6}\s+(.+)$/m)?.[1]?.trim() || t('Plan')}
         action={props.onOpenPlan ? () => perform(() => props.onOpenPlan!(plan)) : undefined} /></Section>}
-      {outputs && (outputs.canCreate || outputs.showWhenEmpty || outputs.loading || outputs.error || outputs.entries.length > 0) && <Section
+      {outputs && (outputs.canCreate || outputs.showWhenEmpty || outputs.loading || outputs.error || outputs.notice || outputs.entries.length > 0) && <Section
         client={props.client} sectionKey="artifacts" storageError={labels.storageError} title={labels.outputs} count={outputs.entries.length}
         after={outputs.canCreate && <CreateOutputControl labels={labels} variant="icon" disabled={!props.onCreateOutput} onCreate={createOutput} />}>
         {visibleOutputs.map(output => <Row key={output.id} icon={<File size={16} aria-hidden="true" />} label={output.label}
-          action={props.onOpenOutput ? () => perform(() => props.onOpenOutput!(output))
+          action={generatedImages.entries.includes(output) && output.kind === 'file' && props.onOpenFile && thread
+            ? () => perform(() => props.onOpenFile!({ hostId: output.source?.hostId ?? hostId,
+              cwd: output.source?.cwd ?? thread.cwd, path: output.path }))
+            : props.onOpenOutput ? () => perform(() => props.onOpenOutput!(output))
             : output.kind === 'file' && props.onOpenFile && thread ? () => perform(() => props.onOpenFile!({
               hostId: output.source?.hostId ?? hostId, cwd: output.source?.cwd ?? thread.cwd, path: output.path })) : undefined} />)}
         {outputs.entries.length > 3 && more(showAllOutputs, () => setShowAllOutputs(!showAllOutputs))}
         {outputs.loading && <div role="status" className="yard-thread-summary__muted">{labels.loadingOutputs}</div>}
+        {outputs.notice && <div role="status" className="yard-thread-summary__muted">{outputs.notice}</div>}
         {outputs.error && <div role="alert" className="yard-thread-summary__error">{labels.outputError}: {outputs.error}
           {(props.onRetryOutputs || generatedImages.error) && <button type="button" onClick={() => {
             if (generatedImages.error) generatedImages.retry();
             if (props.onRetryOutputs) perform(props.onRetryOutputs);
           }}>{t('Retry')}</button>}</div>}
-        {!outputs.loading && !outputs.error && outputs.entries.length === 0 && (outputs.canCreate
+        {!outputs.loading && !outputs.error && !outputs.notice && outputs.entries.length === 0 && (outputs.canCreate
           ? <CreateOutputControl labels={labels} variant="row" disabled={!props.onCreateOutput} onCreate={createOutput} />
           : <div className="yard-thread-summary__muted">{labels.emptyOutputs}</div>)}
       </Section>}

@@ -6,6 +6,7 @@ import { readComposerDraftVersions } from '../composer/composer-draft-store.ts';
 import type { ComposerDraftOwner, ComposerDraftSnapshot, ComposerDraftVersions } from '../composer/composer-draft-store.ts';
 import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
 import type { MessageEditHistory, StandaloneMessagesRecoveryProps } from '../messages/StandaloneMessages.tsx';
+import type { MessageOutputPreviewAuthority } from '../messages/MessageOutputPreviews.tsx';
 import { isThreadBusy } from '../app/thread-state.ts';
 import type { ComposerDraft, StandaloneMessagesProps, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import type { SideChatController } from './controller.ts';
@@ -53,7 +54,9 @@ export interface SideChatPanelProps {
     assertBeforeSend: () => void): Promise<'deleted' | 'changed'>;
   dispatchQueueMutation?<T>(method: SideChatQueueMutation, params: Record<string, unknown>, hostId: string,
     originalAuthority: () => void, assertBeforeSend: () => void): Promise<T>;
-  messages?: Omit<StandaloneMessagesProps, 'client' | 'hostId' | 'thread'> & StandaloneMessagesRecoveryProps & { editHistory?: MessageEditHistory };
+  messages?: Omit<StandaloneMessagesProps, 'client' | 'hostId' | 'thread'> & StandaloneMessagesRecoveryProps & {
+    editHistory?: MessageEditHistory; outputPreviewAuthority?: MessageOutputPreviewAuthority;
+  };
   prefill?: StandaloneComposerRuntimeProps['prefill'];
   onPrefillConsumed?: StandaloneComposerRuntimeProps['onPrefillConsumed'];
   onDraftChange?: StandaloneComposerRuntimeProps['onDraftChange'];
@@ -312,7 +315,7 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
             || !(latestHistory.liveReady ?? (latestHistory.historyComplete || isThreadBusy(latestHistory.thread))) || latestHistory.streamGap
             || action.type === 'send' && (isThreadBusy(latestHistory.thread) || latestHistory.thread.status?.type !== 'idle')
             || action.type === 'steer' && !latestHistory.thread.turns.some(turn => turn.id === action.turnId && turn.status === 'inProgress')
-            || action.type === 'queue' && !isThreadBusy(latestHistory.thread)) throw localRejection('侧聊尚未就绪或正在关闭，草稿已保留。');
+            || action.type === 'queue') throw localRejection('侧聊尚未就绪或正在关闭，草稿已保留。');
           if (!description || !draftSession || owner?.hostId !== current.hostId || owner.threadId !== child.thread.id || owner.draftId !== current.draftId)
             throw localRejection('侧聊草稿身份尚未就绪。');
           controller.markActivity();

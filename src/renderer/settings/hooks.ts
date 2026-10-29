@@ -73,6 +73,7 @@ export class HookSettings {
   private readonly hostId: string;
   private readonly cwds: readonly string[];
   private readonly operations: SettingsConfigOperations;
+  private readonly captureReadAuthority?: () => () => void;
   private originalId: string | null = null;
   private resolvedOriginalId: string | null = null;
   private originalBlocker: WriteStatus | null = null;
@@ -89,8 +90,9 @@ export class HookSettings {
   private source: ConfigReadSource | null = null;
   private latestRead: HookRead | null = null;
   private snapshot: HookSnapshot = { loading: true, saving: false, hooks: [], warnings: [], drafts: [], error: null, targetError: null, needsRefresh: false, writeUncertain: false, latest: null, draftStorageError: null, draftSaving: false };
-  constructor(client: WorkbenchClient, hostId: string, cwds: readonly string[], operations = settingsConfigOperations(client)) {
+  constructor(client: WorkbenchClient, hostId: string, cwds: readonly string[], operations = settingsConfigOperations(client), captureReadAuthority?: () => () => void) {
     this.client = client; this.hostId = hostId; this.cwds = [...cwds]; this.operations = operations;
+    this.captureReadAuthority = captureReadAuthority;
   }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -129,12 +131,12 @@ export class HookSettings {
     else if (this.snapshot.loading) this.update({ loading: false });
   }
 
-  private async read(): Promise<HookRead> {
+  private async read(assertBeforeSend?: () => void): Promise<HookRead> {
     if (!this.cwds.length || !this.cwds.every(validScopePath)) throw new Error('Select a project or session with a working directory.');
     type ConfigResponse = { config: { profile?: unknown }; layers?: unknown; yardConfigSource?: unknown };
-    const configBefore = await this.client.rpc<ConfigResponse>('config/read', { includeLayers: true }, this.hostId).catch(() => null);
-    const listResult = await this.client.rpc<{ data: unknown }>('hooks/list', { cwds: this.cwds }, this.hostId);
-    const configResult = await this.client.rpc<ConfigResponse>('config/read', { includeLayers: true }, this.hostId).catch(() => null);
+    const configBefore = await this.client.rpc<ConfigResponse>('config/read', { includeLayers: true }, this.hostId, { assertBeforeSend }).catch(() => null);
+    const listResult = await this.client.rpc<{ data: unknown }>('hooks/list', { cwds: this.cwds }, this.hostId, { assertBeforeSend });
+    const configResult = await this.client.rpc<ConfigResponse>('config/read', { includeLayers: true }, this.hostId, { assertBeforeSend }).catch(() => null);
     const groups = hookGroups(listResult?.data), hooks = uniqueHooks(groups);
     const warnings = groups.flatMap(group => [...group.warnings, ...group.errors.map(error => `${error.path}: ${error.message}`)]);
     let target: ConfigTarget | null = null, targetError: string | null = null, profile: string | null = null;
@@ -163,6 +165,12 @@ export class HookSettings {
     const generation = ++this.generation;
     this.update({ loading: true, error: null });
     try {
+      const assertOriginal = this.captureReadAuthority?.();
+      const assertBeforeSend = () => {
+        if (generation !== this.generation) throw new Error('The original hook settings page is no longer active.');
+        assertOriginal?.();
+      };
+      assertBeforeSend();
       const previous = await this.operations.find(this.hostId, 'hooks-settings', this.cwds);
       if (generation !== this.generation) return;
       const unresolved = !!previous && (previous.phase === 'pending' || previous.phase === 'unknown' || previous.phase === 'blocked' || !!previous.operation?.storageError);
@@ -173,8 +181,8 @@ export class HookSettings {
         const blocker = this.originalBlocker;
         resolved = this.resolvedOriginalId === this.originalId
           || await this.operations.originalNotSentClosed(this.hostId, this.originalId, 'config/batchWrite')
-          || !!(blocker?.method && await this.operations.originalFinished(blocker.hostId, blocker.operationId, blocker.method))
-          || !blocker && await this.operations.originalFinished(this.hostId, this.originalId, 'config/batchWrite');
+          || !!(blocker?.method && blocker.hostId === this.hostId && await this.operations.originalFinished(blocker.hostId, blocker.operationId, blocker.method, assertBeforeSend))
+          || !blocker && await this.operations.originalFinished(this.hostId, this.originalId, 'config/batchWrite', assertBeforeSend);
         if (generation !== this.generation) return;
       }
       if (unresolved && previous?.operationId === this.originalId) {
@@ -182,7 +190,7 @@ export class HookSettings {
       } else if (this.snapshot.writeUncertain && resolved) {
         this.snapshot = { ...this.snapshot, writeUncertain: false, needsRefresh: true };
       }
-      const read = await this.read();
+      const read = await this.read(assertBeforeSend);
       if (generation !== this.generation) return;
       if (this.dirty && (this.snapshot.needsRefresh || this.changed(read))) {
         this.latestRead = read;
