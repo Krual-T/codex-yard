@@ -86,7 +86,7 @@ export interface StandaloneComposerProps {
   onSubmit(draft: ComposerDraft, options: SubmitOptions, action: SubmitAction): Promise<void>;
   onInterrupt(): Promise<void>;
   /** App resumes the selected thread before starting an authoritative queue item. */
-  onStartQueued?(queuedSubmissionId: string): Promise<void>;
+  onStartQueued?(queuedSubmissionId: string, assertAuthority?: () => void): Promise<void>;
   /** Explicit contextual reference prefill, consumed once per id; never a message edit. */
   prefill?: { id: string; draft: ComposerDraft } | null;
   /** Called only after this prefill has been durably merged into its draft. */
