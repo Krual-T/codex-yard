@@ -363,7 +363,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         response.end(path === '/' ? html : html.replace('<head>', '<head><meta name="initial-route" content="' + path.replaceAll('"', '&quot;').replaceAll('<', '&lt;') + '">'));
         return;
       }
-      const assetRoot = path.startsWith('/brand/') ? join(projectRoot, 'public') : renderer;
+      const assetRoot = path.startsWith('/brand/') || path.startsWith('/pets/') ? join(projectRoot, 'public') : renderer;
       const file = resolve(assetRoot, '.' + path);
       if (!file.startsWith(assetRoot + sep)) { response.writeHead(404); response.end(); return; }
       let content: Buffer = await readFile(file);

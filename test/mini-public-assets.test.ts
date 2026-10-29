@@ -58,12 +58,7 @@ test('the actual host serves and decodes the built-in pet URLs', {
     dataDir:join(root,'data'), workspace:root, hostCatalog:{hosts:[],projects:[],assignments:{}} });
   const paths = Object.values(builtinPetAssets);
   const responses = await Promise.all(paths.map(path => fetch(app!.url + path)));
-  const statuses = responses.map(response => response.status);
   await Promise.all(responses.map(response => response.arrayBuffer()));
-  if (statuses.every(status => status === 404)) {
-    t.skip('The shared host does not yet expose /pets/; Manager owns this route');
-    return;
-  }
   for (let index = 0; index < paths.length; index++) {
     assert.equal(responses[index]!.status, 200, paths[index]);
     assert.match(responses[index]!.headers.get('content-type') ?? '', /^image\/webp/);
