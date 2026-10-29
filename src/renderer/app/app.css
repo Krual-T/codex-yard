@@ -19,6 +19,8 @@
 .yard-thread-title{display:flex;align-items:center;gap:14px;min-width:0;overflow:hidden}
 .yard-thread-title>svg{height:16px;width:16px;flex:none}
 .yard-thread-title>strong{font-size:14px;font-weight:430;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.yard-summary-overlay{position:absolute;top:54px;right:max(12px,calc((100% - 736px)/2 - 24px));z-index:25;max-width:calc(100% - 24px)}
+.yard-icon-button[aria-pressed=true]{background:color-mix(in srgb,var(--yard-fg) 8%,transparent)}
 .yard-icon-button,.yard-toolbar-menu>summary{display:grid;place-items:center;flex:none;width:27px;height:30px;padding:0;border-radius:6px;color:var(--yard-muted)}
 .yard-icon-button svg,.yard-toolbar-menu svg,.yard-menu svg{width:15px;height:15px;flex:none}
 .yard-toolbar-menu,.yard-conversation-actions{position:relative;flex:none}

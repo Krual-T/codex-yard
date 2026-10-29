@@ -27,6 +27,9 @@ import { StandaloneSidebar } from '../sidebar/StandaloneSidebar.tsx';
 import { useThreadList } from '../sidebar/use-thread-list.ts';
 import { useSidebarBehavior } from './use-sidebar-behavior.ts';
 import { createSidebarActionService } from './sidebar-action-service.ts';
+import { ThreadSummaryPanel } from './ThreadSummaryPanel.tsx';
+import { projectCreatedChats } from './thread-summary-created-chats.ts';
+import { sameSummarySideChat, useSummarySideChats } from './use-summary-side-chats.ts';
 import { commitSidebarProjectMembership, createSidebarProjectInventory } from './sidebar-project-inventory.ts';
 import { WorkspacePanels } from '../panels/WorkspacePanels.tsx';
 import type { WorkspacePanelAppearance, WorkspacePanelRequest, WorkspacePanelsHandle } from '../panels/WorkspacePanels.tsx';
@@ -183,9 +186,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const [sideChatSource, setSideChatSource] = useState<SideChatPanelSource | null>(null);
   const sideChatSourceRef = useRef(sideChatSource); sideChatSourceRef.current = sideChatSource;
   const [sideChatOpened, setSideChatOpened] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [, setSideChatProjectionRevision] = useState(0);
   const frozenChildOwners = useRef(new Map<string, object>());
-  const receiveSideChatController = useCallback((controller: SideChatRootController | null) => { sideChats.current = controller; }, []);
-  const receiveSideChatChild = useCallback((child: SideChatRootChild | null) => { sideChatActive.current = child; setSideChatChild(child); }, []);
+  const receiveSideChatController = useCallback((controller: SideChatRootController | null) => { sideChats.current = controller; setSideChatProjectionRevision(value => value + 1); }, []);
+  const receiveSideChatChild = useCallback((child: SideChatRootChild | null) => { sideChatActive.current = child; setSideChatChild(child); setSideChatProjectionRevision(value => value + 1); }, []);
   const releaseSideChatNavigation = () => {
     const lease = sideChatNavigation.current;
     if (!lease) return;
@@ -1358,6 +1363,36 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   useEffect(() => { if (sidebarError) setError(sidebarError); }, [sidebarError]);
   const activeProject = current.threadId && thread && projectState
     ? projectForThread(projectState, projectsForHost(projectState, current.hostId), current.hostId, thread) : selectedProject;
+  const summaryGeneration = navigationGeneration.current;
+  const summaryConnectionGeneration = connectionReadGeneration.current;
+  const summarySourceKey = JSON.stringify([current.hostId, current.threadId, summaryGeneration, summaryConnectionGeneration]);
+  const assertSummaryCurrent = () => {
+    const route = routeRef.current;
+    if (navigationLocked.current || navigationGeneration.current !== summaryGeneration || connectionReadGeneration.current !== summaryConnectionGeneration || route.section
+      || route.hostId !== current.hostId || route.threadId !== current.threadId)
+      throw new Error('The original summary conversation changed.');
+  };
+  const summarySideChats = useSummarySideChats({ controller: sideChats, hostId: current.hostId, threadId: current.threadId,
+    enabled: summaryOpen && !loading && !!thread && !current.section, sourceKey: summarySourceKey,
+    fallbackTitle: previewAppearance.locale.startsWith('zh') ? '侧聊' : 'Side chat', assertCurrent: assertSummaryCurrent });
+  const showSummarySideChat = async (identity: Parameters<SideChatRootController['restore']>[0], recover: boolean) => {
+    assertSummaryCurrent();
+    if (identity.hostId !== current.hostId || identity.parentThreadId !== current.threadId) throw new Error('The side chat belongs to another conversation.');
+    const controller = sideChats.current;
+    if (!controller) throw new Error('Side chats are not ready.');
+    if (recover) {
+      const associations = await controller.listRecoverable(); assertSummaryCurrent();
+      if (!associations.some(value => sameSummarySideChat(value, identity))) throw new Error('The saved side chat changed.');
+      await controller.restore(identity);
+    } else {
+      if (!controller.listMounted().some(value => sameSummarySideChat(value.identity, identity))) throw new Error('The original side chat is no longer mounted.');
+      await controller.show(identity.draftId);
+    }
+    assertSummaryCurrent();
+    if (sideChats.current !== controller || !controller.listMounted().some(value => value.active && sameSummarySideChat(value.identity, identity)))
+      throw new Error('The selected side chat changed.');
+    setSideChatOpened(true); setPanelKind('side-chat'); setPanelOpen(true);
+  };
   const switchHomeTarget = async (target: { hostId: string; cwd: string }, lease: ComposerDraftLease, project: Project | null) => {
     const controller = composerController.current, snapshot = controller?.snapshot(), originalRoute = routeRef.current;
     if (!controller || !snapshot || originalRoute.threadId || originalRoute.section || targetChange.current
@@ -1402,6 +1437,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       onNavigateHistory={direction => { void navigate('/', { delta: direction }); }}
       canNavigateBack={Number(history.state?.__yardIndex ?? 0) > 0}
       onOpenPlugins={() => { void navigate('/plugins' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId))); }}
+      onOpenScheduled={() => { void navigate('/scheduled' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId))); }}
       onRefresh={() => { void list.refresh(); }} onLoadMore={() => { void list.loadMore(); }} onRetryProjectLookup={() => { void reloadProjects().catch(cause => setError(String(cause))); }} />}
     <main className="yard-main">
       {!settings && <header className="yard-toolbar">
@@ -1414,6 +1450,8 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           {!current.readOnly && <button role="menuitem" disabled={loading || leaving || !sendState} onClick={openSideChat}>{chinese ? '新建侧聊' : 'New side chat'}</button>}
           <button role="menuitem" onClick={() => { setMenu(false); setGoalMounted(true); setGoalOpen(value => !value); }}>Goal</button></div>}
         </div>}
+        {current.threadId && <button className="yard-icon-button" aria-label="Toggle summary" title="Toggle summary" aria-pressed={summaryOpen}
+          onClick={() => setSummaryOpen(value => !value)}><ListTodo aria-hidden="true" /></button>}
         {requests.length > 0 && <details className="yard-toolbar-menu"><summary aria-label="Inspect approval request"><ListTodo aria-hidden="true" /></summary><div className="yard-menu">
           {requests.map(entry => <button key={JSON.stringify(entry.request.ref)} onClick={() => { setSelectedRequest(entry.request.ref); setRequestViewHidden(false); }}>
             {entry.request.hostId}: {entry.request.method} · {entry.outcome}</button>)}
@@ -1431,6 +1469,48 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           {!hostCatalogReady && <button type="button" onClick={() => { void reloadHosts().catch(cause => setError(String(cause))); }}>Retry hosts</button>}
         </div></details>
       </header>}
+      {summaryOpen && current.threadId && thread && !settings && !productPage && <div className="yard-summary-overlay" inert={leaving}>
+        <ThreadSummaryPanel client={client} hostId={current.hostId} threadId={current.threadId} snapshot={conversation}
+          sideChats={summarySideChats.entries} sideChatsLoading={summarySideChats.loading} sideChatsError={summarySideChats.error}
+          onRetrySideChats={summarySideChats.retry} onShowSideChat={identity => showSummarySideChat(identity, false)}
+          onRestoreSideChat={identity => showSummarySideChat(identity, true)}
+          onOpenCreatedChat={async chat => {
+            assertSummaryCurrent();
+            const daemon = client.captureDaemonConnection(current.hostId);
+            const checkReceipt = () => {
+              daemon.assertOriginal();
+              const source = sessions.view({ hostId: current.hostId, threadId: current.threadId! }).snapshot().thread;
+              if (!chat.source || chat.source.hostId !== current.hostId || chat.source.threadId !== current.threadId
+                || !projectCreatedChats(source, current.hostId, '').some(value => value.hostId === chat.hostId && value.threadId === chat.threadId
+                  && value.source?.turnId === chat.source!.turnId && value.source.itemId === chat.source!.itemId))
+                throw new Error('The original created conversation receipt changed.');
+            };
+            checkReceipt();
+            const query = new URLSearchParams(); if (chat.hostId !== 'local') query.set('hostId', chat.hostId);
+            await navigate(`/local/${encodeURIComponent(chat.threadId)}${query.size ? '?' + query : ''}`, undefined, () => {
+              checkReceipt();
+              if (navigationGeneration.current !== summaryGeneration + 1 || routeRef.current.section
+                || routeRef.current.hostId !== current.hostId || routeRef.current.threadId !== current.threadId)
+                throw new Error('The original summary conversation changed.');
+            });
+          }}
+          projectless={!activeProject} outputs={{ entries: [], loading: false, showWhenEmpty: true, canCreate: false }}
+          onOpenPlan={async plan => { assertSummaryCurrent();
+            if (plan.hostId !== current.hostId || plan.threadId !== current.threadId) throw new Error('The plan belongs to another conversation.');
+            await navigate('/plan-summary' + (plan.hostId === 'local' ? '' : '?' + new URLSearchParams({ hostId: plan.hostId })),
+              { state: { hostId: plan.hostId, conversationId: plan.threadId, planContent: plan.text, cwd: plan.cwd } }, () => {
+                if (navigationGeneration.current !== summaryGeneration + 1 || routeRef.current.section
+                  || routeRef.current.hostId !== plan.hostId || routeRef.current.threadId !== plan.threadId)
+                  throw new Error('The original plan conversation changed.');
+              });
+          }}
+          onOpenFile={value => { assertSummaryCurrent(); if (value.hostId !== current.hostId) throw new Error('The file host changed.'); openFile(value.path, undefined, undefined, value.cwd); }}
+          onOpenOutput={output => { assertSummaryCurrent(); if (output.kind === 'file') openFile(output.path, undefined, undefined, thread.cwd);
+            else showBrowser({ hostId: current.hostId, threadId: current.threadId!, url: output.url }); }}
+          onOpenWebSearch={source => { assertSummaryCurrent();
+            if (!source.urls[0]) throw new Error('This search has no result URL to open.');
+            showBrowser({ hostId: current.hostId, threadId: current.threadId!, url: source.urls[0] }); }} />
+      </div>}
       {!settings && tabs.length > 1 && <div className="yard-tab-strip" role="tablist" aria-label="Workspace tabs">{tabs.map((tab, index) => {
           const slot = document.documentElement.dir === 'rtl' ? tabs.length - index : index + 1;
           return <div className="yard-tab" key={tab.hostId + ':' + tab.id}><button role="tab" aria-selected={tab.id === current.threadId && tab.hostId === current.hostId} onClick={() => { void openTab(tab); }}>{tab.title}{shortcuts.hints === 'tabs' && slot <= 9 && <kbd>{shortcuts.label('tabs', slot as NumberShortcutSlot)}</kbd>}</button><button aria-label={'Close ' + tab.title} onClick={() => setTabs(previous => previous.filter(item => item !== tab))}>×</button></div>;
