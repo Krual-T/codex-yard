@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Bot, ChevronDown, File, Globe, ListChecks, LoaderCircle, MessageSquare, PanelRightClose, Paperclip, Plus, Square, Target, Terminal, Wrench } from 'lucide-react';
 import { useI18n } from '../i18n/index.tsx';
+import type { AutomationEntry } from '../pages/automations/model.ts';
 import type { SideChatDraftIdentity } from '../side-chat/browser-authority.ts';
-import type { WorkbenchClient, WorkbenchEvent } from '../workbench-contract.ts';
 import type { ConversationSnapshot } from './conversation-sessions.ts';
-import { parseThreadSummaryGoal, projectThreadSummary } from './thread-summary-model.ts';
-import type { ThreadSummaryGoal, ThreadSummaryPlan, ThreadSummarySource } from './thread-summary-model.ts';
+import { projectThreadSummary } from './thread-summary-model.ts';
+import type { ThreadSummaryPlan, ThreadSummarySource } from './thread-summary-model.ts';
 import './thread-summary-panel.css';
 
 export interface ThreadSummarySideChat {
@@ -27,9 +27,9 @@ export interface ThreadSummaryOutputs {
 export interface ThreadSummarySubagent { threadId: string; label: string; working?: boolean; detail?: string }
 export interface ThreadSummaryProcess { id: string; command: string; working?: boolean }
 export interface ThreadSummaryCreatedChat { threadId: string; label: string }
+export interface ThreadSummaryAutomation { entry: AutomationEntry; kind: 'goal' | 'scheduled'; detail?: string }
 
 export interface ThreadSummaryPanelProps {
-  client: WorkbenchClient;
   hostId: string;
   threadId: string;
   snapshot: ConversationSnapshot;
@@ -39,7 +39,9 @@ export interface ThreadSummaryPanelProps {
   onRetrySideChats?(): void | Promise<void>;
   onShowSideChat(identity: SideChatDraftIdentity): void | Promise<void>;
   onRestoreSideChat(identity: SideChatDraftIdentity): void | Promise<void>;
-  onOpenGoal?(): void | Promise<void>;
+  /** Only automations actually associated with this conversation belong here. */
+  automations?: readonly ThreadSummaryAutomation[];
+  onOpenAutomation?(automation: ThreadSummaryAutomation): void | Promise<void>;
   onOpenPlan?(plan: ThreadSummaryPlan): void | Promise<void>;
   onOpenFile?(location: { hostId: string; cwd: string; path: string }): void | Promise<void>;
   onOpenWebSearch?(source: Extract<ThreadSummarySource, { kind: 'web' }>): void | Promise<void>;
@@ -66,56 +68,55 @@ const en = { summary: 'Summary', close: 'Close summary', sources: 'Sources', sid
   web: 'Web search', subagents: 'Subagents', processes: 'Background processes', process: 'Background terminal',
   stop: 'Stop all background terminals', createdChats: 'Created chats', working: 'is working',
   addSource: 'Add sources', emptySources: 'Attach files or connect apps', more: 'View all', less: 'Show less',
-  actionError: 'Could not complete action', goalError: 'Could not read goal',
+  actionError: 'Could not complete action', scheduled: 'Scheduled',
   sideChatsLoading: 'Loading side chats…', sideChatsError: 'Could not load side chats' } as const;
 const translations: Record<string, Partial<Record<keyof Labels, string>>> = {
   zh: { summary: '摘要', close: '关闭摘要', sources: '来源', sideChats: '侧聊', outputs: '输出', emptyOutputs: '暂无输出',
     loadingOutputs: '正在加载输出…', outputError: '无法加载全部输出', web: '网页搜索', subagents: '子代理', processes: '后台进程',
     process: '后台终端', stop: '停止所有后台终端', createdChats: '创建的对话', working: '正在工作', addSource: '添加来源',
-    emptySources: '附加文件或连接应用', more: '查看全部', less: '收起', actionError: '无法完成操作', goalError: '无法读取目标',
+    emptySources: '附加文件或连接应用', more: '查看全部', less: '收起', actionError: '无法完成操作', scheduled: '计划任务',
     sideChatsLoading: '正在加载侧聊…', sideChatsError: '无法加载侧聊' },
   ja: { summary: '概要', close: '概要を閉じる', sources: 'ソース', sideChats: 'サイドチャット', outputs: '出力', emptyOutputs: '出力はまだありません',
     loadingOutputs: '出力を読み込み中…', outputError: '一部の出力を読み込めません', web: 'ウェブ検索', subagents: 'サブエージェント',
     processes: 'バックグラウンドプロセス', process: 'バックグラウンドターミナル', stop: 'すべてのターミナルを停止', createdChats: '作成されたチャット',
     working: '作業中', addSource: 'ソースを追加', emptySources: 'ファイルを添付またはアプリを接続', more: 'すべて表示', less: '折りたたむ',
-    actionError: '操作を完了できません', goalError: '目標を読み込めません', sideChatsLoading: 'サイドチャットを読み込み中…', sideChatsError: 'サイドチャットを読み込めません' },
+    actionError: '操作を完了できません', scheduled: 'スケジュール', sideChatsLoading: 'サイドチャットを読み込み中…', sideChatsError: 'サイドチャットを読み込めません' },
   ko: { summary: '요약', close: '요약 닫기', sources: '소스', sideChats: '사이드 채팅', outputs: '출력', emptyOutputs: '아직 출력이 없습니다',
     loadingOutputs: '출력 불러오는 중…', outputError: '일부 출력을 불러오지 못했습니다', web: '웹 검색', subagents: '하위 에이전트',
     processes: '백그라운드 프로세스', process: '백그라운드 터미널', stop: '모든 백그라운드 터미널 중지', createdChats: '생성된 채팅', working: '작업 중',
-    addSource: '소스 추가', emptySources: '파일을 첨부하거나 앱 연결', more: '모두 보기', less: '접기', actionError: '작업을 완료하지 못했습니다', goalError: '목표를 불러오지 못했습니다',
+    addSource: '소스 추가', emptySources: '파일을 첨부하거나 앱 연결', more: '모두 보기', less: '접기', actionError: '작업을 완료하지 못했습니다', scheduled: '예약됨',
     sideChatsLoading: '사이드 채팅 불러오는 중…', sideChatsError: '사이드 채팅을 불러오지 못했습니다' },
   es: { summary: 'Resumen', close: 'Cerrar resumen', sources: 'Fuentes', sideChats: 'Chats laterales', outputs: 'Resultados',
     emptyOutputs: 'Todavía no hay resultados', loadingOutputs: 'Cargando resultados…', outputError: 'No se pudieron cargar todos los resultados',
     web: 'Búsqueda web', subagents: 'Subagentes', processes: 'Procesos en segundo plano', process: 'Terminal en segundo plano',
     stop: 'Detener terminales en segundo plano', createdChats: 'Chats creados', working: 'trabajando', addSource: 'Añadir fuentes',
-    emptySources: 'Adjunta archivos o conecta aplicaciones', more: 'Ver todo', less: 'Mostrar menos', actionError: 'No se pudo completar la acción', goalError: 'No se pudo leer el objetivo',
+    emptySources: 'Adjunta archivos o conecta aplicaciones', more: 'Ver todo', less: 'Mostrar menos', actionError: 'No se pudo completar la acción', scheduled: 'Programado',
     sideChatsLoading: 'Cargando chats laterales…', sideChatsError: 'No se pudieron cargar los chats laterales' },
   fr: { summary: 'Résumé', close: 'Fermer le résumé', sources: 'Sources', sideChats: 'Conversations latérales', outputs: 'Résultats',
     emptyOutputs: 'Aucun résultat pour le moment', loadingOutputs: 'Chargement des résultats…', outputError: 'Impossible de charger tous les résultats',
     web: 'Recherche web', subagents: 'Sous-agents', processes: 'Processus en arrière-plan', process: 'Terminal en arrière-plan',
     stop: 'Arrêter les terminaux en arrière-plan', createdChats: 'Conversations créées', working: 'en cours', addSource: 'Ajouter des sources',
-    emptySources: 'Joindre des fichiers ou connecter des applications', more: 'Tout voir', less: 'Réduire', actionError: 'Action impossible', goalError: 'Impossible de lire l’objectif',
+    emptySources: 'Joindre des fichiers ou connecter des applications', more: 'Tout voir', less: 'Réduire', actionError: 'Action impossible', scheduled: 'Planifié',
     sideChatsLoading: 'Chargement des conversations latérales…', sideChatsError: 'Impossible de charger les conversations latérales' },
   de: { summary: 'Übersicht', close: 'Übersicht schließen', sources: 'Quellen', sideChats: 'Seitenchats', outputs: 'Ergebnisse',
     emptyOutputs: 'Noch keine Ergebnisse', loadingOutputs: 'Ergebnisse werden geladen…', outputError: 'Nicht alle Ergebnisse konnten geladen werden',
     web: 'Websuche', subagents: 'Unteragenten', processes: 'Hintergrundprozesse', process: 'Hintergrundterminal',
     stop: 'Alle Hintergrundterminals stoppen', createdChats: 'Erstellte Chats', working: 'arbeitet', addSource: 'Quellen hinzufügen',
-    emptySources: 'Dateien anhängen oder Apps verbinden', more: 'Alle anzeigen', less: 'Weniger anzeigen', actionError: 'Aktion fehlgeschlagen', goalError: 'Ziel konnte nicht gelesen werden',
+    emptySources: 'Dateien anhängen oder Apps verbinden', more: 'Alle anzeigen', less: 'Weniger anzeigen', actionError: 'Aktion fehlgeschlagen', scheduled: 'Geplant',
     sideChatsLoading: 'Seitenchats werden geladen…', sideChatsError: 'Seitenchats konnten nicht geladen werden' },
   pt: { summary: 'Resumo', close: 'Fechar resumo', sources: 'Fontes', sideChats: 'Conversas laterais', outputs: 'Resultados',
     emptyOutputs: 'Ainda não há resultados', loadingOutputs: 'Carregando resultados…', outputError: 'Não foi possível carregar todos os resultados',
     web: 'Pesquisa na web', subagents: 'Subagentes', processes: 'Processos em segundo plano', process: 'Terminal em segundo plano',
     stop: 'Parar terminais em segundo plano', createdChats: 'Conversas criadas', working: 'trabalhando', addSource: 'Adicionar fontes',
-    emptySources: 'Anexe arquivos ou conecte aplicativos', more: 'Ver tudo', less: 'Mostrar menos', actionError: 'Não foi possível concluir a ação', goalError: 'Não foi possível ler a meta',
+    emptySources: 'Anexe arquivos ou conecte aplicativos', more: 'Ver tudo', less: 'Mostrar menos', actionError: 'Não foi possível concluir a ação', scheduled: 'Agendado',
     sideChatsLoading: 'Carregando conversas laterais…', sideChatsError: 'Não foi possível carregar as conversas laterais' },
 };
 const traditionalChinese: Partial<Record<keyof Labels, string>> = { summary: '摘要', close: '關閉摘要', sources: '來源', sideChats: '側聊',
   outputs: '輸出', emptyOutputs: '尚無輸出', loadingOutputs: '正在載入輸出…', outputError: '無法載入全部輸出', web: '網頁搜尋',
   subagents: '子代理', processes: '背景程序', process: '背景終端機', stop: '停止所有背景終端機', createdChats: '建立的對話',
   working: '正在工作', addSource: '新增來源', emptySources: '附加檔案或連接應用程式', more: '查看全部', less: '收合',
-  actionError: '無法完成操作', goalError: '無法讀取目標', sideChatsLoading: '正在載入側聊…', sideChatsError: '無法載入側聊' };
+  actionError: '無法完成操作', scheduled: '排程', sideChatsLoading: '正在載入側聊…', sideChatsError: '無法載入側聊' };
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
-const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
 function Section({ title, count, children, after }: { title: string; count?: number; children: ReactNode; after?: ReactNode }) {
   const [expanded, setExpanded] = useState(true);
@@ -143,7 +144,7 @@ export function ThreadSummaryPanel(props: ThreadSummaryPanelProps) {
 }
 
 function SummaryContents(props: ThreadSummaryPanelProps) {
-  const { client, hostId, threadId, snapshot } = props;
+  const { hostId, threadId, snapshot } = props;
   const { t, locale } = useI18n();
   const language = locale.toLowerCase();
   const labels = { ...en, ...translations[language.split('-')[0] ?? ''],
@@ -157,38 +158,14 @@ function SummaryContents(props: ThreadSummaryPanelProps) {
     if (!byDraft.has(key) || item.kind === 'active') byDraft.set(key, item);
   }
   const sideChats = [...byDraft.values()];
-  const [goal, setGoal] = useState<ThreadSummaryGoal | null | undefined>();
-  const [goalError, setGoalError] = useState('');
   const [actionError, setActionError] = useState('');
   const [showAllSources, setShowAllSources] = useState(false);
   const [showAllOutputs, setShowAllOutputs] = useState(false);
-  const sequence = useRef(0), actionSequence = useRef(0), mounted = useRef(false);
-  const refreshGoal = useCallback(async () => {
-    const current = ++sequence.current;
-    try {
-      const value = parseThreadSummaryGoal(await client.rpc('thread/goal/get', { threadId }, hostId), threadId);
-      if (mounted.current && sequence.current === current) { setGoal(value); setGoalError(''); }
-    } catch (error) {
-      if (mounted.current && sequence.current === current) setGoalError(errorText(error));
-    }
-  }, [client, hostId, threadId]);
+  const actionSequence = useRef(0), mounted = useRef(false);
   useEffect(() => {
     mounted.current = true;
-    void refreshGoal();
-    const unsubscribe = client.subscribe((event: WorkbenchEvent) => {
-      if (event.hostId !== hostId) return;
-      if (event.type === 'codex-app-server-connection-changed' && event.state === 'connected') { void refreshGoal(); return; }
-      if (event.type !== 'mcp-notification') return;
-      const params = object(event.params);
-      if (params.threadId !== threadId) return;
-      if (event.method === 'thread/goal/cleared') { sequence.current++; setGoal(null); setGoalError(''); }
-      if (event.method === 'thread/goal/updated') {
-        try { const next = parseThreadSummaryGoal({ goal: params.goal }, threadId); sequence.current++; setGoal(next); setGoalError(''); }
-        catch { void refreshGoal(); }
-      }
-    });
-    return () => { mounted.current = false; sequence.current++; actionSequence.current++; unsubscribe(); };
-  }, [client, hostId, threadId, refreshGoal]);
+    return () => { mounted.current = false; actionSequence.current++; };
+  }, []);
   const perform = (callback: () => void | Promise<void>) => {
     const current = ++actionSequence.current;
     try {
@@ -197,8 +174,12 @@ function SummaryContents(props: ThreadSummaryPanelProps) {
     } catch (error) { setActionError(errorText(error)); }
   };
   const outputs = props.outputs;
-  const goalStatus = goal ? ({ active: t('Active'), paused: t('Paused'), blocked: t('Blocked'),
-    usageLimited: t('Usage limited'), budgetLimited: t('Goal budget exhausted'), complete: t('Completed') } as Record<string, string>)[goal.status] ?? goal.status : '';
+  const goals = props.automations?.filter(item => item.kind === 'goal') ?? [];
+  const scheduled = props.automations?.filter(item => item.kind === 'scheduled') ?? [];
+  const automationRow = (automation: ThreadSummaryAutomation) => <Row
+    key={JSON.stringify([automation.entry.sourceKey, automation.entry.item.id])}
+    icon={<Target size={16} aria-hidden="true" />} label={automation.entry.item.name} detail={automation.detail}
+    action={props.onOpenAutomation ? () => perform(() => props.onOpenAutomation!(automation)) : undefined} />;
   const visibleOutputs = showAllOutputs ? outputs?.entries ?? [] : outputs?.entries.slice(0, 3) ?? [];
   const visibleSources = showAllSources ? sources : sources.slice(0, 3);
   const more = (open: boolean, toggle: () => void) => <button className="yard-thread-summary__more" type="button" onClick={toggle}>{open ? labels.less : labels.more}</button>;
@@ -207,12 +188,8 @@ function SummaryContents(props: ThreadSummaryPanelProps) {
       <button type="button" aria-label={labels.close} title={labels.close} onClick={props.onClose}><PanelRightClose size={16} aria-hidden="true" /></button>}</header>
     <div className="yard-thread-summary__content">
       {actionError && <div className="yard-thread-summary__error" role="alert">{labels.actionError}: {actionError}</div>}
-      {(goal || goalError || goal === undefined) && <Section title={t('Goal')}>
-        {goal && <Row icon={<Target size={16} aria-hidden="true" />} label={goal.objective} detail={goalStatus}
-          action={props.onOpenGoal ? () => perform(props.onOpenGoal!) : undefined} />}
-        {goal === undefined && !goalError && <div role="status" className="yard-thread-summary__muted">{t('Loading goal...')}</div>}
-        {goalError && <div role="alert" className="yard-thread-summary__error">{labels.goalError}: {goalError} <button type="button" onClick={() => void refreshGoal()}>{t('Retry')}</button></div>}
-      </Section>}
+      {goals.length > 0 && <Section title={t('Goal')} count={goals.length}>{goals.map(automationRow)}</Section>}
+      {scheduled.length > 0 && <Section title={labels.scheduled} count={scheduled.length}>{scheduled.map(automationRow)}</Section>}
       {plan && <Section title={t('Plan')}><Row icon={<ListChecks size={16} aria-hidden="true" />}
         label={plan.text.match(/^\s{0,3}#{1,6}\s+(.+)$/m)?.[1]?.trim() || t('Plan')}
         action={props.onOpenPlan ? () => perform(() => props.onOpenPlan!(plan)) : undefined} /></Section>}
