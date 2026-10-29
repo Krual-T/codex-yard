@@ -156,9 +156,9 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   }, [markUnresolved, persist]);
   const changeDraft = useCallback((update: (draft: Draft) => Draft, prefillId?: string): Promise<boolean> =>
     apply(update, prefillId)?.saved ?? Promise.resolve(false), [apply]);
-  const preserveVisibleDraft = useCallback((rendered: StoredDraft, draft: Draft): boolean => {
+  const preserveVisibleDraft = useCallback((rendered: StoredDraft, draft: Draft, composing = false): boolean => {
     if (!mounted.current || !active.current || frozen.current || external.current || initializing.current || dirty.current
-      || preserveProjection.current || pendingLink?.current || pendingComposition?.current || current.current.revision === rendered.revision) return false;
+      || preserveProjection.current || pendingLink?.current || (pendingComposition?.current && !composing) || current.current.revision === rendered.revision) return false;
     current.current = { ...rendered, revision: createId(), draft };
     dirty.current = true;
     setStored(current.current);
@@ -532,7 +532,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
   }, [beginOperation, controller, owner, pendingLink, pendingComposition, publish]);
   const saveUnresolved = useCallback(async (): Promise<boolean> => {
     if (!preserveProjection.current) return true;
-    if (savingConflict.current) return false;
+    if (savingConflict.current || pendingComposition?.current) return false;
     const finish = beginOperation();
     if (!finish) return false;
     savingConflict.current = true; setSaving(true);
@@ -540,9 +540,10 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
     let success = false;
     try {
       await queue.current;
+      if (pendingComposition?.current) return false;
       const previous = current.current, next = { ...previous, revision: createId() };
       const view = await saveComposerDraftConflict(owner, next);
-      if (active.current !== controller || current.current !== previous) return false;
+      if (active.current !== controller || current.current !== previous || pendingComposition?.current) return false;
       current.current = next; setStored(next); setVersions(view.versions); durableRevision.current = next.revision;
       dirty.current = false; preserveProjection.current = false; pendingAncestors.current.clear(); setUnresolved(false); setSaving(false);
       lastWrite.current = Promise.resolve(true); setStorageError(''); publish(controller, next);
@@ -555,7 +556,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
       if (active.current === controller) setSaving(false);
       pendingProjection.current--; finish(success);
     }
-  }, [beginOperation, controller, owner, publish]);
+  }, [beginOperation, controller, owner, pendingComposition, publish]);
   useEffect(() => () => { generation.current += 1; }, []);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {

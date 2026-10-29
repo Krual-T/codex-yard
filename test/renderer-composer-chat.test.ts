@@ -37,7 +37,8 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
           if(state.hold===host)return new Promise(resolve=>state.pending.push(()=>resolve(pages(host,params.cursor))));
           return pages(host,params.cursor);
         }
-        if(method==='skills/list')return {data:[{skills:[{enabled:true,name:'review-skill',path:'/skills/review',description:'Review'}]}]};
+        if(method==='skills/list')return {data:[{skills:[{enabled:true,name:'review-skill',path:'/skills/review',description:'Review'},
+          {enabled:true,name:'audit-skill',path:'/skills/audit',description:'Audit'}]}]};
         if(method==='model/list')return {data:[{id:'model',model:'model',displayName:'Fixture',isDefault:true,supportedReasoningEfforts:[]}],nextCursor:null};
         if(method==='config/read')return {config:{model:'model',approval_policy:'on-request',sandbox_mode:'workspace-write',sandbox_workspace_write:null}};
         if(method==='configRequirements/read')return {requirements:null};
@@ -61,10 +62,16 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
         return ()=>{const c=props.context;if(grant!==state.grant || expected!==JSON.stringify({hostId:c.hostId,threadId:c.threadId,draftId:c.draftId}))throw Error('original route authority revoked');};},
       onDraftController(controller){state.controller=controller;},onDraftChange(snapshot){state.snapshots.push(structuredClone(snapshot));
         const pending=state.precommit;if(!pending || pending.revision!==snapshot.revision)return;
-        state.precommit=null;const element=document.querySelector('[data-composer-input-index="0"]');
+        state.precommit=null;const element=document.querySelector('[data-composer-input-index="'+(pending.index??0)+'"]');
         element.focus();if(element instanceof HTMLTextAreaElement)element.setSelectionRange(element.value.length,element.value.length);
         const before=element instanceof HTMLTextAreaElement?element.value:element.textContent;
-        const dispatched=pending.action==='view-undo'
+        if(pending.action==='compose'){
+          element.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
+          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(element,element.value+'Q');
+        }
+        const dispatched=pending.action==='compose'
+          ? element.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertCompositionText',data:'Q',isComposing:true}))
+          : pending.action==='view-undo'
           ? element.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'z',ctrlKey:true}))
           : pending.action==='undo'
           ? element.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:'historyUndo'}))
@@ -1032,6 +1039,131 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(current.draft.input[1], original.input[1]);
       await second.focus(); await second.press('Control+z'); assert.equal(await second.inputValue(), 'Tail');
       await second.press('Control+Shift+z'); assert.equal(await second.inputValue(), 'TailY');
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    for (const scenario of ['removed-structure', 'removed-same', 'retained-same', 'mixed-same'] as const) await t.test(`G known precommit skill ownership ${scenario}`, async () => {
+      const { page, errors } = await open(`g-known-skill-${scenario}`);
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      const original = { text: 'A\nB\nTail', images: [], files: [], references: [], skills: [], input: [
+        { type: 'text', text: 'A\nB', text_elements: [] }, { type: 'image', fileId: 'image-one', detail: 'high' },
+        { type: 'text', text: 'Tail', text_elements: [] },
+      ], document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'B' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'Tail' }] }] } };
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const first = page.getByRole('textbox', { name: 'Work with Codex 1' });
+      const second = page.getByRole('textbox', { name: 'Work with Codex 2' });
+      await second.focus(); await second.press('End'); await second.pressSequentially('Y');
+      await second.press('Control+z'); assert.equal(await second.inputValue(), 'Tail');
+      await second.press('Control+Shift+z'); assert.equal(await second.inputValue(), 'TailY');
+      await first.focus(); await first.press('End'); await first.pressSequentially(' $rev');
+      await page.getByRole('option', { name: /review-skill/ }).click();
+      if (scenario === 'mixed-same') {
+        await first.focus(); await first.press('End'); await first.pressSequentially(' $aud');
+        await page.getByRole('option', { name: /audit-skill/ }).click();
+      }
+      const originalSkills = [{ name: 'review-skill', path: '/skills/review' },
+        ...(scenario === 'mixed-same' ? [{ name: 'audit-skill', path: '/skills/audit' }] : [])];
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), originalSkills);
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const alternate = await page.evaluate(scenario => {
+        const draft = structuredClone((window as any).fixture.state.controller.snapshot().draft);
+        if (scenario !== 'retained-same') draft.skills = scenario === 'mixed-same'
+          ? draft.skills.filter((skill: any) => skill.name === 'audit-skill') : [];
+        if (scenario === 'removed-structure') {
+          const [a, b, tail] = draft.document.content;
+          draft.document.content = [{ type: 'paragraph', content: [...a.content, { type: 'hard_break' }, ...b.content] }, tail];
+        }
+        return draft;
+      }, scenario);
+      const revision = `g-known-skill-${scenario}`;
+      await page.evaluate(({ draft, revision }) => (window as any).fixture.addVersion(draft, revision), { draft: alternate, revision });
+      await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
+      await page.evaluate(revision => { (window as any).fixture.state.precommit = { action: 'type', revision, index: 2 }; }, revision);
+      await page.getByRole('button', { name: alternate.text.replace(/\s+/g, ' '), exact: true }).click();
+      await page.waitForFunction(() => (window as any).fixture.state.precommitResult);
+      const observed = await page.evaluate(() => (window as any).fixture.state.precommitResult);
+      assert.equal(observed.before, 'TailY');
+      assert.equal(observed.snapshot.draft.input[2].text, 'TailYQ');
+      assert.deepEqual(observed.snapshot.draft.skills, alternate.skills);
+      assert.deepEqual(observed.snapshot.draft.input[1], original.input[1]);
+      assert.deepEqual(observed.snapshot.draft.document.content[0], alternate.document.content[0]);
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const versions = await page.evaluate(() => (window as any).fixture.versions());
+      const current = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+      const expected = structuredClone(alternate);
+      expected.text += 'Q'; expected.input[2].text += 'Q';
+      expected.document.content.at(-1).content[0].text += 'Q';
+      assert.deepEqual(current.draft, expected);
+      assert.deepEqual(versions.versions.find((version: any) => version.revision === current.revision)?.draft, expected);
+      await second.focus(); await second.press('Control+z'); assert.equal(await second.inputValue(), 'TailY');
+      await second.press('Control+z'); assert.equal(await second.inputValue(), 'Tail');
+      await second.press('Control+Shift+z'); assert.equal(await second.inputValue(), 'TailY');
+      await second.press('Control+Shift+z'); assert.equal(await second.inputValue(), 'TailYQ');
+      await first.focus(); await first.press('Control+z');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills),
+        scenario === 'retained-same' ? [] : alternate.skills);
+      await first.press('Control+Shift+z');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), alternate.skills);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('G known precommit composition retains the produced input and both versions', async () => {
+      const { page, errors } = await open('g-known-precommit-composition');
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      const original = { text: 'A\nB\nTail', images: [], files: [], references: [], skills: [], input: [
+        { type: 'text', text: 'A\nB', text_elements: [] }, { type: 'image', fileId: 'image-one', detail: 'high' },
+        { type: 'text', text: 'Tail', text_elements: [] },
+      ], document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'B' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'Tail' }] }] } };
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const first = page.getByRole('textbox', { name: 'Work with Codex 1' });
+      await first.focus(); await first.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(element.value.length, element.value.length));
+      await first.pressSequentially('X');
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), true);
+      const alternate = await page.evaluate(() => {
+        const draft = structuredClone((window as any).fixture.state.controller.snapshot().draft);
+        draft.input[0].text = 'A\nBXY'; draft.text = 'A\nBXY\nTail';
+        draft.document.content = [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }, { type: 'hard_break' },
+          { type: 'text', text: 'BXY' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'Tail' }] }];
+        return draft;
+      });
+      const revision = 'g-known-composition-b';
+      await page.evaluate(({ draft, revision }) => (window as any).fixture.addVersion(draft, revision), { draft: alternate, revision });
+      await page.locator('summary').filter({ hasText: 'Select draft version' }).click();
+      await page.evaluate(revision => { (window as any).fixture.state.precommit = { action: 'compose', revision }; }, revision);
+      await page.getByRole('button', { name: 'A BXY Tail', exact: true }).click();
+      await page.waitForFunction(() => (window as any).fixture.state.precommitResult);
+      const observed = await page.evaluate(() => (window as any).fixture.state.precommitResult);
+      assert.equal(observed.before, 'A\nBX');
+      assert.equal(observed.snapshot.draft.input[0].text, 'A\nBXQ');
+      const save = page.getByRole('button', { name: 'Save as a separate draft' });
+      await save.waitFor(); assert.equal(await save.isDisabled(), true);
+      await first.evaluate((element: HTMLTextAreaElement) => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(element, element.value + 'R');
+        element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertCompositionText', data: 'R', isComposing: true }));
+      });
+      assert.equal(await first.inputValue(), 'A\nBXQR');
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.input[0].text), 'A\nBXQR');
+      assert.equal(await page.evaluate(() => { const c = (window as any).fixture.state.controller; return c.flush(c.snapshot().owner); }), false);
+      const beforeSave = await page.evaluate(() => (window as any).fixture.versions());
+      assert.deepEqual(beforeSave.versions.find((version: any) => version.revision === revision)?.draft, alternate);
+      assert.equal(await page.getByRole('button', { name: 'Send', exact: true }).isDisabled(), true);
+      assert.equal(await page.evaluate(() => (window as any).fixture.state.submissions.length), 0);
+      await first.evaluate(async element => {
+        element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      });
+      assert.equal(await save.isDisabled(), false);
+      await save.click(); await save.waitFor({ state: 'hidden' });
+      const current = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+      const versions = await page.evaluate(() => (window as any).fixture.versions());
+      assert.equal(current.draft.input[0].text, 'A\nBXQR');
+      assert.deepEqual(versions.versions.find((version: any) => version.revision === revision)?.draft, alternate);
+      assert.deepEqual(versions.versions.find((version: any) => version.revision === current.revision)?.draft, current.draft);
+      assert.deepEqual(current.draft.input[1], original.input[1]);
+      await first.focus(); await first.press('Control+z'); assert.equal(await first.inputValue(), 'A\nBX');
+      await first.press('Control+Shift+z'); assert.equal(await first.inputValue(), 'A\nBXQR');
       assert.deepEqual(errors, []); await page.close();
     });
 

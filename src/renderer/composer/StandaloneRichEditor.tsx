@@ -56,7 +56,7 @@ export interface StructuredInputEditorProps {
   draft: Draft;
   currentDraft(): Draft;
   onEdit(index: number, expectedText: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
-  onStaleEdit?(index: number, expectedText: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
+  onStaleEdit?(index: number, expectedText: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange, composing?: boolean): boolean;
   agentMentions?(index: number): readonly TextAgentSpan[];
   sourceMarks?(index: number): readonly TextMarkSpan[];
   onSelection?(index: number, cursor: number, text?: string): void;
@@ -369,12 +369,13 @@ interface TextControlProps {
   index: number; text: string; readOnly: boolean; label: string; placeholder: string;
   controls: Map<number, TextControlModel>;
   onEdit(index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
-  onStaleEdit?(index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
+  onStaleEdit?(index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange, composing?: boolean): boolean;
   agentMentions?: readonly TextAgentSpan[];
   sourceMarks?: readonly TextMarkSpan[];
   sourceDocument?: SegmentDocument | null;
   currentSourceDocument?(): SegmentDocument | null;
   currentSegment?(): SegmentSnapshot | null;
+  currentSkills?(): readonly { name: string; path: string }[];
   onSelection?(index: number, cursor: number, text?: string): void;
   onKeyDown(event: KeyboardEvent): boolean;
   onPaste?(event: TextPasteEvent): void;
@@ -427,26 +428,37 @@ function TextControl(props: TextControlProps) {
     if (!latest.current.currentSourceDocument || !latest.current.currentSegment) return true;
     const currentSource = latest.current.currentSourceDocument();
     const sameSource = sameSegmentDocument(control.sourceDocument, currentSource);
-    if (sameSource && currentSource) return true;
+    const skills = latest.current.currentSkills?.();
+    const staleSkills: number[] = [];
+    // A marker and its undo history belong only to skills still present in the authoritative draft.
+    if (skills) control.state.doc.descendants((node, position) => {
+      if (node.type.name === 'skill' && node.attrs.managed && !skills.some(skill => skill.name === node.attrs.name && skill.path === node.attrs.path)) {
+        staleSkills.push(position);
+      }
+    });
+    if (sameSource && currentSource && !staleSkills.length) return true;
     const current = latest.current.currentSegment();
     if (!current || !sameSegmentDocument(current.source, currentSource)) return false;
-    if (sameSource && current.text === historyText(control.state)) return true;
+    if (sameSource && current.text === historyText(control.state) && !staleSkills.length) return true;
     const previous = control.state;
     // Retain inline nodes and selection when the new source has the same visible projection, but discard its old history.
     const authoritative = applySourceMarks(textHistoryState(current.text, current.agents), current.marks);
+    let cleaned = previous.tr;
+    for (const position of staleSkills.reverse()) cleaned = cleaned.delete(position, position + 1);
+    const valid = staleSkills.length ? previous.apply(cleaned.setMeta('addToHistory', false)) : previous;
     const skillPositions: number[] = [];
-    previous.doc.descendants((node, position) => { if (node.type.name === 'skill') skillPositions.push(position); });
-    let comparable = previous.tr;
+    valid.doc.descendants((node, position) => { if (node.type.name === 'skill') skillPositions.push(position); });
+    let comparable = valid.tr;
     for (const position of skillPositions.reverse()) comparable = comparable.delete(position, position + 1);
     const sameContent = comparable.doc.eq(authoritative.doc);
-    const doc = sameContent ? previous.doc : authoritative.doc;
+    const doc = sameContent ? valid.doc : authoritative.doc;
     const plugin = history();
     const plugins = previous.plugins.map(item => item === control.historyPlugin ? plugin : item);
     if (!plugins.includes(plugin)) return false;
-    const selection = sameContent ? previous.selection : TextSelection.create(doc,
+    const selection = sameContent ? valid.selection : TextSelection.create(doc,
       historyPosition(authoritative, Math.min(current.text.length, textOffset(previous, previous.selection.anchor))),
       historyPosition(authoritative, Math.min(current.text.length, textOffset(previous, previous.selection.head))));
-    control.state = EditorState.create({ doc, selection, storedMarks: sameContent ? previous.storedMarks : null, plugins });
+    control.state = EditorState.create({ doc, selection, storedMarks: sameContent ? valid.storedMarks : null, plugins });
     control.historyPlugin = plugin;
     control.sourceDocument = currentSource;
     control.view?.updateState(control.state);
@@ -468,7 +480,7 @@ function TextControl(props: TextControlProps) {
         after: snapshots.flatMap(item => historySkills(item.item === control ? proposed : item.state)) };
       const agents: TextAgentChange = { before: snapshots.map(item => segment(item.item, item.state)),
         after: snapshots.map(item => segment(item.item, item.item === control ? proposed : item.state)) };
-      if (!latest.current.onStaleEdit(control.index, historyText(previous), historyText(proposed), inputType, skills, agents)) return false;
+      if (!latest.current.onStaleEdit(control.index, historyText(previous), historyText(proposed), inputType, skills, agents, composing.current)) return false;
       for (const snapshot of snapshots) {
         snapshot.item.state = snapshot.item === control ? proposed : snapshot.state;
         snapshot.item.historyPlugin = snapshot.historyPlugin;
@@ -1225,6 +1237,7 @@ export const StandaloneStructuredInputEditor = forwardRef<StructuredInputEditorH
       <TextControl index={index} text={text} agentMentions={props.agentMentions?.(index)} sourceMarks={props.sourceMarks?.(index)} controls={controls.current} onEdit={props.onEdit} onStaleEdit={props.onStaleEdit} onSelection={props.onSelection}
         sourceDocument={documents.get(index) ?? null} currentSourceDocument={() => currentDocuments().get(index) ?? null}
         currentSegment={() => currentSegmentSnapshot(props.currentDraft(), index, currentDocuments().get(index) ?? null)}
+        currentSkills={() => props.currentDraft().skills}
         label={(props.ariaLabel ?? t('Work with Codex')) + (entries.length > 1 ? ' ' + new Intl.NumberFormat(locale).format(position + 1) : '')}
         placeholder={props.placeholder ?? t('Message')} readOnly={!!props.readOnly || isStructuredAppInput(entry)} onKeyDown={props.onKeyDown}
         onPaste={props.onPaste} onInvalid={props.onInvalid} onCompositionChange={value => {

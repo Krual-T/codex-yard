@@ -236,10 +236,12 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
   const updateFailedUploads = (next: { id: string; files: File[] }[]) => { failedUploads.current = next; setFailedUploadView(next); };
   const pickerOpen = useRef(false);
   const compositions = useRef(new Set<'editor' | 'queue'>());
+  const [compositionActive, setCompositionActive] = useState(false);
   const setComposition = (source: 'editor' | 'queue', value: boolean) => {
     if (value) compositions.current.add(source); else compositions.current.delete(source);
     const wasPending = pendingComposition.current;
     pendingComposition.current = compositions.current.size > 0;
+    if (wasPending !== pendingComposition.current) setCompositionActive(pendingComposition.current);
     if (wasPending && !pendingComposition.current) recheckProjection();
   };
   const queueEditState = useRef({ editing: false, pending: false });
@@ -853,7 +855,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
     void changeDraft(value => value === before ? next : value);
     return current.current.draft === next;
   };
-  const preserveStaleSegment = (index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange) => {
+  const preserveStaleSegment = (index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange, composing = false) => {
     if (frozenRef.current || current.current.revision === stored.revision || !agents) return false;
     const expectedAgents = agentsForDraft(draft), expectedMarks = marksForDraft(draft);
     const entries = (draft.input ?? []).flatMap((entry, entryIndex) => entry.type === 'text' && typeof entry.text === 'string'
@@ -868,7 +870,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
     const { document: _document, ...withoutDocument } = draft;
     const edited = editStructuredDraftText(hasAgents ? withoutDocument : draft, index, expected, text);
     const next = edited.draft && projectAgentEdit(draft, projectCompletionSkills(edited.draft, skills), agents, inputType);
-    return !!next && preserveVisibleDraft(stored, next);
+    return !!next && preserveVisibleDraft(stored, next, composing);
   };
   const removeImage = (id: string) => {
     const before = current.current.draft;
@@ -1355,7 +1357,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
       <button type="button" disabled={frozen} onClick={() => updateFailedUploads(failedUploads.current.filter(item => item.id !== batch.id))}>{locale.toLowerCase().startsWith('zh') ? '放弃这些附件' : 'Discard these attachments'}</button>
     </div>)}
     {unresolved ? <div role="alert">{locale.toLowerCase().startsWith('zh') ? '当前内容仅保留在此页面。请保存为独立草稿后再切换或刷新。' : 'This content is retained only in this page. Save it as a separate draft before switching or refreshing.'}
-      <button type="button" disabled={frozen || saving} onClick={() => void saveUnresolved()}>{locale.toLowerCase().startsWith('zh') ? '保存为独立草稿' : 'Save as a separate draft'}</button>
+      <button type="button" disabled={frozen || saving || compositionActive} onClick={() => void saveUnresolved()}>{locale.toLowerCase().startsWith('zh') ? '保存为独立草稿' : 'Save as a separate draft'}</button>
       <details><summary>{t('View retained content')}</summary><pre>{JSON.stringify(draft, null, 2)}</pre></details>
     </div> : null}
     {plainTextSetting.error ? <div role="status">{t('Could not read plain text preference:')} {plainTextSetting.error}
