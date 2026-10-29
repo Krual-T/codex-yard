@@ -312,7 +312,7 @@ function SideChatSession({ client, controller, open, history, onClose, onBeforeC
             || !(latestHistory.liveReady ?? (latestHistory.historyComplete || isThreadBusy(latestHistory.thread))) || latestHistory.streamGap
             || action.type === 'send' && (isThreadBusy(latestHistory.thread) || latestHistory.thread.status?.type !== 'idle')
             || action.type === 'steer' && !latestHistory.thread.turns.some(turn => turn.id === action.turnId && turn.status === 'inProgress')
-            || action.type === 'queue' && !isThreadBusy(latestHistory.thread)) throw localRejection('侧聊尚未就绪或正在关闭，草稿已保留。');
+            || action.type === 'queue') throw localRejection('侧聊尚未就绪或正在关闭，草稿已保留。');
           if (!description || !draftSession || owner?.hostId !== current.hostId || owner.threadId !== child.thread.id || owner.draftId !== current.draftId)
             throw localRejection('侧聊草稿身份尚未就绪。');
           controller.markActivity();

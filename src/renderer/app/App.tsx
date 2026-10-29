@@ -1555,6 +1555,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           {current.readOnly && <p role="status">此会话已归档，原输入已保留。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p>}
           <div inert={current.readOnly}>
           {!sendState || current.threadId && (loading || !initialOptions) && !(composerIsCurrent || current.readOnly && thread) ? current.readOnly ? null : <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
+          readOnly={current.readOnly}
           onRemoveReference={(owner, reference, operation) => removeBrowserDraftReference(browserDraftOwner(owner, sendBindings.current), reference,
             operation, retainBrowserProjection, releaseBrowserProjection)}
           onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} initialOptions={initialOptions ?? undefined} hosts={hosts}

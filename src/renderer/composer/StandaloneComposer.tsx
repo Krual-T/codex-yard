@@ -48,6 +48,8 @@ interface ChatLookup {
   id: number; selection: ChatSelection; client: WorkbenchClient; hostId: string; search: string; assertOwner(): void; assertOriginal(): void;
 }
 export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSubmit'> & {
+  /** An archived conversation keeps its draft without reading a mutable CLI queue. */
+  readOnly?: boolean;
   onSubmit(draft: ComposerDraft, options: SubmitOptions, action: SubmitAction, description?: ComposerSubmissionDescription,
     assertAuthority?: () => void): Promise<void>;
   /** Capture the original owner, connection and navigation authority before any submission wait. */
@@ -105,7 +107,7 @@ function FilePreview({ client, hostId, path, name }: { client: WorkbenchClient; 
   }}><summary>{name}</summary>{preview == null ? t('Reading...') : <pre>{preview}</pre>}</details>;
 }
 
-function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, removeQueuedOriginal, dispatchQueueMutation, prefill, activeTurnId, initialOptions, hosts, projectDisplay, projectChoices, selectedProjectId, onProjectChange, onOpenGoal, fullAccessVisible, onEffectiveOptionsChange, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
+function ComposerSession({ client, context, busy, readOnly = false, onSubmit, onInterrupt, onStartQueued, captureSubmissionAuthority, removeQueuedOriginal, dispatchQueueMutation, prefill, activeTurnId, initialOptions, hosts, projectDisplay, projectChoices, selectedProjectId, onProjectChange, onOpenGoal, fullAccessVisible, onEffectiveOptionsChange, onTargetChange, onPrefillConsumed, onDraftController, onDraftChange, onRemoveReference }: StandaloneComposerRuntimeProps) {
   const { t, locale } = useI18n('zh-CN');
   const inputRoot = useRef<HTMLDivElement>(null);
   const projectSource = useRef({ context, projectChoices, selectedProjectId, onProjectChange });
@@ -168,6 +170,8 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
   const lastChatSelection = useRef<ChatSelection | null>(null);
   const enterSetting = useEnterSetting(client);
   const followUpSetting = useFollowUpSetting(client);
+  const queueAvailable = !readOnly && context.placement !== 'side-chat';
+  const preferredFollowUp = queueAvailable ? followUpSetting.value : 'steer';
   const plainTextSetting = usePlainTextSetting(client);
   const mounted = useRef(false);
   const activeController = useRef<ComposerDraftController | null>(null);
@@ -488,8 +492,9 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     }
     void addFiles(files);
   };
-  const submit = async (followUp: FollowUpAction = followUpSetting.value) => {
-    if (submitInFlight.current || uploadsInFlight.current || failedUploads.current.length || unresolved || !hasContent(current.current.draft)) return;
+  const submit = async (followUp: FollowUpAction = preferredFollowUp) => {
+    if (readOnly || submitInFlight.current || uploadsInFlight.current || failedUploads.current.length || unresolved || !hasContent(current.current.draft)) return;
+    if (busy && followUp === 'queue' && !queueAvailable) return;
     if (pendingLink.current) { setError(t('Apply or close the link editor first.')); return; }
     if (defaultPending) { setError(t('Resolve the default model change before sending.')); return; }
     const currentIssue = current.current.draft.document && richEditIssue(current.current.draft);
@@ -840,10 +845,10 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     if (event.key !== 'Enter' || event.altKey || event.repeat || enterSetting.pending || enterSetting.error) return false;
     const modifier = event.ctrlKey || event.metaKey;
     if (busy && modifier && (enterSetting.value === 'enter' ? !event.shiftKey : event.shiftKey)) {
-      if (followUpSetting.pending || followUpSetting.error) return false;
+      if (!queueAvailable || followUpSetting.pending || followUpSetting.error) return false;
       event.preventDefault(); void submit(followUpSetting.value === 'queue' ? 'steer' : 'queue'); return true;
     }
-    if (event.shiftKey || busy && (followUpSetting.pending || followUpSetting.error)) return false;
+    if (event.shiftKey || busy && queueAvailable && (followUpSetting.pending || followUpSetting.error)) return false;
     const needsModifier = enterSetting.value === 'cmdAlways' || enterSetting.value === 'cmdIfMultiline' && draft.text.includes('\n');
     if (needsModifier ? modifier : !modifier) { event.preventDefault(); void submit(); return true; }
     return false;
@@ -865,7 +870,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
       event.preventDefault(); event.stopPropagation(); menu.open = false;
       menu.querySelector<HTMLElement>('summary')?.focus();
     }}>
-    {context.threadId ? <StandaloneQueue key={JSON.stringify([context.hostId, context.threadId])} client={client} hostId={context.hostId} threadId={context.threadId} busy={busy} refreshVersion={queueVersion} onStartQueued={onStartQueued} frozen={frozen}
+    {context.threadId && queueAvailable ? <StandaloneQueue key={JSON.stringify([context.hostId, context.threadId])} client={client} hostId={context.hostId} threadId={context.threadId} busy={busy} refreshVersion={queueVersion} onStartQueued={onStartQueued} frozen={frozen}
       captureAuthority={captureSubmissionAuthority ? () => captureSubmissionAuthority(structuredClone(owner)) : undefined}
       dispatchQueueMutation={dispatchQueueMutation}
       beginQueueEdit={removeQueuedOriginal && captureSubmissionAuthority ? () => {
@@ -1118,15 +1123,15 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
           <Mic size={16} aria-hidden="true" />
         </button>
         {busy ? <button type="button" onClick={() => void interrupt()} disabled={interrupting} title={t('Stop current task')}>{t('Stop')}</button> : null}
-        {busy ? <button type="button" onClick={() => void submit(followUpSetting.value === 'queue' ? 'steer' : 'queue')}
+        {busy && queueAvailable ? <button type="button" onClick={() => void submit(followUpSetting.value === 'queue' ? 'steer' : 'queue')}
           title={followUpSetting.value === 'queue' && !activeTurnId ? t('Current task has no confirmed turn ID') : undefined}
           disabled={sending || uploading || !!failedUploadView.length || unresolved || !hasContent(draft) || plainModeUnavailable || followUpSetting.value === 'queue' && !activeTurnId}>
           {t(followUpSetting.value === 'queue' ? 'Send to current task' : 'Queue message')}</button> : null}
         <button className="standalone-composer__submit" type="button" onClick={() => void submit()}
-          title={busy && followUpSetting.value === 'steer' && !activeTurnId ? t('Current task has no confirmed turn ID') : undefined}
+          title={busy && preferredFollowUp === 'steer' && !activeTurnId ? t('Current task has no confirmed turn ID') : undefined}
           disabled={sending || uploading || !!failedUploadView.length || unresolved || defaultPending || !hasContent(draft) || plainModeUnavailable
-            || busy && (followUpSetting.pending || followUpSetting.value === 'steer' && !activeTurnId)}>
-          <ArrowUp size={18} aria-hidden="true" /><span className="standalone-composer__sr-only">{t(sending ? 'Sending...' : busy ? followUpSetting.value === 'queue' ? 'Queue message' : 'Send to current task' : 'Send')}</span></button>
+            || busy && (queueAvailable && followUpSetting.pending || preferredFollowUp === 'steer' && !activeTurnId)}>
+          <ArrowUp size={18} aria-hidden="true" /><span className="standalone-composer__sr-only">{t(sending ? 'Sending...' : busy ? preferredFollowUp === 'queue' ? 'Queue message' : 'Send to current task' : 'Send')}</span></button>
       </div>
     </div>
     </div>
@@ -1145,7 +1150,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     {saving ? <div role="status">{t('Saving draft...')}</div> : null}
     {storageError ? <div role="alert">{storageError} {!unresolved ? <button type="button" disabled={frozen} onClick={retry}>{t('Retry saving')}</button> : null}</div> : null}
     {enterSetting.error ? <div role="alert">{enterSetting.error}</div> : null}
-    {busy && followUpSetting.error ? <div role="alert">{followUpSetting.error}</div> : null}
+    {busy && queueAvailable && followUpSetting.error ? <div role="alert">{followUpSetting.error}</div> : null}
     {error ? <div role="alert">{error}</div> : null}
   </div>;
 }
