@@ -13,12 +13,16 @@ import { fileDaemonFixture } from './file-daemon-fixture.ts';
 import { nativeFixture } from './native-fixture.ts';
 
 async function waitForBrowser(check: () => Promise<unknown>) {
-  const deadline = Date.now() + 8_000;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise(resolve => setTimeout(resolve, 30));
-  }
-  throw new Error('Timed out waiting for the asynchronous browser condition.');
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Timed out waiting for the asynchronous browser condition.')), 8_000);
+  });
+  try {
+    for (;;) {
+      if (await Promise.race([check(), timeout])) return;
+      await Promise.race([new Promise(resolve => setTimeout(resolve, 30)), timeout]);
+    }
+  } finally { clearTimeout(timer); }
 }
 
 test('file panels recover actual host failed, blocked and lost receipts without replay', {

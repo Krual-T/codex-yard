@@ -289,17 +289,21 @@ async function activeVersions(page: Page, threadId: string) {
   });
 }
 async function waitForVersion(page: Page, threadId: string, text: string, reference: string | null) {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    const versions = await activeVersions(page, threadId);
-    const matching = versions.filter(version => {
-      const draft = record(version.draft);
-      return draft.text === text && (reference === null || JSON.stringify(draft.references).includes(reference));
-    });
-    if (matching.length === 1) return;
-    await page.waitForTimeout(30);
-  }
-  throw new Error(`Timed out waiting for the saved draft version for ${threadId}.`);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out waiting for the saved draft version for ${threadId}.`)), 10_000);
+  });
+  try {
+    for (;;) {
+      const versions = await Promise.race([activeVersions(page, threadId), timeout]);
+      const matching = versions.filter(version => {
+        const draft = record(version.draft);
+        return draft.text === text && (reference === null || JSON.stringify(draft.references).includes(reference));
+      });
+      if (matching.length === 1) return;
+      await Promise.race([page.waitForTimeout(30), timeout]);
+    }
+  } finally { clearTimeout(timer); }
 }
 async function holdDeletionReads(page: Page, threadId: string) {
   await page.evaluate(threadId => {

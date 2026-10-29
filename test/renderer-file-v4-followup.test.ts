@@ -7,12 +7,16 @@ import { build } from 'esbuild';
 import { chromium, type BrowserContext, type Page } from 'playwright-core';
 
 async function waitForBrowser(check: () => Promise<unknown>) {
-  const deadline = Date.now() + 8_000;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise(resolve => setTimeout(resolve, 30));
-  }
-  throw new Error('Timed out waiting for the asynchronous browser condition.');
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Timed out waiting for the asynchronous browser condition.')), 8_000);
+  });
+  try {
+    for (;;) {
+      if (await Promise.race([check(), timeout])) return;
+      await Promise.race([new Promise(resolve => setTimeout(resolve, 30)), timeout]);
+    }
+  } finally { clearTimeout(timer); }
 }
 
 test('file recovery protects distinct page drafts and follows durable host receipts', {
