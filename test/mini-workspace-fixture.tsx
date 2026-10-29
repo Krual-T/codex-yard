@@ -425,7 +425,7 @@ const fixture = {
     emit({ type: 'mcp-request', hostId: ref.hostId, requestRef: ref, request: { id: ref.id,
       method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-b', command: 'pwd', cwd: '/fixture/remote',
         availableDecisions: ['accept', 'decline'] } } }); },
-  records: () => sends.read(),
+  records: () => readSends(),
   queueRecovery: () => readUnknownQueueRecovery('local', 'thread-a'),
   edit: () => edits.read('local', 'thread-a'),
   mainDraft: () => mainController?.snapshot(),
