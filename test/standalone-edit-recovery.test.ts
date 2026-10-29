@@ -142,3 +142,63 @@ test('a newer draft saved during an in-flight request survives its successful co
   await assert.rejects(sending, /较新草稿未发送/);
   assert.equal((await h.store.read(origin.hostId, origin.threadId))?.recovery.draft.text, 'typed while pending');
 });
+
+test('a failed durable settlement leaves the issued operation unknown', async () => {
+  let finish!: (value: unknown) => void, entered!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const h = fixture(() => { entered(); return new Promise(resolve => { finish = resolve; }); });
+  await h.store.save(recovery, origin, version);
+  const sending = h.store.submit(origin, ['original'], params);
+  await waiting;
+  const operationId = (await h.store.read(origin.hostId, origin.threadId))?.submission?.operationId;
+  h.fail(); finish({ stage: 'prepared', error: 'not sent' });
+  await assert.rejects(sending, /storage unavailable/);
+  const saved = await h.store.read(origin.hostId, origin.threadId);
+  assert.equal(saved?.submission?.operationId, operationId); assert.equal(saved?.submission?.stage, 'revertUnknown');
+  assert.equal(saved?.recovery.draft.text, 'edited'); assert.equal(h.calls.length, 1);
+});
+
+test('an old receipt cannot settle an operation whose immutable request changed under the same ID', async () => {
+  let finish!: (value: unknown) => void, entered!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const h = fixture(() => { entered(); return new Promise(resolve => { finish = resolve; }); });
+  await h.store.save(recovery, origin, version);
+  const sending = h.store.submit(origin, ['original'], params);
+  await waiting;
+  await h.storage.update(value => {
+    const records = value as Record<string, { submission: { request: { clientUserMessageId: string } } }>;
+    records[JSON.stringify([origin.hostId, origin.threadId])]!.submission.request.clientUserMessageId = 'changed-client';
+    return records;
+  });
+  finish({ stage: 'prepared', error: 'old response' });
+  await assert.rejects(sending, /结果已过期/);
+  const saved = await h.store.read(origin.hostId, origin.threadId);
+  assert.equal(saved?.submission?.request.clientUserMessageId, 'changed-client');
+  assert.equal(saved?.submission?.stage, 'revertUnknown'); assert.equal(saved?.recovery.draft.text, 'edited');
+});
+
+test('an impossible prepared response to retry-start remains unknown and is only checked', async () => {
+  const h = fixture(value => value.operation === 'submit' ? { stage: 'reverted', error: 'start rejected' } : { stage: 'prepared' });
+  await h.store.save(recovery, origin, version);
+  await assert.rejects(h.store.submit(origin, ['original'], params), /start rejected/);
+  await assert.rejects(h.store.submit(origin, ['original'], params), /结果无法确认/);
+  assert.equal((await h.store.read(origin.hostId, origin.threadId))?.submission?.stage, 'startUnknown');
+  await assert.rejects(h.store.submit(origin, ['original'], params), /尚未确认/);
+  assert.equal((await h.store.read(origin.hostId, origin.threadId))?.submission?.stage, 'startUnknown');
+  assert.deepEqual(h.calls.map(call => call.operation), ['submit', 'retry-start', 'check']);
+});
+
+test('each explicit attempt forwards its captured daemon generation without changing the original request', async () => {
+  const h = fixture(value => ({ stage: value.operation === 'submit' ? 'revertUnknown' : 'prepared' }));
+  await h.store.save(recovery, origin, version);
+  await assert.rejects(h.store.submit(origin, ['original'], params, undefined, ''), /连接身份无效/);
+  assert.equal(h.calls.length, 0); assert.equal((await h.store.read(origin.hostId, origin.threadId))?.submission, undefined);
+  await assert.rejects(h.store.submit(origin, ['original'], params, undefined, 'daemon-A'), /尚未确认/);
+  const first = (await h.store.read(origin.hostId, origin.threadId))!.submission!;
+  assert.equal('daemonConnectionGeneration' in first.request, false);
+  await assert.rejects(h.store.submit(origin, [], { input: [{ type: 'text', text: 'do not replace A' }] }, undefined, 'daemon-B'), /尚未确认/);
+  assert.equal(h.calls[0]!.daemonConnectionGeneration, 'daemon-A'); assert.equal(h.calls[1]!.daemonConnectionGeneration, 'daemon-B');
+  assert.equal(h.calls[1]!.operation, 'check'); assert.equal(h.calls[1]!.clientUserMessageId, h.calls[0]!.clientUserMessageId);
+  assert.deepEqual(h.calls[1]!.turnParams, h.calls[0]!.turnParams);
+  assert.equal((await h.store.read(origin.hostId, origin.threadId))?.submission?.stage, 'revertUnknown');
+});

@@ -73,7 +73,8 @@ test('an unknown start is read back without replay and a changed history blocks 
   assert.equal(record((await page.edit('check')).body).stage, 'started');
   assert.equal(h.fake.calls('turn/start').length, 1);
   h.thread.status = { type: 'idle' }; h.thread.turns.at(-1)!.status = 'completed';
-  assert.equal(record((await page.edit('retry-start')).body).stage, 'conflict');
+  const changed = record((await page.edit('retry-start')).body);
+  assert.equal(changed.stage, 'reverted'); assert.match(String(changed.error), /记录已改变/);
   assert.equal(h.fake.calls('thread/revert').length, 1); assert.equal(h.fake.calls('turn/start').length, 1);
 });
 
@@ -99,7 +100,8 @@ test('edit origin and latest-user preconditions are checked before destructive w
   const mismatch = await page.edit('submit', { origin: { hostId: 'ssh-other', threadId: 'thread', turnId: 'source', itemId: 'user' } });
   assert.equal(mismatch.responseType, 'error'); assert.equal(h.fake.calls('thread/revert').length, 0);
   h.thread.turns.push(fixtureTurn('later', [{ id: 'later-user', type: 'userMessage', content: [{ type: 'text', text: 'later' }] }]));
-  assert.equal((await page.edit('submit', { expectedTurnIds: ['before', 'source', 'later'] })).responseType, 'error');
+  const latest = record((await page.edit('submit', { expectedTurnIds: ['before', 'source', 'later'] })).body);
+  assert.equal(latest.stage, 'prepared'); assert.match(String(latest.error), /最后一条/);
   assert.equal(h.fake.calls('thread/revert').length, 0);
 });
 
@@ -118,14 +120,16 @@ test('an explicitly rebased edit verifies the complete original source inside th
   ]) {
     Object.assign(source, original, changed);
     const result = await page.edit('submit', { expectedSource });
-    assert.equal(result.responseType, 'error');
-    assert.match(String(result.error), /原消息已改变/);
+    const body = record(result.body);
+    assert.equal(body.stage, 'prepared');
+    assert.match(String(body.error), /原消息已改变/);
     assert.equal(h.fake.calls('thread/revert').length, 0);
     assert.equal(h.fake.calls('turn/start').length, 0);
   }
   Object.assign(source, original);
   h.thread.turns[1]!.status = 'failed';
-  assert.equal((await page.edit('submit', { expectedSource })).responseType, 'error');
+  const incomplete = record((await page.edit('submit', { expectedSource })).body);
+  assert.equal(incomplete.stage, 'prepared'); assert.match(String(incomplete.error), /原消息已改变/);
   assert.equal(h.fake.calls('thread/revert').length, 0);
   h.thread.turns[1]!.status = 'completed';
   h.fake.handlers.set('turn/start', () => { throw new Error('explicit refusal after the approved rebase'); });

@@ -7,6 +7,7 @@ import type { MessageEditRecovery } from '../src/renderer/messages/use-message-e
 import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 
 const origin = { hostId: 'synthetic-host', threadId: 'thread', turnId: 'source', itemId: 'user' };
+const binding = { assertOriginal() {} };
 const recovery: MessageEditRecovery = {
   origin, draft: { text: 'edited', input: [{ type: 'text', text: 'edited' }], images: [], files: [] },
   editor: { sessionId: 'editor', revision: 2, baseDraft: { text: 'original', images: [], files: [] },
@@ -48,7 +49,7 @@ function fixture(phase: 'revert' | 'start') {
   const client: WorkbenchClient = { rpc: async () => { throw new Error('unexpected RPC'); }, subscribe: () => () => {}, reply: async () => {},
     host: async <T>(endpoint: string, value: Record<string, unknown> = {}) => {
       assert.equal(endpoint, 'message-edit'); requests.push(structuredClone(value));
-      return await editMessage(connection, origin.hostId, origin.threadId, value) as T;
+      return await editMessage(connection, origin.hostId, origin.threadId, value, binding) as T;
     } };
   return { calls, requests, store: new MessageEditRecoveryStore(client, storage), release: async () => { release(); await late; }, history: () => structuredClone(history) };
 }
@@ -86,8 +87,8 @@ test('a check without its unknown phase never infers that a write is retryable',
     throw new Error('No writes are expected');
   } };
   const request = { origin, expectedTurnIds: ['source'], clientUserMessageId: 'ours', turnParams: { input: [{ type: 'text', text: 'edited' }] }, operation: 'check' };
-  assert.equal((await editMessage(connection, origin.hostId, origin.threadId, request)).stage, 'conflict');
-  assert.equal((await editMessage(connection, origin.hostId, origin.threadId, { ...request, unknownPhase: 'startUnknown' })).stage, 'startUnknown');
-  await assert.rejects(editMessage(connection, origin.hostId, origin.threadId, { ...request, unknownPhase: 'invalid' }), /身份无效/);
-  await assert.rejects(editMessage(connection, origin.hostId, origin.threadId, { ...request, unknownPhase: ['startUnknown'] }), /身份无效/);
+  assert.equal((await editMessage(connection, origin.hostId, origin.threadId, request, binding)).stage, 'conflict');
+  assert.equal((await editMessage(connection, origin.hostId, origin.threadId, { ...request, unknownPhase: 'startUnknown' }, binding)).stage, 'startUnknown');
+  await assert.rejects(editMessage(connection, origin.hostId, origin.threadId, { ...request, unknownPhase: 'invalid' }, binding), /身份无效/);
+  await assert.rejects(editMessage(connection, origin.hostId, origin.threadId, { ...request, unknownPhase: ['startUnknown'] }, binding), /身份无效/);
 });

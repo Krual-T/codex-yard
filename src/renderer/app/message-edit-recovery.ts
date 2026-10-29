@@ -345,7 +345,34 @@ export class MessageEditRecoveryStore {
     return structuredClone(next!.recovery);
   }
 
-  async submit(origin: MessageEditOrigin, expectedTurnIds: string[], turnParams: Record<string, unknown>, assertCanDispatch?: () => void) {
+  private async settleSubmission(origin: MessageEditOrigin, pending: NonNullable<StoredMessageEdit['submission']>,
+    update: (submission: NonNullable<StoredMessageEdit['submission']>) => StoredMessageEdit['submission']): Promise<StoredMessageEdit> {
+    const key = keyFor(origin), observation = this.observed.get(key);
+    let result: StoredMessageEdit | undefined, matchesObservation = false;
+    await this.storage.update(value => {
+      const previous = entries(value), current = stored(previous[key], origin);
+      if (!current || !sameOrigin(current.recovery.origin, origin) || current.submission?.operationId !== pending.operationId
+        || current.submission.stage !== pending.stage || !sameJson(current.submission.request, pending.request)
+        || !sameJson(current.submission.editorVersion, pending.editorVersion)) {
+        throw new Error('编辑结果已过期，未覆盖恢复记录。');
+      }
+      matchesObservation = observation?.serialized === JSON.stringify(previous[key]);
+      const submission = update(current.submission);
+      if (submission) result = { ...current, submission };
+      else { const { submission: _submission, ...withoutSubmission } = current; result = withoutSubmission; }
+      return { ...previous, [key]: result };
+    });
+    // A receipt can settle its own operation, but it cannot accept another page's newer draft.
+    if (matchesObservation && this.observed.get(key) === observation) this.observed.set(key, { serialized: JSON.stringify(result) });
+    this.storage.changed();
+    return result!;
+  }
+
+  async submit(origin: MessageEditOrigin, expectedTurnIds: string[], turnParams: Record<string, unknown>, assertCanDispatch?: () => void,
+    daemonConnectionGeneration?: string) {
+    if (daemonConnectionGeneration !== undefined && (typeof daemonConnectionGeneration !== 'string' || !daemonConnectionGeneration)) {
+      throw new Error('原 daemon 连接身份无效，编辑稿已保留，未发送。');
+    }
     const existing = await this.read(origin.hostId, origin.threadId);
     let checkedRecovery: MessageEditRecovery | undefined;
     if (existing?.recovery.editor?.requiresCurrentSource && (!existing.submission || existing.submission.stage === 'prepared')) {
@@ -409,12 +436,7 @@ export class MessageEditRecoveryStore {
     };
     const restoreUnsent = async () => {
       try {
-        await this.change(origin, previous => {
-          if (previous?.submission?.operationId !== operationId) throw new Error('编辑恢复记录已改变，未覆盖。');
-          if (previousSubmission) return { ...previous, submission: previousSubmission };
-          const { submission: _submission, ...withoutSubmission } = previous;
-          return withoutSubmission;
-        });
+        await this.settleSubmission(origin, pending, () => previousSubmission);
       } catch (restoreError) {
         throw new Error('派发前检查失败，恢复阶段未能写回；原记录已保留，请先核对。', { cause: restoreError });
       }
@@ -425,22 +447,21 @@ export class MessageEditRecoveryStore {
     let response: EditMessageResult;
     try {
       response = await this.client.host<EditMessageResult>('message-edit', { hostId: origin.hostId, threadId: origin.threadId,
-        ...pending.request }, { assertBeforeSend });
+        ...pending.request, ...(daemonConnectionGeneration === undefined ? {} : { daemonConnectionGeneration }) }, { assertBeforeSend });
     } catch (reason) {
       if (reason && typeof reason === 'object' && 'uncertain' in reason && reason.uncertain === false
         && 'sendPhase' in reason && reason.sendPhase === 'before-send') await restoreUnsent();
       throw reason;
     }
-    if (!['prepared', 'reverted', 'revertUnknown', 'startUnknown', 'started', 'conflict'].includes(response.stage)) {
+    if (!response || !['prepared', 'reverted', 'revertUnknown', 'startUnknown', 'started', 'conflict'].includes(response.stage)
+      || operation === 'retry-start' && (response.stage === 'prepared' || response.stage === 'revertUnknown')) {
       throw new Error('编辑结果无法确认，恢复记录已保留；请检查结果，勿重复发送。');
     }
     // Older hosts may infer success from an unchanged snapshot. A check is read-only
     // and only a matching clientId can resolve this request as started.
     const checkedStage = operation === 'check' && response.stage !== 'started' ? pending.stage : response.stage;
-    const completed = await this.change(origin, previous => {
-      if (previous?.submission?.operationId !== operationId) throw new Error('编辑结果已过期，未覆盖恢复记录。');
-      return { ...previous, submission: { ...previous.submission, stage: checkedStage, ...(checkedStage === 'started' && response.turn ? { turn: response.turn } : {}) } };
-    });
+    const completed = await this.settleSubmission(origin, pending, submission => ({ ...submission, stage: checkedStage,
+      ...(checkedStage === 'started' && response.turn ? { turn: response.turn } : {}) }));
     if (checkedStage === 'started') return this.confirmStarted(completed!);
     if (operation === 'check') throw new Error('原操作结果尚未确认，可能仍会迟到；草稿已保留，未重发。');
     throw new Error(response.error || '编辑结果尚未确认，草稿已保留；再次点击先检查结果。');
