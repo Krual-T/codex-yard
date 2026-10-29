@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import type { TestContext } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 import type { Locator } from 'playwright-core';
 
-test('chat lookup uses the real composer, original editor and host-scoped list', {
-  skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
-}, async t => {
+async function createComposerFixture() {
   const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: 'js', contents: `
     import React from 'react';
     import {createRoot} from 'react-dom/client';
@@ -154,7 +153,17 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
     await editor.waitFor(); await editor.focus(); return editor;
   };
   const editorText = (editor: Locator) => editor.evaluate(element => element instanceof HTMLTextAreaElement ? element.value : element.textContent);
-  try {
+  return { bundle, browser, context, open, enterRich, editorText };
+}
+
+function composerGroup(name: string, run: (t: TestContext, fixture: Awaited<ReturnType<typeof createComposerFixture>>) => Promise<void>): void {
+  test(name, { skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000 }, async t => {
+    const fixture = await createComposerFixture();
+    try { await run(t, fixture); } finally { await fixture.context.close(); await fixture.browser.close(); }
+  });
+}
+
+composerGroup('chat lookup uses the original editor and host-scoped list', async (t, { bundle, open, enterRich, editorText }) => {
     await t.test('typed mention searches paged threads, persists and survives a failed send and reload', async () => {
       const { page, errors } = await open('chat-typed');
       const editor = await enterRich(page);
@@ -311,6 +320,9 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
+});
+
+composerGroup('chat nodes retain input, history, clipboard and host identity', async (t, { bundle, open, enterRich, editorText }) => {
     await t.test('default input inserts an agent node, preserves history, sends and reloads', async () => {
       const { page, errors } = await open('chat-default');
       const editor = page.getByRole('textbox', { name: 'Work with Codex' });
@@ -827,6 +839,9 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
+});
+
+composerGroup('chat and link edits adopt the selected document version', async (t, { bundle, open, enterRich, editorText }) => {
     await t.test('rich action keeps link creation, editing and marked paste on the same node history', async () => {
       const { page, errors } = await open('chat-inline-link');
       const editor = page.getByRole('textbox', { name: 'Work with Codex' });
@@ -1049,6 +1064,9 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
+});
+
+composerGroup('draft version adoption preserves skill ownership and composition', async (t, { bundle, open, enterRich, editorText }) => {
     for (const scenario of ['removed-structure', 'removed-same', 'retained-same', 'mixed-same'] as const) await t.test(`G known precommit skill ownership ${scenario}`, async () => {
       const { page, errors } = await open(`g-known-skill-${scenario}`);
       await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
@@ -1367,6 +1385,9 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
+});
+
+composerGroup('segmented and rich version adoption preserves the original history', async (t, { bundle, open, enterRich, editorText }) => {
     await t.test('C precommit view history preserves the original agent and accepted document', async () => {
       const { page, errors } = await open('c-precommit-view');
       await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
@@ -1609,6 +1630,9 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
+});
+
+composerGroup('plain chat lookup, composition and marked paste preserve the original draft', async (t, { bundle, open, enterRich, editorText }) => {
     await t.test('a slow textarea composition is one undo event and blocks another draft adoption', async () => {
       const { page, errors } = await open('chat-slow-composition');
       const editor = page.getByRole('textbox', { name: 'Work with Codex' });
@@ -1948,6 +1972,9 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
+});
+
+composerGroup('plugin references preserve structured input and original authority', async (t, { bundle, open, enterRich, editorText }) => {
     await t.test('plugin append uses the original document, history, clipboard and submitted input', async () => {
       const { page, errors } = await open('plugin-append-plain-mode');
       const editor = page.getByRole('textbox', { name: 'Work with Codex' });
@@ -2164,6 +2191,9 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
+});
+
+composerGroup('prompt consumer retains committed drafts, history and composer controls', async (t, { bundle, open, enterRich, editorText }) => {
     await t.test('prompt consumer cancellation after the root commit retains the original projection and committed version', async () => {
       const { page, errors } = await open('prompt-consumer-cancel-committed');
       const editor = page.getByRole('textbox', { name: 'Work with Codex' }); await editor.fill('Original');
@@ -2343,5 +2373,4 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.match(JSON.stringify(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.document)), /thread:\/\/first\?hostId=local/);
       assert.deepEqual(errors, []); await page.close();
     });
-  } finally { await context.close(); await browser.close(); }
 });
