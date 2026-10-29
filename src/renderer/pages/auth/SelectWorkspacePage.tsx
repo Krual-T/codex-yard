@@ -89,7 +89,7 @@ function WorkspaceScope({ client, hostId, suggestedRoots = [], onPickFolder, onC
   const editingDisabled = disabled || completionPending;
   const closeMenu = () => { if (addMenu.current) { addMenu.current.open = false; addMenu.current.querySelector('summary')?.focus(); } };
 
-  return <main className="yard-workspace"><div className="yard-workspace-content">
+  return <main className="yard-select-workspace"><div className="yard-workspace-content">
     <FolderOpen size={35} aria-hidden="true" />
     <h1>Select a project</h1>
     <p>ChatGPT will be able to edit files and run commands in selected folders.</p>
