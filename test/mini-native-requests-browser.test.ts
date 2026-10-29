@@ -48,7 +48,7 @@ test('Mini replies with native-host request references from the disposable daemo
       hostState:()=>host.state,bridgeState:()=>bridge,
       refresh(){host={...host,fresh:true,revision:String(++revision)};render()},
       async reconnectHost(){await client.rpc('model/list')},suspend(){client.suspend()},async resume(){await client.resume()},
-      async open(){await send({type:'avatar-overlay-open'})},close(){client.close();root.unmount()}};
+      async open(){await send({type:'avatar-overlay-open',isOpen:false})},close(){client.close();root.unmount()}};
     render();void client.connect();
   ` }, bundle: true, write: false, format: 'iife', loader: { '.css': 'empty' } });
   const root = await mkdtemp('/tmp/yard-mini-daemon-');

@@ -79,7 +79,7 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
 }
 
 test('native state recovery precedes settings, project, Mini and configuration consumers', async t => {
-  let loseCommit = true, recoveryBlocked = true;
+  let loseCommit = false, recoveryBlocked = true;
   const initial = JSON.parse('{"globals":{"keep":"global"},"settings":{"selected-avatar-id":"old"},"sideChats":{"version":1,"operations":{},"prepared":{}},"future":{"nested":[1,{"keep":true}]},"__proto__":{"keep":"ordinary-key"}}');
   const h = await fixture(t, undefined, undefined, { hostCatalog: { hosts: [], projects: [], assignments: {} },
     async beforeStart(_fake, root) {
@@ -92,6 +92,7 @@ test('native state recovery precedes settings, project, Mini and configuration c
     },
   });
   const client = await h.connect();
+  loseCommit = true;
   let sequence = 0;
   async function host(endpoint: string, params: Record<string, unknown> = {}) {
     const requestId = 'native-owner-' + ++sequence;
@@ -100,7 +101,8 @@ test('native state recovery precedes settings, project, Mini and configuration c
   }
   const failed = await host('set-setting', { key: 'selected-avatar-id', value: 'new' });
   assert.equal(failed.responseType, 'error'); assert.equal(failed.uncertain, true);
-  assert.equal(client.messages.filter(message => message.type === 'settings-changed' || message.type === 'workbench-pet-state').length, 0);
+  assert.ok(client.messages.some(message => message.type === 'settings-changed' && !Object.hasOwn(message, 'keys')));
+  assert.equal(client.messages.filter(message => message.type === 'workbench-pet-state').length, 0);
   const committed = JSON.parse(await readFile(join(h.root, 'data', 'native-state.json'), 'utf8'));
   assert.equal(committed.settings['selected-avatar-id'], 'new');
   for (const endpoint of ['get-settings', 'get-setting', 'get-global-state', 'codex-command-keymap-state', 'thread-project-state']) {
@@ -291,7 +293,7 @@ test('native Mini messages reach both Web pages and persist the original pet set
   const h = await fixture(t), a = await h.connect(), b = await h.connect();
   a.send({ type: 'avatar-overlay-open-state-request' });
   assert.equal((await a.until(message => message.type === 'avatar-overlay-open-state-changed')).isOpen, false);
-  a.send({ type: 'avatar-overlay-open' });
+  a.send({ type: 'avatar-overlay-open', isOpen: false });
   await Promise.all([a, b].map(client => client.until(message => message.type === 'workbench-pet-state' && message.state.isOpen === true)));
   a.send({ type: 'fetch', requestId: 'pet-choice', url: 'vscode://codex/set-setting', body: JSON.stringify({ key: 'selected-avatar-id', value: 'hoots' }) });
   await Promise.all([a, b].map(client => client.until(message => message.type === 'workbench-mini-setting' && message.key === 'selected-avatar-id' && message.value === 'hoots')));

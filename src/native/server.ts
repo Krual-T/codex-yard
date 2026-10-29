@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { gzip } from 'node:zlib';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 import { readFile, mkdir, mkdtemp, realpath, chmod } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
@@ -23,14 +23,14 @@ import { createThreadProjectInventory } from './thread-project-inventory.ts';
 import type { ThreadProjectOperation } from './thread-projects.ts';
 import { configurationRequest, httpFailure } from './http-fetch.ts';
 import type { HttpWireRequest } from './http-fetch.ts';
-import { loadHostCatalog } from './hosts.ts';
+import { loadHostCatalog, publicHost } from './hosts.ts';
 import type { HostCatalog } from './hosts.ts';
 import { createSshProxyStream } from './ssh.ts';
 import type { HostPaths } from './ssh.ts';
 import { createQueuedSendLocks } from './queued-send-locks.ts';
 import { createPreferenceWrites } from './preference-writes.ts';
 import { createStateMutations } from './state-mutations.ts';
-import { createNativeState } from './native-state.ts';
+import { createNativeState, NativeStateCommitError } from './native-state.ts';
 import type { NativeStateCheckpoint } from './native-state.ts';
 import { createConfigWrites } from './config-writes.ts';
 import { createConfigWriteTargets } from './config-write-targets.ts';
@@ -125,6 +125,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     },
   });
   publishState(await nativeState.load());
+  const loadedState = structuredClone({ ...state, globals, settings });
   // Full workspace view presents the official chat/content tab strip.
   settings['default-workspace-full-view'] ??= true;
   const catalog = options.hostCatalog ?? await loadHostCatalog(codexHome);
@@ -132,7 +133,14 @@ export async function createNativeWorkbench(options: Options = {}) {
   const hostPaths = new Map<string, HostPaths>([['local', { homeDirectory: homedir(), codexHome }]]);
   const fileConnections = new Map<string, CodexConnection>();
   const control = new CodexConnection(socketPath, { cwd: workspace });
-  const stateMutations = createStateMutations(nativeState.beforeAction);
+  let stateNeedsRefresh = false;
+  const stateMutations = createStateMutations(async () => {
+    await nativeState.beforeAction();
+    if (stateNeedsRefresh) {
+      stateNeedsRefresh = false;
+      publishRecoveredState();
+    }
+  });
   const ownedPaths = new WeakMap<CodexConnection, { paths?: HostPaths; sshHost: typeof catalog.hosts[number] }>();
   const connectionSnapshots = new WeakMap<WebSocket, { connection: CodexConnection; hostId: string; paths: HostPaths; sshHost?: typeof catalog.hosts[number] }>();
   const connectionGenerations = new WeakMap<WebSocket, string>();
@@ -178,6 +186,9 @@ export async function createNativeWorkbench(options: Options = {}) {
   if (!globals['local-projects']) globals['local-projects'] = Object.fromEntries(projects.map(project => [project.path, {
     id: project.path, name: project.name, rootPaths: [project.path], createdAt: Date.now(), updatedAt: Date.now(),
   }]));
+  if (!isDeepStrictEqual(loadedState, { ...state, globals, settings })) {
+    await stateMutations.run(() => nativeState.persist({ ...state, globals, settings }));
+  }
   const clients = new Map<WebSocket, Map<string, CodexConnection>>();
   const approvalRequests = new ApprovalRequestRegistry<WebSocket, WebSocket>();
   const observedApprovalSockets = new WeakSet<WebSocket>();
@@ -198,13 +209,39 @@ export async function createNativeWorkbench(options: Options = {}) {
   const createdThreads = new Set<string>();
   const unsupported = new Set<string>();
   const httpRequests = new Set<AbortController>();
-  function persist() {
-    return nativeState.persist({ ...state, globals, settings });
+  async function persist() {
+    try { await nativeState.persist({ ...state, globals, settings }); }
+    catch (error) {
+      if (error instanceof NativeStateCommitError && error.uncertain) {
+        stateNeedsRefresh = true;
+        publishUnconfirmedState();
+      }
+      throw error;
+    }
   }
   function send(client: WebSocket, message: unknown) {
     if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(message));
   }
   function broadcast(message: unknown) { for (const client of clients.keys()) send(client, message); }
+  function broadcastRecovery(message: unknown) {
+    for (const client of clients.keys()) {
+      try { send(client, message); } catch { /* The state owner must remain available to other pages. */ }
+    }
+  }
+  function publishUnconfirmedState() {
+    broadcastRecovery({ type: 'settings-changed' });
+    broadcastRecovery({ type: 'global-state-updated' });
+    broadcastRecovery({ type: 'shared-object-updated', key: 'remote_ssh_connections' });
+    broadcastRecovery({ type: 'workbench-pet-error', error: '宠物设置尚未核实，请重新读取后重试。', stateUnconfirmed: true });
+  }
+  function publishRecoveredState() {
+    broadcastRecovery({ type: 'settings-changed' });
+    broadcastRecovery({ type: 'global-state-updated' });
+    const preferences = record(globals['remote-connection-auto-connect-by-host-id']);
+    const hosts = catalog.hosts.map(host => ({ ...publicHost(host), autoConnect: preferences[host.hostId] === true }));
+    broadcastRecovery({ type: 'shared-object-updated', key: 'remote_ssh_connections', value: hosts });
+    petOverlay.publishRecovery(broadcastRecovery);
+  }
   const configurationWrites = createConfigWrites({ state, persist, mutations: stateMutations,
     assertStateAvailable: nativeState.assertAvailable,
     findFileBlocker: () => files.hasUnresolvedSaves(),

@@ -18,7 +18,7 @@ test('Mini toggle, close, selection, visibility and position survive a host rest
   await pet.handle({ type: 'avatar-overlay-open-state-request' }, reply);
   assert.equal(replies[0].isOpen, false);
   assert.equal(broadcasts.length, 0);
-  await pet.handle({ type: 'avatar-overlay-open' }, reply);
+  await pet.handle({ type: 'avatar-overlay-open', isOpen: false }, reply);
   settings['selected-avatar-id'] = 'hoots';
   settings['avatar-overlay-mascot-width-px'] = 168;
   settings['avatar-overlay-pet-visible'] = false;
@@ -28,13 +28,13 @@ test('Mini toggle, close, selection, visibility and position survive a host rest
   const restarted = createPetOverlay(saved.globals, saved.settings, persist, emit);
   assert.deepEqual(saved.settings, settings);
   assert.deepEqual(restarted.snapshot(), { isOpen: true, visibility: 'on-demand', position: { x: 0.7, y: 0.25 } });
-  await pet.handle({ type: 'avatar-overlay-open' }, reply);
+  await pet.handle({ type: 'avatar-overlay-open', isOpen: true }, reply);
   assert.equal(pet.snapshot().isOpen, false);
-  await pet.handle({ type: 'avatar-overlay-open' }, reply);
+  await pet.handle({ type: 'avatar-overlay-open', isOpen: false }, reply);
   await pet.handle({ type: 'avatar-overlay-close' }, reply);
   const closed = JSON.parse(await readFile(join(root, 'state.json'), 'utf8'));
   assert.equal(createPetOverlay(closed.globals, closed.settings, persist, emit).snapshot().isOpen, false);
-  await pet.handle({ type: 'avatar-overlay-open' }, reply);
+  await pet.handle({ type: 'avatar-overlay-open', isOpen: false }, reply);
   await pet.handle({ type: 'avatar-overlay-hide' }, reply);
   assert.equal(pet.snapshot().isOpen, false);
   const count = broadcasts.length;
@@ -48,7 +48,7 @@ test('failed writes keep the prior visibility and malformed drag positions do no
   const messages: HostMessage[] = [];
   let writes = 0;
   const pet = createPetOverlay({}, {}, async () => { writes++; throw Error('disk full'); }, message => messages.push(message));
-  await pet.handle({ type: 'avatar-overlay-open' }, message => messages.push(message));
+  await pet.handle({ type: 'avatar-overlay-open', isOpen: false }, message => messages.push(message));
   assert.equal(pet.snapshot().isOpen, false);
   assert.equal(messages.at(-1)?.type, 'workbench-pet-error');
   await pet.handle({ type: 'workbench-pet-position', position: { x: 2, y: 0 } }, message => messages.push(message));

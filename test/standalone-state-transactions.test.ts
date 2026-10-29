@@ -42,10 +42,10 @@ test('failed preferences and queued pet toggles share the same commit interval',
   const preferences = createPreferenceWrites(settings, globals, persist, () => {}, () => {}, mutations);
   const pet = createPetOverlay(globals, settings, persist, () => {}, mutations);
   const failed = assert.rejects(preferences('setting', 'theme', 'dark'), /disk full/);
-  const opened = pet.handle({ type: 'avatar-overlay-open' }, () => {});
-  const closed = pet.handle({ type: 'avatar-overlay-open' }, () => {});
+  const opened = pet.handle({ type: 'avatar-overlay-open', isOpen: false }, () => {});
   await new Promise(resolve => setImmediate(resolve)); rejectFirst(new Error('disk full'));
-  await failed; await opened; await closed;
+  await failed; await opened;
+  await pet.handle({ type: 'avatar-overlay-open', isOpen: true }, () => {});
   assert.deepEqual(snapshots, [
     { globals: { 'electron-avatar-overlay-open': true }, settings: { theme: 'light' } },
     { globals: { 'electron-avatar-overlay-open': false }, settings: { theme: 'light' } },
