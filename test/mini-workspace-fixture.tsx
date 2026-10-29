@@ -146,6 +146,11 @@ const backend: WorkbenchClient = {
   async host<T>(endpoint: string, params: Record<string, unknown> = {}, options?: Pick<WorkbenchDispatchOptions, 'assertBeforeSend'>): Promise<T> {
     options?.assertBeforeSend?.();
     hostCalls.push({ endpoint, params: structuredClone(params) });
+    if (endpoint === 'send-injection') {
+      const host = (window as unknown as { miniInjectionHost?: (value: Record<string, unknown>) => Promise<unknown> }).miniInjectionHost;
+      if (!host) throw new Error('Synthetic injection host is unavailable');
+      return await host(params) as T;
+    }
     if (endpoint === 'message-edit') return { stage: 'started', turn: { id: 'edited-turn', status: 'inProgress', items: [] } } as T;
     if (endpoint === 'pet-overlay') {
       const message = params.message as { type: string; isOpen?: boolean };
