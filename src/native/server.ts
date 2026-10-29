@@ -377,6 +377,34 @@ export async function createNativeWorkbench(options: Options = {}) {
       return [...local, ...remote];
     },
     async persistGlobals(keys) { await stateMutations.run(persist); broadcast({ type: 'global-state-updated', keys }); },
+    async transactGlobals(keys, signal, action) {
+      await stateMutations.run(async () => {
+        nativeState.assertAvailable(); signal.throwIfAborted();
+        const previous = new Map(keys.map(key => [key, { exists: Object.hasOwn(globals, key), value: structuredClone(globals[key]) }]));
+        try {
+          action(); await persist();
+        } catch (error) {
+          for (const [key, before] of previous) {
+            if (before.exists) globals[key] = before.value; else delete globals[key];
+          }
+          throw error;
+        }
+      });
+      broadcast({ type: 'global-state-updated', keys });
+    },
+    write(context, dispatch) {
+      const run = async () => {
+        if (context.threadId !== null) await sendInjections.assertCanWrite(context.hostId, context.threadId);
+        context.signal.throwIfAborted();
+        const connection = context.hostId === 'local' ? control : fileConnections.get(context.hostId);
+        if (connection !== context.connection || !connection.connected || connection.socket !== context.socket
+          || context.socket.readyState !== WebSocket.OPEN) {
+          throw Object.assign(new Error('The original native tool connection changed before dispatch.'), { uncertain: false, sendPhase: 'before-send' });
+        }
+        return dispatch();
+      };
+      return context.threadId === null ? run() : conversationWrite(context.hostId, context.threadId, run);
+    },
     async setMembership(threadId, hostId, project, cwd) {
       await threadProjects('setMembership', { threadId, hostId, projectless: project === null, assignment: project === null ? null :
         project.projectKind === 'remote' ? { projectKind: 'remote', projectId: project.projectId, hostId } : { projectKind: 'local', projectId: project.projectId } });

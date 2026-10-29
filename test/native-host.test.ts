@@ -78,6 +78,29 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
   return { root, fake, app, connect };
 }
 
+async function callNativeTool(root: string, tool: string, args: Record<string, unknown>, callId: string) {
+  const socket = createConnection(join(root, 'data', 'app-tools.sock'));
+  let buffer = Buffer.alloc(0);
+  const response = new Promise<Record<string, any>>((resolve, reject) => {
+    socket.on('error', reject);
+    socket.on('data', chunk => {
+      buffer = Buffer.concat([buffer, typeof chunk === 'string' ? Buffer.from(chunk) : chunk]);
+      if (buffer.length < 4 || buffer.length < 4 + buffer.readUInt32LE(0)) return;
+      try { resolve(JSON.parse(buffer.subarray(4, 4 + buffer.readUInt32LE(0)).toString())); }
+      catch (error) { reject(error); }
+    });
+  });
+  try {
+    await once(socket, 'connect');
+    const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: callId, method: 'tools/call', params: {
+      callerSource: 'codex', hostId: 'local', threadId: 'injection-parent', turnId: 'tool-turn', callId,
+      namespace: 'codex_app', tool, arguments: args,
+    } }));
+    const header = Buffer.alloc(4); header.writeUInt32LE(body.length); socket.write(Buffer.concat([header, body]));
+    return await response;
+  } finally { socket.destroy(); }
+}
+
 for (const reconnect of [false, true]) test(`native injection fences all Yard consumers and resumes its immutable original turn (reconnect=${reconnect})`, async t => {
   const h = await fixture(t);
   h.fake.handlers.set('thread/inject_items', () => ({}));
@@ -107,6 +130,9 @@ for (const reconnect of [false, true]) test(`native injection fences all Yard co
     [711, 'thread/queue/add', { threadId: reference.threadId, input: [{ type: 'text', text: 'OTHER_QUEUE' }] }],
     [712, 'thread/queue/start', { threadId: reference.threadId }],
   ] as const) assert((await other.rpc(id, method, params)).error, method);
+  const blockedTool = await callNativeTool(h.root, 'set_thread_title', { title: 'Blocked tool title' }, 'blocked-title');
+  assert.equal(blockedTool.result.success, false, JSON.stringify(blockedTool));
+  assert.equal(h.fake.calls('thread/name/set').length, 0, 'The actual tool pipe shares the injection write fence.');
   assert.equal(h.fake.calls('turn/start').length, 0);
   if (reconnect) {
     page.socket.terminate();
@@ -118,12 +144,18 @@ for (const reconnect of [false, true]) test(`native injection fences all Yard co
   const started = await host({ action: 'start', turnAttemptId: 'original-turn-attempt', daemonConnectionGeneration: generation });
   assert.equal(started.responseType, 'success', JSON.stringify(started));
   assert.equal(started.body.turn.phase, 'accepted');
+  const allowedTool = await callNativeTool(h.root, 'set_thread_title', { title: 'Accepted tool title' }, 'accepted-title');
+  assert.equal(allowedTool.result.success, true, JSON.stringify(allowedTool));
+  assert.equal(h.fake.threads.get(reference.threadId)?.name, 'Accepted tool title');
+  const pinned = await callNativeTool(h.root, 'set_thread_pinned', { threadId: reference.threadId, pinned: true }, 'pin-original');
+  assert.equal(pinned.result.success, true, JSON.stringify(pinned));
   assert.deepEqual(h.fake.calls('turn/start')[0]!.params, turnParams);
   assert.equal(h.fake.calls('thread/inject_items').length, 1);
   const persisted = JSON.parse(await readFile(join(h.root, 'data/native-state.json'), 'utf8'));
   assert.deepEqual(persisted.sendInjections.operations[0].reference, reference);
   assert.deepEqual(persisted.sendInjections.operations[0].items, items);
   assert.deepEqual(persisted.sendInjections.operations[0].turnParams, turnParams);
+  assert.deepEqual(persisted.globals['pinned-thread-ids'], [reference.threadId], 'The tool state transaction preserves the injection section.');
   const observed = await host({ action: 'status' });
   assert.equal(observed.body.turn.phase, 'accepted');
 });
