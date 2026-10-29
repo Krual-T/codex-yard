@@ -43,7 +43,7 @@ import { editMessage } from './message-edit.ts';
 import { findSubmission } from './message-submission-status.ts';
 import { createFiles, fileEndpoints, fileMethods } from './files.ts';
 import type { RemoteFileCommand } from './files.ts';
-import { createPetOverlay } from './pet-overlay.ts';
+import { createPetOverlay, petPosition } from './pet-overlay.ts';
 import { createPetAssets } from './pet-assets.ts';
 import { webManifest, brandAssets } from './visual-feedback.ts';
 import { TerminalHost } from './terminal.ts';
@@ -74,6 +74,27 @@ function acceptsGzip(value = '') {
     const quality = parameters.find(parameter => parameter.trim().startsWith('q='));
     return name === 'gzip' && (quality === undefined || Number(quality.trim().slice(2)) > 0);
   });
+}
+
+function miniCommand(value: unknown): HostMessage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('无效的 Mini 命令。');
+  const message = record(value), type = message.type;
+  if (typeof type !== 'string') throw new Error('无效的 Mini 命令。');
+  if (type === 'avatar-overlay-open') {
+    if (Object.keys(message).some(key => key !== 'type' && key !== 'isOpen') || typeof message.isOpen !== 'boolean') {
+      throw new Error('Mini 状态尚未核实。');
+    }
+    return { type, isOpen: message.isOpen };
+  }
+  if (type === 'workbench-pet-position') {
+    const position = record(message.position), checked = petPosition(message.position);
+    if (Object.keys(message).some(key => key !== 'type' && key !== 'position') || !checked
+      || Object.keys(position).some(key => key !== 'x' && key !== 'y')) throw new Error('无效的 Mini 位置。');
+    return { type, position: checked };
+  }
+  if (['avatar-overlay-open-state-request', 'electron-avatar-overlay-restore-ready', 'avatar-overlay-close', 'avatar-overlay-hide'].includes(type)
+    && Object.keys(message).every(key => key === 'type')) return { type };
+  throw new Error('无效的 Mini 命令。');
 }
 
 export async function createNativeWorkbench(options: Options = {}) {
@@ -679,6 +700,17 @@ export async function createNativeWorkbench(options: Options = {}) {
     validHost(hostId);
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
     switch (endpoint) {
+      case 'pet-overlay': {
+        if (hostId !== 'local') throw new Error('Mini 状态仅由本机宿主管理。');
+        const command = miniCommand(params.message);
+        let failure: HostMessage | undefined;
+        await petOverlay.handle(command, value => {
+          if (value.type === 'workbench-pet-error') failure = value;
+          send(client, value);
+        });
+        if (failure) throw Object.assign(new Error(String(failure.error ?? 'Mini 状态尚未核实。')), { uncertain: failure.stateUnconfirmed === true });
+        return {};
+      }
       case 'approval-request-interrupt': {
         const ref = record(params.ref), connection = connections.get(hostId), socket = connection?.socket;
         if (!connection?.connected || !socket || socket.readyState !== WebSocket.OPEN || ref.hostId !== hostId
