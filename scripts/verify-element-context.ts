@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { join, resolve } from 'node:path';
@@ -13,6 +14,7 @@ import { chromium } from 'playwright-core';
 import type { BrowserContext, Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
+import { isolatePublicVerifier } from './public-verifier-environment.ts';
 
 // The test drives Chrome's actual DevTools picker through its shipped action.
 // Product code continues to use only official MCP, with no CDP picker.
@@ -24,11 +26,12 @@ interface PickerBrowser {
   pages(): Promise<{ url(): string; openDevTools(): Promise<DevToolsPage> }[]>;
   disconnect(): Promise<void>;
 }
+const root = await mkdtemp(join(tmpdir(), 'aw-element-context-'));
+const output = process.env.AGENTS_ELEMENT_EVIDENCE
+  ? resolve(process.env.AGENTS_ELEMENT_EVIDENCE) : await mkdtemp(join(tmpdir(), 'yard-element-evidence-'));
+await isolatePublicVerifier(root, process.env.AGENTS_PUBLIC_VERIFIER_NPM_CACHE_SEED);
 const entry = new URL('./third_party/index.js', pathToFileURL(createRequire(import.meta.url).resolve('chrome-devtools-mcp')));
 const { puppeteer } = await import(entry.href) as { puppeteer: { connect(options: { browserURL: string; defaultViewport: null }): Promise<PickerBrowser> } };
-const root = await mkdtemp('/tmp/aw-element-context-');
-const output = process.env.AGENTS_ELEMENT_EVIDENCE
-  ? resolve(process.env.AGENTS_ELEMENT_EVIDENCE) : await mkdtemp('/tmp/yard-element-evidence-');
 await mkdir(output, { recursive: true });
 const fake = await createFakeCodex(root);
 let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
@@ -78,7 +81,8 @@ try {
   browser = await chromium.launchPersistentContext(join(root, 'chrome'), {
     executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome',
     headless: true, viewport: { width: 1440, height: 1000 }, args: [
-      '--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--remote-debugging-port=' + debugPort,
+      '--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-proxy-server',
+      '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost', '--remote-debugging-port=' + debugPort,
       '--enable-features=CDPScreenshotNewSurface', '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
     ],
   });
@@ -100,6 +104,7 @@ try {
   page = await browser.newPage();
   await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
   page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => { if (message.type() === 'error') errors.push('console: ' + message.text()); });
   await page.goto(app.url + '/local/' + id, { waitUntil: 'commit' });
   await page.locator('[data-owned-renderer="true"]').waitFor();
   await page.getByText('隔离验收已准备', { exact: true }).waitFor({ timeout: 60000 });
@@ -112,7 +117,7 @@ try {
   const quote = page.getByRole('button', { name: '引用所选元素', exact: true });
   await quote.waitFor({ state: 'visible' });
   await page.getByAltText('Chrome 标签的最新画面').waitFor();
-  const editor = page.getByRole('textbox', { name: /^(和 Codex 一起工作|Work with Codex|随心输入|Ask anything)$/ });
+  const editor = page.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作|Work with Codex|随心输入|Ask anything)$/ });
   await editor.fill('保留这段草稿，请调整元素');
   await quote.click();
   await page.getByRole('status').filter({ hasText: /请先.*Ctrl\+Shift\+C/ }).waitFor();
@@ -151,7 +156,8 @@ try {
   await capture('attached');
   await page.reload({ waitUntil: 'commit' });
   await editor.waitFor({ timeout: 60000 });
-  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === '保留这段草稿，请调整元素');
+  await page.waitForFunction(() => [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
+    .some(input => ['和 Codex 一起工作', '与 Codex 协作', 'Work with Codex'].includes(input.getAttribute('aria-label') ?? '') && input.value === '保留这段草稿，请调整元素'));
   await page.locator('.standalone-composer__reference').filter({ hasText: '需要修改的按钮' }).waitFor();
   await capture('after-refresh');
   await page.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
@@ -180,7 +186,11 @@ try {
   const downloaded = await fetch(app.url + '/chrome-client.tgz');
   assert.equal(downloaded.status, 200);
   await writeFile(packagePath, Buffer.from(await downloaded.arrayBuffer()));
-  await promisify(execFile)('npm', ['install', '--prefix', installRoot, '--offline', '--ignore-scripts', '--no-audit', '--no-fund', packagePath], { timeout: 60000 });
+  try {
+    await promisify(execFile)('npm', ['install', '--prefix', installRoot, '--offline', '--ignore-scripts', '--no-audit', '--no-fund', packagePath], { timeout: 60000 });
+  } catch (cause) {
+    throw new Error('Offline companion installation failed. Set AGENTS_PUBLIC_VERIFIER_NPM_CACHE_SEED to a disposable seeded npm cache.', { cause });
+  }
   const installed = JSON.parse(await readFile(join(installRoot, 'node_modules/codex-yard-chrome-client/package.json'), 'utf8'));
   report.companionVersion = installed.version;
   const client = spawn(process.execPath, [join(installRoot, 'node_modules/.bin/codex-yard-chrome'), '--connect', app.url,
@@ -220,7 +230,8 @@ try {
   for (const expected of [id, '保留这段草稿，请调整元素', '把按钮改成蓝色', '#selected', '需要修改的按钮', 'border-radius', fixtureUrl]) assert.ok(request.includes(expected), 'Missing model context: ' + expected);
   assert.doesNotMatch(request, /private-form-value/);
   await page.getByRole('button', { name: '另一个对话', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === '另一个对话的草稿');
+  await page.waitForFunction(() => [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
+    .some(input => ['和 Codex 一起工作', '与 Codex 协作', 'Work with Codex'].includes(input.getAttribute('aria-label') ?? '') && input.value === '另一个对话的草稿'));
   checks.push('Drafts and references are isolated by conversation; explicit send carries the selected context without private form values');
   await capture('after-send');
 

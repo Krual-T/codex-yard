@@ -11,11 +11,13 @@ import { chromium } from 'playwright-core';
 import type { Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
+import { isolatePublicVerifier } from './public-verifier-environment.ts';
 
 // Hold /tmp/agents-workbench-heavy.lock for this runner's entire lifecycle.
 const root = await mkdtemp(join(tmpdir(), 'aw-chrome-'));
 const evidence = process.env.AGENTS_BROWSER_EVIDENCE
-  ? resolve(process.env.AGENTS_BROWSER_EVIDENCE) : await mkdtemp('/tmp/yard-chrome-evidence-');
+  ? resolve(process.env.AGENTS_BROWSER_EVIDENCE) : await mkdtemp(join(tmpdir(), 'yard-chrome-evidence-'));
+await isolatePublicVerifier(root, process.env.AGENTS_PUBLIC_VERIFIER_NPM_CACHE_SEED);
 await mkdir(evidence, { recursive: true });
 const cleanup: (() => Promise<unknown>)[] = [];
 const report: Record<string, unknown> = { startedAt: new Date().toISOString(), renderer: 'owned', personalProfile: false, daemonUsed: false };
@@ -201,7 +203,7 @@ try {
   // No typing delay: every key must survive screenshots and MCP round trips.
   await image.pressSequentially('Fast123');
   await target.waitForFunction(() => document.querySelector('input')?.value === 'Fast123', undefined, { timeout: 10000, polling: 100 });
-  assert.doesNotMatch(await nativePage.getByRole('textbox', { name: '和 Codex 一起工作' }).inputValue(), /Fast123|ast123/);
+  assert.doesNotMatch(await nativePage.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作|Work with Codex)$/ }).inputValue(), /Fast123|ast123/);
   report.keyTrace = await nativePage.evaluate(() => (window as Window & { browserKeyTrace?: unknown[] }).browserKeyTrace);
   await nativePage.getByRole('status').filter({ hasText: '点击画面后可键入' }).waitFor({ timeout: 30000 });
   await nativePage.getByLabel('向网页输入').fill('原版 Chrome 面板中文输入');
@@ -248,7 +250,11 @@ try {
   const downloaded = await fetch(app.url + '/chrome-client.tgz');
   assert.equal(downloaded.status, 200);
   await writeFile(packagePath, Buffer.from(await downloaded.arrayBuffer()));
-  await promisify(execFile)('npm', ['install', '--prefix', installRoot, '--offline', '--ignore-scripts', '--no-audit', '--no-fund', packagePath], { timeout: 60_000 });
+  try {
+    await promisify(execFile)('npm', ['install', '--prefix', installRoot, '--offline', '--ignore-scripts', '--no-audit', '--no-fund', packagePath], { timeout: 60_000 });
+  } catch (cause) {
+    throw new Error('Offline companion installation failed. Set AGENTS_PUBLIC_VERIFIER_NPM_CACHE_SEED to a disposable seeded npm cache.', { cause });
+  }
   // Invoke the installed bin symlink, matching npx's command resolution.
   const clientBin = join(installRoot, 'node_modules', '.bin', 'codex-yard-chrome');
   const help = await promisify(execFile)(process.execPath, [clientBin, '--help']);
@@ -308,6 +314,8 @@ try {
   const accessB = await ui.newContext(); cleanup.push(() => accessB.close());
   const nativeB = await accessB.newPage();
   clientBPage = nativeB;
+  nativeB.on('pageerror', error => errors.push(String(error)));
+  nativeB.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
   await nativeB.bringToFront();
   await nativeB.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
   await nativeB.goto(app.url + '/local/' + id);

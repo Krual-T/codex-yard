@@ -1,15 +1,18 @@
 // Run under /tmp/agents-workbench-heavy.lock. Uses disposable daemon state only.
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright-core';
 import type { Browser, Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
-import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
+import { createFakeCodex, fixtureThread, fixtureTurn, agentItem, NO_REPLY } from '../test/fake-codex.ts';
+import { isolatePublicVerifier } from './public-verifier-environment.ts';
 
-const root = await mkdtemp('/tmp/aw-queue-ui-');
+const root = await mkdtemp(join(tmpdir(), 'aw-queue-ui-'));
 const output = process.env.AGENTS_QUEUE_EVIDENCE
-  ? resolve(process.env.AGENTS_QUEUE_EVIDENCE) : await mkdtemp('/tmp/yard-queue-evidence-');
+  ? resolve(process.env.AGENTS_QUEUE_EVIDENCE) : await mkdtemp(join(tmpdir(), 'yard-queue-evidence-'));
+await isolatePublicVerifier(root);
 await mkdir(output, { recursive: true });
 const fake = await createFakeCodex(root);
 let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
@@ -25,6 +28,7 @@ async function capture(name: string) {
 }
 try {
   const threadId = '00000000-0000-4000-8000-000000000155';
+  const unknownThreadId = '00000000-0000-4000-8000-000000000156';
   fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.163.0 (Linux)' }));
   fake.handlers.set('account/gatewayOAuth/read', () => ({ providerId: 'fixture', providerName: 'Fixture', required: false, status: null, error: null }));
   fake.handlers.set('thread/resume', params => ({ ...fake.defaultResult('thread/resume', params), turnsBackwardsCursor: '0', itemsBackwardsCursor: '0' }));
@@ -35,15 +39,20 @@ try {
   fake.queues.set(threadId, [editText, deleteText].map((text, index) => ({
     id: 'queue-ui-' + index, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: text,
   })));
+  fake.threads.set(unknownThreadId, fixtureThread(unknownThreadId, root, { name: '发送回执未知验收' }));
+  fake.queues.set(unknownThreadId, [{ id: 'unknown-queue', input: [{ type: 'text', text: '未知回执不得重发', text_elements: [] }],
+    clientUserMessageId: 'unknown-queue-message' }]);
   const dataDir = join(root, 'data');
   app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: fake.socketPath, codexHome: join(root, 'codex'),
     hostCatalog: { hosts: [], projects: [], assignments: {} },
     httpFetch: async () => new Response('External requests disabled for queue fixture', { status: 503 }) });
   browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome',
-    headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking'] });
-  page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-proxy-server',
+      '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost'] });
+  page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN' });
   await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
   page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => { if (message.type() === 'error') errors.push('console: ' + message.text()); });
   await page.goto(app.url + '/local/' + threadId, { waitUntil: 'commit' });
   await page.locator('[data-owned-renderer="true"]').waitFor();
   await page.getByText(editText, { exact: true }).waitFor({ timeout: 60000 });
@@ -53,10 +62,11 @@ try {
   assert.equal(fake.queues.get(threadId)?.length, 1);
   checks.push('Deletion reached thread/queue/delete and removed only the selected item');
   await page.getByRole('button', { name: '编辑待发送消息', exact: true }).click();
-  const editor = page.getByRole('textbox', { name: '和 Codex 一起工作', exact: true });
+  const editor = page.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作)$/ });
   const queueEditor = page.getByRole('textbox', { name: '编辑待发送消息', exact: true });
   await page.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="编辑待发送消息"]') !== null
-    || document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value === text, editText);
+    || [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
+      .some(input => ['和 Codex 一起工作', '与 Codex 协作'].includes(input.getAttribute('aria-label') ?? '') && input.value === text), editText);
   await capture('editing');
   const changed = '验收：修改后重新排队';
   if (await queueEditor.isVisible()) {
@@ -91,15 +101,39 @@ try {
   assert.equal(fake.calls('thread/queue/add').length, addsBefore + 1);
   assert.equal(fake.calls('turn/start').length, 0);
   checks.push('A separate queued submission uses thread/queue/add and starts no turn');
+  await page.locator('.standalone-composer__submit').filter({ hasText: '发送到当前任务' }).waitFor();
+  const keyboardText = '验收：快捷键排队';
+  await editor.fill(keyboardText);
+  await editor.press('Control+Enter');
+  const queue = page.getByRole('region', { name: '待发送消息', exact: true });
+  await queue.getByText(keyboardText, { exact: true }).waitFor();
+  assert.equal(fake.calls('thread/queue/add').length, addsBefore + 2);
+  assert.deepEqual(fake.queues.get(threadId)?.[2]?.input, [{ type: 'text', text: keyboardText, text_elements: [] }]);
+  assert.equal(fake.calls('turn/start').length, 0);
+  assert.equal(fake.calls('turn/steer').length, 0);
+  checks.push('Ctrl+Enter queues through the real composer without starting a model turn');
   const writesBeforeReload = fake.messages.filter(message => ['thread/queue/add', 'thread/queue/update', 'thread/queue/delete'].includes(message.method ?? '')).length;
   await page.reload({ waitUntil: 'commit' });
-  const queue = page.getByRole('region', { name: '待发送消息', exact: true });
   await queue.getByText(changed, { exact: true }).waitFor({ timeout: 60000 });
   await queue.getByText(added, { exact: true }).waitFor();
+  await queue.getByText(keyboardText, { exact: true }).waitFor();
   assert.equal(fake.messages.filter(message => ['thread/queue/add', 'thread/queue/update', 'thread/queue/delete'].includes(message.method ?? '')).length, writesBeforeReload);
   assert.equal(fake.calls('turn/start').length, 0);
   await capture('after-refresh');
   checks.push('Edited and added entries survive a page reload without replay');
+  fake.handlers.set('thread/queue/start', (_params, { socket }) => { socket.terminate(); return NO_REPLY; });
+  await page.goto(app.url + '/local/' + unknownThreadId, { waitUntil: 'commit' });
+  await page.getByText('未知回执不得重发', { exact: true }).waitFor({ timeout: 60000 });
+  await page.getByRole('button', { name: '立即发送待发送消息', exact: true }).click();
+  await fake.waitFor(message => message.method === 'thread/queue/start' && message.params.threadId === unknownThreadId);
+  await page.getByText(/发送结果未知.*不会自动重发/).first().waitFor({ timeout: 30000 });
+  assert.equal(fake.calls('thread/queue/start').length, 1);
+  await capture('unknown-before-reload');
+  await page.reload({ waitUntil: 'commit' });
+  await page.getByText(/发送结果未知.*不会自动重发/).first().waitFor({ timeout: 60000 });
+  assert.equal(fake.calls('thread/queue/start').length, 1, 'Reload must not retry an unknown queue start');
+  assert.equal(fake.calls('turn/start').length, 0);
+  checks.push('A disconnected unknown queue start remains visible after reload and is never resent');
   assert.deepEqual(errors, []);
   report.queue = fake.queues.get(threadId);
   assert.deepEqual(gaps, [], 'Original queue edit-to-composer behavior is missing');

@@ -1,6 +1,7 @@
 // Run under /tmp/agents-workbench-heavy.lock. The daemon and chats are disposable fixtures.
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright-core';
 import type { Browser, Page } from 'playwright-core';
@@ -8,10 +9,12 @@ import { createNativeWorkbench } from '../src/native/server.ts';
 import { fileMethods } from '../src/native/files.ts';
 import { agentItem, createFakeCodex, fixtureThread, fixtureTurn } from '../test/fake-codex.ts';
 import { fileDaemonFixture } from '../test/file-daemon-fixture.ts';
+import { isolatePublicVerifier } from './public-verifier-environment.ts';
 
-const root = await mkdtemp('/tmp/aw-tabs-');
+const root = await mkdtemp(join(tmpdir(), 'aw-tabs-'));
 const output = process.env.AGENTS_TABS_EVIDENCE
-  ? resolve(process.env.AGENTS_TABS_EVIDENCE) : await mkdtemp('/tmp/yard-tabs-evidence-');
+  ? resolve(process.env.AGENTS_TABS_EVIDENCE) : await mkdtemp(join(tmpdir(), 'yard-tabs-evidence-'));
+await isolatePublicVerifier(root);
 await mkdir(output, { recursive: true });
 const fake = await createFakeCodex(root);
 let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
@@ -43,10 +46,12 @@ try {
     hostCatalog: { hosts: [], projects: [], assignments: {} },
     httpFetch: async () => new Response('External telemetry disabled for tabs fixture', { status: 503 }) });
   browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome',
-    headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking'] });
-  page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-proxy-server',
+      '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost'] });
+  page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN' });
   await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
   page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => { if (message.type() === 'error') errors.push('console: ' + message.text()); });
   await page.goto(app.url + '/local/' + threadId, { waitUntil: 'commit' });
   await page.locator('[data-owned-renderer="true"]').waitFor();
   await page.getByText('标签栏验收内容', { exact: true }).waitFor({ timeout: 60000 });
@@ -55,7 +60,7 @@ try {
   await chatTab.waitFor();
   assert.equal(await chatTab.getAttribute('aria-selected'), 'true');
   checks.push('The current chat is the selected owned workspace tab');
-  const editor = page.getByRole('textbox', { name: '和 Codex 一起工作', exact: true });
+  const editor = page.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作)$/ });
   await editor.fill('标签切换后保留的草稿');
   await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
   await capture('02-new-tab');
@@ -80,13 +85,15 @@ try {
   finally { await page.keyboard.up('Control'); }
   await chatTab.click();
   assert.equal(await chatTab.getAttribute('aria-selected'), 'true');
-  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value.includes('标签切换后保留的草稿'));
+  await page.waitForFunction(() => [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
+    .some(input => ['和 Codex 一起工作', '与 Codex 协作'].includes(input.getAttribute('aria-label') ?? '') && input.value.includes('标签切换后保留的草稿')));
   assert.ok((await editor.inputValue()).includes('标签切换后保留的草稿'));
   checks.push('Returning to the chat keeps its unsent draft');
   await page.reload({ waitUntil: 'commit' });
   await page.getByText('标签栏验收内容', { exact: true }).waitFor({ timeout: 60000 });
   await chatTab.waitFor();
-  await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="和 Codex 一起工作"]')?.value.includes('标签切换后保留的草稿'));
+  await page.waitForFunction(() => [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
+    .some(input => ['和 Codex 一起工作', '与 Codex 协作'].includes(input.getAttribute('aria-label') ?? '') && input.value.includes('标签切换后保留的草稿')));
   await capture('04-refresh');
   checks.push('Refresh keeps the chat tab, route and draft');
   await page.setViewportSize({ width: 402, height: 874 });

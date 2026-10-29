@@ -5,9 +5,10 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { hostname } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import type { Duplex } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { chromium } from 'playwright-core';
@@ -25,15 +26,19 @@ const requestedSsh = process.argv.includes('--ssh');
 const requestedBinary = process.env.AGENTS_TERMINAL_CODEX_BIN;
 const chromePath = process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome';
 const requestedOutput = process.env.AGENTS_TERMINAL_EVIDENCE_DIR;
-const root = await mkdtemp('/tmp/yard-terminal-ui-');
+const temporaryParent = resolve(tmpdir());
+const root = await mkdtemp(join(temporaryParent, 'yard-terminal-ui-'));
 const fixtureEnv = { PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`, LANG: 'C.UTF-8', HOME: join(root, 'home'),
   CODEX_HOME: join(root, 'codex'), XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache'),
-  XDG_DATA_HOME: join(root, 'xdg-data'), TMPDIR: join(root, 'tmp') };
+  XDG_DATA_HOME: join(root, 'xdg-data'), XDG_RUNTIME_DIR: join(root, 'runtime'), TMPDIR: join(root, 'tmp'),
+  npm_config_cache: join(root, 'npm-cache'), npm_config_userconfig: join(root, 'user.npmrc'),
+  npm_config_globalconfig: join(root, 'global.npmrc') };
 for (const key of Object.keys(process.env)) delete process.env[key];
 Object.assign(process.env, fixtureEnv);
 await Promise.all([fixtureEnv.HOME, fixtureEnv.CODEX_HOME, fixtureEnv.XDG_CONFIG_HOME, fixtureEnv.XDG_CACHE_HOME,
-  fixtureEnv.XDG_DATA_HOME, fixtureEnv.TMPDIR].map(path => mkdir(path, { recursive: true })));
-const output = requestedOutput ? resolve(requestedOutput) : await mkdtemp('/tmp/yard-terminal-evidence-');
+  fixtureEnv.XDG_DATA_HOME, fixtureEnv.XDG_RUNTIME_DIR, fixtureEnv.TMPDIR, fixtureEnv.npm_config_cache]
+  .map(path => mkdir(path, { recursive: true, mode: 0o700 })));
+const output = requestedOutput ? resolve(requestedOutput) : await mkdtemp(join(temporaryParent, 'yard-terminal-evidence-'));
 assert.ok(output !== root && !output.startsWith(root + '/'), 'Evidence must be outside the disposable fixture');
 await mkdir(output, { recursive: true });
 const remoteRoot = join(root, 'remote-project');
@@ -47,6 +52,7 @@ const targets = [
 ].filter(target => !projectFilter || projectFilter === target.projectId);
 let sshFixture: TerminalSshFixture | undefined;
 let sshConnections = 0, sshPathsVerified = false;
+const sshStreams = new Set<Duplex>();
 const processes = new Map<string, { child: ChildProcessWithoutNullStreams; owner: string; pid?: number }>();
 const ownedPids = new Set<number>();
 let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
@@ -57,9 +63,10 @@ let events: { at: number; event: TerminalEvent }[] = [];
 let connections: { hostId: string; state: string }[] = [];
 let sockets: { page: WebSocketRoute; server: WebSocketRoute; connected: boolean }[] = [];
 type ShortcutObservation = { at: number; hostId: string | null; connection: string | null; state: string | null;
-  focus: { tag: string; label: string | null; className: string } | null };
+  focus: { tag: string; label: string | null; className: string } | null; defaultPrevented?: boolean };
 const results: { hostId: string; projectId: string; cwd: string; checks: string[]; gaps: string[]; errors: string[];
-  requests: typeof requests; events: typeof events; connections: typeof connections; firstShortcut?: ShortcutObservation | null }[] = [];
+  requests: typeof requests; events: typeof events; connections: typeof connections; firstShortcut?: ShortcutObservation | null;
+  unavailableShortcut?: ShortcutObservation | null }[] = [];
 const report: Record<string, unknown> = { renderer: 'owned', localPeer: 'synthetic local RPC with a real disposable local PTY',
   requestedSsh, realDaemonUsed: false, realSshUsed: false, physicalRemoteMachine: false, realInference: false, results };
 
@@ -160,15 +167,19 @@ try {
       assert.equal(host.hostId, remoteHost);
       assert.ok(sshFixture);
       sshConnections++;
-      return createSshProxyStream(host, paths => {
+      const stream = createSshProxyStream(host, paths => {
         assert.deepEqual(paths, { homeDirectory: sshFixture!.home, codexHome: sshFixture!.codexHome });
         sshPathsVerified = true;
         onPaths?.(paths);
       });
+      sshStreams.add(stream);
+      stream.once('close', () => sshStreams.delete(stream));
+      return stream;
     },
     httpFetch: async () => new Response('External requests disabled for terminal fixture', { status: 503 }) });
   browser = await chromium.launch({ executablePath: chromePath,
-    headless: true, env: fixtureEnv, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking'] });
+    headless: true, env: fixtureEnv, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-proxy-server',
+      '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost'] });
   for (const target of targets) {
     checks = []; gaps = []; errors = []; requests = []; events = []; connections = []; sockets = [];
     results.push({ hostId: target.hostId, projectId: target.projectId, cwd: target.cwd, checks, gaps, errors, requests, events, connections });
@@ -180,15 +191,18 @@ try {
         const host = document.querySelector<HTMLSelectElement>('select[aria-label="Execution host"]');
         const connection = document.querySelector('.yard-connection');
         const focus = document.activeElement;
-        (window as Window & { yardTerminalShortcut?: unknown }).yardTerminalShortcut = {
+        const observation: ShortcutObservation = {
           at: Date.now(), hostId: host?.value ?? null, connection: connection?.getAttribute('title') ?? null,
           state: connection?.getAttribute('data-state') ?? null,
           focus: focus ? { tag: focus.tagName, label: focus.getAttribute('aria-label'), className: String(focus.className) } : null,
         };
+        (window as Window & { yardTerminalShortcut?: ShortcutObservation }).yardTerminalShortcut = observation;
+        setTimeout(() => { observation.defaultPrevented = event.defaultPrevented; }, 0);
       }, true);
     });
     await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
     page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => { if (message.type() === 'error') errors.push('console: ' + message.text()); });
     await page.routeWebSocket('**/native-host', route => {
       const socket = { page: route, server: route.connectToServer(), connected: false };
       sockets.push(socket);
@@ -213,7 +227,8 @@ try {
     await page.locator('[data-owned-renderer="true"]').waitFor();
     const projectAction = page.getByRole('button', { name: `New chat in ${target.label}`, exact: true });
     await projectAction.click({ timeout: 60000 });
-    await page.getByRole('textbox', { name: /^(和 Codex 一起工作|Work with Codex)$/ }).waitFor();
+    await page.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作|Work with Codex)$/ }).waitFor();
+    await page.locator('.yard-connection[data-state="connected"]').waitFor({ timeout: 30000 });
     const terminal = page.locator('.yard-terminal-container:visible .xterm-helper-textarea');
     async function waitForNewTerminal(previousCount: number) {
       await until(() => requests.filter(request => request.operation === 'create').length > previousCount, 'new terminal request');
@@ -413,6 +428,44 @@ try {
     assert.equal(text().split('TW_ONCE\r\n').length - 1, 1, 'Earlier terminal input must not be replayed after reconnect');
     if (target.hostId !== 'local') assert.equal(localFake.calls('process/spawn').filter(call => call.params.tty === true).length, localSpawnCount);
     checks.push('Disconnect reaps processes; reconnect does not replay input or automatically create a shell');
+    const beforeUnavailable = requests.filter(request => request.operation === 'create').length;
+    if (target.hostId === 'local') localFake.disconnectAll();
+    else for (const stream of sshStreams) stream.destroy();
+    try {
+      await until(async () => (await page!.locator('.yard-connection').getAttribute('title'))?.includes('Host: disconnected') === true,
+        'selected host disconnected while the browser is connected', 5000);
+      const reconnect = page.getByRole('button', { name: 'Reconnect host', exact: true });
+      if (!await reconnect.isVisible()) gaps.push('Disconnected host does not offer an explicit Reconnect host action');
+      await page.keyboard.press('Control+Backquote');
+      await delay(100);
+      const unavailableShortcut = await page.evaluate(() =>
+        (window as Window & { yardTerminalShortcut?: ShortcutObservation }).yardTerminalShortcut ?? null);
+      results.at(-1)!.unavailableShortcut = unavailableShortcut;
+      if (!unavailableShortcut?.defaultPrevented) gaps.push('Ctrl+Backquote was not consumed while the host was unavailable');
+      const feedback = async () => (await page!.locator('[role="alert"]:visible, [role="status"]:visible').allTextContents())
+        .some(text => /terminal|host|终端|主机/i.test(text) && /unavailable|connect|disconnect|不可用|连接|断开/i.test(text));
+      if (!await feedback()) gaps.push('Unavailable terminal shortcut did not show a clear connection message');
+      const toolbar = page.getByRole('button', { name: 'Open terminal', exact: true });
+      if (await toolbar.isEnabled()) {
+        await toolbar.click();
+        if (!await feedback()) gaps.push('Unavailable terminal button did not clearly reject the action');
+      }
+      if (requests.filter(request => request.operation === 'create').length !== beforeUnavailable) {
+        gaps.push('An unavailable terminal action issued a create request');
+      }
+      await capture(target.projectId + '-host-unavailable');
+      if (await reconnect.isVisible()) {
+        const beforeReconnect = requests.filter(request => request.operation === 'create').length;
+        await reconnect.click();
+        await page.locator('.yard-connection[data-state="connected"]').waitFor({ timeout: 30000 });
+        assert.equal(requests.filter(request => request.operation === 'create').length, beforeReconnect,
+          'Reconnecting must not automatically create a terminal');
+        checks.push('Explicit host reconnect does not automatically create a shell');
+      } else gaps.push('Explicit host reconnect could not be verified after the unavailable actions');
+    } catch (error) {
+      gaps.push('Disconnected host shortcut/reconnect verification: ' + String(error));
+      await capture(target.projectId + '-host-unavailable-failure').catch(() => {});
+    }
     await capture(target.projectId + '-terminal');
     assert.deepEqual(errors, []);
     await page.close();
@@ -451,7 +504,7 @@ try {
   if (cleanupErrors.length) {
     report.ok = false; report.cleanupErrors = cleanupErrors; report.retainedFixture = root; process.exitCode = 1;
   } else {
-    assert.ok(root.startsWith('/tmp/yard-terminal-ui-'));
+    assert.ok(root.startsWith(join(temporaryParent, 'yard-terminal-ui-')));
     try { await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); report.fixtureRemoved = true; }
     catch (error) { report.ok = false; report.cleanupErrors = [String(error)]; report.retainedFixture = root; process.exitCode = 1; }
   }

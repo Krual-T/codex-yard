@@ -1,16 +1,19 @@
 // Run under /tmp/agents-workbench-heavy.lock. No real model turn is submitted.
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright-core';
 import type { Browser, Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { agentItem, createFakeCodex, fixtureThread, fixtureTurn } from '../test/fake-codex.ts';
 import { fileDaemonFixture } from '../test/file-daemon-fixture.ts';
+import { isolatePublicVerifier } from './public-verifier-environment.ts';
 
-const root = await mkdtemp('/tmp/aw-viz-');
+const root = await mkdtemp(join(tmpdir(), 'aw-viz-'));
 const output = process.env.AGENTS_VISUALIZATION_EVIDENCE
-  ? resolve(process.env.AGENTS_VISUALIZATION_EVIDENCE) : await mkdtemp('/tmp/yard-viz-evidence-');
+  ? resolve(process.env.AGENTS_VISUALIZATION_EVIDENCE) : await mkdtemp(join(tmpdir(), 'yard-viz-evidence-'));
+await isolatePublicVerifier(root);
 await mkdir(output, { recursive: true });
 const fake = await createFakeCodex(root);
 let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
@@ -54,7 +57,8 @@ root.querySelector('#follow-up').addEventListener('click',()=>window.openai.send
     hostCatalog: { hosts: [], projects: [], assignments: {} },
     httpFetch: async () => new Response('External telemetry disabled for fixture', { status: 503 }) });
   browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome',
-    headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking'] });
+    headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-proxy-server',
+      '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost'] });
   page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
   page.on('pageerror', error => errors.push(error.message));
@@ -102,12 +106,12 @@ root.querySelector('#follow-up').addEventListener('click',()=>window.openai.send
   await page.getByRole('button', { name: 'Expand', exact: true }).waitFor();
   await frame.locator('#total').filter({ hasText: '70' }).waitFor();
   checks.push('Expanded preview closes with Escape without losing state');
-  const editor = page.getByRole('textbox', { name: /^(Work with Codex|和 Codex 一起工作)$/ });
+  const editor = page.getByRole('textbox', { name: /^(Work with Codex|和 Codex 一起工作|与 Codex 协作)$/ });
   await editor.fill('未发送的原草稿');
   await frame.getByRole('button', { name: '继续分析', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[role="dialog"]') !== null
     || [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
-      .some(textarea => ['Work with Codex', '和 Codex 一起工作'].includes(textarea.getAttribute('aria-label') ?? '')
+      .some(textarea => ['Work with Codex', '和 Codex 一起工作', '与 Codex 协作'].includes(textarea.getAttribute('aria-label') ?? '')
         && textarea.value.includes('分析当前数量 7')));
   assert.equal(fake.calls('turn/start').length, 0);
   await capture('02-follow-up-confirmation');
@@ -159,6 +163,11 @@ root.querySelector('#follow-up').addEventListener('click',()=>window.openai.send
   await capture('04-missing-file');
   checks.push('An unavailable source shows an error while chat remains readable');
   assert.deepEqual(errors, []);
+  const expectedCspUrl = app.url + '/api/status';
+  const unexpectedConsoleErrors = consoleErrors.filter(message => !message.includes(expectedCspUrl)
+    || !/Content Security Policy|ERR_BLOCKED_BY_CSP/.test(message));
+  report.unexpectedConsoleErrors = unexpectedConsoleErrors;
+  assert.deepEqual(unexpectedConsoleErrors, [], 'Only the intentional host-API CSP probe may produce console or network errors');
   assert.deepEqual(gaps, [], 'Original visualization follow-up confirmation and sending must be available');
   report.ok = true;
 } catch (error) {

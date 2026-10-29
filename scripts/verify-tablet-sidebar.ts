@@ -1,15 +1,18 @@
 // The renderer is real; projects, conversations and daemon are disposable fixtures.
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright-core';
 import type { Page, Locator } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { createFakeCodex, fixtureThread } from '../test/fake-codex.ts';
+import { isolatePublicVerifier } from './public-verifier-environment.ts';
 
-const root = await mkdtemp('/tmp/yard-tablet-');
+const root = await mkdtemp(join(tmpdir(), 'yard-tablet-'));
 const output = process.env.AGENTS_TABLET_EVIDENCE
-  ? resolve(process.env.AGENTS_TABLET_EVIDENCE) : await mkdtemp('/tmp/yard-tablet-evidence-');
+  ? resolve(process.env.AGENTS_TABLET_EVIDENCE) : await mkdtemp(join(tmpdir(), 'yard-tablet-evidence-'));
+await isolatePublicVerifier(root);
 const fake = await createFakeCodex(root);
 const dataDir = join(root, 'data');
 const projectPath = join(root, 'project');
@@ -27,7 +30,8 @@ for (let index = 0; index < 65; index++) {
 const app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: fake.socketPath, codexHome: join(root, 'codex'),
   hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Fixture telemetry disabled', { status: 503 }) });
 const browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome',
-  headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking'] });
+  headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-proxy-server',
+    '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost'] });
 const report: Record<string, unknown> = { checks, errors, realDaemonUsed: false, renderer: 'owned' };
 
 async function settleScroll(page: Page, scroller: Locator, top = 0) {
@@ -60,8 +64,9 @@ async function visibleThroughAncestors(button: Locator) {
 
 try {
   for (const viewport of [{ width: 1280, height: 800 }, { width: 800, height: 1280 }]) {
-    const page = await browser.newPage({ viewport, hasTouch: true, isMobile: true });
+    const page = await browser.newPage({ viewport, hasTouch: true, isMobile: true, locale: 'zh-CN' });
     page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => { if (message.type() === 'error') errors.push('console: ' + message.text()); });
     await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
     await page.goto(app.url, { waitUntil: 'commit' });
     await page.locator('[data-owned-renderer="true"]').waitFor();
@@ -101,9 +106,9 @@ try {
     assert.ok(fake.calls('thread/resume').length > previousResumes, 'touch taps must still open a conversation');
     checks.push(`${viewport.width}px: tapping a conversation still opens it`);
     await newChat.tap();
-    await page.getByRole('textbox', { name: '和 Codex 一起工作', exact: true }).waitFor();
+    await page.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作)$/ }).waitFor();
     await page.screenshot({ path: join(output, `${viewport.width}-new-chat.png`) });
-    const editor = page.getByRole('textbox', { name: '和 Codex 一起工作', exact: true });
+    const editor = page.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作)$/ });
     const prompt = `Tablet project test ${viewport.width}`;
     await editor.fill(prompt);
     await page.getByRole('button', { name: /^(Send|发送)$/ }).tap();
@@ -114,6 +119,8 @@ try {
     await page.close();
   }
   const desktop = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  desktop.on('pageerror', error => errors.push(error.message));
+  desktop.on('console', message => { if (message.type() === 'error') errors.push('console: ' + message.text()); });
   await desktop.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
   await desktop.goto(app.url, { waitUntil: 'commit' });
   const row = desktop.locator('.yard-owned-sidebar-project .yard-owned-sidebar-thread').first();

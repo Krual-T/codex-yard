@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
@@ -9,18 +10,14 @@ import type { Browser, Locator, Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { record } from '../src/native/protocol.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
+import { isolatePublicVerifier } from './public-verifier-environment.ts';
 
-const root = await mkdtemp('/tmp/yard-ui-bugs-');
+const root = await mkdtemp(join(tmpdir(), 'yard-ui-bugs-'));
 const output = process.env.AGENTS_BUG_EVIDENCE
-  ? resolve(process.env.AGENTS_BUG_EVIDENCE) : await mkdtemp('/tmp/yard-sidebar-copy-evidence-');
+  ? resolve(process.env.AGENTS_BUG_EVIDENCE) : await mkdtemp(join(tmpdir(), 'yard-sidebar-copy-evidence-'));
 const dataDir = join(root, 'data');
 const codexHome = join(root, 'codex');
-for (const [name, path] of Object.entries({ HOME: join(root, 'home'), CODEX_HOME: codexHome,
-  XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache'),
-  XDG_DATA_HOME: join(root, 'xdg-data'), XDG_RUNTIME_DIR: join(root, 'runtime'), TMPDIR: join(root, 'tmp') })) {
-  await mkdir(path, { recursive: true, mode: 0o700 });
-  process.env[name] = path;
-}
+await isolatePublicVerifier(root);
 await mkdir(dataDir, { mode: 0o700 });
 await mkdir(output, { recursive: true });
 await writeFile(join(dataDir, 'projects.json'), JSON.stringify([{ name: 'Active project', path: root }]));
@@ -32,7 +29,7 @@ const message = 'Copy fixture:\n\n```ts\n' + code + '\n```';
 fake.threads.set(id, fixtureThread(id, root, { name: 'Code example', model: 'gpt-6-sol',
   status: { type: 'active', activeFlags: [] }, turns: [fixtureTurn('turn-copy', [agentItem('code-copy', message)], 'inProgress')] }));
 fake.threads.set(secondId, fixtureThread(secondId, root, { name: 'Second conversation', model: 'gpt-6-sol' }));
-fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.163.0 (Linux)' }));
+fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.163.0 (Linux)', codexHome }));
 fake.handlers.set('getAuthStatus', () => ({ authMethod: 'apikey', authToken: null, requiresOpenaiAuth: false }));
 fake.handlers.set('account/read', () => ({ account: { type: 'apiKey' }, requiresOpenaiAuth: false }));
 fake.handlers.set('account/gatewayOAuth/read', () => ({ providerId: 'fixture', providerName: 'Fixture', required: false, status: null, error: null }));
@@ -91,6 +88,7 @@ async function setup(current: Page) {
   assert.ok(app);
   const origin = app.url;
   current.on('pageerror', error => errors.push(error.message));
+  current.on('console', message => { if (message.type() === 'error') errors.push('console: ' + message.text()); });
   await current.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
 }
 async function checkLocale(current: Page) {

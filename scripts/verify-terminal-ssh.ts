@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { chmod, mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { connect, createServer } from 'node:net';
 import { userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -11,6 +11,21 @@ import type { SshHost } from '../src/native/ssh.ts';
 
 const run = promisify(execFile);
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+
+async function assertIsolatedWorkspace(workspace: string) {
+  let directory = await realpath(workspace);
+  while (true) {
+    for (const name of ['.codex', 'AGENTS.md', 'AGENTS.override.md']) {
+      const path = join(directory, name);
+      try { await lstat(path); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+      throw new Error('Disposable CLI workspace has an ancestor configuration or instruction file: ' + path);
+    }
+    const parent = dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+}
 
 /** An isolated managed CLI reached through an actual loopback sshd and the production SSH proxy. */
 export class TerminalSshFixture {
@@ -43,16 +58,19 @@ export class TerminalSshFixture {
   }
 
   async start() {
+    await assertIsolatedWorkspace(this.workspace);
     await mkdir(this.bin, { recursive: true, mode: 0o700 });
     const binary = await realpath(this.binary);
-    this.version = (await run(binary, ['--version'], { env: this.env, timeout: 10_000 })).stdout.trim();
+    this.version = (await run(binary, ['--version'], { cwd: this.workspace, env: this.env, timeout: 10_000 })).stdout.trim();
     await symlink(binary, join(this.bin, 'codex'));
     await symlink(process.execPath, join(this.bin, 'node'));
     await writeFile(join(this.codexHome, 'config.toml'), 'model_provider="yard_fixture"\nmodel="fixture-model"\napproval_policy="never"\n[analytics]\nenabled=false\n[model_providers.yard_fixture]\nname="Local disabled fixture"\nbase_url="http://127.0.0.1:9/v1"\nwire_api="responses"\nrequires_openai_auth=false\nrequest_max_retries=0\nstream_max_retries=0\n', { mode: 0o600 });
     this.daemonAttempted = true;
     const started = await run(binary, ['app-server', 'daemon', 'start'], { cwd: this.workspace, env: this.env, timeout: 20_000 });
     const daemon = JSON.parse(started.stdout) as { pid: number; socketPath: string; cliVersion?: string; appServerVersion?: string };
-    assert.ok(Number.isInteger(daemon.pid) && daemon.pid > 1 && daemon.socketPath.startsWith(this.codexHome + '/'), 'CLI daemon must belong to the disposable CODEX_HOME');
+    const canonicalHome = await realpath(this.codexHome);
+    assert.ok(Number.isInteger(daemon.pid) && daemon.pid > 1 && typeof daemon.socketPath === 'string'
+      && [this.codexHome, canonicalHome].some(home => daemon.socketPath.startsWith(home + '/')), 'CLI daemon must belong to the disposable CODEX_HOME');
     this.daemon = daemon;
 
     for (const name of ['host-key', 'client-key']) await run('/usr/bin/ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', join(this.root, name)], { env: this.env });
@@ -121,14 +139,20 @@ export class TerminalSshFixture {
         if (await alive()) { process.kill(this.daemon.pid, 'SIGTERM'); await delay(300); }
         if (await alive()) { process.kill(this.daemon.pid, 'SIGKILL'); await delay(300); }
         assert.equal(await alive(), false, 'Disposable daemon did not exit');
+      } catch (error) { errors.push('daemon cleanup: ' + String(error)); }
+      try {
         // Some CLI versions leave a detached updater. Match the fixture release path and both homes.
+        const releasePaths = [...new Set([this.codexHome, await realpath(this.codexHome)])]
+          .map(home => home + '/packages/app-server-daemon/releases/');
         let candidates = '';
-        try { candidates = (await run('pgrep', ['-f', this.codexHome + '/packages/app-server-daemon/releases/'], { env: this.env })).stdout; }
-        catch (error) { if ((error as { code?: number }).code !== 1) throw error; }
-        for (const candidate of candidates.trim().split(/\s+/).filter(Boolean)) {
+        for (const path of releasePaths) {
+          try { candidates += '\n' + (await run('pgrep', ['-f', path], { env: this.env })).stdout; }
+          catch (error) { if ((error as { code?: number }).code !== 1) throw error; }
+        }
+        for (const candidate of new Set(candidates.trim().split(/\s+/).filter(Boolean))) {
           try {
             const command = await readFile(`/proc/${candidate}/cmdline`, 'utf8');
-            if (!command.startsWith(this.codexHome + '/packages/app-server-daemon/releases/') || !command.includes('\0app-server\0daemon\0pid-update-loop')) continue;
+            if (!releasePaths.some(path => command.startsWith(path)) || !command.includes('\0app-server\0daemon\0pid-update-loop')) continue;
             const env = (await readFile(`/proc/${candidate}/environ`, 'utf8')).split('\0');
             assert.ok(env.includes('HOME=' + this.home) && env.includes('CODEX_HOME=' + this.codexHome), 'Updater PID no longer belongs to fixture');
             process.kill(Number(candidate), 'SIGTERM');
@@ -140,7 +164,7 @@ export class TerminalSshFixture {
             }
           } catch (error) { if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
         }
-      } catch (error) { errors.push('daemon cleanup: ' + String(error)); }
+      } catch (error) { errors.push('updater cleanup: ' + String(error)); }
     }
     if (this.sshd?.pid && this.sshd.exitCode === null && this.sshd.signalCode === null) {
       this.sshd.kill('SIGTERM');
