@@ -1392,7 +1392,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       /> : <>
         <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')} inert={leaving}>
           {streamGap && <p role="status" className="yard-stream-gap">此页面未收到连续的活动内容，正在核对会话记录。{isThreadBusy(thread) && '任务正在运行；完成后将重新读取完整记录。'}</p>}
-          {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} threadId={current.threadId} thread={thread} editRecovery={editState?.recovery ?? null} editEnabled={!leaving} editAccess={editAccess} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
+          {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} threadId={current.threadId} thread={thread} editRecovery={editState?.recovery ?? null} editAccess={editAccess} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
             searchOpen={messageSearchOpen} onSearchOpenChange={setMessageSearchOpen}
             editRebase={messageEditRebaseMarker(editState)} onPrepareEditRebase={(origin, version) => editStore.prepareRebase(origin, version)}
             onCommitEditRebase={async candidate => {
