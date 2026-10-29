@@ -195,7 +195,7 @@ export function SettingsBrowserIntegrations(props: SettingsBrowserIntegrationsPr
     <p role="status">{translateKnown(t, 'Loading browser settings...')}</p>;
 
   const values = currentRead.features;
-  const rawInAppBrowserFeature = values.has('in_app_browser') ? scope.rawFeatureSource === 'unmodified' ? values.get('in_app_browser')! : null : true;
+  const rawInAppBrowserFeature = scope.rawFeatureSource === 'unmodified' ? values.get('in_app_browser') ?? null : null;
   const original = gates?.authorityKey === scope.lease?.key ? gates : undefined;
   const notWsl = original?.runCodexInWsl == null ? null : !original.runCodexInWsl;
   const browserAvailability = availability([currentRead.policy, values.get('browser_use') ?? true, rawInAppBrowserFeature,

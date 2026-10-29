@@ -2,6 +2,7 @@ import type { WorkbenchClient } from '../workbench-contract.ts';
 import { listInstalledPlugins, prepareLocalPluginEnabled } from '../pages/plugins/catalog.ts';
 import type { PluginSummary } from '../pages/plugins/catalog.ts';
 import { WorkbenchError } from './client.ts';
+import type { SettingsConfigOperations, SettingsDraftRecord } from '../settings/config-operations.ts';
 
 interface ConfigSource { hostId: string; generation: string; homeDirectory: string; codexHome: string }
 interface ConfigRecord {
@@ -17,7 +18,7 @@ export interface ProductConfigurationWrites {
   getSnapshot(): ConfigSnapshot;
   refresh(): Promise<void>;
   submit(hostId: string, method: 'config/batchWrite', params: Record<string, unknown>, origin: {
-    section: 'plugins-settings'; scope?: readonly string[]; draft: unknown; source: ConfigSource;
+    section: 'plugins-settings'; scope?: readonly string[]; draft: unknown; source: ConfigSource; editorId?: string; revision?: number;
   }, canDispatch: () => boolean): Promise<{ operationId: string; result: unknown }>;
   check(operationId: string, retryPersistence?: boolean, assertBeforeSend?: () => void): Promise<void>;
   finish(operationId: string): Promise<void>;
@@ -56,7 +57,8 @@ export function pluginConfigBlocksScope(snapshot: ConfigSnapshot, hostId: string
 }
 
 export async function writePluginConfig(operations: ProductConfigurationWrites | undefined, client: WorkbenchClient,
-  value: { hostId: string; cwd: string; plugin: PluginSummary; enabled: boolean }, current: () => boolean): Promise<void> {
+  value: { hostId: string; cwd: string; plugin: PluginSummary; enabled: boolean }, current: () => boolean,
+  restored?: { editorId: string; revision: number; source: ConfigSource }): Promise<void> {
   if (!operations) throw new WorkbenchError('Plugin settings cannot be saved on this host. Try again after configuration recovery is available.', false);
   const assertCurrent = () => { if (!current()) throw new DOMException('The selected page changed.', 'AbortError'); };
   assertCurrent();
@@ -65,12 +67,14 @@ export async function writePluginConfig(operations: ProductConfigurationWrites |
   catch (error) { throw new WorkbenchError(error instanceof Error ? error.message : String(error), false); }
   const source = sourceFor(prepared.source, value.hostId);
   if (!source) throw new WorkbenchError('The original configuration source is unavailable. Reload and try again.', false);
+  if (restored) assertInventorySource(source, restored.source, true);
   if (!current()) throw new DOMException('The selected page changed.', 'AbortError');
   let received = false;
   try {
     const submitted = await operations.submit(value.hostId, 'config/batchWrite', prepared.params, {
       section: 'plugins-settings', scope: [value.cwd], source,
       draft: { pluginId: value.plugin.id, enabled: value.enabled },
+      ...(restored ? { editorId: restored.editorId, revision: restored.revision } : {}),
     }, current);
     received = true;
     if (!object(submitted.result) || submitted.result.status !== 'ok' && submitted.result.status !== 'okOverridden') {
@@ -88,6 +92,31 @@ export async function writePluginConfig(operations: ProductConfigurationWrites |
     const notSent = !received && error instanceof Error && 'uncertain' in error && error.uncertain === false;
     throw new WorkbenchError(error instanceof Error ? error.message : String(error), !notSent);
   }
+}
+
+export async function saveRecoveredPluginEdit(operations: SettingsConfigOperations, client: WorkbenchClient,
+  draft: SettingsDraftRecord, current: () => boolean): Promise<void> {
+  const original = structuredClone(draft);
+  const assertCurrent = () => { if (!current()) throw new DOMException('The selected page changed.', 'AbortError'); };
+  assertCurrent();
+  await operations.refresh(); assertCurrent();
+  const snapshot = operations.getSnapshot();
+  const saved = snapshot.drafts.find(item => item.hostId === original.hostId && item.section === original.section
+    && JSON.stringify(item.scope ?? []) === JSON.stringify(original.scope ?? []) && item.editorId === original.editorId);
+  if (snapshot.error || !saved || JSON.stringify(saved) !== JSON.stringify(original) || saved.section !== 'plugins-settings'
+    || !saved.editorId.startsWith('recovered:') || saved.scope?.length !== 1 || !object(saved.draft)
+    || typeof saved.draft.pluginId !== 'string' || typeof saved.draft.enabled !== 'boolean') {
+    throw new Error(snapshot.error || 'The saved plugin edit changed. Review its original copy before saving.');
+  }
+  const edit = saved.draft;
+  const source = sourceFor(edit.originalSource, saved.hostId);
+  if (!source) throw new Error('The original configuration source cannot be verified. Keep or copy this saved edit.');
+  const inventory = await listInstalledPlugins(client, saved.hostId, saved.scope[0]!, { assertBeforeSend: assertCurrent });
+  assertCurrent(); assertInventorySource(inventory.source, source, true);
+  const matches = inventory.entries.filter(entry => entry.plugin.id === edit.pluginId);
+  if (matches.length !== 1 || matches[0]!.plugin.source.type === 'remote') throw new Error('The original local plugin cannot be identified uniquely. Keep or copy this saved edit.');
+  await writePluginConfig(operations, client, { hostId: saved.hostId, cwd: saved.scope[0]!, plugin: matches[0]!.plugin,
+    enabled: edit.enabled as boolean }, current, { editorId: saved.editorId, revision: saved.revision, source });
 }
 
 export async function reconcilePluginConfig(operations: ProductConfigurationWrites, client: WorkbenchClient,

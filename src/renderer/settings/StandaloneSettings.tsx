@@ -301,7 +301,7 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
     </aside>
     <main className="yard-settings-main" aria-label={locale.startsWith('en') ? `${title} settings` : `${t('Settings')}: ${title}`}>
       <div className="yard-settings-content" ref={content}>
-        <ConfigurationRecovery client={client} />
+        <ConfigurationRecovery client={client} hostId={selectedHost} captureAuthority={browserIntegrations ? host => browserIntegrations.captureAuthority(host).assertCurrent : undefined} />
         {needsScope && scopeState !== 'ready' ? scopeState === 'error' ?
           <p className="yard-setting-error" role="alert">{t('Selected project or session')}: {t('Unavailable')}{scopeStatus?.error ? `: ${scopeStatus.error}` : ''}{' '}
             <button type="button" className="yard-link" onClick={() => scopeStatus?.retry()}>{t('Retry')}</button></p> :

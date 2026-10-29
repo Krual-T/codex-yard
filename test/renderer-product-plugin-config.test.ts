@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { WorkbenchClient } from '../src/renderer/workbench-contract.ts';
 import type { PluginSummary } from '../src/renderer/pages/plugins/catalog.ts';
 import { WorkbenchError } from '../src/renderer/app/client.ts';
-import { pluginConfigBlocksScope, reconcilePluginConfig, writePluginConfig } from '../src/renderer/app/ProductPluginConfig.ts';
+import { pluginConfigBlocksScope, reconcilePluginConfig, saveRecoveredPluginEdit, writePluginConfig } from '../src/renderer/app/ProductPluginConfig.ts';
 import type { ProductConfigurationWrites } from '../src/renderer/app/ProductPluginConfig.ts';
 import { SettingsConfigOperations } from '../src/renderer/settings/config-operations.ts';
 import type { SettingsWriteStorage, WriteStatus } from '../src/renderer/settings/config-operations.ts';
@@ -105,8 +105,10 @@ test('plugin recovery checks the original operation and rereads the inventory be
 
 class MemoryStorage implements SettingsWriteStorage {
   value: unknown;
+  fail = false;
   async read() { return structuredClone(this.value); }
   async update(change: (value: unknown) => unknown) {
+    if (this.fail) throw new Error('fixture draft persistence failed');
     this.value = structuredClone(change(structuredClone(this.value)));
     return structuredClone(this.value);
   }
@@ -115,12 +117,14 @@ class MemoryStorage implements SettingsWriteStorage {
 
 function recoveryFixture() {
   const storage = new MemoryStorage(), calls: { method: string; id?: string }[] = [], receipts = new Map<string, WriteStatus>();
+  const submissions: Record<string, unknown>[] = [];
   let sequence = 0, behavior: 'success' | 'rejected' | 'lost' = 'success';
   const client = { async host(endpoint: string, params: Record<string, unknown>) {
     assert.equal(endpoint, 'configuration-write');
     const id = String(params.operationId); calls.push({ method: String(params.action), id });
     if (params.action === 'status') return { operation: receipts.get(id) ?? null };
     assert.equal(params.action, 'submit');
+    submissions.push(structuredClone(params));
     const operation: WriteStatus = behavior === 'rejected'
       ? { operationId: id, hostId: 'local', method: 'config/batchWrite', state: 'failed', terminal: { kind: 'rejected', code: -32000 } }
       : behavior === 'lost' ? { operationId: id, hostId: 'local', method: 'config/batchWrite', state: 'pending' }
@@ -131,14 +135,16 @@ function recoveryFixture() {
       : { outcome: 'success', operation, result: { status: 'ok' } };
   }, async rpc(_method: string, _params: unknown, _hostId: string, options?: Parameters<WorkbenchClient['rpc']>[3]) {
     options?.assertBeforeSend?.();
-    assert.equal(_method, 'plugin/installed'); calls.push({ method: _method });
+    calls.push({ method: _method });
+    if (_method === 'config/read') return { layers: [{ name: { type: 'user', file: '/codex/config.toml' }, version: 'fresh-version' }], yardConfigSource: source };
+    assert.equal(_method, 'plugin/installed');
     return { marketplaces: [{ name: 'Local', plugins: [{ ...plugin, enabled: false }] }], yardConfigSource: source };
   } } as unknown as WorkbenchClient;
   const operations = new SettingsConfigOperations(client, storage, () => `original-${++sequence}`);
   const submit = (cwd: string, canDispatch = () => true) => operations.submit('local', 'config/batchWrite', {
     edits: [{ keyPath: 'plugins.demo.enabled', value: false, mergeStrategy: 'upsert' }],
   }, { ...originalOrigin, scope: [cwd] }, canDispatch);
-  return { storage, operations, client, calls, receipts, submit, behavior(value: typeof behavior) { behavior = value; } };
+  return { storage, operations, client, calls, receipts, submissions, submit, behavior(value: typeof behavior) { behavior = value; } };
 }
 
 test('checking a not-sent plugin edit preserves both original scope drafts with the real controller', async () => {
@@ -237,4 +243,72 @@ test('an original status read cannot dispatch after its page becomes stale while
   await assert.rejects(check, /Original page changed/);
   assert.equal(item.calls.filter(call => call.method === 'status').length, 0);
   assert.equal(item.operations.getSnapshot().records.length, 1);
+});
+
+test('restoring a not-sent plugin edit atomically preserves its original scope before closing and explicitly saves with a fresh version', async () => {
+  const item = recoveryFixture();
+  await assert.rejects(item.submit('/workspace', () => false), /before it was sent/);
+  await assert.rejects(item.submit('/other-workspace', () => false), /before it was sent/);
+  const original = structuredClone(item.operations.getSnapshot().records[0]!);
+  await assert.rejects(item.operations.finish(original.operationId), /Restore the original plugin edit/);
+  const before = structuredClone(item.storage.value);
+  item.storage.fail = true;
+  await assert.rejects(item.operations.restoreOriginalPluginEdit(original), /persistence failed/);
+  assert.deepEqual(item.storage.value, before);
+  item.storage.fail = false;
+  await item.operations.restoreOriginalPluginEdit(original);
+  const draft = item.operations.getSnapshot().drafts[0]!;
+  assert.equal(draft.hostId, 'local'); assert.deepEqual(draft.scope, ['/workspace']);
+  assert.equal(draft.editorId, 'recovered:original-1');
+  assert.deepEqual(draft.draft, { pluginId: 'demo', enabled: false, originalSource: source });
+  assert.deepEqual(item.operations.getSnapshot().records.map(record => record.operationId), ['original-2']);
+  assert.equal(await item.operations.originalNotSentClosed('local', 'original-1', 'config/batchWrite'), true);
+  assert.deepEqual(item.calls, []);
+  await saveRecoveredPluginEdit(item.operations, item.client, draft, () => true);
+  assert.equal(item.submissions.length, 1);
+  assert.equal(item.submissions[0]!.operationId, 'original-3');
+  assert.equal((item.submissions[0]!.params as Record<string, unknown>).expectedVersion, 'fresh-version');
+  assert.deepEqual(item.operations.getSnapshot().drafts, []);
+  assert.deepEqual(item.operations.getSnapshot().records.map(record => record.operationId), ['original-2']);
+});
+
+test('unknown plugin writes cannot become resubmittable edits; explicit discard is scoped to the known rejected original', async () => {
+  const item = recoveryFixture(); item.behavior('rejected');
+  await assert.rejects(item.submit('/workspace'), /rejected/);
+  const rejected = structuredClone(item.operations.getSnapshot().records[0]!);
+  await assert.rejects(item.operations.finish(rejected.operationId), /Restore/);
+  await item.operations.restoreOriginalPluginEdit(rejected);
+  item.behavior('lost'); await assert.rejects(item.submit('/other-workspace'), /could not be confirmed/);
+  const unknown = structuredClone(item.operations.getSnapshot().records[0]!);
+  await assert.rejects(item.operations.restoreOriginalPluginEdit(unknown), /needs confirmation/);
+  await assert.rejects(item.operations.finish(unknown.operationId, { discardOriginalEdit: true }), /not ready/);
+  assert.equal(item.operations.getSnapshot().drafts.length, 1);
+  assert.equal(item.calls.filter(call => call.method === 'submit').length, 2);
+  const known = recoveryFixture();
+  await assert.rejects(known.submit('/workspace', () => false), /before it was sent/);
+  await assert.rejects(known.submit('/other-workspace', () => false), /before it was sent/);
+  await known.operations.finish('original-1', { discardOriginalEdit: true });
+  assert.deepEqual(known.operations.getSnapshot().records.map(record => record.operationId), ['original-2']);
+});
+
+test('a recovered plugin edit stays intact when its source changes or its same editor gains a newer revision during review', async () => {
+  const item = recoveryFixture();
+  await assert.rejects(item.submit('/workspace', () => false), /before it was sent/);
+  await item.operations.restoreOriginalPluginEdit(item.operations.getSnapshot().records[0]!);
+  const draft = structuredClone(item.operations.getSnapshot().drafts[0]!);
+  const rpc = item.client.rpc.bind(item.client);
+  item.client.rpc = async <T>(method: string, params: Record<string, unknown>, hostId: string, options?: Parameters<WorkbenchClient['rpc']>[3]) => {
+    const response = await rpc<Record<string, unknown>>(method, params, hostId, options);
+    return { ...response, yardConfigSource: { ...source, codexHome: '/different-home' } } as T;
+  };
+  await assert.rejects(saveRecoveredPluginEdit(item.operations, item.client, draft, () => true), /different configuration source/);
+  assert.deepEqual(item.operations.getSnapshot().drafts, [draft]);
+  item.client.rpc = async <T>(method: string, params: Record<string, unknown>, hostId: string, options?: Parameters<WorkbenchClient['rpc']>[3]) => {
+    if (method === 'plugin/installed') await item.operations.saveDraft(draft.hostId, draft.section, draft.scope, draft.editorId, { pluginId: 'demo', enabled: true, originalSource: source });
+    return rpc<T>(method, params, hostId, options);
+  };
+  await assert.rejects(saveRecoveredPluginEdit(item.operations, item.client, draft, () => true), /draft revision changed/);
+  assert.equal(item.calls.filter(call => call.method === 'submit').length, 0);
+  assert.equal((item.operations.getSnapshot().drafts[0]!.draft as { enabled: boolean }).enabled, true);
+  assert.ok(item.operations.getSnapshot().drafts[0]!.revision > draft.revision);
 });
