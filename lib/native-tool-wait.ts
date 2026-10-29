@@ -95,7 +95,9 @@ export async function readHistory(options: {
   signal?.throwIfAborted();
   let thread = options.thread as ExtraThread, turns: TurnSummary[], nextCursor: string | null, hasMore: boolean;
   const version = options.getAppServerVersion();
-  if (thread.historyMode === 'paginated' || options.isCloudHost || (version !== '0.0.0' && versionAtLeast(version, 0, 145, 0, 15))) {
+  const validVersion = version != null && /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version);
+  const supportsPages = version != null && version !== '0.0.0' && (!validVersion || versionAtLeast(version, 0, 145, 0, 15));
+  if (thread.historyMode === 'paginated' || options.isCloudHost || supportsPages) {
     const anchorCursor = !options.isCloudHost && thread.historyMode !== 'paginated';
     const result = await abortable(manager.listThreadTurns(threadId, { cursor: anchorCursor && cursor != null ? JSON.stringify({ turnId: cursor, includeAnchor: false }) : cursor,
       itemsView: 'full', itemLimit: null, itemSnapshot: 'latest', maxBytes: maxHistoryBytes, limit: turnLimit, requestOptions: readOptions }), signal);

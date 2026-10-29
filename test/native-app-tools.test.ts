@@ -400,6 +400,15 @@ test('newer non-paginated histories translate turn-id cursors to daemon anchors'
   assert.deepEqual(JSON.parse(String(h.fake.calls('thread/turns/list')[1]!.params.cursor)), { turnId: 'newer', includeAnchor: false });
 });
 
+test('an unrecognized nonempty daemon version retains the original paginated history path', async t => {
+  const h = await fixture(t);
+  h.connection.server = { userAgent: 'codex/not-a-version' };
+  h.target.historyMode = 'legacy';
+  data(await h.call('read_thread', { threadId: 'target' }));
+  assert.equal(h.fake.calls('thread/turns/list').length, 1);
+  assert.ok(h.fake.calls('thread/read').every(call => call.params.includeTurns === false));
+});
+
 test('wait wakes on actionable status without treating commentary as an event', async t => {
   const h = await fixture(t);
   h.target.status = { type: 'active', activeFlags: [] };
