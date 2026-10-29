@@ -47,6 +47,8 @@ import { createPetOverlay, petPosition } from './pet-overlay.ts';
 import { createPetAssets } from './pet-assets.ts';
 import { SideChatParentReceipts } from './side-chat-parent-receipts.ts';
 import type { SideChatReceiptAttempt } from './side-chat-parent-receipts.ts';
+import { createNativeSideChatParent } from './side-chat-native-parent.ts';
+import type { SideChatBrowserAuthority } from './side-chat-native-parent.ts';
 import { webManifest, brandAssets } from './visual-feedback.ts';
 import { TerminalHost } from './terminal.ts';
 import type { TerminalOperation } from './terminal-protocol.ts';
@@ -59,7 +61,7 @@ import type { ChromeConnection } from '../browser-reuse/chrome-mcp.ts';
 import type { ChromeRequest } from '../browser-reuse/protocol.ts';
 import { visualizationSandboxPolicy } from './visualizations.ts';
 
-interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; httpFetch?: typeof fetch; hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection; nativeStateCheckpoint?: (step: NativeStateCheckpoint) => void | Promise<void>; sideChatParentReceipts?: SideChatParentReceipts }
+interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; httpFetch?: typeof fetch; hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection; nativeStateCheckpoint?: (step: NativeStateCheckpoint) => void | Promise<void>; sideChatParentReceipts?: SideChatParentReceipts; sideChatBrowserAuthority?: SideChatBrowserAuthority }
 const mime: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript',
   '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
@@ -126,6 +128,9 @@ export async function createNativeWorkbench(options: Options = {}) {
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallback; throw error; }
   }
   const state: ObjectValue = {}, globals: ObjectValue = {}, settings: ObjectValue = {};
+  const projectKeys = ['local-projects', 'remote-projects', 'thread-project-assignments', 'projectless-thread-ids',
+    'thread-projectless-output-directories', 'thread-workspace-root-hints'];
+  let projectAuthorityRevision = 0, projectAuthoritySnapshot: unknown[] | undefined;
   function replaceObject(target: ObjectValue, next: ObjectValue) {
     for (const key of Object.keys(target)) delete target[key];
     for (const [key, value] of Object.entries(next)) {
@@ -133,7 +138,11 @@ export async function createNativeWorkbench(options: Options = {}) {
     }
   }
   function publishState(root: ObjectValue) {
-    replaceObject(globals, record(root.globals));
+    const nextGlobals = record(root.globals);
+    const projectSnapshot = projectKeys.map(key => structuredClone(nextGlobals[key]));
+    if (projectAuthoritySnapshot && !isDeepStrictEqual(projectAuthoritySnapshot, projectSnapshot)) projectAuthorityRevision++;
+    projectAuthoritySnapshot = projectSnapshot;
+    replaceObject(globals, nextGlobals);
     replaceObject(settings, record(root.settings));
     replaceObject(state, { ...root, globals, settings });
   }
@@ -237,8 +246,8 @@ export async function createNativeWorkbench(options: Options = {}) {
   const createdThreads = new Set<string>();
   const unsupported = new Set<string>();
   const httpRequests = new Set<AbortController>();
-  async function persist() {
-    try { await nativeState.persist({ ...state, globals, settings }); }
+  async function persistRoot(root: ObjectValue) {
+    try { await nativeState.persist(root); }
     catch (error) {
       if (error instanceof NativeStateCommitError && error.uncertain) {
         stateNeedsRefresh = true;
@@ -247,6 +256,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       throw error;
     }
   }
+  async function persist() { await persistRoot({ ...state, globals, settings }); }
   function send(client: WebSocket, message: unknown) {
     if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(message));
   }
@@ -319,6 +329,15 @@ export async function createNativeWorkbench(options: Options = {}) {
     readThread: (params, options) => readToolHistory(control, params, options),
   });
   const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'), tools: appToolCatalog, callTool: callHostTool });
+  const sideChats = createNativeSideChatParent({ mutations: stateMutations, assertStateAvailable: nativeState.assertAvailable,
+    readSection: () => state.sideChats, persistSection: section => persistRoot({ ...state, globals, settings, sideChats: section }),
+    globals, compatibility: () => compatibility, projectRevision: () => projectAuthorityRevision,
+    receipts: sideChatParents, connections: page => clients.get(page),
+    generation: connectionGeneration, validateHost: validHost,
+    forkConfig: hostId => hostId === 'local' ? hostTools.config : undefined,
+    authority: options.sideChatBrowserAuthority,
+    notify: hint => broadcast({ type: 'side-chat-updated', ...hint }),
+  });
   // A daemon request is broadcast to every page subscribed to its thread.
   // Retain each result through the turn so another page or a replay only replies.
   const legacyTitleCalls = new Map<string, Map<string, ReturnType<typeof callHostTool>>>();
@@ -476,7 +495,9 @@ export async function createNativeWorkbench(options: Options = {}) {
       try { message = JSON.parse(String(data)); } catch { client.close(1007); return; }
       void handle(message, client, connections).catch(error => {
         if (message.type === 'mcp-response' && message.requestId) send(client, { type: 'server-request-response', requestId: message.requestId, error: error.message, uncertain: error.uncertain === true });
-        else if (message.type === 'fetch') send(client, { type: 'fetch-response', requestId: message.requestId, responseType: 'error', status: 500, error: error.message, uncertain: error.uncertain === true });
+        else if (message.type === 'fetch') send(client, { type: 'fetch-response', requestId: message.requestId, responseType: 'error', status: 500, error: error.message,
+          uncertain: error.uncertain === true || typeof message.url === 'string'
+            && message.url.split('/').at(-1) === 'side-chat' && error.uncertain !== false });
         else if (message.request) send(client, { type: 'mcp-response', hostId: message.hostId ?? 'local', message: { id: message.request.id,
           error: { code: typeof error.code === 'number' ? error.code : -32000, message: error.message,
             data: error.data === undefined ? { uncertain: error.uncertain === true } : error.data } } });
@@ -485,6 +506,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     client.on('close', () => {
       clients.delete(client);
       sideChatParents.forgetPage(client);
+      sideChats.forgetPage(client);
       approvalRequests.closePage(client);
       void browser.close().finally(() => browsers.delete(client));
       // Hang up page-owned shells before closing their daemon connection, so
@@ -644,10 +666,13 @@ export async function createNativeWorkbench(options: Options = {}) {
         send(client, { type: 'mcp-response', hostId, message: { id, result } }); return;
       }
       const readsConfigurationSource = method === 'config/read' || method === 'skills/list' || method === 'hooks/list';
+      if (!readMethods.has(method) && !writeMethods.has(method)) { unsupported.add(method); throw new Error('Web 宿主尚未接入：' + method); }
+      if (method === 'thread/unsubscribe' && typeof params.threadId === 'string' && await sideChats.ownsChild(hostId, params.threadId)) {
+        throw Object.assign(new Error('侧聊会话由侧聊操作负责关闭。'), { uncertain: false });
+      }
       const connection = readsConfigurationSource ? await ownedConnectionFor(hostId) : await connectedFor(client, connections, hostId);
       const sourceSocket = connection.socket;
       const readSource = readsConfigurationSource ? configurationSource(hostId, connection, sourceSocket) : undefined;
-      if (!readMethods.has(method) && !writeMethods.has(method)) { unsupported.add(method); throw new Error('Web 宿主尚未接入：' + method); }
       if (method === 'thread/delete') {
         if (!createdThreads.has(hostId + ':' + String(params.threadId))) throw new Error('仅清理本次宿主创建的空预热对话');
         const { thread } = await connection.request('thread/read', { threadId: params.threadId, includeTurns: true });
@@ -675,15 +700,15 @@ export async function createNativeWorkbench(options: Options = {}) {
       }
       if (typeof params.threadId === 'string' && params.threadId) {
         if (method === 'thread/unsubscribe') sideChatParents.revokePageThread(client, hostId, params.threadId);
-        if (['thread/settings/update', 'thread/archive', 'thread/unarchive', 'thread/delete', 'thread/revert', 'thread/queue/start'].includes(method)
-          || method === 'turn/start' && ['model', 'effort', 'serviceTier', 'approvalPolicy', 'approvalsReviewer', 'permissions',
+        if (['thread/settings/update', 'thread/archive', 'thread/unarchive', 'thread/delete', 'thread/revert', 'thread/rollback', 'thread/queue/start'].includes(method)
+          || method === 'turn/start' && ['cwd', 'runtimeWorkspaceRoots', 'model', 'effort', 'serviceTier', 'approvalPolicy', 'approvalsReviewer', 'permissions',
             'sandboxPolicy', 'collaborationMode'].some(key => Object.hasOwn(params, key))) sideChatParents.invalidate(hostId, params.threadId);
       }
       const observeSubscription = message.observeSubscriptionTerminal === true && ['thread/resume', 'thread/unsubscribe'].includes(method);
       const request = () => connection.requestWithCursor(method, params, { mutating: writeMethods.has(method),
         onLateTerminal: observeSubscription || parentAttempt ? terminal => {
           if (parentAttempt) {
-            if (terminal.outcome === 'success') sideChatParents.receive(parentAttempt, terminal.result, connection.eventCursor);
+            if (terminal.outcome === 'success' && terminal.eventCursor !== undefined) sideChatParents.receive(parentAttempt, terminal.result, terminal.eventCursor);
             else sideChatParents.cancel(parentAttempt);
           }
           if (!observeSubscription || connections.get(hostId) !== connection || connection.socket !== sourceSocket) return;
@@ -750,6 +775,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     validHost(hostId);
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
     switch (endpoint) {
+      case 'side-chat': return sideChats.handle(client, params);
       case 'pet-overlay': {
         if (hostId !== 'local') throw new Error('Mini 状态仅由本机宿主管理。');
         const command = miniCommand(params.message);
@@ -819,7 +845,10 @@ export async function createNativeWorkbench(options: Options = {}) {
         });
         const status = await inventory.refresh();
         return stateMutations.run(() => {
-          if (generation === projectInventoryGeneration) projectCompatibility = inventory.compatibility;
+          if (generation === projectInventoryGeneration) {
+            projectCompatibility = inventory.compatibility;
+            projectAuthorityRevision++;
+          }
           return structuredClone({ ...readThreadProjectState(globals, inventory.compatibility), inventory: status,
             catalog: { local: globals['local-projects'], remote: globals['remote-projects'] } });
         });
