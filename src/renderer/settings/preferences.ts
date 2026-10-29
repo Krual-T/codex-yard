@@ -162,7 +162,7 @@ export const generalPreferenceKeys: readonly GeneralPreferenceKey[] = ['composer
   'app-shell-bottom-panel-launcher-visible', 'confirm-before-close', 'notifications-turn-mode',
   'notifications-permissions-enabled', 'notifications-questions-enabled', 'notifications-dot-enabled'];
 export const allPreferenceKeys = Object.keys(preferenceDefinitions) as AnyPreferenceKey[];
-// The existing shared conflict-label map covers the original keys; General renders its additional conflicts inline.
+// Retained for callers that deliberately request the original preference group.
 export const preferenceKeys = allPreferenceKeys.filter((key): key is PreferenceKey => !generalPreferenceKeys.includes(key as GeneralPreferenceKey));
 export interface PreferenceObservation { exists: boolean; value?: unknown }
 export interface PreferenceEntry<T> {

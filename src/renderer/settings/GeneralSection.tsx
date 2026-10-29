@@ -1,21 +1,9 @@
-import { Fragment, useState } from 'react';
+import { useState } from 'react';
 import { entryState, Row, Select, Toggle } from './PreferenceControls.tsx';
 import type { PreferenceProps } from './PreferenceControls.tsx';
 import { fullAccessVisible, setFullAccessVisible } from './preferences.ts';
 import type { GeneralPreferenceKey, GeneralPreferenceValues } from './preferences.ts';
 import { hasTranslations, languageOptions, translateKnown, useI18n } from '../i18n/index.tsx';
-
-function GeneralConflict({ preferences, snapshot, setting }: PreferenceProps & { setting: GeneralPreferenceKey }) {
-  const { t } = useI18n();
-  const entry = snapshot[setting];
-  if (!entry.conflict) return null;
-  return <div className="yard-preference-conflict" role="alert">
-    <p>{t('The saved preference changed elsewhere. Review the current value before saving.')}</p>
-    <div>{t('Current:')}</div><pre>{entry.observation?.exists ? JSON.stringify(entry.observation.value, null, 2) : t('(not set)')}</pre>
-    <div className="yard-actions"><button type="button" onClick={() => preferences.resolveConflict(setting, 'current')}>{t('Use current value')}</button>
-      <button type="button" disabled={!entry.available} onClick={() => preferences.resolveConflict(setting, 'draft')}>{t('Review and reapply')}</button></div>
-  </div>;
-}
 
 export function GeneralSection(props: PreferenceProps & { platform: string; navigate: (section: string) => void }) {
   const { t } = useI18n();
@@ -51,7 +39,7 @@ export function GeneralSection(props: PreferenceProps & { platform: string; navi
             if (event.target.checked) setConfirmFullAccess(true); else setFullAccess(false);
           }} />
       </Row>
-      <GeneralConflict {...props} setting="composer-permission-mode-visibility" />
+
     </div>
     <h3 className="yard-settings-group-title">{t('General')}</h3>
     <div className="yard-setting-group">
@@ -74,14 +62,14 @@ export function GeneralSection(props: PreferenceProps & { platform: string; navi
           <option value="never">Never</option><option value="keyboardOnly">Close shortcut only</option><option value="always">Always</option>
         </select>
       </Row>
-      <GeneralConflict {...props} setting="confirm-before-close" />
+
       <Row label="Bottom panel" description="Show the bottom panel control in the app header"
         error={bottomPanel.error} retry={() => { void props.preferences.reload('app-shell-bottom-panel-launcher-visible'); }}>
         <input type="checkbox" role="switch" aria-label="Bottom panel" checked={bottomPanel.value} disabled={entryState(bottomPanel).disabled || bottomPanel.conflict}
           style={bottomPanel.value ? { backgroundColor: 'var(--yard-accent, #339cff)' } : undefined}
           onChange={event => save('app-shell-bottom-panel-launcher-visible', event.target.checked)} />
       </Row>
-      <GeneralConflict {...props} setting="app-shell-bottom-panel-launcher-visible" />
+
       {bottomPanel.value && <Row label="Default terminal location" description="Choose where the terminal shortcut and environment actions open terminal tabs"
         error={props.snapshot.defaultTerminalLocation.error} retry={() => { void props.preferences.reload('defaultTerminalLocation'); }}>
         <div className="yard-segmented" role="group" aria-label={t('Default terminal location')}>
@@ -130,16 +118,16 @@ export function GeneralSection(props: PreferenceProps & { platform: string; navi
           <option value="off">Never</option><option value="unfocused">Only when unfocused</option><option value="always">Always</option>
         </select>
       </Row>
-      <GeneralConflict {...props} setting="notifications-turn-mode" />
+
       {(['notifications-permissions-enabled', 'notifications-questions-enabled', 'notifications-dot-enabled'] as const).map((key, index) =>
-        <Fragment key={key}><Row label={['Enable permission notifications', 'Enable question notifications', 'Enable dot notifications'][index]}
+        <Row key={key} label={['Enable permission notifications', 'Enable question notifications', 'Enable dot notifications'][index]}
           description={['Show alerts when notification permissions are required', 'Show alerts when input is needed to continue', 'Show alerts when your dot sends you a message'][index]}
           error={props.snapshot[key].error} retry={() => { void props.preferences.reload(key); }}>
           <input type="checkbox" role="switch" aria-label={['Enable permission notifications', 'Enable question notifications', 'Enable dot notifications'][index]}
             checked={props.snapshot[key].value} disabled={entryState(props.snapshot[key]).disabled || props.snapshot[key].conflict}
             style={props.snapshot[key].value ? { backgroundColor: 'var(--yard-accent, #339cff)' } : undefined}
             onChange={event => save(key, event.target.checked)} />
-        </Row><GeneralConflict {...props} setting={key} /></Fragment>)}
+        </Row>)}
     </div>
     {confirmFullAccess && <div className="yard-dialog-backdrop"><div className="yard-dialog" role="dialog" aria-modal="true" aria-labelledby="yard-full-access-title"
       onKeyDown={event => { if (event.key === 'Escape') setConfirmFullAccess(false); }}>
