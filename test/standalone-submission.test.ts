@@ -112,6 +112,8 @@ test('unchanged session controls do not reconstruct a custom sandbox or collabor
   const initialOptions = sessionOptions({ model: 'custom', reasoningEffort: 'high',
     sandbox: { type: 'workspaceWrite', writableRoots: ['/extra'], networkAccess: true, excludeSlashTmp: true, excludeTmpdirEnvVar: true },
     collaborationMode: { mode: 'plan' } });
+  assert.deepEqual(initialOptions.sandboxPolicy, { type: 'workspaceWrite', writableRoots: ['/extra'], networkAccess: true,
+    excludeSlashTmp: true, excludeTmpdirEnvVar: true });
   await submitDraft(h.client, { ...base, initialOptions }, draft, initialOptions, { type: 'send' }, async () => {});
   const params = h.calls[0].params;
   for (const key of ['sandboxPolicy', 'permissions', 'collaborationMode', 'model', 'effort']) assert.equal(Object.hasOwn(params, key), false, key);
@@ -120,6 +122,54 @@ test('unchanged session controls do not reconstruct a custom sandbox or collabor
   assert.equal(h.calls[0].params.effort, null);
   assert.equal(Object.hasOwn(h.calls[0].params, 'sandboxPolicy'), false);
   assert.equal(Object.hasOwn(h.calls[0].params, 'collaborationMode'), false);
+});
+
+test('a selected complete sandbox reaches both new thread and turn without discarding its restrictions', async () => {
+  const h = fixture();
+  const policy = { type: 'workspaceWrite' as const, writableRoots: ['/extra', '/other'], networkAccess: true,
+    excludeTmpdirEnvVar: true, excludeSlashTmp: true };
+  const options = { permissionProfileId: undefined, sandboxMode: 'workspace-write' as const, sandboxPolicy: policy };
+  await submitDraft(h.client, { ...base, threadId: null, overrides: options }, draft, options, { type: 'send' }, async () => {});
+  const start = h.calls.find(call => call.method === 'thread/start')!.params;
+  const turn = h.calls.find(call => call.method === 'turn/start')!.params;
+  assert.equal(start.sandbox, 'workspace-write');
+  assert.deepEqual(start.config, { sandbox_workspace_write: { writable_roots: ['/extra', '/other'], network_access: true,
+    exclude_tmpdir_env_var: true, exclude_slash_tmp: true } });
+  assert.equal(start.permissions, null);
+  assert.deepEqual(turn.sandboxPolicy, policy);
+  assert.equal(turn.permissions, null);
+  policy.writableRoots.push('/later');
+  assert.deepEqual((turn.sandboxPolicy as typeof policy).writableRoots, ['/extra', '/other']);
+  assert.deepEqual((start.config as { sandbox_workspace_write: { writable_roots: string[] } }).sandbox_workspace_write.writable_roots, ['/extra', '/other']);
+});
+
+test('explicit policy changes preserve all fields, and a named profile stays mutually exclusive', async () => {
+  const h = fixture();
+  const previous = sessionOptions({ sandbox: { type: 'readOnly', networkAccess: true } });
+  const selected = { type: 'externalSandbox' as const, networkAccess: 'enabled' as const };
+  await submitDraft(h.client, { ...base, initialOptions: previous, overrides: { permissionProfileId: undefined, sandboxPolicy: selected } },
+    draft, { ...previous, permissionProfileId: undefined, sandboxPolicy: selected }, { type: 'send' }, async () => {});
+  assert.deepEqual(h.calls[0].params.sandboxPolicy, selected);
+  assert.equal(h.calls[0].params.permissions, null);
+  h.calls.length = 0;
+  await submitDraft(h.client, { ...base, initialOptions: previous, overrides: { permissionProfileId: 'team', sandboxPolicy: undefined } },
+    draft, { ...previous, permissionProfileId: 'team', sandboxPolicy: undefined }, { type: 'send' }, async () => {});
+  assert.equal(h.calls[0].params.permissions, 'team');
+  assert.equal(Object.hasOwn(h.calls[0].params, 'sandboxPolicy'), false);
+});
+
+test('unrepresentable new-thread policies fail before creation or any RPC', async () => {
+  for (const sandboxPolicy of [{ type: 'readOnly' as const, networkAccess: true },
+    { type: 'externalSandbox' as const, networkAccess: 'restricted' as const },
+    { type: 'readOnly' as const, networkAccess: false, futureRule: true }]) {
+    const h = fixture(); let creating = false;
+    await assert.rejects(submitDraft(h.client, { ...base, threadId: null, send: { clientUserMessageId: 'fixture',
+      async creating() { creating = true; }, async created() { throw new Error('unexpected creation'); },
+      async sending() { throw new Error('unexpected send'); }, async confirmed() { throw new Error('unexpected confirmation'); } } },
+      draft, { sandboxPolicy }, { type: 'send' }, async () => {}), /cannot be safely represented/);
+    assert.equal(creating, false);
+    assert.deepEqual(h.calls, []);
+  }
 });
 
 test('an explicit sandbox selection clears its former permission profile and leaves unrelated controls intact', async () => {

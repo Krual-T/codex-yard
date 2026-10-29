@@ -15,7 +15,7 @@ test('permission choices derive from the actual profile and administrative requi
   let requirements: unknown = { allowedPermissionProfiles: { ':workspace': true, ':danger-full-access': true },
     allowedApprovalPolicies: ['on-request'], allowedSandboxModes: ['workspace-write'], allowedApprovalsReviewers: ['user'] };
   const client = { async rpc(method: string) {
-    if (method === 'config/read') return { config: { model: 'fixture', sandbox_mode: 'workspace-write', approval_policy: 'on-request' } };
+    if (method === 'config/read') return { config: { model: 'fixture', sandbox_mode: 'workspace-write', sandbox_workspace_write: null, approval_policy: 'on-request' } };
     if (method === 'configRequirements/read') return { requirements };
     if (method === 'permissionProfile/list') return { data: [
       { id: ':workspace', allowed: true }, { id: ':read-only', allowed: true }, { id: ':danger-full-access', allowed: true },
@@ -25,7 +25,7 @@ test('permission choices derive from the actual profile and administrative requi
   const choices = await loadComposerPermissions(client, 'ssh:fixture', '/workspace', 'fixture', {}, false);
   assert.equal(choices.find(choice => choice.id === 'ask')?.allowed, true);
   assert.deepEqual(choices.find(choice => choice.id === 'ask')?.patch,
-    { permissionProfileId: ':workspace', sandboxMode: undefined, approvalPolicy: 'on-request', approvalsReviewer: 'user' });
+    { permissionProfileId: ':workspace', sandboxMode: undefined, sandboxPolicy: undefined, approvalPolicy: 'on-request', approvalsReviewer: 'user' });
   assert.equal(choices.find(choice => choice.id === 'full-access')?.allowed, false);
   assert.equal(choices.find(choice => choice.id === 'sandbox:workspace-write')?.allowed, false);
   assert.equal(choices.find(choice => choice.id === 'sandbox:default')?.allowed, false);
@@ -45,10 +45,15 @@ test('permission choices derive from the actual profile and administrative requi
   assert.equal(unknownReviewer.find(choice => choice.id === 'policy:never')?.allowed, false);
   requirements = { autoReview: { requiredOnModels: ['protected-model'] } };
   await assert.rejects(loadComposerPermissions(client, 'ssh:fixture', '/workspace', undefined, {}, false, {}), /current model is not confirmed/);
+  const granular = { granular: { sandbox_approval: false, rules: false, skill_approval: false, request_permissions: true, mcp_elicitations: true } };
+  requirements = { allowedApprovalPolicies: [granular] };
+  const granularChoices = await loadComposerPermissions(client, 'ssh:fixture', '/workspace', 'fixture', {}, true);
+  assert.equal(granularChoices.find(choice => choice.id === 'ask')?.allowed, true);
+  assert.deepEqual(granularChoices.find(choice => choice.id === 'ask')?.patch.approvalPolicy, granular);
 });
 
 test('composer presets match the host catalog for the same scoped inputs', async () => {
-  const config: SessionConfig = { model: 'fixture', approval_policy: 'on-request', sandbox_mode: 'workspace-write' };
+  const config: SessionConfig = { model: 'fixture', approval_policy: 'on-request', sandbox_mode: 'workspace-write', sandbox_workspace_write: null };
   const profiles = [{ id: ':workspace', allowed: true }, { id: ':read-only', allowed: true },
     { id: ':danger-full-access', allowed: true }, { id: 'team', allowed: true, description: 'Team profile' }];
   const requirements = { allowedApprovalsReviewers: ['user' as const], allowedSandboxModes: ['read-only' as const, 'workspace-write' as const, 'danger-full-access' as const] };
@@ -72,14 +77,33 @@ test('composer presets match the host catalog for the same scoped inputs', async
   config.approval_policy = 'never';
   const custom = await loadComposerPermissions(client, 'local', '/workspace', 'fixture', {}, false);
   assert.deepEqual(custom.find(item => item.id === 'config')?.patch,
-    { permissionProfileId: undefined, sandboxMode: 'read-only', approvalPolicy: 'never', approvalsReviewer: 'user' });
+    { permissionProfileId: undefined, sandboxMode: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never', approvalsReviewer: 'user' });
   assert.equal(custom.find(item => item.id === 'config')?.allowed, true);
   config.sandbox_mode = 'workspace-write';
+  config.sandbox_workspace_write = { writable_roots: ['/outside'], network_access: true,
+    exclude_tmpdir_env_var: true, exclude_slash_tmp: true };
+  const workspace = await loadComposerPermissions(client, 'local', '/workspace', 'fixture', {}, false);
+  const shared = permissionCatalog({ config, profiles, requirements, cwd: '/workspace', model: 'fixture' }).find(item => item.id === 'config');
+  assert.equal(workspace.find(item => item.id === 'config')?.allowed, shared?.allowed);
+  assert.deepEqual(workspace.find(item => item.id === 'config')?.patch.sandboxPolicy, shared?.native.sandboxPolicy);
+  assert.deepEqual(workspace.find(item => item.id === 'config')?.patch.sandboxPolicy, {
+    type: 'workspaceWrite', writableRoots: ['/outside'], networkAccess: true, excludeTmpdirEnvVar: true, excludeSlashTmp: true,
+  });
+  assert.equal(workspace.find(item => item.id === 'sandbox:default')?.allowed, true);
+  assert.deepEqual(workspace.find(item => item.id === 'sandbox:default')?.patch.sandboxPolicy, shared?.native.sandboxPolicy);
+  requirements.allowedSandboxModes = ['read-only'];
+  const restricted = await loadComposerPermissions(client, 'local', '/workspace', 'fixture', {}, false);
+  const restrictedShared = permissionCatalog({ config, profiles, requirements, cwd: '/workspace', model: 'fixture' });
+  assert.equal(restricted.find(item => item.id === 'config')?.allowed, false);
+  assert.equal(restricted.find(item => item.id === 'config')?.allowed, restrictedShared.find(item => item.id === 'config')?.allowed);
+  assert.equal(restricted.find(item => item.id === 'sandbox:default')?.allowed, false);
+  delete config.sandbox_workspace_write;
+  await assert.rejects(loadComposerPermissions(client, 'local', '/workspace', 'fixture', {}, false), /details are unavailable/);
   config.sandbox_workspace_write = { writable_roots: ['/outside'] };
-  const unsupported = await loadComposerPermissions(client, 'local', '/workspace', 'fixture', {}, false);
-  assert.equal(unsupported.find(item => item.id === 'config')?.allowed, false);
-  assert.match(unsupported.find(item => item.id === 'config')?.reason ?? '', /cannot be preserved/);
-  assert.equal(unsupported.find(item => item.id === 'sandbox:default')?.allowed, false);
+  await assert.rejects(loadComposerPermissions(client, 'local', '/workspace', 'fixture', {}, false), /Invalid workspace permission configuration/);
+  config.sandbox_workspace_write = { writable_roots: ['/outside'], network_access: true, exclude_tmpdir_env_var: true, exclude_slash_tmp: true };
+  (config.sandbox_workspace_write as unknown as Record<string, unknown>).writable_roots = 'invalid';
+  await assert.rejects(loadComposerPermissions(client, 'local', '/workspace', 'fixture', {}, false), /Invalid workspace permission configuration/);
 });
 
 test('project lease, confirmed permissions, file lookup and owner projection use the real composer', {
@@ -90,12 +114,13 @@ test('project lease, confirmed permissions, file lookup and owner projection use
     import {createRoot} from 'react-dom/client';
     import {I18nProvider} from './src/renderer/i18n/index.tsx';
     import {StandaloneComposer} from './src/renderer/composer/StandaloneComposer.tsx';
-    const state={calls:[],projects:[],projections:[],requirements:null,deferProject:false,releaseProject:null,goals:0,failStorage:false};
+    const state={calls:[],projects:[],projections:[],requirements:null,deferProject:false,releaseProject:null,goals:0,failStorage:false,
+      config:{model:'model',approval_policy:'on-request',sandbox_mode:'workspace-write',sandbox_workspace_write:null}};
     const originalPut=IDBObjectStore.prototype.put;
     IDBObjectStore.prototype.put=function(...args){if(state.failStorage && this.name==='atoms')throw Error('fixture storage failure');return originalPut.apply(this,args);};
-    const client={async rpc(method,params={},hostId){state.calls.push({method,hostId});
+    const client={async rpc(method,params={},hostId){state.calls.push({method,hostId,params:structuredClone(params)});
       if(method==='model/list')return {data:[{id:'model',model:'model',displayName:'Fixture',isDefault:true,defaultReasoningEffort:'high',supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null};
-      if(method==='config/read')return {config:{model:'model',approval_policy:'on-request',sandbox_mode:'workspace-write'},layers:[{name:{type:'user',file:'/fixture/config.toml',profile:null},version:'1'}],yardConfigSource:{hostId,generation:'g1',homeDirectory:'/fixture',codexHome:'/fixture'}};
+      if(method==='config/read')return {config:structuredClone(state.config),layers:[{name:{type:'user',file:'/fixture/config.toml',profile:null},version:'1'}],yardConfigSource:{hostId,generation:'g1',homeDirectory:'/fixture',codexHome:'/fixture'}};
       if(method==='configRequirements/read')return {requirements:structuredClone(state.requirements)};
       if(method==='permissionProfile/list')return {data:[{id:':workspace',allowed:true},{id:':read-only',allowed:true},{id:':danger-full-access',allowed:true}],nextCursor:null};
       if(method==='thread/queue/list')return {data:[],nextCursor:null};
@@ -133,6 +158,19 @@ test('project lease, confirmed permissions, file lookup and owner projection use
     assert.equal(projected[0].options.approvalPolicy, 'on-request');
     await page.evaluate(() => (window as any).fixture.render());
     assert.equal(await page.evaluate(() => (window as any).fixture.state.projections.length), 1);
+    await page.evaluate(() => (window as any).fixture.render({ initialOptions: { serviceTier: 'fast', sandboxMode: 'workspace-write',
+      sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } },
+      projectDisplay: { hostId: 'local', cwd: '/workspace', name: 'Projection A' } }));
+    await page.waitForFunction(() => (window as any).fixture.state.projections.at(-1).options.serviceTier === 'fast');
+    const projectionCount = await page.evaluate(() => (window as any).fixture.state.projections.length);
+    await page.evaluate(() => (window as any).fixture.render({ initialOptions: { serviceTier: 'fast', sandboxMode: 'workspace-write',
+      sandboxPolicy: { excludeSlashTmp: false, excludeTmpdirEnvVar: false, networkAccess: false, writableRoots: [], type: 'workspaceWrite' } },
+      projectDisplay: { hostId: 'local', cwd: '/workspace', name: 'Projection B' } }));
+    await page.locator('.standalone-composer__target > details > summary').getByText('Projection B').waitFor();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    assert.equal(await page.evaluate(() => (window as any).fixture.state.projections.length), projectionCount);
+    await page.evaluate(() => (window as any).fixture.render({ initialOptions: undefined, projectDisplay: null }));
+    await page.waitForFunction(() => (window as any).fixture.state.projections.at(-1).options.serviceTier === null);
 
     await editor.fill('keep this draft');
     await page.evaluate(() => { (window as any).fixture.state.deferProject = true; });
@@ -173,6 +211,38 @@ test('project lease, confirmed permissions, file lookup and owner projection use
     assert.equal(await page.evaluate(() => (window as any).fixture.state.calls.some((call: any) => call.method === 'config/batchWrite')), false);
 
     const accessMenu = page.locator('.standalone-composer__access');
+    await page.evaluate(() => { (window as any).fixture.state.config.sandbox_workspace_write = {
+      writable_roots: ['/outside'], network_access: true, exclude_tmpdir_env_var: true, exclude_slash_tmp: true,
+    }; });
+    if (await accessMenu.evaluate(element => (element as HTMLDetailsElement).open)) await accessMenu.locator(':scope > summary').click();
+    await accessMenu.locator(':scope > summary').click();
+    await page.getByRole('button', { name: /Custom \(config.toml\)/ }).click();
+    await page.waitForFunction(() => (window as any).fixture.state.projections.at(-1).options.sandboxPolicy?.writableRoots?.[0] === '/outside');
+    assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.projections.at(-1).options.sandboxPolicy), {
+      type: 'workspaceWrite', writableRoots: ['/outside'], networkAccess: true, excludeTmpdirEnvVar: true, excludeSlashTmp: true,
+    });
+    assert.equal(await editor.inputValue(), 'keep this draft');
+    if (await accessMenu.evaluate(element => (element as HTMLDetailsElement).open)) await accessMenu.locator(':scope > summary').click();
+    await page.evaluate(() => { delete (window as any).fixture.state.config.sandbox_workspace_write;
+      (window as any).fixture.render({ initialOptions: { serviceTier: 'fast' }, context: { cwd: '/other' } }); });
+    await page.waitForFunction(() => (window as any).fixture.state.calls.some((call: any) => call.method === 'config/read' && call.params.cwd === '/other'));
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    assert.notEqual(await page.evaluate(() => (window as any).fixture.state.projections.at(-1).options.serviceTier), 'fast');
+    await accessMenu.locator(':scope > summary').click();
+    await accessMenu.getByRole('alert').filter({ hasText: 'Workspace permission details are unavailable' }).waitFor();
+    await page.evaluate(() => { (window as any).fixture.state.config.sandbox_workspace_write = {
+      writable_roots: ['/outside'], network_access: true, exclude_tmpdir_env_var: true, exclude_slash_tmp: true,
+    }; });
+    await accessMenu.getByRole('button', { name: 'Retry' }).click();
+    await accessMenu.getByRole('button', { name: /Custom \(config.toml\)/ }).waitFor();
+    await page.waitForFunction(() => (window as any).fixture.state.projections.at(-1).options.serviceTier === 'fast');
+    await page.locator('.standalone-composer__model > summary').click();
+    await page.locator('.standalone-composer__model-choices > summary').click();
+    await page.getByRole('button', { name: 'Model: Fixture', exact: true }).waitFor();
+    await page.locator('.standalone-composer__model > summary').click();
+    await page.evaluate(() => (window as any).fixture.render({ initialOptions: undefined, context: { cwd: '/workspace' } }));
+    await page.waitForFunction(() => (window as any).fixture.state.projections.at(-1).options.serviceTier === null);
+    assert.equal(await editor.inputValue(), 'keep this draft');
     if (!await accessMenu.evaluate(element => (element as HTMLDetailsElement).open)) await accessMenu.locator(':scope > summary').click();
     await page.getByText('Other permission settings').click();
     const sandbox = page.getByLabel('Sandbox permissions');

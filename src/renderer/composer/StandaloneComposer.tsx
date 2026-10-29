@@ -67,6 +67,10 @@ export type StandaloneComposerRuntimeProps = Omit<StandaloneComposerProps, 'onSu
 };
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function sandboxKey(policy: SubmitOptions['sandboxPolicy']): string | undefined {
+  return JSON.stringify(policy, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : value);
+}
 function completionEnd(text: string, end: number, token: string): number {
   const suffix = text.slice(end).match(token.startsWith('@') ? /^[^\s@$\ufffc]*/ : /^[^\s@$\/\ufffc]*/)?.[0] ?? '';
   return end + suffix.length;
@@ -121,7 +125,7 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     const normalizedPolicy = typeof policy === 'object' ? [policy.granular.sandbox_approval, policy.granular.rules,
       policy.granular.skill_approval, policy.granular.request_permissions, policy.granular.mcp_elicitations] : policy;
     const signature = JSON.stringify([owner.hostId, owner.threadId, owner.draftId, value(effective.model), value(effective.effort),
-      value(normalizedPolicy), value(effective.sandboxMode), value(effective.approvalsReviewer), value(effective.permissionProfileId),
+      value(normalizedPolicy), value(effective.sandboxMode), value(sandboxKey(effective.sandboxPolicy)), value(effective.approvalsReviewer), value(effective.permissionProfileId),
       value(effective.serviceTier), value(effective.mode)]);
     if (signature === lastOptionsProjection.current) return;
     lastOptionsProjection.current = signature;
@@ -247,12 +251,13 @@ function ComposerSession({ client, context, busy, onSubmit, onInterrupt, onStart
     const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
     const baseline = appliedOptions.baseline, next = { ...appliedOptions.changes };
     const sandboxChanged = !same(initialOptions?.sandboxMode, baseline.sandboxMode)
+      || sandboxKey(initialOptions?.sandboxPolicy) !== sandboxKey(baseline.sandboxPolicy)
       || !same(initialOptions?.permissionProfileId, baseline.permissionProfileId);
     const cleared: (keyof SubmitOptions)[] = [];
     let changed = false;
     for (const field of Object.keys(next) as (keyof SubmitOptions)[]) {
       const local = Object.hasOwn(overrides, field) && same(overrides[field], next[field]);
-      const authoritativeChanged = field === 'sandboxMode' || field === 'permissionProfileId'
+      const authoritativeChanged = field === 'sandboxMode' || field === 'sandboxPolicy' || field === 'permissionProfileId'
         ? sandboxChanged : !same(initialOptions?.[field], baseline[field]);
       if (!local || authoritativeChanged) {
         if (local) cleared.push(field);

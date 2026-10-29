@@ -14,7 +14,7 @@ import type { SendIntent } from '../src/renderer/app/send-recovery.ts';
 import { sessionOptions } from '../src/renderer/app/session-options.ts';
 import { captureDraftInjection, submitDraft } from '../src/renderer/app/submission.ts';
 import type { SubmissionContext } from '../src/renderer/app/submission.ts';
-import type { ComposerDraft, WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
+import type { ComposerDraft, SubmitOptions, WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import type { ThreadSummary } from '../lib/codex-protocol.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, NO_REPLY } from './fake-codex.ts';
 
@@ -27,7 +27,7 @@ const draft: ComposerDraft = { text, images: [], files: [], input: [{ type: 'tex
 const thread: ThreadSummary = { id: 'thread', name: null, cwd: '/fixture', status: { type: 'idle' }, turns: [] };
 const owner = { hostId: 'fixture', threadId: thread.id, draftId: 'original-draft' };
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, options: SubmitOptions = { model: 'original-model' }) {
   const root = await mkdtemp(join(tmpdir(), 'yard-inject-'));
   const peer = await createFakeCodex(root);
   peer.threads.set(thread.id, fixtureThread(thread.id, root)); peer.loaded.add(thread.id);
@@ -101,8 +101,8 @@ async function fixture(t: TestContext) {
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); }, async reply() { throw new Error('unexpected approval'); },
   };
   let store = new SendRecoveryStore(client, storage);
-  let intent: SendIntent = await store.prepare({ owner, revision: 'original-revision' }, '/fixture', draft, { model: 'original-model' },
-    { model: 'original-model' }, undefined, undefined, { type: 'send' }, captureDraftInjection(draft, owner.hostId));
+  let intent: SendIntent = await store.prepare({ owner, revision: 'original-revision' }, '/fixture', draft, options,
+    options, undefined, undefined, { type: 'send' }, captureDraftInjection(draft, owner.hostId));
   const context = (): SubmissionContext => ({ hostId: owner.hostId, threadId: owner.threadId, cwd: '/fixture',
     readOnly: false, activeTurnId: null, thread, overrides: intent.overrides, injection: structuredClone(intent.injection),
     nativeInjection: { store, intent: structuredClone(intent), authority: { daemonConnectionGeneration: generation, assertBeforeSend: assertAuthority } },
@@ -144,7 +144,9 @@ test('submission uses the native fence with immutable ordered input and no direc
 });
 
 test('authority, input and explicit options remain captured across asynchronous preflight', async t => {
-  const h = await fixture(t), context = h.context(), value = structuredClone(draft), options = structuredClone(h.intent.options);
+  const policy = { type: 'workspaceWrite' as const, writableRoots: ['/original-root'], networkAccess: true,
+    excludeTmpdirEnvVar: true, excludeSlashTmp: true };
+  const h = await fixture(t, { model: 'original-model', sandboxPolicy: policy }), context = h.context(), value = structuredClone(draft), options = structuredClone(h.intent.options);
   const original = structuredClone(h.intent), hooks = context.send!;
   let entered!: () => void, release!: () => void;
   const reached = new Promise<void>(resolve => { entered = resolve; });
@@ -158,9 +160,12 @@ test('authority, input and explicit options remain captured across asynchronous 
   context.nativeInjection!.intent.injection!.responseItems[1]!.output = 'changed';
   context.injection!.responseItems[1]!.output = 'changed';
   context.overrides!.model = 'changed-model'; options.model = 'changed-model'; value.text = 'changed draft';
+  (context.overrides!.sandboxPolicy as typeof policy).writableRoots.push('/late-root');
+  (options.sandboxPolicy as typeof policy).networkAccess = false;
   release(); await sending;
   const sent = h.peer.calls('turn/start')[0]!.params;
   assert.equal(sent.model, 'original-model');
+  assert.deepEqual(sent.sandboxPolicy, policy);
   assert.deepEqual(sent.input, original.injection!.input);
   assert.deepEqual(h.peer.calls('thread/inject_items')[0]!.params.items, original.injection!.responseItems);
   assert.equal((await h.current()).injection!.native!.reference.connectionGeneration, 'generation-a');

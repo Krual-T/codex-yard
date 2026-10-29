@@ -37,9 +37,12 @@ test('custom workspace permissions retain native paths and network limits while 
   const choices = permissionCatalog({ config, profiles, cwd: '/workspace' });
   const custom = choices.find(choice => choice.id === 'config');
   assert.ok(custom);
-  assert.deepEqual(custom.native.sandboxPolicy, { type: 'workspaceWrite', writableRoots: ['/workspace', '/private'],
+  assert.deepEqual(custom.native.sandboxPolicy, { type: 'workspaceWrite', writableRoots: ['/private'],
     networkAccess: true, excludeTmpdirEnvVar: true, excludeSlashTmp: true });
   assert.deepEqual(permissionStart(custom), { sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: 'user' });
+  assert.deepEqual(permissionStart(custom, { preserveSandboxPolicy: true }), { sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: 'user',
+    config: { sandbox_workspace_write: { writable_roots: ['/private'], network_access: true,
+      exclude_tmpdir_env_var: true, exclude_slash_tmp: true } } });
   assert.doesNotMatch(JSON.stringify(publicPermissions(choices)), /native|private|writableRoots|sandboxPolicy/);
   assert.equal(nonFullAccessChoice(choices)?.id, 'ask');
 });

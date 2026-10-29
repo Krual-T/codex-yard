@@ -5,7 +5,8 @@ import { positionComposerMenu } from './composer-menu-position.ts';
 import type { SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { useI18n } from '../i18n/index.tsx';
 import { ModelSettings } from '../settings/model-settings.ts';
-import { isCyberModel, loadComposerPermissions } from './composer-permissions.ts';
+import { isCyberModel, loadComposerPermissions, permissionConfigFrom } from './composer-permissions.ts';
+import { sandboxPolicyForConfig } from '../../../lib/permissions.ts';
 import type { ComposerPermissionChoice } from './composer-permissions.ts';
 import type { ApprovalPolicy, ApprovalsReviewer, SandboxMode } from '../../../lib/codex-protocol.ts';
 
@@ -77,6 +78,7 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, 
   const [permissionChoices, setPermissionChoices] = useState<ComposerPermissionChoice[]>([]);
   const [permissionLoading, setPermissionLoading] = useState(false);
   const [permissionError, setPermissionError] = useState('');
+  const [configReadVersion, setConfigReadVersion] = useState(0);
   const [confirmFullAccess, setConfirmFullAccess] = useState<ComposerPermissionChoice | null>(null);
   const confirmCancel = useRef<HTMLButtonElement>(null);
   const confirmationId = useId();
@@ -105,20 +107,30 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, 
       .then(([list, response]) => {
         if (!active) return;
         const config = record(record(response).config);
+        let sandboxPolicy: SubmitOptions['sandboxPolicy'];
+        let validPermissions = true;
+        try {
+          const validated = permissionConfigFrom(config);
+          sandboxPolicy = sandbox(validated.sandbox_mode) ? sandboxPolicyForConfig(validated) : undefined;
+        } catch {
+          // Permission loading reports the invalid settings without disabling the model menu.
+          validPermissions = false;
+        }
         const defaults = list.filter(item => item.default);
         const model = string(config.model) ?? (defaults.length === 1 ? defaults[0]?.value : undefined);
         const selected = list.find(item => item.value === model);
         setAvailable(list);
         setDefaults({ model, effort: string(config.model_reasoning_effort) ?? selected?.defaultEffort ?? null,
           approvalPolicy: approval(config.approval_policy), sandboxMode: sandbox(config.sandbox_mode),
+          sandboxPolicy,
           approvalsReviewer: reviewer(config.approvals_reviewer), permissionProfileId: string(config.default_permissions),
           serviceTier: string(config.service_tier) ?? null });
-        setLoadedConfigSource(configSource);
+        setLoadedConfigSource(validPermissions ? configSource : null);
         setError('');
       }).catch(reason => { if (active) setError('无法读取模型或配置：' + String(reason instanceof Error ? reason.message : reason)); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [configSource]);
+  }, [configSource, configReadVersion]);
   const configured = threadId == null ? defaults : {};
   const fallback = isHome ? configured : inherited ?? {};
   const effective: SubmitOptions = { ...fallback, ...value };
@@ -128,7 +140,7 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, 
   if (effective.approvalsReviewer === undefined) effective.approvalsReviewer = fallback.approvalsReviewer;
   if (effective.serviceTier === undefined) effective.serviceTier = fallback.serviceTier;
   if (effective.sandboxMode === undefined && !effective.permissionProfileId) effective.sandboxMode = fallback.sandboxMode;
-  if (effective.permissionProfileId) effective.sandboxMode = undefined;
+  if (effective.permissionProfileId) { effective.sandboxMode = undefined; effective.sandboxPolicy = undefined; }
   const effectiveKey = JSON.stringify(effective);
   useEffect(() => {
     if (loading || loadedConfigSource !== configSource || error || isHome && (homeState.loading || homeState.saving || modelSettings.dirty || defaultWritePending || !!homeState.error)) return;
@@ -188,6 +200,10 @@ export function StandaloneOptions({ client, hostId, cwd, threadId, projectless, 
       const choices = await loadComposerPermissions(source.client, source.hostId, source.cwd, source.model, source.effective, source.projectless, source.inherited);
       if (!permissionMounted.current || sequence !== permissionSequence.current) return;
       if (permissionSource.current.key !== source.key || permissionSource.current.client !== source.client) throw new Error('The conversation or permissions changed; review the choices again.');
+      if (loadedConfigSource !== configSource) {
+        setConfigReadVersion(version => version + 1);
+        if (choice) throw new Error('Permission configuration was refreshed; review the choices again.');
+      }
       setPermissionChoices(choices);
       if (choice) {
         const current = choices.find(item => item.id === choice.id);

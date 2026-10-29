@@ -22,7 +22,7 @@ test('standalone composer preserves drafts, routes settings and controls the aut
         async rpc(method, params = {}, host = 'local') {
           state.calls.push({method, params:structuredClone(params), host});
           if (method === 'model/list') return {data:[{id:'model-a',model:'model-a',displayName:'Model A',isDefault:true,defaultReasoningEffort:'high',supportedReasoningEfforts:[{reasoningEffort:'low'},{reasoningEffort:'high'}]},{id:'model-b',model:'model-b',displayName:'Model B',supportedReasoningEfforts:[{reasoningEffort:'low'}]}],nextCursor:null};
-          if (method === 'config/read') return {config:{model:'model-a',model_reasoning_effort:'high',approval_policy:'on-request',sandbox_mode:'workspace-write',service_tier:null}};
+          if (method === 'config/read') return {config:{model:'model-a',model_reasoning_effort:'high',approval_policy:'on-request',sandbox_mode:'workspace-write',sandbox_workspace_write:null,service_tier:null}};
           if (method === 'configRequirements/read') return {requirements:null};
           if (method === 'permissionProfile/list') return {data:[{id:':workspace',allowed:true},{id:':read-only',allowed:true},{id:':danger-full-access',allowed:true},{id:'fixture-profile',allowed:true}],nextCursor:null};
           if (method === 'thread/items/list') return {data:state.history.map(item=>({item})),nextCursor:null};
@@ -120,7 +120,7 @@ test('standalone composer preserves drafts, routes settings and controls the aut
     const submitted = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
     assert.equal(submitted.draft.text, 'first draft');
     assert.deepEqual(submitted.action, { type: 'send' });
-    assert.deepEqual(submitted.options, { model: 'model-b', effort: 'low', approvalPolicy: { granular: { sandbox_approval: false, rules: true, skill_approval: false, request_permissions: true, mcp_elicitations: false } }, sandboxMode: 'read-only', serviceTier: 'fast', mode: 'plan', approvalsReviewer: 'user', permissionProfileId: undefined });
+    assert.deepEqual(submitted.options, { model: 'model-b', effort: 'low', approvalPolicy: { granular: { sandbox_approval: false, rules: true, skill_approval: false, request_permissions: true, mcp_elicitations: false } }, sandboxMode: 'read-only', sandboxPolicy: undefined, serviceTier: 'fast', mode: 'plan', approvalsReviewer: 'user', permissionProfileId: undefined });
     await editor.fill('newer edit');
     await page.evaluate(() => (window as any).fixture.resolveSubmit());
     await page.getByRole('button', { name: '发送', exact: true }).waitFor();

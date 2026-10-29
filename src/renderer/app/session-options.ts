@@ -13,6 +13,7 @@ export function sessionOptions(settings: ThreadSettingsResponse): SubmitOptions 
     ...(settings.approvalsReviewer ? { approvalsReviewer: settings.approvalsReviewer } : {}),
     ...(settings.activePermissionProfile?.id ? { permissionProfileId: settings.activePermissionProfile.id } : {}),
     ...(sandboxMode ? { sandboxMode } : {}),
+    ...(settings.sandbox ? { sandboxPolicy: structuredClone(settings.sandbox) } : {}),
     ...(settings.serviceTier !== undefined ? { serviceTier: settings.serviceTier } : {}),
     ...(mode === 'default' || mode === 'plan' ? { mode } : {}),
   };

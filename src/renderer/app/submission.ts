@@ -1,4 +1,5 @@
 import type { ThreadSettingsResponse, ThreadSummary, TurnSummary } from '../../../lib/codex-protocol.ts';
+import { sandboxPolicyThreadStart } from '../../../lib/permissions.ts';
 import type { ComposerDraft, MessageEditOrigin, SubmissionCollaborationMode, SubmitAction, SubmitOptions, WorkbenchClient } from '../workbench-contract.ts';
 import { draftToInput, isStructuredAppInput, prepareDraftInput } from '../composer/standalone-draft.ts';
 import type { SendInjectedInput, SendIntent } from './send-recovery.ts';
@@ -54,6 +55,9 @@ export interface SubmissionContext {
 function permissions(options: SubmitOptions, cwd: string, starting: boolean): Record<string, unknown> {
   if (options.permissionProfileId) return { permissions: options.permissionProfileId };
   const clearedProfile = Object.hasOwn(options, 'permissionProfileId') ? { permissions: null } : {};
+  if (options.sandboxPolicy) return starting
+    ? { ...clearedProfile, ...sandboxPolicyThreadStart(options.sandboxPolicy) }
+    : { ...clearedProfile, sandboxPolicy: structuredClone(options.sandboxPolicy) };
   if (!options.sandboxMode) return clearedProfile;
   if (starting) return { ...clearedProfile, sandbox: options.sandboxMode };
   return { ...clearedProfile, sandboxPolicy: options.sandboxMode === 'danger-full-access' ? { type: 'dangerFullAccess' }
@@ -154,9 +158,10 @@ export async function submitDraft(client: WorkbenchClient, context: SubmissionCo
   let id = context.threadId;
   let settings: ThreadSettingsResponse = {};
   if (!id) {
+    const threadPermissions = permissions(options, context.cwd, true);
     await context.send?.creating();
     const result = await client.rpc<{ thread: ThreadSummary } & ThreadSettingsResponse>('thread/start',
-      { cwd: context.cwd, ...sharedOptions(options), ...permissions(options, context.cwd, true) }, context.hostId);
+      { cwd: context.cwd, ...sharedOptions(options), ...threadPermissions }, context.hostId);
     id = result.thread.id; settings = result;
     await context.send?.created(result.thread, result);
     // thread/start owns the initial subscription. Its empty history may not yet

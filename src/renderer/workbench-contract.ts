@@ -1,4 +1,4 @@
-import type { ApprovalPolicy, ApprovalsReviewer, SandboxMode, ThreadSummary, RequestOptions } from '../../lib/codex-protocol.ts';
+import type { ApprovalPolicy, ApprovalsReviewer, SandboxMode, SandboxPolicy, ThreadSummary, RequestOptions } from '../../lib/codex-protocol.ts';
 
 /** The browser talks only to Yard's host bridge, which owns CLI connections. */
 export interface WorkbenchEvent {
@@ -66,6 +66,8 @@ export interface SubmitOptions {
   effort?: string | null;
   approvalPolicy?: ApprovalPolicy;
   sandboxMode?: SandboxMode;
+  /** Full authoritative policy or explicit selection; distinct from a named profile. */
+  sandboxPolicy?: SandboxPolicy;
   approvalsReviewer?: ApprovalsReviewer;
   permissionProfileId?: string;
   serviceTier?: string | null;
