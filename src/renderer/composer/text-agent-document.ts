@@ -187,18 +187,22 @@ export function applyTextAgentMarks(original: ComposerDocument, ranges: readonly
   return readRichDocument(result) ? result : null;
 }
 
-/** Serialize each original input segment without merging its surrounding non-text items. */
-export function serializeTextAgentSegments(doc: ProseMirrorNode, segments: readonly string[], plain: boolean): string[] | null {
+/** Recover the document portion belonging to each original protocol text item. */
+export function textAgentSegmentDocuments(doc: ProseMirrorNode, segments: readonly string[]): ProseMirrorNode[] | null {
   const projection = projectTextAgentDocument(doc);
   if (!projection || !projection.agents.length || projection.text !== segments.join('\n')) return null;
   let offset = 0;
-  const result: string[] = [];
+  const result: ProseMirrorNode[] = [];
   for (const segment of segments) {
     const from = positionAt(doc, projection, offset), to = positionAt(doc, projection, offset + segment.length);
     if (from === null || to === null) return null;
-    const part = doc.cut(from, to);
-    result.push(plain ? serializePlainDocument(part) : serializeRichDocument(part));
+    result.push(doc.cut(from, to));
     offset += segment.length + 1;
   }
   return result;
+}
+
+/** Serialize each original input segment without merging its surrounding non-text items. */
+export function serializeTextAgentSegments(doc: ProseMirrorNode, segments: readonly string[], plain: boolean): string[] | null {
+  return textAgentSegmentDocuments(doc, segments)?.map(part => plain ? serializePlainDocument(part) : serializeRichDocument(part)) ?? null;
 }

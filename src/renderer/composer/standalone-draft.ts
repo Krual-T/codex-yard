@@ -1,8 +1,9 @@
 import type { ComposerContext, ComposerDocument, ComposerDraft, ComposerImage } from '../workbench-contract.ts';
+import { EditorState } from 'prosemirror-state';
 import { applyTextEdits, canRemoveImageAttachment, textEdits } from '../messages/message-edit.ts';
 import { composerSchema, isOrdinaryRichText, readRichDocument, richDocumentSkills, serializePlainDocument, serializeRichDocument } from './rich-document.ts';
 import type { Node as ProseMirrorNode } from 'prosemirror-model';
-import { documentFromText, isPlainTextAgentDocument, projectTextAgentDocument, serializeTextAgentSegments, textAgentSegments, textInlineNode } from './text-agent-document.ts';
+import { documentFromText, isPlainTextAgentDocument, projectTextAgentDocument, textAgentSegmentDocuments, textAgentSegments, textInlineNode } from './text-agent-document.ts';
 import type { TextAgentSpan } from './text-agent-document.ts';
 
 export { documentFromText } from './text-agent-document.ts';
@@ -616,17 +617,91 @@ function remapAgentRanges(item: Record<string, unknown>, before: string, after: 
   return { ...item, text: after, text_elements: elements };
 }
 
+/** Locate references in the actual serialized nodes, checking that instrumentation changes no output. */
+function remapAgentDocumentRanges(item: Record<string, unknown>, part: ProseMirrorNode, before: string, after: string,
+  plain: boolean): Record<string, unknown> | null {
+  if (isStructuredAppInput(item) || !Array.isArray(item.text_elements) || !item.text_elements.length) return null;
+  const projection = projectTextAgentDocument(part);
+  if (!projection || projection.text !== before || !projection.agents.length) return null;
+  if (Object.keys(item).some(key => !['type', 'text', 'text_elements'].includes(key))) {
+    throw new Error('格式化文本包含无法安全转换的原始上下文，已保留原始草稿。');
+  }
+  const encoder = new TextEncoder(), decoder = new TextDecoder('utf-8', { fatal: true }), bytes = encoder.encode(before);
+  if (decoder.decode(bytes) !== before) throw new Error('消息文本包含无效 Unicode，已保留原始消息。');
+  const offset = (value: unknown): number => {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > bytes.length) {
+      throw new Error('格式化文本的引用范围无法无损映射，已保留原始草稿。');
+    }
+    try { return decoder.decode(bytes.slice(0, value)).length; }
+    catch { throw new Error('格式化文本的引用范围无法无损映射，已保留原始草稿。'); }
+  };
+  const ranges = item.text_elements.map(element => {
+    if (!record(element) || !record(element.byteRange) || Object.keys(element).some(key => !['byteRange', 'placeholder'].includes(key))
+      || Object.keys(element.byteRange).some(key => !['start', 'end'].includes(key))
+      || element.placeholder !== null && typeof element.placeholder !== 'string') {
+      throw new Error('格式化文本包含未识别的引用信息，已保留原始草稿。');
+    }
+    const start = offset(element.byteRange.start), end = offset(element.byteRange.end);
+    if (start > end) throw new Error('格式化文本的引用范围无法无损映射，已保留原始草稿。');
+    if (projection.agents.some(agent => start < agent.end && end > agent.start
+      || start === end && start > agent.start && start < agent.end)) {
+      throw new Error('格式化文本与引用内容重叠，已保留原始草稿。');
+    }
+    return { element, start, end };
+  });
+  let prefix = '\uE000';
+  while (before.includes(prefix) || after.includes(prefix)) prefix += '\uE000';
+  const boundaries = ranges.flatMap((range, index) => [
+    { offset: range.start, side: 'start' as const, marker: prefix + index + 's\uE001' },
+    { offset: range.end, side: 'end' as const, marker: prefix + index + 'e\uE001' },
+  ]);
+  const positioned = boundaries.map(boundary => {
+    const token = projection.tokens.find(token => token.node?.isText && (boundary.side === 'start'
+      ? token.start <= boundary.offset && boundary.offset < token.end
+      : token.start < boundary.offset && boundary.offset <= token.end));
+    return token?.node ? { ...boundary, position: token.from + boundary.offset - token.start, marks: token.node.marks } : null;
+  });
+  if (positioned.some(boundary => !boundary)) return null;
+  let transaction = EditorState.create({ doc: part }).tr;
+  for (const boundary of positioned.filter((value): value is NonNullable<typeof value> => !!value)
+    .sort((a, b) => b.position - a.position || Number(b.side === 'start') - Number(a.side === 'start'))) {
+    transaction = transaction.insert(boundary.position, part.type.schema.text(boundary.marker, boundary.marks));
+  }
+  const annotated = plain ? serializePlainDocument(transaction.doc) : serializeRichDocument(transaction.doc);
+  const found = boundaries.map(boundary => ({ ...boundary, at: annotated.indexOf(boundary.marker) }));
+  if (found.some(boundary => boundary.at < 0 || annotated.indexOf(boundary.marker, boundary.at + boundary.marker.length) >= 0)) return null;
+  const ordered = [...found].sort((a, b) => a.at - b.at);
+  let restored = '', cursor = 0;
+  const positions = new Map<string, number>();
+  for (const boundary of ordered) {
+    restored += annotated.slice(cursor, boundary.at);
+    positions.set(boundary.marker, restored.length);
+    cursor = boundary.at + boundary.marker.length;
+  }
+  restored += annotated.slice(cursor);
+  if (restored !== after) return null;
+  const mapped = ranges.map((range, index) => {
+    const start = positions.get(boundaries[index * 2]!.marker)!, end = positions.get(boundaries[index * 2 + 1]!.marker)!;
+    if (start > end || after.slice(start, end) !== before.slice(range.start, range.end)) return null;
+    return { ...range.element, byteRange: { ...(range.element.byteRange as Record<string, unknown>),
+      start: encoder.encode(after.slice(0, start)).length, end: encoder.encode(after.slice(0, end)).length } };
+  });
+  return mapped.some(element => !element) ? null : { ...item, text: after, text_elements: mapped };
+}
+
 function formatOrderedDocument(input: Record<string, unknown>[], document: ProseMirrorNode, plain: boolean,
   appContexts: ReadonlyMap<number, { context: Record<string, unknown>; text: string }>): void {
   const indexes = input.flatMap((item, index) => item.type === 'text' ? [index] : []);
   const sourceSegments = indexes.map(index => input[index]!.text as string);
-  const visibleSegments = serializeTextAgentSegments(document, sourceSegments, plain);
-  if (visibleSegments) {
+  const segmentDocuments = textAgentSegmentDocuments(document, sourceSegments);
+  if (segmentDocuments) {
     const agents = textAgentSegments(document, sourceSegments);
     indexes.forEach((index, position) => {
-      const item = input[index]!;
-      input[index] = remapAgentRanges(item, item.text as string, visibleSegments[position]!, agents?.[position] ?? [])
-        ?? remapFormattedRanges(item, item.text as string, visibleSegments[position]!, appContexts.get(index)?.context);
+      const item = input[index]!, part = segmentDocuments[position]!, before = item.text as string;
+      const after = plain ? serializePlainDocument(part) : serializeRichDocument(part);
+      input[index] = remapAgentDocumentRanges(item, part, before, after, plain)
+        ?? remapAgentRanges(item, before, after, agents?.[position] ?? [])
+        ?? remapFormattedRanges(item, before, after, appContexts.get(index)?.context);
     });
     return;
   }

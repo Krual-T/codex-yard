@@ -1188,6 +1188,66 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
+    await t.test('C review marked pasted nodes retain repeated UTF-8 references in the actual submission', async () => {
+      for (const kind of ['agent', 'plugin'] as const) {
+        const { page, errors } = await open('c-review-paste-range-' + kind);
+        await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+        const original = { text: 'local文\nTail', images: [], files: [], references: [], skills: [], input: [
+          { type: 'text', text: 'local文', text_elements: [{ byteRange: { start: 0, end: 8 }, placeholder: 'ref' }] },
+          { type: 'image', fileId: 'file-1', detail: 'high' }, { type: 'text', text: 'Tail', text_elements: [] },
+        ], document: { type: 'doc', content: [
+          { type: 'paragraph', content: [{ type: 'text', text: 'local文' }] },
+          { type: 'paragraph', content: [{ type: 'text', text: 'Tail' }] },
+        ] } };
+        assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+        const first = page.getByRole('textbox', { name: 'Work with Codex 1' });
+        await first.focus(); await first.evaluate(element => (element as HTMLTextAreaElement).setSelectionRange(0, 0));
+        await first.evaluate((element, kind) => {
+          const span = kind === 'agent' ? '<span agent-mention-name="A" agent-mention-display-name="A" agent-mention-path="thread://t?hostId=local">A</span>'
+            : '<span plugin-mention-name="A" plugin-mention-display-name="A" plugin-mention-path="plugin://local@openai-primary-runtime">A</span>';
+          const data = new DataTransfer(); data.setData('text/html', '<strong>' + span + '</strong>'); data.setData('text/plain', 'A');
+          element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+        }, kind);
+        await first.locator('strong [data-mention="' + kind + '"]').waitFor();
+        const current = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+        const shift = kind === 'agent' ? 1 : 2;
+        assert.deepEqual(current.input[0].text_elements[0].byteRange, { start: shift, end: shift + 8 });
+        await page.getByRole('button', { name: 'Send', exact: true }).click();
+        await page.waitForFunction(() => (window as any).fixture.state.submissions.length > 0 || !!document.querySelector('[role="alert"]'));
+        const state = await page.evaluate(() => ({ submissions: (window as any).fixture.state.submissions,
+          alerts: Array.from(document.querySelectorAll('[role="alert"]'), node => node.textContent) }));
+        assert.equal(state.submissions.length, 1, JSON.stringify(state.alerts));
+        const input = state.submissions[0].input, range = input[0].text_elements[0].byteRange;
+        assert.equal(new TextDecoder().decode(new TextEncoder().encode(input[0].text).slice(range.start, range.end)), 'local文');
+        assert.deepEqual(input.slice(1), original.input.slice(1));
+        assert.deepEqual(errors, []); await page.close();
+      }
+    });
+
+    await t.test('C review ordinary marked duplicate agent and plugin paste undo and redo', async () => {
+      for (const kind of ['agent', 'plugin'] as const) {
+        const { page, errors } = await open('c-review-paste-undo-' + kind);
+        const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+        const before = kind === 'agent' ? 'A' : '@A';
+        await editor.fill(before); await editor.press('End');
+        await editor.evaluate((element, kind) => {
+          const span = kind === 'agent' ? '<span agent-mention-name="A" agent-mention-display-name="A" agent-mention-path="thread://t?hostId=local">A</span>'
+            : '<span plugin-mention-name="A" plugin-mention-display-name="A" plugin-mention-path="plugin://local@openai-primary-runtime">A</span>';
+          const data = new DataTransfer(); data.setData('text/html', '<strong>' + span + '</strong>'); data.setData('text/plain', 'A');
+          element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+        }, kind);
+        await editor.locator('strong [data-mention="' + kind + '"]').waitFor();
+        assert.equal(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.text), before + before);
+        await editor.press('Control+z');
+        assert.equal(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.text), before);
+        assert.equal(await editor.locator('[data-mention="' + kind + '"]').count(), 0);
+        await editor.press('Control+Shift+z');
+        assert.equal(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.text), before + before);
+        assert.equal(await editor.locator('strong [data-mention="' + kind + '"]').count(), 1);
+        assert.deepEqual(errors, []); await page.close();
+      }
+    });
+
     await t.test('an unchanged text selection cannot replace an existing reference with an agent', async () => {
       const { page, errors } = await open('chat-reference-overlap');
       await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
@@ -1618,10 +1678,42 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(draft.input[0], original.input[0]); assert.deepEqual(draft.input[1], original.input[1]);
       assert.deepEqual(draft.document.content[0], original.document.content[0]);
       assert.equal(draft.input[2].text, `Tail ${prompt}`);
+      assert.deepEqual(draft.document.content[1].content, [{ type: 'text', text: `Tail ${prompt}`, marks: [{ type: 'em' }] }]);
       await segmentEditor.press('Control+z'); assert.equal(await editorText(segmentEditor), 'Tail');
       await segmentEditor.press('Control+Shift+z'); assert.equal(await editorText(segmentEditor), `Tail ${prompt}`);
+      await segmentEditor.press('Control+z'); assert.equal(await editorText(segmentEditor), 'Tail');
       assert.deepEqual(rich.errors, []); assert.deepEqual(segmented.errors, []);
       await rich.page.close(); await segmented.page.close();
+    });
+
+    await t.test('C review segmented skill before prompt append keeps both history steps', async () => {
+      const { page, errors } = await open('c-review-segmented-skill-append');
+      await page.waitForFunction(() => (window as any).fixture.state.controller?.snapshot());
+      const original = { text: 'First\nTail', images: [], files: [], references: [], skills: [], input: [
+        { type: 'text', text: 'First', text_elements: [] }, { type: 'image', fileId: 'file-1', detail: 'high' },
+        { type: 'text', text: 'Tail', text_elements: [] },
+      ], document: { type: 'doc', content: [
+        { type: 'paragraph', content: [{ type: 'text', text: 'First' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'Tail', marks: [{ type: 'em' }] }] },
+      ] } };
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const editor = page.getByRole('textbox', { name: 'Work with Codex 2' });
+      await editor.focus(); await editor.press('End'); await editor.pressSequentially(' $rev');
+      await page.getByRole('option', { name: /review-skill/ }).click();
+      const before = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+      assert.deepEqual(before.skills, [{ name: 'review-skill', path: '/skills/review' }]);
+      assert.equal(await page.evaluate(() => (window as any).fixture.beginAppend()), true);
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.appendText('follow up', 'skill-prompt')), { status: 'accepted' });
+      await editor.press('Control+z');
+      assert.equal(await editorText(editor), before.input[2].text);
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), before.skills);
+      await editor.press('Control+Shift+z'); assert.equal(await editorText(editor), before.input[2].text + 'follow up');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), before.skills);
+      await editor.press('Control+z'); await editor.press('Control+z');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), []);
+      await editor.press('Control+Shift+z');
+      assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft.skills), before.skills);
+      assert.deepEqual(errors, []); await page.close();
     });
 
     await t.test('the conversation placeholder differs from the home placeholder', async () => {

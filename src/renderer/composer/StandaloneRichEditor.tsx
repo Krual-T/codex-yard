@@ -485,8 +485,8 @@ function TextControl(props: TextControlProps) {
       control.view?.updateState(control.state);
       return;
     }
-    const sourceMarksChanged = !props.formatting && props.sourceMarks
-      && !applySourceMarks(control.state, props.sourceMarks).doc.eq(control.state.doc);
+    const sourceMarksChanged = !props.formatting
+      && !applySourceMarks(control.state, props.sourceMarks ?? []).doc.eq(control.state.doc);
     if (!control.rich && (historyText(control.state) !== props.text
       || JSON.stringify(historyAgents(control.state)) !== JSON.stringify(props.agentMentions ?? []) || sourceMarksChanged)) {
       control.state = applySourceMarks(textHistoryState(props.text, props.agentMentions), props.sourceMarks ?? []);
@@ -840,7 +840,7 @@ function replaceLink(editor: EditorView, before: LinkOccurrence, label: string, 
   return 'saved';
 }
 
-function appendPromptState(state: EditorState, addition: ComposerDocument): EditorState | null {
+function appendPromptState(state: EditorState, addition: ComposerDocument, inheritSegmentMarks = false): EditorState | null {
   const incoming = readRichDocument(addition);
   if (!incoming || incoming.childCount !== 1 || incoming.firstChild?.type.name !== 'paragraph') return null;
   let hasPlugin = false;
@@ -855,8 +855,19 @@ function appendPromptState(state: EditorState, addition: ComposerDocument): Edit
     if (!end.$from.parent.isTextblock || end.$from.parent.type.spec.code) {
       transaction = transaction.insert(state.doc.content.size, paragraph);
     } else {
-      const separator = last && !/\s$/u.test(last) ? Fragment.from(state.schema.text(' ')) : Fragment.empty;
-      transaction = transaction.insert(end.from, separator.append(paragraph.content));
+      let previous = end.$from.nodeBefore;
+      if (inheritSegmentMarks && previous?.type.name === 'skill') {
+        for (let index = end.$from.parent.childCount - 1; index >= 0; index--) {
+          const child = end.$from.parent.child(index);
+          if (child.type.name !== 'skill') { previous = child; break; }
+        }
+      }
+      const marks = inheritSegmentMarks && plainText && previous?.isText ? previous.marks : [];
+      const content = inheritSegmentMarks && plainText
+        ? Fragment.fromArray(Array.from({ length: paragraph.childCount }, (_, index) => paragraph.child(index).mark(marks)))
+        : paragraph.content;
+      const separator = last && !/\s$/u.test(last) ? Fragment.from(state.schema.text(' ', marks)) : Fragment.empty;
+      transaction = transaction.insert(end.from, separator.append(content));
     }
     transaction = transaction.setSelection(Selection.atEnd(transaction.doc));
     const next = state.apply(closeHistory(transaction));
@@ -900,7 +911,8 @@ function textEditorHandle(controls: Map<number, TextControlModel>): StructuredIn
           base = activated;
         }
       }
-      const next = appendPromptState(base, addition);
+      const inheritSegmentMarks = index !== -1 && !Array.from(controls.values()).some(item => historyAgents(item.state).length);
+      const next = appendPromptState(base, addition, inheritSegmentMarks);
       if (!next) return null;
       const document = index === -1 ? fullHistoryDocument(next) : null;
       if (index === -1 && !document) return null;

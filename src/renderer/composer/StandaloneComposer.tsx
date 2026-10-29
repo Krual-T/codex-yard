@@ -1180,7 +1180,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
           const { document: _document, ...withoutDocument } = before;
           const next = updateDraftText(hasAgents ? withoutDocument : before, text);
           if (next.text !== text) return false;
-          const projected = projectAgentEdit(before, projectCompletionSkills(next, skills), agents);
+          const projected = projectAgentEdit(before, projectCompletionSkills(next, skills), agents, inputType);
           if (!projected) { setError('The chat reference cannot be inserted without changing retained formatting or input.'); return false; }
           const previousView = textAgentView.current;
           if (hasAgents) textAgentView.current = composerOwnerKey;
