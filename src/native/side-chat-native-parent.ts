@@ -50,6 +50,8 @@ interface Options {
   generation(socket: WebSocket): string;
   validateHost(hostId: string): void;
   forkConfig(hostId: string): Value | undefined;
+  /** Reuse the host's per-thread write interval, without holding native-state during RPC replies. */
+  write?<T>(scope: SideChatEndpointScope, method: 'thread/fork' | 'thread/inject_items' | 'thread/unsubscribe', run: () => Promise<T>): Promise<T>;
   authority?: SideChatBrowserAuthority;
   notify(hint: { hostId: string; operationId: string }, except: ReadonlySet<WebSocket>): void;
   notifyPage(page: WebSocket, hint: { hostId: string; operationId: string }): void;
@@ -232,6 +234,17 @@ export function createNativeSideChatParent(options: Options) {
   }
 
   async function send(scope: SideChatEndpointScope, method: 'thread/fork' | 'thread/inject_items' | 'thread/unsubscribe',
+    params: Value, late: ((terminal: LateRpcTerminal) => void | Promise<void>) | undefined, forkAttempt?: string) {
+    let entered = false;
+    const run = () => { entered = true; return sendOriginal(scope, method, params, late, forkAttempt); };
+    try { return await (options.write ? options.write(scope, method, run) : run()); }
+    catch (error) {
+      if (!entered) throw new BeforeSend(error instanceof Error ? error.message : '原侧聊写入未派发。');
+      throw error;
+    }
+  }
+
+  async function sendOriginal(scope: SideChatEndpointScope, method: 'thread/fork' | 'thread/inject_items' | 'thread/unsubscribe',
     params: Value, late: ((terminal: LateRpcTerminal) => void | Promise<void>) | undefined, forkAttempt?: string) {
     let dispatched: { reply: ReturnType<CodexConnection['requestWithCursor']> };
     try {

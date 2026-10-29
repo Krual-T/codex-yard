@@ -150,6 +150,33 @@ test('real host prepares and restores the same native-state operation but requir
   assert.equal(read.body.view.fork.status, 'waiting');
 });
 
+test('a pending original context injection fences the actual SideChat fork consumer', async t => {
+  const f = await fixture(t), a = await f.connect();
+  await a.rpc('thread/start', { cwd: f.root });
+  const generation = (await a.until(item => item.type === 'codex-app-server-connection-changed'
+    && item.state === 'connected')).daemonConnectionGeneration;
+  const reference = { hostId: 'local', threadId: 'parent-a', intentId: 'context-intent', injectionAttemptId: 'context-attempt',
+    callId: 'context-call', clientUserMessageId: 'context-cid', owner: { hostId: 'local', threadId: 'parent-a', draftId: 'main-draft' },
+    revision: 'original-revision', connectionGeneration: generation };
+  const injected = await a.host('send-injection', { action: 'inject', hostId: 'local', reference,
+    daemonConnectionGeneration: generation,
+    items: [{ type: 'function_call', call_id: reference.callId, name: 'untrusted_input', arguments: '{}' },
+      { type: 'function_call_output', call_id: reference.callId, output: [{ type: 'input_text', text: 'MAIN_CONTEXT' }] }],
+    turnParams: { threadId: reference.threadId, clientUserMessageId: reference.clientUserMessageId,
+      input: [{ type: 'text', text: 'MAIN_ORIGINAL_TURN' }] } });
+  assert.equal(injected.responseType, 'success', JSON.stringify(injected));
+  assert.equal(injected.body.injection.phase, 'injected');
+  const preparedReply = await a.host('side-chat', prepared);
+  assert.equal(preparedReply.responseType, 'success', JSON.stringify(preparedReply));
+  const blocked = await a.host('side-chat', action(preparedReply.body, 'start', { forkDispatchId: 'blocked-by-main-context' }));
+  assert.equal(blocked.responseType, 'success', JSON.stringify(blocked));
+  assert.equal(blocked.body.view.fork.status, 'not-sent');
+  assert.equal(f.fake.calls('thread/fork').length, 0);
+  assert.equal(f.fake.calls('thread/inject_items').length, 1);
+  const original = await a.host('send-injection', { action: 'status', hostId: 'local', reference });
+  assert.equal(original.body.injection.phase, 'injected'); assert.equal(original.body.turn.phase, 'waiting');
+});
+
 test('the real endpoint does not transfer an operation between two host connections', async t => {
   const f = await fixture(t), a = await f.connect();
   await a.rpc('thread/start', { cwd: f.root });

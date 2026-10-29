@@ -282,20 +282,25 @@ test('a host-wide settings invalidation revokes a pending start regardless of it
   assert.equal(f.receipts.current(source.page, 'local', 'parent-a'), null);
 });
 
-test('an older resume reply cannot replace a newer original response on the same page', async t => {
+test('an older late resume reply cannot replace a newer original response on the same page', async t => {
   const f = await fixture(t), a = await f.connect();
+  f.receipts.shortTimeout = true;
   const pending: { id: string | number; send(value: unknown): void }[] = [];
   f.fake.handlers.set('thread/resume', (_params, context) => {
     pending.push({ id: context.message.id!, send: context.send }); return NO_REPLY;
   });
   const older = a.rpc('thread/resume', { threadId: 'parent-a' });
   await f.fake.waitForCall('thread/resume', 1);
+  // Same-thread writes are serialized. A timed-out original request can still
+  // complete after the next explicit resume through its retained late callback.
+  assert.ok((await older).message.error);
   const newer = a.rpc('thread/resume', { threadId: 'parent-a' });
   await f.fake.waitForCall('thread/resume', 2);
   pending[1]!.send({ id: pending[1]!.id, result: { ...f.response('parent-a'), model: 'newer-model' } });
   assert.ok((await newer).message.result);
   pending[0]!.send({ id: pending[0]!.id, result: { ...f.response('parent-a'), model: 'older-model' } });
-  assert.ok((await older).message.result);
+  pending[0]!.send({ method: 'fixture/after-older-resume', params: {} });
+  await a.until(item => item.type === 'mcp-notification' && item.method === 'fixture/after-older-resume');
   const source = f.receipts.sources.at(-1)!;
   const current = f.receipts.current(source.page, 'local', 'parent-a');
   assert.ok(current); assert.equal((current.response as Message).model, 'newer-model');

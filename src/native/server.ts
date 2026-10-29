@@ -399,6 +399,14 @@ export async function createNativeWorkbench(options: Options = {}) {
     receipts: sideChatParents, connections: page => clients.get(page),
     generation: connectionGeneration, validateHost: validHost,
     forkConfig: hostId => hostId === 'local' ? hostTools.config : undefined,
+    write(scope, method, run) {
+      const threadId = method === 'thread/fork' ? scope.parentThreadId : scope.childThreadId;
+      if (!threadId) throw new Error('原侧聊写入目标尚未确认。');
+      return conversationWrite(scope.hostId, threadId, async () => {
+        if (method !== 'thread/unsubscribe') await sendInjections.assertCanWrite(scope.hostId, threadId);
+        return run();
+      });
+    },
     authority: options.sideChatBrowserAuthority ?? sideChatBrowserAuthority,
     notify: (hint, except) => {
       for (const page of clients.keys()) {
