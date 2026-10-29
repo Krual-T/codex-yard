@@ -418,6 +418,13 @@ test('Mini binds actual writes to the captured daemon socket identity', {
         const mini = page.locator('.yard-mini-conversation');
         await mini.locator('textarea').first().fill('running original turn');
         await mini.locator('.standalone-composer__submit').click();
+        // Busy also renders Stop while the initial send is still awaiting its receipt.
+        await eventually(page, async () => {
+          const fixture = (window as any).miniWorkspaceFixture;
+          return fixture.calls.some((call: any) => call.method === 'turn/start')
+            && !Object.keys((await fixture.records()).requests).length
+            && (document.querySelector('.yard-mini-conversation textarea') as HTMLTextAreaElement)?.value === '';
+        });
         await mini.getByRole('button', { name: '停止', exact: true }).waitFor();
         await page.evaluate(() => (window as any).miniWorkspaceFixture.holdInterruptConnect());
         await mini.getByRole('button', { name: '停止', exact: true }).click();
