@@ -1,4 +1,4 @@
-import { StatsigClient } from '@statsig/js-client';
+import { _getFullUserHash, StatsigClient } from '@statsig/js-client';
 import type { StatsigStorageProvider } from '../../native/statsig-storage.ts';
 import { openStatsigStorage } from '../../native/statsig-storage.ts';
 import { BrowserHttpFetch } from '../../native/browser-http-fetch.ts';
@@ -9,6 +9,9 @@ import type { BrowserWorkbenchClient } from './client.ts';
 const sdkKey = 'client-sYWqzCYMRkUg4DqqiZcR5DGTNl2iD7zNJY0HoeDLzxR';
 const gateName = '637432221';
 const initializeUrl = 'https://ab.chatgpt.com/v1/initialize';
+const betaPreferenceKey = 'desktop-app-beta-preferences-by-account-id';
+// This is the fixed original UI's configuration target, not Yard's version.
+const referenceUiVersion = '26.1013.40934';
 
 export interface AppgenGate {
   readonly enabled: boolean | undefined;
@@ -29,17 +32,7 @@ interface Scope {
 
 let storagePromise: Promise<StatsigStorageProvider> | undefined;
 function currentStorage(): Promise<StatsigStorageProvider> {
-  return storagePromise ??= openStatsigStorage().then(storage => {
-    // Stable ID belongs to this browser profile. Evaluations must come from a
-    // full current network response, never from a prior cached profile value.
-    const cachedEvaluation = (key: string) => key.startsWith('statsig.cached.') || key.startsWith('statsig.last_modified_time.');
-    return { ...storage,
-      getItem: key => cachedEvaluation(key) ? null : storage.getItem(key),
-      setItem: (key, value) => { if (!cachedEvaluation(key)) storage.setItem(key, value); },
-      removeItem: key => { if (!cachedEvaluation(key)) storage.removeItem(key); },
-      getAllKeys: () => storage.getAllKeys().filter(key => !cachedEvaluation(key)),
-    };
-  }).catch(error => { storagePromise = undefined; throw error; });
+  return storagePromise ??= openStatsigStorage().catch(error => { storagePromise = undefined; throw error; });
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -115,9 +108,11 @@ class AppgenGateSource {
   }
 
   private publish(scope: Scope, enabled: boolean | undefined): void {
-    this.snapshot = { enabled, sourceKey: scope.key, assertCurrent: () => {
+    if (this.snapshot.enabled !== enabled) scope.key = crypto.randomUUID();
+    const key = scope.key;
+    this.snapshot = { enabled, sourceKey: key, assertCurrent: () => {
       this.assertScope(scope);
-      if (!scope.ready) throw new Error('The Sites configuration is not current.');
+      if (!scope.ready || scope.key !== key) throw new Error('The Sites configuration is not current.');
     } };
     for (const listener of this.listeners) listener();
   }
@@ -139,6 +134,9 @@ class AppgenGateSource {
     } else if (event.type === 'mcp-notification' && event.hostId === this.hostId &&
       (event.method === 'account/updated' || event.method === 'account/login/completed')) {
       this.restart();
+    } else if (event.type === 'global-state-updated') {
+      const keys = Array.isArray(event.keys) ? event.keys : typeof event.key === 'string' ? [event.key] : [];
+      if (!keys.length || keys.includes(betaPreferenceKey)) this.restart();
     }
   };
 
@@ -167,8 +165,20 @@ class AppgenGateSource {
       const os = object(await this.client.host('os-info', {}, { assertBeforeSend: check }));
       check();
       if (os?.platform !== 'linux' || os.osVersion !== 'Web') return;
+      const betaPreference = object(await this.client.host('get-global-state', { key: betaPreferenceKey }, { assertBeforeSend: check }));
+      check();
+      if (!betaPreference || typeof betaPreference.exists !== 'boolean') return;
+      const betaPreferences = betaPreference.exists ? object(betaPreference.value) : {};
+      if (!betaPreferences) return;
+      // The original local policy defaults off. A local opt-in also needs an
+      // unavailable experiment decision. ChatGPT has no exposed account ID,
+      // so the original account-scoped beta policy is blocked.
+      const localBeta = betaPreferences.__local__;
+      const betaEnabled = identity?.type === 'chatgpt' ? false : localBeta ?? false;
+      if (betaEnabled !== false) return;
       const storage = await currentStorage();
       check();
+      let cacheMatches = false;
       const sdk = new StatsigClient(sdkKey, {}, {
         storageProvider: storage,
         loggingEnabled: 'disabled',
@@ -184,6 +194,16 @@ class AppgenGateSource {
               throw new Error('Unexpected configuration request');
             }
             if (typeof args.body !== 'string') throw new Error('Unsupported configuration request body');
+            let body = args.body;
+            if (!cacheMatches) {
+              // The SDK's default cache key omits some targeting fields. Ask
+              // for a full response when its cached user does not match.
+              const request = object(JSON.parse(body));
+              if (!request) throw new Error('Invalid configuration request');
+              Object.assign(request, { sinceTime: 0, partialUserMatchSinceTime: 0,
+                previousDerivedFields: {}, deltasResponseRequested: false, full_checksum: null });
+              body = JSON.stringify(request);
+            }
             const id = crypto.randomUUID();
             const abort = () => this.http.cancel(id);
             const headers: Record<string, string> = {};
@@ -195,14 +215,19 @@ class AppgenGateSource {
             args.signal?.addEventListener('abort', abort, { once: true });
             const timer = setTimeout(abort, 10_000);
             try {
-              const result = await this.http.fetch(id, { url, method: 'POST', headers, body: args.body });
+              const result = await this.http.fetch(id, { url, method: 'POST', headers, body });
               check();
               if (!('response' in result)) throw new Error('Configuration request failed');
               const response = result.response;
-              const body = response.status === 200 ? await response.arrayBuffer() : null;
+              const responseBody = response.status === 200 ? await response.arrayBuffer() : null;
               if (response.status !== 200) await response.body?.cancel();
               check();
-              return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+              if (!cacheMatches && response.status === 200) {
+                const payload = object(JSON.parse(new TextDecoder().decode(responseBody!)));
+                if (payload?.has_updates !== true || payload.is_delta === true) throw new Error('A full configuration response is required');
+              }
+              if (!cacheMatches && response.status === 204) throw new Error('A full configuration response is required');
+              return new Response(responseBody, { status: response.status, statusText: response.statusText, headers: response.headers });
             } finally {
               clearTimeout(timer);
               scope.requests.delete(id);
@@ -217,21 +242,37 @@ class AppgenGateSource {
       const email = identity?.type === 'chatgpt' && typeof identity.email === 'string' ? identity.email : undefined;
       const plan = identity?.type === 'chatgpt' && typeof identity.planType === 'string' ? identity.planType : undefined;
       sdk.updateUserSync({ ...(identity?.type === 'apiKey' ? { userID: `ua-${stableId}` } : {}),
-        ...(email === undefined ? {} : { email }), locale: navigator.language,
+        ...(email === undefined ? {} : { email }), locale: navigator.language, appVersion: referenceUiVersion,
         customIDs: { stableID: stableId, source_surface_stable_id: stableId },
         custom: { auth_status: identity?.type === 'chatgpt' ? 'logged_in' : 'logged_out',
           ...(identity?.type === 'chatgpt' ? { auth_method: 'chatgpt' } : identity?.type === 'apiKey' ? { auth_method: 'apikey' } : {}),
           ...(plan === undefined ? {} : { plan_type: plan }), is_openai_internal: email?.endsWith('@openai.com') ?? false,
-          brand_name: 'chatgpt', systemName: 'Linux', systemVersion: 'Web' },
+          brand_name: 'chatgpt', systemName: 'Linux', systemVersion: 'Web', codex_window_type: 'electron',
+          codex_build_flavor: 'prod', codex_app_session_id: 'agents-workbench-web', desktop_app_beta_enabled: betaEnabled },
       }, { disableBackgroundCacheRefresh: true });
-      const initialized = await sdk.initializeAsync();
+      const user = sdk.getContext().user;
+      const cached = sdk.dataAdapter.getDataSync(user);
+      try {
+        cacheMatches = !!cached?.fullUserHash && cached.fullUserHash === _getFullUserHash(user)
+          && cached.stableID === stableId && object(JSON.parse(cached.data))?.has_updates === true;
+      } catch { cacheMatches = false; }
+      const evaluate = (reason: string): boolean | undefined => {
+        const gate = sdk.getFeatureGate(gateName, { disableExposureLog: true });
+        if (gate.details.reason !== reason || typeof gate.__evaluation?.value !== 'boolean' || typeof gate.value !== 'boolean'
+          || gate.details.warnings?.includes('PartialUserMatch') || gate.details.warnings?.includes('StableIDMismatch')) return undefined;
+        return gate.value;
+      };
+      const cachedValue = cacheMatches ? evaluate('Cache:Recognized') : undefined;
+      if (cachedValue !== undefined) {
+        scope.ready = true;
+        this.publish(scope, cachedValue);
+      }
+      const updated = await sdk.updateUserAsync(user);
       check();
-      const gate = sdk.getFeatureGate(gateName, { disableExposureLog: true });
-      if (!initialized.success || initialized.source !== 'Network' || gate.details.reason !== 'Network:Recognized'
-        || typeof gate.__evaluation?.value !== 'boolean' || typeof gate.value !== 'boolean'
-        || gate.details.warnings?.includes('PartialUserMatch') || gate.details.warnings?.includes('StableIDMismatch')) return;
-      scope.ready = true;
-      this.publish(scope, gate.value);
+      if (!updated.success || (updated.source !== 'Network' && !(cacheMatches && updated.source === 'NetworkNotModified'))) return;
+      const value = evaluate(`${updated.source}:Recognized`);
+      scope.ready = value !== undefined;
+      this.publish(scope, value);
     } catch {
       // An unavailable or stale source is not a false gate evaluation.
     }

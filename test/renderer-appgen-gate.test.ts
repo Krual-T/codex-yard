@@ -23,11 +23,12 @@ test('Sites gate uses the selected daemon and fresh public SDK evaluation', {
   const codexHome = join(directory, 'codex'), dataDir = join(directory, 'data');
   await mkdir(codexHome); await mkdir(dataDir);
   let account: 'apiKey' | 'chatgpt' | 'none' = 'apiKey';
+  let plan: 'plus' | 'pro' = 'plus';
   peer.handlers.set('account/read', () => ({ account: account === 'apiKey' ? { type: 'apiKey' }
-    : account === 'chatgpt' ? { type: 'chatgpt', email: 'fixture@example.invalid', planType: 'plus' } : null,
+    : account === 'chatgpt' ? { type: 'chatgpt', email: 'fixture@example.invalid', planType: plan } : null,
   requiresOpenaiAuth: false }));
   const accountRead = peer.handlers.get('account/read')!;
-  type Mode = 'true' | 'false' | 'hashed' | 'malformed' | 'missing' | 'error' | 'non200' | 'hold';
+  type Mode = 'true' | 'false' | 'hashed' | 'malformed' | 'missing' | 'error' | 'non200' | 'notmodified' | 'delta' | 'hold';
   let mode: Mode = 'true';
   const requests: Array<{ url: string; body: Record<string, unknown>; headers: Headers; mode: Mode }> = [];
   const held: Array<(response: Response) => void> = [];
@@ -47,6 +48,8 @@ test('Sites gate uses the selected daemon and fresh public SDK evaluation', {
       requests.push({ url, body: JSON.parse(init!.body as string) as Record<string, unknown>, headers: new Headers(init?.headers), mode: current });
       if (current === 'hold') return await new Promise<Response>(resolve => held.push(resolve));
       if (current === 'error') return new Response('unavailable', { status: 400 });
+      if (current === 'notmodified') return new Response(null, { status: 204 });
+      if (current === 'delta') return Response.json({ has_updates: true, is_delta: true, time: Date.now() });
       return response(current === 'missing' ? undefined : current === 'malformed' ? 'true' : current === 'true' || current === 'hashed' || current === 'non200', current === 'hashed', current === 'non200' ? 201 : 200);
     },
   });
@@ -76,6 +79,11 @@ test('Sites gate uses the selected daemon and fresh public SDK evaluation', {
       capture: () => { captured.push(current); return captured.length - 1; },
       capturedValid: (index: number) => valid(captured[index]!),
       host: (host: string) => flushSync(() => setHost(host)),
+      setBetaPreference: async (value: unknown) => {
+        const key = 'desktop-app-beta-preferences-by-account-id';
+        const expected = await client.host('get-global-state', { key });
+        return client.host('set-global-state', { key, value, expected });
+      },
       suspend: () => client.suspend(), resume: () => client.resume(),
       connectDaemon: () => client.rpc('account/read', { refreshToken: false }, 'local'),
       close: () => { root.unmount(); client.close(); },
@@ -114,11 +122,15 @@ test('Sites gate uses the selected daemon and fresh public SDK evaluation', {
   assert.equal(user.userID, `ua-${ids.stableID}`);
   assert.equal(ids.source_surface_stable_id, ids.stableID);
   assert.equal((user.custom as Record<string, unknown>).auth_method, 'apikey');
+  assert.equal(user.appVersion, '26.1013.40934');
+  assert.deepEqual(Object.fromEntries(['codex_window_type', 'codex_build_flavor', 'codex_app_session_id', 'desktop_app_beta_enabled']
+    .map(key => [key, (user.custom as Record<string, unknown>)[key]])),
+  { codex_window_type: 'electron', codex_build_flavor: 'prod', codex_app_session_id: 'agents-workbench-web', desktop_app_beta_enabled: false });
   assert.ok(!JSON.stringify(requests[0]?.body).includes('fixture@example.invalid'));
 
   mode = 'hold';
   peer.broadcast({ method: 'account/updated', params: {} });
-  await page.waitForFunction(() => (window as any).gateFixture?.snapshot().enabled === null);
+  await page.waitForFunction(previous => (window as any).gateFixture?.snapshot().sourceKey !== previous, firstSnapshot.sourceKey);
   await t.test('a pending evaluation is revoked on account change', async () => {
     await waitFor(() => held.length === 1);
     assert.equal(await page.evaluate(index => (window as any).gateFixture.capturedValid(index), first), false);
@@ -158,7 +170,6 @@ test('Sites gate uses the selected daemon and fresh public SDK evaluation', {
   await page.waitForTimeout(150);
   assert.equal((await page.evaluate(() => (window as any).gateFixture.snapshot())).enabled, null);
   assert.equal(await page.evaluate(index => (window as any).gateFixture.capturedValid(index), second), false);
-  assert.ok(requests.every(request => request.body.sinceTime === undefined || request.body.sinceTime === 0));
 
   mode = 'error';
   const errorResponse = page.waitForResponse(res => res.url().endsWith('/api/http-fetch'));
@@ -250,6 +261,69 @@ test('Sites gate uses the selected daemon and fresh public SDK evaluation', {
   await page.evaluate(() => (window as any).gateFixture.resume());
   await page.evaluate(() => (window as any).gateFixture.connectDaemon());
   await page.waitForFunction(() => (window as any).gateFixture?.snapshot().enabled === false);
+
+  const beforeBeta = await page.evaluate(() => (window as any).gateFixture.capture());
+  await page.evaluate(() => (window as any).gateFixture.setBetaPreference({ __local__: true }));
+  await page.waitForFunction(() => (window as any).gateFixture?.snapshot().enabled === null);
+  assert.equal(await page.evaluate(index => (window as any).gateFixture.capturedValid(index), beforeBeta), false);
+  await page.evaluate(() => (window as any).gateFixture.setBetaPreference({ __local__: false }));
+  await page.waitForFunction(() => (window as any).gateFixture?.snapshot().enabled === false);
+
+  mode = 'notmodified';
+  const cachedNotModified = page.waitForResponse(res => res.url().endsWith('/api/http-fetch'));
+  peer.broadcast({ method: 'account/updated', params: {} });
+  await cachedNotModified;
+  await page.waitForTimeout(150);
+  assert.equal((await page.evaluate(() => (window as any).gateFixture.snapshot())).enabled, false);
+
+  await page.waitForTimeout(200);
+  const requestsBeforeReload = requests.length;
+  mode = 'error';
+  await page.reload();
+  await page.waitForFunction(() => (window as any).gateFixture?.snapshot().enabled === false);
+  await waitFor(() => requests.length > requestsBeforeReload && requests.at(-1)?.mode === 'error');
+  assert.equal((await page.evaluate(() => (window as any).gateFixture.snapshot())).enabled, false);
+
+  account = 'chatgpt'; plan = 'plus'; mode = 'true';
+  peer.broadcast({ method: 'account/updated', params: {} });
+  await page.waitForFunction(() => (window as any).gateFixture?.snapshot().enabled === true);
+  const plus = await page.evaluate(() => (window as any).gateFixture.capture());
+  plan = 'pro'; mode = 'notmodified';
+  const mismatchedResponse = page.waitForResponse(res => res.url().endsWith('/api/http-fetch'));
+  peer.broadcast({ method: 'account/updated', params: {} });
+  await mismatchedResponse;
+  await page.waitForTimeout(150);
+  assert.equal((await page.evaluate(() => (window as any).gateFixture.snapshot())).enabled, null);
+  assert.equal(await page.evaluate(index => (window as any).gateFixture.capturedValid(index), plus), false);
+  const mismatched = requests.at(-1)!.body;
+  assert.equal(mismatched.sinceTime, 0);
+  assert.equal(mismatched.partialUserMatchSinceTime, 0);
+  assert.equal(mismatched.deltasResponseRequested, false);
+  mode = 'delta';
+  const deltaResponse = page.waitForResponse(res => res.url().endsWith('/api/http-fetch'));
+  peer.broadcast({ method: 'account/updated', params: {} });
+  await deltaResponse;
+  await page.waitForTimeout(150);
+  assert.equal((await page.evaluate(() => (window as any).gateFixture.snapshot())).enabled, null);
+  mode = 'hold';
+  peer.broadcast({ method: 'account/updated', params: {} });
+  await waitFor(() => held.length === 1);
+  assert.equal((await page.evaluate(() => (window as any).gateFixture.snapshot())).enabled, null);
+  held.shift()!(response(false));
+  await page.waitForFunction(() => (window as any).gateFixture?.snapshot().enabled === false);
+
+  mode = 'hold';
+  const beforeRefresh = (await page.evaluate(() => (window as any).gateFixture.snapshot())).sourceKey;
+  peer.broadcast({ method: 'account/updated', params: {} });
+  await page.waitForFunction(previous => {
+    const value = (window as any).gateFixture?.snapshot();
+    return value?.enabled === false && value.sourceKey !== previous;
+  }, beforeRefresh);
+  await waitFor(() => held.length === 1);
+  const cached = await page.evaluate(() => (window as any).gateFixture.capture());
+  held.shift()!(response(true));
+  await page.waitForFunction(() => (window as any).gateFixture?.snapshot().enabled === true);
+  assert.equal(await page.evaluate(index => (window as any).gateFixture.capturedValid(index), cached), false);
   const last = await page.evaluate(() => (window as any).gateFixture.capture());
   await page.evaluate(() => (window as any).gateFixture.close());
   assert.equal(await page.evaluate(index => (window as any).gateFixture.capturedValid(index), last), false);
