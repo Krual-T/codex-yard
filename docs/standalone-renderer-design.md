@@ -1,6 +1,6 @@
 # 自有 React + TypeScript Web 前端
 
-状态：实施设计 v17，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
+状态：实施设计 v18，2026-10-29，完整功能仍在实施；整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账；不得以首批叶组件代替全量。用户要求移除整个 `vendor/codex-app/` 后仍可安装、构建、启动和验收。本设计替代固定函数注入方案，旧来源保留为行为研究和可复用源码。
 
 ## 入口与现有能力
 
@@ -59,7 +59,9 @@ composer-drafts.v3是同一UI atom根中的事务记录，首次导入精确旧v
 
 设置通过get/set-setting、get/set-global-state、get/set-persisted-atom和CLI config/read/batchWrite访问原来源。后两个atom端点由浏览器WorkbenchClient处理，复用updatedAtom和旧native-atoms key；读、条件检查、更新位于同一个IndexedDB readwrite事务，事务完成后才回成功，失败拒绝。成功后本页订阅及跨页BroadcastChannel只发送失效键，消费者异步重读唯一权威记录。UI偏好是全局host设置，CLI配置是执行host作用域；界面不接触token/env。config/read(includeLayers:true)取得实际user层file/version，缺可信版本不写，冲突保留编辑。实际CLI0.164及桌面0.163-alpha只提供可写base user层，不支持旧profile/profiles配置；当前模型与effort按该层真实file/version写顶层键，不发明目标。其他后端多层按真实身份选择，不以合成fixture当本机能力。
 
-共用native-state.json的项目、偏好、pet与SSH自动连接变更共享一个串行提交区间，包含读取旧值、修改内存、捕获快照、原子写入和失败回滚。不能只串行文件写入，否则会保存其他尚未提交的内存值。新临时文件以0600独占创建，写入并同步文件、rename、同步父目录后才确认持久成功。成功持久化后才广播；较晚编辑不被旧回执覆盖。原设置保存须连接真实消费者：composerEnterBehavior、followUpQueueMode、主题字体、终端位置等，不能只证明值写入。平台原先不支持的操作保留准确错误/空态，不能用“不支持”代替已有Web功能。
+共用native-state.json的项目、偏好、pet与SSH自动连接变更共享一个StateMutations串行区间，包含读取旧值、修改内存、捕获完整根、原子写入和失败回滚。createNativeState负责原文件的读写与提交状态，server保留原settings/globals引用并就地发布完整根，未知section与普通JSON键不丢失。临时文件以0600独占创建，同步文件、rename、同步父目录并发布后才确认持久成功。rename开始后的错误可能已经改动原文件；此时隔离全部依赖该根的读写、配置目标读取和pet投影。原调用的回滚完成后，下一次串行操作先重读、验证、同步原文件并完整发布，成功后才恢复访问；恢复失败保留隔离及原文件，不重放业务RPC。仅在rename之前明确失败时保留旧根可用。真实文件恢复经同一提交区间，不能让读取绕过恢复或保存回滚后的旧内存覆盖已写入的新根。该保证限于单进程、同一dataDir。
+
+原设置保存须连接真实消费者：composerEnterBehavior、followUpQueueMode、主题字体、终端位置等，不能只证明值写入。平台原先不支持的操作保留准确错误/空态，不能用“不支持”代替已有Web功能。
 
 模型、Agent、Hooks、Worktrees和Skills的配置变更统一调用configuration-write，原operationId在连接或异步准备前先持久记为preparing。提交校验当前注册host；status和retry-persistence只核对原记录身份，即使host已移除也不连接后端。宿主复用常驻control/SSH文件连接；原socket绑定当时的host、SSH参数和home快照，不读取另一页面后来覆盖的路径。页面关闭不关该连接，超时仅结束当前等待；原迟到观察保留到真实终态或socket断开，沿原16项上限，不重连重发。中断准备在重启后只允许显式本地收尾为未发送，unknown不能靠当前配置值、null或重连消除。
 
@@ -69,7 +71,7 @@ composer-drafts.v3是同一UI atom根中的事务记录，首次导入精确旧v
 
 host工具read_thread在真实server接线中使用turnLimit/cursor分页历史，按includeOutputs投影，默认最新10轮、每轮最新60项、不含输出，按maxOutputCharsPerItem（默认4000）截断输出并返回可继续读取较早turn/items的游标；不能把外层参数检查或mock handler测试当作真实实现。取消沿MCP适配器到host请求，断线不重放写入。
 
-## 当前父级接线合同（v16）
+## 当前父级接线合同（v18）
 
 v17修订：文件与可视化预填必须在来源回调的首await前登记原composer外部operation，等待applyPrefill持久回执后才关闭或清除来源；输入区尚未挂载、已冻结或只读时明确拒绝，来源继续保留，不借未受导航保护的内存队列接受输入。浏览器未接收回执保留完整before/after，显式恢复始终重放原两端的条件接收；历史删除标记先与当前完整引用求交集，再登记operation，组合输入结束后重试真正待处理项。
 
@@ -77,11 +79,15 @@ v17修订：文件与可视化预填必须在来源回调的首await前登记原
 
 主导航在首次等待前同步取得原消息编辑租约和原composer owner租约，并置输入区域inert；排空后核对设置离页、文件恢复、浏览器未提交编辑和未接收快照，在路由提交前再次flush两项租约，直到新路由layout commit才释放。失败或取消释放并留在原页。租约保护本页输入与已登记外部操作；不会锁住其他renderer的合法后续编辑，也不额外保存所有历史版本。
 
+主页面和Mini使用同一个MessageEditRecoveryStore，各自稳定创建独立的createAccess句柄，同一host/thread同时只有一个可写消息编辑器。取得使用权后重读现有IDB恢复记录；另一个视图只读。每次提交在首次await前捕获本次使用权，持久化原提交阶段后、宿主调用前同步复核原host/thread/turn/item、连接代次和当前目标。检查失败不调用宿主，并按原operationId条件恢复之前的提交阶段，保留新稿与并发记录；已调用宿主后的断线仍保持unknown。导航先freeze并flush，只有实际提交新目标时才handoff释放使用权，取消或失败调用release保留原编辑器。该使用权仅协调同一renderer的双视图；跨页仍由现有IDB事务冲突检查负责。主页面已接此合同，Mini消费者及双视图实际App验收仍待接入。
+
 浏览器选择、保存、附加和删除先取得原owner外部句柄，根atom事务共用既有composer版本更新。父级用实际home/thread binding核对browser owner；composer删除借用同一句柄，完整after在投影接收前保留，根事务已提交时返回handled，不再进行第二次删除。接收失败保留完整快照及复制、另存、核对与明确放弃出口，阻止静默离页；已持久版本不会被旧投影二次写回。跨页删除watcher也经同一外部操作队列和根事务，只处理精确删除标记。发送确认仍从不可变intent记录实际完整引用后按精确revision清理。
+
+组合输入结束后的删除重试排在composer清除组合态的动画帧之后。若另一页已经提交删除且旧revision不再存在，只在同一根事务内核对唯一现存版本与“原完整稿减去精确删除引用”完全相同后接纳该版本，不重复写入；新文字、不同完整引用或多分支保持冲突和恢复出口。此路径的真实父页故障重试由原B独立验证，叶子通过不代替整页结果。
 
 documentPlainTextMode是本次提交的捕获值，随现有SendIntent持久；send、queue、steer与显式retry使用同一值序列化原document，不读取之后改变的偏好。旧intent省略此字段时保留旧文档自身的兼容规则，不伪造历史选择。
 
-设置config/read、skills/list通过宿主持有的原连接读取，RPC前捕获socket、代次和home/CODEX_HOME，返回前再次核对，在顶层yardConfigSource投影原来源；configuration-write提交携带原baseline的source，宿主只使用匹配的原socket和路径，不把新SSH登录环境代替旧来源。页面关闭不结束该原连接；真实断线换代后旧source明确未发送并要求重读。status/retry-persistence继续按原operation/回执本地恢复。五编辑器独立未提交稿及明确未发送页面恢复仍在D的后续来源实现，不能据本宿主接线声称已闭合。文件写的原迟到终态观察在原socket存活时保留，真实断开仍保持unknown；共享文件/config预留不因超时五分钟自动解除。
+设置config/read、skills/list通过宿主持有的原连接读取，RPC前捕获socket、代次和home/CODEX_HOME，返回前再次核对，在顶层yardConfigSource投影原来源；configuration-write提交携带原baseline的source，宿主只使用匹配的原socket和路径，不把新SSH登录环境代替旧来源。页面关闭不结束该原连接；真实断线换代后旧source明确未发送并要求重读。status/retry-persistence继续按原operation/回执本地恢复。五编辑器的独立草稿以原baseline、target和revision保留；保存、重试、丢弃按编辑器串行，旧保存完成只清除对应提交版本。target:null的旧恢复只供查看，重新保存前须明确核对新来源；确定未发送记录保留原operationId以兼容旧页面，丢弃须先排空并清除自己的原版本才能导航。D的模块与真实组件检查已交回，实际聚合页面及旧页并存验收仍开放。文件写的原迟到终态观察在原socket存活时保留，真实断开仍保持unknown；共享文件/config预留不因超时五分钟自动解除。
 
 ## 兼容、并发和断线
 

@@ -159,6 +159,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     if (pending) { targetChange.current = null; setLeaving(false); pending.committed(); }
   }, [navigationCommit, current.hostId, current.threadId, current.section, cwd]);
   const editStore = useMemo(() => new MessageEditRecoveryStore(client, undefined, { hostChecksRebasedSourceBeforeRevert: true }), [client]);
+  const editAccess = useMemo(() => editStore.createAccess(), [editStore]);
   const sendStore = useMemo(() => new SendRecoveryStore(client), [client]);
   const [sendState, setSendState] = useState<SendRecoverySnapshot | null>(null);
   const sessions = useMemo(() => new ConversationSessions(client, async identity =>
@@ -273,6 +274,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   useEffect(() => {
     const controller = createRouteNavigation(() => {
       const next = route();
+      navigationLease.current?.handoff(); navigationLease.current = null;
       if (next.section && !routeRef.current.section) setSettingsSourceEpoch(value => value + 1);
       navigationGeneration.current++; setLeaving(Boolean(targetChange.current)); setCurrent(next); setNavigationCommit(value => value + 1); setError(''); setMenu(false);
     }, async () => {
@@ -493,6 +495,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     visualizationSubmission?: { hostId: string; threadId: string; path: string; signal: AbortSignal }) => {
     if (inFlight.current) throw new Error('正在提交，请稍候。');
     if (loading) throw new Error('会话仍在加载，请稍候。');
+    origin = origin && structuredClone(origin);
+    const assertEditAuthority = origin && editAccess.capture(origin);
+    const editConnectionRevision = origin && sessions.view(origin).connectionRevision;
     inFlight.current = true; setSubmitting(true); setError('');
     // A displayed recovery snapshot grants no authority over another page's
     // attempt. Only prepare/attempt may return a token owned by this invocation.
@@ -502,6 +507,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     const allowFirstTurn = !origin && action.type === 'send';
     const activeCwd = retry?.cwd ?? (thread?.cwd || cwd || workspace);
     const requireCurrent = (threadId: string | null) => {
+      if (origin && sessions.view(origin).connectionRevision !== editConnectionRevision) {
+        throw Object.assign(new Error('消息编辑的原连接已改变，编辑稿已保留，未发送。'), { uncertain: false });
+      }
       if (visualizationSubmission && (visualizationSubmission.signal.aborted
         || visualizationSubmission.hostId !== hostId || visualizationSubmission.threadId !== threadId
         || !visualizationSubmission.path)) {
@@ -591,7 +599,14 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         });
         expectedNavigation = navigationGeneration.current;
         await reloadSends();
-      }, origin, (target, expected, params) => editStore.submit(target, expected, params));
+      }, origin, (target, expected, params) => editStore.submit(target, expected, params, () => {
+        assertEditAuthority?.();
+        if (!origin || target.hostId !== origin.hostId || target.threadId !== origin.threadId
+          || target.turnId !== origin.turnId || target.itemId !== origin.itemId) {
+          throw Object.assign(new Error('消息编辑来源已改变，编辑稿已保留，未发送。'), { uncertain: false });
+        }
+        requireCurrent(origin.threadId);
+      }));
       if (result.turn) sessions.started({ hostId, threadId: result.threadId }, result.turn);
       void refreshList().catch(cause => setError(String(cause)));
       if (intent) await finishSend((await sendStore.read()).requests[intent.id]!);
@@ -814,7 +829,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         {current.threadId && <header className="yard-conversation-header"><strong>{thread?.name || threads.find(item => item.id === current.threadId)?.name || 'Conversation'}</strong><span>{thread?.cwd}</span><button aria-label="Conversation menu" onClick={() => setMenu(value => !value)}>•••</button>{menu && <div className="yard-menu" role="menu">{['rename', 'fork', 'copy', 'archive'].map(name => <button role="menuitem" key={name} onClick={() => { void action(name); }}>{name === 'copy' ? 'Copy conversation link' : name[0]!.toUpperCase() + name.slice(1)}</button>)}</div>}</header>}
         <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')} inert={leaving}>
           {streamGap && <p role="status" className="yard-stream-gap">此页面未收到连续的活动内容，正在核对会话记录。{isThreadBusy(thread) && '任务正在运行；完成后将重新读取完整记录。'}</p>}
-          {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} thread={thread} editRecovery={editState?.recovery ?? null} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
+          {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} thread={thread} editRecovery={editState?.recovery ?? null} editAccess={editAccess} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
             editRebase={messageEditRebaseMarker(editState)} onPrepareEditRebase={(origin, version) => editStore.prepareRebase(origin, version)}
             onCommitEditRebase={async candidate => {
               const recovered = await editStore.commitRebase(candidate);
