@@ -61,30 +61,21 @@ try {
   await page.getByText(deleteText, { exact: true }).waitFor({ state: 'detached' });
   assert.equal(fake.queues.get(threadId)?.length, 1);
   checks.push('Deletion reached thread/queue/delete and removed only the selected item');
-  await page.getByRole('button', { name: '编辑待发送消息', exact: true }).click();
+  const editButton = page.getByRole('button', { name: '编辑待发送消息', exact: true });
+  assert.equal(await editButton.isEnabled(), true, 'Queue Edit requires the main-composer and conditional-delete bindings');
+  await editButton.click();
   const editor = page.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作)$/ });
-  const queueEditor = page.getByRole('textbox', { name: '编辑待发送消息', exact: true });
-  await page.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="编辑待发送消息"]') !== null
-    || [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
+  await page.waitForFunction(text => [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
       .some(input => ['和 Codex 一起工作', '与 Codex 协作'].includes(input.getAttribute('aria-label') ?? '') && input.value === text), editText);
   await capture('editing');
   const changed = '验收：修改后重新排队';
-  if (await queueEditor.isVisible()) {
-    assert.equal(await queueEditor.inputValue(), editText);
-    gaps.push('Editing does not move the queued message into the main composer and remove it from the queue as the original flow did.');
-    await queueEditor.fill(changed);
-    await page.getByRole('button', { name: '保存', exact: true }).click();
-    await fake.waitFor(message => message.method === 'thread/queue/update');
-    assert.equal(fake.calls('thread/queue/update').length, 1);
-    checks.push('Inline editing updates the existing queue item through thread/queue/update');
-  } else {
-    assert.equal(await editor.inputValue(), editText);
-    assert.equal(fake.queues.get(threadId)?.length, 0);
-    await editor.fill(changed);
-    await page.getByRole('button', { name: /^(排队|Queue)$/ }).click();
-    await fake.waitFor(message => message.method === 'thread/queue/add');
-    checks.push('Editing moves the original item into the composer and requeues it');
-  }
+  assert.equal(await editor.inputValue(), editText);
+  assert.equal(fake.queues.get(threadId)?.length, 0);
+  assert.equal(fake.calls('thread/queue/update').length, 0);
+  await editor.fill(changed);
+  await page.getByRole('button', { name: /^(排队|Queue)$/ }).click();
+  await fake.waitFor(message => message.method === 'thread/queue/add');
+  checks.push('Editing moves the original item into the composer and requeues it');
   await page.getByText(changed, { exact: true }).waitFor();
   assert.deepEqual(fake.queues.get(threadId)?.[0]?.input, [{ type: 'text', text: changed, text_elements: [] }]);
   const added = '验收：另外排队';
@@ -97,7 +88,7 @@ try {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   assert.deepEqual(fake.queues.get(threadId)?.[1]?.input, [{ type: 'text', text: added, text_elements: [] }]);
-  assert.equal(fake.calls('thread/queue/delete').length, gaps.length ? 1 : 2);
+  assert.equal(fake.calls('thread/queue/delete').length, 2);
   assert.equal(fake.calls('thread/queue/add').length, addsBefore + 1);
   assert.equal(fake.calls('turn/start').length, 0);
   checks.push('A separate queued submission uses thread/queue/add and starts no turn');

@@ -1,7 +1,7 @@
 import { readBrowserAtom, updateBrowserAtoms } from '../storage/ui-atoms.ts';
 import type { ComposerContext, ComposerDraft } from '../workbench-contract.ts';
 import { activatePending, createId, draftKey, emptyDraft, isPristine, isStoredDraft, legacyBlockedMessage,
-  legacyDraftCandidates, loadDraft, parseStoredDraft } from './standalone-draft.ts';
+  legacyDraftCandidates, loadDraft, normalizeDraft, parseStoredDraft } from './standalone-draft.ts';
 import type { StoredDraft } from './standalone-draft.ts';
 
 export interface ComposerDraftOwner { hostId: string; threadId: string | null; draftId: string }
@@ -70,6 +70,22 @@ export function sameComposerDraftValue(left: unknown, right: unknown): boolean {
 /** Prepare one exact active-version replacement for an existing root atom transaction. */
 export function updateComposerDraftVersionInRoot(root: unknown, before: ComposerDraftSnapshot,
   change: (draft: ComposerDraft) => ComposerDraft, nextRevision: string): { root: unknown; after: ComposerDraftSnapshot; changed: boolean } {
+  return changeComposerDraftVersionInRoot(root, before, change, nextRevision, true);
+}
+
+/** Move a confirmed queue item to the active draft while parking the previous draft. */
+export function replaceComposerDraftWithQueuedInRoot(root: unknown, before: ComposerDraftSnapshot,
+  queued: ComposerDraft, nextRevision: string): { root: unknown; after: ComposerDraftSnapshot; changed: boolean } {
+  return changeComposerDraftVersionInRoot(root, before, draft => {
+    const previous = normalizeDraft(draft);
+    const { pendingDrafts, ...current } = previous;
+    const parked = [...pendingDrafts ?? [], ...isPristine(current) ? [] : [current]];
+    return { ...normalizeDraft(queued), ...(parked.length ? { pendingDrafts: parked } : {}) };
+  }, nextRevision, false);
+}
+
+function changeComposerDraftVersionInRoot(root: unknown, before: ComposerDraftSnapshot,
+  change: (draft: ComposerDraft) => ComposerDraft, nextRevision: string, merge: boolean): { root: unknown; after: ComposerDraftSnapshot; changed: boolean } {
   if (!before || !isOwner(before.owner) || typeof before.revision !== 'string' || !before.revision
     || typeof nextRevision !== 'string' || !nextRevision) throw new Error('草稿版本或身份无效。');
   const store = repository(root), entry = entryFor(store, before.owner);
@@ -80,7 +96,7 @@ export function updateComposerDraftVersionInRoot(root: unknown, before: Composer
   if (!sameComposerDraftValue(previous.draft, before.draft)) throw new Error('草稿内容已改变，请核对后重试。');
   const changed = change(structuredClone(previous.draft));
   if (!record(changed)) throw new Error('草稿更新无法无损保存。');
-  const draft = { ...previous.draft, ...structuredClone(changed) };
+  const draft = merge ? { ...previous.draft, ...structuredClone(changed) } : structuredClone(changed);
   const candidate = { ...previous, draft };
   if (!isVersion(candidate)) throw new Error('草稿更新无法无损保存。');
   if (sameComposerDraftValue(previous.draft, draft)) return { root, after: snapshot(previous, before.owner), changed: false };
