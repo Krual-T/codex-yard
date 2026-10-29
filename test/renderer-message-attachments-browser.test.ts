@@ -45,7 +45,7 @@ test('attachment removal, undo and persisted recovery retain the untouched messa
       ]}]};
       const root = createRoot(document.getElementById('root'));
       const onEditDraftChange = async value => { saved = value && structuredClone(value); };
-      const onEdit = async (draft,origin) => { edits.push({draft:structuredClone(draft),origin:structuredClone(origin)});
+      const onEdit = async (draft,origin,prepare) => { await prepare(); edits.push({draft:structuredClone(draft),origin:structuredClone(origin)});
         if(mode === 'reject') throw Error('Synthetic send failure'); };
       function render(){root.render(visible ? React.createElement(StandaloneMessages,{client,hostId:'ssh',thread,editHistory:{order:'ascending',tailComplete:true},
         editRecovery:saved,onEditDraftChange,onEdit}) : null);}

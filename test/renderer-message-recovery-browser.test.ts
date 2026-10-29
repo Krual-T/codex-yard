@@ -62,7 +62,8 @@ test('inline edit recovery retains unsafe text and delegates rollback retries', 
         calls.writes.push(value?.editor?.edits?.[0]?.text ?? 'clear');
         saved = value && structuredClone(value);
       };
-      const onEdit = (draft, origin) => {
+      const onEdit = async (draft, origin, prepare) => {
+        await prepare();
         calls.edits.push({draft:structuredClone(draft),origin:structuredClone(origin)});
         if (editMode === 'reject') return Promise.reject(Error('Synthetic edit failure'));
         if (editMode === 'pending') return new Promise((resolve, reject) => { resolveEdit = resolve; rejectEdit = reject; });

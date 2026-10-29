@@ -119,3 +119,14 @@ test('authority is scoped to both host and thread and invalidates a previous cap
   assert.equal(other.acquire(origin), true);
   assert.throws(captured, /使用权已改变/);
 });
+
+test('a stale acquisition can neither accept its read nor release a later grant to the same view', async () => {
+  const h = fixture();
+  assert.equal(h.access.acquire(origin), true);
+  const captured = h.access.capture(origin), oldRead = await h.access.read(origin);
+  assert.equal(h.access.acquire(origin), true);
+  assert.throws(() => oldRead.accept(), /使用权已改变/);
+  h.access.release(origin, captured);
+  assert.equal(h.access.owns(origin), true);
+  h.access.capture(origin)();
+});

@@ -94,7 +94,8 @@ test('standalone messages render CLI items and retain interactions while streami
         ] }
       ] };
       let editMode = 'reject', resolveEdit = () => {}, rejectEdit = () => {}, editEnabled = true, hostId = 'ssh-test', savedThread;
-      const onEdit = (draft, origin) => {
+      const onEdit = async (draft, origin, prepare) => {
+        await prepare();
         calls.edits.push({draft, origin});
         if (editMode === 'reject') return Promise.reject(Error('Synthetic edit failure'));
         if (editMode === 'pending') return new Promise((resolve, reject) => { resolveEdit = resolve; rejectEdit = reject; });

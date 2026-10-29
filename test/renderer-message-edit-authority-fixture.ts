@@ -19,15 +19,32 @@ const initial: MessageEditRecovery = { origin, draft, editor: { sessionId: 'shar
   edits: [{ index: 0, text: 'original' }], addedText: '', sourceSignature: editSourceSignature(item), snapshot: item, turnIndex: 0, itemIndex: 0 } };
 let failNextSave = false, captured: (() => void) | undefined, targetValid = true, hostCalls = 0;
 let holdNextSubmit = false, gate: Promise<void> | undefined, releaseGate: (() => void) | undefined, waiting = false;
+let holdNextPrepare = false, parentCalls = 0, connectionGeneration = 0, completedClears = 0;
+let writtenText = '';
+let holdNextRead = false, readWaiting = false, releaseRead: (() => void) | undefined;
+let holdBeforeWrite = false, beforeWriteWaiting = false, releaseBeforeWrite: (() => void) | undefined, lastWriteError = '';
 const client: WorkbenchClient = {
   rpc: async () => { throw new Error('unexpected RPC'); }, subscribe: () => () => {}, reply: async () => {},
   host: async () => { hostCalls++; throw new Error('fixture connection lost after dispatch'); },
 };
 const storage: EditRecoveryStorage = {
-  read: () => readBrowserAtom(messageEditsAtom),
+  read: async () => {
+    const result = await readBrowserAtom(messageEditsAtom);
+    if (holdNextRead) {
+      holdNextRead = false;
+      readWaiting = true;
+      await new Promise<void>(resolve => { releaseRead = resolve; });
+    }
+    return result;
+  },
   update: async change => {
     const fail = failNextSave;
     failNextSave = false;
+    if (holdBeforeWrite) {
+      holdBeforeWrite = false;
+      beforeWriteWaiting = true;
+      await new Promise<void>(resolve => { releaseBeforeWrite = resolve; });
+    }
     const result = await updateBrowserAtom(messageEditsAtom, value => {
       if (fail) throw new Error('fixture IDB failure');
       return change(value);
@@ -42,31 +59,47 @@ const access = { one: store.createAccess(), two: store.createAccess() };
 const controllers: Partial<Record<'one' | 'two', MessageEditNavigationController>> = {};
 const leases: Partial<Record<'one' | 'two', MessageEditNavigationLease>> = {};
 const root = createRoot(document.getElementById('root')!);
+const visible = { one: true, two: true };
+let suppliedRecovery: MessageEditRecovery | null = null;
 
-async function initialize() {
-  await store.save(initial, origin, { sessionId: 'shared-session', revision: 0 });
-  const recovered = (await store.read(origin.hostId, origin.threadId))!.recovery;
-  const suppliedRecovery = location.search ? null : recovered;
-  const view = (name: 'one' | 'two') => createElement('section', { 'data-view': name, key: name },
+function render() {
+  const view = (name: 'one' | 'two') => visible[name] ? createElement('section', { 'data-view': name, key: name },
     createElement(StandaloneMessages, { client, hostId: origin.hostId, thread, editRecovery: suppliedRecovery, editAccess: access[name],
       editHistory: { order: 'ascending', tailComplete: true },
       onEditNavigationController: value => { if (value) controllers[name] = value; else delete controllers[name]; },
       onEditDraftChange: async (value, target, version) => {
-        await store.save(value, target, version);
+        try { await store.save(value, target, version); }
+        catch (reason) { lastWriteError = reason instanceof Error ? reason.message : String(reason); throw reason; }
+        if (!value) completedClears++;
+        else writtenText = value.editor?.edits[0]?.text ?? '';
       },
-      onEdit: async (_draft, target) => {
-        const assertAuthority = access[name].capture(target);
+      onEdit: async (_draft, target, prepare) => {
+        parentCalls++;
+        const assertAuthority = access[name].capture(target), connection = connectionGeneration;
+        if (holdNextPrepare) {
+          holdNextPrepare = false;
+          gate = new Promise<void>(resolve => { releaseGate = resolve; });
+        }
+        await prepare();
         if (holdNextSubmit) {
           holdNextSubmit = false;
           gate = new Promise<void>(resolve => { releaseGate = resolve; });
         }
         await store.submit(target, ['turn'], {}, () => {
           assertAuthority();
+          if (connection !== connectionGeneration) throw new Error('fixture connection changed before dispatch');
           if (!targetValid) throw new Error('fixture target changed before dispatch');
         });
       },
-    }));
+    })) : null;
   root.render(createElement('div', null, view('one'), view('two')));
+}
+
+async function initialize() {
+  if (!await store.read(origin.hostId, origin.threadId)) await store.save(initial, origin, { sessionId: 'shared-session', revision: 0 });
+  const recovered = (await store.read(origin.hostId, origin.threadId))!.recovery;
+  suppliedRecovery = new URLSearchParams(location.search).has('unread') ? null : recovered;
+  render();
 }
 
 Object.assign(window, { editAuthorityHarness: {
@@ -75,7 +108,22 @@ Object.assign(window, { editAuthorityHarness: {
   owner: (name: 'one' | 'two') => access[name].owns(origin),
   revoke: (name: 'one' | 'two') => { access[name].release(origin); },
   failNextSave: () => { failNextSave = true; },
+  holdNextPrepare: () => { holdNextPrepare = true; waiting = false; },
+  holdNextWrite: () => { waiting = false; gate = new Promise<void>(resolve => { releaseGate = resolve; }); },
+  holdBeforeWrite: () => { holdBeforeWrite = true; beforeWriteWaiting = false; lastWriteError = ''; },
+  beforeWriteWaiting: () => beforeWriteWaiting,
+  releaseBeforeWrite: () => { releaseBeforeWrite?.(); releaseBeforeWrite = undefined; beforeWriteWaiting = false; },
+  lastWriteError: () => lastWriteError,
   holdNextSubmit: () => { holdNextSubmit = true; waiting = false; },
+  parentCalls: () => parentCalls,
+  completedClears: () => completedClears,
+  writtenText: () => writtenText,
+  changeConnection: () => { connectionGeneration++; },
+  holdNextRead: () => { holdNextRead = true; readWaiting = false; },
+  readWaiting: () => readWaiting,
+  releaseRead: () => { releaseRead?.(); releaseRead = undefined; readWaiting = false; },
+  show: (name: 'one' | 'two', value: boolean) => { visible[name] = value; render(); },
+  acquire: (name: 'one' | 'two') => access[name].acquire(origin),
   waiting: () => waiting,
   targetValid: (value: boolean) => { targetValid = value; },
   releaseGate: () => { releaseGate?.(); releaseGate = undefined; waiting = false; },

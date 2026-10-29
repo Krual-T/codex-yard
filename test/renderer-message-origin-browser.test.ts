@@ -48,7 +48,7 @@ test('message context, edit qualification, IME, literal tool paths and app conte
       let editHistory;
       const root = createRoot(document.getElementById('root'));
       const render = () => root.render(React.createElement(StandaloneMessages,{client,hostId:'ssh',thread,editHistory,
-        onEdit:async(draft,origin)=>calls.edits.push({draft,origin}),onOpenFileAt:value=>calls.locations.push(value),
+        onEdit:async(draft,origin,prepare)=>{await prepare();calls.edits.push({draft,origin});},onOpenFileAt:value=>calls.locations.push(value),
         onOpenVisualization:value=>calls.visualizations.push(value)}));
       window.messageOriginHarness = {calls,setHistory(order,tailComplete){editHistory={order,tailComplete};render();},
         reverseTimestamps(value){thread={...thread,turns:thread.turns.map((turn,index)=>({...turn,startedAt:value?20-index*10:10+index*10}))};render();},

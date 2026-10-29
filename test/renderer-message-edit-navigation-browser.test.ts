@@ -35,7 +35,7 @@ test('message navigation freezes the exact draft, waits for storage, retries fai
     const thread = { id:'thread-a', cwd:'/work', name:null, status:{type:'idle'}, turns:[{id:'turn-a',status:'completed',itemsView:'full',items:[
       {id:'user-a',type:'userMessage',content:[{type:'text',text:'original',text_elements:[]},{type:'image',fileId:'image-a',detail:'high'}]}]}] };
     createRoot(document.getElementById('root')).render(React.createElement(StandaloneMessages, {client, hostId:'host-a', thread,
-      onEdit:async () => { editCalls++; }, editHistory:{order:'ascending',tailComplete:true}, onEditDraftChange,
+      onEdit:async (_draft, _origin, prepare) => { await prepare(); editCalls++; }, editHistory:{order:'ascending',tailComplete:true}, onEditDraftChange,
       onEditNavigationController:value => { controller = value; }}));
     window.editLeaveHarness = {
       ready:() => !!controller, writes:() => writes, saving:() => !!releaseSave, saved:() => saved,

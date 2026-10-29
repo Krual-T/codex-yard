@@ -69,7 +69,7 @@ function render() {
     editHistory: { order: 'ascending', tailComplete: true }, editRecovery: state?.recovery ?? null,
     editRebase: messageEditRebaseMarker(state), onEditNavigationController: (value: MessageEditNavigationController | null) => { controller = value; },
     onEditDraftChange: (value, origin, version) => store.save(value, origin, version),
-    onEdit: async (draft, origin) => { await store.submit(origin, projection.turns.map(turn => turn.id), { input: draftToInput(draft, host) }); },
+    onEdit: async (draft, origin, prepare) => { await prepare(); await store.submit(origin, projection.turns.map(turn => turn.id), { input: draftToInput(draft, host) }); },
     onPrepareEditRebase: async (origin, version) => {
       try { return await store.prepareRebase(origin, version); }
       finally { completedChecks++; }

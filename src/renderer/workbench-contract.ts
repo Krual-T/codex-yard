@@ -96,7 +96,7 @@ export interface StandaloneMessagesProps {
   client: WorkbenchClient;
   hostId: string;
   thread: ThreadSummary | null;
-  onEdit?(draft: ComposerDraft, origin: MessageEditOrigin): Promise<void>;
+  onEdit?(draft: ComposerDraft, origin: MessageEditOrigin, prepare: () => Promise<void>): Promise<void>;
   onFork?(turnId: string): void | Promise<void>;
   onOpenFile?(path: string): void;
   onOpenFileAt?(location: { path: string; hostId: string; cwd?: string; line?: number; column?: number }): void;

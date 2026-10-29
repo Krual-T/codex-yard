@@ -185,7 +185,7 @@ async function readRebaseHistory(client: WorkbenchClient, origin: MessageEditOri
 
 /** Recovery is UI data in native-atoms. Codex remains the conversation authority. */
 export class MessageEditRecoveryStore {
-  private observed = new Map<string, string | undefined>();
+  private observed = new Map<string, { serialized: string | undefined }>();
   private readonly editOwners = new Map<string, { owner: symbol }>();
   private readonly accessListeners = new Map<symbol, Set<() => void>>();
   private readonly client: WorkbenchClient;
@@ -206,9 +206,9 @@ export class MessageEditRecoveryStore {
     return {
       acquire: identity => {
         const key = keyFor(identity), current = this.editOwners.get(key);
-        if (current) return current.owner === owner;
+        if (current && current.owner !== owner) return false;
         this.editOwners.set(key, { owner });
-        notifyPeers();
+        if (!current) notifyPeers();
         return true;
       },
       owns,
@@ -220,13 +220,23 @@ export class MessageEditRecoveryStore {
           if (this.editOwners.get(key) !== current) throw new Error('消息编辑使用权已改变，未发送。');
         };
       },
-      read: async identity => (await this.read(identity.hostId, identity.threadId))?.recovery ?? null,
+      read: async identity => {
+        const key = keyFor(identity), current = this.editOwners.get(key);
+        if (!current || current.owner !== owner) throw new Error('此消息编辑已由另一视图持有。');
+        const value = entries(await this.storage.read())[key], recovery = stored(value, identity)?.recovery ?? null;
+        const serialized = JSON.stringify(value);
+        return { recovery, accept: () => {
+          if (this.editOwners.get(key) !== current) throw new Error('消息编辑使用权已改变，未接纳恢复稿。');
+          this.observed.set(key, { serialized });
+        } };
+      },
       subscribe: listener => {
         const listeners = this.accessListeners.get(owner) ?? new Set<() => void>();
         listeners.add(listener); this.accessListeners.set(owner, listeners);
         return () => { listeners.delete(listener); if (!listeners.size) this.accessListeners.delete(owner); };
       },
-      release: identity => {
+      release: (identity, authority) => {
+        try { authority?.(); } catch { return; }
         if (!owns(identity)) return;
         this.editOwners.delete(keyFor(identity));
         notifyPeers();
@@ -236,15 +246,16 @@ export class MessageEditRecoveryStore {
 
   async read(hostId: string, threadId: string): Promise<StoredMessageEdit | null> {
     const identity = { hostId, threadId }, key = keyFor(identity), value = entries(await this.storage.read())[key];
-    if (!this.observed.has(key)) this.observed.set(key, JSON.stringify(value));
+    if (!this.observed.has(key)) this.observed.set(key, { serialized: JSON.stringify(value) });
     return stored(value, identity);
   }
   private async change(origin: MessageEditOrigin, update: (previous: StoredMessageEdit | null) => StoredMessageEdit | null): Promise<StoredMessageEdit | null> {
     const key = keyFor(origin);
+    const observation = this.observed.get(key);
     let result: StoredMessageEdit | null = null;
     await this.storage.update(value => {
       const previous = entries(value), serialized = JSON.stringify(previous[key]);
-      if (this.observed.has(key) && this.observed.get(key) !== serialized) {
+      if (this.observed.get(key) !== observation || (observation && observation.serialized !== serialized)) {
         throw new Error('另一页面已更改此编辑。当前输入已保留，请刷新后核对恢复记录。');
       }
       const next = { ...previous };
@@ -252,7 +263,8 @@ export class MessageEditRecoveryStore {
       if (result) next[key] = result; else delete next[key];
       return next;
     });
-    this.observed.set(key, result ? JSON.stringify(result) : undefined);
+    // A later acquisition may have accepted a different baseline while this receipt was pending.
+    if (this.observed.get(key) === observation) this.observed.set(key, { serialized: result ? JSON.stringify(result) : undefined });
     this.storage.changed();
     return result;
   }
