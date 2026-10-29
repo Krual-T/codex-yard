@@ -1,20 +1,4 @@
-.yard-home-subagents-banner{container:yard-home-subagents-banner/inline-size;margin:0 13px 8px;color:var(--yard-fg);font:430 calc(var(--yard-font-size,14px)*.928571)/1.428571 var(--yard-ui-font,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif)}
-.yard-home-subagents-banner__content{display:flex;flex-direction:column;min-width:0;min-height:80px;padding:16px 12px 16px 20px;border-radius:25px;background:var(--yard-bg);box-shadow:0 0 0 .5px color-mix(in srgb,var(--yard-fg) 11.8%,transparent),0 0 2px #0000000d,0 4px 6px #00000005}
-.yard-home-subagents-banner__lead{display:flex;align-items:center;gap:8px;min-width:0;flex:1}
-.yard-home-subagents-banner__icon{display:grid;place-items:center;flex:none;width:48px;height:48px;color:color-mix(in srgb,var(--yard-fg) 65%,transparent)}
-.yard-home-subagents-banner__icon svg{display:block;flex:none;width:18px;height:18px}
-.yard-home-subagents-banner__copy{min-width:0;flex:1}
-.yard-home-subagents-banner__copy strong{font-size:var(--yard-font-size,14px);font-weight:500;line-height:1.5}
-.yard-home-subagents-banner__copy p{margin:0;color:var(--yard-muted);line-height:1.25;overflow-wrap:anywhere}
-.yard-home-subagents-banner__actions{display:flex;align-items:center;align-self:flex-start;gap:8px;margin-top:8px}
-.yard-home-subagents-banner__try,.yard-home-subagents-banner__dismiss{display:flex;align-items:center;justify-content:center;height:28px;border-radius:9999px;line-height:18px;white-space:nowrap}
-.yard-home-subagents-banner__try{padding:0 12px;background:var(--yard-fg);color:var(--yard-bg)}
-.yard-home-subagents-banner__try:hover:not(:disabled){background:color-mix(in srgb,var(--yard-fg) 80%,transparent)}
-.yard-home-subagents-banner__dismiss{width:28px;padding:0;color:var(--yard-muted)}
-.yard-home-subagents-banner__dismiss svg{width:16px;height:16px}
-.yard-home-subagents-banner__status,.yard-home-subagents-banner__recovery{margin:6px 0;overflow-wrap:anywhere}
+.yard-home-subagents-banner__status,.yard-home-subagents-banner__recovery{margin:6px 13px;overflow-wrap:anywhere}
 .yard-home-subagents-banner__status button,.yard-home-subagents-banner__recovery button{text-decoration:underline;text-underline-offset:2px}
 .yard-home-subagents-banner__recovery p{margin:4px 0}
 .yard-home-subagents-banner__recovery code{font-family:var(--yard-code-font,monospace);font-size:var(--yard-code-size,12px)}
-@container yard-home-subagents-banner (min-width:560px){.yard-home-subagents-banner__content{flex-direction:row;align-items:center;justify-content:space-between;gap:16px}.yard-home-subagents-banner__actions{align-self:center;margin-top:0}}
-@container yard-home-subagents-banner (max-width:400px){.yard-home-subagents-banner__lead{align-items:flex-start}.yard-home-subagents-banner__actions{width:100%;justify-content:center;flex-wrap:wrap}.yard-home-subagents-banner__try{flex:1}}

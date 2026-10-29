@@ -22,12 +22,14 @@ test('home subagent banner uses the real browser atoms, config operations and co
     import {StandaloneComposer} from './src/renderer/composer/StandaloneComposer.tsx';
     import {I18nProvider} from './src/renderer/i18n/index.tsx';
     import {browserAtom} from './src/renderer/app/browser-atoms.ts';
+    import {BrowserWorkbenchClient} from './src/renderer/app/client.ts';
     import {settingsConfigOperations} from './src/renderer/settings/config-operations.ts';
 
     const options=window.homeBannerOptions||{};
-    const state={host:'local',cwd:'/workspace',grant:1,bannerEpoch:1,sourceGeneration:'generation-1',configVersion:1,
+    const state={host:'local',cwd:'/workspace',grant:1,bannerEpoch:1,replaceClient:false,sourceGeneration:'generation-1',configVersion:1,
       feature:options.enabled===true,remoteFeature:true,featureError:!!options.featureError,featureHeld:!!options.featureHeld,
-      writeMode:'success',failSeen:0,seenSaved:false,featureWaiters:[],writeWaiters:[],events:new Set(),calls:[],errors:[],prefills:[],sends:[],controller:null};
+      writeMode:'success',failSeen:0,seenSaved:false,featureWaiters:[],writeWaiters:[],events:new Set(),calls:[],errors:[],prefills:[],sends:[],controller:null,
+      holdNative:!!options.holdNative,nativeWaiters:[],nativeAttempts:[],nativeCalls:[],nativeRejections:[]};
     const grants=new WeakMap();
     const source=hostId=>({hostId,generation:state.sourceGeneration,homeDirectory:'/fixture',codexHome:'/fixture/codex'});
     const client={
@@ -81,6 +83,34 @@ test('home subagent banner uses the real browser atoms, config operations and co
       subscribe(listener){state.events.add(listener);return ()=>state.events.delete(listener);},
       async reply(){throw Error('Unexpected approval');},
     };
+    let startClient=async()=>{};
+    if(options.nativeClient){
+      class PeerSocket {
+        static OPEN=1;
+        readyState=0;
+        constructor(){queueMicrotask(()=>{this.readyState=1;this.onopen?.();});}
+        send(raw){const request=JSON.parse(raw);if(request.type!=='mcp-request')return;
+          state.nativeCalls.push({host:request.hostId,method:request.request.method,params:request.request.params});
+          const enabled=request.hostId==='remote'?state.remoteFeature:state.feature;
+          const result=request.request.params.cursor===null?{data:[{name:'other',enabled:false}],nextCursor:'page-2'}
+            :{data:[{name:'multi_agent',enabled}],nextCursor:null};
+          queueMicrotask(()=>this.onmessage?.({data:JSON.stringify({type:'mcp-response',hostId:request.hostId,message:{id:request.request.id,result}})}));
+        }
+        close(){this.readyState=3;this.onclose?.();}
+      }
+      window.WebSocket=PeerSocket;
+      const native=new BrowserWorkbenchClient('ws://fixture.invalid/native-host'), connect=native.connect.bind(native), fallback=client.rpc.bind(client);
+      startClient=async()=>{await connect();native.connect=()=>{
+        if(state.holdNative&&state.nativeAttempts.length===(options.holdNativeAt??0)+1){state.holdNative=false;return new Promise(resolve=>state.nativeWaiters.push(resolve)).then(connect);}
+        return connect();
+      };};
+      client.rpc=async(method,params={},host='local',dispatch={})=>{
+        if(method!=='experimentalFeature/list')return fallback(method,params,host,dispatch);
+        const index=state.nativeAttempts.length;state.nativeAttempts.push({host,cwd:state.cwd});
+        try{return await native.rpc(method,params,host,dispatch);}catch(error){state.nativeRejections.push({index,message:String(error)});throw error;}
+      };
+    }
+    const replacementClient={...client};
     const operations=settingsConfigOperations(client);
     const onController=controller=>{state.controller=controller;};
     function captureMain(){
@@ -106,7 +136,7 @@ test('home subagent banner uses the real browser atoms, config operations and co
     }
     const root=createRoot(document.getElementById('root'));
     const render=()=>root.render(<I18nProvider locale={options.locale||'en-US'}><main style={{maxWidth:736,margin:'0 auto'}}>
-      <HomeSubagentsBanner key={state.bannerEpoch} client={client} hostId={state.host} cwd={state.cwd} captureMain={captureMain} onTryNow={onTryNow} onError={message=>state.errors.push(message)}/>
+      <HomeSubagentsBanner key={state.bannerEpoch} client={state.replaceClient?replacementClient:client} hostId={state.host} cwd={state.cwd} captureMain={captureMain} onTryNow={onTryNow} onError={message=>state.errors.push(message)}/>
       <StandaloneComposer key={state.host} client={client} context={{hostId:state.host,threadId:null,draftId:'fixture-'+state.host,cwd:state.cwd}}
         busy={false} initialOptions={{model:'fixture',effort:'high',approvalPolicy:'on-request',sandboxMode:'read-only'}}
         onDraftController={onController} onSubmit={async (...args)=>{state.sends.push(args);}} onInterrupt={async()=>{}} />
@@ -117,27 +147,33 @@ test('home subagent banner uses the real browser atoms, config operations and co
       async atom(){return browserAtom('get-persisted-atom',{key:'has-seen-multi-agent-composer-banner'});},
       async flush(){const c=state.controller;return c?.flush(c.snapshot().owner);},
       changeHost(host){state.grant++;state.host=host;state.cwd=host==='local'?'/workspace':'/remote';render();},
+      changeCwd(cwd){state.grant++;state.cwd=cwd;render();},
+      changeClient(){state.grant++;state.replaceClient=true;render();},
       remountBanner(){state.grant++;state.bannerEpoch++;render();},
+      refreshConnection(){for(const listener of state.events)listener({type:'connection-state',state:'connected'});},
+      releaseNative(){for(const done of state.nativeWaiters.splice(0))done();},
       revoke(){state.grant++;},
       releaseFeature(){state.featureHeld=false;for(const done of state.featureWaiters.splice(0))done();},
       releaseWrite(){for(const done of state.writeWaiters.splice(0))done();},
     };
-    render();
+    void startClient().then(render);
   ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' } });
   const browser = await chromium.launch({ executablePath: chrome, headless: true,
     args: ['--no-sandbox', '--disable-background-networking', '--disable-sync', '--disable-component-update'] });
   const open = async (options: Record<string, unknown> = {}, width = 1000): Promise<{ context: BrowserContext; page: Page; errors: string[] }> => {
     const context = await browser.newContext({ viewport: { width, height: 850 } });
-    await context.route('**/*', route => new URL(route.request().url()).origin === 'http://banner.test'
+    const origin = options.nativeClient ? 'http://127.0.0.1' : 'http://banner.test';
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin
       ? route.fulfill({ contentType: 'text/html', body: '<main id="root"></main>' }) : route.abort());
     await context.addInitScript(value => { window.homeBannerOptions = value; }, options);
     const page = await context.newPage(), errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
     page.setDefaultTimeout(8_000);
-    await page.goto('http://banner.test/');
+    await page.goto(origin + '/');
     await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
     await page.addStyleTag({ content: readFileSync('src/renderer/app/app.css', 'utf8') });
     await page.addStyleTag({ content: readFileSync('src/renderer/composer/standalone-composer.css', 'utf8') });
+    await page.addStyleTag({ content: readFileSync('src/renderer/app/home-subagent-banner.css', 'utf8') });
     await page.addStyleTag({ content: readFileSync('src/renderer/app/HomeSubagentsBanner.css', 'utf8') });
     await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
     await page.getByRole('textbox', { name: options.locale === 'zh-CN' ? '与 Codex 协作' : 'Work with Codex' }).waitFor();
@@ -229,6 +265,37 @@ test('home subagent banner uses the real browser atoms, config operations and co
       } finally { await context.close(); }
     });
 
+    await t.test('the real client rejects a stale feature read after its connection wait', async () => {
+      for (const change of ['host', 'cwd', 'client', 'controller', 'refresh', 'second-page'] as const) {
+        const holdNativeAt = change === 'second-page' ? 1 : 0;
+        const { context, page, errors } = await open({ nativeClient: true, holdNative: true, holdNativeAt });
+        try {
+          assert.equal(await page.evaluate(() => window.isSecureContext), true);
+          try { await page.waitForFunction(() => window.homeBannerFixture.state.nativeWaiters.length === 1); }
+          catch (cause) {
+            const state = await page.evaluate(() => ({ attempts: window.homeBannerFixture.state.nativeAttempts,
+              calls: window.homeBannerFixture.state.nativeCalls, rejections: window.homeBannerFixture.state.nativeRejections,
+              errors: window.homeBannerFixture.state.errors, socketOpen: WebSocket.OPEN }));
+            throw new Error(`${change}: original connection wait was not reached: ${JSON.stringify(state)}`, { cause });
+          }
+          if (change === 'host' || change === 'second-page') await page.evaluate(() => window.homeBannerFixture.changeHost('remote'));
+          else if (change === 'cwd') await page.evaluate(() => window.homeBannerFixture.changeCwd('/another-workspace'));
+          else if (change === 'client') await page.evaluate(() => window.homeBannerFixture.changeClient());
+          else if (change === 'controller') await page.evaluate(() => window.homeBannerFixture.remountBanner());
+          else await page.evaluate(() => window.homeBannerFixture.refreshConnection());
+          await page.waitForFunction((count: number) => window.homeBannerFixture.state.nativeCalls.length === count, holdNativeAt + 2);
+          const before = await page.evaluate(() => window.homeBannerFixture.state.nativeCalls);
+          assert.equal(before.filter((call: any) => call.method === 'experimentalFeature/list').length, holdNativeAt + 2);
+          if (change === 'host' || change === 'second-page') assert.equal(before.filter((call: any) => call.host === 'remote').length, 2);
+          await page.evaluate(() => window.homeBannerFixture.releaseNative());
+          await page.waitForFunction((index: number) => window.homeBannerFixture.state.nativeRejections.some((item: any) => item.index === index), holdNativeAt);
+          const after = await page.evaluate(() => window.homeBannerFixture.state.nativeCalls);
+          assert.deepEqual(after, before, `${change}: stale load must not dispatch`);
+          assert.deepEqual(errors, []);
+        } finally { await context.close(); }
+      }
+    });
+
     await t.test('unknown write remains fenced until explicit status and continues the same operation', async () => {
       const { context, page, errors } = await open();
       try {
@@ -236,6 +303,9 @@ test('home subagent banner uses the real browser atoms, config operations and co
         await page.evaluate(() => { window.homeBannerFixture.state.writeMode = 'lost'; });
         await page.getByRole('button', { name: 'Try now' }).click();
         await page.getByRole('button', { name: 'Check original operation' }).waitFor();
+        assert.equal(await page.locator('.yard-home-subagents').count(), 1);
+        assert.equal(await page.getByRole('button', { name: 'Try now' }).isDisabled(), true);
+        assert.equal(await page.getByRole('button', { name: 'Dismiss subagent banner' }).isEnabled(), true);
         let saved = await page.evaluate(() => window.homeBannerFixture.snapshot());
         assert.equal(saved.records[0].phase, 'unknown'); assert.deepEqual(saved.records[0].origin.scope, ['features.multi_agent']);
         assert.equal((await page.evaluate(() => window.homeBannerFixture.atom())).value, undefined);
@@ -339,7 +409,7 @@ test('home subagent banner uses the real browser atoms, config operations and co
         await page.evaluate(() => window.homeBannerFixture.changeHost('remote'));
         const button = page.getByRole('button', { name: 'Try now' }); await button.waitFor();
         await page.evaluate(() => window.homeBannerFixture.releaseWrite());
-        await page.waitForFunction(() => !(document.querySelector('.yard-home-subagents-banner__try') as HTMLButtonElement)?.disabled);
+        await page.waitForFunction(() => !(document.querySelector('.yard-home-subagents__try') as HTMLButtonElement)?.disabled);
         const result = await page.evaluate(async () => ({ snapshot: await window.homeBannerFixture.snapshot(), atom: await window.homeBannerFixture.atom(),
           state: { calls: window.homeBannerFixture.state.calls, prefills: window.homeBannerFixture.state.prefills,
             owner: window.homeBannerFixture.state.controller.snapshot().owner } }));
@@ -405,9 +475,9 @@ test('home subagent banner uses the real browser atoms, config operations and co
         await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; document.documentElement.style.setProperty('--yard-ui-font', 'Arial');
           document.documentElement.style.setProperty('--yard-font-size', '16px'); });
         assert.equal(await page.getByText('Codex 中的子智能体').count(), 1);
-        const metrics = await page.locator('.yard-home-subagents-banner__content').evaluate(element => {
-          const rect = element.getBoundingClientRect(), copy = element.querySelector('.yard-home-subagents-banner__copy')!.getBoundingClientRect();
-          const button = element.querySelector('.yard-home-subagents-banner__try')!.getBoundingClientRect();
+        const metrics = await page.locator('.yard-home-subagents').evaluate(element => {
+          const rect = element.getBoundingClientRect(), copy = element.querySelector('.yard-home-subagents__copy')!.getBoundingClientRect();
+          const button = element.querySelector('.yard-home-subagents__try')!.getBoundingClientRect();
           return { width: rect.width, height: rect.height, scroll: element.scrollWidth, copy, button, font: getComputedStyle(element).fontFamily };
         });
         assert.ok(metrics.height >= 80); assert.ok(metrics.scroll <= metrics.width + 1);

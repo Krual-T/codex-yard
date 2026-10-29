@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { X } from 'lucide-react';
 import type { ConfigReadSource } from '../../../lib/config-write-protocol.ts';
 import { useI18n } from '../i18n/index.tsx';
+import { HomeSubagentBanner } from './HomeSubagentBanner.tsx';
 import { configReadSource, sameConfigSource } from '../settings/config-source.ts';
 import { settingsConfigOperations, SettingsWriteError } from '../settings/config-operations.ts';
 import type { SettingsWriteRecord } from '../settings/config-operations.ts';
@@ -13,20 +13,6 @@ import './HomeSubagentsBanner.css';
 const seenKey = 'has-seen-multi-agent-composer-banner';
 const featureScope = ['features.multi_agent'] as const;
 const prompt = 'Spawn a subagent to explore this repo.';
-type BannerLabels = readonly [title: string, body: string, action: string, dismiss: string];
-const labels: Record<string, BannerLabels> = {
-  en: ['Subagents in Codex', 'Delegate work to subagents that work in parallel. Note: may increase token usage.', 'Try now', 'Dismiss subagent banner'],
-  zh: ['Codex 中的子智能体', '将任务委派给并行运行的子智能体。注意：这可能会增加 Token 消耗量。', '立即试用', '关闭子智能体横幅'],
-  'zh-Hant': ['Codex 中的子代理', '委派工作給可平行運作的子代理。注意：可能會增加 Token 用量。', '立即試用', '關閉子代理橫幅'],
-  ja: ['Codex のサブエージェント', '並列で動作するサブエージェントに作業を委任します。注: トークン使用量が増えることがあります。', '今すぐ試す', 'サブエージェントのバナーを閉じる'],
-  ko: ['Codex의 하위 에이전트', '병렬로 작업하는 하위 에이전트에 작업을 위임합니다. 참고: 토큰 사용량이 늘어날 수 있습니다.', '지금 사용해 보세요', '하위 에이전트 배너 닫기'],
-  es: ['Subagentes en Codex', 'Delega trabajo a subagentes que trabajan en paralelo. Nota: puede aumentar el uso de tókenes.', 'Pruébalo ahora', 'Cerrar anuncio de subagente'],
-  'es-419': ['Subagentes en Codex', 'Delega trabajo a subagentes que trabajan en paralelo. Nota: Puede aumentar el uso de tókenes.', 'Pruébalo ahora', 'Descartar el banner del subagente'],
-  fr: ['Sous-agents dans Codex', 'Déléguez le travail à des sous-agents qui travaillent en parallèle. Remarque\u00a0: peut augmenter l’utilisation de jetons.', 'Essayer', 'Fermer la bannière des sous-agents'],
-  de: ['Subagenten in Codex', 'Delegiere Aufgaben an parallel arbeitende Subagenten. Hinweis: Kann den Tokenverbrauch erhöhen.', 'Jetzt testen', 'Subagenten-Banner schließen'],
-  pt: ['Subagentes no Codex', 'Delegue tarefas para subagentes que trabalham em paralelo. Atenção: isso pode aumentar o uso de tokens.', 'Experimente agora', 'Fechar banner de subagente'],
-  'pt-PT': ['Subagentes no Codex', 'Delegue trabalho a subagentes que trabalham em paralelo. Nota: pode aumentar a utilização de tokens.', 'Experimente já', 'Fechar banner do subagente'],
-};
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const errorText = (value: unknown) => value instanceof Error ? value.message : String(value);
 
@@ -55,10 +41,11 @@ function isBannerOperation(entry: SettingsWriteRecord, hostId: string): boolean 
 async function featureEnabled(client: WorkbenchClient, hostId: string, current: () => boolean): Promise<boolean> {
   let cursor: string | null = null, enabled: boolean | undefined;
   const cursors = new Set<string>();
+  const assertCurrent = () => { if (!current()) throw new Error('The original page changed.'); };
   do {
-    if (!current()) throw new Error('The original page changed.');
-    const page: unknown = await client.rpc('experimentalFeature/list', { cursor, limit: 100 }, hostId);
-    if (!current()) throw new Error('The original page changed.');
+    assertCurrent();
+    const page: unknown = await client.rpc('experimentalFeature/list', { cursor, limit: 100 }, hostId, { assertBeforeSend: assertCurrent });
+    assertCurrent();
     if (!object(page) || !Array.isArray(page.data)
       || page.nextCursor != null && (typeof page.nextCursor !== 'string' || !page.nextCursor)) {
       throw new Error('Invalid experimental features response.');
@@ -94,9 +81,6 @@ export function HomeSubagentsBanner({ client, hostId, cwd, captureMain, onTryNow
   const { locale, t } = useI18n();
   const traditional = /^zh-(?:TW|HK|MO|Hant)/i.test(locale), chinese = /^zh(?:-|$)/i.test(locale);
   const text = (en: string, zh: string, tw = zh) => chinese ? traditional ? tw : zh : en;
-  const language = locale.toLowerCase();
-  const labelKey = traditional ? 'zh-Hant' : language === 'es-419' ? 'es-419' : language === 'pt-pt' ? 'pt-PT' : language.split('-')[0]!;
-  const [title, body, action, dismissLabel] = labels[labelKey] ?? labels.en!;
   const operations = useMemo(() => settingsConfigOperations(client), [client]);
   const writes = useSyncExternalStore(operations.subscribe, operations.getSnapshot, operations.getSnapshot);
   const [load, setLoad] = useState<LoadState>({ client, hostId, cwd, seen: null, status: 'loading', enabled: false });
@@ -241,20 +225,12 @@ export function HomeSubagentsBanner({ client, hostId, cwd, captureMain, onTryNow
   if (currentLoad.status === 'ready' && currentLoad.seen === true && !recovery && !error && !writes.error) return null;
   if (currentLoad.status === 'ready' && currentLoad.enabled && !recovery && !error && !writes.error) return null;
 
-  return <section className="yard-home-subagents-banner" aria-label={title}>
+  return <div className="yard-home-subagents-banner">
     {currentLoad.status === 'loading' && !recovery ? <p className="yard-home-subagents-banner__status" role="status">{t('Loading experimental features...')}</p> : null}
     {currentLoad.status === 'error' && !recovery ? <p className="yard-home-subagents-banner__status" role="alert">{t('Could not load experimental features:')} {currentLoad.error}{' '}
       <button type="button" onClick={() => setRevision(value => value + 1)}>{t('Retry')}</button></p> : null}
-    {currentLoad.status === 'ready' && !currentLoad.seen && !currentLoad.enabled && <div className="yard-home-subagents-banner__content">
-      <div className="yard-home-subagents-banner__lead"><span className="yard-home-subagents-banner__icon" aria-hidden="true">
-        <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-          <circle cx="14" cy="9.5" r="3" /><circle cx="5" cy="10.5" r="2.5" /><circle cx="23" cy="10.5" r="2.5" />
-          <path d="M8 21c0-3 2.7-5 6-5s6 2 6 5M1 20c0-2.5 1.8-4 4.2-4 .5 0 1 .1 1.5.3M27 20c0-2.5-1.8-4-4.2-4-.5 0-1 .1-1.5.3" />
-        </svg></span>
-        <div className="yard-home-subagents-banner__copy"><strong>{title}</strong><p>{body}</p></div></div>
-      <div className="yard-home-subagents-banner__actions"><button className="yard-home-subagents-banner__try" type="button" disabled={busy || recovery || writes.loading || !!writes.error} onClick={tryNow}>{action}</button>
-        <button className="yard-home-subagents-banner__dismiss" type="button" disabled={busy} onClick={dismiss} title={dismissLabel} aria-label={dismissLabel}><X aria-hidden="true" /></button></div>
-    </div>}
+    {currentLoad.status === 'ready' && !currentLoad.seen && !currentLoad.enabled && <HomeSubagentBanner
+      pending={busy} tryDisabled={recovery || writes.loading || !!writes.error} onTryNow={tryNow} onDismiss={dismiss} />}
     {error && <p className="yard-home-subagents-banner__status" role="alert">{error}</p>}
     {writes.error && <p className="yard-home-subagents-banner__status" role="alert">{writes.error}{' '}
       <button type="button" disabled={busy} onClick={() => { void operations.refresh(); }}>{t('Retry')}</button></p>}
@@ -288,5 +264,5 @@ export function HomeSubagentsBanner({ client, hostId, cwd, captureMain, onTryNow
         </div>;
       })}
     </div>}
-  </section>;
+  </div>;
 }

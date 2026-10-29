@@ -19,8 +19,9 @@ const translations: Record<string, Labels> = {
 };
 
 /** The App owns the original feature gate, durable dismissal and guarded prefill. */
-export function HomeSubagentBanner({ pending = false, onTryNow, onDismiss }: {
+export function HomeSubagentBanner({ pending = false, tryDisabled = false, onTryNow, onDismiss }: {
   pending?: boolean;
+  tryDisabled?: boolean;
   onTryNow(): void;
   onDismiss(): void;
 }) {
@@ -43,7 +44,7 @@ export function HomeSubagentBanner({ pending = false, onTryNow, onDismiss }: {
             <div className="yard-home-subagents__body">{body}</div></div>
         </div>
         <div className="yard-home-subagents__actions">
-          <button type="button" className="yard-home-subagents__try" disabled={pending} onClick={onTryNow}>{tryNow}</button>
+          <button type="button" className="yard-home-subagents__try" disabled={pending || tryDisabled} onClick={onTryNow}>{tryNow}</button>
           <button type="button" className="yard-home-subagents__dismiss" aria-label={dismiss} disabled={pending} onClick={onDismiss}><X size={16} aria-hidden="true" /></button>
         </div>
       </div>
