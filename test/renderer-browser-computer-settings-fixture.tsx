@@ -25,6 +25,7 @@ let setGate: (gate: IntegrationAvailability) => void;
 let setRawFeature: (value: boolean | null) => void;
 let refreshes = 0;
 let failNextNavigation = false;
+let failNextRefresh = false;
 const savedKeys = new Set<BrowserPreferenceKey>();
 
 function Fixture() {
@@ -68,7 +69,7 @@ function Fixture() {
       if (options.replace) history.replaceState(options.state, '', path); else history.pushState(options.state, '', path);
       setLocationKey(value => value + 1);
     },
-    refreshAvailability: async () => { refreshes++; },
+    refreshAvailability: async () => { refreshes++; if (failNextRefresh) { failNextRefresh = false; throw new Error('Synthetic availability refresh failure'); } },
   };
   return <I18nProvider locale="en-US"><div className="yard-settings"><main className="yard-settings-main"><div className="yard-settings-content">
     {route.pathname.startsWith('/settings/computer-use') ?
@@ -80,9 +81,10 @@ function Fixture() {
 declare global { interface Window { integrationSettingsHarness: {
   show(path: string, state?: unknown): void; gate(value: IntegrationAvailability): void; rawFeature(value: boolean | null): void; revoke(): void;
   refreshes(): number; saved(key: BrowserPreferenceKey): boolean; failNextNavigation(): void;
-  suspend(): void; resume(): Promise<void>; close(): void;
+  failNextRefresh(): void; suspend(): void; resume(): Promise<void>; close(): void;
 } } }
 window.integrationSettingsHarness = { show: (path, state) => show(path, state), gate: value => setGate(value), rawFeature: value => setRawFeature(value),
   revoke: () => { authority++; }, refreshes: () => refreshes, saved: key => savedKeys.has(key),
-  failNextNavigation: () => { failNextNavigation = true; }, suspend: () => client.suspend(), resume: () => client.resume(), close: () => client.close() };
+  failNextNavigation: () => { failNextNavigation = true; }, failNextRefresh: () => { failNextRefresh = true; },
+  suspend: () => client.suspend(), resume: () => client.resume(), close: () => client.close() };
 void client.connect().then(() => createRoot(document.getElementById('root')!).render(<Fixture />));

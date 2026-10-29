@@ -145,6 +145,7 @@ function BrowserSectionScope(props: BrowserSectionProps) {
   };
   const manage = (target: string) => navigation.navigate(`/settings/browser-use/${target}`);
   const retryFeature = () => {
+    setSaveError(null);
     feature.retry();
     if (current(props)) void props.refreshAvailability().catch(cause => {
       if (mounted.current && current(props)) setSaveError(cause instanceof Error ? cause.message : String(cause));
@@ -152,6 +153,7 @@ function BrowserSectionScope(props: BrowserSectionProps) {
   };
   if (validSubpage && (feature.loading || feature.error)) return <>
     <NavigationFailureNotice failure={navigation.failure} retry={navigation.retry} />
+    {saveError && <p className="yard-setting-error" role="alert">{saveError}</p>}
     <h1>{text(subpage.title)}</h1>{feature.loading ? <p role="status">{text('Loading browser settings...')}</p> :
       <p className="yard-setting-error" role="alert">{text('Could not load browser settings:')} {text(feature.error ?? '')} <button type="button" className="yard-link" onClick={retryFeature}>{t('Retry')}</button></p>}
   </>;

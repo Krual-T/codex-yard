@@ -209,6 +209,11 @@ test('browser and computer settings use the real host bridge, retain gates and i
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
     assert.equal(peer.calls('config/batchWrite').length, writesBeforeReconnect);
     listBrowserFeature = true;
+    await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use/history?step=feature'));
+    await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
+    await page.evaluate(() => window.integrationSettingsHarness.failNextRefresh());
+    await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).getByRole('button', { name: 'Retry' }).click();
+    await page.getByRole('alert').filter({ hasText: 'Synthetic availability refresh failure' }).waitFor();
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?step=feature'));
     await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
     assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
