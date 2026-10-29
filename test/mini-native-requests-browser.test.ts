@@ -18,7 +18,7 @@ test('Mini replies with native-host request references from the disposable daemo
     import { BrowserWorkbenchClient } from './src/renderer/app/client.ts';
     import { StandaloneMini } from './src/renderer/mini/index.tsx';
     const client=new BrowserWorkbenchClient(), root=createRoot(document.getElementById('root'));
-    const records=[], replies=[];
+    const records=[], replies=[], resolutions=[];
     let bridge='connecting', host={state:'connecting',fresh:false,revision:'0'}, pending=[], revision=0;
     const same=(a,b)=>a.hostId===b.hostId&&a.id===b.id&&a.generation===b.generation;
     const send=async message=>{await client.connect();client.socket.send(JSON.stringify(message))};
@@ -33,6 +33,7 @@ test('Mini replies with native-host request references from the disposable daemo
         catch(error){item.request.outcome=error.uncertain?'unknown':'expired';item.request.error=error.message}render()}
     }))}
     client.subscribe(event=>{
+      if(event.method==='serverRequest/resolved'&&event.requestRef)resolutions.push(event.requestRef);
       if(event.type==='connection-state'){bridge=event.state;
         if(event.state!=='connected'){pending=[];host={...host,fresh:false}}render()}
       if(event.type==='codex-app-server-connection-changed'&&event.hostId==='local'){
@@ -43,7 +44,7 @@ test('Mini replies with native-host request references from the disposable daemo
         pending=[...pending,ref];records.push({kind:'approval',request:{requestRef:ref,title:'Request '+ref.id,
           outcome:'ready',choices:[{label:'Reply '+ref.id+' '+count,result:{decision:'accept'}}]}});render()}
     });
-    window.nativeMiniHarness={records,replies,ready:()=>bridge==='connected'&&host.state==='connected',
+    window.nativeMiniHarness={records,replies,resolutions,ready:()=>bridge==='connected'&&host.state==='connected',
       hostState:()=>host.state,bridgeState:()=>bridge,
       refresh(){host={...host,fresh:true,revision:String(++revision)};render()},
       async reconnectHost(){await client.rpc('model/list')},suspend(){client.suspend()},async resume(){await client.resume()},
@@ -85,6 +86,9 @@ test('Mini replies with native-host request references from the disposable daemo
   await fake.waitFor(message => message.id === 'first' && 'result' in message);
   await page.getByRole('button', { name: 'Reply second 1' }).click();
   await fake.waitFor(message => message.id === 'second' && 'result' in message);
+  fake.send({ method: 'serverRequest/resolved', params: { requestId: 'first', threadId: 'fixture-thread' } });
+  await page.waitForFunction(() => (window as any).nativeMiniHarness.resolutions.length === 1);
+  assert.deepEqual(await page.evaluate(() => (window as any).nativeMiniHarness.resolutions[0]), refs[0]);
   fake.send({ id: 'first', method: 'item/commandExecution/requestApproval', params: { threadId: 'fixture-thread' } });
   await page.getByRole('button', { name: 'Reply first 2' }).waitFor();
   await page.getByRole('button', { name: 'Reply first 2' }).click();
