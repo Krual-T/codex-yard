@@ -289,26 +289,6 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
         if (threadId !== owner.threadId) throw notSent('原侧聊注入目标已改变。');
         assertSend(); sync(capturedNative.assertBeforeSend(threadId));
       } };
-    // The shared submitDraft copy on this baseline predates sideChat. Keep the original
-    // captured pair on this submission's host call until that shared copy is updated.
-    const submissionClient: WorkbenchClient = {
-      rpc: (method, params, hostId, dispatchOptions) => client.rpc(method, params, hostId, dispatchOptions),
-      host: (endpoint, params, dispatchOptions) => {
-        if (endpoint !== 'send-injection' || !params || !['inject', 'start'].includes(String(params.action))) {
-          return client.host(endpoint, params, dispatchOptions);
-        }
-        if (!nativeInjectionAuthority?.sideChat) throw Object.assign(notSent('原侧聊注入授权尚未接入。'), { sendPhase: 'before-send' });
-        const proof = structuredClone(nativeInjectionAuthority.sideChat), reference = params.reference;
-        if (!reference || typeof reference !== 'object' || !('hostId' in reference) || !('threadId' in reference)
-          || reference.hostId !== owner.hostId || reference.threadId !== owner.threadId) {
-          throw Object.assign(notSent('原侧聊注入目标已改变。'), { sendPhase: 'before-send' });
-        }
-        return client.host(endpoint, { ...params, sideChat: proof }, { assertBeforeSend: () => {
-          nativeInjectionAuthority.assertBeforeSend(owner.threadId!); sync(dispatchOptions?.assertBeforeSend?.());
-        } });
-      },
-      subscribe: listener => client.subscribe(listener), reply: (request, response) => client.reply(request, response),
-    };
     return task(async () => {
       const cleanup = { controller(intent: SendIntent) {
         assertOriginal();
@@ -316,7 +296,7 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
         if (!draft.current) throw new Error('原侧聊输入区未挂载，恢复记录已保留。');
         return draft.current;
       } };
-      await sendConversationDraft({ client: submissionClient, sessions, sends, cleanup,
+      await sendConversationDraft({ client, sessions, sends, cleanup,
         nativeInjectionAuthority,
         dispatch: (method, params, hostId, beforeSend) => latest.current.dispatchSubmission(method, params, hostId, beforeSend, originalAuthority),
         guard(threadId) { if (threadId !== owner.threadId) throw notSent('原侧聊目标已改变。'); assertSend(); },
@@ -528,9 +508,6 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
         activeTurnId: current.thread.turns.find(turn => turn.status === 'inProgress')?.id ?? null, thread: current.thread,
         initialOptions: current.options ?? undefined }, value, {}, { type: 'send' }, async () => {}, origin,
       (actual, expected, params) => {
-        const submit = edits.submit as typeof edits.submit & ((origin: MessageEditOrigin, expectedTurnIds: string[], turnParams: Record<string, unknown>,
-          assertCanDispatch: () => void, daemonConnectionGeneration: string | undefined, childDispatch?: SideChatChildDispatchAuthority)
-          => ReturnType<MessageEditRecoveryStore['submit']>);
         const assertRead = () => {
           assertOriginal(); access();
           if (locked.current || !sameOwner(owner, currentOwner())
@@ -539,7 +516,7 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
         const childDispatch = capturedNative?.sideChat && authority ? { proof: structuredClone(capturedNative.sideChat), assertCurrent() {
           guard(owner, { type: 'send' }, authority!); sync(capturedNative!.assertBeforeSend(owner.threadId!));
         } } : undefined;
-        return submit.call(edits, actual, expected, params, assertRead, capturedNative?.daemonConnectionGeneration, childDispatch);
+        return edits.submit(actual, expected, params, assertRead, capturedNative?.daemonConnectionGeneration, childDispatch);
       });
       if (result.turn) sessions.started({ hostId: owner.hostId, threadId: owner.threadId! }, result.turn);
     });

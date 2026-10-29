@@ -1521,6 +1521,15 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         {panelOpen && !settings && panelKind === 'visualization' && visualization?.hostId === panelHostId && visualization.threadId === panelThreadId
           && <StandaloneVisualization client={client} {...visualization} theme={previewAppearance.theme} themeVariables={previewAppearance.variables}
             locale={previewAppearance.locale} onPrefill={addReference} onFollowUp={async (request, signal) => {
+              const child = sideChatSourceRef.current;
+              if (child) {
+                checkPanelChild(child);
+                if (signal.aborted || request.hostId !== child.owner.hostId || request.threadId !== child.owner.threadId || !sideChats.current) {
+                  throw new Error('可视化所属侧聊已改变，输入未发送。');
+                }
+                await sideChats.current.submitVisualization(structuredClone(request), signal);
+                return;
+              }
               if (leaving || navigationLocked.current || signal.aborted || current.readOnly || !composerIsCurrent
                 || request.hostId !== current.hostId || request.threadId !== current.threadId) {
                 throw new Error('可视化所属会话尚未就绪，输入未发送。');

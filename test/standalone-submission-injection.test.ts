@@ -136,6 +136,7 @@ test('submission uses the native fence with immutable ordered input and no direc
   const result = await h.submit();
   assert.equal(result.turn?.id, 'accepted-turn');
   assert.deepEqual(h.actions.map(value => value.action), ['inject', 'start']);
+  assert.ok(h.actions.every(value => !Object.hasOwn(value.params, 'sideChat')));
   assert.deepEqual(h.peer.calls('thread/inject_items')[0]!.params.items, original.injection!.responseItems);
   assert.deepEqual(h.peer.calls('turn/start')[0]!.params.input, original.injection!.input);
   assert.equal(h.peer.calls('turn/start')[0]!.params.clientUserMessageId, original.clientUserMessageId);
@@ -153,8 +154,14 @@ test('authority, input and explicit options remain captured across asynchronous 
   const wait = new Promise<void>(resolve => { release = resolve; });
   const resolveMode = hooks.resolvedCollaboration!;
   hooks.resolvedCollaboration = async mode => { await resolveMode(mode); entered(); await wait; };
+  const proof = { identity: { hostId: owner.hostId, parentThreadId: 'parent', draftId: owner.draftId,
+    prepareId: 'prepare', operationId: 'original-operation', parentCwd: '/fixture',
+    connectionGeneration: 'generation-a', childThreadId: thread.id }, challengeId: 'original-challenge' };
+  const originalProof = structuredClone(proof);
+  context.nativeInjection!.authority = { ...context.nativeInjection!.authority, sideChat: proof };
   const sending = submitDraft(h.client, context, value, options, { type: 'send' }, async () => {});
   await reached;
+  proof.identity.operationId = 'replacement-operation'; proof.challengeId = 'replacement-challenge';
   context.nativeInjection!.authority.daemonConnectionGeneration = 'changed-generation';
   context.nativeInjection!.authority.assertBeforeSend = () => { throw new Error('replacement assertion'); };
   context.nativeInjection!.intent.injection!.responseItems[1]!.output = 'changed';
@@ -169,6 +176,8 @@ test('authority, input and explicit options remain captured across asynchronous 
   assert.deepEqual(sent.input, original.injection!.input);
   assert.deepEqual(h.peer.calls('thread/inject_items')[0]!.params.items, original.injection!.responseItems);
   assert.equal((await h.current()).injection!.native!.reference.connectionGeneration, 'generation-a');
+  assert.deepEqual(h.actions.filter(value => ['inject', 'start'].includes(value.action)).map(value => value.params.sideChat),
+    [originalProof, originalProof]);
 });
 
 test('a newly created thread keeps the original null-thread owner and submitted revision', async t => {

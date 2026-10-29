@@ -80,7 +80,8 @@ export async function submitDraft(client: WorkbenchClient, context: SubmissionCo
     const originalAssertion = authority.assertBeforeSend;
     context = { ...context, injection: structuredClone(context.injection),
       nativeInjection: { store, intent: structuredClone(intent), authority: {
-        daemonConnectionGeneration: authority.daemonConnectionGeneration, assertBeforeSend: originalAssertion } },
+        daemonConnectionGeneration: authority.daemonConnectionGeneration, assertBeforeSend: originalAssertion,
+        ...(authority.sideChat ? { sideChat: structuredClone(authority.sideChat) } : {}) } },
       initialOptions: structuredClone(context.initialOptions), overrides: structuredClone(context.overrides),
       additionalContext: structuredClone(context.additionalContext), collaborationMode: structuredClone(context.collaborationMode),
       createdOptions: structuredClone(context.createdOptions), send: context.send && { ...context.send } };
