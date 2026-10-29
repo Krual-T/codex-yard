@@ -72,13 +72,20 @@ test('settings parent scopes real host reads, guarded actions and unavailable or
     await page.goto(app.url + '/settings/browser-use?return=fixture#section');
     await page.getByRole('heading', { name: 'Browser', exact: true }).waitFor();
     await page.getByText('Disabled by your organization or unavailable in your region').waitFor();
-    await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
+    await page.waitForFunction(() => !document.body.textContent?.includes('Loading browser settings...'));
     assert.ok(peer.calls('experimentalFeature/list').some(call => call.params.cursor === 'next'));
     assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
+    assert.equal(await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).count(), 0);
 
     includeRaw = false;
     await page.evaluate(() => window.browserParentHarness.renew());
-    await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
+    await page.waitForFunction(() => !!document.querySelector('[aria-label="Show full URL"]') ||
+      !!document.body.textContent?.includes('In-app browser availability cannot be verified'));
+    await t.test('a missing host feature remains unknown through the production parent', async () => {
+      assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0,
+        'The parent must not treat a missing in_app_browser feature as enabled.');
+      await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
+    });
     includeRaw = true; browser = true; policy = false;
     await page.evaluate(() => window.browserParentHarness.renew());
     await page.getByText('Disabled by your organization or unavailable in your region').waitFor();
@@ -86,12 +93,13 @@ test('settings parent scopes real host reads, guarded actions and unavailable or
     await page.evaluate(() => window.browserParentHarness.renew());
     await page.getByText('Availability could not be determined for this connection.').first().waitFor();
     assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
-    await page.evaluate(() => window.browserParentHarness.source('unmodified', false));
+    await page.evaluate(() => window.browserParentHarness.source('unmodified'));
     await page.getByRole('heading', { name: 'Browser', exact: true }).waitFor();
     await page.waitForFunction(() => !document.body.textContent?.includes('Loading browser settings...'));
     assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
 
-    await page.evaluate(() => window.browserParentHarness.source('unmodified', true));
+    raw = true;
+    await page.evaluate(() => window.browserParentHarness.source('unmodified'));
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
     await page.getByText('Availability could not be determined for this connection.').first().waitFor();
     const beforeRevokedPreference = sent.filter(value => value.includes('vscode://codex/set-setting')).length;
@@ -105,9 +113,11 @@ test('settings parent scopes real host reads, guarded actions and unavailable or
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
     await page.getByRole('switch', { name: 'Show full URL' }).click();
     await page.waitForFunction(() => (document.querySelector('[aria-label="Show full URL"]') as HTMLInputElement | null)?.checked === true);
-    await page.getByRole('button', { name: 'Clear all browsing data' }).click();
-    await page.getByRole('alert').filter({ hasText: 'Unable to clear browsing data' }).waitFor();
-    assert.equal(sent.filter(value => value.includes('browser-browsing-data-clear')).length, 1);
+    const clear = page.getByRole('button', { name: 'Clear all browsing data' });
+    assert.equal(await clear.isDisabled(), true);
+    assert.equal(await clear.getAttribute('title'), 'Clearing browsing data is unavailable on this web host.');
+    await page.getByRole('alert').filter({ hasText: 'Clearing browsing data is unavailable on this web host.' }).waitFor();
+    assert.equal(sent.filter(value => value.includes('browser-browsing-data-clear')).length, 0);
 
     await page.evaluate(() => window.browserParentHarness.gates({ browserAgentRollout: true, externalBrowserRollout: true,
       extensionsRollout: true, runCodexInWsl: false }));
@@ -116,9 +126,22 @@ test('settings parent scopes real host reads, guarded actions and unavailable or
     await page.getByRole('menuitem', { name: 'Try now' }).click();
     assert.deepEqual(await page.evaluate(() => window.browserParentHarness.tried()), { hostId: 'local', cwd: '/fixture/project', name: 'browser' });
     await page.getByLabel('More actions').click();
-    await page.getByRole('menuitem', { name: 'Delete' }).click();
-    await page.getByRole('alert').filter({ hasText: 'plugin/uninstall' }).waitFor();
+    assert.equal(await page.getByRole('menuitem', { name: 'Delete' }).isDisabled(), true);
+    assert.equal(await page.getByRole('menuitem', { name: 'Delete' }).getAttribute('title'),
+      'Plugin installation and removal are unavailable on this web host.');
     assert.equal(peer.calls('plugin/uninstall').length, 0);
+    await page.getByLabel('More actions').click();
+
+    plugin.installed = false;
+    await page.evaluate(() => window.browserParentHarness.renew());
+    const install = page.getByRole('button', { name: 'Install' });
+    await install.waitFor();
+    assert.equal(await install.isDisabled(), true);
+    assert.equal(await install.getAttribute('title'), 'Plugin installation and removal are unavailable on this web host.');
+    assert.equal(peer.calls('plugin/install').length, 0);
+    plugin.installed = true;
+    await page.evaluate(() => window.browserParentHarness.renew());
+    await page.waitForFunction(() => !!document.querySelector<HTMLInputElement>('[aria-label="Browser"]')?.checked);
 
     holdConfig = true;
     const configPending = new Promise<void>(resolve => { configEntered = resolve; });

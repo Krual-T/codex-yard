@@ -21,17 +21,26 @@ test('browser and computer settings use the real host bridge, retain gates and i
     const codexHome = join(directory, 'codex'), dataDir = join(directory, 'data');
     await mkdir(codexHome); await mkdir(dataDir);
     peer.handlers.set('initialize', () => ({ userAgent: 'codex/fixture', codexHome }));
-    let failFeature = false, holdFeature = false, listBrowserFeature = false, entered: (() => void) | undefined, release: (() => void) | undefined;
+    let failFeature = false, holdFeature = false, browserFeature: boolean | null = null;
+    let featureMode: 'normal' | 'duplicate' | 'malformed' | 'cycle' = 'normal';
+    let entered: (() => void) | undefined, release: (() => void) | undefined;
     peer.handlers.set('experimentalFeature/list', async params => {
       if (failFeature) throw new Error('Synthetic feature read failure');
-      if (holdFeature) { holdFeature = false; entered?.(); await new Promise<void>(resolve => { release = resolve; }); }
-      return params.cursor === 'next' ? { data: listBrowserFeature ? [{ name: 'in_app_browser', enabled: false }] : [], nextCursor: null } :
-        { data: [{ name: 'other', enabled: true }], nextCursor: 'next' };
+      const feature = browserFeature, mode = featureMode;
+      if (holdFeature && params.cursor === 'next') { holdFeature = false; entered?.(); await new Promise<void>(resolve => { release = resolve; }); }
+      if (params.cursor === 'next') return { data: mode === 'malformed' ? [{ name: 'in_app_browser', enabled: 'bad' }] :
+        feature === null ? [] : [{ name: 'in_app_browser', enabled: feature }], nextCursor: mode === 'cycle' ? 'next' : null };
+      return { data: mode === 'duplicate' ? [{ name: 'in_app_browser', enabled: true }] : [{ name: 'other', enabled: true }], nextCursor: 'next' };
     });
     const plugin = { id: 'browser@openai-bundled', name: 'browser', installed: true, enabled: true,
       installPolicy: 'AVAILABLE', availability: 'AVAILABLE', source: { type: 'local' } };
     const plugins = () => ({ marketplaces: [{ name: 'openai-bundled', path: '/fixture/bundled', plugins: [plugin] }] });
-    peer.handlers.set('plugin/list', plugins); peer.handlers.set('plugin/installed', plugins);
+    let holdPlugin = false, pluginEntered: (() => void) | undefined, releasePlugin: (() => void) | undefined;
+    peer.handlers.set('plugin/list', async () => {
+      if (holdPlugin) { holdPlugin = false; pluginEntered?.(); await new Promise<void>(resolve => { releasePlugin = resolve; }); }
+      return plugins();
+    });
+    peer.handlers.set('plugin/installed', plugins);
     let holdConfig = false, enteredConfig: (() => void) | undefined, releaseConfig: (() => void) | undefined;
     peer.handlers.set('config/read', async () => {
       if (holdConfig) { holdConfig = false; enteredConfig?.(); await new Promise<void>(resolve => { releaseConfig = resolve; }); }
@@ -213,7 +222,6 @@ test('browser and computer settings use the real host bridge, retain gates and i
     await page.evaluate(() => window.integrationSettingsHarness.resume());
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
     assert.equal(peer.calls('config/batchWrite').length, writesBeforeReconnect);
-    listBrowserFeature = true;
     await page.evaluate(() => window.integrationSettingsHarness.rawFeature(null));
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use/history?step=feature'));
     await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
@@ -223,14 +231,46 @@ test('browser and computer settings use the real host bridge, retain gates and i
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?step=feature'));
     await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
     assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
-    await page.evaluate(() => window.integrationSettingsHarness.rawFeature(true));
+    browserFeature = false;
+    await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use/history?step=false'));
+    await page.waitForURL(url => url.pathname === '/settings/browser-use' && url.searchParams.get('step') === 'false');
+    assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
+    assert.equal(await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).count(), 0);
+
+    browserFeature = true;
+    await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?step=true'));
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
     await page.evaluate(() => window.integrationSettingsHarness.rawFeature(false));
     await page.getByRole('switch', { name: 'Show full URL' }).waitFor({ state: 'hidden' });
-    listBrowserFeature = false;
     await page.evaluate(() => window.integrationSettingsHarness.rawFeature(null));
-    await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).waitFor();
+    await page.getByRole('switch', { name: 'Show full URL' }).waitFor();
+    for (const [mode, error] of [
+      ['duplicate', 'Duplicate browser feature.'], ['malformed', 'Invalid experimental feature.'],
+      ['cycle', 'Experimental feature pagination did not advance.'],
+    ] as const) {
+      featureMode = mode;
+      await page.evaluate(value => window.integrationSettingsHarness.show(`/settings/browser-use?step=${value}`), mode);
+      await page.getByRole('alert').filter({ hasText: error }).waitFor();
+      assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
+    }
+    featureMode = 'normal';
+    browserFeature = true;
+    holdFeature = true;
+    const connectionPending = new Promise<void>(resolve => { entered = resolve; });
+    await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?step=connection'));
+    await connectionPending;
+    await page.evaluate(() => window.integrationSettingsHarness.suspend());
+    await page.getByRole('alert').filter({ hasText: 'The connection was lost' }).waitFor();
+    browserFeature = false;
+    assert.ok(release); release();
+    await page.evaluate(() => window.integrationSettingsHarness.resume());
+    await page.waitForFunction(() => !document.body.textContent?.includes('Loading browser settings...') &&
+      !document.body.textContent?.includes('The connection was lost'));
     assert.equal(await page.getByRole('switch', { name: 'Show full URL' }).count(), 0);
+    assert.equal(await page.getByRole('alert').filter({ hasText: 'In-app browser availability cannot be verified' }).count(), 0);
+    assert.equal(peer.calls('config/batchWrite').length, writesBeforeReconnect);
+
+    browserFeature = true;
     holdFeature = true;
     const pending = new Promise<void>(resolve => { entered = resolve; });
     await page.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?step=delayed'));
@@ -241,6 +281,58 @@ test('browser and computer settings use the real host bridge, retain gates and i
     await page.waitForTimeout(100);
     assert.equal(await page.getByRole('heading', { name: 'Browser', exact: true }).count(), 0);
     assert.equal(new URL(page.url()).searchParams.get('step'), 'next');
+
+    const recoveryContext = await browser.newContext({ viewport: { width: 800, height: 800 }, serviceWorkers: 'block' });
+    const writesBeforeRecovery = peer.calls('config/batchWrite').length;
+    const recoveryRecords = [
+      { operationId: 'browser-operation', hostId: 'local', method: 'config/batchWrite', params: {}, phase: 'not-started',
+        origin: { section: 'plugins-settings', scope: ['/fixture/project'], draft: { pluginId: 'browser@openai-bundled', enabled: false } } },
+      { operationId: 'other-operation', hostId: 'local', method: 'config/batchWrite', params: {}, phase: 'not-started',
+        origin: { section: 'plugins-settings', scope: ['/fixture/project'], draft: { pluginId: 'other@openai-bundled', enabled: false } } },
+      { operationId: 'other-scope-operation', hostId: 'local', method: 'config/batchWrite', params: {}, phase: 'not-started',
+        origin: { section: 'plugins-settings', scope: ['/fixture/other'], draft: { pluginId: 'browser@openai-bundled', enabled: false } } },
+      { operationId: 'other-host-operation', hostId: 'remote', method: 'config/batchWrite', params: {}, phase: 'not-started',
+        origin: { section: 'plugins-settings', scope: ['/fixture/project'], draft: { pluginId: 'browser@openai-bundled', enabled: false } } },
+    ];
+    await recoveryContext.addInitScript(records => {
+      localStorage.setItem('native-atoms', JSON.stringify({ 'codex-yard.settings-config-writes.v1':
+        { version: 2, nextRevision: 1, operations: records, drafts: [], closedNotSent: [] } }));
+    }, recoveryRecords);
+    const recoveryPage = await recoveryContext.newPage(); recoveryPage.setDefaultTimeout(8000);
+    await recoveryPage.route('**/*', route => new URL(route.request().url()).origin === app.url ? route.continue() : route.abort());
+    plugin.id = 'other@openai-bundled'; plugin.name = 'other';
+    await recoveryPage.goto(app.url + '/settings/browser-use?step=recovery');
+    await recoveryPage.getByRole('heading', { name: 'Browser', exact: true }).waitFor();
+    holdPlugin = true;
+    const pluginPending = new Promise<void>(resolve => { pluginEntered = resolve; });
+    await recoveryPage.evaluate(() => window.integrationSettingsHarness.gate('available'));
+    await pluginPending;
+    assert.equal(await recoveryPage.getByRole('button', { name: 'Check original operation' }).count(), 0);
+    assert.equal(await recoveryPage.getByText('other-operation', { exact: true }).count(), 0);
+    assert.ok(releasePlugin); releasePlugin();
+    await recoveryPage.getByText('In-app plugin unavailable').waitFor();
+    assert.equal(await recoveryPage.getByRole('button', { name: 'Check original operation' }).count(), 0);
+    assert.equal(await recoveryPage.getByText('browser-operation', { exact: true }).count(), 0);
+    plugin.id = 'browser@openai-bundled'; plugin.name = 'browser';
+    await recoveryPage.evaluate(() => window.integrationSettingsHarness.show('/settings/browser-use?step=identified'));
+    await recoveryPage.getByText('browser-operation', { exact: true }).waitFor();
+    assert.equal(await recoveryPage.getByRole('button', { name: 'Check original operation' }).count(), 1);
+    assert.equal(await recoveryPage.getByText('other-operation', { exact: true }).count(), 0);
+    assert.equal(await recoveryPage.getByText('other-scope-operation', { exact: true }).count(), 0);
+    assert.equal(await recoveryPage.getByText('other-host-operation', { exact: true }).count(), 0);
+    const retained = await recoveryPage.evaluate(() => new Promise<unknown>((resolve, reject) => {
+      const open = indexedDB.open('codex-yard.ui-atoms.v1', 1);
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const request = open.result.transaction('atoms').objectStore('atoms').get('native-atoms');
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result.atoms['codex-yard.settings-config-writes.v1'].operations);
+      };
+    }));
+    assert.deepEqual(retained, recoveryRecords);
+    assert.equal(peer.calls('config/batchWrite').length, writesBeforeRecovery);
+    await recoveryPage.evaluate(() => window.integrationSettingsHarness.close());
+    await recoveryContext.close();
     assert.deepEqual(errors, []); assert.equal(external, 0);
     await page.evaluate(() => window.integrationSettingsHarness.close());
     await context.close();

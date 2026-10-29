@@ -78,12 +78,11 @@ interface FeatureState { loading: boolean; error: string | null; enabled: boolea
 export function useInAppBrowserFeature(props: IntegrationSettingsProps, rawFeature: boolean | null) {
   const [revision, setRevision] = useState(0);
   const [state, setState] = useState<FeatureState>({ loading: true, error: null, enabled: null });
-  const latest = useRef(props); latest.current = props;
   const sequence = useRef(0);
   useEffect(() => {
     let alive = true;
     const version = ++sequence.current;
-    const valid = () => alive && sequence.current === version && current(latest.current);
+    const valid = () => alive && sequence.current === version && current(props);
     if (rawFeature !== null) {
       setState({ loading: false, error: null, enabled: rawFeature });
       return () => { alive = false; };
@@ -107,9 +106,9 @@ export function useInAppBrowserFeature(props: IntegrationSettingsProps, rawFeatu
         if (cursor && (seen.has(cursor) || seen.size >= 100)) throw new Error('Experimental feature pagination did not advance.');
         if (cursor) seen.add(cursor);
       } while (cursor);
-      if (valid()) {
-        setState({ loading: false, error: 'In-app browser availability cannot be verified for this connection.', enabled: null });
-      }
+      if (valid()) setState(enabled === undefined ?
+        { loading: false, error: 'In-app browser availability cannot be verified for this connection.', enabled: null } :
+        { loading: false, error: null, enabled });
     })().catch(error => { if (valid()) setState({ loading: false, error: error instanceof Error ? error.message : String(error), enabled: null }); });
     return () => { alive = false; };
   }, [props.client, props.route.hostId, props.authorityKey, rawFeature, revision]);
@@ -171,7 +170,7 @@ export function BundledPluginControl({ props, name, label, description, onTry }:
       .finally(() => { if (alive && current(latest.current)) setLoading(false); });
     return () => { alive = false; };
   }, [props.client, props.route.hostId, props.cwd, props.authorityKey, name, revision]);
-  const records = pluginConfigRecords(snapshot, props.route.hostId, props.cwd, entry?.plugin.id);
+  const records = entry ? pluginConfigRecords(snapshot, props.route.hostId, props.cwd, entry.plugin.id) : [];
   const locked = busy || changePending || snapshot.loading || !!snapshot.error || snapshot.inFlight.length > 0 || records.length > 0;
   const update = async (enabled: boolean) => {
     if (!entry || locked || busyRef.current || !current(props)) return;
