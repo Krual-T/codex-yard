@@ -113,7 +113,7 @@ export interface StandaloneMessagesProps {
   onOpenFile?(path: string): void;
   onOpenFileAt?(location: { path: string; hostId: string; cwd?: string; line?: number; column?: number }): void;
   onOpenVisualization?(value: { hostId: string; threadId: string; path: string }): void;
-  onOpenBrowser?(value: { hostId: string; threadId: string; url?: string }): void;
+  onOpenBrowser?(value: { hostId: string; threadId: string; url?: string; source?: 'link' }): void;
 }
 export interface StandaloneSettingsProps {
   client: WorkbenchClient;

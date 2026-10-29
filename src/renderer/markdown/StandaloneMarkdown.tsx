@@ -137,7 +137,7 @@ export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowB
           if (!threadId?.trim() || !onOpenBrowser || !safeBrowserUrl(external) || event.defaultPrevented || event.button !== 0
             || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
           event.preventDefault();
-          onOpenBrowser({ hostId, threadId, url: external });
+          onOpenBrowser({ hostId, threadId, url: external, source: 'link' });
         }}>{children}</a>;
       if (!onOpenFile && !onOpenFileAt) return <span>{children}</span>;
       return <button type="button" className="yard-file-link" onClick={() => {

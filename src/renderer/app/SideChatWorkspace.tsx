@@ -98,7 +98,7 @@ export interface SideChatWorkspaceProps {
   onRemoveReference?: StandaloneComposerRuntimeProps['onRemoveReference'];
   onEditNavigationController?(controller: MessageEditNavigationController | null): void;
   onOpenFile?(location: { hostId: string; threadId: string; path: string; cwd?: string; line?: number; column?: number }): void;
-  onOpenBrowser?(value: { hostId: string; threadId: string; url?: string }): void;
+  onOpenBrowser?(value: { hostId: string; threadId: string; url?: string; source?: 'link' }): void;
   onOpenVisualization?(value: { hostId: string; threadId: string; path: string }): void;
   approvalOptions?: Partial<Omit<ApprovalDialogProps, 'request' | 'onRespond' | 'onUnsupported' | 'onCloseView' | 'onInputEscape'>>;
 }

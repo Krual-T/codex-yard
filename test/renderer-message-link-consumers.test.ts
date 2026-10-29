@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 import { chromium } from 'playwright-core';
 
-type OpenCall = { surface: string; hostId: string; threadId: string; url: string };
+type OpenCall = { surface: string; hostId: string; threadId: string; url: string; source?: 'link' };
 type ClickRecord = { text: string; type: string; prevented: boolean };
 declare global {
   interface Window {
@@ -120,13 +120,13 @@ test('message and side-chat Markdown preserve native link behavior and original 
     await page.locator('#main [data-message-id="reasoning"]').getByRole('link', { name: 'Reasoning link' }).click();
     await page.locator('#child').getByRole('link', { name: 'Child link' }).click();
     assert.deepEqual(await page.evaluate(() => window.messageLinkFixture.calls), [
-      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'https://example.invalid/user?q=one%20two&n=2#frag' },
-      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'https://example.invalid/app?q=1#app' },
-      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'http://localhost:5123/path?q=1#local' },
-      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'https://example.invalid/plan' },
-      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'https://example.invalid/hook' },
-      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'https://example.invalid/reason' },
-      { surface: 'child', hostId: 'ssh-same', threadId: 'child-thread', url: 'https://example.invalid/child?x=1#child' },
+      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'https://example.invalid/user?q=one%20two&n=2#frag', source: 'link' },
+      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'https://example.invalid/app?q=1#app', source: 'link' },
+      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'http://localhost:5123/path?q=1#local', source: 'link' },
+      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'https://example.invalid/plan', source: 'link' },
+      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'https://example.invalid/hook', source: 'link' },
+      { surface: 'main', hostId: 'ssh-same', threadId: 'parent-thread', url: 'https://example.invalid/reason', source: 'link' },
+      { surface: 'child', hostId: 'ssh-same', threadId: 'child-thread', url: 'https://example.invalid/child?x=1#child', source: 'link' },
     ]);
     assert.ok((await page.evaluate(() => window.messageLinkFixture.clicks)).slice(0, 7).every(event => event.prevented));
 
@@ -167,11 +167,11 @@ test('message and side-chat Markdown preserve native link behavior and original 
     await assistantLink.focus();
     await page.keyboard.press('Enter');
     assert.deepEqual((await page.evaluate(() => window.messageLinkFixture.calls)).at(-1),
-      { surface: 'main', hostId: 'ssh-other', threadId: 'parent-thread', url: 'http://localhost:5123/path?q=1#local' });
+      { surface: 'main', hostId: 'ssh-other', threadId: 'parent-thread', url: 'http://localhost:5123/path?q=1#local', source: 'link' });
     await page.evaluate(() => window.messageLinkFixture.changeMain('ssh-other', 'other-thread'));
     await page.locator('#main [data-message-id="assistant"]').getByRole('link', { name: 'Assistant link' }).click();
     assert.deepEqual((await page.evaluate(() => window.messageLinkFixture.calls)).at(-1),
-      { surface: 'main', hostId: 'ssh-other', threadId: 'other-thread', url: 'http://localhost:5123/path?q=1#local' });
+      { surface: 'main', hostId: 'ssh-other', threadId: 'other-thread', url: 'http://localhost:5123/path?q=1#local', source: 'link' });
     assert.deepEqual(await page.evaluate(() => window.messageLinkFixture.unexpected), []);
     assert.deepEqual(externalRequests, []);
     assert.deepEqual(errors, []);
