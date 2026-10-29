@@ -253,7 +253,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
         const finish = beginOperation(true);
         if (!finish) return false;
         pendingProjection.current++;
-        let success = false;
+        let success = false, deferredForLink = false;
         try {
           if (!ready.current) return false;
           await ready.current;
@@ -261,10 +261,14 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
           await waiting;
           if (!await saved || saved !== lastWrite.current || waiting !== queue.current) return false;
           const view = await readComposerDraftVersions(owner);
-          if (active.current !== result || current.current !== observed || dirty.current || pendingLink?.current || pendingProjection.current !== 1
+          if (active.current !== result || current.current !== observed || dirty.current || pendingProjection.current !== 1
             || saved !== lastWrite.current || waiting !== queue.current) return false;
           const candidates = view.versions.filter(version => version.revision === target.revision);
           if (candidates.length !== 1 || !sameComposerDraftValue(candidates[0]!.draft, target.draft)) return false;
+          // A form opened during this read owns an unchanged local projection.
+          // Closing it may re-read; applying it must still write from the original
+          // revision. Only a real version/read conflict needs unresolved mode.
+          if (pendingLink?.current) { deferredForLink = true; return false; }
           const next = candidates[0]!;
           current.current = next; setStored(next); setVersions(view.versions);
           durableRevision.current = next.revision; dirty.current = false; preserveProjection.current = false; setUnresolved(false); setSaving(false);
@@ -276,7 +280,7 @@ export function useComposerDraft(context: ComposerContext, onController?: (contr
           return false;
         } finally {
           pendingProjection.current--;
-          if (!success && active.current === result) {
+          if (!success && !deferredForLink && active.current === result) {
             markUnresolved(); setSaving(false); refreshVersions.current?.();
           }
           finish(success);
