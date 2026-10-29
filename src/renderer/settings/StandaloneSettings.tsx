@@ -74,6 +74,7 @@ interface RemoteConnection { hostId: string; displayName?: string; sshAlias?: st
 export interface SettingsNavigationGuard { requestLeave(): Promise<boolean> }
 export type SettingsIntegrationProps = StandaloneSettingsProps & {
   registerNavigationGuard?: (guard: SettingsNavigationGuard | null) => void;
+  onOpenArchivedThread?: (hostId: string, threadId: string) => Promise<void>;
   projectRoots: SettingsProjectRoots | null;
   sessionCwd: SettingsSessionCwd | null;
   scopeStatus?: { state: 'loading' | 'error' | 'ready'; error?: string; retry(): void };
@@ -97,7 +98,7 @@ export function StandaloneSettings(props: SettingsIntegrationProps) {
   return <SettingsPage {...props} preferences={preferences} snapshot={snapshot} />;
 }
 
-function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, projectRoots, sessionCwd, scopeStatus, InstructionEditor, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
+function SettingsPage({ client, hostId, location, onNavigate, onClose, registerNavigationGuard, onOpenArchivedThread, projectRoots, sessionCwd, scopeStatus, InstructionEditor, preferences, snapshot }: SettingsIntegrationProps & PreferenceProps) {
   const { t, locale } = useI18n();
   const configurationOperations = useMemo(() => settingsConfigOperations(client), [client]);
   const recovery = useSyncExternalStore(configurationOperations.subscribe, configurationOperations.getSnapshot, configurationOperations.getSnapshot);
@@ -319,7 +320,8 @@ function SettingsPage({ client, hostId, location, onNavigate, onClose, registerN
               section === 'skills-settings' ? <SkillSection key={`${selectedHost}:${editorRevision}`} client={client} hostId={selectedHost}
                 projectScope={projectScope} memory={skillMemory} revision={editorRevision} onDirtyChange={setOtherDirty} onSavingChange={setOtherSaving} registerDiscard={registerDiscard} /> :
               isCatalog(section) ? <CatalogSection key={`${selectedHost}:${section}`} client={client} hostId={selectedHost} kind={section} /> :
-                section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving} /> :
+                section === 'archived-chats' ? <ArchivedSection key={selectedHost} client={client} hostId={selectedHost} onSavingChange={setOtherSaving}
+                  onOpenThread={onOpenArchivedThread ? threadId => onOpenArchivedThread(selectedHost, threadId) : undefined} /> :
                   section === 'connections' ? <ConnectionsSection client={client} onSavingChange={setOtherSaving} /> :
             <><h2>{title}</h2><p className="yard-setting-error">{remainingSections[section] ?? 'This settings page cannot be displayed yet.'}</p></>}
       </div>

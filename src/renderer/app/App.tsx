@@ -47,6 +47,8 @@ import { themeFontFamily } from './theme-fonts.ts';
 import { readSettingsRoute } from '../settings/routing.ts';
 import { readThreadArchived } from './thread-archive.ts';
 import { useWorkbenchShortcuts } from './use-workbench-shortcuts.ts';
+import { useShellPreferences } from './use-shell-preferences.ts';
+import { fullAccessVisible } from '../settings/preferences.ts';
 import { ProductWorkspace } from './ProductWorkspace.tsx';
 import { readProductRoute } from './product-routes.ts';
 import type { ProductRouteOwner } from './ProductRoutePage.tsx';
@@ -89,6 +91,7 @@ function SettingsInstructionEditor(props: SettingsInstructionEditorProps) {
 }
 
 export function App({ client }: { client: BrowserWorkbenchClient }) {
+  const shellPreferences = useShellPreferences(client);
   const [current, setCurrent] = useState(route);
   const [bridgeStatus, setBridgeStatus] = useState('connecting');
   const [hostStatuses, setHostStatuses] = useState<Record<string, string>>({});
@@ -213,6 +216,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   useEffect(() => () => sessions.dispose(), [sessions]);
   const composerController = useRef<ComposerDraftController | null>(null);
   const [composerSnapshot, setComposerSnapshot] = useState<ComposerDraftSnapshot | null>(null);
+  const [effectiveComposerOptions, setEffectiveComposerOptions] = useState<{ owner: ComposerDraftOwner; options: SubmitOptions } | null>(null);
   const [browserSyncError, setBrowserSyncError] = useState('');
   const [browserSyncRetry, setBrowserSyncRetry] = useState(0);
   const browserRecoveryBarrier = useRef<(() => Promise<void>) | null>(null);
@@ -232,6 +236,11 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   }, []);
   const receiveComposerSnapshot = useCallback((value: ComposerDraftSnapshot) => setComposerSnapshot(value), []);
   const receiveComposerController = useCallback((controller: ComposerDraftController | null) => { composerController.current = controller; }, []);
+  const receiveEffectiveOptions = useCallback((owner: ComposerDraftOwner, options: SubmitOptions) => {
+    const current = composerController.current?.snapshot()?.owner;
+    if (!current || current.hostId !== owner.hostId || current.threadId !== owner.threadId || current.draftId !== owner.draftId) return;
+    setEffectiveComposerOptions({ owner: structuredClone(owner), options: structuredClone(options) });
+  }, []);
   const sendReadGeneration = useRef(0);
   const reloadSends = useCallback(async () => {
     const generation = ++sendReadGeneration.current;
@@ -947,10 +956,26 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     }, cause => setBrowserSyncError(String(cause)));
   }, [browserOwner.hostId, browserOwner.threadId, browserOwner.draftId, composerSnapshot?.revision, browserSyncRetry, beginBrowserDraftOperation, retainBrowserProjection, releaseBrowserProjection]);
   useEffect(() => {
-    const beforeUnload = (event: BeforeUnloadEvent) => { if (Object.keys(browserProjections.current).length) event.preventDefault(); };
+    let keyboardClose = false;
+    const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.altKey || event.shiftKey) return;
+      if (event.key.toLowerCase() === 'w' && (event.ctrlKey && !event.metaKey || event.metaKey && !event.ctrlKey)) {
+        keyboardClose = true;
+        setTimeout(() => { keyboardClose = false; }, 0);
+      }
+    };
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      const mode = shellPreferences.values['confirm-before-close'];
+      if (Object.keys(browserProjections.current).length || mode === 'always' || mode === 'keyboardOnly' && keyboardClose) {
+        event.preventDefault();
+      }
+    };
+    // Browsers own their close accelerators; use the gesture only when they
+    // actually deliver it to this page. Never replace Ctrl+W with a fake close.
+    window.addEventListener('keydown', keydown);
     window.addEventListener('beforeunload', beforeUnload);
-    return () => window.removeEventListener('beforeunload', beforeUnload);
-  }, []);
+    return () => { window.removeEventListener('keydown', keydown); window.removeEventListener('beforeunload', beforeUnload); };
+  }, [shellPreferences.values['confirm-before-close']]);
   const showBrowser = (source?: { hostId: string; threadId: string; url?: string }) => {
     if (source && (source.hostId !== current.hostId || source.threadId !== current.threadId)) {
       setError('浏览器链接所属会话已改变，请返回原会话。'); return;
@@ -1023,11 +1048,51 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       else showPanel({ kind: 'terminal', reuse: true });
       return true;
     },
+    openSettings: () => {
+      if (current.section) return false;
+      void navigate('/settings/general' + (current.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(current.hostId)));
+      return true;
+    },
+    findConversation: () => {
+      if (!current.threadId || current.section) return false;
+      setMessageSearchOpen(true); return true;
+    },
   });
   const shortcutSidebarHints = new Map(shortcuts.hints === 'sidebar' ? shortcuts.sidebarHintKeys.map((key, index) =>
     [key, shortcuts.label('sidebar', index + 1 as NumberShortcutSlot)] as const) : []);
   const activeProject = current.threadId && thread && projectState
     ? projectForThread(projectState, projectsForHost(projectState, current.hostId), current.hostId, thread) : selectedProject;
+  const switchHomeTarget = async (target: { hostId: string; cwd: string }, lease: ComposerDraftLease, project: Project | null) => {
+    const controller = composerController.current, snapshot = controller?.snapshot(), originalRoute = routeRef.current;
+    if (!controller || !snapshot || originalRoute.threadId || originalRoute.section || targetChange.current
+      || snapshot.owner.threadId !== null || snapshot.owner.hostId !== originalRoute.hostId) throw new Error('原首页输入区不能切换目标。');
+    if (!hostCatalogConfirmed.current || !hosts.some(host => host.hostId === target.hostId)) throw new Error('执行主机列表尚未核实，请重新连接后重试。');
+    const assertProject = () => {
+      if (!project) return;
+      const state = projectStateRef.current;
+      const actual = state && projectsForHost(state, target.hostId).find(value => value.id === project.id);
+      if (!actual || actual.hostId !== target.hostId || actual.name !== project.name || !actual.rootPaths.includes(target.cwd)) {
+        throw new Error('原项目或工作目录已改变，请重新选择。');
+      }
+    };
+    assertProject();
+    let committed!: () => void;
+    const completion = new Promise<void>(resolve => { committed = resolve; });
+    const pending = { controller, owner: snapshot.owner, lease, target, committed };
+    targetChange.current = pending;
+    try {
+      const path = '/' + (target.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(target.hostId));
+      if (!await navigate(path, undefined, () => {
+        const owner = controller.snapshot()?.owner;
+        if (targetChange.current !== pending || composerController.current !== controller || !owner
+          || JSON.stringify(owner) !== JSON.stringify(snapshot.owner) || routeRef.current !== originalRoute
+          || !hostCatalogConfirmed.current) throw new Error('原输入区或主机已改变，目标未切换。');
+        assertProject();
+      })) throw new Error('目标切换未完成，原草稿已保留。');
+      rememberNewDraftLocation(target.hostId, homeDraftIdentity(target.hostId), target.cwd, project?.id);
+      setCwd(target.cwd); setSelectedProject(project); await completion;
+    } finally { if (targetChange.current === pending) { targetChange.current = null; setLeaving(false); } }
+  };
   const chinese = previewAppearance.locale.startsWith('zh');
   return <I18nProvider locale={previewAppearance.locale}><div className="yard-app" data-sidebar-open={sidebar && !settings} data-settings={settings} data-owned-renderer="true">
     {sidebar && !settings && <StandaloneSidebar hostId={current.hostId} currentThread={current.threadId ? { hostId: current.hostId, threadId: current.threadId } : null}
@@ -1055,7 +1120,9 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           {requests.map(entry => <button key={JSON.stringify(entry.request.ref)} onClick={() => { setSelectedRequest(entry.request.ref); setRequestViewHidden(false); }}>
             {entry.request.hostId}: {entry.request.method} · {entry.outcome}</button>)}
         </div></details>}
-        <button className="yard-icon-button" aria-label="Open terminal" onClick={() => showPanel({ kind: 'terminal' })}><Terminal aria-hidden="true" /></button>
+        {shellPreferences.values['app-shell-bottom-panel-launcher-visible'] && <button className="yard-icon-button" aria-label="Toggle bottom panel" onClick={() => {
+          if (panelOpen && panelKind === 'workspace') setPanelOpen(false); else showPanel({ kind: 'terminal', reuse: true });
+        }}><Terminal aria-hidden="true" /></button>}
         <details className="yard-toolbar-menu"><summary aria-label="Open side panel"><PanelRight aria-hidden="true" /></summary><div className="yard-menu" role="menu">
           <button role="menuitem" aria-label="Workspace files" onClick={() => showPanel()}>Files</button>
           <button role="menuitem" aria-label="Open Chrome panel" disabled={!sendState} onClick={() => showBrowser()}><Globe aria-hidden="true" />Chrome</button>
@@ -1074,6 +1141,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           void client.rpc('thread/list', { limit: 1 }, hostId).catch(cause => setError(String(cause)));
         }}>Reconnect host</button></div>}
       {error && <div role="alert" className="yard-error">{error}<button onClick={() => { setError(''); navigation.current?.replaceCurrentURL(location.href); setRefresh(value => value + 1); setNavigationFactsEpoch(value => value + 1); }}>Retry</button><button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
+      {shellPreferences.error && <div role="alert" className="yard-error">{shellPreferences.error}<button onClick={() => { void shellPreferences.reload(); }}>Retry</button></div>}
       {browserSyncError && <div role="alert" className="yard-error">{browserSyncError}<button onClick={() => setBrowserSyncRetry(value => value + 1)}>Retry browser reference sync</button></div>}
       <div inert={leaving}>
       {Object.entries(browserProjectionState).map(([key, receipt]) => <BrowserDraftRecoveryNotice key={key} before={receipt.before} snapshot={receipt.after}
@@ -1099,6 +1167,16 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       <div className="yard-workspace" data-panel-open={panelOpen && !settings}>
       <div className="yard-chat-pane" inert={leaving}>
       {settings ? <InstructionEditorTheme.Provider value={panelAppearance.theme}><StandaloneSettings client={client} hostId={current.hostId}
+        onOpenArchivedThread={async (hostId, threadId) => {
+          const original = routeRef.current;
+          if (!original.section || original.hostId !== hostId) throw new Error('原归档列表已改变，请重新打开。');
+          const search = new URLSearchParams({ archived: '1' });
+          if (hostId !== 'local') search.set('hostId', hostId);
+          if (!await navigate('/local/' + encodeURIComponent(threadId) + '?' + search, undefined, () => {
+            if (routeRef.current !== original) throw new Error('原归档列表已改变，未切换会话。');
+          })) throw new Error('归档会话未打开，原页面已保留。');
+          if (routeRef.current.hostId === hostId && routeRef.current.threadId === threadId) setArchived(true);
+        }}
         projectRoots={settingsContext.projectRoots} sessionCwd={settingsContext.sessionCwd} InstructionEditor={SettingsInstructionEditor}
         scopeStatus={{ state: settingsSource.key === settingsSourceKey ? settingsSource.state : 'loading',
           error: settingsSource.key === settingsSourceKey ? settingsSource.error : undefined, retry: () => setSettingsSourceRetry(value => value + 1) }}
@@ -1171,28 +1249,31 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         </section>
         <div className="yard-composer-container" inert={leaving}>
           {current.threadId && !loading && goalMounted && <div hidden={!goalOpen}><StandaloneGoal client={client} hostId={current.hostId} threadId={current.threadId} readOnly={current.readOnly} /></div>}
-          <FullAccessNotice client={client} options={initialOptions} sessionDismissed={fullAccessDismissed} onDismissSession={() => setFullAccessDismissed(true)} />
+          <FullAccessNotice client={client} options={effectiveComposerOptions?.owner.hostId === composerOwner.hostId
+            && effectiveComposerOptions.owner.threadId === composerOwner.threadId && effectiveComposerOptions.owner.draftId === composerOwner.draftId
+            ? effectiveComposerOptions.options : initialOptions} sessionDismissed={fullAccessDismissed} onDismissSession={() => setFullAccessDismissed(true)} />
           {current.readOnly && <p role="status">此会话已归档，原输入已保留。<button onClick={() => { void client.rpc('thread/unarchive', { threadId: current.threadId }, current.hostId).then(() => openThread(current.threadId!, current.hostId, false)).catch(cause => setError(String(cause))); }}>Restore conversation</button></p>}
           <div inert={current.readOnly}>
           {!sendState || current.threadId && (loading || !initialOptions) && !(composerIsCurrent || current.readOnly && thread) ? current.readOnly ? null : <p role="status">Loading session settings…</p> : <StandaloneComposer key={current.hostId + ':' + (current.threadId ?? newDraftId)} client={client} context={{ ...composerOwner, cwd: thread?.cwd ?? cwd }}
           onRemoveReference={(owner, reference, operation) => removeBrowserDraftReference(browserDraftOwner(owner, sendBindings.current), reference,
             operation, retainBrowserProjection, releaseBrowserProjection)}
           onDraftController={receiveComposerController} onDraftChange={receiveComposerSnapshot} initialOptions={initialOptions ?? undefined} hosts={hosts}
+          onEffectiveOptionsChange={receiveEffectiveOptions}
+          fullAccessVisible={fullAccessVisible(shellPreferences.values['composer-permission-mode-visibility'])}
+          onOpenGoal={current.threadId && !current.readOnly ? () => { setGoalMounted(true); setGoalOpen(true); } : undefined}
           projectDisplay={activeProject && activeProject.hostId === current.hostId && activeProject.rootPaths.includes(thread?.cwd ?? cwd) ? { hostId: current.hostId, cwd: thread?.cwd ?? cwd, name: activeProject.name } : null}
-          onTargetChange={async (target, lease) => {
-          const controller = composerController.current, snapshot = controller?.snapshot();
-          if (!controller || !snapshot || targetChange.current) throw new Error('原输入区不能切换目标。');
-          if (!hostCatalogConfirmed.current) throw new Error('执行主机列表尚未核实，请重新连接后重试。');
-          let committed!: () => void;
-          const completion = new Promise<void>(resolve => { committed = resolve; });
-          const pending = { controller, owner: snapshot.owner, lease, target, committed };
-          targetChange.current = pending;
-          try {
-            if (!await navigate('/' + (target.hostId === 'local' ? '' : '?hostId=' + encodeURIComponent(target.hostId)))) throw new Error('目标切换未完成，原草稿已保留。');
-            rememberNewDraftLocation(target.hostId, homeDraftIdentity(target.hostId), target.cwd); setCwd(target.cwd); setSelectedProject(null);
-            await completion;
-          } finally { if (targetChange.current === pending) { targetChange.current = null; setLeaving(false); } }
-        }} activeTurnId={thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null} busy={busy}
+          projectChoices={!current.threadId && projectState && hostCatalogReady ? hosts.flatMap(host => projectsForHost(projectState, host.hostId)
+            .flatMap(project => project.rootPaths.map(cwd => ({ projectId: project.id, hostId: project.hostId, cwd, name: project.name })))) : undefined}
+          selectedProjectId={activeProject?.id ?? null}
+          onProjectChange={current.threadId ? undefined : async (choice, lease) => {
+            const state = projectStateRef.current;
+            const project = choice && state ? projectsForHost(state, choice.hostId).find(project => project.id === choice.projectId
+              && project.name === choice.name && project.rootPaths.includes(choice.cwd)) : null;
+            if (choice && !project) throw new Error('原项目已改变，请重新选择。');
+            await switchHomeTarget(choice ?? { hostId: current.hostId, cwd }, lease, project ?? null);
+          }}
+          onTargetChange={current.threadId ? undefined : (target, lease) => switchHomeTarget(target, lease, null)}
+          activeTurnId={thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null} busy={busy}
           captureSubmissionAuthority={captureMainSubmissionAuthority}
           dispatchQueueMutation={(method, params, hostId, originalAuthority, assertBeforeSend) => {
             const original = mainSubmissionAuthorities.current.get(originalAuthority);

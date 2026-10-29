@@ -4,7 +4,9 @@ export type NumberShortcutSlot = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 
 export type WorkbenchShortcutAction =
   | { type: 'select-number'; target: NumberShortcutTarget; slot: NumberShortcutSlot }
-  | { type: 'toggle-terminal' };
+  | { type: 'toggle-terminal' }
+  | { type: 'open-settings' }
+  | { type: 'find-conversation' };
 
 export interface WorkbenchShortcutMatch {
   action: WorkbenchShortcutAction;
@@ -66,6 +68,10 @@ export function resolveWorkbenchShortcut(event: WorkbenchShortcutEvent,
 
   if (modifier === 'control' && event.key === '`') {
     return { action: { type: 'toggle-terminal' }, consumeIfHandled: true };
+  }
+  if (modifier === (context.platform === 'macOS' ? 'meta' : 'control')) {
+    if (event.key === ',') return { action: { type: 'open-settings' }, consumeIfHandled: true };
+    if (event.key.toLowerCase() === 'f') return { action: { type: 'find-conversation' }, consumeIfHandled: true };
   }
 
   const primary = context.primaryNumberTarget;

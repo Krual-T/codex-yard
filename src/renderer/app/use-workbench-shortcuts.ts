@@ -7,6 +7,8 @@ interface ShortcutActions {
   blocked(): boolean;
   selectTab(slot: NumberShortcutSlot): boolean;
   toggleTerminal(): boolean;
+  openSettings?(): boolean;
+  findConversation?(): boolean;
 }
 const preferenceKey = 'primary-number-shortcut-target';
 function sidebarButtons(): HTMLButtonElement[] {
@@ -77,6 +79,8 @@ export function useWorkbenchShortcuts(client: WorkbenchClient, actions: Shortcut
       if (!match) return;
       let handled = false;
       if (match.action.type === 'toggle-terminal') handled = current.current.toggleTerminal();
+      else if (match.action.type === 'open-settings') handled = current.current.openSettings?.() ?? false;
+      else if (match.action.type === 'find-conversation') handled = current.current.findConversation?.() ?? false;
       else if (match.action.target === 'tabs') handled = current.current.selectTab(match.action.slot);
       else {
         const button = sidebarButtons()[match.action.slot - 1];

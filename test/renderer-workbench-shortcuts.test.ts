@@ -55,6 +55,21 @@ test('terminal is Control plus the literal backquote on all platforms, independe
   }
 });
 
+test('settings and conversation search use the platform command and preserve owned scopes', () => {
+  for (const platform of ['macOS', 'linux', 'windows']) {
+    const modifier = platform === 'macOS' ? { metaKey: true } : { ctrlKey: true };
+    for (const [key, action] of [[',', 'open-settings'], ['f', 'find-conversation']] as const) {
+      const command = event({ ...modifier, key });
+      assert.deepEqual(resolveWorkbenchShortcut(command, context(platform, null)),
+        { action: { type: action }, consumeIfHandled: true });
+      for (const changes of [{ isComposing: true }, { keyCode: 229 }, { defaultPrevented: true }, { shiftKey: true }, { altKey: true }]) {
+        assert.equal(resolveWorkbenchShortcut(event({ ...modifier, key, ...changes }), context(platform, null)), null);
+      }
+      assert.equal(resolveWorkbenchShortcut(command, context(platform, null, true)), null);
+    }
+  }
+});
+
 test('ignores unrelated keys, modifier combinations, repeated keys and unresolved preference', () => {
   for (const changes of [
     {}, { ctrlKey: true, key: '0', code: 'Digit0' }, { ctrlKey: true, key: 'a', code: 'KeyA' },
