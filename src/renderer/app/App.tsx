@@ -90,6 +90,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const mainGrantRevision = useRef(0);
   const mainSubmissionAuthorities = useRef(new WeakMap<() => void, {
     daemon: ReturnType<BrowserWorkbenchClient['captureDaemonConnection']>;
+    owner: ComposerDraftOwner;
     acceptCreated(threadId: string, navigation: number): void;
   }>());
   const [error, setError] = useState('');
@@ -814,7 +815,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       }
     };
     assert();
-    mainSubmissionAuthorities.current.set(assert, { daemon, acceptCreated(threadId, navigation) {
+    mainSubmissionAuthorities.current.set(assert, { daemon, owner: original, acceptCreated(threadId, navigation) {
       checkConnection();
       const actual = composerController.current?.snapshot()?.owner, route = routeRef.current;
       if (original.threadId !== null || !threadId || route.hostId !== original.hostId || route.threadId !== threadId
@@ -1038,11 +1039,27 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
           } finally { if (targetChange.current === pending) { targetChange.current = null; setLeaving(false); } }
         }} activeTurnId={thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null} busy={busy}
           captureSubmissionAuthority={captureMainSubmissionAuthority}
-          onSubmit={(draft, options, action, description, authority) => submit(draft, options, action, undefined, description, undefined, undefined, undefined, authority)} onInterrupt={interrupt} onStartQueued={async (queuedSubmissionId, authority) => {
-          if (!authority) throw Object.assign(new Error('原队列权限尚未捕获，未启动。'), { uncertain: false });
+          dispatchQueueMutation={(method, params, hostId, originalAuthority, assertBeforeSend) => {
+            const original = mainSubmissionAuthorities.current.get(originalAuthority);
+            if (!original || original.owner.hostId !== hostId || original.owner.threadId !== params.threadId) {
+              throw Object.assign(new Error('原队列目标权限尚未捕获，未派发。'), { uncertain: false, sendPhase: 'before-send' });
+            }
+            assertBeforeSend();
+            return client.rpc(method, params, hostId, { assertBeforeSend, daemonConnectionGeneration: original.daemon.generation });
+          }}
+          removeQueuedOriginal={(entry, originalAuthority, assertBeforeSend) => {
+            const original = mainSubmissionAuthorities.current.get(originalAuthority);
+            if (!original?.owner.threadId) throw Object.assign(new Error('原队列输入身份尚未确认，未删除。'), { uncertain: false, sendPhase: 'before-send' });
+            return client.host<'deleted' | 'changed'>('queue-edit', { hostId: original.owner.hostId, threadId: original.owner.threadId,
+              entry, daemonConnectionGeneration: original.daemon.generation }, { assertBeforeSend: () => {
+              assertBeforeSend(); original.daemon.assertOriginal();
+            } });
+          }}
+          onSubmit={(draft, options, action, description, authority) => submit(draft, options, action, undefined, description, undefined, undefined, undefined, authority)} onInterrupt={interrupt} onStartQueued={async (queuedSubmissionId, authority, originalAuthority) => {
+          if (!authority || !originalAuthority) throw Object.assign(new Error('原队列权限尚未捕获，未启动。'), { uncertain: false, sendPhase: 'before-send' });
           authority();
-          const daemon = mainSubmissionAuthorities.current.get(authority)?.daemon;
-          if (!daemon) throw new Error('原队列的 daemon 连接未捕获，未启动。');
+          const grant = mainSubmissionAuthorities.current.get(originalAuthority), daemon = grant?.daemon;
+          if (!daemon || grant.owner.hostId !== current.hostId || grant.owner.threadId !== current.threadId) throw Object.assign(new Error('原队列的 daemon 连接未捕获，未启动。'), { uncertain: false, sendPhase: 'before-send' });
           if (!current.threadId || current.readOnly || inFlight.current || isThreadBusy(threadRef.current)) throw new Error('当前会话暂时无法启动队列。');
           const identity = { hostId: current.hostId, threadId: current.threadId }, generation = navigationGeneration.current;
           inFlight.current = true; setSubmitting(true);

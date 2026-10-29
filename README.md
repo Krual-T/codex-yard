@@ -18,7 +18,7 @@ This branch is completing the React + TypeScript migration. The default renderer
 - Use project navigation, workspace tabs, conversation history, queued messages, image attachments, and temporary side chats.
 - Browse files and use terminals through Codex's existing host interfaces.
 - Pair an existing Chrome browser, navigate pages, and attach selected elements to a conversation.
-- Display interactive HTML visualizations and the app's Mini interface.
+- Display interactive HTML visualizations.
 
 The next product direction is a task dashboard: clarify and assign work, see which Agent is doing what, and distribute queued tasks to available workers. That scheduler and dashboard are planned features. The current source provides the conversation workspace.
 

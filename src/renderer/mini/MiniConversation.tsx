@@ -563,6 +563,12 @@ export function MiniConversation(props: MiniConversationProps) {
     {initialized && (!target.threadId || !conversation.loading && conversation.options || composer.current) && <StandaloneComposer
       client={props.client} context={{ ...ownerOf(target), cwd: thread?.cwd || target.cwd, placement: 'mini' }}
       captureSubmissionAuthority={captureSubmissionAuthority}
+      removeQueuedOriginal={(entry, originalAuthority, assertBeforeSend) => {
+        const captured = submissionAuthorities.current.get(originalAuthority), original = targetRef.current;
+        if (!captured?.daemonConnectionGeneration || !original.threadId) throw Object.assign(new Error('Mini 原队列输入身份尚未确认，未删除。'), { uncertain: false, sendPhase: 'before-send' });
+        return props.client.host<'deleted' | 'changed'>('queue-edit', { hostId: original.hostId, threadId: original.threadId,
+          entry, daemonConnectionGeneration: captured.daemonConnectionGeneration }, { assertBeforeSend });
+      }}
       busy={working || isThreadBusy(thread)} activeTurnId={thread?.turns.find(turn => turn.status === 'inProgress')?.id ?? null}
       initialOptions={conversation.options ?? props.initialOptions} hosts={props.hosts} onDraftController={receiveComposer}
       onDraftChange={props.onDraftChange} onRemoveReference={async (owner, reference, operation) => {
