@@ -26,8 +26,12 @@ const client: WorkbenchClient = {
 const storage: EditRecoveryStorage = {
   read: () => readBrowserAtom(messageEditsAtom),
   update: async change => {
-    if (failNextSave) { failNextSave = false; throw new Error('fixture IDB failure'); }
-    const result = await updateBrowserAtom(messageEditsAtom, change);
+    const fail = failNextSave;
+    failNextSave = false;
+    const result = await updateBrowserAtom(messageEditsAtom, value => {
+      if (fail) throw new Error('fixture IDB failure');
+      return change(value);
+    });
     if (gate) { const held = gate; gate = undefined; waiting = true; await held; }
     return result;
   },
