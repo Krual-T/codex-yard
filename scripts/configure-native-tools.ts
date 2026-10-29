@@ -8,7 +8,7 @@ import { appToolsConfig, defaultAppToolsAdapter } from '../lib/app-tools.ts';
 import { projectRoot } from '../lib/app-resources.ts';
 import { CodexConnection } from '../lib/codex.ts';
 import { errorMessage, isRecord } from '../lib/codex-protocol.ts';
-import { catalog } from '../vendor/native-app-tools/26.1013.40934/portable-tools.mjs';
+import { catalog } from '../lib/native-tool-kernel.ts';
 
 // Explicit administration. Planning reads only the host catalog and daemon
 // configuration; --apply adds one server and never resumes or interrupts a chat.

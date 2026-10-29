@@ -5,7 +5,8 @@ import { setImmediate } from 'node:timers/promises';
 import { CodexConnection } from '../lib/codex.ts';
 import { createNativeAppToolHost, type NativeAppToolsOptions } from '../lib/native-app-tools.ts';
 import { record } from '../src/native/protocol.ts';
-import { catalog, schemas } from '../vendor/native-app-tools/26.1013.40934/portable-tools.mjs';
+import { catalog, schemas, delegationTurnInput, formatAssistantMessage, nativeParentThread, success, validateModel, ThreadWaiter } from '../lib/native-tool-kernel.ts';
+import type { NativeManager } from '../lib/native-tool-kernel.ts';
 import { agentItem, commandItem, createFakeCodex, fixtureThread, fixtureTurn } from './fake-codex.ts';
 
 async function fixture(t: TestContext, overrides: Partial<NativeAppToolsOptions> = {}) {
@@ -223,4 +224,209 @@ test('native ancestor protection rejects parent messaging while allowing peer an
   const fork = data(await h.call('fork_thread', { threadId: 'target' }));
   assert.equal(typeof fork.threadId, 'string');
   assert.equal(h.fake.calls('thread/fork').length, 1);
+});
+
+test('nested native target objects are closed and the twelve catalog names remain available', () => {
+  assert.deepEqual(catalog.map(tool => tool.name), ['list_projects', 'create_thread', 'fork_thread', 'list_threads',
+    'list_archived_threads', 'read_thread', 'wait_threads', 'send_message_to_thread', 'set_thread_pinned',
+    'set_thread_archived', 'set_thread_title', 'set_thread_read_state']);
+  const invalid = [
+    { prompt: 'x', target: { type: 'projectless', directoryName: 'out', extra: true } },
+    { prompt: 'x', target: { type: 'project', projectId: 'repo', environment: { type: 'local', extra: true } } },
+    { prompt: 'x', target: { type: 'project', projectId: 'repo', environment: { type: 'worktree', startingState: { type: 'branch', branchName: 'main', extra: true } } } },
+  ];
+  for (const args of invalid) assert.equal(schemas.create_thread!.safeParse(args).success, false);
+  assert.equal(schemas.wait_threads!.safeParse({ targets: [{ threadId: 'target', unknown: true }] }).success, false);
+  assert.equal(schemas.wait_threads!.safeParse({ targets: [{ threadId: 'target' }], timeoutMs: 120_001 }).success, false);
+  assert.match(catalog.find(tool => tool.name === 'send_message_to_thread')!.description, /human user explicitly authorizes/);
+});
+
+test('delegation is escaped and uses toolOutput only on supported app-server versions', () => {
+  const args = { sourceThreadId: 'parent<&', input: 'do <work> & report', toolName: 'send_message_to_thread' };
+  const old = delegationTurnInput({ ...args, appServerVersion: '0.151.0-alpha.3' });
+  assert.equal(old.toolOutput, undefined);
+  assert.match(old.input[0]!.text, /parent&lt;&amp;/);
+  assert.match(old.input[0]!.text, /do &lt;work&gt; &amp; report/);
+  for (const version of ['0.151.0-alpha.4', '0.163.0', '0.164.0', '0.0.0']) {
+    const supported = delegationTurnInput({ ...args, appServerVersion: version });
+    assert.deepEqual(supported.input, []);
+    assert.equal(supported.toolOutput?.namespace, 'codex_app');
+    assert.equal(supported.toolOutput?.output, old.input[0]!.text);
+  }
+});
+
+test('native model validation and assistant filtering preserve explicit failures', () => {
+  const models = [{ model: 'fixture', description: '', supportedReasoningEfforts: [{ reasoningEffort: 'low' }] }];
+  assert.equal(validateModel('fixture', 'low', models), null);
+  assert.match(validateModel('fixture', 'high', models)!, /does not support "high"/);
+  assert.match(validateModel('missing', undefined, models)!, /could not validate model/);
+  assert.deepEqual(formatAssistantMessage(':: SKIP_COMPLETION ::'), { content: '', removed: true, isSkippedCompletion: true });
+  assert.equal(formatAssistantMessage('ok <oai-mem-citation>secret</oai-mem-citation> end').content, 'ok  end');
+  assert.equal(formatAssistantMessage('literal `<oai-mem-citation>` stays').content, 'literal `<oai-mem-citation>` stays');
+  assert.equal(formatAssistantMessage('a `<oai-mem-citation>` b <oai-mem-citation>unfinished').content, 'a `<oai-mem-citation>` b');
+  assert.throws(() => success({ value: 'x'.repeat(1_048_576) }), /size limit/);
+  assert.equal(nativeParentThread({ id: 'child', name: null, cwd: '/', status: { type: 'idle' }, turns: [],
+    source: { subAgent: { thread_spawn: { parent_thread_id: 'parent' } } } } as Parameters<typeof nativeParentThread>[0]), 'parent');
+});
+
+test('legacy history uses old turn cursors and fails unknown cursors without any write', async t => {
+  const h = await fixture(t);
+  h.target.historyMode = 'legacy';
+  h.target.turns = [fixtureTurn('old', [agentItem('old-message', 'old')]), fixtureTurn('new', [agentItem('new-message', 'new')])];
+  h.fake.handlers.set('thread/read', params => ({ thread: { ...h.target, turns: params.includeTurns ? h.target.turns : [] } }));
+  const newest = data(await h.call('read_thread', { threadId: 'target', turnLimit: 1 }));
+  assert.equal(record(newest.page).nextCursor, 'new');
+  const older = data(await h.call('read_thread', { threadId: 'target', turnLimit: 1, cursor: 'new' }));
+  assert.equal(record((older.turns as unknown[])[0]).id, 'old');
+  const unknown = await h.call('read_thread', { threadId: 'target', cursor: 'missing' });
+  assert.equal(unknown.success, false);
+  assert.match(unknown.contentItems[0]!.text, /Unknown cursor/);
+  assert.equal(h.fake.calls('thread/turns/list').length, 0);
+  assert.equal(h.fake.calls('turn/start').length, 0);
+});
+
+test('passive wait reports an actual peer disconnect and does not interrupt the target', async t => {
+  const h = await fixture(t);
+  h.target.status = { type: 'active', activeFlags: [] };
+  h.target.turns = [fixtureTurn('running', [], 'inProgress')];
+  const pending = h.call('wait_threads', { targets: [{ threadId: 'target' }], timeoutMs: 10_000 });
+  await h.fake.waitForCall('thread/turns/list');
+  await h.call('list_projects', {});
+  h.fake.disconnect();
+  const value = data(await pending);
+  assert.equal(value.wake, null);
+  assert.match(record((value.errors as unknown[])[0]).message as string, /disconnect/i);
+  assert.equal(h.fake.calls('turn/interrupt').length, 0);
+});
+
+test('a completed turn notification wakes the passive wait with the final message', async t => {
+  const h = await fixture(t);
+  h.target.status = { type: 'active', activeFlags: [] };
+  h.target.turns = [fixtureTurn('running', [], 'inProgress')];
+  const pending = h.call('wait_threads', { targets: [{ threadId: 'target' }], timeoutMs: 10_000 });
+  await h.fake.waitForCall('thread/turns/list');
+  await h.call('list_projects', {});
+  const finished = fixtureTurn('running', [agentItem('final', 'Final **result**')]);
+  h.target.turns = [finished];
+  h.target.status = { type: 'idle' };
+  h.fake.broadcast({ method: 'turn/completed', params: { threadId: 'target', turn: finished } });
+  const result = data(await pending);
+  assert.equal(record(result.wake).reason, 'turnCompleted');
+  assert.equal(record(record((result.polls as unknown[])[0]).latestAssistantMessage).text, 'Final result');
+  assert.equal(h.fake.calls('turn/interrupt').length, 0);
+});
+
+test('a slower concurrent history read cannot replace a newer completed poll', async t => {
+  const h = await fixture(t);
+  const old = fixtureTurn('old', [agentItem('old-message', 'Old result')]);
+  old.startedAt = 1;
+  const fresh = fixtureTurn('fresh', [agentItem('fresh-message', 'Fresh result')]);
+  fresh.startedAt = 2;
+  let release!: () => void, calls = 0;
+  h.fake.handlers.set('thread/turns/list', async () => {
+    if (++calls === 1) {
+      await new Promise<void>(resolve => { release = resolve; });
+      return { data: [old], nextCursor: null };
+    }
+    return { data: [fresh], nextCursor: null };
+  });
+  const first = h.call('wait_threads', { targets: [{ threadId: 'target' }], timeoutMs: 0 });
+  await h.fake.waitForCall('thread/turns/list');
+  const second = data(await h.call('wait_threads', { targets: [{ threadId: 'target' }], timeoutMs: 0 }));
+  release();
+  const stale = data(await first);
+  const newestPoll = record((second.polls as unknown[])[0]);
+  const olderPoll = record((stale.polls as unknown[])[0]);
+  assert.equal(olderPoll.cursor, newestPoll.cursor);
+  assert.equal(record(olderPoll.latestTurn).id, 'fresh');
+  assert.equal(record(olderPoll.latestAssistantMessage).text, 'Fresh result');
+});
+
+test('same-host reconnection starts a new cursor generation', async t => {
+  let active!: CodexConnection;
+  const h = await fixture(t, { connectionFor: async () => active });
+  active = h.connection;
+  const first = data(await h.call('wait_threads', { targets: [{ threadId: 'target' }], timeoutMs: 0 }));
+  const cursor = record((first.polls as unknown[])[0]).cursor;
+  active.close();
+  active = new CodexConnection(h.fake.socketPath);
+  await active.connect();
+  t.after(() => active.close());
+  const second = data(await h.call('wait_threads', { targets: [{ threadId: 'target', afterCursor: cursor }], timeoutMs: 0 }));
+  assert.equal(record((second.polls as unknown[])[0]).cursorReset, true);
+});
+
+test('wait summaries preserve markdown content while excluding internal and executable HTML', async t => {
+  const h = await fixture(t);
+  for (const [input, expected] of [
+    ['one\n\ntwo', 'one two'],
+    ['::notice[title]{.box}', 'title'],
+    [':::note\ninside\n:::', 'inside'],
+    ['one\uE200hidden\uE201two', 'onetwo'],
+    ['<p>Hello <b>world</b></p>', 'Hello world'],
+    ['<script>secret()</script><p>visible</p>', 'visible'],
+    ['<heartbeat><decision>DONT_NOTIFY</decision><message>note</message></heartbeat>', 'note'],
+    ['<heartbeat><message>unknown</message></heartbeat>', 'unknown'],
+  ]) {
+    h.target.turns = [fixtureTurn('done', [agentItem('final', input!)])];
+    const result = data(await h.call('wait_threads', { targets: [{ threadId: 'target' }], timeoutMs: 0 }));
+    assert.equal(record(record((result.polls as unknown[])[0]).latestAssistantMessage).text, expected);
+  }
+});
+
+test('the host sends a delegated 0.164 toolOutput to the original target', async t => {
+  const h = await fixture(t);
+  h.connection.server = { userAgent: 'codex/0.164.0' };
+  data(await h.call('send_message_to_thread', { threadId: 'target', prompt: 'Continue <carefully>' }));
+  const request = h.fake.calls('turn/start')[0]!.params;
+  assert.deepEqual(request.input, []);
+  assert.equal(record(request.toolOutput).name, 'send_message_to_thread');
+  assert.match(String(record(request.toolOutput).output), /Continue &lt;carefully&gt;/);
+  assert.equal(h.fake.calls('turn/start').length, 1);
+});
+
+test('newer non-paginated histories translate turn-id cursors to daemon anchors', async t => {
+  const h = await fixture(t);
+  h.connection.server = { userAgent: 'codex/0.164.0' };
+  h.target.historyMode = 'legacy';
+  const newer = fixtureTurn('newer', [agentItem('newer-message', 'newer')]);
+  const older = fixtureTurn('older', [agentItem('older-message', 'older')]);
+  h.fake.handlers.set('thread/turns/list', params => params.cursor
+    ? { data: [older], nextCursor: null } : { data: [newer], nextCursor: 'daemon-page-token' });
+  const first = data(await h.call('read_thread', { threadId: 'target', turnLimit: 1 }));
+  assert.equal(record(first.page).nextCursor, 'newer');
+  const second = data(await h.call('read_thread', { threadId: 'target', turnLimit: 1, cursor: 'newer' }));
+  assert.equal(record((second.turns as unknown[])[0]).id, 'older');
+  assert.deepEqual(JSON.parse(String(h.fake.calls('thread/turns/list')[1]!.params.cursor)), { turnId: 'newer', includeAnchor: false });
+});
+
+test('wait wakes on actionable status without treating commentary as an event', async t => {
+  const h = await fixture(t);
+  h.target.status = { type: 'active', activeFlags: [] };
+  h.target.turns = [fixtureTurn('running', [], 'inProgress')];
+  const pending = h.call('wait_threads', { targets: [{ threadId: 'target' }], timeoutMs: 10_000 });
+  await h.fake.waitForCall('thread/turns/list');
+  await h.call('list_projects', {});
+  h.target.status = { type: 'active', activeFlags: ['waitingOnApproval'] };
+  h.fake.broadcast({ method: 'thread/status/changed', params: { threadId: 'target', status: h.target.status } });
+  const value = data(await pending);
+  assert.equal(record(value.wake).reason, 'actionableStatus');
+  assert.equal(h.fake.calls('turn/interrupt').length, 0);
+});
+
+test('unqualified duplicate thread ids remain ambiguous across hosts', async () => {
+  const reads: string[] = [];
+  function manager(hostId: string): NativeManager {
+    return { getHostId: () => hostId,
+      async readThread() { reads.push(hostId); return { thread: { id: 'same', name: null, cwd: '/', status: { type: 'idle' }, turns: [] } }; },
+      async listThreadTurns() { return { response: { data: [], nextCursor: null } }; },
+      addNotificationCallback() { return () => {}; }, addThreadDeletedListener() { return () => {}; } };
+  }
+  const managers = [manager('local'), manager('remote')];
+  const waiter = new ThreadWaiter({ getManagers: () => managers, subscribe: () => () => {} }, formatAssistantMessage);
+  const signal = new AbortController().signal;
+  await assert.rejects(waiter.resolveThreadHost({ threadId: 'same', signal }), /Ambiguous.*local, remote/);
+  reads.length = 0;
+  assert.equal((await waiter.resolveThreadHost({ preferredHostId: 'local', threadId: 'same', signal })).hostId, 'local');
+  assert.deepEqual(reads, ['local']);
 });

@@ -5,9 +5,9 @@ import { errorMessage, isRecord } from './codex-protocol.ts';
 import type { Page, RpcMessage, ThreadSummary, TurnSummary } from './codex-protocol.ts';
 import type { AppToolCall, AppToolDescriptor } from './app-tools.ts';
 import { catalog, schemas, ThreadWaiter, readHistory, success, failure, invalidArguments,
-  validateModel, formatAssistantMessage, nativeParentThread, delegationTurnInput } from '../vendor/native-app-tools/26.1013.40934/portable-tools.mjs';
+  validateModel, formatAssistantMessage, nativeParentThread, delegationTurnInput } from './native-tool-kernel.ts';
 import type { AvailableModel, NativeArguments, NativeManager, NativeReadOptions,
-  ToolResult } from '../vendor/native-app-tools/26.1013.40934/portable-tools.mjs';
+  ToolResult } from './native-tool-kernel.ts';
 
 export interface NativeProject {
   projectId: string; projectKind: 'local' | 'remote'; label: string; path: string;
@@ -24,7 +24,7 @@ export interface NativeAppToolsOptions {
   setMembership(threadId: string, hostId: string, project: NativeProject | null, cwd: string): Promise<void>;
 }
 
-/** Native business rules live in the copied kernel. This module supplies real
+/** Native business rules live in the owned kernel. This module supplies real
  * daemon and Yard-state I/O, with no browser window or synthetic AppScope. */
 export function createNativeAppToolHost(options: NativeAppToolsOptions) {
   const managers = new Map<string, NativeManager>();
