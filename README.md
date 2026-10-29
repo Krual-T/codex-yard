@@ -18,6 +18,7 @@ Mini/Pets is disabled. Existing drafts and saved state are retained; its old ena
 
 - Continue conversations through the existing Codex daemon, including registered SSH hosts.
 - Use project navigation, workspace tabs, conversation history, queued messages, image attachments, and temporary side chats.
+- Read Markdown, file citations, and file, website, Google document, Sheet/Slide and Sites outputs through their existing workspace actions.
 - Browse files and use terminals through Codex's existing host interfaces.
 - Pair an existing Chrome browser, navigate pages, and attach selected elements to a conversation.
 - Display interactive HTML visualizations.

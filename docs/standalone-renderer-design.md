@@ -2,7 +2,7 @@
 
 2026-10-29 用户范围修订：Mini/Pets 本次禁用，移除实际 App 挂载、入口和对主输入的租约控制；旧启用偏好不再唤起界面。保留已有草稿、身份指针、偏好数据与 Git 历史，不添加功能开关框架。SideChat 是独立临时侧聊能力，继续使用共享会话/草稿服务和真实主界面。
 
-实施设计 v25，2026-10-30。原稿恢复、协议来源、正常消息引用及 Main/SideChat 文件预览使用实际页面消费者；输入历史在事务前核对权威稿与技能归属，外部删除不能由旧 undo/redo 恢复。整个 `vendor/codex-app/` 已删除，覆盖当前 Yard Web 的 F00–F23 功能账，Mini/Pets 按上述用户裁决禁用。干净来源的安装、构建、实际启动和验收必须对应同一已提交来源；具体结果在独立交付材料记录。本设计替代固定函数注入方案，Git 历史只作为行为研究依据。
+实施设计 v26，2026-10-30。原稿恢复、协议来源、正常消息引用及 Main/SideChat 文件预览使用实际页面消费者；输入历史在事务前核对权威稿与技能归属，外部删除不能由旧 undo/redo 恢复。整个 `vendor/codex-app/` 已删除，覆盖当前 Yard Web 的 F00–F23 功能账，Mini/Pets 按上述用户裁决禁用。干净来源的安装、构建、实际启动和验收必须对应同一已提交来源；具体结果在独立交付材料记录。本设计替代固定函数注入方案，Git 历史只作为行为研究依据。
 
 ## 入口与现有能力
 
@@ -24,6 +24,14 @@
 ## 状态、路由与模块契约
 
 `app` 负责 shell、路由、WorkbenchClient、会话 reducer 和父级服务集成；`composer` 负责草稿、富文档、提交控件和持久 Main 队列；`messages`/`markdown` 负责消息与工具展示；`settings` 负责配置、主题和原编辑恢复。共享契约在 `src/renderer/workbench-contract.ts`；组件通过 props 接收真实客户端和当前 host/thread/cwd，直接使用 npm React。旧 renderer-migration 及资源注入入口已删除。
+
+消息产物复用现有 `thread-summary-file-outputs.ts` 的目录与网站优先级投影；普通文件、Google 文档、网页、live Sheet/Slide 和 Sites 保留各自的原入口。Main 和侧聊都传入捕获的 host/thread/cwd、消息内容、连接代次和父页面校验；文件两步读取继续使用 `FilePanelRequest.assertCurrent`，侧聊同时保留原 activation。成功文件标签不保存消息的一次性回调，之后 Reload 使用既有标签生命周期。
+
+live 引用的正文按钮及 turn-end 行通过 `ArtifactSessionTarget` 交给 App 的中央资源标签，不调用普通文件读取，也不复制会话状态。原消息 DOM、主输入和草稿保留；关闭标签返回原消息。当前 Web host 缺少 live artifact 服务时显示原文 `Live Artifact Sessions aren’t available in this app host.`，不冒称文档加载成功。外部及 Page 引用仍按各自可用性校验处理。
+
+Sites 使用锁定的公开 `@statsig/js-client`，仅恢复原 `637432221` 的读取。`use-appgen-gate.ts` 沿当前 daemon 的 `account/read`、原 `os-info`、既有 Statsig IndexedDB 存储与 `/api/http-fetch` 的公开配置 allowlist 初始化 SDK；不读取 auth.json、token 或私有身份端口。API-key 的匿名设备身份由当前浏览器稳定 ID 生成；ChatGPT 只提交公开账号已有字段，未知用户 ID 保持省略。配置 targeting 的历史 UI 版本26.1013.40934与Yard运行版本分开记录。保留 SDK 对完整当前 profile 匹配缓存的读取及异步刷新；跨 profile、partial 匹配或缺 gate 不作为有效评估。曝光和事件发送关闭，未知状态不阻止主输入。
+
+App 将同一次评估的值和来源传给 Main、侧聊与 Summary 的既有投影。已识别 true 才显示合格 Sites 回执，已识别 false 才采用对应分支；未知保留明确状态。账号、host、连接及页面恢复事件使旧来源同步失效，迟到配置响应不能恢复它。Site 点击仍走原链接偏好及精确回执 URL；Web host 不支持的元数据、Share 或云自动化不能由本地合成响应冒充，也不因此移除原 Site 入口。
 
 配置读取和写入共用 `config-write-targets.ts` 的实际 daemon home 校验。`server.ts` 在请求前后核对原连接、generation、home；实际 daemon home 与选定 host 不匹配时拒绝读取，避免把另一套配置标成当前来源。插件操作在原 operation 的 origin 中保留 source type；显示值相同的另一个来源不能消费旧回执，`okOverridden` 保留待用户核查。
 
