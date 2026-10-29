@@ -544,9 +544,14 @@ function remapFormattedRanges(item: Record<string, unknown>, before: string, aft
     while (position >= 0 && long[position] !== short[index]) position--;
     last[index] = position--;
   }
-  if (first.some((value, index) => value !== last[index])) throw new Error('格式化文本的引用位置不唯一，已保留原始草稿。');
-  const mapping = source.length <= target.length ? first : source.map(() => -1);
-  if (source.length > target.length) first.forEach((sourceIndex, targetIndex) => { mapping[sourceIndex] = targetIndex; });
+  // Only referenced characters need a unique alignment; unrelated repeated text can vary.
+  const mapping = source.map(() => -1);
+  if (source.length <= target.length) first.forEach((targetIndex, sourceIndex) => {
+    if (targetIndex === last[sourceIndex]) mapping[sourceIndex] = targetIndex;
+  });
+  else first.forEach((sourceIndex, targetIndex) => {
+    if (sourceIndex === last[targetIndex]) mapping[sourceIndex] = targetIndex;
+  });
   const encoder = new TextEncoder();
   const offsets = (characters: string[]) => characters.reduce<number[]>((result, character) => {
     result.push(result.at(-1)! + encoder.encode(character).length); return result;
@@ -563,7 +568,8 @@ function remapFormattedRanges(item: Record<string, unknown>, before: string, aft
     const start = sourceOffsets.indexOf(range.start as number), end = sourceOffsets.indexOf(range.end as number);
     if (start < 0 || end <= start) throw new Error('格式化文本的引用范围无法无损映射，已保留原始草稿。');
     const mapped = mapping.slice(start, end), targetStart = mapped[0];
-    if (targetStart === undefined || targetStart < 0 || mapped.some((value, index) => value !== targetStart + index)) {
+    if (targetStart === undefined || mapped.some(value => value < 0)) throw new Error('格式化文本的引用位置不唯一，已保留原始草稿。');
+    if (mapped.some((value, index) => value !== targetStart + index)) {
       throw new Error('格式化文本与引用内容重叠，已保留原始草稿。');
     }
     return { ...element, byteRange: { ...range, start: targetOffsets[targetStart], end: targetOffsets[targetStart + mapped.length] } };

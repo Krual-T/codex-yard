@@ -708,6 +708,69 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       assert.deepEqual(errors, []); await page.close();
     });
 
+    await t.test('pasting a copied chat into a new empty owner retains the original host and history', async () => {
+      const source = await open('chat-copy-source');
+      const sourceEditor = source.page.getByRole('textbox', { name: 'Work with Codex' });
+      await source.page.locator('.standalone-composer__add > summary').click();
+      await source.page.getByRole('button', { name: 'Add chat' }).click();
+      await source.page.getByLabel('Chat host').selectOption('ssh:other');
+      await source.page.getByRole('button', { name: /Review remote/ }).click();
+      const copied = await sourceEditor.evaluate(element => {
+        const range = document.createRange(); range.selectNode(element.querySelector('[data-mention="agent"]')!);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const data = new DataTransfer(); element.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: data }));
+        return { html: data.getData('text/html'), text: data.getData('text/plain') };
+      });
+      const target = await open('chat-copy-empty-target');
+      const editor = target.page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.focus();
+      await editor.evaluate((element, copied) => {
+        const data = new DataTransfer(); data.setData('text/html', copied.html); data.setData('text/plain', copied.text);
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+      }, copied);
+      await editor.locator('[data-mention="agent"]').waitFor();
+      assert.equal(await editor.locator('[data-mention="agent"]').getAttribute('agent-mention-path'), 'thread://same-id?hostId=ssh%3Aother');
+      await editor.press('Control+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 0);
+      await editor.press('Control+Shift+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      await target.page.getByRole('button', { name: 'Send', exact: true }).click();
+      await target.page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      assert.match(JSON.stringify(await target.page.evaluate(() => (window as any).fixture.state.submissions[0].input)), /thread:\/\/same-id\?hostId=ssh%3Aother/);
+      assert.deepEqual(target.errors, []); assert.deepEqual(source.errors, []);
+      await target.page.close(); await source.page.close();
+    });
+
+    await t.test('rich to plain preference keeps copied chat identity on paste', async () => {
+      const { page, errors } = await open('chat-rich-plain-copy');
+      const editor = page.getByRole('textbox', { name: 'Work with Codex' });
+      await editor.pressSequentially('@Rev'); await page.getByRole('option', { name: /Review local/ }).waitFor(); await editor.press('Enter');
+      await page.locator('.standalone-composer__add > summary').click(); await page.getByRole('button', { name: 'Rich text editor' }).click();
+      const copied = await editor.evaluate(element => {
+        const range = document.createRange(); range.selectNode(element.querySelector('[data-mention="agent"]')!);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const data = new DataTransfer(); element.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: data }));
+        return { html: data.getData('text/html'), text: data.getData('text/plain') };
+      });
+      await page.evaluate(() => { const state = (window as any).fixture.state; state.plainOverride = true;
+        for (const listener of state.listeners) listener({ type: 'settings-changed', keys: ['composerPlainTextMode'] }); });
+      await page.getByRole('toolbar', { name: 'Text formatting' }).waitFor({ state: 'hidden' });
+      await editor.evaluate((element, copied) => {
+        const range = document.createRange(); range.selectNodeContents(element.querySelector('p')!); range.collapse(false);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const data = new DataTransfer(); data.setData('text/html', copied.html); data.setData('text/plain', copied.text);
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+      }, copied);
+      assert.equal(await editor.locator('[data-mention="agent"]').count(), 2);
+      await editor.press('Control+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 1);
+      await editor.press('Control+Shift+z'); assert.equal(await editor.locator('[data-mention="agent"]').count(), 2);
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor();
+      assert.equal((JSON.stringify(await page.evaluate(() => (window as any).fixture.state.submissions[0].input)).match(/thread:\/\/same-id\?hostId=local/g) ?? []).length, 2);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
     await t.test('rich action keeps link creation, editing and marked paste on the same node history', async () => {
       const { page, errors } = await open('chat-inline-link');
       const editor = page.getByRole('textbox', { name: 'Work with Codex' });
@@ -938,6 +1001,61 @@ test('chat lookup uses the real composer, original editor and host-scoped list',
       await second.waitFor(); assert.equal(await editorText(second), 'Look Review local ');
       assert.equal(await second.locator('[data-mention="agent"]').count(), 1);
       assert.equal(await second.locator('em [data-mention="agent"]').count(), 1);
+      assert.deepEqual(errors, []); await page.close();
+    });
+
+    await t.test('marked chat paste preserves segmented input, images, byte ranges and undo', async () => {
+      const { page, errors } = await open('chat-segmented-marked-paste');
+      const original = { text: '文件 @ref\nLook @Rev', images: [], files: [], references: [], skills: [], input: [
+        { type: 'text', text: '文件 @ref', text_elements: [{ byteRange: { start: 7, end: 11 }, placeholder: 'ref' }] },
+        { type: 'image', fileId: 'file-1', detail: 'high' },
+        { type: 'text', text: 'Look @Rev', text_elements: [] },
+      ], document: { type: 'doc', content: [
+        { type: 'paragraph', content: [{ type: 'text', text: '文件 @ref', marks: [{ type: 'strong' }] }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'Look @Rev', marks: [{ type: 'em' }] }] },
+      ] } };
+      assert.equal(await page.evaluate(value => { const c = (window as any).fixture.state.controller; return c.update(c.snapshot().owner, () => value); }, original), true);
+      const first = page.getByRole('textbox', { name: 'Work with Codex 1' }), second = page.getByRole('textbox', { name: 'Work with Codex 2' });
+      await second.focus(); await second.press('End'); await page.getByRole('option', { name: /Review local/ }).waitFor(); await second.press('Enter');
+      const copied = await second.evaluate(element => {
+        const range = document.createRange(); range.selectNode(element.querySelector('em')!);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const data = new DataTransfer(); element.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: data }));
+        return { html: data.getData('text/html'), text: data.getData('text/plain') };
+      });
+      assert.match(copied.html, /<em>/); assert.match(copied.html, /data-mention="agent"/);
+      await first.focus(); await first.press('End');
+      await first.evaluate((element, copied) => {
+        const data = new DataTransfer(); data.setData('text/html', copied.html); data.setData('text/plain', copied.text);
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+      }, copied);
+      await first.locator('em [data-mention="agent"]').waitFor();
+      const after = await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft);
+      assert.deepEqual(after.input[1], original.input[1]); assert.deepEqual(after.input[0].text_elements, original.input[0].text_elements);
+      assert.match(JSON.stringify(after.document.content[0]), /"type":"em"/);
+      await first.press('Control+z'); assert.equal(await first.locator('[data-mention="agent"]').count(), 0);
+      await first.press('Control+Shift+z'); assert.equal(await first.locator('em [data-mention="agent"]').count(), 1);
+      await second.focus(); await second.press('End');
+      await second.evaluate((element, copied) => {
+        const range = document.createRange(); range.selectNodeContents(element.querySelector('p')!); range.collapse(false);
+        const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        const data = new DataTransfer(); data.setData('text/html', copied.html); data.setData('text/plain', copied.text);
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+      }, copied);
+      assert.equal(await second.locator('em [data-mention="agent"]').count(), 2, JSON.stringify(await page.getByRole('alert').allTextContents()));
+      await second.press('Control+z'); assert.equal(await second.locator('[data-mention="agent"]').count(), 1);
+      await second.press('Control+Shift+z'); assert.equal(await second.locator('em [data-mention="agent"]').count(), 2);
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      try { await page.getByRole('alert').filter({ hasText: 'fixture send declined' }).waitFor(); }
+      catch { throw new Error('send did not reach fixture: ' + JSON.stringify({ alerts: await page.getByRole('alert').allTextContents(),
+        draft: await page.evaluate(() => (window as any).fixture.state.controller.snapshot().draft) })); }
+      const input = await page.evaluate(() => (window as any).fixture.state.submissions[0].input);
+      assert.deepEqual(input[1], original.input[1]);
+      assert.equal(new TextDecoder().decode(new TextEncoder().encode(input[0].text).slice(input[0].text_elements[0].byteRange.start, input[0].text_elements[0].byteRange.end)), '@ref');
+      assert.match(input[0].text, /\*.*\[@Review local\]\(thread:\/\/same-id\?hostId=local\).*\*/);
+      assert.equal((input[2].text.match(/thread:\/\/same-id\?hostId=local/g) ?? []).length, 2);
       assert.deepEqual(errors, []); await page.close();
     });
 

@@ -2,7 +2,7 @@ import { Fragment as ReactFragment, forwardRef, useEffect, useImperativeHandle, 
 import { Bold, Code2, FileText, Italic, Link as LinkIcon, MessageSquare, X } from 'lucide-react';
 import { toggleMark } from 'prosemirror-commands';
 import { closeHistory, history, redo, undo } from 'prosemirror-history';
-import { DOMSerializer, Fragment, Mark, Schema, Slice } from 'prosemirror-model';
+import { DOMParser as ProseMirrorDOMParser, DOMSerializer, Fragment, Mark, Schema, Slice } from 'prosemirror-model';
 import type { Node as ProseMirrorNode } from 'prosemirror-model';
 import { EditorState, Plugin, TextSelection } from 'prosemirror-state';
 import type { Transaction } from 'prosemirror-state';
@@ -17,7 +17,8 @@ import type { Completion } from './standalone-completions.tsx';
 import { isStructuredAppInput } from './standalone-draft.ts';
 import type { Draft } from './standalone-draft.ts';
 import { projectTextAgentDocument, updateTextAgentDocument } from './text-agent-document.ts';
-import type { TextAgentSpan } from './text-agent-document.ts';
+import type { TextAgentSpan, TextMarkSpan } from './text-agent-document.ts';
+export type { TextMarkSpan } from './text-agent-document.ts';
 
 export interface RichEditorHandle {
   focus(): void;
@@ -41,9 +42,8 @@ export interface StructuredInputEditorHandle {
 }
 export interface TextCompletionSkill { name: string; path: string; managed: boolean }
 export interface TextSkillChange { before: TextCompletionSkill[]; after: TextCompletionSkill[] }
-export interface TextAgentSegment { index: number; text: string; agents: TextAgentSpan[] }
+export interface TextAgentSegment { index: number; text: string; agents: TextAgentSpan[]; marks: TextMarkSpan[] }
 export interface TextAgentChange { before: TextAgentSegment[]; after: TextAgentSegment[]; document?: ComposerDocument }
-export interface TextMarkSpan { start: number; end: number; marks: { type: string; attrs?: Record<string, unknown> }[] }
 export interface StructuredInputEditorProps {
   draft: Draft;
   onEdit(index: number, expectedText: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange): boolean;
@@ -142,6 +142,10 @@ function historyAgents(state: EditorState): TextAgentSpan[] {
     }
   });
   return agents;
+}
+function historyMarks(state: EditorState): TextMarkSpan[] {
+  return historyProjection(state).tokens.flatMap(token => token.node && token.node.type.name !== 'hard_break'
+    ? [{ start: token.start, end: token.end, marks: token.node.marks.map(mark => mark.toJSON()) }] : []);
 }
 function historyDocument(state: EditorState, source: ComposerDocument): ComposerDocument | null {
   const original = readRichDocument(source), before = original && projectTextAgentDocument(original);
@@ -370,7 +374,7 @@ function TextControl(props: TextControlProps) {
   const { t } = useI18n('zh-CN');
   const model = useRef<TextControlModel | null>(null);
   if (!model.current) {
-    const state = textHistoryState(props.text, props.agentMentions);
+    const state = applySourceMarks(textHistoryState(props.text, props.agentMentions), props.sourceMarks ?? []);
     model.current = { state, element: null, index: props.index, historyPlugin: state.plugins[0]!,
       view: null, activateView: () => {}, composing: false, rich: false, plainMode: false,
       applyMode: () => {}, canEdit: () => false, apply: () => false };
@@ -408,7 +412,8 @@ function TextControl(props: TextControlProps) {
     const all = Array.from(latest.current.controls.values());
     const before = all.flatMap(item => historySkills(item.state));
     const after = all.flatMap(item => historySkills(item === control ? next : item.state));
-    const segment = (item: TextControlModel, state: EditorState): TextAgentSegment => ({ index: item.index, text: historyText(state), agents: historyAgents(state) });
+    const segment = (item: TextControlModel, state: EditorState): TextAgentSegment => ({ index: item.index, text: historyText(state),
+      agents: historyAgents(state), marks: historyMarks(state) });
     const source = latest.current.currentDocument?.();
     const document = latest.current.formatting && transaction.docChanged && source
       ? control.rich ? fullHistoryDocument(next) : historyDocument(next, source) : undefined;
@@ -467,21 +472,21 @@ function TextControl(props: TextControlProps) {
     }
     if (control.rich && !props.formatting) {
       control.rich = false;
-      control.state = textHistoryState(props.text, props.agentMentions);
+      control.state = applySourceMarks(textHistoryState(props.text, props.agentMentions), props.sourceMarks ?? []);
       control.historyPlugin = control.state.plugins[0]!;
       control.plainMode = false;
       control.view?.updateState(control.state);
       return;
     }
     if (!control.rich && (historyText(control.state) !== props.text || JSON.stringify(historyAgents(control.state)) !== JSON.stringify(props.agentMentions ?? []))) {
-      control.state = textHistoryState(props.text, props.agentMentions);
+      control.state = applySourceMarks(textHistoryState(props.text, props.agentMentions), props.sourceMarks ?? []);
       control.historyPlugin = control.state.plugins[0]!;
       control.view?.updateState(control.state);
     }
   }, [control, props.text, props.agentMentions, props.formatting, props.document, props.currentDocument, props.plainTextMode]);
   useLayoutEffect(() => { control.applyMode(); }, [control, props.formatting, props.plainTextMode]);
   useLayoutEffect(() => {
-    if (!showView || props.formatting || !props.sourceMarks) return;
+    if (props.formatting || !props.sourceMarks || composing.current) return;
     const next = applySourceMarks(control.state, props.sourceMarks);
     if (next !== control.state) { control.state = next; control.view?.updateState(next); }
   }, [control, props.sourceMarks, props.formatting, showView]);
@@ -563,6 +568,13 @@ function TextControl(props: TextControlProps) {
         if (!data) return false;
         latest.current.onPaste?.({ clipboardData: data, preventDefault: () => event.preventDefault() });
         if (event.defaultPrevented) return true;
+        const html = data.getData('text/html');
+        const containsAgent = /data-mention\s*=\s*["']agent["']|agent-mention-name\s*=/i.test(html);
+        if (containsAgent) {
+          const supported = control.rich ? supportedClipboardHTML(html, true) : supportedTextHistoryClipboard(html, true);
+          if (!supported) { latest.current.onInvalid?.(); return true; }
+          return false;
+        }
         if (control.rich && latest.current.plainTextMode) {
           const text = data.getData('text/plain').replace(/\r\n?/g, '\n');
           if (text) {
@@ -575,9 +587,7 @@ function TextControl(props: TextControlProps) {
           }
           return true;
         }
-        const html = data.getData('text/html');
-        const containsAgent = /data-mention\s*=\s*["']agent["']|agent-mention-name\s*=/i.test(html);
-        if (html && (latest.current.formatting || containsAgent)) {
+        if (html && latest.current.formatting) {
           const supported = control.rich ? supportedClipboardHTML(html, true) : supportedTextHistoryClipboard(html, !!latest.current.formatting);
           if (!supported) { latest.current.onInvalid?.(); return true; }
           return false;
@@ -714,7 +724,23 @@ function TextControl(props: TextControlProps) {
           event.preventDefault(); runHistory(event.key.toLowerCase() === 'y' || event.shiftKey ? 'redo' : 'undo');
         } else latest.current.onKeyDown(event.nativeEvent);
       }
-    }} onPaste={props.onPaste}
+    }} onPaste={event => {
+      props.onPaste?.(event);
+      if (event.defaultPrevented) return;
+      const html = event.clipboardData.getData('text/html');
+      if (!/data-mention\s*=\s*["']agent["']|agent-mention-name\s*=/i.test(html)) return;
+      event.preventDefault();
+      if (!control.canEdit() || !supportedTextHistoryClipboard(html, true)) { latest.current.onInvalid?.(); return; }
+      try {
+        const element = event.currentTarget, parsed = new DOMParser().parseFromString(remapClipboardLinkOccurrences(html, control.state.doc), 'text/html');
+        const slice = ProseMirrorDOMParser.fromSchema(textHistorySchema).parseSlice(parsed.body, { preserveWhitespace: 'full' });
+        const from = historyPosition(control.state, element.selectionStart), to = historyPosition(control.state, element.selectionEnd);
+        const transaction = control.state.tr.setSelection(TextSelection.create(control.state.doc, from, to)).replaceSelection(slice);
+        if (!publish(closeHistory(transaction), 'insertFromPaste')) return;
+        control.state = control.state.apply(closeHistory(control.state.tr));
+        control.activateView();
+      } catch { latest.current.onInvalid?.(); }
+    }}
     onCompositionStart={() => {
       compositionGeneration.current++;
       if (!composing.current) {

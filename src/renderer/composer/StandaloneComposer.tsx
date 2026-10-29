@@ -26,7 +26,7 @@ import { StandalonePlainInputEditor, StandaloneRichEditor, StandaloneStructuredI
 import type { RichEditorHandle, StructuredInputEditorHandle, TextAgentChange, TextMarkSpan, TextPasteEvent, TextSkillChange } from './StandaloneRichEditor.tsx';
 import type { RichCompletionContext } from './rich-editor-actions.ts';
 import { readRichDocument, serializePlainDocument, serializeRichDocument } from './rich-document.ts';
-import { isPlainTextAgentDocument, projectTextAgentDocument, textAgentSegments, updateTextAgentDocument } from './text-agent-document.ts';
+import { applyTextAgentMarks, isPlainTextAgentDocument, projectTextAgentDocument, textAgentSegments, updateTextAgentDocument } from './text-agent-document.ts';
 import type { TextAgentSpan } from './text-agent-document.ts';
 import { ArrowUp, FilePenLine, Lightbulb, MessageSquare, Mic, Paperclip, Plus } from 'lucide-react';
 import './standalone-composer.css';
@@ -629,7 +629,7 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
     const entries = segmented && next.input ? next.input.flatMap((entry, index) => entry.type === 'text' && typeof entry.text === 'string'
       ? [{ index, text: entry.text }] : []) : [{ index: -1, text: next.text }];
     let offset = 0;
-    const spans: TextAgentSpan[] = [];
+    const spans: TextAgentSpan[] = [], marks: TextMarkSpan[] = [];
     for (const entry of entries) {
       const segment = agents.after.find(value => value.index === entry.index);
       if (!segment || segment.text !== entry.text) return null;
@@ -650,10 +650,12 @@ function ComposerSession({ client, context, busy, readOnly = false, onSubmit, on
         })) return null;
       }
       spans.push(...segment.agents.map(agent => ({ ...agent, start: agent.start + offset, end: agent.end + offset })));
+      marks.push(...segment.marks.map(mark => ({ ...mark, start: mark.start + offset, end: mark.end + offset })));
       offset += entry.text.length + 1;
     }
     const document = updateTextAgentDocument(before.document, before.text, next.text, spans);
-    return document ? { ...next, document } : null;
+    const marked = document && applyTextAgentMarks(document, marks);
+    return marked ? { ...next, document: marked } : null;
   };
   const editSegment = (index: number, expected: string, text: string, inputType?: string, skills?: TextSkillChange, agents?: TextAgentChange) => {
     if (frozenRef.current) return false;

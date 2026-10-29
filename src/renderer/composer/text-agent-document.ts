@@ -14,6 +14,7 @@ export interface TextAgentSpan {
   end: number;
   attrs: { name: string; displayName: string; conversationId: string | null; path: string };
 }
+export interface TextMarkSpan { start: number; end: number; marks: { type: string; attrs?: Record<string, unknown> }[] }
 
 interface Token { start: number; end: number; from: number; to: number; node?: ProseMirrorNode }
 export interface TextAgentProjection { text: string; agents: TextAgentSpan[]; tokens: Token[] }
@@ -137,6 +138,34 @@ export function updateTextAgentDocument(original: ComposerDocument | undefined, 
   }
   const result = projectTextAgentDocument(state.doc);
   return result?.text === after && result.agents.length === agents.length ? state.doc.toJSON() as ComposerDocument : null;
+}
+
+/** Reapply the actual editor marks to text and complete inline atoms across input segments. */
+export function applyTextAgentMarks(original: ComposerDocument, ranges: readonly TextMarkSpan[]): ComposerDocument | null {
+  const document = readRichDocument(original), projection = document && projectTextAgentDocument(document);
+  if (!document || !projection) return null;
+  let transaction = EditorState.create({ doc: document }).tr, firstRange = 0;
+  for (const token of projection.tokens) {
+    if (!token.node || token.node.type.name === 'hard_break') continue;
+    while (firstRange < ranges.length && ranges[firstRange]!.end <= token.start) firstRange++;
+    let covered = token.start;
+    for (let index = firstRange; index < ranges.length && ranges[index]!.start < token.end; index++) {
+      const range = ranges[index]!, start = Math.max(token.start, range.start), end = Math.min(token.end, range.end);
+      if (start !== covered || start >= end || !token.node.isText && (start !== token.start || end !== token.end)) return null;
+      const from = token.node.isText ? token.from + start - token.start : token.from;
+      const to = token.node.isText ? token.from + end - token.start : token.to;
+      transaction = transaction.removeMark(from, to);
+      for (const mark of range.marks) {
+        const type = composerSchema.marks[mark.type];
+        if (!type) return null;
+        try { transaction = transaction.addMark(from, to, type.create(mark.attrs)); } catch { return null; }
+      }
+      covered = end;
+    }
+    if (covered !== token.end) return null;
+  }
+  const result = transaction.doc.toJSON() as ComposerDocument;
+  return readRichDocument(result) ? result : null;
 }
 
 /** Serialize each original input segment without merging its surrounding non-text items. */
