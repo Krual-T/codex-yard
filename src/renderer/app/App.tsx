@@ -265,8 +265,16 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         const result = await client.rpc('account/read', { refreshToken: false }, hostId,
           { daemonConnectionGeneration: daemon.generation, assertBeforeSend: daemon.assertOriginal });
         daemon.assertOriginal();
-        const email = record(record(result).account).email;
-        if (alive && request === sequence) setSidebarAccount({ hostId, label: typeof email === 'string' ? email.trim() : '' });
+        const account = record(record(result).account), email = account.email;
+        let label = typeof email === 'string' ? email.trim() : '';
+        if (!label && account.type === 'apiKey') {
+          if (!alive || request !== sequence) return;
+          const read = await client.rpc('config/read', { includeLayers: false }, hostId, { assertBeforeSend: daemon.assertOriginal });
+          daemon.assertOriginal();
+          const provider = record(record(read).config).model_provider;
+          label = typeof provider === 'string' && provider.trim() && provider !== 'openai' ? provider.trim() : 'OpenAI';
+        }
+        if (alive && request === sequence) setSidebarAccount({ hostId, label });
       } catch { if (alive && request === sequence) setSidebarAccount(null); }
     };
     const unsubscribe = client.subscribe(event => {
