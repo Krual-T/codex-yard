@@ -128,9 +128,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallback; throw error; }
   }
   const state: ObjectValue = {}, globals: ObjectValue = {}, settings: ObjectValue = {};
-  const projectKeys = ['local-projects', 'remote-projects', 'thread-project-assignments', 'projectless-thread-ids',
-    'thread-projectless-output-directories', 'thread-workspace-root-hints'];
-  let projectAuthorityRevision = 0, projectAuthoritySnapshot: unknown[] | undefined;
+  let refreshSideChatProjects: (() => void) | undefined;
   function replaceObject(target: ObjectValue, next: ObjectValue) {
     for (const key of Object.keys(target)) delete target[key];
     for (const [key, value] of Object.entries(next)) {
@@ -139,12 +137,10 @@ export async function createNativeWorkbench(options: Options = {}) {
   }
   function publishState(root: ObjectValue) {
     const nextGlobals = record(root.globals);
-    const projectSnapshot = projectKeys.map(key => structuredClone(nextGlobals[key]));
-    if (projectAuthoritySnapshot && !isDeepStrictEqual(projectAuthoritySnapshot, projectSnapshot)) projectAuthorityRevision++;
-    projectAuthoritySnapshot = projectSnapshot;
     replaceObject(globals, nextGlobals);
     replaceObject(settings, record(root.settings));
     replaceObject(state, { ...root, globals, settings });
+    refreshSideChatProjects?.();
   }
   const nativeState = createNativeState({ dataDir, publish: publishState, checkpoint: options.nativeStateCheckpoint,
     validate(root) {
@@ -331,13 +327,20 @@ export async function createNativeWorkbench(options: Options = {}) {
   const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'), tools: appToolCatalog, callTool: callHostTool });
   const sideChats = createNativeSideChatParent({ mutations: stateMutations, assertStateAvailable: nativeState.assertAvailable,
     readSection: () => state.sideChats, persistSection: section => persistRoot({ ...state, globals, settings, sideChats: section }),
-    globals, compatibility: () => compatibility, projectRevision: () => projectAuthorityRevision,
+    globals, compatibility: () => compatibility,
     receipts: sideChatParents, connections: page => clients.get(page),
     generation: connectionGeneration, validateHost: validHost,
     forkConfig: hostId => hostId === 'local' ? hostTools.config : undefined,
     authority: options.sideChatBrowserAuthority,
-    notify: hint => broadcast({ type: 'side-chat-updated', ...hint }),
+    notify: (hint, except) => {
+      for (const page of clients.keys()) {
+        if (except.has(page)) continue;
+        try { send(page, { type: 'side-chat-updated', ...hint }); } catch { /* Other pages still receive their hints. */ }
+      }
+    },
+    notifyPage: (page, hint) => { try { send(page, { type: 'side-chat-updated', ...hint }); } catch { /* A hint is advisory. */ } },
   });
+  refreshSideChatProjects = sideChats.projectsChanged;
   // A daemon request is broadcast to every page subscribed to its thread.
   // Retain each result through the turn so another page or a replay only replies.
   const legacyTitleCalls = new Map<string, Map<string, ReturnType<typeof callHostTool>>>();
@@ -501,6 +504,10 @@ export async function createNativeWorkbench(options: Options = {}) {
         else if (message.request) send(client, { type: 'mcp-response', hostId: message.hostId ?? 'local', message: { id: message.request.id,
           error: { code: typeof error.code === 'number' ? error.code : -32000, message: error.message,
             data: error.data === undefined ? { uncertain: error.uncertain === true } : error.data } } });
+      }).finally(() => {
+        if (message.type === 'fetch' && typeof message.url === 'string' && message.url.split('/').at(-1) === 'side-chat') {
+          sideChats.flushNotifications(client);
+        }
       });
     });
     client.on('close', () => {
@@ -771,11 +778,11 @@ export async function createNativeWorkbench(options: Options = {}) {
 
   async function fetchHost(endpoint: string, params: ObjectValue, client: WebSocket, connections: Map<string, CodexConnection>): Promise<unknown> {
     if (endpoint === 'configuration-write') return configurationWriteHost.handle(params, { client, connections });
+    if (endpoint === 'side-chat') return sideChats.handle(client, params);
     const hostId = typeof params.hostId === 'string' ? params.hostId : 'local';
     validHost(hostId);
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
     switch (endpoint) {
-      case 'side-chat': return sideChats.handle(client, params);
       case 'pet-overlay': {
         if (hostId !== 'local') throw new Error('Mini 状态仅由本机宿主管理。');
         const command = miniCommand(params.message);
@@ -847,7 +854,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         return stateMutations.run(() => {
           if (generation === projectInventoryGeneration) {
             projectCompatibility = inventory.compatibility;
-            projectAuthorityRevision++;
+            sideChats.projectsChanged();
           }
           return structuredClone({ ...readThreadProjectState(globals, inventory.compatibility), inventory: status,
             catalog: { local: globals['local-projects'], remote: globals['remote-projects'] } });

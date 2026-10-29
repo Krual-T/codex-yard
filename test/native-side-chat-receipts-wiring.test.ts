@@ -218,6 +218,70 @@ test('pending start checks invalidation against its returned thread instead of u
   assert.equal(f.receipts.current(source.page, 'local', 'parent-a'), null);
 });
 
+test('pending fork checks invalidations against the returned child identity', async t => {
+  const f = await fixture(t), a = await f.connect(), b = await f.connect();
+  const pending: { id: string | number; send(value: unknown): void }[] = [];
+  f.fake.handlers.set('thread/fork', (_params, context) => {
+    pending.push({ id: context.message.id!, send: context.send }); return NO_REPLY;
+  });
+  f.fake.handlers.set('thread/settings/update', () => ({}));
+  const first = a.rpc('thread/fork', { threadId: 'parent-a' });
+  await f.fake.waitForCall('thread/fork');
+  assert.ok((await b.rpc('thread/settings/update', { threadId: 'other-thread' })).message.result);
+  pending[0]!.send({ id: pending[0]!.id, result: f.response('child-a') });
+  assert.ok((await first).message.result);
+  const source = f.receipts.sources.at(-1)!;
+  assert.ok(f.receipts.current(source.page, 'local', 'child-a'));
+
+  const second = a.rpc('thread/fork', { threadId: 'parent-a' });
+  await f.fake.waitForCall('thread/fork', 2);
+  assert.ok((await b.rpc('thread/settings/update', { threadId: 'child-a' })).message.result);
+  pending[1]!.send({ id: pending[1]!.id, result: f.response('child-a') });
+  assert.ok((await second).message.result);
+  assert.equal(f.receipts.current(source.page, 'local', 'child-a'), null);
+});
+
+test('an unsubscribe revokes only pending receipts from the same page and returned thread', async t => {
+  const f = await fixture(t), a = await f.connect(), b = await f.connect();
+  const pending: { id: string | number; send(value: unknown): void }[] = [];
+  f.fake.handlers.set('thread/start', (_params, context) => {
+    pending.push({ id: context.message.id!, send: context.send }); return NO_REPLY;
+  });
+  const first = a.rpc('thread/start', { cwd: f.root });
+  await f.fake.waitForCall('thread/start');
+  assert.ok((await b.rpc('thread/unsubscribe', { threadId: 'parent-a' })).message.result);
+  pending[0]!.send({ id: pending[0]!.id, result: f.response('parent-a') });
+  assert.ok((await first).message.result);
+  const source = f.receipts.sources.at(-1)!;
+  assert.ok(f.receipts.current(source.page, 'local', 'parent-a'));
+
+  const second = a.rpc('thread/start', { cwd: f.root });
+  await f.fake.waitForCall('thread/start', 2);
+  assert.ok((await a.rpc('thread/unsubscribe', { threadId: 'parent-a' })).message.result);
+  pending[1]!.send({ id: pending[1]!.id, result: f.response('parent-a') });
+  assert.ok((await second).message.result);
+  assert.equal(f.receipts.current(source.page, 'local', 'parent-a'), null);
+});
+
+test('a host-wide settings invalidation revokes a pending start regardless of its returned identity', async t => {
+  const f = await fixture(t), a = await f.connect(), b = await f.connect();
+  let delayed: { id: string | number; send(value: unknown): void } | undefined;
+  f.fake.handlers.set('thread/start', (_params, context) => {
+    delayed = { id: context.message.id!, send: context.send }; return NO_REPLY;
+  });
+  const pending = a.rpc('thread/start', { cwd: f.root });
+  await f.fake.waitForCall('thread/start');
+  f.fake.handlers.set('model/list', (_params, context) => {
+    context.send({ method: 'thread/settings/updated', params: {} });
+    return { data: [], nextCursor: null };
+  });
+  assert.ok((await b.rpc('model/list', {})).message.result);
+  assert.ok(delayed); delayed.send({ id: delayed.id, result: f.response('parent-a') });
+  assert.ok((await pending).message.result);
+  const source = f.receipts.sources.at(-1)!;
+  assert.equal(f.receipts.current(source.page, 'local', 'parent-a'), null);
+});
+
 test('an older resume reply cannot replace a newer original response on the same page', async t => {
   const f = await fixture(t), a = await f.connect();
   const pending: { id: string | number; send(value: unknown): void }[] = [];

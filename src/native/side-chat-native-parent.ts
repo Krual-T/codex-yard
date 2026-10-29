@@ -42,14 +42,14 @@ interface Options {
   persistSection(section: unknown): Promise<void>;
   globals: Value;
   compatibility(): ThreadProjectCompatibility;
-  projectRevision(): number;
   receipts: SideChatParentReceipts;
   connections(page: WebSocket): Map<string, CodexConnection> | undefined;
   generation(socket: WebSocket): string;
   validateHost(hostId: string): void;
   forkConfig(hostId: string): Value | undefined;
   authority?: SideChatBrowserAuthority;
-  notify(hint: { hostId: string; operationId: string }): void;
+  notify(hint: { hostId: string; operationId: string }, except: ReadonlySet<WebSocket>): void;
+  notifyPage(page: WebSocket, hint: { hostId: string; operationId: string }): void;
 }
 interface Binding {
   page: WebSocket;
@@ -60,12 +60,14 @@ interface Binding {
   socket: WebSocket;
   connectionGeneration: string;
   revision: string;
-  projectRevision: number;
   project: unknown;
+  projectSource: unknown;
+  projectStale: boolean;
   forkConfig: Value | undefined;
 }
 interface Claim { operationId: string; action: SideChatHostAction; value?: { callId: string; token: string; page: WebSocket } }
-interface Context { page: WebSocket; binding?: Binding; guard?: Binding; claim?: Claim; claimed?: Claim['value'] }
+interface Context { page: WebSocket; binding?: Binding; guard?: Binding; guardConnectionOnly?: boolean;
+  claim?: Claim; claimed?: Claim['value'] }
 const id = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0
   && value.length <= 512 && !value.includes('\0');
 
@@ -81,8 +83,34 @@ export function createNativeSideChatParent(options: Options) {
   const bindings = new Map<string, Binding>();
   const prepareBindings = new Map<string, Binding>();
   const claims = new Map<string, NonNullable<Claim['value']>>();
+  const activeHints = new Map<string, Map<WebSocket, { hostId: string; calls: number; dirty: boolean }>>();
 
-  function project(hostId: string, threadId: string): unknown {
+  function beginHints(page: WebSocket, hostId: string, operationId: string): () => void {
+    let pages = activeHints.get(operationId);
+    if (!pages) activeHints.set(operationId, pages = new Map());
+    let entry = pages.get(page);
+    if (!entry) pages.set(page, entry = { hostId, calls: 0, dirty: false });
+    entry.calls++;
+    return () => { entry.calls--; };
+  }
+
+  function notify(hint: { hostId: string; operationId: string }): void {
+    const pages = activeHints.get(hint.operationId);
+    if (pages) for (const entry of pages.values()) entry.dirty = true;
+    options.notify(hint, new Set(pages?.keys()));
+  }
+
+  function flushNotifications(page: WebSocket): void {
+    for (const [operationId, pages] of activeHints) {
+      const entry = pages.get(page);
+      if (!entry || entry.calls) continue;
+      pages.delete(page);
+      if (!pages.size) activeHints.delete(operationId);
+      if (entry.dirty && page.readyState === WebSocket.OPEN) options.notifyPage(page, { hostId: entry.hostId, operationId });
+    }
+  }
+
+  function projectState(hostId: string, threadId: string): { project: unknown; source: unknown } {
     const snapshot = readThreadProjectState(options.globals, options.compatibility());
     const unresolved = snapshot.unresolved;
     if (Object.keys(unresolved.unreadable).length || Object.hasOwn(unresolved.assignments, threadId)
@@ -94,30 +122,53 @@ export function createNativeSideChatParent(options: Options) {
     const membership = snapshot.memberships.find(item => item.hostId === hostId && item.threadId === threadId);
     if (membership?.assignment && membership.projectless) throw new Error('原会话的项目归属存在冲突。');
     const assignment = membership?.assignment;
-    if (!assignment) return null;
-    const source = assignment.projectKind === 'local'
-      ? Object.values(record(options.globals['local-projects']))
-      : Array.isArray(options.globals['remote-projects']) ? options.globals['remote-projects'] : [];
-    const matches = source.filter(value => {
-      const candidate = record(value);
-      return candidate.id === assignment.projectId && (assignment.projectKind === 'local'
-        ? hostId === 'local' : candidate.hostId === hostId);
-    });
-    if (matches.length !== 1) throw new Error('原会话的项目目录尚未核实。');
-    return structuredClone({ assignment, catalog: matches[0] });
+    let project: unknown = null, directory: unknown = null;
+    if (assignment) {
+      const candidates = assignment.projectKind === 'local'
+        ? Object.values(record(options.globals['local-projects']))
+        : Array.isArray(options.globals['remote-projects']) ? options.globals['remote-projects'] : [];
+      const matches = candidates.filter(value => {
+        const candidate = record(value);
+        return candidate.id === assignment.projectId && (assignment.projectKind === 'local'
+          ? hostId === 'local' : candidate.hostId === hostId);
+      });
+      if (matches.length !== 1) throw new Error('原会话的项目目录尚未核实。');
+      project = { assignment, catalog: matches[0] };
+      const catalog = record(matches[0]);
+      directory = assignment.projectKind === 'local'
+        ? { id: catalog.id, rootPaths: catalog.rootPaths }
+        : { id: catalog.id, hostId: catalog.hostId, remotePath: catalog.remotePath };
+    }
+    const same = (item: { hostId: string; threadId: string }) => item.hostId === hostId && item.threadId === threadId;
+    return structuredClone({ project, source: { assignment: assignment ?? null, directory, projectless: membership?.projectless ?? false,
+      outputDirectory: snapshot.outputDirectories.find(same)?.value ?? null,
+      workspaceRoot: snapshot.workspaceRoots.find(same)?.value ?? null } });
   }
 
-  function assertBinding(binding: Binding): void {
+  function assertConnection(binding: Binding): void {
     options.validateHost(binding.hostId);
     const connection = options.connections(binding.page)?.get(binding.hostId);
     if (binding.page.readyState !== WebSocket.OPEN || connection !== binding.connection || !connection.connected
       || connection.socket !== binding.socket || binding.socket.readyState !== WebSocket.OPEN
       || options.generation(binding.socket) !== binding.connectionGeneration) throw new BeforeSend('原会话连接已改变。');
+  }
+
+  function assertBinding(binding: Binding): void {
+    assertConnection(binding);
     options.receipts.assertCurrent(binding.page, binding.hostId, binding.parentThreadId, binding.revision);
-    if (options.projectRevision() !== binding.projectRevision
-      || !isDeepStrictEqual(project(binding.hostId, binding.parentThreadId), binding.project)
+    if (binding.projectStale || !isDeepStrictEqual(projectState(binding.hostId, binding.parentThreadId).source, binding.projectSource)
       || !isDeepStrictEqual(options.forkConfig(binding.hostId), binding.forkConfig)) {
+      binding.projectStale = true;
       throw new BeforeSend('原会话的项目或宿主设置已改变。');
+    }
+  }
+
+  function projectsChanged(): void {
+    for (const binding of new Set([...bindings.values(), ...prepareBindings.values()])) {
+      if (binding.projectStale) continue;
+      try {
+        if (!isDeepStrictEqual(projectState(binding.hostId, binding.parentThreadId).source, binding.projectSource)) binding.projectStale = true;
+      } catch { binding.projectStale = true; }
     }
   }
 
@@ -125,7 +176,7 @@ export function createNativeSideChatParent(options: Options) {
     read() {
       options.assertStateAvailable();
       const current = context.getStore(), guard = current?.guard;
-      if (guard) assertBinding(guard);
+      if (guard) (current?.guardConnectionOnly ? assertConnection : assertBinding)(guard);
       const section = options.readSection(), claim = current?.claim;
       if (claim) {
         const operation = record(record(record(section).operations)[claim.operationId]);
@@ -183,7 +234,7 @@ export function createNativeSideChatParent(options: Options) {
     try {
       dispatched = await options.mutations.run(() => {
         const binding = bindingFor(scope);
-        assertBinding(binding);
+        if (method === 'thread/unsubscribe') assertConnection(binding); else assertBinding(binding);
         const op = operation(scope), active = record(record(op.endpointFence).active);
         const action = active.action as SideChatHostAction;
         const phase = method === 'thread/fork' ? 'fork' : method === 'thread/inject_items' ? 'inject' : 'unsubscribe';
@@ -232,9 +283,10 @@ export function createNativeSideChatParent(options: Options) {
       if (access.kind === 'read') return run();
       const current = context.getStore(), binding = bindingFor(scope);
       if (!current || current.page !== binding.page) throw new BeforeSend('侧聊属于另一页面。');
-      await options.mutations.run(() => { assertBinding(binding); checkBrowser(binding, scope, access.action, 'claim'); });
+      const closing = access.action === 'close' || access.action === 'retry' && access.closeRequested;
+      await options.mutations.run(() => { (closing ? assertConnection : assertBinding)(binding); checkBrowser(binding, scope, access.action, 'claim'); });
       const claim: Claim = { operationId: scope.operationId, action: access.action };
-      const result = await context.run({ ...current, guard: binding, claim }, run);
+      const result = await context.run({ ...current, guard: binding, guardConnectionOnly: closing, claim }, run);
       if (!claim.value) throw new BeforeSend('侧聊调用权限尚未确认。');
       claims.set(scope.operationId, claim.value);
       current.claimed = claim.value;
@@ -267,7 +319,7 @@ export function createNativeSideChatParent(options: Options) {
     async prepareClose(scope) {
       const binding = bindingFor(scope);
       const action = await options.mutations.run(() => {
-        assertBinding(binding);
+        assertConnection(binding);
         return record(record(operation(scope).endpointFence).active).action as SideChatHostAction;
       });
       if (!options.authority) throw new BeforeSend('侧聊草稿尚未冻结。');
@@ -277,24 +329,24 @@ export function createNativeSideChatParent(options: Options) {
       const binding = bindingFor(scope);
       if (!options.authority) throw new BeforeSend('侧聊本地清理尚未确认。');
       const action = await options.mutations.run(() => {
-        assertBinding(binding);
+        assertConnection(binding);
         return record(record(operation(scope).endpointFence).active).action as SideChatHostAction;
       });
       await options.authority.cleanup({ ...browserScope(binding, scope, action), childThreadId: scope.childThreadId });
     },
     ownerStopped: oldOwner => options.authority?.ownerStopped(oldOwner) === true,
-    notify: options.notify,
+    notify,
   });
 
   async function handle(page: WebSocket, params: Value): Promise<unknown> {
     const { hostId, parentThreadId, action } = params;
     if (!id(hostId) || !id(parentThreadId) || !id(action)) throw new BeforeSend('侧聊身份无效。');
-    options.validateHost(hostId);
     if (action === 'readPrepared') {
       if (!id(params.prepareId)) throw new BeforeSend('侧聊准备身份无效。');
       return endpoint.readPrepared({ hostId, parentThreadId, prepareId: params.prepareId });
     }
     if (action === 'prepare') {
+      options.validateHost(hostId);
       if (!id(params.prepareId) || !id(params.draftId)) throw new BeforeSend('侧聊草稿或准备身份无效。');
       try {
         const binding = await options.mutations.run(() => {
@@ -310,9 +362,10 @@ export function createNativeSideChatParent(options: Options) {
           if (!receipt || !connection || !socket || options.generation(socket) !== receipt.connectionGeneration) {
             throw new BeforeSend('原父会话尚未确认。');
           }
+          const project = projectState(hostId, parentThreadId);
           const result: Binding = { page, hostId, parentThreadId, draftId: params.draftId as string, connection, socket,
             connectionGeneration: receipt.connectionGeneration, revision: receipt.revision,
-            projectRevision: options.projectRevision(), project: project(hostId, parentThreadId),
+            project: project.project, projectSource: project.source, projectStale: false,
             forkConfig: structuredClone(options.forkConfig(hostId)) };
           assertBinding(result);
           prepareBindings.set(params.prepareId as string, result);
@@ -329,7 +382,7 @@ export function createNativeSideChatParent(options: Options) {
               || !isDeepStrictEqual(saved.parent.forkConfig, binding.forkConfig)
               || record(record(saved).endpointFence).ownerId !== ownerId || previous &&
               (previous.page !== page || previous.revision !== binding.revision || previous.draftId !== binding.draftId
-                || previous.projectRevision !== binding.projectRevision)) {
+                || previous.projectStale)) {
               throw new BeforeSend('原侧聊准备身份已属于另一页面。');
             }
             bindings.set(result.view.operationId, binding);
@@ -345,13 +398,21 @@ export function createNativeSideChatParent(options: Options) {
     const call: Context = { page };
     return context.run(call, async () => {
       if (action === 'read') return endpoint.read(input);
-      if (!['start', 'retry', 'close', 'retryPersistence'].includes(action) || !id(params.token)
+      if (!['start', 'retry', 'close', 'retryPersistence'].includes(action)
+        || action === 'retryPersistence' && !id(params.connectionGeneration)
+        || action !== 'retryPersistence' && !id(params.token)
         || params.forkDispatchId !== undefined && !id(params.forkDispatchId)) throw new BeforeSend('侧聊操作无效。');
+      const endHints = beginHints(page, hostId, input.operationId);
       try {
-        return await endpoint[action as SideChatHostAction]({ ...input, token: params.token,
+        if (action === 'retryPersistence') {
+          return await endpoint.saveCaptured({ ...input, connectionGeneration: params.connectionGeneration as string });
+        }
+        options.validateHost(hostId);
+        return await endpoint[action as SideChatHostAction]({ ...input, token: params.token as string,
           ...(typeof params.forkDispatchId === 'string' ? { forkDispatchId: params.forkDispatchId } : {}) });
       } finally {
         if (call.claimed && claims.get(input.operationId) === call.claimed) claims.delete(input.operationId);
+        endHints();
       }
     });
   }
@@ -360,6 +421,10 @@ export function createNativeSideChatParent(options: Options) {
     for (const [operationId, binding] of bindings) if (binding.page === page) bindings.delete(operationId);
     for (const [prepareId, binding] of prepareBindings) if (binding.page === page) prepareBindings.delete(prepareId);
     for (const [operationId, claim] of claims) if (claim.page === page) claims.delete(operationId);
+    for (const [operationId, pages] of activeHints) {
+      pages.delete(page);
+      if (!pages.size) activeHints.delete(operationId);
+    }
   }
 
   async function ownsChild(hostId: string, threadId: string): Promise<boolean> {
@@ -380,5 +445,5 @@ export function createNativeSideChatParent(options: Options) {
       });
     });
   }
-  return { handle, forgetPage, ownsChild };
+  return { handle, forgetPage, ownsChild, projectsChanged, flushNotifications };
 }

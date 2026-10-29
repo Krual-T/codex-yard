@@ -114,7 +114,9 @@ export class SideChatParentReceipts {
   revokePageThread(page: WebSocket, hostId: string, threadId: string): void {
     this.pages.get(page)?.delete(this.key(hostId, threadId));
     for (const attempt of this.attempts) {
-      if (attempt.source.page === page && attempt.source.hostId === hostId && attempt.expectedThreadId === threadId) attempt.stale = true;
+      if (attempt.source.page !== page || attempt.source.hostId !== hostId) continue;
+      if (attempt.expectedThreadId === null) attempt.invalidatedThreads.add(threadId);
+      else if (attempt.expectedThreadId === threadId) attempt.stale = true;
     }
   }
 

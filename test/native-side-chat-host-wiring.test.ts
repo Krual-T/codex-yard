@@ -9,6 +9,8 @@ import { createNativeWorkbench } from '../src/native/server.ts';
 import type { SideChatBrowserAuthority, SideChatBrowserCheck } from '../src/native/side-chat-native-parent.ts';
 import { SideChatParentReceipts } from '../src/native/side-chat-parent-receipts.ts';
 import type { SideChatReceiptSource } from '../src/native/side-chat-parent-receipts.ts';
+import { SideChatController } from '../src/renderer/side-chat/controller.ts';
+import type { SideChatHostPort, SideChatHostView } from '../src/renderer/side-chat/types.ts';
 import type { createSshProxyStream } from '../src/native/ssh.ts';
 import { createFakeCodex, fixtureThread, NO_REPLY } from './fake-codex.ts';
 import { nativeFixture } from './native-fixture.ts';
@@ -52,7 +54,9 @@ async function fixture(t: import('node:test').TestContext, enabled = true, timeo
   const dataDir = join(root, 'data');
   await mkdir(dataDir);
   await writeFile(join(dataDir, 'native-state.json'), JSON.stringify({ globals: {}, settings: {}, otherOwner: { preserved: true } }));
-  let permitted = true, frozen = false, failDirectorySync = false, asynchronousGuard = false;
+  let permitted = true, frozen = false, failDirectorySync = false, failFileSync = false, asynchronousGuard = false;
+  let closeGate: Promise<void> | undefined;
+  let commitGate: { entered(): void; wait: Promise<void> } | undefined;
   let blockedPhase: SideChatBrowserCheck['phase'] | null = null;
   const checks: SideChatBrowserCheck[] = [], closeCalls: string[] = [];
   const authority: SideChatBrowserAuthority = {
@@ -63,7 +67,8 @@ async function fixture(t: import('node:test').TestContext, enabled = true, timeo
       }
       if (asynchronousGuard) return Promise.resolve();
     },
-    async prepareClose(scope) { if (!permitted || scope.draftId !== 'draft-a') throw new Error('fixture close blocked'); frozen = true; closeCalls.push('freeze'); },
+    async prepareClose(scope) { if (!permitted || scope.draftId !== 'draft-a') throw new Error('fixture close blocked');
+      closeCalls.push('freeze'); await closeGate; frozen = true; },
     async cleanup() { if (!permitted || !frozen) throw new Error('fixture cleanup blocked'); closeCalls.push('cleanup'); frozen = false; },
     ownerStopped: () => false,
   };
@@ -73,7 +78,11 @@ async function fixture(t: import('node:test').TestContext, enabled = true, timeo
   const app = await createNativeWorkbench({ port: 0, socketPath: fake.socketPath, codexHome: join(root, 'codex'), dataDir,
     workspace: root, renderer, adapterPath, hostCatalog: { hosts: [remote], projects: [], assignments: {} }, sshStream,
     ...(enabled ? { sideChatBrowserAuthority: authority } : {}), ...(timeout ? { sideChatParentReceipts: new ShortTimeoutReceipts() } : {}),
-    nativeStateCheckpoint(step) { if (step === 'directory-sync' && failDirectorySync) { failDirectorySync = false; throw new Error('fixture confirmation failure'); } } });
+    nativeStateCheckpoint(step) {
+      if (step === 'directory-sync' && failDirectorySync) { failDirectorySync = false; throw new Error('fixture confirmation failure'); }
+      if (step === 'file-sync' && failFileSync) { failFileSync = false; throw new Error('fixture receipt persistence failure'); }
+      if (step === 'directory-sync' && commitGate) { const gate = commitGate; commitGate = undefined; gate.entered(); return gate.wait; }
+    } });
   const pages: WebSocket[] = [];
   t.after(async () => { for (const socket of pages) socket.terminate(); await app.close(); await fake.close(); await rm(root, { recursive: true, force: true }); });
   async function connect() { const result = await page(app.url); pages.push(result.socket); return result; }
@@ -87,13 +96,22 @@ async function fixture(t: import('node:test').TestContext, enabled = true, timeo
   fake.handlers.set('thread/inject_items', () => ({}));
   return { root, dataDir, fake, connect, response, checks, closeCalls,
     permit(value: boolean) { permitted = value; }, block(phase: SideChatBrowserCheck['phase'] | null) { blockedPhase = phase; },
-    failNextCommit() { failDirectorySync = true; }, asynchronous(value: boolean) { asynchronousGuard = value; } };
+    failNextCommit() { failDirectorySync = true; }, failNextFileCommit() { failFileSync = true; },
+    gateNextCommit(value: { entered(): void; wait: Promise<void> }) { commitGate = value; },
+    setCloseGate(value: Promise<void> | undefined) { closeGate = value; }, asynchronous(value: boolean) { asynchronousGuard = value; } };
 }
 
 const identity = { hostId: 'local', parentThreadId: 'parent-a' };
 const prepared = { ...identity, action: 'prepare', prepareId: 'prepare-a', draftId: 'draft-a' };
 const action = (view: Message, name: string, extra: Record<string, unknown> = {}) => ({ ...identity, action: name,
   operationId: view.view.operationId, token: view.token, ...extra });
+async function eventually(check: () => boolean) {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    if (check()) return;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  throw new Error('expected asynchronous side-chat result');
+}
 
 test('real host prepares and restores the same native-state operation but requires browser authority to dispatch', async t => {
   const f = await fixture(t, false), a = await f.connect();
@@ -158,6 +176,8 @@ test('a lost prepare cannot gain new project authority but its original operatio
   const first = await a.host('side-chat', prepared);
   assert.equal(first.responseType, 'error'); assert.equal(first.uncertain, true);
   assert.equal((await a.host('project-add', { hostId: 'local', path: f.root, name: 'Fixture' })).responseType, 'success');
+  assert.equal((await a.host('thread-projects', { operation: 'setMembership', value: { hostId: 'local', threadId: 'parent-a',
+    assignment: { projectKind: 'local', projectId: f.root }, projectless: false } })).responseType, 'success');
   const repeated = await a.host('side-chat', prepared);
   assert.equal(repeated.responseType, 'error'); assert.equal(repeated.uncertain, true);
   const state = JSON.parse(await readFile(join(f.dataDir, 'native-state.json'), 'utf8'));
@@ -188,8 +208,56 @@ test('a slow original directory request does not block other native-state operat
   assert.ok(delayed);
   const setting = await b.host('get-setting', { key: 'pet-visibility' });
   assert.equal(setting.responseType, 'success');
+  const absent = await b.host('side-chat', { ...identity, action: 'readPrepared', prepareId: prepared.prepareId });
+  assert.equal(absent.responseType, 'success'); assert.equal(absent.body, null);
   delayed.send({ id: delayed.id, result: { data: [{ id: 'parent-a' }], nextCursor: null } });
-  assert.equal((await pending).responseType, 'success');
+  const completed = await pending;
+  assert.equal(completed.responseType, 'success');
+  const found = await b.host('side-chat', { ...identity, action: 'readPrepared', prepareId: prepared.prepareId });
+  assert.equal(found.body.view.operationId, completed.body.view.operationId);
+});
+
+test('a committed prepare whose original authority changes is uncertain and recoverable by its prepare identity', async t => {
+  const f = await fixture(t), a = await f.connect(), b = await f.connect();
+  await a.rpc('thread/start', { cwd: f.root });
+  await b.rpc('model/list', {});
+  f.fake.handlers.set('thread/settings/update', () => ({}));
+  let entered!: () => void, release!: () => void;
+  const inCommit = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  f.gateNextCommit({ entered, wait: gate });
+  const preparing = a.host('side-chat', prepared);
+  await inCommit;
+  assert.ok((await b.rpc('thread/settings/update', { threadId: 'parent-a', approvalPolicy: 'never' })).message.result);
+  release();
+  const result = await preparing;
+  assert.equal(result.responseType, 'error'); assert.equal(result.uncertain, true);
+  const found = await b.host('side-chat', { ...identity, action: 'readPrepared', prepareId: prepared.prepareId });
+  assert.equal(found.responseType, 'success'); assert.ok(found.body.view.operationId);
+  assert.equal(Object.hasOwn(found.body, 'token'), false);
+  const state = JSON.parse(await readFile(join(f.dataDir, 'native-state.json'), 'utf8'));
+  assert.equal(state.sideChats.prepared[prepared.prepareId], found.body.view.operationId);
+  assert.equal(f.fake.calls('thread/fork').length, 0);
+});
+
+test('a delayed directory response is rejected after the original parent settings change', async t => {
+  const f = await fixture(t), a = await f.connect(), b = await f.connect();
+  await a.rpc('thread/start', { cwd: f.root });
+  await b.rpc('model/list', {});
+  f.fake.handlers.set('thread/settings/update', () => ({}));
+  let delayed: { id: string | number; send(value: unknown): void } | undefined;
+  f.fake.handlers.set('thread/list', (_params, context) => {
+    delayed = { id: context.message.id!, send: context.send }; return NO_REPLY;
+  });
+  const preparing = a.host('side-chat', prepared);
+  await f.fake.waitForCall('thread/list');
+  assert.ok((await b.rpc('thread/settings/update', { threadId: 'parent-a', approvalPolicy: 'never' })).message.result);
+  assert.ok(delayed); delayed.send({ id: delayed.id, result: { data: [{ id: 'parent-a' }], nextCursor: null } });
+  const result = await preparing;
+  assert.equal(result.responseType, 'error'); assert.equal(result.uncertain, true);
+  assert.equal((await b.host('side-chat', { ...identity, action: 'readPrepared', prepareId: prepared.prepareId })).body, null);
+  assert.equal(f.fake.calls('thread/fork').length, 0);
 });
 
 test('real endpoint checks page, draft and fork identity at dispatch and closes with one unsubscribe', async t => {
@@ -256,6 +324,172 @@ test('a concurrent page read rotates the token and prevents the old call from in
   assert.equal(retried.body.view.inject.status, 'received');
   assert.equal(f.fake.calls('thread/fork').length, 1);
   assert.equal(f.fake.calls('thread/inject_items').length, 1);
+});
+
+test('a real controller does not read its own hints during fork or close, while another page receives them', async t => {
+  const f = await fixture(t), a = await f.connect(), b = await f.connect();
+  await a.rpc('thread/start', { cwd: f.root });
+  let delayed: { id: string | number; send(value: unknown): void } | undefined;
+  f.fake.handlers.set('thread/fork', (_params, context) => {
+    delayed = { id: context.message.id!, send: context.send }; return NO_REPLY;
+  });
+  let token = '', generation = '', pendingReads = 0, startFromA = 0, startFromB = 0, hints = 0;
+  let startResponseId = '', closeResponseId = '';
+  async function call(name: string, operationId: string, extra: Record<string, unknown> = {}): Promise<SideChatHostView> {
+    const reply = await a.host('side-chat', { ...identity, action: name, operationId, token, ...extra });
+    if (reply.responseType !== 'success') throw Object.assign(new Error(reply.error), { uncertain: reply.uncertain });
+    if (name === 'start') startResponseId = reply.requestId;
+    if (name === 'close') closeResponseId = reply.requestId;
+    if (reply.body.token) token = reply.body.token;
+    return reply.body.view;
+  }
+  const port: SideChatHostPort = {
+    async prepare() {
+      const reply = await a.host('side-chat', prepared);
+      assert.equal(reply.responseType, 'success'); token = reply.body.token; generation = reply.body.connectionGeneration;
+      return reply.body.view;
+    },
+    async start(id) { startFromA = a.messages.length; startFromB = b.messages.length;
+      assert.ok(generation); return call('start', id, { forkDispatchId: 'controller-fork' }); },
+    async read(id) { pendingReads++; try { return await call('read', id); } finally { pendingReads--; } },
+    async retry(id) { return call('retry', id); },
+    async close(id) { return call('close', id); },
+    async retryPersistence(id) { return call('retryPersistence', id, { connectionGeneration: generation }); },
+    subscribe(listener) {
+      const receive = (bytes: WebSocket.RawData) => {
+        const message = JSON.parse(String(bytes));
+        if (message.type === 'side-chat-updated') { hints++; listener(message); }
+      };
+      a.socket.on('message', receive); return () => a.socket.off('message', receive);
+    },
+  };
+  const controller = new SideChatController({ ...identity, draftId: 'draft-a', port,
+    onPrepared: async () => {}, canDispatch: () => true });
+  t.after(() => controller.dispose());
+  const starting = controller.start();
+  await f.fake.waitForCall('thread/fork');
+  await b.until(item => item.type === 'side-chat-updated', startFromB);
+  assert.equal(a.messages.slice(startFromA).filter(item => item.type === 'side-chat-updated').length, 0);
+  assert.ok(delayed); delayed.send({ id: delayed.id, result: f.response(true) });
+  await starting;
+  await eventually(() => controller.getSnapshot().phase === 'ready' && hints > 0 && pendingReads === 0);
+  assert.ok(a.messages.findIndex((item, index) => item.type === 'side-chat-updated' && index >= startFromA)
+    > a.messages.findIndex(item => item.type === 'fetch-response' && item.requestId === startResponseId));
+  assert.equal(f.fake.calls('thread/inject_items').length, 1);
+
+  let releaseClose!: () => void;
+  f.setCloseGate(new Promise<void>(resolve => { releaseClose = resolve; }));
+  t.after(() => releaseClose());
+  const closeFromA = a.messages.length, closeFromB = b.messages.length;
+  const closing = controller.close();
+  await eventually(() => f.closeCalls.includes('freeze'));
+  await b.until(item => item.type === 'side-chat-updated', closeFromB);
+  assert.equal(a.messages.slice(closeFromA).filter(item => item.type === 'side-chat-updated').length, 0);
+  releaseClose(); await closing;
+  await eventually(() => controller.getSnapshot().phase === 'closed');
+  await a.until(item => item.type === 'side-chat-updated', closeFromA);
+  assert.ok(a.messages.findIndex((item, index) => item.type === 'side-chat-updated' && index >= closeFromA)
+    > a.messages.findIndex(item => item.type === 'fetch-response' && item.requestId === closeResponseId));
+  assert.equal(f.fake.calls('thread/unsubscribe').length, 1);
+  assert.equal(f.fake.calls('thread/fork').length, 1);
+  assert.equal(f.fake.calls('turn/start').length, 0);
+});
+
+test('unrelated project changes do not revoke dispatch and an existing child can close after parent settings change', async t => {
+  const f = await fixture(t), a = await f.connect();
+  await a.rpc('thread/start', { cwd: f.root });
+  const first = await a.host('side-chat', prepared);
+  assert.equal((await a.host('project-add', { hostId: 'local', path: f.root, name: 'Unrelated' })).responseType, 'success');
+  assert.equal((await a.host('thread-projects', { operation: 'setMembership', value: { hostId: 'local', threadId: 'other-thread',
+    assignment: { projectKind: 'local', projectId: f.root }, projectless: false } })).responseType, 'success');
+  f.fake.handlers.set('thread/fork', () => f.response(true));
+  const started = await a.host('side-chat', action(first.body, 'start', { forkDispatchId: 'unrelated-project' }));
+  assert.equal(started.responseType, 'success'); assert.equal(started.body.view.inject.status, 'received');
+  assert.equal((await a.host('thread-projects', { operation: 'setMembership', value: { hostId: 'local', threadId: 'parent-a',
+    assignment: { projectKind: 'local', projectId: f.root }, projectless: false } })).responseType, 'success');
+  f.fake.handlers.set('thread/settings/update', () => ({}));
+  assert.ok((await a.rpc('thread/settings/update', { threadId: 'parent-a', approvalPolicy: 'never' })).message.result);
+  const closed = await a.host('side-chat', action(started.body, 'close'));
+  assert.equal(closed.responseType, 'success'); assert.equal(closed.body.view.close.status, 'closed');
+  assert.deepEqual(f.closeCalls, ['freeze', 'cleanup']);
+  assert.equal(f.fake.calls('thread/unsubscribe').length, 1);
+  assert.equal(f.fake.calls('thread/fork').length, 1);
+});
+
+test('renaming the assigned project without changing its roots does not revoke its binding', async t => {
+  const f = await fixture(t), a = await f.connect();
+  await a.rpc('thread/start', { cwd: f.root });
+  assert.equal((await a.host('project-add', { hostId: 'local', path: f.root, name: 'Original' })).responseType, 'success');
+  assert.equal((await a.host('thread-projects', { operation: 'setMembership', value: { hostId: 'local', threadId: 'parent-a',
+    assignment: { projectKind: 'local', projectId: f.root }, projectless: false } })).responseType, 'success');
+  const first = await a.host('side-chat', prepared);
+  assert.equal((await a.host('project-add', { hostId: 'local', path: f.root, name: 'Renamed' })).responseType, 'success');
+  f.fake.handlers.set('thread/fork', () => f.response(true));
+  const started = await a.host('side-chat', action(first.body, 'start', { forkDispatchId: 'renamed-project' }));
+  assert.equal(started.responseType, 'success'); assert.equal(started.body.view.inject.status, 'received');
+  assert.equal(f.fake.calls('thread/fork').length, 1);
+});
+
+test('another page can persist the captured late fork terminal without acquiring dispatch rights', async t => {
+  const f = await fixture(t, true, true), a = await f.connect(), b = await f.connect();
+  await a.rpc('thread/start', { cwd: f.root });
+  const first = await a.host('side-chat', prepared);
+  let delayed: { id: string | number; send(value: unknown): void } | undefined;
+  f.fake.handlers.set('thread/fork', (_params, context) => {
+    delayed = { id: context.message.id!, send: context.send }; return NO_REPLY;
+  });
+  const timedOut = await a.host('side-chat', action(first.body, 'start', { forkDispatchId: 'late-terminal' }));
+  assert.equal(timedOut.body.view.fork.status, 'unknown');
+  const recovery = { ...identity, action: 'retryPersistence', operationId: first.body.view.operationId,
+    connectionGeneration: first.body.connectionGeneration };
+  const stillUnknown = await b.host('side-chat', recovery);
+  assert.equal(stillUnknown.body.view.fork.status, 'unknown');
+  assert.equal(f.fake.calls('thread/fork').length, 1);
+  assert.ok(delayed); const from = b.messages.length;
+  f.failNextFileCommit(); delayed.send({ id: delayed.id, result: f.response(true) });
+  await b.until(item => item.type === 'side-chat-updated', from);
+  const pageClosed = once(a.socket, 'close'); a.socket.terminate(); await pageClosed;
+  const found = await b.host('side-chat', { ...identity, action: 'readPrepared', prepareId: prepared.prepareId });
+  assert.equal(found.body.view.operationId, first.body.view.operationId);
+  assert.equal(found.body.connectionGeneration, first.body.connectionGeneration);
+  const original = await b.host('side-chat', { ...identity, action: 'read', operationId: first.body.view.operationId });
+  assert.equal(original.body.view.fork.status, 'unknown'); assert.ok(original.body.view.recoveryError);
+  const wrong = await b.host('side-chat', { ...recovery, connectionGeneration: 'different-connection' });
+  assert.equal(wrong.responseType, 'error');
+  const saved = await b.host('side-chat', recovery);
+  assert.equal(saved.responseType, 'success'); assert.equal(saved.body.token, null);
+  assert.equal(saved.body.view.fork.status, 'received'); assert.equal(saved.body.view.inject.status, 'waiting');
+  assert.equal(saved.body.view.fork.receipt.attemptId, 'late-terminal');
+  assert.equal(saved.body.view.recoveryError, null);
+  assert.equal(f.fake.calls('thread/fork').length, 1); assert.equal(f.fake.calls('thread/inject_items').length, 0);
+  assert.equal(f.fake.calls('thread/unsubscribe').length, 0);
+  const read = await b.host('side-chat', { ...identity, action: 'read', operationId: first.body.view.operationId });
+  const denied = await b.host('side-chat', action(read.body, 'retry'));
+  assert.equal(denied.responseType, 'error'); assert.equal(denied.uncertain, false);
+  assert.equal(f.fake.calls('thread/inject_items').length, 0);
+});
+
+test('saving a captured close barrier cannot dispatch unsubscribe on a replacement page', async t => {
+  const f = await fixture(t), a = await f.connect(), b = await f.connect();
+  await a.rpc('thread/start', { cwd: f.root });
+  const first = await a.host('side-chat', prepared);
+  f.fake.handlers.set('thread/fork', () => f.response(true));
+  const started = await a.host('side-chat', action(first.body, 'start', { forkDispatchId: 'close-barrier' }));
+  assert.equal(started.body.view.inject.status, 'received');
+  let release!: () => void;
+  f.setCloseGate(new Promise<void>(resolve => { release = resolve; }));
+  t.after(() => release());
+  const closing = a.host('side-chat', action(started.body, 'close'));
+  await eventually(() => f.closeCalls.includes('freeze'));
+  f.failNextFileCommit(); release();
+  const failed = await closing;
+  assert.equal(failed.responseType, 'error'); assert.equal(failed.uncertain, true);
+  const pageClosed = once(a.socket, 'close'); a.socket.terminate(); await pageClosed;
+  const saved = await b.host('side-chat', { ...identity, action: 'retryPersistence', operationId: first.body.view.operationId,
+    connectionGeneration: first.body.connectionGeneration });
+  assert.equal(saved.responseType, 'success'); assert.equal(saved.body.view.close.requested, true);
+  assert.equal(saved.body.view.close.status, 'not-sent'); assert.equal(saved.body.token, null);
+  assert.equal(f.fake.calls('thread/unsubscribe').length, 0);
 });
 
 test('dispatch rechecks the parent project and the original socket after preparation', async t => {

@@ -262,7 +262,7 @@ export function createSideChatHost(deps: SideChatDependencies) {
   const key = (event: PendingTerminal) => JSON.stringify([event.operationId, event.step, event.attemptId]);
   const localKey = (event: PendingLocal) => JSON.stringify([event.operationId, event.step, event.attemptId]);
 
-  async function applyTerminal(event: PendingTerminal): Promise<SideChatOperation> {
+  async function applyTerminal(event: PendingTerminal, advance = true): Promise<SideChatOperation> {
     let accepted = false, sameAttempt = false;
     const op = await update(event.operationId, current => {
       const state = event.step === 'close' ? current.close : current[event.step];
@@ -300,6 +300,7 @@ export function createSideChatHost(deps: SideChatDependencies) {
         terminalError: undefined, error: valid ? undefined : 'unsubscribe 回执无效。' } };
     });
     pending.delete(key(event));
+    if (!advance) return op;
     if (!accepted) {
       if (!sameAttempt) return op;
       if (op.close.requested) return driveClose(op.operationId, false);
@@ -311,12 +312,12 @@ export function createSideChatHost(deps: SideChatDependencies) {
     return op;
   }
 
-  async function settle(event: PendingTerminal): Promise<SideChatOperation> {
-    try { return await applyTerminal(event); }
+  async function settle(event: PendingTerminal, advance = true): Promise<SideChatOperation> {
+    try { return await applyTerminal(event, advance); }
     catch (error) { pending.set(key(event), event); throw error; }
   }
 
-  async function settleLocal(event: PendingLocal): Promise<SideChatOperation> {
+  async function settleLocal(event: PendingLocal, advance = true): Promise<SideChatOperation> {
     let claimed = false;
     let op: SideChatOperation;
     try {
@@ -326,7 +327,8 @@ export function createSideChatHost(deps: SideChatDependencies) {
         claimed = true;
         if (event.step === 'prepare') {
           return event.error === undefined
-            ? { ...current, close: { ...current.close, status: 'inflight', attemptId: event.nextAttemptId, error: undefined } }
+            ? { ...current, close: { ...current.close, status: advance ? 'inflight' : 'not-sent',
+              attemptId: event.nextAttemptId, error: undefined } }
             : { ...current, close: { ...current.close, status: 'prepare-failed', error: event.error } };
         }
         return { ...current, close: { ...current.close, status: event.error === undefined ? 'closed' : 'cleanup-pending',
@@ -337,7 +339,7 @@ export function createSideChatHost(deps: SideChatDependencies) {
       throw error;
     }
     pendingLocal.delete(localKey(event));
-    return claimed && event.step === 'prepare' && event.error === undefined && event.nextAttemptId
+    return advance && claimed && event.step === 'prepare' && event.error === undefined && event.nextAttemptId
       ? send(op, 'close', event.nextAttemptId) : op;
   }
 
@@ -487,6 +489,12 @@ export function createSideChatHost(deps: SideChatDependencies) {
     return read(id);
   }
 
+  async function saveCaptured(id: string): Promise<SideChatOperation> {
+    for (const event of [...pending.values()].filter(item => item.operationId === id)) await settle(event, false);
+    for (const event of [...pendingLocal.values()].filter(item => item.operationId === id)) await settleLocal(event, false);
+    return read(id);
+  }
+
   /** Only after the previous host process and its connection observers are known to have ended. */
   async function recoverAfterRestart(id: string): Promise<SideChatOperation> {
     return update(id, current => ({ ...current,
@@ -499,5 +507,5 @@ export function createSideChatHost(deps: SideChatDependencies) {
   }
 
   return { prepare, start: (id: string, forkDispatchId?: string) => dispatchFork(id, false, forkDispatchId),
-    read, retry, close, retryPersistence, recoverAfterRestart };
+    read, retry, close, retryPersistence, saveCaptured, recoverAfterRestart };
 }

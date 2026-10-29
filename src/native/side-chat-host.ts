@@ -422,6 +422,21 @@ export function createSideChatEndpointHost(deps: SideChatEndpointDependencies) {
     return { view: reply(operation).view, connectionGeneration: operation.parent.connectionGeneration };
   }
 
+  async function saveCaptured(input: SideChatEndpointInput & { connectionGeneration: string }): Promise<SideChatEndpointReply> {
+    const before = await original(input);
+    const fence = fenceOf(before);
+    if (!nonempty(input.connectionGeneration) || before.parent.connectionGeneration !== input.connectionGeneration
+      || !fence || fence.ownerId !== ownerId || fence.recovering) {
+      throw new SideChatEndpointError('无法核对原侧聊回执，原记录已保留。');
+    }
+    const marker = recovery.get(input.operationId);
+    await hostFor(input.operationId).saveCaptured(input.operationId);
+    if (marker && recovery.get(input.operationId) === marker) recovery.delete(input.operationId);
+    const after = await original(input);
+    notify(after);
+    return { view: reply(after).view, token: null };
+  }
+
   async function read(input: SideChatEndpointInput): Promise<SideChatEndpointReply> {
     try {
       const before = await original(input);
@@ -517,7 +532,7 @@ export function createSideChatEndpointHost(deps: SideChatEndpointDependencies) {
     }
   }
 
-  return { prepare, readPrepared, read,
+  return { prepare, readPrepared, read, saveCaptured,
     start: (input: SideChatEndpointActionInput) => dispatch('start', input),
     retry: (input: SideChatEndpointActionInput) => dispatch('retry', input),
     close: (input: SideChatEndpointActionInput) => dispatch('close', input),
