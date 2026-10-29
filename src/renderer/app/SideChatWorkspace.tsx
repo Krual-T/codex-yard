@@ -4,6 +4,7 @@ import type { ComposerDraftController, ComposerDraftLease, ComposerDraftOwner, C
 import { saveComposerDraftConflict } from '../composer/composer-draft-store.ts';
 import { normalizeDraft } from '../composer/standalone-draft.ts';
 import type { MessageEditNavigationController, MessageEditNavigationLease } from '../messages/StandaloneMessages.tsx';
+import type { MessageOutputPreviewAuthority } from '../messages/MessageOutputPreviews.tsx';
 import { SideChatPanel } from '../side-chat/SideChatPanel.tsx';
 import type { SideChatActiveChildScope, SideChatCloseBarrier, SideChatChildScope, SideChatInterruptScope, SideChatQueueEntry, SideChatQueueMutation } from '../side-chat/SideChatPanel.tsx';
 import type { SideChatBrowserIdentity, SideChatChildDispatchAuthority, SideChatSendLease } from '../side-chat/browser-authority.ts';
@@ -98,6 +99,8 @@ export interface SideChatWorkspaceProps {
   onRemoveReference?: StandaloneComposerRuntimeProps['onRemoveReference'];
   onEditNavigationController?(controller: MessageEditNavigationController | null): void;
   onOpenFile?(location: { hostId: string; threadId: string; path: string; cwd?: string; line?: number; column?: number }): void;
+  /** Read-only project facts and the original page/connection; the workspace adds its own child guard. */
+  outputPreviewAuthority?(identity: SideChatWorkspaceIdentity, threadId: string, cwd: string): MessageOutputPreviewAuthority;
   onOpenBrowser?(value: { hostId: string; threadId: string; url?: string; source?: 'link' }): void;
   onOpenVisualization?(value: { hostId: string; threadId: string; path: string }): void;
   approvalOptions?: Partial<Omit<ApprovalDialogProps, 'request' | 'onRespond' | 'onUnsupported' | 'onCloseView' | 'onInputEscape'>>;
@@ -247,6 +250,15 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
 
   const currentOwner = (): ComposerDraftOwner => ({ hostId: original.hostId, threadId: controller.getSnapshot().view?.childId ?? null, draftId: original.draftId });
   const assertOriginal = () => { runtime.assertScope(); if (!mounted.current) throw notSent('原侧聊工作区已卸载。'); };
+  const parentOutputAuthority = childId && props.outputPreviewAuthority?.(original, childId, conversation.thread?.cwd ?? original.cwd);
+  const outputPreviewAuthority: MessageOutputPreviewAuthority | undefined = parentOutputAuthority ? {
+    ...parentOutputAuthority,
+    sourceKey: JSON.stringify([parentOutputAuthority.sourceKey, original.prepareId, original.draftId, childId]),
+    assertCurrent() {
+      parentOutputAuthority.assertCurrent(); assertOriginal();
+      if (locked.current || currentOwner().threadId !== childId) throw notSent('原侧聊文件来源已改变。');
+    },
+  } : undefined;
   const capture = (owner: ComposerDraftOwner, write = true): (() => void) => {
     if (locked.current || !sameOwner(owner, currentOwner()) || !owner.threadId) throw notSent('侧聊输入目标已改变。');
     assertOriginal();
@@ -626,7 +638,7 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
         };
         check(); await latest.current.dispatchSubmission('thread/queue/start', { threadId: scope.childThreadId, queuedSubmissionId: id }, scope.hostId, check, originalCaptured ?? null);
       })}
-      messages={{ editAccess, editRecovery: edit?.childId === childId ? edit.value?.recovery ?? null : null,
+      messages={{ editAccess, outputPreviewAuthority, editRecovery: edit?.childId === childId ? edit.value?.recovery ?? null : null,
         editRebase: edit?.childId === childId ? messageEditRebaseMarker(edit.value) : null,
         editHistory: { order: 'ascending', tailComplete: conversation.historyComplete },
         onEditNavigationController: receiveEditController, onEditDraftChange: (value, origin, version, authority) => edits.save(value, origin, version, authority),

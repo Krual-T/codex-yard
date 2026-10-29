@@ -36,7 +36,8 @@ const projectFields = ['thread-project-assignments', 'projectless-thread-ids',
   'thread-projectless-output-directories', 'thread-workspace-root-hints'];
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 
-function outputDirectory(state: ProjectState | null, hostId: string, threadId: string): SummaryOutputDirectory {
+/** Interpret the existing project atoms for both summary and message outputs. */
+export function threadOutputDirectory(state: ProjectState | null, hostId: string, threadId: string): SummaryOutputDirectory {
   if (!state || !Array.isArray(state.memberships) || !Array.isArray(state.outputDirectories)
     || !Array.isArray(state.workspaceRoots) || !record(state.unresolved)) return { status: 'unknown' };
   const unresolved = state.unresolved;
@@ -142,7 +143,7 @@ export function useThreadSummaryOutputs(options: ThreadSummaryOutputsOptions): T
         const thread = scope.snapshot.thread;
         const file = projectThreadSummaryFileOutputs({ hostId: scope.hostId, thread,
           historyComplete: scope.snapshot.historyComplete, streamGap: scope.snapshot.streamGap,
-          outputDirectory: outputDirectory(scope.projectState, scope.hostId, scope.threadId) });
+          outputDirectory: threadOutputDirectory(scope.projectState, scope.hostId, scope.threadId) });
         const resource = projectThreadSummaryResourceOutputs({ hostId: scope.hostId, thread,
           historyComplete: scope.snapshot.historyComplete, streamGap: scope.snapshot.streamGap });
         const gaps = new Set<string>([...file.gaps, ...resource.gaps]);

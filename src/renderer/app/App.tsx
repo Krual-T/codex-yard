@@ -6,6 +6,7 @@ import type { ComposerDocument, ComposerDraft, MessageEditOrigin, ServerRequestR
 import { StandaloneComposer, bindComposerDraftToThread, clearComposerDraftRevision, readComposerDraft } from '../composer/StandaloneComposer.tsx';
 import type { ComposerDraftController, ComposerDraftLease, ComposerDraftOwner, ComposerDraftSnapshot, ComposerPromptAppendPort, ComposerSubmissionDescription } from '../composer/StandaloneComposer.tsx';
 import { StandaloneMessages } from '../messages/StandaloneMessages.tsx';
+import type { MessageOutputPreviewAuthority } from '../messages/MessageOutputPreviews.tsx';
 import type { MessageEditNavigationController, MessageEditNavigationLease } from '../messages/use-message-editing.ts';
 import { StandaloneGoal } from '../composer/StandaloneGoal.tsx';
 import { StandaloneSettings } from '../settings/StandaloneSettings.tsx';
@@ -32,7 +33,7 @@ import type { ThreadSummaryCreateKind } from './ThreadSummaryPanel.tsx';
 import { createSummaryOutputPrefill } from './summary-output-prefill.ts';
 import { HomeSubagentsBanner } from './HomeSubagentsBanner.tsx';
 import { projectCreatedChats } from './thread-summary-created-chats.ts';
-import { useThreadSummaryOutputs } from './use-thread-summary-outputs.ts';
+import { threadOutputDirectory, useThreadSummaryOutputs } from './use-thread-summary-outputs.ts';
 import { sameSummarySideChat, useSummarySideChats } from './use-summary-side-chats.ts';
 import { commitSidebarProjectMembership, createSidebarProjectInventory } from './sidebar-project-inventory.ts';
 import { WorkspacePanels } from '../panels/WorkspacePanels.tsx';
@@ -1447,6 +1448,23 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       || route.hostId !== current.hostId || route.threadId !== current.threadId)
       throw new Error('The original summary conversation changed.');
   };
+  const messageOutputPage = current;
+  let messageOutputDaemon: ReturnType<BrowserWorkbenchClient['captureDaemonConnection']> | null = null;
+  try { messageOutputDaemon = client.captureDaemonConnection(current.hostId); } catch { /* The existing connection projection will retry. */ }
+  const messageOutputAuthority = (hostId: string, threadId: string, cwd: string): MessageOutputPreviewAuthority => {
+    const directory = threadOutputDirectory(projectState, hostId, threadId), directoryKey = JSON.stringify(directory);
+    return {
+      sourceKey: JSON.stringify([summarySourceKey, navigationFactsEpoch, hostId, threadId, cwd, directoryKey]),
+      outputDirectory: directory,
+      assertCurrent() {
+        if (!messageOutputDaemon) throw new Error('The original output connection is unavailable.');
+        messageOutputDaemon.assertOriginal(); assertSummaryCurrent();
+        if (routeRef.current !== messageOutputPage || hostId !== messageOutputPage.hostId
+          || JSON.stringify(threadOutputDirectory(projectStateRef.current, hostId, threadId)) !== directoryKey)
+          throw new Error('The original output conversation or directory changed.');
+      },
+    };
+  };
   const captureMainPrompt = () => {
     const controller = composerController.current, snapshot = controller?.snapshot(), route = routeRef.current;
     if (!controller || !snapshot || route.section || route.readOnly || navigationLocked.current
@@ -1735,6 +1753,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         <section className={'yard-conversation ' + (!current.threadId ? 'yard-home' : '')} inert={leaving}>
           {streamGap && <p role="status" className="yard-stream-gap">此页面未收到连续的活动内容，正在核对会话记录。{isThreadBusy(thread) && '任务正在运行；完成后将重新读取完整记录。'}</p>}
           {loading ? <div role="status" className="yard-loading">Loading conversation…</div> : current.threadId ? <StandaloneMessages client={client} hostId={current.hostId} threadId={current.threadId} thread={thread} editRecovery={editState?.recovery ?? null} editAccess={editAccess} editHistory={{ order: 'ascending', tailComplete: historyComplete }}
+            outputPreviewAuthority={thread ? messageOutputAuthority(current.hostId, current.threadId, thread.cwd) : undefined}
             searchOpen={messageSearchOpen} onSearchOpenChange={setMessageSearchOpen}
             editRebase={messageEditRebaseMarker(editState)} onPrepareEditRebase={(origin, version) => editStore.prepareRebase(origin, version)}
             onCommitEditRebase={async candidate => {
@@ -1833,6 +1852,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
       <aside className="yard-workspace-panel" hidden={!panelOpen || settings} aria-label="Workspace panel" inert={leaving}>
         <div className="yard-side-chat-workspace" hidden={panelKind !== 'side-chat'}><SideChatRoot client={client} sessions={sessions} sends={sendStore} edits={editStore} approvals={approvals}
           visible={panelOpen && !settings && panelKind === 'side-chat'} captureParent={captureSideChatParent}
+          outputPreviewAuthority={(identity, threadId, cwd) => messageOutputAuthority(identity.hostId, threadId, cwd)}
           onController={receiveSideChatController} onActiveChild={receiveSideChatChild}
           freezeChildOwner={freezeSideChatOwner} cancelSend={(intent, guard) => sendStore.cancelOriginal(intent, guard)}
           cleanupChild={cleanupSideChat}

@@ -75,6 +75,7 @@ export interface SideChatRootProps {
   cancelSend(intent: SendIntent, assertCurrent: () => void): Promise<void>;
   onRemoveReference(child: SideChatRootChild, ...args: Parameters<NonNullable<StandaloneComposerRuntimeProps['onRemoveReference']>>): Promise<'handled' | void>;
   onOpenFile: NonNullable<SideChatWorkspaceProps['onOpenFile']>;
+  outputPreviewAuthority?: SideChatWorkspaceProps['outputPreviewAuthority'];
   onOpenBrowser: NonNullable<SideChatWorkspaceProps['onOpenBrowser']>;
   onOpenVisualization: NonNullable<SideChatWorkspaceProps['onOpenVisualization']>;
   approvalOptions?: SideChatWorkspaceProps['approvalOptions'];
@@ -427,6 +428,7 @@ export function SideChatRoot(props: SideChatRootProps) {
       <SideChatWorkspace client={entry.client} identity={entry.identity}
       open={props.visible && active.current === entry.identity.draftId} startOnMount={entry.identity.mode === 'new'}
       sessions={entry.sessions} sends={entry.sends} edits={entry.edits} approvals={entry.approvals}
+      outputPreviewAuthority={props.outputPreviewAuthority}
       assertCurrent={() => assertEntry(entry)} assertMounted={() => assertMountedEntry(entry)}
       freezeSending={(owner, purpose, disconnectedHandoff) => freezeSending(entry, owner, purpose, disconnectedHandoff)}
       captureSubmissionAuthority={(owner, authority) => capture(entry, owner, authority)}

@@ -2,7 +2,7 @@
 
 2026-10-29 用户范围修订：Mini/Pets 本次禁用，移除实际 App 挂载、入口和对主输入的租约控制；旧启用偏好不再唤起界面。保留已有草稿、身份指针、偏好数据与 Git 历史，不添加功能开关框架。SideChat 是独立临时侧聊能力，继续使用共享会话/草稿服务和真实主界面。
 
-状态：实施设计 v23，2026-10-30，原稿恢复、协议来源与页面消费者已分批接入；当前收口编辑器事务前来源核对、正常消息文件引用与最终同源验收。整个 `vendor/codex-app/` 已由2a9175fc删除，最终干净来源验收待聚合冻结。覆盖当前 Yard Web 的 F00–F23 功能账，Mini/Pets 按上述用户裁决禁用。删除快照后仍须在同一已提交来源安装、构建、实际启动和验收。本设计替代固定函数注入方案，Git 历史只作为行为研究依据。
+状态：实施设计 v24，2026-10-30。原稿恢复、协议来源、正常消息引用及 Main/SideChat 文件预览已接实际页面；当前收口输入历史已知反例和最终同源验收。整个 `vendor/codex-app/` 已删除，覆盖当前 Yard Web 的 F00–F23 功能账，Mini/Pets 按上述用户裁决禁用。删除快照后仍须在同一已提交来源安装、构建、实际启动和验收。本设计替代固定函数注入方案，Git 历史只作为行为研究依据。
 
 ## 入口与现有能力
 
@@ -36,6 +36,8 @@
 普通网页的首次加载外部默认只依据 App 原 `get-settings` 查询是否仍为首次在途；这不是每次 LinkSettings 创建的默认。查询结束后，新 owner 投影的偏好读取尚未确认就保持不可用，不能因取消导航或 child 解冻误用外部目标；点击同步观察当前查询事实，不复制上一实例的偏好或授权。
 
 Summary Outputs 从当前 ConversationSessions 的完整消息、原 thread-projects 输出和可读文件投影产生。资源结果和旧 MCP Google/Figma/Notion 结构按同一事件/别名规则去重；缺失文件不显示为可打开产物，后端不支持或元数据不完整时保留真实 notice/错误和重试。hook 捕获当前 host/thread、导航及连接，打开前复核原 entry 和来源；本地文件交原 workspace-files，HTTP(S) 交既有链接动作，不创建产物后端。四种 Create 入口按原插件 mention 追加到当前 Main 富文档和历史，不能将追加称为已发送或产物已生成。
+
+消息中的本地文件产物按同一 turn 的输出引用合并，完成或失败后才检查原 host 的 paths-exist；读取中不把候选当成存在，失败保留原候选与重试，明确缺失则不展示卡片。App 捕获当前页面和原 daemon，复用 Summary 对现有项目状态的 threadOutputDirectory 纯投影，向 Main 和 SideChat 传递原 host/thread/cwd、目录事实和导航/连接来源；没有第二份目录状态。SideChat 再叠加其原挂载、child 和冻结检查，打开仍走既有父文件回调。目录未知显示未核实，已知目录只允许其内文件；导航、连接或目录变化使旧读取与打开失效。外部应用发现没有对应 Web host 端点，Open in 保留明确不可用说明，不添加伪造应用列表。公共 turn 协议未提供独立 cwd 时，相对路径沿用真实 thread.cwd，不能承诺恢复不可读的历史 turn 工作目录。
 
 WorkbenchClient 提供 `rpc(method,params,hostId)`、`host(endpoint,params)`、事件 `subscribe` 和审批 `reply(ref,response)`。它使用 `/native-host` WebSocket，关联请求id、超时及响应错误，建立后发送ready。reply为必需方法，反向请求有必填ServerRequestEvent.requestRef；浏览器验证后才交UI。审批ref由服务端产生，包含hostId、每个请求唯一的generation和原请求id，并在宿主绑定原连接。generation不是host代次，同host的不同请求可有不同值。只向收到请求的原连接发送，禁止回复时自动重连；resolved/取消/断开使原ref失效，同ID新请求不能接受旧ref。服务端发送回执表示已转发，不能声称daemon已完成业务处理；发送不确定时保留未知结果，不能自动再次批准。
 
