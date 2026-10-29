@@ -1049,18 +1049,31 @@ export async function createNativeWorkbench(options: Options = {}) {
         return {};
       }
       case 'approval-request-interrupt': {
+        const childWrite = captureChildWrite(client, params.sideChat);
+        const pageConnection = Object.hasOwn(params, 'daemonConnectionGeneration')
+          ? capturePageConnection(client, connections, hostId, params.daemonConnectionGeneration) : undefined;
         const ref = record(params.ref), connection = connections.get(hostId), socket = connection?.socket;
         if (!connection?.connected || !socket || socket.readyState !== WebSocket.OPEN || ref.hostId !== hostId
           || typeof ref.generation !== 'string' || !(typeof ref.id === 'string' || typeof ref.id === 'number' && Number.isFinite(ref.id))
           || typeof params.threadId !== 'string' || !params.threadId || typeof params.turnId !== 'string' || !params.turnId)
           throw Object.assign(new Error('原输入请求不可用，未停止其他会话。'), { uncertain: false });
-        const claim = approvalRequests.claim({ page: client, hostId, socket },
-          { hostId, id: ref.id, generation: ref.generation }, { threadId: params.threadId, turnId: params.turnId });
-        if (claim.status !== 'claimed') throw Object.assign(new Error('原输入请求已失效或正在处理。'), { uncertain: false });
-        const dispatched = await approvalRequests.dispatch(claim.claim, original => {
-          if (connection.socket !== original || original.readyState !== WebSocket.OPEN) throw new Error('Original input connection closed');
-          return connection.request('turn/interrupt', { threadId: params.threadId, turnId: params.turnId }, { mutating: true }).then(() => undefined);
+        const pending = await stateMutations.run(() => {
+          pageConnection?.assertOriginal();
+          if (!connection.connected || connection.socket !== socket || socket.readyState !== WebSocket.OPEN)
+            throw Object.assign(new Error('原输入请求连接已改变，未停止其他会话。'), { uncertain: false, sendPhase: 'before-send' });
+          assertChildWrite(hostId, params.threadId as string, childWrite);
+          const claim = approvalRequests.claim({ page: client, hostId, socket },
+            { hostId, id: ref.id as string | number, generation: ref.generation as string },
+            { threadId: params.threadId as string, turnId: params.turnId as string });
+          if (claim.status !== 'claimed') throw Object.assign(new Error('原输入请求已失效或正在处理。'), { uncertain: false });
+          // Claim and socket dispatch share revoke/close's existing interval;
+          // the daemon response must not hold the native-state queue.
+          return { reply: approvalRequests.dispatch(claim.claim, original => {
+            if (connection.socket !== original || original.readyState !== WebSocket.OPEN) throw new Error('Original input connection closed');
+            return connection.request('turn/interrupt', { threadId: params.threadId, turnId: params.turnId }, { mutating: true }).then(() => undefined);
+          }) };
         });
+        const dispatched = await pending.reply;
         if (dispatched.status !== 'sent') throw Object.assign(new Error('停止原任务的结果待确认，请检查原会话。'), { uncertain: dispatched.status === 'unknown' });
         return null;
       }
