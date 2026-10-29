@@ -73,10 +73,10 @@ async function createInjectionHost(t: TestContext, options: { holdInject?: boole
   };
 }
 
-async function eventually(page: Page, predicate: () => Promise<unknown>) {
+async function eventually(page: Page, predicate: (arg: string) => Promise<unknown>, arg = '') {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    if (await page.evaluate(predicate)) return;
+    if (await page.evaluate(predicate, arg)) return;
     await page.waitForTimeout(30);
   }
   throw new Error('Timed out waiting for the browser condition.');
@@ -210,7 +210,8 @@ test('Mini binds actual writes to the captured daemon socket identity', {
         });
         const original = await page.evaluate(async () => {
           const f = (window as any).miniWorkspaceFixture;
-          return f.miniDraft(JSON.parse(f.pointer()));
+          const { hostId, threadId, draftId } = JSON.parse(f.pointer());
+          return f.miniDraft({ hostId, threadId, draftId });
         });
         host.expect(original);
         await page.locator('.yard-mini-conversation .standalone-composer__submit').click();
@@ -245,10 +246,10 @@ test('Mini binds actual writes to the captured daemon socket identity', {
         await page.waitForFunction(() => (window as any).miniWorkspaceFixture.hostCalls
           .some((x: any) => x.endpoint === 'send-injection' && x.params.action === 'start'));
         await host.peer.waitForCall('turn/start');
-        await eventually(page, async () => {
-          const current = (await (window as any).miniWorkspaceFixture.records()).requests[reference.intentId];
+        await eventually(page, async (intentId: string) => {
+          const current = (await (window as any).miniWorkspaceFixture.records()).requests[intentId];
           return !current || current.stage === 'confirmed';
-        });
+        }, reference.intentId);
         assert.deepEqual(host.actions.map(value => value.action), ['inject', 'start']);
         assert.deepEqual(host.actions[1]!.params.reference, reference);
         assert.equal(host.actions[1]!.params.daemonConnectionGeneration, 'daemon-A');
@@ -277,7 +278,8 @@ test('Mini binds actual writes to the captured daemon socket identity', {
         });
         const original = await page.evaluate(async () => {
           const f = (window as any).miniWorkspaceFixture;
-          return f.miniDraft(JSON.parse(f.pointer()));
+          const { hostId, threadId, draftId } = JSON.parse(f.pointer());
+          return f.miniDraft({ hostId, threadId, draftId });
         });
         host.expect(original);
         await page.evaluate(() => (window as any).miniWorkspaceFixture.holdSendRead());
@@ -307,12 +309,28 @@ test('Mini binds actual writes to the captured daemon socket identity', {
         });
         const original = await page.evaluate(async () => {
           const f = (window as any).miniWorkspaceFixture;
-          return f.miniDraft(JSON.parse(f.pointer()));
+          const { hostId, threadId, draftId } = JSON.parse(f.pointer());
+          return f.miniDraft({ hostId, threadId, draftId });
         });
         host.expect(original);
         await page.locator('.yard-mini-conversation .standalone-composer__submit').click();
-        await eventually(page, async () => Object.values((await (window as any).miniWorkspaceFixture.records()).requests)
-          .some((intent: any) => intent.stage === 'unknown' && intent.injection?.native?.status?.injection.phase === 'unknown'));
+        try {
+          await eventually(page, async () => Object.values((await (window as any).miniWorkspaceFixture.records()).requests)
+            .some((intent: any) => intent.stage === 'unknown' && intent.injection?.native?.status?.injection.phase === 'unknown'));
+        } catch (cause) {
+          const diagnostic = await page.evaluate(async () => {
+            const f = (window as any).miniWorkspaceFixture, state = await f.records();
+            const draft = await f.miniDraft(JSON.parse(f.pointer()));
+            return { alerts: Array.from(document.querySelectorAll('.yard-mini-conversation [role="alert"]'), node => node.textContent),
+              requests: Object.values(state.requests).map((intent: any) => ({ stage: intent.stage, injectionPhase: intent.injection?.phase,
+                nativePhase: intent.injection?.native?.status?.injection.phase })),
+              originalInputRetained: draft?.draft.input?.[0]?.text?.includes('MCP app initiated') === true };
+          });
+          throw new Error('Dispatched injection did not become unknown: ' + JSON.stringify({ ...diagnostic,
+            actions: host.actions.map(value => value.action),
+            results: host.results.map(value => [value.action, value.status?.injection.phase, value.status?.turn.phase]),
+            injectCalls: host.peer.calls('thread/inject_items').length, turnCalls: host.peer.calls('turn/start').length }), { cause });
+        }
         const injection = host.actions.find(value => value.action === 'inject')!;
         const reference = injection.params.reference as SendInjectionReference;
         const before = (await page.evaluate(() => (window as any).miniWorkspaceFixture.records())).requests[reference.intentId];
