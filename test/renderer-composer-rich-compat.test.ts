@@ -148,7 +148,10 @@ test('ordered document formatting maps UTF-8 ranges without changing non-text it
     { type: 'text', text: 'app', marks: [{ type: 'strong' }] },
   ] }] }, images: [], files: [], input: [{ type: 'text', text: 'app', text_elements: [{ byteRange: { start: 0, end: 3 },
     placeholder: 'codex-untrusted-app-input:' + JSON.stringify({ version: 1, promptContextWithoutReviewedMessages: 'context' }) }] }] };
-  assert.throws(() => draftToInput(protectedApp, 'local', { plainTextMode: false }), /无法安全转换/);
+  const formattedApp = draftToInput(protectedApp, 'local', { plainTextMode: false });
+  assert.deepEqual(formattedApp, [{ ...protectedApp.input[0], text: '**app**', text_elements: [{
+    ...protectedApp.input[0]!.text_elements[0], byteRange: { start: 0, end: 7 },
+  }] }]);
   assert.deepEqual(draftToInput(protectedApp, 'local', { plainTextMode: true }), protectedApp.input);
 });
 

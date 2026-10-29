@@ -90,6 +90,36 @@ test('untrusted attachment variants project text, images and structured content 
   assert.throws(() => draftToInput(draft, 'local'), /完整上下文/);
 });
 
+test('resource-link icons retain the original validated shape in the model context', () => {
+  const icons = [{ src: 'https://example.test/dark.svg', mimeType: 'image/svg+xml', sizes: ['16x16', 'any'], theme: 'dark' },
+    { src: '', sizes: [], theme: 'light' }, { src: 'fixture' }];
+  const links = [{ type: 'resource_link', name: 'empty', uri: 'file:///empty', icons: [] },
+    { type: 'resource_link', name: 'full', title: 'Full', uri: 'file:///full', icons, _meta: { retained: true } }];
+  const envelope = { version: 1, modelContextAttachments: [{ kind: 'context', untrusted: true, id: 'icons',
+    sourceName: 'Fixture', content: links }] };
+  const draft = draftWith(envelope, 'icons'), before = structuredClone(draft);
+  const result = prepareDraftInput(draft, 'local', { callId: 'icon-call' });
+  assert.deepEqual(result.input, draft.input);
+  const output = result.responseItems[1];
+  assert.equal(output?.type, 'function_call_output');
+  const content = JSON.parse((output as { output: { text: string }[] }).output[0]!.text);
+  assert.equal(content.text, JSON.stringify(links[0]) + '\n\n' + JSON.stringify({ ...links[1], _meta: undefined }));
+  assert.deepEqual(draft, before);
+
+  for (const invalid of [null, {}, [{ mimeType: 'image/png' }], [{ src: 1 }], [{ src: 'x', mimeType: null }],
+    [{ src: 'x', sizes: '16x16' }], [{ src: 'x', sizes: ['16x16', 1] }], [{ src: 'x', theme: 'system' }],
+    [{ src: 'x', future: true }]]) {
+    const altered = structuredClone(envelope);
+    altered.modelContextAttachments[0]!.content[1]!.icons = invalid as typeof icons;
+    const unsafe = draftWith(altered, 'icons'), original = structuredClone(unsafe);
+    assert.throws(() => prepareDraftInput(unsafe, 'local', { callId: 'icon-call' }), /完整上下文/);
+    assert.deepEqual(unsafe, original);
+  }
+  const unknown = structuredClone(envelope);
+  Object.assign(unknown.modelContextAttachments[0]!.content[0]!, { future: true });
+  assert.throws(() => prepareDraftInput(draftWith(unknown, 'icons'), 'local', { callId: 'icon-call' }), /完整上下文/);
+});
+
 test('sender-wrapped visualization and plain-text mode use the original complete text', () => {
   const text = '<codex_multi_user_message>\n<account_user_id>u&amp;1</account_user_id>\n'
     + '<name>&lt;Name&gt;</name>\n<email>a@example.test</email>\n<profile_picture_url></profile_picture_url>\n'
@@ -128,6 +158,101 @@ test('captured rich format changes a separate segment without rewriting the app 
   assert.throws(() => draftToInput(draft, 'local', { plainTextMode: true }), /完整上下文/);
 });
 
+test('a verified no-message app segment maps its whole UTF-8 range in either captured format', () => {
+  const envelope = { version: 1, modelContextAttachments: [{ kind: 'context', untrusted: true, id: 'tool',
+    sourceName: 'Fixture', text: 'context', imageAttachments: [] }] };
+  const text = '你好😀', app = appItem(text, envelope);
+  const draft: ComposerDraft = { text: text + '\nSecond', images: [], files: [], input: [app,
+    { type: 'image', url: image }, { type: 'skill', name: 'review', path: '/skill/review' },
+    { type: 'text', text: 'Second', text_elements: [] }], document: { type: 'doc', content: [
+    { type: 'paragraph', content: [{ type: 'text', text, marks: [{ type: 'strong' }] }] },
+    { type: 'paragraph', content: [{ type: 'text', text: 'Second' }] },
+  ] } };
+  const before = structuredClone(draft), richText = '**你好😀**';
+  const rich = prepareDraftInput(draft, 'local', { callId: 'format-call', plainTextMode: false });
+  const element = (rich.input[0]!.text_elements as { byteRange: { start: number; end: number }; placeholder: string }[])[0]!;
+  assert.equal(rich.input[0]!.text, richText);
+  assert.deepEqual(element.byteRange, { start: 0, end: new TextEncoder().encode(richText).length });
+  assert.equal(element.placeholder, (app.text_elements as { placeholder: string }[])[0]!.placeholder);
+  assert.deepEqual(rich.input.slice(1), draft.input!.slice(1));
+  assert.equal(rich.responseItems.length, 2);
+  assert.deepEqual(prepareDraftInput(draft, 'local', { callId: 'format-call', plainTextMode: true }).input, draft.input);
+  const richDraft = { ...draft, text: richText + '\nSecond', input: rich.input };
+  const plain = prepareDraftInput(richDraft, 'local', { callId: 'format-call', plainTextMode: true });
+  assert.deepEqual(plain.input, draft.input);
+  assert.deepEqual(plain.responseItems, rich.responseItems);
+  assert.deepEqual(draft, before);
+  assert.throws(() => draftToInput(draft, 'local', { plainTextMode: false }), /完整上下文/);
+});
+
+test('a whole app marker may cover a multi-paragraph rich document without flattening other inputs', () => {
+  const text = 'Hello 😀\nSecond', envelope = { version: 1, modelContextAttachments: [
+    { kind: 'context', untrusted: true, id: 'multi', sourceName: 'Fixture', text: 'context', imageAttachments: [] },
+  ] };
+  const draft: ComposerDraft = { text, images: [], files: [], input: [appItem(text, envelope),
+    { type: 'image', url: image }, { type: 'skill', name: 'review', path: '/skill/review' }],
+  document: { type: 'doc', content: [
+    { type: 'paragraph', content: [{ type: 'text', text: 'Hello 😀', marks: [{ type: 'strong' }] }] },
+    { type: 'paragraph', content: [{ type: 'text', text: 'Second' }] },
+  ] } };
+  const before = structuredClone(draft), result = prepareDraftInput(draft, 'local', { callId: 'multi', plainTextMode: false });
+  const formatted = '**Hello 😀**\nSecond';
+  assert.equal(result.input[0]!.text, formatted);
+  assert.deepEqual((result.input[0]!.text_elements as { byteRange: unknown }[])[0]!.byteRange,
+    { start: 0, end: new TextEncoder().encode(formatted).length });
+  assert.deepEqual(result.input.slice(1), draft.input!.slice(1));
+  assert.deepEqual(draft, before);
+});
+
+test('formatting keeps active messages protected and revalidates reviewed context', () => {
+  const withMessage = draftWith({ version: 1, message: { source: 'mcp_app', sourceId: 'app', text: 'context' } });
+  withMessage.document = { type: 'doc', content: [
+    { type: 'paragraph', content: [{ type: 'text', text: '前😀' }] },
+    { type: 'paragraph', content: [{ type: 'text', text: appText, marks: [{ type: 'strong' }] }] },
+    { type: 'paragraph', content: [{ type: 'text', text: 'End' }] },
+  ] };
+  const unchanged = structuredClone(withMessage);
+  assert.throws(() => prepareDraftInput(withMessage, 'local', { callId: 'active', plainTextMode: false }), /无法安全转换/);
+  assert.deepEqual(withMessage, unchanged);
+
+  const reviewedText = '\n# MCP app context:\n\n## Reviewed\nConfirmed\n\n## My request:\nProceed\n';
+  const reviewed = { version: 1, promptContextWithoutReviewedMessages: '',
+    modelContextAttachments: [{ kind: 'context', untrusted: true, id: 'tool', sourceName: 'Fixture', text: 'context', imageAttachments: [] }],
+    reviewedMessageAttachments: [{ kind: 'message', untrusted: false, id: 'r', sourceName: 'Reviewed', text: 'Confirmed', imageAttachments: [] }] };
+  const draft: ComposerDraft = { text: reviewedText, images: [], files: [], input: [appItem(reviewedText, reviewed)],
+    document: { type: 'doc', content: reviewedText.split('\n').map(line => ({ type: 'paragraph',
+      ...(line ? { content: [{ type: 'text', text: line, ...(line === 'Confirmed' ? { marks: [{ type: 'strong' }] } : {}) }] } : {}) })) } };
+  const original = structuredClone(draft);
+  assert.deepEqual(prepareDraftInput(draft, 'local', { callId: 'reviewed', plainTextMode: true }).input, draft.input);
+  assert.throws(() => prepareDraftInput(draft, 'local', { callId: 'reviewed', plainTextMode: false }), /完整上下文/);
+  assert.deepEqual(draft, original);
+
+  const direct = structuredClone(draft), directEnvelope = structuredClone(reviewed);
+  delete (directEnvelope as { modelContextAttachments?: unknown }).modelContextAttachments;
+  direct.input![0] = appItem(reviewedText, directEnvelope);
+  const directOriginal = structuredClone(direct);
+  assert.deepEqual(draftToInput(direct, 'local', { plainTextMode: true }), direct.input);
+  assert.throws(() => draftToInput(direct, 'local', { plainTextMode: false }), /完整上下文/);
+  assert.deepEqual(direct, directOriginal);
+
+  const untrusted: ComposerDraft = { text: 'hello', images: [], files: [],
+    input: [appItem('hello', { version: 1, modelContextAttachments: reviewed.modelContextAttachments })],
+    document: { type: 'doc', content: [{ type: 'paragraph', content: [
+      { type: 'text', text: 'hello', marks: [{ type: 'strong' }] },
+    ] }] } };
+  for (const alter of [
+    (item: Record<string, unknown>) => { item.future = 'preserve'; },
+    (item: Record<string, unknown>) => { (item.text_elements as Record<string, unknown>[])[0]!.future = 'preserve'; },
+    (item: Record<string, unknown>) => { ((item.text_elements as Record<string, unknown>[])[0]!.byteRange as Record<string, unknown>).future = 'preserve'; },
+    (item: Record<string, unknown>) => { ((item.text_elements as Record<string, unknown>[])[0]!.byteRange as Record<string, unknown>).end = 4; },
+  ]) {
+    const unsafe = structuredClone(untrusted); alter(unsafe.input![0]!);
+    const snapshot = structuredClone(unsafe);
+    assert.throws(() => prepareDraftInput(unsafe, 'local', { callId: 'unknown', plainTextMode: false }));
+    assert.deepEqual(unsafe, snapshot);
+  }
+});
+
 test('unproven or incomplete app contexts are rejected without changing the draft', () => {
   const base = draftWith({ version: 1, message: { source: 'mcp_app', sourceId: 'app', text: 'content' } });
   const variants: ComposerDraft[] = [];
@@ -141,8 +266,6 @@ test('unproven or incomplete app contexts are rejected without changing the draf
   changed(value => { value.modelContextAttachments = [{ kind: 'context', untrusted: false, id: 'x', sourceName: 'x', text: '', imageAttachments: [] }]; });
   changed(value => { value.modelContextAttachments = [{ kind: 'context', untrusted: true, id: 'x', sourceName: 'x',
     content: [{ type: 'audio', data: 'YQ==', mimeType: 'audio/wav' }] }]; });
-  changed(value => { value.modelContextAttachments = [{ kind: 'context', untrusted: true, id: 'x', sourceName: 'x',
-    content: [{ type: 'resource_link', name: 'fixture', uri: 'file:///fixture', icons: [] }] }]; });
   changed(value => { value.reviewedMessageAttachments = [{ kind: 'message', untrusted: false, id: 'r', sourceName: 'review',
     text: 'not in the original prompt', imageAttachments: [] }]; });
   const wrongText = structuredClone(base); wrongText.input![2]!.text = 'not the original message'; variants.push(wrongText);

@@ -507,10 +507,24 @@ export type UntrustedAppResponseItem =
 export interface PrepareDraftInputOptions extends DraftInputOptions { callId?: string }
 export interface PreparedDraftInput { input: Record<string, unknown>[]; responseItems: UntrustedAppResponseItem[] }
 
-/** Map ranges only where the formatted and plain strings share one unambiguous character alignment. */
-function remapFormattedRanges(item: Record<string, unknown>, before: string, after: string): Record<string, unknown> {
+/** App markers cover the full text; ordinary ranges need an unambiguous character alignment. */
+function remapFormattedRanges(item: Record<string, unknown>, before: string, after: string,
+  appContext?: Record<string, unknown>): Record<string, unknown> {
   if (before === after) return item;
-  if (isStructuredAppInput(item) || Object.keys(item).some(key => !['type', 'text', 'text_elements'].includes(key))) {
+  if (isStructuredAppInput(item)) {
+    const element = Array.isArray(item.text_elements) ? item.text_elements[0] : undefined;
+    const range = record(element) && record(element.byteRange) ? element.byteRange : undefined;
+    if (!appContext || appContext.message !== undefined || !hasOnly(item, ['type', 'text', 'text_elements'])
+      || !record(element) || !hasOnly(element, ['byteRange', 'placeholder']) || !range || !hasOnly(range, ['start', 'end'])) {
+      throw new Error('格式化文本包含无法安全转换的原始上下文，已保留原始草稿。');
+    }
+    const bytes = new TextEncoder().encode(after);
+    if (new TextDecoder('utf-8', { fatal: true }).decode(bytes) !== after) {
+      throw new Error('消息文本包含无效 Unicode，已保留原始消息。');
+    }
+    return { ...item, text: after, text_elements: [{ ...element, byteRange: { ...range, start: 0, end: bytes.length } }] };
+  }
+  if (Object.keys(item).some(key => !['type', 'text', 'text_elements'].includes(key))) {
     throw new Error('格式化文本包含无法安全转换的原始上下文，已保留原始草稿。');
   }
   if (item.text_elements === undefined || Array.isArray(item.text_elements) && !item.text_elements.length) return { ...item, text: after };
@@ -555,10 +569,19 @@ function remapFormattedRanges(item: Record<string, unknown>, before: string, aft
   return { ...item, text: after, text_elements: next };
 }
 
-function formatOrderedDocument(input: Record<string, unknown>[], document: ProseMirrorNode, plain: boolean): void {
+function formatOrderedDocument(input: Record<string, unknown>[], document: ProseMirrorNode, plain: boolean,
+  appContexts: ReadonlyMap<number, { context: Record<string, unknown>; text: string }>): void {
   const indexes = input.flatMap((item, index) => item.type === 'text' ? [index] : []);
   const full = plain ? serializePlainDocument(document) : serializeRichDocument(document);
   if (indexes.map(index => input[index]!.text).join('\n') === full) return;
+  if (indexes.length === 1 && appContexts.has(indexes[0]!)) {
+    const index = indexes[0]!, item = input[index]!;
+    if (item.text !== serializePlainDocument(document) && item.text !== serializeRichDocument(document)) {
+      throw new Error('文档格式与消息分段无法无损对应，已保留原始草稿。');
+    }
+    input[index] = remapFormattedRanges(item, item.text as string, full, appContexts.get(index)?.context);
+    return;
+  }
   if (document.childCount !== indexes.length || Array.from({ length: document.childCount }, (_, index) => document.child(index))
     .some(node => node.type.name !== 'paragraph')) throw new Error('文档格式与消息分段无法无损对应，已保留原始草稿。');
   const formatted: string[] = [];
@@ -567,7 +590,7 @@ function formatOrderedDocument(input: Record<string, unknown>[], document: Prose
     const rich = serializeRichDocument(paragraph), text = serializePlainDocument(paragraph), index = indexes[position]!, item = input[index]!;
     if (item.text !== text && item.text !== rich) throw new Error('文档格式与消息分段无法无损对应，已保留原始草稿。');
     const selected = plain ? text : rich;
-    input[index] = remapFormattedRanges(item, item.text as string, selected);
+    input[index] = remapFormattedRanges(item, item.text as string, selected, appContexts.get(index)?.context);
     formatted.push(selected);
   }
   if (formatted.join('\n') !== full) throw new Error('文档格式与消息分段无法无损对应，已保留原始草稿。');
@@ -619,6 +642,14 @@ function appAnnotations(value: unknown): boolean {
       && Number.isFinite(Date.parse(value.lastModified)));
 }
 
+function appIcons(value: unknown): boolean {
+  return value === undefined || Array.isArray(value) && value.every(icon => record(icon)
+    && hasOnly(icon, ['src', 'mimeType', 'sizes', 'theme']) && typeof icon.src === 'string'
+    && (icon.mimeType === undefined || typeof icon.mimeType === 'string')
+    && (icon.sizes === undefined || Array.isArray(icon.sizes) && icon.sizes.every(size => typeof size === 'string'))
+    && (icon.theme === undefined || icon.theme === 'light' || icon.theme === 'dark'));
+}
+
 function appAttachment(value: unknown): AppAttachment {
   if (!record(value) || !hasOnly(value, ['kind', 'untrusted', 'id', 'sourceName', 'server', 'composerAttachmentLayout',
     'composerIcon', 'composerLabel', 'modelContextUpdateId', 'showInComposer', 'structuredContent', 'content', 'text', 'imageAttachments'])
@@ -646,10 +677,10 @@ function appAttachment(value: unknown): AppAttachment {
       else if (part.type === 'image' && hasOnly(part, ['type', 'data', 'mimeType', 'annotations', '_meta'])
         && typeof part.data === 'string' && typeof part.mimeType === 'string' && appImage.test(`data:${part.mimeType};base64,${part.data}`)) {
         images.push(`data:${part.mimeType};base64,${part.data}`);
-      } else if (part.type === 'resource_link' && hasOnly(part, ['type', 'name', 'title', 'uri', 'description', 'mimeType', 'size', 'annotations', '_meta'])
+      } else if (part.type === 'resource_link' && hasOnly(part, ['type', 'name', 'title', 'uri', 'description', 'mimeType', 'size', 'icons', 'annotations', '_meta'])
         && typeof part.name === 'string' && typeof part.uri === 'string'
         && ['title', 'description', 'mimeType'].every(key => part[key] === undefined || typeof part[key] === 'string')
-        && (part.size === undefined || typeof part.size === 'number' && Number.isFinite(part.size))) {
+        && (part.size === undefined || typeof part.size === 'number' && Number.isFinite(part.size)) && appIcons(part.icons)) {
         texts.push(JSON.stringify({ ...part, _meta: undefined }));
       } else if (part.type === 'resource' && hasOnly(part, ['type', 'resource', 'annotations', '_meta']) && record(part.resource)
         && hasOnly(part.resource, ['uri', 'mimeType', 'text', 'blob', '_meta']) && typeof part.resource.uri === 'string'
@@ -763,7 +794,7 @@ function prepareAppEnvelope(value: unknown, text: string, callId: string | undef
 }
 
 function convertDraftToInput(draft: ComposerDraft, hostId: string, options?: DraftInputOptions,
-  handleApp?: (context: unknown, text: string, inputIndex: number) => void): Record<string, unknown>[] {
+  handleApp?: (context: unknown, text: string, inputIndex: number, recheck: boolean) => void): Record<string, unknown>[] {
   const rich = draft.document && readRichDocument(draft.document);
   const legacyPlain = legacyPlainTextMode(draft) === true;
   const savedText = rich && (legacyPlain ? serializePlainDocument(rich, true) : serializeRichDocument(rich));
@@ -774,6 +805,7 @@ function convertDraftToInput(draft: ComposerDraft, hostId: string, options?: Dra
   }
   if (draft.hints?.length) throw new Error('此草稿包含尚不支持的提示信息，已保留原始数据。');
   const input: Record<string, unknown>[] = draft.input?.map(item => ({ ...item })) ?? [];
+  const appContexts = new Map<number, { context: Record<string, unknown>; text: string }>();
   if (draft.input) {
     const text = input.filter(item => item.type === 'text');
     if (text.some(item => typeof item.text !== 'string') || text.map(item => item.text).join('\n') !== draft.text) {
@@ -807,14 +839,24 @@ function convertDraftToInput(draft: ComposerDraft, hostId: string, options?: Dra
           || context.version !== 1 || Object.keys(context).some(key => !fields.includes(key)) || !validSender) return invalidAppInput();
         if (handleApp) {
           if (!record(element) || !hasOnly(element, ['byteRange', 'placeholder']) || !hasOnly(range, ['start', 'end'])) return invalidAppInput();
-          handleApp(context, original, input.indexOf(item));
+          handleApp(context, original, input.indexOf(item), false);
         } else if (context.message !== undefined || typeof context.promptContextWithoutReviewedMessages !== 'string'
           || context.modelContextAttachments !== undefined && (!Array.isArray(context.modelContextAttachments) || context.modelContextAttachments.length > 0)
           || context.reviewedMessageAttachments !== undefined && !hasReviewedTextContext(context.reviewedMessageAttachments, original)) return invalidAppInput();
+        appContexts.set(input.indexOf(item), { context, text: original });
       }
     }
   }
-  if (rich && draft.input) formatOrderedDocument(input, rich, options?.plainTextMode ?? legacyPlain);
+  if (rich && draft.input) {
+    formatOrderedDocument(input, rich, options?.plainTextMode ?? legacyPlain, appContexts);
+    // Reviewed app content must still match the exact emitted text.
+    for (const [index, { context, text }] of appContexts) {
+      const formatted = input[index]!.text as string;
+      if (formatted === text) continue;
+      if (handleApp) handleApp(context, formatted, index, true);
+      else if (context.reviewedMessageAttachments !== undefined && !hasReviewedTextContext(context.reviewedMessageAttachments, formatted)) return invalidAppInput();
+    }
+  }
   const original = input.slice(), matched = new Set<number>();
   let submittedText = draft.text;
   if (rich && !draft.input) {
@@ -865,9 +907,10 @@ export function prepareDraftInput(draft: ComposerDraft, hostId: string, options?
   if ('blocked' in draft && draft.blocked) throw new Error('此草稿包含尚未恢复的内容，已保留原始数据。');
   let responseItems: UntrustedAppResponseItem[] = [], appEnvelopes = 0;
   const reviewedImages: { after: number; urls: string[] }[] = [];
-  const input = convertDraftToInput(draft, hostId, options, (context, text, inputIndex) => {
-    appEnvelopes++;
+  const input = convertDraftToInput(draft, hostId, options, (context, text, inputIndex, recheck) => {
     const prepared = prepareAppEnvelope(context, text, options?.callId);
+    if (recheck) return;
+    appEnvelopes++;
     if (prepared.responseItems.length && responseItems.length) return invalidAppInput();
     if (prepared.responseItems.length) responseItems = prepared.responseItems;
     reviewedImages.push({ after: inputIndex, urls: prepared.reviewedImages });

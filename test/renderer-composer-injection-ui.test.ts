@@ -117,6 +117,43 @@ test('app input preflight and recovery controls use actual React and IndexedDB',
     return { context, page, errors };
   }
   try {
+    await t.test('the real composer preflights a no-message rich app draft with resource icons', async () => {
+      const { context, page, errors } = await pageFor();
+      try {
+        const text = 'Hello 😀\nSecond', icons = [{ src: 'fixture-icon', sizes: ['16x16'], theme: 'dark' }];
+        const envelope = { version: 1, modelContextAttachments: [{ kind: 'context', untrusted: true, id: 'resource',
+          sourceName: 'Fixture', content: [{ type: 'resource_link', name: 'doc', uri: 'file:///doc', icons }] }] };
+        const app = { type: 'text', text, text_elements: [{ byteRange: { start: 0, end: Buffer.byteLength(text) },
+          placeholder: 'codex-untrusted-app-input:' + JSON.stringify(envelope) }] };
+        const draft = { text, images: [], files: [], skills: [], references: [], input: [app,
+          { type: 'skill', name: 'review', path: '/fixture/skill' }], document: { type: 'doc', content: [
+          { type: 'paragraph', content: [{ type: 'text', text: 'Hello 😀', marks: [{ type: 'strong' }] }] },
+          { type: 'paragraph', content: [{ type: 'text', text: 'Second' }] },
+        ] } };
+        assert.equal(await page.evaluate(value => (window as any).fixture.setDraft(value), draft), true);
+        const before = await page.evaluate(() => (window as any).fixture.state.controller.snapshot());
+        await page.getByRole('button', { name: '发送', exact: true }).click();
+        await page.waitForFunction(() => (window as any).fixture.state.submissions.length === 1);
+        const submitted = await page.evaluate(() => (window as any).fixture.state.submissions[0]);
+        assert.deepEqual(submitted.draft, before.draft);
+        assert.equal(submitted.description.documentPlainTextMode, false);
+        const prepared = prepareDraftInput(submitted.draft, 'fixture-host',
+          { callId: 'parent-owned-fixture', plainTextMode: submitted.description.documentPlainTextMode });
+        const formatted = '**Hello 😀**\nSecond';
+        assert.equal(prepared.input[0]!.text, formatted);
+        assert.deepEqual((prepared.input[0]!.text_elements as { byteRange: unknown }[])[0]!.byteRange,
+          { start: 0, end: Buffer.byteLength(formatted) });
+        assert.deepEqual(prepared.input.slice(1), draft.input.slice(1));
+        const output = prepared.responseItems[1];
+        assert.equal(output?.type, 'function_call_output');
+        const projected = JSON.parse((output as { output: { text: string }[] }).output[0]!.text);
+        assert.deepEqual(JSON.parse(projected.text).icons, icons);
+        await page.getByRole('alert').filter({ hasText: 'synthetic parent retained draft' }).waitFor();
+        assert.deepEqual(await page.evaluate(() => (window as any).fixture.state.controller.snapshot()), before);
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+
     await t.test('busy actions preserve rich draft and undo; idle send reaches the original parent', async () => {
       const { context, page, errors } = await pageFor();
       try {
