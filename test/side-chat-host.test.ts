@@ -67,6 +67,10 @@ function fixture() {
       if (handler) return handler(call);
       return defaultResult(call);
     },
+    async requestFork(origin, params, late) {
+      const result = await deps.request(origin.hostId, 'thread/fork', params, true, late, origin.connectionGeneration);
+      return { result, eventCursor: 7 };
+    },
     classifyFailure(_method, error) {
       return typeof error === 'object' && error !== null && 'delivery' in error
         ? (error as { delivery: 'not-sent' | 'rejected' | 'unknown' }).delivery : 'unknown';
@@ -296,7 +300,7 @@ test('unknown fork is never replayed; a late result settles the original operati
   await f.host.retry(op.operationId); await f.host.retry(op.operationId);
   assert.equal(f.calls.filter(call => call.method === 'thread/fork').length, 1);
   const original = f.calls.find(call => call.method === 'thread/fork')!;
-  await late!({ outcome: 'success', result: f.defaultResult(original) });
+  await late!({ outcome: 'success', result: f.defaultResult(original), eventCursor: 7 });
   await eventually(async () => (await f.host.read(op.operationId)).inject.status === 'received');
   const saved = await createSideChatHost(f.deps).read(op.operationId);
   assert.equal(saved.childId, 'child'); assert.equal(saved.fork.status, 'received');
@@ -438,7 +442,7 @@ test('a close requested after an unknown fork follows the original late child an
   });
   const op = await f.host.prepare({ hostId: 'local', threadId: 'parent' }); await f.host.start(op.operationId);
   assert.equal((await f.host.close(op.operationId)).fork.status, 'unknown');
-  await late!({ outcome: 'success', result: f.defaultResult(f.calls.find(call => call.method === 'thread/fork')!) });
+  await late!({ outcome: 'success', result: f.defaultResult(f.calls.find(call => call.method === 'thread/fork')!), eventCursor: 7 });
   await eventually(async () => (await f.host.read(op.operationId)).close.status === 'closed');
   assert.equal(f.calls.filter(call => call.method === 'thread/fork').length, 1);
   assert.equal(f.calls.filter(call => call.method === 'thread/inject_items').length, 0);
@@ -525,4 +529,45 @@ test('a modified persisted fork receipt cannot authorize an inject or be overwri
   await assert.rejects(() => f.host.close(op.operationId), /子会话回执/);
   assert.deepEqual((f.store.values.get(op.operationId)!.fork.receipt as Value).runtimeWorkspaceRoots, ['/different']);
   assert.equal(f.calls.filter(call => call.method === 'thread/unsubscribe').length, 0);
+});
+
+test('a late fork cannot adopt a changed stored connection generation', async () => {
+  const f = fixture();
+  let late: Call['late'];
+  f.handle(async call => {
+    if (call.method === 'thread/fork') { late = call.late; throw Object.assign(new Error('timeout'), { delivery: 'unknown' }); }
+    return f.defaultResult(call);
+  });
+  const prepared = await f.host.prepare({ hostId: 'local', threadId: 'parent' });
+  assert.equal((await f.host.start(prepared.operationId)).fork.status, 'unknown');
+  const original = f.calls.find(call => call.method === 'thread/fork')!;
+  await f.store.update(prepared.operationId, op => ({ ...op, parent: { ...op.parent, connectionGeneration: 'new-generation' } }));
+  await late!({ outcome: 'success', result: f.defaultResult(original), eventCursor: 4 });
+  await new Promise(resolve => setImmediate(resolve));
+  const saved = await f.store.read(prepared.operationId);
+  assert.equal(saved?.fork.status, 'unknown'); assert.equal(saved?.fork.receiptOrigin, undefined);
+  assert.equal(saved?.childId, undefined);
+  assert.equal(f.calls.filter(call => call.method === 'thread/inject_items').length, 0);
+});
+
+test('a late fork captures its original response and cursor before asynchronous persistence', async () => {
+  const f = fixture();
+  let late: Call['late'];
+  f.handle(async call => {
+    if (call.method === 'thread/fork') { late = call.late; throw Object.assign(new Error('timeout'), { delivery: 'unknown' }); }
+    return f.defaultResult(call);
+  });
+  const prepared = await f.host.prepare({ hostId: 'local', threadId: 'parent' });
+  await f.host.start(prepared.operationId);
+  const call = f.calls.find(entry => entry.method === 'thread/fork')!;
+  const receipt = f.defaultResult(call) as Value;
+  const terminal: LateRpcTerminal & { outcome: 'success' } = { outcome: 'success', result: receipt, eventCursor: 13 };
+  void late!(terminal);
+  terminal.eventCursor = 100; receipt.model = 'replacement-model';
+  await eventually(async () => (await f.store.read(prepared.operationId))?.inject.status === 'received');
+  const saved = await f.host.read(prepared.operationId);
+  assert.equal(saved.fork.receiptOrigin?.eventCursor, 13);
+  assert.equal((saved.fork.receipt as Value).model, 'fixture-model');
+  assert.equal(f.calls.filter(entry => entry.method === 'thread/fork').length, 1);
+  assert.equal(f.calls.filter(entry => entry.method === 'thread/inject_items').length, 1);
 });

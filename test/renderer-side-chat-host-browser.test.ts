@@ -53,6 +53,9 @@ test('the React panel consumes actual E host operations over an isolated synthet
       if (method === 'thread/unsubscribe') return { status: 'unsubscribed' };
       throw Error('unexpected method');
     },
+    async requestFork(origin, params, late) {
+      return { result: await deps.request(origin.hostId, 'thread/fork', params, true, late, origin.connectionGeneration), eventCursor: 7 };
+    },
     classifyFailure() { return 'unknown'; },
     async prepareClose(scope) { scopes.push({ prepare: scope }); },
     async cleanup(scope) { scopes.push({ cleanup: scope }); },

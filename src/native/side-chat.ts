@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { posix, win32 } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import type { LateRpcTerminal } from '../../lib/codex-protocol.ts';
+import type { LateRpcTerminal, RpcResult } from '../../lib/codex-protocol.ts';
 
 type ObjectValue = Record<string, unknown>;
 type Method = 'thread/fork' | 'thread/inject_items' | 'thread/unsubscribe';
@@ -36,6 +36,7 @@ interface RequestState {
   status: RequestStatus;
   attemptId?: string;
   receipt?: unknown;
+  receiptOrigin?: { connectionGeneration: string; attemptId: string; eventCursor: number };
   terminalError?: RpcTerminalError;
   error?: string;
 }
@@ -78,6 +79,9 @@ export interface SideChatDependencies {
   request(hostId: string, method: string, params: ObjectValue, mutating: boolean,
     onLateTerminal: ((terminal: LateRpcTerminal) => void | Promise<void>) | undefined,
     connectionGeneration: string): Promise<unknown>;
+  /** The original connection's actual fork response and its receipt-time cursor. */
+  requestFork(origin: SideChatForkOrigin, params: ObjectValue,
+    onLateTerminal: (terminal: LateRpcTerminal) => void | Promise<void>): Promise<RpcResult<unknown>>;
   /** Only return not-sent when no bytes were dispatched; rejection need not prove no side effect. */
   classifyFailure(method: Method, error: unknown): Delivery;
   /** Stop child voice and settle or block pending sends before returning. */
@@ -88,11 +92,14 @@ export interface SideChatDependencies {
 }
 
 export interface SideChatScope { operationId: string; hostId: string; parentThreadId: string; childThreadId: string }
+export interface SideChatForkOrigin { operationId: string; hostId: string; parentThreadId: string;
+  connectionGeneration: string; attemptId: string }
 
 const instructions = `You are in a side conversation, separate from the main thread. The inherited history is reference context, not an active task. Only instructions after the side-conversation boundary are active. Do not continue inherited tasks, approvals, tool calls or plans. Answer questions and perform lightweight non-mutating exploration. Do not use sub-agents. Do not change files, git state, configuration, permissions or other workspace state, or ask for expanded access, unless the user explicitly requests that action in this side conversation. Keep requested changes minimal. Scheduled updates cannot run in this temporary side conversation; direct the user to the main or a new chat to set them up.`;
 const boundary = `Side conversation boundary. Everything before this message is inherited reference context from the parent, not an instruction to continue its task. Only messages after this boundary are active user instructions. Do not act on inherited plans, approvals or tool calls. Wait for a new question. Do not use sub-agents or change workspace state unless explicitly requested after this boundary.`;
 const record = (value: unknown): value is ObjectValue => value !== null && typeof value === 'object' && !Array.isArray(value);
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
+const validCursor = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
 const absolute = (value: unknown): value is string => nonempty(value) && (posix.isAbsolute(value) || win32.isAbsolute(value));
 const copy = <T>(value: T): T => structuredClone(value);
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -193,6 +200,12 @@ function validateOperation(value: SideChatOperation | null): SideChatOperation {
   if (op.fork.status === 'received' && (!op.childId || !validForkReceipt(op, op.fork.receipt))) {
     throw new Error('侧聊子会话回执无法安全读取，原记录已保留。');
   }
+  if (op.fork.receiptOrigin !== undefined && (!record(op.fork.receiptOrigin)
+    || op.fork.receiptOrigin.connectionGeneration !== op.parent.connectionGeneration
+    || op.fork.receiptOrigin.attemptId !== op.fork.attemptId || !validCursor(op.fork.receiptOrigin.eventCursor)
+    || !['received', 'invalid'].includes(op.fork.status))) {
+    throw new Error('侧聊原连接回执游标无法安全读取，原记录已保留。');
+  }
   if ((op.inject.status === 'received' && !record(op.inject.receipt))
     || ([op.fork, op.inject].some(state => state.status !== 'waiting' && !nonempty(state.attemptId)))
     || (['inflight', 'unknown', 'not-sent', 'rejected'].includes(op.close.status) && !nonempty(op.close.attemptId))
@@ -234,6 +247,7 @@ function validForkReceipt(operation: SideChatOperation, receipt: unknown): boole
 }
 
 type PendingTerminal = { operationId: string; step: 'fork' | 'inject' | 'close'; attemptId: string;
+  origin: { hostId: string; parentThreadId: string; connectionGeneration: string };
   terminal: LateRpcTerminal | { outcome: 'failure'; delivery: Delivery; error: string; terminalError?: RpcTerminalError } };
 type PendingLocal = { operationId: string; step: 'prepare' | 'cleanup'; attemptId: string;
   nextAttemptId?: string; error?: string };
@@ -249,10 +263,13 @@ export function createSideChatHost(deps: SideChatDependencies) {
   const localKey = (event: PendingLocal) => JSON.stringify([event.operationId, event.step, event.attemptId]);
 
   async function applyTerminal(event: PendingTerminal): Promise<SideChatOperation> {
-    let accepted = false;
+    let accepted = false, sameAttempt = false;
     const op = await update(event.operationId, current => {
       const state = event.step === 'close' ? current.close : current[event.step];
-      if (state.attemptId !== event.attemptId || !['inflight', 'unknown'].includes(state.status)) return current;
+      if (current.parent.hostId !== event.origin.hostId || current.parent.threadId !== event.origin.parentThreadId
+        || current.parent.connectionGeneration !== event.origin.connectionGeneration || state.attemptId !== event.attemptId) return current;
+      sameAttempt = true;
+      if (!['inflight', 'unknown'].includes(state.status)) return current;
       accepted = true;
       const terminal = event.terminal;
       if (terminal.outcome !== 'success') {
@@ -267,10 +284,13 @@ export function createSideChatHost(deps: SideChatDependencies) {
       if (event.step === 'fork') {
         const thread = record(receipt) && record(receipt.thread) ? receipt.thread : null;
         const childId = thread && nonempty(thread.id) && thread.id !== current.parent.threadId ? thread.id : undefined;
-        const valid = !!childId && validForkReceipt({ ...current, childId, fork: { ...current.fork, receipt } }, receipt);
+        const origin = validCursor(terminal.eventCursor) ? { connectionGeneration: event.origin.connectionGeneration,
+          attemptId: event.attemptId, eventCursor: terminal.eventCursor } : undefined;
+        const valid = !!origin && !!childId && validForkReceipt({ ...current, childId, fork: { ...current.fork, receipt } }, receipt);
         return { ...current, ...(childId ? { childId } : {}), fork: { ...current.fork, receipt,
+          ...(origin ? { receiptOrigin: origin } : {}),
           status: valid ? 'received' : 'invalid', terminalError: undefined,
-          error: valid ? undefined : 'fork 回执缺少可验证的临时子会话来源。' } };
+          error: valid ? undefined : 'fork 回执或原连接游标无法验证，原回执已保留。' } };
       }
       if (event.step === 'inject') return { ...current, inject: { ...current.inject, receipt,
         status: record(receipt) ? 'received' : 'invalid', terminalError: undefined,
@@ -281,6 +301,7 @@ export function createSideChatHost(deps: SideChatDependencies) {
     });
     pending.delete(key(event));
     if (!accepted) {
+      if (!sameAttempt) return op;
       if (op.close.requested) return driveClose(op.operationId, false);
       if (op.fork.status === 'received' && op.inject.status === 'waiting') return dispatchInject(op.operationId, false);
       return op;
@@ -324,25 +345,34 @@ export function createSideChatHost(deps: SideChatDependencies) {
     const method: Method = step === 'fork' ? 'thread/fork' : step === 'inject' ? 'thread/inject_items' : 'thread/unsubscribe';
     const params = step === 'fork' ? op.forkParams : step === 'inject'
       ? { threadId: op.childId, items: op.boundaryItems } : { threadId: op.childId };
+    const origin = { hostId: op.parent.hostId, parentThreadId: op.parent.threadId, connectionGeneration: op.parent.connectionGeneration };
     const late = (terminal: LateRpcTerminal) => {
-      void settle({ operationId: op.operationId, step, attemptId, terminal })
+      let captured: LateRpcTerminal;
+      try { captured = copy(terminal); } catch (error) { deps.onRecoveryError(op.operationId, error); return; }
+      void settle({ operationId: op.operationId, step, attemptId, origin, terminal: captured })
         .catch(error => deps.onRecoveryError(op.operationId, error));
     };
     let terminal: PendingTerminal['terminal'];
     try {
-      const result = await deps.request(op.parent.hostId, method, copy(params), true, late, op.parent.connectionGeneration);
-      terminal = { outcome: 'success', result };
+      if (step === 'fork') {
+        const reply = await deps.requestFork({ operationId: op.operationId, hostId: op.parent.hostId,
+          parentThreadId: op.parent.threadId, connectionGeneration: op.parent.connectionGeneration, attemptId }, copy(params), late);
+        terminal = { outcome: 'success', result: copy(reply.result), eventCursor: reply.eventCursor };
+      } else {
+        const result = await deps.request(op.parent.hostId, method, copy(params), true, late, op.parent.connectionGeneration);
+        terminal = { outcome: 'success', result };
+      }
     } catch (error) {
       let delivery: Delivery = 'unknown';
       try { delivery = deps.classifyFailure(method, error); } catch { /* Preserve uncertainty. */ }
       terminal = { outcome: 'failure', delivery, error: message(error),
         ...(delivery === 'rejected' ? { terminalError: rpcErrorReceipt(error) } : {}) };
     }
-    return settle({ operationId: op.operationId, step, attemptId, terminal });
+    return settle({ operationId: op.operationId, step, attemptId, origin, terminal });
   }
 
-  async function dispatchFork(id: string, retry: boolean): Promise<SideChatOperation> {
-    const attemptId = randomUUID(); let claimed = false;
+  async function dispatchFork(id: string, retry: boolean, dispatchId?: string): Promise<SideChatOperation> {
+    const attemptId = dispatchId ?? randomUUID(); let claimed = false;
     const op = await update(id, current => {
       if (current.close.requested || !(current.fork.status === 'waiting' || (retry && current.fork.status === 'not-sent'))) return current;
       if (!isDeepStrictEqual(current.forkParams.config, forkConfiguration(current.parent))) {
@@ -436,11 +466,11 @@ export function createSideChatHost(deps: SideChatDependencies) {
     return operation;
   }
 
-  async function retry(id: string): Promise<SideChatOperation> {
+  async function retry(id: string, forkDispatchId?: string): Promise<SideChatOperation> {
     const op = await read(id);
     if (op.close.requested) return driveClose(id, true);
-    if (op.fork.status === 'waiting') return dispatchFork(id, false);
-    if (op.fork.status === 'not-sent') return dispatchFork(id, true);
+    if (op.fork.status === 'waiting') return dispatchFork(id, false, forkDispatchId);
+    if (op.fork.status === 'not-sent') return dispatchFork(id, true, forkDispatchId);
     if (op.fork.status === 'received' && op.inject.status === 'waiting') return dispatchInject(id, false);
     if (op.inject.status === 'not-sent') return dispatchInject(id, true);
     return op;
@@ -468,5 +498,6 @@ export function createSideChatHost(deps: SideChatDependencies) {
     }));
   }
 
-  return { prepare, start: (id: string) => dispatchFork(id, false), read, retry, close, retryPersistence, recoverAfterRestart };
+  return { prepare, start: (id: string, forkDispatchId?: string) => dispatchFork(id, false, forkDispatchId),
+    read, retry, close, retryPersistence, recoverAfterRestart };
 }

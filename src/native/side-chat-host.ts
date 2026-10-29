@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { LateRpcTerminal, ThreadSummary } from '../../lib/codex-protocol.ts';
+import { posix, win32 } from 'node:path';
+import type { LateRpcTerminal, RpcResult, SandboxPolicy, ThreadSummary, TurnSummary } from '../../lib/codex-protocol.ts';
 import type { SubmitOptions } from '../renderer/workbench-contract.ts';
-import type { SideChatHostAction, SideChatHostView } from '../renderer/side-chat/types.ts';
+import type { SideChatForkChild, SideChatHostAction, SideChatHostView } from '../renderer/side-chat/types.ts';
 import { createSideChatHost } from './side-chat.ts';
 import type { SideChatDependencies, SideChatOperation, SideChatParent, SideChatScope, SideChatStore } from './side-chat.ts';
 
@@ -18,7 +19,7 @@ export interface SideChatEndpointScope {
 }
 
 export interface SideChatEndpointInput { hostId: string; parentThreadId: string; operationId: string }
-export interface SideChatEndpointActionInput extends SideChatEndpointInput { token: string }
+export interface SideChatEndpointActionInput extends SideChatEndpointInput { token: string; forkDispatchId?: string }
 export interface SideChatEndpointReply { view: SideChatHostView; token: string | null }
 export type SideChatEndpointAccess = { kind: 'read' }
   | { kind: 'dispatch'; action: SideChatHostAction; closeRequested: boolean };
@@ -43,6 +44,9 @@ export interface SideChatEndpointDependencies {
   request(scope: SideChatEndpointScope | Omit<SideChatEndpointScope, 'operationId' | 'childThreadId'>,
     method: string, params: Value, mutating: boolean,
     late: ((terminal: LateRpcTerminal) => void | Promise<void>) | undefined): Promise<unknown>;
+  /** Dispatch on the guarded original socket, preserving the cursor captured by requestWithCursor. */
+  requestFork(scope: SideChatEndpointScope, attemptId: string, params: Value,
+    late: (terminal: LateRpcTerminal) => void | Promise<void>): Promise<RpcResult<unknown>>;
   classifyFailure(method: RequestMethod, error: unknown): Delivery;
   prepareClose(scope: SideChatEndpointScope & { childThreadId: string }): Promise<void>;
   cleanup(scope: SideChatEndpointScope & { childThreadId: string }): Promise<void>;
@@ -64,6 +68,8 @@ type FencedOperation = SideChatOperation & { endpointFence?: unknown };
 const actions: readonly SideChatHostAction[] = ['start', 'retry', 'close', 'retryPersistence'];
 const isObject = (value: unknown): value is Value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
+const receiptString = (value: unknown): value is string => nonempty(value) && value.trim().length > 0 && !value.includes('\0');
+const absolute = (value: unknown): value is string => receiptString(value) && (posix.isAbsolute(value) || win32.isAbsolute(value));
 
 export class SideChatEndpointError extends Error {
   readonly uncertain?: false;
@@ -117,9 +123,12 @@ function sameScope(operation: SideChatOperation, scope: SideChatEndpointScope): 
   }
 }
 
-function optionProjection(parent: SideChatParent): SubmitOptions | null {
-  const value = parent.submitOptions;
-  const options: SubmitOptions = { model: parent.model, effort: parent.effort, serviceTier: parent.serviceTier };
+function optionProjection(value: Value): SubmitOptions | null {
+  if (!receiptString(value.model) || !receiptString(value.modelProvider)
+    || !Object.hasOwn(value, 'reasoningEffort') || !(value.reasoningEffort === null || receiptString(value.reasoningEffort))
+    || !Object.hasOwn(value, 'serviceTier') || !(value.serviceTier === null || receiptString(value.serviceTier))) return null;
+  const options: SubmitOptions = { model: value.model, effort: value.reasoningEffort as string | null,
+    serviceTier: value.serviceTier as string | null };
   if (value.approvalPolicy === 'untrusted' || value.approvalPolicy === 'on-request' || value.approvalPolicy === 'never') {
     options.approvalPolicy = value.approvalPolicy;
   } else if (isObject(value.approvalPolicy) && isObject(value.approvalPolicy.granular)) {
@@ -131,36 +140,75 @@ function optionProjection(parent: SideChatParent): SubmitOptions | null {
     }
   }
   if (!options.approvalPolicy) return null;
-  if (value.sandboxMode === 'read-only' || value.sandboxMode === 'workspace-write' || value.sandboxMode === 'danger-full-access') {
-    options.sandboxMode = value.sandboxMode;
-  }
   if (value.approvalsReviewer === 'user' || value.approvalsReviewer === 'auto_review' || value.approvalsReviewer === 'guardian_subagent') {
     options.approvalsReviewer = value.approvalsReviewer;
   }
-  if (!options.approvalsReviewer || value.sandboxMode != null && !options.sandboxMode) return null;
-  if (value.permissionProfileId != null && !nonempty(value.permissionProfileId)) return null;
-  if (typeof value.permissionProfileId === 'string') options.permissionProfileId = value.permissionProfileId;
-  if (value.mode != null && value.mode !== 'default' && value.mode !== 'plan') return null;
-  if (value.mode === 'default' || value.mode === 'plan') options.mode = value.mode;
+  if (!options.approvalsReviewer || !isObject(value.sandbox) || !Object.hasOwn(value, 'activePermissionProfile')) return null;
+  const sandboxModes = { readOnly: 'read-only', workspaceWrite: 'workspace-write', dangerFullAccess: 'danger-full-access' } as const;
+  const sandboxMode = sandboxModes[value.sandbox.type as keyof typeof sandboxModes];
+  if (sandboxMode) options.sandboxMode = sandboxMode;
+  const profile = value.activePermissionProfile;
+  if (!(profile === null || isObject(profile) && receiptString(profile.id))) return null;
+  if (profile) options.permissionProfileId = profile.id as string;
+  if (!profile && !sandboxMode) return null;
+  const mode = isObject(value.collaborationMode) ? value.collaborationMode.mode : value.collaborationMode;
+  if (mode != null && mode !== 'default' && mode !== 'plan') return null;
+  if (mode === 'default' || mode === 'plan') options.mode = mode;
   return options;
 }
 
-function childThread(operation: SideChatOperation): ThreadSummary | null {
+function sandboxProjection(value: unknown): SandboxPolicy | null {
+  if (!isObject(value)) return null;
+  if (value.type === 'dangerFullAccess') return { type: 'dangerFullAccess' };
+  if (value.type === 'readOnly' && typeof value.networkAccess === 'boolean') {
+    return { type: 'readOnly', networkAccess: value.networkAccess };
+  }
+  if (value.type === 'externalSandbox' && (value.networkAccess === 'restricted' || value.networkAccess === 'enabled')) {
+    return { type: 'externalSandbox', networkAccess: value.networkAccess };
+  }
+  if (value.type === 'workspaceWrite' && Array.isArray(value.writableRoots) && value.writableRoots.every(absolute)
+    && typeof value.networkAccess === 'boolean' && typeof value.excludeTmpdirEnvVar === 'boolean'
+    && typeof value.excludeSlashTmp === 'boolean') {
+    return { type: 'workspaceWrite', writableRoots: [...value.writableRoots] as string[], networkAccess: value.networkAccess,
+      excludeTmpdirEnvVar: value.excludeTmpdirEnvVar, excludeSlashTmp: value.excludeSlashTmp };
+  }
+  return null;
+}
+
+function childProjection(operation: SideChatOperation): SideChatForkChild | null {
   const receipt = operation.fork.receipt;
   if (operation.fork.status !== 'received' || !isObject(receipt) || !isObject(receipt.thread)) return null;
   const thread = receipt.thread;
   if (thread.id !== operation.childId || thread.cwd !== operation.parent.cwd
+    || thread.ephemeral !== true || thread.forkedFromId !== operation.parent.threadId
     || !(typeof thread.name === 'string' || thread.name === null)
-    || !Array.isArray(thread.turns) || thread.turns.length !== 0 || !isObject(thread.status)) return null;
+    || !Array.isArray(thread.turns) || !isObject(thread.status)) return null;
+  if (thread.turns.some(turn => !isObject(turn) || !receiptString(turn.id)
+    || !['completed', 'interrupted', 'failed', 'inProgress'].includes(String(turn.status))
+    || !Array.isArray(turn.items) || turn.items.some(item => !isObject(item) || !receiptString(item.id) || !receiptString(item.type))
+    || turn.error != null && (!isObject(turn.error) || typeof turn.error.message !== 'string'
+      || turn.error.additionalDetails != null && typeof turn.error.additionalDetails !== 'string')
+    || turn.itemsView !== undefined && !['full', 'summary', 'notLoaded'].includes(String(turn.itemsView)))) return null;
   const status = thread.status;
+  let projectedStatus: ThreadSummary['status'];
   if (status.type === 'idle' || status.type === 'notLoaded' || status.type === 'systemError') {
-    return { id: thread.id as string, name: thread.name, cwd: thread.cwd, turns: [], status: { type: status.type } };
-  }
-  if (status.type === 'active' && Array.isArray(status.activeFlags) && status.activeFlags.every(flag => typeof flag === 'string')) {
-    return { id: thread.id as string, name: thread.name, cwd: thread.cwd, turns: [],
-      status: { type: 'active', activeFlags: [...status.activeFlags] as string[] } };
-  }
-  return null;
+    projectedStatus = { type: status.type };
+  } else if (status.type === 'active' && Array.isArray(status.activeFlags) && status.activeFlags.every(flag => typeof flag === 'string')) {
+    projectedStatus = { type: 'active', activeFlags: [...status.activeFlags] as string[] };
+  } else return null;
+  const options = optionProjection(receipt), sandbox = sandboxProjection(receipt.sandbox);
+  const profile = receipt.activePermissionProfile;
+  if (!options || !sandbox || !Array.isArray(receipt.runtimeWorkspaceRoots)
+    || receipt.runtimeWorkspaceRoots.some(root => !receiptString(root))
+    || isObject(profile) && Object.hasOwn(profile, 'extends') && !(profile.extends === null || receiptString(profile.extends))) return null;
+  return {
+    thread: { id: thread.id as string, name: thread.name, cwd: thread.cwd, turns: structuredClone(thread.turns) as TurnSummary[],
+      status: projectedStatus, ephemeral: true, forkedFromId: thread.forkedFromId },
+    options, modelProvider: receipt.modelProvider as string, sandbox,
+    activePermissionProfile: profile === null ? null : { id: (profile as Value).id as string,
+      ...(Object.hasOwn(profile as Value, 'extends') ? { extends: (profile as Value).extends as string | null } : {}) },
+    runtimeWorkspaceRoots: [...receipt.runtimeWorkspaceRoots] as string[],
+  };
 }
 
 function requestError(status: string, phase: string, present: boolean): string | null {
@@ -174,16 +222,18 @@ function requestError(status: string, phase: string, present: boolean): string |
 
 function project(operation: SideChatOperation, recoveryError: string | null,
   settledCalls?: Partial<Record<SideChatHostAction, boolean>>): SideChatHostView {
-  const thread = childThread(operation);
-  const options = optionProjection(operation.parent);
+  const child = childProjection(operation);
   return {
     operationId: operation.operationId,
     parent: { hostId: operation.parent.hostId, threadId: operation.parent.threadId, cwd: operation.parent.cwd },
     childId: operation.childId ?? null,
-    child: thread && options ? { thread, options } : null,
-    fork: { status: operation.fork.status, error: operation.fork.status === 'received' && (!thread || !options)
+    child,
+    fork: { status: operation.fork.status, error: operation.fork.status === 'received' && !child
       ? '子会话初始信息无法安全读取，原回执已保留。'
-      : requestError(operation.fork.status, '创建侧聊', !!operation.fork.error) },
+      : operation.fork.status === 'received' && !operation.fork.receiptOrigin
+        ? '原 fork 回执缺少连接游标，无法确认实时投影。'
+      : requestError(operation.fork.status, '创建侧聊', !!operation.fork.error),
+      ...(operation.fork.receiptOrigin ? { receipt: structuredClone(operation.fork.receiptOrigin) } : {}) },
     inject: { status: operation.inject.status, error: requestError(operation.inject.status, '写入侧聊边界', !!operation.inject.error) },
     close: { requested: operation.close.requested, status: operation.close.status,
       error: requestError(operation.close.status, '关闭侧聊', !!operation.close.error) },
@@ -273,6 +323,19 @@ export function createSideChatEndpointHost(deps: SideChatEndpointDependencies) {
           throw new BeforeDispatchError('request child mismatch');
         }
         return deps.request(scope, method, params, mutating, late);
+      },
+      async requestFork(origin, params, late) {
+        if (!operationId || origin.operationId !== operationId) throw new BeforeDispatchError('missing operation');
+        const operation = await deps.store.read(operationId);
+        if (!operation || operation.parent.hostId !== origin.hostId || operation.parent.threadId !== origin.parentThreadId
+          || operation.parent.connectionGeneration !== origin.connectionGeneration || operation.fork.status !== 'inflight'
+          || operation.fork.attemptId !== origin.attemptId) throw new BeforeDispatchError('fork origin mismatch');
+        const scope = scopeOf(operation, origin);
+        const fence = fenceOf(operation);
+        if (!fence || fence.ownerId !== ownerId || fence.recovering || params.threadId !== scope.parentThreadId) {
+          throw new BeforeDispatchError('fork owner mismatch');
+        }
+        return deps.requestFork(scope, origin.attemptId, params, late);
       },
       classifyFailure: (method, error) => error instanceof BeforeDispatchError ? 'not-sent' : deps.classifyFailure(method, error),
       prepareClose: async scope => deps.prepareClose(await scopeForChild(scope)),
@@ -385,11 +448,12 @@ export function createSideChatEndpointHost(deps: SideChatEndpointDependencies) {
 
   async function dispatch(action: SideChatHostAction, input: SideChatEndpointActionInput): Promise<SideChatEndpointReply> {
     const callId = randomUUID();
+    const forkDispatchId = input?.forkDispatchId;
     let invoked = false;
     let claimed = false;
     let scope: SideChatEndpointScope | undefined;
     try {
-      if (!input || !nonempty(input.token)) throw new Error('missing token');
+      if (!input || !nonempty(input.token) || forkDispatchId !== undefined && !receiptString(forkDispatchId)) throw new Error('invalid action');
       const before = await original(input);
       scope = scopeOf(before, input);
       await deps.withScope(scope, { kind: 'dispatch', action, closeRequested: before.close.requested }, async () => {
@@ -400,13 +464,20 @@ export function createSideChatEndpointHost(deps: SideChatEndpointDependencies) {
           if (!fence || fence.ownerId !== ownerId || fence.recovering || fence.token !== input.token || fence.active) {
             throw new Error('stale or active call');
           }
+          const forkWillDispatch = !operation.close.requested && (action === 'start' && operation.fork.status === 'waiting'
+            || action === 'retry' && (operation.fork.status === 'waiting' || operation.fork.status === 'not-sent'));
+          if (forkWillDispatch && !forkDispatchId || forkDispatchId && operation.fork.attemptId === forkDispatchId) {
+            throw new Error('invalid fork dispatch identity');
+          }
           claimed = true;
           return setFence(operation, { ...fence, token: randomUUID(), active: { action, ownerId, callId } });
         });
       });
       invoked = true;
       const marker = recovery.get(input.operationId);
-      await hostFor(input.operationId)[action](input.operationId);
+      const host = hostFor(input.operationId);
+      if (action === 'start' || action === 'retry') await host[action](input.operationId, forkDispatchId);
+      else await host[action](input.operationId);
       if (action === 'retryPersistence' && marker && recovery.get(input.operationId) === marker) recovery.delete(input.operationId);
       completed.add(callId);
       await deps.store.update(input.operationId, operation => {

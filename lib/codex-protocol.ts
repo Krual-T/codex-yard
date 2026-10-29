@@ -99,7 +99,7 @@ export interface RpcResponses {
 }
 export interface RpcMessage { id?: RpcId; method: string; params: unknown; seq: number }
 export interface RpcResult<T> { result: T; eventCursor: number }
-export type LateRpcTerminal = { outcome: 'success'; result: unknown }
+export type LateRpcTerminal = { outcome: 'success'; result: unknown; eventCursor?: number }
   | { outcome: 'error'; error: { message: string; code?: string | number; data?: unknown } };
 export interface RequestOptions {
   mutating?: boolean;

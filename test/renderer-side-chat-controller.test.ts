@@ -63,6 +63,9 @@ function fixture(hostId = 'host-a', parentThreadId = 'parent-a') {
       if (method === 'config/read') return { config: { developer_instructions: 'PRIVATE CONFIG TEXT' } };
       return handler ? handler(call) : result(call);
     },
+    async requestFork(origin, params, late) {
+      return { result: await deps.request(origin.hostId, 'thread/fork', params, true, late, origin.connectionGeneration), eventCursor: 7 };
+    },
     classifyFailure(_method, error) { return (error as { delivery?: 'unknown' | 'not-sent' | 'rejected' }).delivery ?? 'unknown'; },
     async prepareClose(scope) { scopes.push({ prepare: scope }); if (failClose) throw Error('pending send'); },
     async cleanup(scope) { scopes.push({ cleanup: scope }); if (failCleanup) throw Error('cleanup failed'); },
@@ -75,8 +78,11 @@ function fixture(hostId = 'host-a', parentThreadId = 'parent-a') {
   const project = (op: SideChatOperation): SideChatHostView => {
     const receipt = op.fork.receipt as { thread?: ThreadSummary } | undefined;
     return { operationId: op.operationId, parent: { hostId: op.parent.hostId, threadId: op.parent.threadId, cwd: op.parent.cwd }, childId: op.childId ?? null,
-      child: op.fork.status === 'received' && receipt?.thread ? { thread: structuredClone(receipt.thread),
-        options: { ...op.parent.submitOptions, effort: null, serviceTier: 'default' } as SubmitOptions } : null,
+      child: op.fork.status === 'received' && receipt?.thread ? { thread: { ...structuredClone(receipt.thread),
+        ephemeral: true, forkedFromId: op.parent.threadId },
+        options: { ...op.parent.submitOptions, effort: null, serviceTier: 'default' } as SubmitOptions,
+        modelProvider: op.parent.modelProvider, sandbox: { type: 'readOnly', networkAccess: false },
+        activePermissionProfile: null, runtimeWorkspaceRoots: op.parent.workspaceRoots } : null,
       fork: { status: op.fork.status, error: op.fork.error ?? null }, inject: { status: op.inject.status, error: op.inject.error ?? null },
       close: { requested: op.close.requested, status: op.close.status, error: op.close.error ?? null }, recoveryError,
       settledCalls: { ...settledCalls } };
@@ -146,7 +152,7 @@ test('unknown fork is never replayed, and a late child closes on its original ho
   assert.equal(a.calls.filter(call => call.method === 'thread/fork').length, 1);
   await a.controller.close(); await b.controller.start();
   const fork = a.calls.find(call => call.method === 'thread/fork')!;
-  await fork.late!({ outcome: 'success', result: a.result(fork) });
+  await fork.late!({ outcome: 'success', result: a.result(fork), eventCursor: 7 });
   await eventually(async () => (await a.host.read(id)).close.status === 'closed');
   a.hint('host-b', id); assert.equal(b.controller.getSnapshot().view?.childId, 'child-host-b');
   a.hint('host-a', id); await eventually(() => a.controller.getSnapshot().phase === 'closed');
@@ -249,7 +255,7 @@ test('late receipt survives repeated persistence failures and fenced reads witho
   await f.controller.start(); const id = f.controller.getSnapshot().view!.operationId;
   const fork = f.calls.find(call => call.method === 'thread/fork')!; let failures = 0;
   f.store.fail = (next, old) => old.inject.status === 'inflight' && next.inject.status === 'received' && ++failures <= 3;
-  await fork.late!({ outcome: 'success', result: f.result(fork) });
+  await fork.late!({ outcome: 'success', result: f.result(fork), eventCursor: 7 });
   await eventually(() => f.controller.getSnapshot().view?.recoveryError != null);
   for (let attempt = 0; attempt < 2; attempt++) {
     f.settle('retryPersistence', false);
@@ -350,7 +356,7 @@ test('late fork can reach an inflight inject whose terminal persistence needs sc
   await f.controller.start(); const id = f.controller.getSnapshot().view!.operationId;
   const fork = f.calls.find(call => call.method === 'thread/fork')!; let failures = 0;
   f.store.fail = (next, old) => old.inject.status === 'inflight' && next.inject.status === 'received' && failures++ === 0;
-  await fork.late!({ outcome: 'success', result: f.result(fork) });
+  await fork.late!({ outcome: 'success', result: f.result(fork), eventCursor: 7 });
   await eventually(() => f.controller.getSnapshot().view?.recoveryError != null);
   assert.equal(f.controller.getSnapshot().phase, 'injecting');
   assert.match(f.controller.getSnapshot().view!.recoveryError!, /persistence failure/);

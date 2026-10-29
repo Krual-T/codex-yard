@@ -187,7 +187,7 @@ export class CodexConnection extends EventEmitter<{ message: [RpcMessage, WebSoc
         const terminal: LateRpcTerminal = message.error
           ? { outcome: 'error', error: { message: typeof error.message === 'string' ? error.message : 'Codex 返回了无效错误。',
             ...(typeof error.code === 'number' || typeof error.code === 'string' ? { code: error.code } : {}), data: error.data } }
-          : { outcome: 'success', result: message.result };
+          : { outcome: 'success', result: message.result, eventCursor: this.eventCursor };
         try { void Promise.resolve(pending.onLateTerminal?.(terminal)).catch(() => {}); } catch { /* The caller retains its unknown state. */ }
         return;
       }

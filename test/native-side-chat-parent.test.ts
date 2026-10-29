@@ -281,6 +281,11 @@ test('the E host consumes the mapped parent on the same synthetic connection wit
       assert.equal(f.connection.socket, f.socket);
       return f.connection.request(method, params, { mutating, onLateTerminal });
     },
+    requestFork(origin, params, onLateTerminal) {
+      assert.equal(origin.hostId, f.identity.hostId); assert.equal(origin.connectionGeneration, f.identity.connectionGeneration);
+      assert.equal(f.connection.socket, f.socket);
+      return f.connection.requestWithCursor('thread/fork', params, { mutating: true, onLateTerminal });
+    },
     classifyFailure: () => 'unknown', async prepareClose() {}, async cleanup() {}, onRecoveryError() {},
   });
   const prepared = await host.prepare({ hostId: 'local', threadId: 'parent' });

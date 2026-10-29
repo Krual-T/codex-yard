@@ -204,7 +204,7 @@ test('file reconciliation does not replay a late fork or send its boundary until
   const forkReceipt = { thread: { id: 'child-a', name: null, cwd: parent.cwd, turns: [], status: { type: 'idle' },
     ephemeral: true, forkedFromId: parent.threadId }, cwd: parent.cwd, runtimeWorkspaceRoots: parent.workspaceRoots,
   model: parent.model, modelProvider: parent.modelProvider, reasoningEffort: null, serviceTier: 'default',
-  approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: parent.sandboxPolicy };
+  approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: parent.sandboxPolicy, activePermissionProfile: null };
   const dependencies: SideChatEndpointDependencies = {
     store: f.sideChats, ownerId: 'host-process',
     async resolveParent(hostId, threadId) {
@@ -225,6 +225,9 @@ test('file reconciliation does not replay a late fork or send its boundary until
       if (method === 'thread/inject_items') return {};
       throw new Error('unexpected request');
     },
+    async requestFork(scope, _attemptId, params, late) {
+      return { result: await dependencies.request(scope, 'thread/fork', params, true, late), eventCursor: 7 };
+    },
     classifyFailure: () => 'unknown', prepareClose: async () => {}, cleanup: async () => {},
     ownerStopped: () => false, notify: () => {},
   };
@@ -232,14 +235,14 @@ test('file reconciliation does not replay a late fork or send its boundary until
   const scope = { hostId: parent.hostId, parentThreadId: parent.threadId };
   const prepared = await host.prepare({ ...scope, prepareId: 'prepare-late' });
   assert.ok(prepared.token);
-  const unknown = await host.start({ ...scope, operationId: prepared.view.operationId, token: prepared.token });
+  const unknown = await host.start({ ...scope, operationId: prepared.view.operationId, token: prepared.token, forkDispatchId: 'late-fork' });
   assert.equal(unknown.view.fork.status, 'unknown');
   let loseConfirmation = true;
   f.checkpoint(step => {
     if (step === 'rename' && loseConfirmation) { loseConfirmation = false; throw new Error('confirmation lost'); }
   });
   assert.ok(lateFork);
-  await lateFork({ outcome: 'success', result: forkReceipt });
+  await lateFork({ outcome: 'success', result: forkReceipt, eventCursor: 7 });
   let view = await host.read({ ...scope, operationId: prepared.view.operationId });
   for (let attempt = 0; attempt < 100 && !view.view.recoveryError; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 5));
@@ -253,6 +256,8 @@ test('file reconciliation does not replay a late fork or send its boundary until
   assert.ok(view.token);
   const recovered = await host.retryPersistence({ ...scope, operationId: prepared.view.operationId, token: view.token });
   assert.equal(recovered.view.inject.status, 'received');
+  assert.deepEqual(recovered.view.fork.receipt, { connectionGeneration: parent.connectionGeneration,
+    attemptId: 'late-fork', eventCursor: 7 });
   assert.equal(recovered.view.recoveryError, null);
   assert.deepEqual(calls, ['config/read', 'thread/fork', 'thread/inject_items']);
   const disk = await f.disk();

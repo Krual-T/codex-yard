@@ -327,7 +327,7 @@ test('real endpoint and E lifecycle recover a late receipt through the file-back
     turns: [], status: { type: 'idle' }, ephemeral: true, forkedFromId: original.threadId }, cwd: original.cwd,
   runtimeWorkspaceRoots: original.workspaceRoots, model: original.model, modelProvider: original.modelProvider,
   reasoningEffort: null, serviceTier: 'default', approvalPolicy: 'on-request', approvalsReviewer: 'user',
-  sandbox: original.sandboxPolicy };
+  sandbox: original.sandboxPolicy, activePermissionProfile: null };
   const deps: SideChatEndpointDependencies = {
     store, ownerId: 'process-a',
     async resolveParent(hostId, threadId) {
@@ -350,6 +350,9 @@ test('real endpoint and E lifecycle recover a late receipt through the file-back
       if (method === 'thread/unsubscribe') return { status: 'unsubscribed' };
       throw new Error('unexpected request');
     },
+    async requestFork(scope, _attemptId, params, late) {
+      return { result: await deps.request(scope, 'thread/fork', params, true, late), eventCursor: 7 };
+    },
     classifyFailure: () => 'unknown', prepareClose: async () => {}, cleanup: async () => {},
     ownerStopped: () => false, notify: () => {},
   };
@@ -357,7 +360,7 @@ test('real endpoint and E lifecycle recover a late receipt through the file-back
   const scope = { hostId: original.hostId, parentThreadId: original.threadId };
   const prepared = await host.prepare({ ...scope, prepareId: 'stable-prepare' });
   assert.ok(prepared.token);
-  const ready = await host.start({ ...scope, operationId: prepared.view.operationId, token: prepared.token });
+  const ready = await host.start({ ...scope, operationId: prepared.view.operationId, token: prepared.token, forkDispatchId: 'first-fork' });
   assert.equal(ready.view.fork.status, 'received');
   assert.equal(ready.view.inject.status, 'received');
   const fromFile = await f.disk();
@@ -365,13 +368,15 @@ test('real endpoint and E lifecycle recover a late receipt through the file-back
   await f.recover();
   const restored = await f.store().readPrepared('stable-prepare');
   assert.equal(restored?.childId, 'child-a');
+  assert.deepEqual(restored?.fork.receiptOrigin, { connectionGeneration: original.connectionGeneration,
+    attemptId: 'first-fork', eventCursor: 7 });
   assert.ok((restored as SideChatOperation & Value).endpointFence);
   assert.deepEqual(calls, ['config/read', 'thread/fork', 'thread/inject_items']);
 
   const pending = await host.prepare({ ...scope, prepareId: 'late-prepare' });
   assert.ok(pending.token);
   timeoutFork = true;
-  const unknown = await host.start({ ...scope, operationId: pending.view.operationId, token: pending.token });
+  const unknown = await host.start({ ...scope, operationId: pending.view.operationId, token: pending.token, forkDispatchId: 'late-fork' });
   assert.equal(unknown.view.fork.status, 'unknown');
   assert.ok(unknown.token);
   const noReplay = await host.retry({ ...scope, operationId: pending.view.operationId, token: unknown.token });
@@ -384,7 +389,7 @@ test('real endpoint and E lifecycle recover a late receipt through the file-back
     if (failReceipt && section?.operations[pending.view.operationId]?.fork.status === 'received') f.fault('before-rename');
   });
   assert.ok(lateFork);
-  await lateFork({ outcome: 'success', result: forkReceipt });
+  await lateFork({ outcome: 'success', result: forkReceipt, eventCursor: 7 });
   let observed = await host.read({ ...scope, operationId: pending.view.operationId });
   for (let attempt = 0; attempt < 100 && !observed.view.recoveryError; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 5));
@@ -403,6 +408,8 @@ test('real endpoint and E lifecycle recover a late receipt through the file-back
   assert.ok(observed.token);
   const recovered = await host.retryPersistence({ ...scope, operationId: pending.view.operationId, token: observed.token });
   assert.equal(recovered.view.childId, 'child-a');
+  assert.deepEqual(recovered.view.fork.receipt, { connectionGeneration: original.connectionGeneration,
+    attemptId: 'late-fork', eventCursor: 7 });
   assert.equal(recovered.view.inject.status, 'received');
   assert.equal(recovered.view.recoveryError, null);
   assert.equal(calls.filter(method => method === 'thread/fork').length, 2);

@@ -98,7 +98,7 @@ test('only the original live connection delivers a bounded late terminal after t
     await observed;
     assert.equal(connection.pending.size, 0);
   }
-  assert.deepEqual(received, [{ outcome: 'success', result: { written: true } },
+  assert.deepEqual(received, [{ outcome: 'success', result: { written: true }, eventCursor: 0 },
     { outcome: 'error', error: { code: -32001, message: 'denied', data: undefined } }]);
 
   const stale = connection.request('fixture/late', {}, { mutating: true, timeoutMs: 20,
@@ -128,7 +128,7 @@ test('durable write observers survive five minutes but retire with their origina
   t.mock.timers.tick(5 * 60_000 + 1);
   assert.equal(connection.pending.size, 1);
   peer.send({ id: call.id, result: { status: 'ok' } });
-  assert.deepEqual(await observed, { outcome: 'success', result: { status: 'ok' } });
+  assert.deepEqual(await observed, { outcome: 'success', result: { status: 'ok' }, eventCursor: 0 });
   assert.equal(connection.pending.size, 0);
   const another = connection.request('fixture/durable-observer', {}, { mutating: true, timeoutMs: 10,
     retainLateUntilDisconnect: true, onLateTerminal: () => { throw new Error('a disconnected socket must not observe'); } });

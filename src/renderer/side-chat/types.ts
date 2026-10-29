@@ -1,10 +1,19 @@
-import type { ThreadSummary } from '../../../lib/codex-protocol.ts';
+import type { SandboxPolicy, ThreadSummary } from '../../../lib/codex-protocol.ts';
 import type { SubmitOptions } from '../workbench-contract.ts';
 
 export type SideChatRequestStatus = 'waiting' | 'inflight' | 'not-sent' | 'rejected' | 'unknown' | 'received' | 'invalid';
 export type SideChatCloseStatus = 'idle' | 'preparing' | 'prepare-failed' | 'inflight' | 'not-sent' | 'rejected' | 'unknown'
   | 'cleanup-pending' | 'cleaning' | 'closed';
 export type SideChatHostAction = 'start' | 'retry' | 'close' | 'retryPersistence';
+
+export interface SideChatForkChild {
+  thread: ThreadSummary & { ephemeral: true; forkedFromId: string };
+  options: SubmitOptions;
+  modelProvider: string;
+  sandbox: SandboxPolicy;
+  activePermissionProfile: { id: string; extends?: string | null } | null;
+  runtimeWorkspaceRoots: string[];
+}
 
 /** Authorized and sanitized projection of one native SideChatOperation. */
 export interface SideChatHostView {
@@ -15,8 +24,10 @@ export interface SideChatHostView {
     cwd: string;
   };
   childId: string | null;
-  child: { thread: ThreadSummary; options: SubmitOptions } | null;
-  fork: { status: SideChatRequestStatus; error: string | null };
+  child: SideChatForkChild | null;
+  fork: { status: SideChatRequestStatus; error: string | null;
+    /** The original fork attempt and response-time cursor; absent on older records. */
+    receipt?: { connectionGeneration: string; attemptId: string; eventCursor: number } };
   inject: { status: SideChatRequestStatus; error: string | null };
   close: { requested: boolean; status: SideChatCloseStatus; error: string | null };
   /** Sanitized host recovery callback error for this operation, if any. */

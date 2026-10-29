@@ -113,6 +113,9 @@ function fixture() {
       if (method === 'config/read') return { config: { developer_instructions: 'PRIVATE_DEVELOPER', api_key: 'PRIVATE_KEY' } };
       return handler ? handler(call) : result(call);
     },
+    async requestFork(scope, _attemptId, params, late) {
+      return { result: await deps.request(scope, 'thread/fork', params, true, late), eventCursor: 7 };
+    },
     classifyFailure(_method, error) {
       return typeof error === 'object' && error !== null && 'delivery' in error
         ? (error as { delivery: 'not-sent' | 'rejected' | 'unknown' }).delivery : 'unknown';
@@ -131,7 +134,7 @@ function fixture() {
         ephemeral: true, forkedFromId: parent.threadId, secret: 'PRIVATE_THREAD' },
       cwd: parent.cwd, runtimeWorkspaceRoots: parent.workspaceRoots, model: parent.model, modelProvider: parent.modelProvider,
       reasoningEffort: parent.effort, serviceTier: 'default', approvalPolicy: 'on-request', approvalsReviewer: 'user',
-      sandbox: parent.sandboxPolicy, secret: 'PRIVATE_RECEIPT',
+      sandbox: parent.sandboxPolicy, activePermissionProfile: null, secret: 'PRIVATE_RECEIPT',
     };
     if (call.method === 'thread/inject_items') return {};
     if (call.method === 'thread/unsubscribe') return { status: 'unsubscribed', secret: 'PRIVATE_RECEIPT' };
@@ -150,9 +153,10 @@ function fixture() {
 
 const parent = { hostId: 'host-a', parentThreadId: 'parent-a' };
 const input = (reply: SideChatEndpointReply) => ({ ...parent, operationId: reply.view.operationId });
+let nextForkDispatch = 0;
 function action(reply: SideChatEndpointReply) {
   assert.ok(reply.token);
-  return { ...input(reply), token: reply.token };
+  return { ...input(reply), token: reply.token, forkDispatchId: 'fixture-dispatch-' + ++nextForkDispatch };
 }
 function unsent(error: unknown): boolean {
   return error instanceof Error && 'uncertain' in error && error.uncertain === false && !error.message.includes('PRIVATE');
@@ -169,15 +173,20 @@ test('prepare deduplicates and the real E lifecycle projects only safe original 
   const ready = await f.host.start(action(prepared));
   assert.equal(ready.view.fork.status, 'received');
   assert.equal(ready.view.inject.status, 'received');
-  assert.deepEqual(ready.view.child, { thread: { id: 'child-a', name: null, cwd: '/workspace/a', turns: [], status: { type: 'idle' } },
-    options: { model: 'model-a', effort: null, approvalPolicy: 'on-request', approvalsReviewer: 'user', mode: 'plan', serviceTier: null } });
+  assert.deepEqual(ready.view.child, { thread: { id: 'child-a', name: null, cwd: '/workspace/a', turns: [], status: { type: 'idle' },
+    ephemeral: true, forkedFromId: 'parent-a' },
+  options: { model: 'model-a', effort: null, approvalPolicy: 'on-request', approvalsReviewer: 'user', sandboxMode: 'read-only', serviceTier: 'default' },
+  modelProvider: 'provider-a', sandbox: { type: 'readOnly', networkAccess: false }, activePermissionProfile: null,
+  runtimeWorkspaceRoots: ['/workspace/a', '/workspace/shared'] });
+  assert.deepEqual(ready.view.fork.receipt, { connectionGeneration: 'socket-1',
+    attemptId: (await f.store.read(prepared.view.operationId))!.fork.attemptId, eventCursor: 7 });
   const fork = f.calls.find(call => call.method === 'thread/fork')!;
   assert.equal(fork.params.ephemeral, true);
   assert.equal(Object.hasOwn(fork.params, 'deferGoalContinuation'), false);
   assert.equal(Object.hasOwn(fork.params.config as object, 'model_reasoning_effort'), false);
   assert.match(String(fork.params.developerInstructions), /PRIVATE_DEVELOPER/);
   assert.equal('token' in fork.scope, false);
-  assert.doesNotMatch(JSON.stringify(ready.view), /PRIVATE|developerInstructions|endpointFence|forkParams|connectionGeneration/);
+  assert.doesNotMatch(JSON.stringify(ready.view), /PRIVATE|developerInstructions|endpointFence|forkParams/);
   const closed = await f.host.close(action(ready));
   assert.equal(closed.view.close.status, 'closed');
   assert.equal(f.barriers.length, 1); assert.equal(f.cleanups.length, 1);
@@ -329,7 +338,7 @@ test('a late original fork cannot inject on a replacement connection', async () 
   assert.equal(unknown.view.fork.status, 'unknown');
   f.setGeneration('socket-2');
   const fork = f.calls.find(call => call.method === 'thread/fork')!;
-  await fork.late!({ outcome: 'success', result: f.result(fork) });
+  await fork.late!({ outcome: 'success', result: f.result(fork), eventCursor: 7 });
   await eventually(async () => {
     try { return (await f.host.read(input(prepared))).view.inject.status === 'not-sent'; } catch { return false; }
   });
@@ -353,7 +362,7 @@ test('a changed stored generation invalidates the frozen origin before a late co
   f.setGeneration('socket-2');
   const fork = f.calls.find(call => call.method === 'thread/fork')!;
   const notifications = f.notifications.length;
-  await fork.late!({ outcome: 'success', result: f.result(fork) });
+  await fork.late!({ outcome: 'success', result: f.result(fork), eventCursor: 7 });
   await eventually(() => f.notifications.length > notifications);
   const view = await f.host.read(input(prepared));
   assert.equal(view.token, null);
@@ -373,7 +382,7 @@ test('the accepted H controller resolves a lost response through the actual scop
   const accept = (reply: SideChatEndpointReply) => { token = reply.token; return reply.view; };
   const dispatch = async (actionName: 'start' | 'retry' | 'close' | 'retryPersistence') => {
     assert.ok(token);
-    const result = await f.host[actionName]({ ...scoped(), token });
+    const result = await f.host[actionName]({ ...scoped(), token, forkDispatchId: 'controller-dispatch-' + ++nextForkDispatch });
     if (actionName === 'start') throw new Error('synthetic response lost');
     return accept(result);
   };
@@ -438,7 +447,7 @@ test('unknown original fork is never replayed and a late persistence failure rec
   const fork = f.calls.find(call => call.method === 'thread/fork')!;
   let failReceipt = true;
   f.store.fail = (next, previous) => failReceipt && next.fork.status === 'received' && previous.fork.status === 'unknown';
-  await fork.late!({ outcome: 'success', result: f.result(fork) });
+  await fork.late!({ outcome: 'success', result: f.result(fork), eventCursor: 7 });
   await eventually(async () => (await f.host.read(input(prepared))).view.recoveryError !== null);
   for (let i = 0; i < 2; i++) {
     current = await f.host.read(input(prepared));
@@ -570,7 +579,7 @@ test('an old observer cannot write a late terminal after the operation changes o
   const recovered = await replacement.read(input(prepared));
   assert.equal(recovered.view.fork.status, 'unknown');
   const notifications = f.notifications.length;
-  await fork.late!({ outcome: 'success', result: f.result(fork) });
+  await fork.late!({ outcome: 'success', result: f.result(fork), eventCursor: 7 });
   await eventually(() => f.notifications.length > notifications);
   const after = await replacement.read(input(prepared));
   assert.equal(after.view.fork.status, 'unknown');
