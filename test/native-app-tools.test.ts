@@ -238,7 +238,23 @@ test('nested native target objects are closed and the twelve catalog names remai
   for (const args of invalid) assert.equal(schemas.create_thread!.safeParse(args).success, false);
   assert.equal(schemas.wait_threads!.safeParse({ targets: [{ threadId: 'target', unknown: true }] }).success, false);
   assert.equal(schemas.wait_threads!.safeParse({ targets: [{ threadId: 'target' }], timeoutMs: 120_001 }).success, false);
-  assert.match(catalog.find(tool => tool.name === 'send_message_to_thread')!.description, /human user explicitly authorizes/);
+  assert.match(catalog.find(tool => tool.name === 'send_message_to_thread')!.description, /Authorization must come directly from the human user/);
+  assert.equal(catalog.find(tool => tool.name === 'create_thread')!.inputSchema.properties.title!.minLength, 1);
+  for (const name of ['set_thread_archived', 'set_thread_read_state']) {
+    const properties = catalog.find(tool => tool.name === name)!.inputSchema.properties;
+    assert.equal(properties.threadId!.minLength, 1);
+    assert.equal(properties.hostId!.minLength, 1);
+  }
+});
+
+test('prototype property names are rejected as unknown tools', async t => {
+  const h = await fixture(t);
+  for (const name of ['__proto__', 'constructor']) {
+    const result = await h.call(name, {});
+    assert.equal(result.success, false);
+    assert.match(result.contentItems[0]!.text, /Unknown native app tool/);
+  }
+  assert.equal(h.fake.calls('turn/start').length, 0);
 });
 
 test('delegation is escaped and uses toolOutput only on supported app-server versions', () => {
