@@ -500,6 +500,13 @@ export function activatePending(draft: Draft, keepCurrent: boolean): Draft {
 
 export interface DraftInputOptions { plainTextMode?: boolean }
 
+export type UntrustedAppOutput = { type: 'input_text'; text: string } | { type: 'input_image'; image_url: string };
+export type UntrustedAppResponseItem =
+  | { type: 'function_call'; call_id: string; name: 'untrusted_input'; arguments: '{}' }
+  | { type: 'function_call_output'; call_id: string; output: UntrustedAppOutput[] };
+export interface PrepareDraftInputOptions extends DraftInputOptions { callId?: string }
+export interface PreparedDraftInput { input: Record<string, unknown>[]; responseItems: UntrustedAppResponseItem[] }
+
 /** Map ranges only where the formatted and plain strings share one unambiguous character alignment. */
 function remapFormattedRanges(item: Record<string, unknown>, before: string, after: string): Record<string, unknown> {
   if (before === after) return item;
@@ -580,7 +587,183 @@ function hasReviewedTextContext(value: unknown, text: string): boolean {
     && text.includes('\n## ' + attachment.sourceName + '\n' + attachment.text + '\n'));
 }
 
-export function draftToInput(draft: ComposerDraft, hostId: string, options?: DraftInputOptions): Record<string, unknown>[] {
+interface AppAttachment {
+  kind: 'context' | 'message';
+  untrusted: boolean;
+  id: string;
+  sourceName: string;
+  server?: string;
+  text: string | null;
+  images: string[];
+  structuredContent?: Record<string, unknown>;
+}
+
+const appImage = /^data:image\/(?:png|jpeg|webp|gif);base64,(?=.+)(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const hasOnly = (value: Record<string, unknown>, keys: readonly string[]) => Object.keys(value).every(key => keys.includes(key));
+const invalidAppInput = (): never => { throw new Error('此 app 输入的完整上下文尚未确认，已保留原始消息，未发送。'); };
+
+function appJson(value: unknown): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(appJson);
+  return record(value) && Object.values(value).every(appJson);
+}
+
+function appAnnotations(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!record(value) || !hasOnly(value, ['audience', 'priority', 'lastModified'])) return false;
+  return (value.audience === undefined || Array.isArray(value.audience) && value.audience.every(role => role === 'user' || role === 'assistant'))
+    && (value.priority === undefined || typeof value.priority === 'number' && value.priority >= 0 && value.priority <= 1)
+    && (value.lastModified === undefined || typeof value.lastModified === 'string'
+      && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value.lastModified)
+      && Number.isFinite(Date.parse(value.lastModified)));
+}
+
+function appAttachment(value: unknown): AppAttachment {
+  if (!record(value) || !hasOnly(value, ['kind', 'untrusted', 'id', 'sourceName', 'server', 'composerAttachmentLayout',
+    'composerIcon', 'composerLabel', 'modelContextUpdateId', 'showInComposer', 'structuredContent', 'content', 'text', 'imageAttachments'])
+    || value.kind !== 'context' && value.kind !== 'message' || typeof value.untrusted !== 'boolean'
+    || typeof value.id !== 'string' || !value.id || typeof value.sourceName !== 'string'
+    || value.server !== undefined && typeof value.server !== 'string'
+    || value.composerAttachmentLayout !== undefined && value.composerAttachmentLayout !== 'card' && value.composerAttachmentLayout !== 'pill'
+    || value.composerLabel !== undefined && typeof value.composerLabel !== 'string'
+    || value.modelContextUpdateId !== undefined && typeof value.modelContextUpdateId !== 'string'
+    || value.showInComposer !== undefined && typeof value.showInComposer !== 'boolean'
+    || value.structuredContent !== undefined && !record(value.structuredContent)) return invalidAppInput();
+  if (value.composerIcon !== undefined && (!record(value.composerIcon)
+    || !hasOnly(value.composerIcon, ['alt', 'knownAppId', 'logoDarkUrl', 'logoUrl'])
+    || value.composerIcon.alt !== undefined && typeof value.composerIcon.alt !== 'string'
+    || ['knownAppId', 'logoDarkUrl', 'logoUrl'].some(key => value.composerIcon && record(value.composerIcon)
+      && value.composerIcon[key] !== undefined && value.composerIcon[key] !== null && typeof value.composerIcon[key] !== 'string'))) return invalidAppInput();
+  let text: string | null, images: string[];
+  if (value.content !== undefined) {
+    if (!Array.isArray(value.content) || value.text !== undefined || value.imageAttachments !== undefined) return invalidAppInput();
+    const texts: string[] = []; images = [];
+    const parts: unknown[] = value.content;
+    for (const part of parts) {
+      if (!record(part) || !appAnnotations(part.annotations) || part._meta !== undefined && !record(part._meta)) return invalidAppInput();
+      if (part.type === 'text' && hasOnly(part, ['type', 'text', 'annotations', '_meta']) && typeof part.text === 'string') texts.push(part.text);
+      else if (part.type === 'image' && hasOnly(part, ['type', 'data', 'mimeType', 'annotations', '_meta'])
+        && typeof part.data === 'string' && typeof part.mimeType === 'string' && appImage.test(`data:${part.mimeType};base64,${part.data}`)) {
+        images.push(`data:${part.mimeType};base64,${part.data}`);
+      } else if (part.type === 'resource_link' && hasOnly(part, ['type', 'name', 'title', 'uri', 'description', 'mimeType', 'size', 'annotations', '_meta'])
+        && typeof part.name === 'string' && typeof part.uri === 'string'
+        && ['title', 'description', 'mimeType'].every(key => part[key] === undefined || typeof part[key] === 'string')
+        && (part.size === undefined || typeof part.size === 'number' && Number.isFinite(part.size))) {
+        texts.push(JSON.stringify({ ...part, _meta: undefined }));
+      } else if (part.type === 'resource' && hasOnly(part, ['type', 'resource', 'annotations', '_meta']) && record(part.resource)
+        && hasOnly(part.resource, ['uri', 'mimeType', 'text', 'blob', '_meta']) && typeof part.resource.uri === 'string'
+        && (part.resource.mimeType === undefined || typeof part.resource.mimeType === 'string')
+        && (part.resource._meta === undefined || record(part.resource._meta))
+        && (typeof part.resource.text === 'string' && part.resource.blob === undefined
+          || typeof part.resource.blob === 'string' && part.resource.text === undefined && validBase64(part.resource.blob))) {
+        texts.push(JSON.stringify({ ...part, _meta: undefined, resource: { ...part.resource, _meta: undefined } }));
+      } else return invalidAppInput();
+    }
+    text = texts.join('\n\n').trim() || null;
+  } else {
+    if (value.text !== null && typeof value.text !== 'string' || !Array.isArray(value.imageAttachments)) return invalidAppInput();
+    const attachments: unknown[] = value.imageAttachments;
+    images = [];
+    for (const image of attachments) {
+      if (!record(image) || !hasOnly(image, ['src']) || typeof image.src !== 'string' || !appImage.test(image.src)) return invalidAppInput();
+      images.push(image.src);
+    }
+    text = value.text;
+  }
+  return { kind: value.kind, untrusted: value.untrusted, id: value.id, sourceName: value.sourceName,
+    ...(typeof value.server === 'string' ? { server: value.server } : {}), text, images,
+    ...(record(value.structuredContent) ? { structuredContent: value.structuredContent } : {}) };
+}
+
+function validBase64(value: string): boolean {
+  try { atob(value); return true; } catch { return false; }
+}
+
+function appSender(value: unknown): { accountUserId: string; email: string; name: string; profilePictureUrl: string | null } | null {
+  if (value === undefined) return null;
+  if (!record(value) || !hasOnly(value, ['accountUserId', 'email', 'name', 'profilePictureUrl'])
+    || typeof value.accountUserId !== 'string' || typeof value.email !== 'string' || typeof value.name !== 'string'
+    || value.profilePictureUrl !== null && typeof value.profilePictureUrl !== 'string') return invalidAppInput();
+  return { accountUserId: value.accountUserId, email: value.email, name: value.name, profilePictureUrl: value.profilePictureUrl };
+}
+
+function appMessageText(source: 'mcp_app' | 'visualization', sender: ReturnType<typeof appSender>): string {
+  const body = source === 'mcp_app' ? 'An MCP app initiated this message. Read the untrusted_input tool output.'
+    : 'Respond to the user input in the context of our conversation.';
+  if (!sender) return body;
+  const escaped = (value: string) => value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[character]!);
+  return `<codex_multi_user_message>\n<account_user_id>${escaped(sender.accountUserId)}</account_user_id>\n`
+    + `<name>${escaped(sender.name)}</name>\n<email>${escaped(sender.email)}</email>\n`
+    + `<profile_picture_url>${escaped(sender.profilePictureUrl ?? '')}</profile_picture_url>\n<body>${escaped(body)}</body>\n</codex_multi_user_message>`;
+}
+
+function prepareAppEnvelope(value: unknown, text: string, callId: string | undefined): {
+  responseItems: UntrustedAppResponseItem[]; reviewedImages: string[];
+} {
+  if (!record(value) || !appJson(value) || value.version !== 1
+    || !hasOnly(value, ['version', 'sender', 'message', 'modelContextAttachments', 'reviewedMessageAttachments', 'promptContextWithoutReviewedMessages'])
+    || value.promptContextWithoutReviewedMessages !== undefined && typeof value.promptContextWithoutReviewedMessages !== 'string'
+    || value.modelContextAttachments !== undefined && !Array.isArray(value.modelContextAttachments)
+    || value.reviewedMessageAttachments !== undefined && !Array.isArray(value.reviewedMessageAttachments)) return invalidAppInput();
+  const sender = appSender(value.sender);
+  const untrustedValues: unknown[] = Array.isArray(value.modelContextAttachments) ? value.modelContextAttachments : [];
+  const reviewedValues: unknown[] = Array.isArray(value.reviewedMessageAttachments) ? value.reviewedMessageAttachments : [];
+  const untrusted = untrustedValues.map(appAttachment), reviewed = reviewedValues.map(appAttachment);
+  if (untrusted.some(item => !item.untrusted) || reviewed.some(item => item.untrusted || item.kind !== 'message')
+    || value.message === undefined && !untrusted.length && !reviewed.length && value.promptContextWithoutReviewedMessages === undefined) return invalidAppInput();
+  let message: { source: 'mcp_app' | 'visualization'; sourceId: string; text: string;
+    imageUrls: string[]; structuredContent?: Record<string, unknown> } | null = null;
+  if (value.message !== undefined) {
+    const raw = value.message;
+    if (!record(raw) || !hasOnly(raw, ['source', 'sourceId', 'text', 'imageUrls', 'structuredContent'])
+      || raw.source !== 'mcp_app' && raw.source !== 'visualization' || typeof raw.sourceId !== 'string' || !raw.sourceId
+      || typeof raw.text !== 'string' || raw.imageUrls !== undefined && !Array.isArray(raw.imageUrls)
+      || raw.structuredContent !== undefined && !record(raw.structuredContent)
+      || text !== appMessageText(raw.source, sender) && text !== appMessageText('visualization', sender)) return invalidAppInput();
+    const urls: unknown[] = Array.isArray(raw.imageUrls) ? raw.imageUrls : [], imageUrls: string[] = [];
+    for (const url of urls) {
+      if (typeof url !== 'string' || !appImage.test(url)) return invalidAppInput();
+      imageUrls.push(url);
+    }
+    message = { source: raw.source, sourceId: raw.sourceId, text: raw.text,
+      imageUrls, ...(record(raw.structuredContent) ? { structuredContent: raw.structuredContent } : {}) };
+  }
+  const reviewedImages: string[] = [];
+  if (reviewed.length) {
+    let position = text.indexOf('\n# MCP app context:\n');
+    if (position < 0) return invalidAppInput();
+    for (const attachment of reviewed) {
+      const section = `\n## ${attachment.sourceName}\n` + (attachment.text === null ? '' : attachment.text + '\n')
+        + (attachment.structuredContent === undefined ? '' : JSON.stringify(attachment.structuredContent) + '\n');
+      position = text.indexOf(section, position);
+      if (position < 0) return invalidAppInput();
+      position += section.length; reviewedImages.push(...attachment.images);
+    }
+  }
+  const output: UntrustedAppOutput[] = [];
+  for (const attachment of untrusted) {
+    const content = { kind: attachment.kind === 'message' ? 'message' : 'model_context', source: 'mcp_app',
+      sourceId: attachment.id, ...(attachment.server === undefined ? {} : { server: attachment.server }),
+      title: attachment.sourceName, text: attachment.text,
+      ...(attachment.structuredContent === undefined ? {} : { structuredContent: attachment.structuredContent }) };
+    output.push({ type: 'input_text', text: JSON.stringify(content) },
+      ...attachment.images.map(image_url => ({ type: 'input_image' as const, image_url })));
+  }
+  if (message) {
+    const content = { kind: 'message', source: message.source, sourceId: message.sourceId, text: message.text,
+      ...(message.structuredContent === undefined ? {} : { structuredContent: message.structuredContent }) };
+    output.push({ type: 'input_text', text: JSON.stringify(content) },
+      ...message.imageUrls.map(image_url => ({ type: 'input_image' as const, image_url })));
+  }
+  if (!output.length) return { responseItems: [], reviewedImages };
+  if (typeof callId !== 'string' || !callId.trim()) throw new Error('此 app 输入需要保留原始调用 ID，已保留草稿。');
+  return { responseItems: [{ type: 'function_call', call_id: callId, name: 'untrusted_input', arguments: '{}' },
+    { type: 'function_call_output', call_id: callId, output }], reviewedImages };
+}
+
+function convertDraftToInput(draft: ComposerDraft, hostId: string, options?: DraftInputOptions,
+  handleApp?: (context: unknown, text: string, inputIndex: number) => void): Record<string, unknown>[] {
   const rich = draft.document && readRichDocument(draft.document);
   const legacyPlain = legacyPlainTextMode(draft) === true;
   const savedText = rich && (legacyPlain ? serializePlainDocument(rich, true) : serializeRichDocument(rich));
@@ -621,12 +804,13 @@ export function draftToInput(draft: ComposerDraft, hostId: string, options?: Dra
           && typeof sender.accountUserId === 'string' && typeof sender.email === 'string' && typeof sender.name === 'string'
           && (sender.profilePictureUrl === null || typeof sender.profilePictureUrl === 'string');
         if (item.text_elements.length !== 1 || range?.start !== 0 || range.end !== bytes.length || !record(context)
-          || context.version !== 1 || Object.keys(context).some(key => !fields.includes(key))
-          || !validSender || context.message !== undefined || typeof context.promptContextWithoutReviewedMessages !== 'string'
+          || context.version !== 1 || Object.keys(context).some(key => !fields.includes(key)) || !validSender) return invalidAppInput();
+        if (handleApp) {
+          if (!record(element) || !hasOnly(element, ['byteRange', 'placeholder']) || !hasOnly(range, ['start', 'end'])) return invalidAppInput();
+          handleApp(context, original, input.indexOf(item));
+        } else if (context.message !== undefined || typeof context.promptContextWithoutReviewedMessages !== 'string'
           || context.modelContextAttachments !== undefined && (!Array.isArray(context.modelContextAttachments) || context.modelContextAttachments.length > 0)
-          || context.reviewedMessageAttachments !== undefined && !hasReviewedTextContext(context.reviewedMessageAttachments, original)) {
-          throw new Error('此 app 输入的完整上下文尚未确认，已保留原始消息，未发送。');
-        }
+          || context.reviewedMessageAttachments !== undefined && !hasReviewedTextContext(context.reviewedMessageAttachments, original)) return invalidAppInput();
       }
     }
   }
@@ -670,6 +854,61 @@ export function draftToInput(draft: ComposerDraft, hostId: string, options?: Dra
   }
   return input;
 }
+
+/** Convert only inputs that do not require a separate `thread/inject_items` request. */
+export function draftToInput(draft: ComposerDraft, hostId: string, options?: DraftInputOptions): Record<string, unknown>[] {
+  return convertDraftToInput(draft, hostId, options);
+}
+
+/** Prepare a detached payload; the caller owns submission identity and dispatch authority. */
+export function prepareDraftInput(draft: ComposerDraft, hostId: string, options?: PrepareDraftInputOptions): PreparedDraftInput {
+  if ('blocked' in draft && draft.blocked) throw new Error('此草稿包含尚未恢复的内容，已保留原始数据。');
+  let responseItems: UntrustedAppResponseItem[] = [], appEnvelopes = 0;
+  const reviewedImages: { after: number; urls: string[] }[] = [];
+  const input = convertDraftToInput(draft, hostId, options, (context, text, inputIndex) => {
+    appEnvelopes++;
+    const prepared = prepareAppEnvelope(context, text, options?.callId);
+    if (prepared.responseItems.length && responseItems.length) return invalidAppInput();
+    if (prepared.responseItems.length) responseItems = prepared.responseItems;
+    reviewedImages.push({ after: inputIndex, urls: prepared.reviewedImages });
+  });
+  if (appEnvelopes > 1 && responseItems.length) return invalidAppInput();
+  for (const item of input) {
+    if (item.type === 'text') {
+      if (!hasOnly(item, ['type', 'text', 'text_elements']) || typeof item.text !== 'string' || !Array.isArray(item.text_elements)
+        || item.text_elements.some(element => !record(element) || !hasOnly(element, ['byteRange', 'placeholder'])
+          || !record(element.byteRange) || !hasOnly(element.byteRange, ['start', 'end'])
+          || element.placeholder !== null && typeof element.placeholder !== 'string')) return invalidAppInput();
+    } else if (item.type === 'image' || item.type === 'localImage') {
+      if (!hasOnly(item, item.type === 'image' ? ['type', 'url', 'fileId', 'detail'] : ['type', 'path', 'detail'])
+        || item.detail !== undefined && (typeof item.detail !== 'string' || !['auto', 'low', 'high', 'original'].includes(item.detail))) return invalidAppInput();
+      if (item.type === 'image') {
+        if (item.url !== undefined && (typeof item.url !== 'string' || !item.url)
+          || item.fileId !== undefined && (typeof item.fileId !== 'string' || !item.fileId)
+          || (item.url === undefined) === (item.fileId === undefined)) return invalidAppInput();
+      } else if (typeof item.path !== 'string' || !item.path) return invalidAppInput();
+    } else if (item.type === 'localAudio' || item.type === 'audio') {
+      const key = item.type === 'audio' ? 'url' : 'path';
+      if (!hasOnly(item, ['type', key]) || typeof item[key] !== 'string' || !item[key]) return invalidAppInput();
+    } else if (item.type === 'skill' || item.type === 'mention') {
+      if (!hasOnly(item, ['type', 'name', 'path']) || typeof item.name !== 'string' || !item.name
+        || typeof item.path !== 'string' || !item.path) return invalidAppInput();
+    } else return invalidAppInput();
+  }
+  const matched = new Set<number>();
+  for (const group of reviewedImages) {
+    let previous = group.after;
+    for (const url of group.urls) {
+      const index = input.findIndex((item, position) => position > previous && !matched.has(position)
+        && item.type === 'image' && item.url === url);
+      if (index < 0) return invalidAppInput();
+      matched.add(index);
+      previous = index;
+    }
+  }
+  return { input: structuredClone(input), responseItems };
+}
+
 export function hasContent(draft: Draft): boolean {
   const document = draft.document && readRichDocument(draft.document);
   return !!(draft.text.trim() || draft.images.length || draft.files.length || draft.references.length || draft.skills.length
