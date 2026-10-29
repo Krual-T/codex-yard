@@ -27,6 +27,7 @@ class FakeClient implements WorkbenchClient {
     if (endpoint.startsWith('get-')) {
       const value = structuredClone(target[key]), exists = Object.hasOwn(target, key);
       await this.pauseRead?.(key);
+      options?.assertBeforeSend?.();
       return { value, exists } as T;
     }
     if (endpoint.startsWith('set-')) {
@@ -89,7 +90,7 @@ test('Browser saves recheck the captured authority after dispatch waits and pres
   current = false;
   release();
   assert.equal(await saving, false);
-  assert.equal(checks, 1);
+  assert.equal(checks, 2);
   assert.equal(Object.hasOwn(client.settings, 'browser-show-full-url'), false);
   const rejected = prefs.getSnapshot()['browser-show-full-url'];
   assert.equal(rejected.value, true);
@@ -98,12 +99,88 @@ test('Browser saves recheck the captured authority after dispatch waits and pres
   assert.match(rejected.error ?? '', /selected settings page changed/);
   assert.equal(prefs.dirty, true);
   assert.equal(client.calls.filter(call => call.endpoint === 'set-setting').length, 1);
+  assert.equal(client.calls.filter(call => call.endpoint === 'get-setting').length, 0);
   current = true;
   client.pauseWrite = null;
   assert.equal(await prefs.saveOne('browser-show-full-url', assertBeforeSend), true);
-  assert.equal(checks, 2);
+  assert.equal(checks, 3);
   assert.equal(client.settings['browser-show-full-url'], true);
   assert.equal(prefs.dirty, false);
+});
+
+test('failed-write recovery checks the original authority again after a read dispatch wait', async () => {
+  const client = new FakeClient(), prefs = new Preferences(client);
+  await prefs.load();
+  let release: () => void = () => {};
+  let entered: () => void = () => {};
+  const reading = new Promise<void>(resolve => { entered = resolve; });
+  client.pauseRead = async () => {
+    entered();
+    await new Promise<void>(resolve => { release = resolve; });
+  };
+  let current = true, checks = 0;
+  const assertBeforeSend = () => {
+    checks++;
+    if (!current) throw new DOMException('The selected settings page changed.', 'AbortError');
+  };
+  client.fail = 'set-setting';
+  prefs.edit('browser-show-full-url', true);
+  const saving = prefs.saveOne('browser-show-full-url', assertBeforeSend);
+  await reading;
+  current = false;
+  release();
+  assert.equal(await saving, false);
+  assert.equal(checks, 2);
+  assert.equal(prefs.getSnapshot()['browser-show-full-url'].value, true);
+  assert.equal(prefs.getSnapshot()['browser-show-full-url'].saved, false);
+  assert.equal(prefs.dirty, true);
+  assert.equal(client.calls.filter(call => call.endpoint === 'set-setting').length, 1);
+});
+
+test('a failed acknowledged read retains refresh notifications and the newer edit until reconnect or explicit reload', async t => {
+  for (const recovery of ['reconnect', 'reload'] as const) await t.test(recovery, async () => {
+    const client = new FakeClient(), prefs = new Preferences(client);
+    const stop = prefs.start();
+    try {
+      await prefs.load();
+      let release: () => void = () => {};
+      let entered: () => void = () => {};
+      const reading = new Promise<void>(resolve => { entered = resolve; });
+      client.pauseRead = async key => {
+        if (key !== 'appearanceTheme') return;
+        entered();
+        await new Promise<void>(resolve => { release = resolve; });
+        throw new Error('read connection closed');
+      };
+      prefs.edit('appearanceTheme', 'light');
+      const saving = prefs.saveOne('appearanceTheme');
+      await reading;
+      prefs.edit('appearanceTheme', 'system');
+      client.settings.appearanceTheme = 'dark';
+      for (const listener of client.listeners) listener({ type: 'settings-changed', keys: ['appearanceTheme'] });
+      release();
+      assert.equal(await saving, false);
+      assert.equal(prefs.getSnapshot().appearanceTheme.value, 'system');
+      assert.match(prefs.getSnapshot().appearanceTheme.error ?? '', /read connection closed/);
+      client.pauseRead = null;
+      if (recovery === 'reload') await prefs.reload('appearanceTheme');
+      else {
+        for (const listener of client.listeners) listener({ type: 'connection-state', state: 'connected' });
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      const restored = prefs.getSnapshot().appearanceTheme;
+      assert.equal(restored.value, 'system');
+      assert.equal(restored.saved, 'dark');
+      assert.deepEqual(restored.observation, { exists: true, value: 'dark' });
+      assert.deepEqual(restored.editBase, { exists: true, value: 'light' });
+      assert.equal(restored.conflict, true);
+      assert.equal(client.calls.filter(call => call.endpoint === 'set-setting').length, 1);
+      const reads = client.calls.filter(call => call.endpoint === 'get-setting').length;
+      for (const listener of client.listeners) listener({ type: 'connection-state', state: 'connected' });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(client.calls.filter(call => call.endpoint === 'get-setting').length, reads);
+    } finally { stop(); }
+  });
 });
 
 test('the shared preference key list includes every General atom and global preference once', () => {

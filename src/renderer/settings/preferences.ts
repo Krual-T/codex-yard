@@ -253,6 +253,9 @@ export class Preferences {
     this.disposed = false;
     const lifecycle = ++this.lifecycle;
     this.unsubscribe = this.client.subscribe(event => {
+      if (event.type === 'connection-state' && event.state === 'connected') {
+        for (const key of this.pendingRefresh) if (!this.snapshot[key].saving) void this.reload(key);
+      }
       const source = event.type === 'global-state-updated' ? 'global' : event.type === 'persisted-atom-updated' || event.type === 'persisted-atoms-changed' ? 'atom' :
         event.type === 'settings-changed' ? 'setting' : null;
       if (source) {
@@ -306,7 +309,7 @@ export class Preferences {
     this.update(key, { observation: clone(raw), editBase, conflict, saved: clone(value),
       value: editBase ? entry.value : clone(value), available: true, loading: false, error: null });
   }
-  async reload(key: PreferenceKey): Promise<void> {
+  async reload(key: PreferenceKey, assertBeforeSend?: () => void): Promise<void> {
     if (this.snapshot[key].saving) { this.pendingRefresh.add(key); return; }
     const revision = (this.revisions.get(key) ?? 0) + 1;
     const lifecycle = this.lifecycle;
@@ -314,8 +317,11 @@ export class Preferences {
     const source = preferenceDefinitions[key].source;
     const endpoint = source === 'setting' ? 'get-setting' : source === 'global' ? 'get-global-state' : 'get-persisted-atom';
     try {
-      const response = await this.client.host<unknown>(endpoint, { key });
-      if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) this.applyRead(key, observation(response));
+      const response = await this.client.host<unknown>(endpoint, { key }, { assertBeforeSend });
+      if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) {
+        if (!this.snapshot[key].saving) this.pendingRefresh.delete(key);
+        this.applyRead(key, observation(response));
+      }
     } catch (error) {
       if (this.lifecycle === lifecycle && this.revisions.get(key) === revision) this.update(key, { loading: false, error: errorText(error) });
     }
@@ -412,11 +418,14 @@ export class Preferences {
       if (this.pendingRefresh.delete(key)) void this.reload(key);
       return matches;
     } catch (error) {
-      this.pendingRefresh.delete(key);
-      if (acknowledged) this.update(key, { observation: written, saved: clone(sent) as never, editBase: written, baseValue: clone(sent) as never });
+      if (acknowledged) {
+        this.pendingRefresh.add(key);
+        this.update(key, { observation: written, saved: clone(sent) as never, editBase: written, baseValue: clone(sent) as never });
+      }
       this.update(key, { saving: false, error: `Could not confirm save: ${errorText(error)}. Your edit is preserved.` });
       if (!acknowledged) {
-        await this.reload(key);
+        try { assertBeforeSend?.(); } catch { return false; }
+        await this.reload(key, assertBeforeSend);
         if (!this.snapshot[key].conflict) this.update(key, { error: `Could not confirm save: ${errorText(error)}. Your edit is preserved.` });
       }
       return false;
