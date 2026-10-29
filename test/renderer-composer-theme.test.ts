@@ -51,7 +51,10 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
         if(!owner)throw Error('original authority lost');
         return client.host('queue-edit',{hostId:owner.hostId,threadId:owner.threadId,entry},{assertBeforeSend});}
     }));
-    window.fixture={state,applyTheme(variant,background,foreground){
+    window.fixture={state,applyDefaultAppearance(dark,overrides){
+      applyAppearance({[dark?'appearanceDarkChromeTheme':'appearanceLightChromeTheme']:
+        {...defaultThemes[dark?'dark':'light'],...overrides}},dark);
+    },applyTheme(variant,background,foreground){
       const theme={...defaultThemes[variant],surface:background,ink:foreground,
         fonts:{ui:'Arial',content:'Georgia',code:'Courier New'}};
       applyAppearance({[variant==='dark'?'appearanceDarkChromeTheme':'appearanceLightChromeTheme']:theme,
@@ -167,6 +170,14 @@ test('composer surfaces, controls, queue and content follow the supplied appeara
     });
     assert.match(await page.locator('.ProseMirror').evaluate(element => getComputedStyle(element).fontFamily), /Times New Roman/);
     assert.match(await page.locator('.ProseMirror code').evaluate(element => getComputedStyle(element).fontFamily), /Consolas/);
+    for (const [dark, overrides, foreground] of [
+      [true, {}, 'rgb(223, 223, 223)'], [false, {}, 'rgb(26, 28, 31)'],
+      [true, { ink: '#f0f5f2' }, 'rgb(240, 245, 242)'],
+      [true, { fonts: { ui: 'Arial', code: null } }, 'rgb(255, 255, 255)'],
+    ] as const) {
+      await page.evaluate(({ dark, overrides }) => (window as any).fixture.applyDefaultAppearance(dark,overrides), { dark, overrides });
+      assert.equal(await page.locator('.ProseMirror').evaluate(element => getComputedStyle(element).color), foreground);
+    }
     assert.deepEqual(errors, []);
     assert.deepEqual(failures, []);
   } finally { await context.close(); await browser.close(); }

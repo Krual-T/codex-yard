@@ -15,6 +15,14 @@ function composerBackground(theme: ChromeTheme, dark: boolean): string {
   return `rgb(${channels.join(', ')})`;
 }
 
+function isDefaultDarkTheme(theme: ChromeTheme): boolean {
+  const defaults = defaultThemes.dark;
+  return ['accent', 'contrast', 'ink', 'surface', 'opaqueWindows'].every(key => theme[key] === defaults[key]) &&
+    ['diffAdded', 'diffRemoved', 'skill'].every(key => theme.semanticColors[key] === defaults.semanticColors[key]) &&
+    theme.fonts.ui === defaults.fonts.ui && theme.fonts.code === defaults.fonts.code && theme.fonts.content == null &&
+    theme.fonts.uiFace == null && theme.fonts.codeFace == null && theme.fonts.contentFace == null;
+}
+
 /** Apply the same persisted theme edited by Appearance, clearing previous-mode values. */
 export function applyAppearance(values: Record<string, unknown>, dark: boolean, root = document.documentElement) {
   const raw = dark ? values.appearanceDarkChromeTheme : values.appearanceLightChromeTheme;
@@ -23,7 +31,7 @@ export function applyAppearance(values: Record<string, unknown>, dark: boolean, 
   applyThemeFontFaces(theme.fonts, root.ownerDocument);
   const contrast = theme.contrast / 100;
   const variables: Record<string, string> = {
-    '--yard-bg': theme.surface, '--yard-fg': theme.ink, '--yard-accent': theme.accent,
+    '--yard-bg': theme.surface, '--yard-fg': dark && isDefaultDarkTheme(theme) ? '#dfdfdf' : theme.ink, '--yard-accent': theme.accent,
     '--yard-composer-bg': composerBackground(theme, dark),
     '--yard-surface': `color-mix(in srgb, ${theme.ink} 4%, ${theme.surface})`,
     '--yard-panel': `color-mix(in srgb, ${theme.ink} 6%, ${theme.surface})`,
