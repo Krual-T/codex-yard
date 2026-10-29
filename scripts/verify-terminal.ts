@@ -109,7 +109,7 @@ CodexConnection.prototype.receive = function (this: CodexConnection, data, sourc
   }
   return originalReceive.call(this, data, sourceSocket);
 };
-type ShortcutObservation = { at: number; hostId: string | null; connection: string | null; state: string | null;
+type ShortcutObservation = { at: number; hostId: string | null;
   focus: { tag: string; label: string | null; className: string } | null; defaultPrevented?: boolean };
 const results: { hostId: string; projectId: string; cwd: string; checks: string[]; gaps: string[]; errors: string[];
   requests: typeof requests; events: typeof events; connections: typeof connections; innerRpc: InnerRpc[]; firstShortcut?: ShortcutObservation | null;
@@ -138,6 +138,15 @@ async function capture(name: string) {
   await writeFile(join(output, name + '.txt'), await page.locator('body').ariaSnapshot());
   await page.screenshot({ path: join(output, name + '.png'), timeout: 10000 });
 }
+async function openPanelItem(name: 'Workspace files' | 'Open Chrome panel') {
+  assert.ok(page);
+  const summary = page.locator('summary[aria-label="Open side panel"]');
+  const menu = summary.locator('..');
+  if (await menu.getAttribute('open') === null) await summary.click();
+  await menu.getByRole('menuitem', { name, exact: true }).click();
+  if (await menu.getAttribute('open') !== null) await summary.click();
+}
+const latestHostState = (hostId: string) => [...connections].reverse().find(connection => connection.hostId === hostId)?.state;
 try {
   assert.ok(targets.length, 'No matching disposable fixture project; use fixture-local or --ssh --project=fixture-ssh');
   assert.ok(!requestedSsh || targets.some(target => target.hostId === remoteHost), '--ssh requires the fixture-ssh project');
@@ -242,11 +251,9 @@ try {
       window.addEventListener('keydown', event => {
         if (!event.ctrlKey || event.code !== 'Backquote') return;
         const host = document.querySelector<HTMLSelectElement>('select[aria-label="Execution host"]');
-        const connection = document.querySelector('.yard-connection');
         const focus = document.activeElement;
         const observation: ShortcutObservation = {
-          at: Date.now(), hostId: host?.value ?? null, connection: connection?.getAttribute('title') ?? null,
-          state: connection?.getAttribute('data-state') ?? null,
+          at: Date.now(), hostId: host?.value ?? null,
           focus: focus ? { tag: focus.tagName, label: focus.getAttribute('aria-label'), className: String(focus.className) } : null,
         };
         (window as Window & { yardTerminalShortcut?: ShortcutObservation }).yardTerminalShortcut = observation;
@@ -281,7 +288,7 @@ try {
     const projectAction = page.getByRole('button', { name: `New chat in ${target.label}`, exact: true });
     await projectAction.click({ timeout: 60000 });
     await page.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作|Work with Codex)$/ }).waitFor();
-    await page.locator('.yard-connection[data-state="connected"]').waitFor({ timeout: 30000 });
+    await until(() => latestHostState(target.hostId) === 'connected', 'selected host connection');
     const terminal = page.locator('.yard-terminal-container:visible .xterm-helper-textarea');
     async function waitForNewTerminal(previousCount: number) {
       await until(() => requests.filter(request => request.operation === 'create').length > previousCount, 'new terminal request');
@@ -297,7 +304,9 @@ try {
     }
     async function open() {
       const before = requests.filter(request => request.operation === 'create').length;
-      await page!.getByRole('button', { name: 'Open terminal', exact: true }).click();
+      const toggle = page!.getByRole('button', { name: 'Toggle bottom panel', exact: true });
+      if (await page!.locator('.yard-workspace-panels:visible').isVisible()) await toggle.click();
+      await toggle.click();
       await terminal.waitFor({ state: 'attached' });
       await waitForNewTerminal(before);
     }
@@ -389,23 +398,23 @@ try {
     }
     checks.push('Real PTY multiline and streaming output, Ctrl+C and kernel dimensions');
     await page.getByRole('button', { name: /^(隐藏面板|Hide panel)$/ }).click();
-    await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
+    await openPanelItem('Workspace files');
     assert.equal(await pid('TW_HIDE_REVEAL'), initialPid);
     assert.equal(requests.filter(request => request.operation === 'create').length, 1);
     checks.push('Hiding and revealing the panel preserves the same shell');
     await page.setViewportSize({ width: 390, height: 780 });
+    const closeSidebar = page.getByRole('button', { name: 'Close sidebar', exact: true });
+    if (await closeSidebar.isVisible()) await closeSidebar.click();
     const hideAtMobile = page.getByRole('button', { name: /^(隐藏面板|Hide panel)$/ });
     const hideBox = await hideAtMobile.boundingBox();
     assert.ok(hideBox && hideBox.x >= 0 && hideBox.x + hideBox.width <= 390, 'The hide control must remain reachable on a narrow screen');
     await hideAtMobile.click();
-    const closeSidebar = page.getByRole('button', { name: 'Close sidebar', exact: true });
-    if (await closeSidebar.isVisible()) await closeSidebar.click();
-    await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
+    await openPanelItem('Workspace files');
     assert.equal(await pid('TW_MOBILE_REVEAL'), initialPid);
     assert.equal(requests.filter(request => request.operation === 'create').length, 1);
     checks.push('Narrow-screen hide and reveal controls preserve the same shell');
     await page.setViewportSize({ width: 1100, height: 800 });
-    await page.getByRole('button', { name: 'Open terminal', exact: true }).click();
+    await page.locator('.yard-panel-header').getByRole('button', { name: 'Create terminal tab', exact: true }).click();
     await waitForNewTerminal(1);
     const secondPid = await pid('TW_SECOND');
     assert.notEqual(secondPid, initialPid);
@@ -428,8 +437,8 @@ try {
     await until(async () => await page!.getByRole('tab', { name: 'Terminal' }).count() === 1, 'second terminal tab closes');
     assert.equal(requests.filter(request => request.operation === 'create').length, 2);
     checks.push('Explicit new terminal opens another shell; switching tabs preserves the first');
-    await page.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
-    await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
+    await openPanelItem('Open Chrome panel');
+    await openPanelItem('Workspace files');
     assert.equal(await pid('TW_SAME'), initialPid);
     assert.equal(requests.filter(request => request.operation === 'create').length, 2);
     checks.push('Switching away and back preserves the same shell');
@@ -456,13 +465,14 @@ try {
     const beforeReload = await pid('TW_BEFORE_RELOAD');
     const reloadChild = await child('TW_RELOAD_CHILD');
     await command(`printf 'TW_ONCE\\n'`); await waitText('TW_ONCE');
+    const reloadConnectionStart = connections.length;
     await page.reload({ waitUntil: 'commit' });
     if (!await projectAction.isVisible()) await page.getByRole('button', { name: 'Toggle sidebar', exact: true }).click();
     await projectAction.click({ timeout: 60000 });
     await stopped(beforeReload); await stopped(reloadChild);
-    await until(async () => await page!.getByRole('combobox', { name: 'Execution host' }).inputValue() === target.hostId
-      && await page!.locator('.yard-connection').getAttribute('data-state') === 'connected'
-      && (await page!.locator('.yard-connection').getAttribute('title'))?.includes('Host: connected') === true,
+    await until(async () => await page!.locator('select[aria-label="Execution host"]').inputValue() === target.hostId
+      && connections.slice(reloadConnectionStart).some(connection => connection.hostId === target.hostId && connection.state === 'connected')
+      && latestHostState(target.hostId) === 'connected',
     'selected host ready after reload');
     await open();
     const afterReload = await pid('TW_AFTER_RELOAD');
@@ -505,7 +515,7 @@ try {
     }
     catch {
       gaps.push('Ctrl+Backquote did not reveal the existing terminal');
-      await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
+      await openPanelItem('Workspace files');
     }
     assert.equal(await pid('TW_SHORTCUT_SAME'), reconnectedPid);
     assert.equal(requests.filter(request => request.operation === 'create').length, createCount + 1);
@@ -516,8 +526,9 @@ try {
     if (target.hostId === 'local') localFake.disconnectAll();
     else for (const stream of sshStreams) stream.destroy();
     try {
-      await until(async () => (await page!.locator('.yard-connection').getAttribute('title'))?.includes('Host: disconnected') === true,
+      await until(() => latestHostState(target.hostId) === 'disconnected',
         'selected host disconnected while the browser is connected', 5000);
+      await page.getByRole('status').filter({ hasText: 'Host disconnected' }).waitFor({ timeout: 5000 });
       const reconnect = page.getByRole('button', { name: 'Reconnect host', exact: true });
       if (!await reconnect.isVisible()) gaps.push('Disconnected host does not offer an explicit Reconnect host action');
       await page.keyboard.press('Control+Backquote');
@@ -529,7 +540,7 @@ try {
       const feedback = async () => (await page!.locator('[role="alert"]:visible, [role="status"]:visible').allTextContents())
         .some(text => /terminal|host|终端|主机/i.test(text) && /unavailable|connect|disconnect|不可用|连接|断开/i.test(text));
       if (!await feedback()) gaps.push('Unavailable terminal shortcut did not show a clear connection message');
-      const toolbar = page.getByRole('button', { name: 'Open terminal', exact: true });
+      const toolbar = page.locator('.yard-panel-header').getByRole('button', { name: 'Create terminal tab', exact: true });
       if (await toolbar.isEnabled()) {
         await toolbar.click();
         if (!await feedback()) gaps.push('Unavailable terminal button did not clearly reject the action');
@@ -540,8 +551,10 @@ try {
       await capture(target.projectId + '-host-unavailable');
       if (await reconnect.isVisible()) {
         const beforeReconnect = requests.filter(request => request.operation === 'create').length;
+        const reconnectConnectionStart = connections.length;
         await reconnect.click();
-        await page.locator('.yard-connection[data-state="connected"]').waitFor({ timeout: 30000 });
+        await until(() => connections.slice(reconnectConnectionStart).some(connection => connection.hostId === target.hostId && connection.state === 'connected')
+          && latestHostState(target.hostId) === 'connected', 'explicit host reconnect');
         assert.equal(requests.filter(request => request.operation === 'create').length, beforeReconnect,
           'Reconnecting must not automatically create a terminal');
         checks.push('Explicit host reconnect does not automatically create a shell');
