@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { StandaloneMini } from '../src/renderer/mini/index.tsx';
+import type { MiniQuickChatOpen, MiniQuickChatState } from '../src/renderer/mini/index.tsx';
 import { MiniConversation, miniDraftIdentity } from '../src/renderer/mini/MiniConversation.tsx';
 import type { MiniConversationController, MiniConversationLease, MiniConversationTarget } from '../src/renderer/mini/MiniConversation.tsx';
 import { StandaloneComposer } from '../src/renderer/composer/StandaloneComposer.tsx';
 import { readComposerDraft, readComposerDraftVersions } from '../src/renderer/composer/composer-draft-store.ts';
-import type { ComposerDraftController, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
+import type { ComposerDraftController, ComposerDraftLease, ComposerDraftSnapshot } from '../src/renderer/composer/StandaloneComposer.tsx';
+import { BrowserWorkbenchClient } from '../src/renderer/app/client.ts';
 import { removeBrowserDraftReference } from '../src/renderer/app/browser-draft.ts';
 import { addBrowserComment } from './browser-comment-fixture.ts';
 import { readBrowserAtom, updateBrowserAtom } from '../src/renderer/storage/ui-atoms.ts';
@@ -16,7 +18,8 @@ import { MessageEditRecoveryStore, messageEditChanged, messageEditsAtom } from '
 import type { EditRecoveryStorage, StoredMessageEdit } from '../src/renderer/app/message-edit-recovery.ts';
 import { StandaloneMessages } from '../src/renderer/messages/StandaloneMessages.tsx';
 import type { MessageEditNavigationController, MessageEditNavigationLease } from '../src/renderer/messages/StandaloneMessages.tsx';
-import type { WorkbenchClient, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
+import type { MessageEditAccess } from '../src/renderer/messages/use-message-editing.ts';
+import type { WorkbenchClient, WorkbenchDispatchOptions, WorkbenchEvent } from '../src/renderer/workbench-contract.ts';
 import type { ThreadSummary, TurnSummary } from '../lib/codex-protocol.ts';
 
 const listeners = new Set<(event: WorkbenchEvent) => void>();
@@ -58,9 +61,41 @@ let switchAtClear: (() => void) | null = null, switching: Promise<boolean> | nul
 let barrierLease: MiniConversationLease | null = null;
 let peerController: MessageEditNavigationController | null = null, peerLease: MessageEditNavigationLease | null = null;
 let mainRelease: (() => void) | undefined;
+const quickRequests: MiniQuickChatOpen[] = [];
+const quickStates: (MiniQuickChatState & { contentInert: boolean | null })[] = [];
+let parentFence = false, miniFence = false, rejectOpen = false, holdOpen = false, openWaiting = false;
+let releaseOpen: (() => void) | undefined, parentLease: ComposerDraftLease | null = null;
+let miniOpenLease: MiniConversationLease | null = null;
+let holdEditTransaction = false, editTransactionWaiting = false, releaseEditTransaction: (() => void) | undefined;
+let editTransactionError = '', miniAccess: MessageEditAccess | null = null;
+let realInterrupt: BrowserWorkbenchClient | null = null, interruptSocket: FixtureSocket | null = null;
+let holdInterrupt = false, interruptWaiting = false, releaseInterrupt: (() => void) | undefined;
+let dropInterrupt = false;
+const originalWebSocket = Object.getOwnPropertyDescriptor(window, 'WebSocket');
+class FixtureSocket {
+  static OPEN = 1;
+  readyState = 0;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor(_url: string) { interruptSocket = this; }
+  open() { this.readyState = 1; this.onopen?.(); }
+  close() { if (this.readyState !== 3) { this.readyState = 3; this.onclose?.(); } }
+  send(value: string) {
+    const message = JSON.parse(value);
+    if (message.type !== 'mcp-request') return;
+    calls.push({ method: message.request.method, hostId: message.hostId, params: structuredClone(message.request.params) });
+    if (dropInterrupt) { dropInterrupt = false; this.close(); return; }
+    complete(message.hostId, message.request.params.threadId);
+    queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: 'mcp-response', hostId: message.hostId,
+      message: { id: message.request.id, result: {} } }) }));
+  }
+}
 const client: WorkbenchClient & { connected: boolean } = {
   get connected() { return connected; },
-  async rpc<T>(method: string, params: Record<string, unknown> = {}, hostId = 'local'): Promise<T> {
+  async rpc<T>(method: string, params: Record<string, unknown> = {}, hostId = 'local', options?: WorkbenchDispatchOptions): Promise<T> {
+    if (method === 'turn/interrupt' && realInterrupt) return realInterrupt.rpc<T>(method, params, hostId, options);
     calls.push({ method, hostId, params: structuredClone(params) });
     if (method === 'model/list') return { data: [{ id: 'fixture', model: 'fixture-model', displayName: 'Fixture', isDefault: true,
       supportedReasoningEfforts: [] }], nextCursor: null } as T;
@@ -131,7 +166,13 @@ const sessions = new ConversationSessions(client, async identity => (await sends
 const editStorage: EditRecoveryStorage = {
   read: () => readBrowserAtom(messageEditsAtom),
   update: async change => {
-    const result = await updateBrowserAtom(messageEditsAtom, change);
+    if (holdEditTransaction) {
+      holdEditTransaction = false; editTransactionWaiting = true;
+      await new Promise<void>(resolve => { releaseEditTransaction = resolve; }); editTransactionWaiting = false;
+    }
+    let result: unknown;
+    try { result = await updateBrowserAtom(messageEditsAtom, change); }
+    catch (reason) { editTransactionError = reason instanceof Error ? reason.message : String(reason); throw reason; }
     const entries = result as Record<string, StoredMessageEdit>;
     if (holdEditPreparation && Object.values(entries).some(value => value.submission?.stage === 'revertUnknown')) {
       holdEditPreparation = false; editPreparing = true;
@@ -150,6 +191,8 @@ edits.save = async (...args: Parameters<MessageEditRecoveryStore['save']>) => {
   return realSaveEdit(...args);
 };
 const peerAccess = edits.createAccess();
+const createEditAccess = edits.createAccess.bind(edits);
+edits.createAccess = () => { const access = createEditAccess(); miniAccess = access; return access; };
 const realReadSends = sends.read.bind(sends), realReadEdits = edits.read.bind(edits), realReady = sessions.ready.bind(sessions);
 sends.read = async () => {
   if (holdRetryRead) { holdRetryRead = false; retryReadWaiting = true;
@@ -186,7 +229,7 @@ function PeerMessages({ visible }: { visible: boolean }) {
   return <section id="peer-messages"><StandaloneMessages client={client} hostId="remote" thread={view.thread}
     editAccess={peerAccess} editRecovery={recovery?.recovery ?? null} editHistory={{ order: 'ascending', tailComplete: view.historyComplete }}
     onEditNavigationController={value => { peerController = value; }}
-    onEditDraftChange={(value, origin, version) => edits.save(value, origin, version)} onEdit={async (_draft, origin, prepare) => {
+    onEditDraftChange={(value, origin, version, authority) => edits.save(value, origin, version, authority)} onEdit={async (_draft, origin, prepare) => {
       const assertAccess = peerAccess.capture(origin);
       await prepare();
       await edits.submit(origin, ['original-turn'], {}, assertAccess);
@@ -198,15 +241,19 @@ function Fixture() {
   const [ownerAvailable, setOwnerAvailable] = useState(true);
   const [connectionRevision, setConnectionRevision] = useState(0);
   const [peerVisible, setPeerVisible] = useState(false);
+  const [quickGrant, setQuickGrant] = useState(true);
+  const [mainGrant, setMainGrant] = useState(true);
   const main = useConversationSession(sessions, { hostId: 'local', threadId: 'thread-a' }, false, true, 0);
   const targetRef = useRef(target); targetRef.current = target;
   useEffect(() => {
     fixture.renderConnection = value => { setOnline(value); if (value) setConnectionRevision(revision => revision + 1); };
     fixture.renderOwner = value => { authorityEpoch++; setOwnerAvailable(value); };
     fixture.renderPeer = setPeerVisible;
+    fixture.renderQuickGrant = setQuickGrant;
+    fixture.renderMainGrant = setMainGrant;
   }, []);
   return <>
-    <div id="main"><StandaloneComposer client={client} context={{ hostId: 'local', threadId: 'thread-a', draftId: 'main-draft', cwd: '/fixture/local' }}
+    <div id="main" inert={!mainGrant}><StandaloneComposer client={client} context={{ hostId: 'local', threadId: 'thread-a', draftId: 'main-draft', cwd: '/fixture/local' }}
       busy={false} initialOptions={main.options ?? undefined} onDraftController={value => { mainController = value; }}
       onSubmit={async () => {}} onInterrupt={async () => {}} /></div>
     <PeerMessages visible={peerVisible} />
@@ -216,11 +263,43 @@ function Fixture() {
       } else if (command.type === 'avatar-overlay-hide' || command.type === 'avatar-overlay-close') {
         emit({ type: 'workbench-pet-state', state: { isOpen: false, visibility: 'always-visible', position: null } });
       }
-    }} activities={[]} bridgeState={online ? 'connected' : 'disconnected'}
+    }} activities={[{ hostId: 'remote', threadId: 'thread-b', title: 'Remote fixture', status: 'idle',
+      actions: [{ id: 'follow-remote', kind: 'follow-up', label: 'Follow remote' }] }]} bridgeState={online ? 'connected' : 'disconnected'}
     hostConnections={{ local: { state: 'connected', fresh: true, revision: String(connectionRevision) },
       remote: { state: 'connected', fresh: true, revision: String(connectionRevision) } }} pendingRequests={[]}
     quickChatTarget={{ hostId: target.hostId, threadId: target.threadId }} onOpenThread={() => {}} onOpenRequest={() => {}}
     onExpand={() => {}} onRespond={async () => {}} onInputDraftChange={() => {}}
+    quickChatInteractive={quickGrant} onQuickChatStateChange={value => {
+      const element = document.querySelector<HTMLElement>('[data-mini-composer-content]');
+      quickStates.push({ ...structuredClone(value), contentInert: element?.inert ?? null });
+    }} onBeforeQuickChatOpen={request => {
+      quickRequests.push(structuredClone(request));
+      if (parentFence) {
+        const current = mainController?.snapshot();
+        parentLease = current ? mainController?.freeze(current.owner) ?? null : null;
+        if (!parentLease) return Promise.resolve(false);
+      }
+      if (miniFence && controller) {
+        miniOpenLease = controller.freeze();
+        if (!miniOpenLease) { parentLease?.release(); parentLease = null; return Promise.resolve(false); }
+      }
+      return (async () => {
+        if (holdOpen) { holdOpen = false; openWaiting = true;
+          await new Promise<void>(resolve => { releaseOpen = resolve; }); openWaiting = false; }
+        if (rejectOpen || parentLease && !await parentLease.flush() || miniOpenLease && !await miniOpenLease.flush()) {
+          parentLease?.release(); parentLease = null; miniOpenLease?.release(); miniOpenLease = null; return false;
+        }
+        if (request.source === 'follow-up') { miniOpenLease?.release(); miniOpenLease = null; }
+        return true;
+      })();
+    }} onQuickChatTarget={async identity => {
+      if (controller) return fixture.target(identity.hostId, identity.threadId);
+      if (rejectTarget) return false;
+      const state = await sends.read();
+      const next: MiniConversationTarget = { ...identity, draftId: miniDraftIdentity(identity.hostId, identity.threadId, state.bindings),
+        cwd: '/fixture/' + identity.hostId };
+      targets.push(next); sessionStorage.setItem('fixture-mini-target', JSON.stringify(next)); setTarget(next); return true;
+    }}
     onBeforeQuickChatClose={async () => { const lease = controller?.freeze(); if (!lease) return false;
       try { return await lease.flush(); } finally { lease.release(); } }}>
       <MiniConversation client={client} sessions={sessions} sends={sends} edits={edits} initialTarget={target}
@@ -299,6 +378,39 @@ IDBObjectStore.prototype.get = function (key) {
 const root = createRoot(document.getElementById('root')!);
 const fixture = {
   calls, hostCalls, opened, errors, targets, projectChecks, projectMembership, sends, sessions,
+  quickRequests, quickStates,
+  fenceParent(value: boolean) { parentFence = value; },
+  fenceMini(value: boolean) { miniFence = value; },
+  rejectOpen(value: boolean) { rejectOpen = value; },
+  holdOpen() { holdOpen = true; }, openWaiting: () => openWaiting,
+  releaseOpen() { releaseOpen?.(); releaseOpen = undefined; },
+  grantMini() { fixture.renderMainGrant(false); parentLease?.release(); parentLease = null; fixture.renderQuickGrant(true); },
+  grantMain() { fixture.renderQuickGrant(false); fixture.renderMainGrant(true); },
+  holdEditTransaction() { holdEditTransaction = true; editTransactionError = ''; },
+  editTransactionWaiting: () => editTransactionWaiting, editTransactionError: () => editTransactionError,
+  releaseEditTransaction() { releaseEditTransaction?.(); releaseEditTransaction = undefined; },
+  transferEdit() {
+    const identity = { hostId: 'remote', threadId: 'thread-b' };
+    miniAccess?.release(identity); return peerAccess.acquire(identity);
+  },
+  async useRealInterrupt() {
+    Object.defineProperty(window, 'WebSocket', { configurable: true, writable: true, value: FixtureSocket });
+    realInterrupt = new BrowserWorkbenchClient('ws://fixture.invalid/native-host');
+    const connect = realInterrupt.connect.bind(realInterrupt);
+    realInterrupt.connect = async () => {
+      if (holdInterrupt) { holdInterrupt = false; interruptWaiting = true;
+        await new Promise<void>(resolve => { releaseInterrupt = resolve; }); interruptWaiting = false; }
+      return connect();
+    };
+    const opening = realInterrupt.connect(); interruptSocket!.open(); await opening;
+  },
+  holdInterrupt() { holdInterrupt = true; }, interruptWaiting: () => interruptWaiting,
+  releaseInterrupt() { releaseInterrupt?.(); releaseInterrupt = undefined; },
+  async replaceInterruptSocket() {
+    interruptSocket?.close();
+    const opening = realInterrupt!.connect(); interruptSocket!.open(); await opening;
+  },
+  dropInterrupt() { dropInterrupt = true; },
   captures: () => captures, writesAfterCapture: () => writesAfterCapture,
   holdDispatch(method: string) { heldDispatch = method; }, dispatchWaiting: () => dispatchWaiting,
   releaseDispatch() { releaseDispatch?.(); releaseDispatch = undefined; },
@@ -312,6 +424,7 @@ const fixture = {
   releaseEditSnapshot() { releaseEditSnapshot?.(); releaseEditSnapshot = undefined; },
   failTargetAfterWrite() { failTargetAfterWrite = true; },
   renderConnection: (_value: boolean) => {}, renderOwner: (_value: boolean) => {}, renderPeer: (_value: boolean) => {},
+  renderQuickGrant: (_value: boolean) => {}, renderMainGrant: (_value: boolean) => {},
   controller: () => controller, main: () => mainController?.snapshot(),
   draftController: () => miniController,
   receipt: () => structuredClone(browserReceipt),
@@ -342,7 +455,7 @@ const fixture = {
     const reference = await addBrowserComment(snapshot.owner, { kind: 'element', pageUrl: 'https://fixture.invalid/page',
       framePath: [], title: 'Fixture element', immediateText: 'Example', role: 'button', name: 'Example', selector: '#fixture',
       elementPath: '#fixture', nearbyText: 'Example', rect: { x: 1, y: 2, width: 20, height: 10 }, elementMetadata: { tag: 'button' } });
-    if (!await current.update(snapshot.owner, draft => ({ ...draft, references: [...draft.references, reference] }))) {
+    if (!await current.update(snapshot.owner, draft => ({ ...draft, references: [...(draft.references ?? []), reference] }))) {
       throw new Error('Could not attach fixture browser reference');
     }
     return reference;
@@ -407,7 +520,9 @@ const fixture = {
   disconnect() { connected = false; authorityEpoch++; fixture.renderConnection(false); emit({ type: 'connection-state', state: 'disconnected' }); },
   reconnect() { connected = true; authorityEpoch++; fixture.renderConnection(true); emit({ type: 'connection-state', state: 'connected' }); },
   unknown() { unknownNext = true; }, hold() { holdNext = true; }, release() { resolveHeld?.(); resolveHeld = undefined; }, complete,
-  dispose() { root.unmount(); mainRelease?.(); sessions.dispose(); IDBObjectStore.prototype.put = nativePut; IDBObjectStore.prototype.get = nativeGet;
+  dispose() { root.unmount(); mainRelease?.(); parentLease?.release(); miniOpenLease?.release(); realInterrupt?.close(); sessions.dispose();
+    if (originalWebSocket) Object.defineProperty(window, 'WebSocket', originalWebSocket);
+    IDBObjectStore.prototype.put = nativePut; IDBObjectStore.prototype.get = nativeGet;
     IDBDatabase.prototype.transaction = nativeTransaction; },
 };
 (window as unknown as { miniFixture: typeof fixture }).miniFixture = fixture;

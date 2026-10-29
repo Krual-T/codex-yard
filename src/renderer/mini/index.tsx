@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { ChevronDown, Maximize2, MessageSquare, MoreHorizontal, Settings, X } from 'lucide-react';
 import type { PetPosition, WebPetState } from '../../native/pet-overlay.ts';
@@ -34,6 +34,21 @@ export interface MiniActivity {
   actions?: readonly MiniNotificationAction[];
 }
 
+export interface MiniQuickChatState {
+  mounted: boolean;
+  visible: boolean;
+  /** The committed content wrapper is interactive; inner controls may still be loading or read-only. */
+  interactive: boolean;
+  transitioning: boolean;
+  target: { hostId: string; threadId: string | null } | null;
+}
+
+export interface MiniQuickChatOpen {
+  source: 'open' | 'recover' | 'follow-up';
+  target: { hostId: string; threadId: string | null } | null;
+  previous: MiniQuickChatState;
+}
+
 export interface StandaloneMiniProps {
   client: WorkbenchClient;
   send(message: MiniCommand): Promise<void>;
@@ -55,6 +70,12 @@ export interface StandaloneMiniProps {
   children?: ReactNode;
   /** Required for notification follow-up; null threadId denotes a new draft. */
   quickChatTarget?: { hostId: string; threadId: string | null };
+  /** The parent synchronously freezes the current owner before starting its drain. */
+  onBeforeQuickChatOpen?(request: MiniQuickChatOpen): Promise<boolean>;
+  /** Report the committed Mini subtree and actual interaction state after layout. */
+  onQuickChatStateChange?(state: MiniQuickChatState): void;
+  /** The parent has transferred exclusive input authority to this Mini view. */
+  quickChatInteractive?: boolean;
   onBeforeQuickChatClose(): Promise<boolean>;
   onQuickChatTarget?(identity: MiniIdentity): Promise<boolean>;
   /** Disable when the application already owns the in-page shortcut handler. */
@@ -80,7 +101,7 @@ function motionFor(activities: readonly MiniActivity[]): PetMotion {
 
 export function StandaloneMini({ client, send, activities, bridgeState, hostConnections, pendingRequests, onOpenThread, onOpenRequest, onExpand, onRespond,
   onInputDraftChange, onNotificationAction, onOpenSettings, children, quickChatTarget, onBeforeQuickChatClose,
-  onQuickChatTarget, shortcut = true }: StandaloneMiniProps) {
+  onBeforeQuickChatOpen, onQuickChatStateChange, quickChatInteractive = true, onQuickChatTarget, shortcut = true }: StandaloneMiniProps) {
   const [state, setState] = useState<WebPetState | null>(null);
   const [petStateConfirmed, setPetStateConfirmed] = useState(false);
   const [petError, setPetError] = useState('');
@@ -94,6 +115,8 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
   const [recovering, setRecovering] = useState(false);
   const [recoveryAvailable, setRecoveryAvailable] = useState(false);
   const [transition, setTransition] = useState(false);
+  const [openingCommit, setOpeningCommit] = useState(false);
+  const [transitionVersion, setTransitionVersion] = useState(0);
   const [draftError, setDraftError] = useState('');
   const [requestedTarget, setRequestedTarget] = useState<MiniIdentity | null>(null);
   const [saving, setSaving] = useState(false);
@@ -131,8 +154,15 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
   const hideConfirmation = useRef<((confirmed: boolean) => void) | null>(null);
   const transitionRef = useRef(false);
   const composerMountedRef = useRef(false);
+  const composerRef = useRef(composer);
+  const recoveringRef = useRef(recovering);
   const sendRef = useRef(send);
   const beforeCloseRef = useRef(onBeforeQuickChatClose);
+  const beforeOpenRef = useRef(onBeforeQuickChatOpen);
+  const quickStateRef = useRef(onQuickChatStateChange);
+  const quickTargetRef = useRef(quickChatTarget);
+  const committedQuickState = useRef<MiniQuickChatState>({ mounted: false, visible: false, interactive: false,
+    transitioning: false, target: quickChatTarget ? { ...quickChatTarget } : null });
   const connectionsRef = useRef(hostConnections);
   const bridgeRef = useRef(bridgeState);
   const observedBridge = useRef<string | null>(null);
@@ -150,7 +180,12 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
   sendRef.current = send;
   requestsRef.current = pendingRequests;
   beforeCloseRef.current = onBeforeQuickChatClose;
+  beforeOpenRef.current = onBeforeQuickChatOpen;
+  quickStateRef.current = onQuickChatStateChange;
+  quickTargetRef.current = quickChatTarget;
   composerMountedRef.current = composerMounted;
+  composerRef.current = composer;
+  recoveringRef.current = recovering;
   quickChatHostRef.current = quickChatHost;
 
   const hostReady = useCallback((hostId: string) => {
@@ -176,9 +211,10 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
     clearPetRead();
     petEpoch.current++;
     confirmedOpen.current = null;
+    if (composerFreezeElement.current) composerFreezeElement.current.inert = true;
     setPetStateConfirmed(false);
     setPetError(`${message} Mini state is unconfirmed.`);
-    if (composerMountedRef.current) { setRecoveryAvailable(true); setRecovering(true); }
+    if (composerMountedRef.current) { setRecoveryAvailable(true); setRecovering(false); }
   }, [clearPetRead]);
 
   const requestPetState = useCallback((force = false) => {
@@ -212,7 +248,10 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
       sizeRevision.current++;
       setSizeDraft(null);
     }
-    if (hostId === null || hostId === quickChatHostRef.current) composerFocusRequested.current = false;
+    if (hostId === null || hostId === quickChatHostRef.current) {
+      composerFocusRequested.current = false;
+      if (composerFreezeElement.current) composerFreezeElement.current.inert = true;
+    }
     setConnectionVersion(version => version + 1);
   }, []);
 
@@ -253,6 +292,7 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
     if (transitionRef.current) return false;
     transitionRef.current = true;
     const epoch = petEpoch.current;
+    const wasComposer = composerRef.current, wasRecovering = recoveringRef.current;
     const input = composerFreezeElement.current;
     if (input) input.inert = true;
     setTransition(true);
@@ -274,22 +314,26 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
       if (!mounted.current) return false;
       setComposer(false);
       setRecovering(false);
+      setOpeningCommit(false);
       setRequestedTarget(null);
       composerFocusRequested.current = false;
       if (mode === 'chat') quickChatButton.current?.focus();
       return true;
     } catch (reason) {
       if (mounted.current) {
-        setComposer(composerMountedRef.current);
-        if (!stateRef.current?.isOpen && composerMountedRef.current) { setRecoveryAvailable(true); setRecovering(true); }
+        setComposer(wasComposer);
+        setRecovering(wasRecovering);
+        if (!stateRef.current?.isOpen && composerMountedRef.current) {
+          setRecoveryAvailable(true);
+          if (wasComposer) setRecovering(true);
+        }
         setDraftError(reason instanceof Error && reason.message ? reason.message : 'The draft could not be saved.');
       }
       return false;
     } finally {
       transitionRef.current = false;
       hiding.current = false;
-      if (input) input.inert = false;
-      if (mounted.current) setTransition(false);
+      if (mounted.current) { setTransition(false); setTransitionVersion(value => value + 1); }
     }
   }, [sendCommand]);
 
@@ -318,7 +362,10 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
         if (!next.isOpen) {
           hiding.current = false;
           setMenu(false); setPicker(false);
-          if (wasOpen && !ownHide.current && composerMountedRef.current) setRecoveryAvailable(true);
+          if (wasOpen && !ownHide.current && composerMountedRef.current) {
+            if (composerFreezeElement.current) composerFreezeElement.current.inert = true;
+            setRecoveryAvailable(true); setRecovering(false); setComposer(false); setOpeningCommit(false);
+          }
           if (ownHide.current) { ownHide.current = false; setRecoveryAvailable(false); hideConfirmation.current?.(true); }
         } else { setRecoveryAvailable(false); setRecovering(false); }
       } else if (event.type === 'workbench-mini-setting' && typeof event.key === 'string' && settingKeys.includes(event.key as typeof settingKeys[number])) {
@@ -482,35 +529,72 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
   };
   const targetReady = !requestedTarget || quickChatTarget?.hostId === requestedTarget.hostId && quickChatTarget.threadId === requestedTarget.threadId;
   const quickReady = targetReady && !!quickChatHost && usable(quickChatHost);
+  const quickChatMounted = composerMounted && Boolean(children);
+  const asideHidden = !visibleState?.isOpen && !recoveryAvailable && !visibleError;
+  const quickChatVisible = quickChatMounted && composer && (!!visibleState?.isOpen || recovering) && !asideHidden;
+  const transitioning = transition || transitionRef.current;
+  const quickChatEnabled = quickChatVisible && petStateConfirmed && quickReady && !transitioning && !openingCommit && quickChatInteractive;
+  useLayoutEffect(() => {
+    if (!transition && !transitionRef.current && composerFreezeElement.current) composerFreezeElement.current.inert = false;
+    const snapshot: MiniQuickChatState = { mounted: quickChatMounted, visible: quickChatVisible, interactive: quickChatEnabled,
+      transitioning, target: quickChatTarget ? { ...quickChatTarget } : null };
+    committedQuickState.current = snapshot;
+    try { quickStateRef.current?.(structuredClone(snapshot)); }
+    catch (cause) {
+      setDraftError(cause instanceof Error && cause.message ? cause.message : 'Quick chat could not be opened.');
+      return;
+    }
+    if (openingCommit && quickChatVisible && targetReady) setOpeningCommit(false);
+  }, [quickChatMounted, quickChatVisible, quickChatEnabled, transitioning, transitionVersion,
+    quickChatTarget?.hostId, quickChatTarget?.threadId, openingCommit, targetReady]);
+  useEffect(() => () => {
+    try { quickStateRef.current?.({ mounted: false, visible: false, interactive: false, transitioning: false, target: null }); }
+    catch { /* Unmount still retains the parent's recovery state. */ }
+  }, []);
   useEffect(() => {
-    if (!composer || !quickReady || transition || !composerFocusRequested.current) return;
+    if (!quickChatEnabled || !composerFocusRequested.current) return;
     const input = composerElement.current?.querySelector<HTMLElement>('textarea:not(:disabled), input:not(:disabled), [contenteditable="true"]');
     if (input) { composerFocusRequested.current = false; input.focus(); }
-  }, [composer, quickReady, transition, quickChatTarget?.hostId, quickChatTarget?.threadId]);
-  async function openFollowUp(identity: MiniIdentity) {
-    if (!onQuickChatTarget || !quickChatTarget || !usable(identity.hostId) || transitionRef.current) return;
+  }, [quickChatEnabled, quickChatTarget?.hostId, quickChatTarget?.threadId]);
+  async function openQuickChat(source: MiniQuickChatOpen['source'], identity?: MiniIdentity) {
+    const previousTarget = quickTargetRef.current ? { ...quickTargetRef.current } : null;
+    const switchTarget = onQuickChatTarget;
+    if (transitionRef.current || source === 'follow-up' && (!identity || !switchTarget || !previousTarget || !usable(identity.hostId))) return false;
     transitionRef.current = true;
     const input = composerFreezeElement.current;
     if (input) input.inert = true;
+    const epoch = petEpoch.current;
+    const request: MiniQuickChatOpen = { source, target: identity ? { ...identity } : previousTarget,
+      previous: structuredClone(committedQuickState.current) };
     setTransition(true);
     setDraftError('');
-    composerFocusRequested.current = true;
-    setRequestedTarget(identity);
-    composerMountedRef.current = true;
-    setComposerMounted(true);
-    setComposer(true);
     try {
-      if (!await onQuickChatTarget(identity)) throw new Error('The draft could not be saved.');
+      const allowed = beforeOpenRef.current ? beforeOpenRef.current(request) : Promise.resolve(true);
+      if (!await allowed) throw new Error('The draft could not be saved.');
+      const current = quickTargetRef.current;
+      if (!mounted.current || epoch !== petEpoch.current || (current?.hostId ?? null) !== (previousTarget?.hostId ?? null)
+        || (current?.threadId ?? null) !== (previousTarget?.threadId ?? null)) {
+        throw new Error('Quick chat changed while saving. Your draft is still here.');
+      }
+      if (source === 'follow-up' && identity && switchTarget && !await switchTarget(identity)) throw new Error('The draft could not be saved.');
+      if (!mounted.current) return false;
+      composerFocusRequested.current = true;
+      setRequestedTarget(identity ?? null);
+      composerMountedRef.current = true;
+      setComposerMounted(true);
+      setOpeningCommit(true);
+      if (source === 'recover') setRecovering(true);
+      setComposer(true);
+      return true;
     } catch (reason) {
       if (mounted.current) {
-        setRequestedTarget(null);
         composerFocusRequested.current = false;
         setDraftError(reason instanceof Error && reason.message ? reason.message : 'The conversation could not be opened.');
       }
+      return false;
     } finally {
       transitionRef.current = false;
-      if (input) input.inert = false;
-      if (mounted.current) setTransition(false);
+      if (mounted.current) { setTransition(false); setTransitionVersion(value => value + 1); }
     }
   }
   const width = Math.min(420, viewport.width), height = Math.min(620, viewport.height);
@@ -548,7 +632,7 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
 
   if (!visibleState?.isOpen && !visibleError && !composerMounted) return null;
   return <aside ref={container} className="yard-mini" data-workbench-mini="" aria-label="Codex Mini" style={style}
-    hidden={!visibleState?.isOpen && !recoveryAvailable && !visibleError} onKeyDown={event => {
+    hidden={asideHidden} onKeyDown={event => {
       if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.defaultPrevented || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
       if (!menu && !picker && !composer) return;
       event.preventDefault(); event.stopPropagation();
@@ -559,15 +643,16 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
     <div className="yard-mini-content">
       {!visibleState?.isOpen && recoveryAvailable && <div className="yard-mini-error" role="status">
         {petStateConfirmed ? 'Quick chat was hidden. Your draft is available on this page.' : 'Mini state is unconfirmed. Your draft is available on this page.'}
-        <div><button type="button" onClick={() => { setRecovering(true); setComposer(true); }}>Show Quick chat</button></div>
+        <div><button type="button" disabled={transition} onClick={() => { void openQuickChat('recover'); }}>Show Quick chat</button></div>
       </div>}
+      {draftError && !quickChatVisible && <p className="yard-mini-composer-status" role="alert">{draftError}</p>}
       {composerMounted && children && <section ref={composerElement} className="yard-mini-composer" aria-label="Mini conversation"
         hidden={!composer || !visibleState?.isOpen && !recovering}>
         <div className="yard-mini-composer-heading"><strong>Quick chat</strong><button type="button" title="Close Quick chat" aria-label="Close Quick chat"
           disabled={transition} onClick={() => { void closeQuickChat('chat'); }}><X size={15} /></button></div>
         {!quickReady && <p className="yard-mini-composer-status" role="status">{!targetReady ? 'Opening conversation...' : quickChatHost ? `${connectionMessage(quickChatHost)}. Quick chat is paused.` : 'Select a conversation to use Quick chat.'}</p>}
-        {draftError && <p className="yard-mini-composer-status" role="alert">{draftError}</p>}
-        <div ref={composerFreezeElement}><div data-mini-composer-content="" inert={!quickReady || transition}>{children}</div></div>
+        {draftError && quickChatVisible && <p className="yard-mini-composer-status" role="alert">{draftError}</p>}
+        <div ref={composerFreezeElement}><div data-mini-composer-content="" inert={!quickChatEnabled}>{children}</div></div>
       </section>}
       {visibleState?.isOpen && <>
         {!localReady && <div className="yard-mini-connection" role="status">{connectionMessage('local')}. Mini host is unavailable.</div>}
@@ -594,7 +679,7 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
             {activity.actions?.length ? <div className="yard-mini-request-actions yard-mini-activity-actions">{activity.actions.map(action => <NotificationAction
               key={JSON.stringify([identity.hostId, identity.threadId, 'turnId' in action ? action.turnId : null, action.kind, action.id])}
               action={action} identity={identity} enabled={ready} canWrite={() => usable(activity.hostId)} onOpen={onOpenThread}
-              onFollowUp={children && onQuickChatTarget && quickChatTarget ? value => { void openFollowUp(value); } : undefined} onRun={onNotificationAction} />)}</div> : null}
+              onFollowUp={children && onQuickChatTarget && quickChatTarget ? value => { void openQuickChat('follow-up', value); } : undefined} onRun={onNotificationAction} />)}</div> : null}
           </div>; })}
         </div>}
         {picker && <section className="yard-mini-picker" aria-label="Choose pet">
@@ -616,9 +701,7 @@ export function StandaloneMini({ client, send, activities, bridgeState, hostConn
           <div className="yard-mini-controls">
             {children && <button ref={quickChatButton} type="button" title="Quick chat" aria-label="Quick chat" aria-expanded={composer} disabled={transition} onClick={() => {
               if (composer) { void closeQuickChat('chat'); return; }
-              composerFocusRequested.current = quickReady;
-              composerMountedRef.current = true;
-              setComposerMounted(true); setComposer(true);
+              void openQuickChat('open');
             }}><MessageSquare size={16} /></button>}
             <button type="button" title="Open Codex" aria-label="Open Codex" onClick={onExpand}><Maximize2 size={16} /></button>
             <button ref={menuButton} type="button" title="Mini menu" aria-label="Mini menu" aria-expanded={menu} onClick={() => setMenu(value => !value)}><MoreHorizontal size={18} /></button>

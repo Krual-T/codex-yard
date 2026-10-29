@@ -480,13 +480,33 @@ export function MiniConversation(props: MiniConversationProps) {
     } finally { inFlight.current = false; if (mounted.current) setWorking(false); }
   };
   const interrupt = async () => {
-    const current = targetRef.current;
+    const current = structuredClone(targetRef.current), generation = targetGeneration.current;
     if (!current.threadId || current.readOnly || !latest.current.isConnected(current.hostId)
       || !latest.current.canUseOwner(ownerOf(current)) || locked.current) throw notSent('Mini 会话连接不可用。');
-    const view = props.sessions.view({ hostId: current.hostId, threadId: current.threadId }).snapshot();
+    const identity = { hostId: current.hostId, threadId: current.threadId };
+    const sourceClient = latest.current.client, sourceSessions = latest.current.sessions;
+    const parent: unknown = latest.current.captureEditAuthority(ownerOf(current));
+    if (typeof parent !== 'function') {
+      requireSynchronous(parent, 'Mini 停止任务权限必须同步捕获。');
+      throw notSent('Mini 停止任务权限尚未确认。');
+    }
+    const view = sourceSessions.view(identity).snapshot();
     const turn = view.thread?.turns.find(item => item.status === 'inProgress');
     if (!turn || !view.canSubmit) throw notSent('当前任务已改变，未停止其他任务。');
-    await props.client.rpc('turn/interrupt', { threadId: current.threadId, turnId: turn.id }, current.hostId);
+    const assertAuthority = () => {
+      try { requireSynchronous(parent(), 'Mini 停止任务权限检查必须同步完成。'); }
+      catch (cause) { throw Object.assign(new Error('Mini 原连接或停止任务权限已改变，未停止。', { cause }), { uncertain: false }); }
+      const actual = sourceSessions.view(identity).snapshot();
+      if (!mounted.current || targetGeneration.current !== generation || targetKey(targetRef.current) !== targetKey(current)
+        || latest.current.client !== sourceClient || latest.current.sessions !== sourceSessions
+        || !latest.current.isConnected(identity.hostId) || !latest.current.canUseOwner(ownerOf(current)) || locked.current
+        || !actual.canSubmit || !actual.thread?.turns.some(item => item.id === turn.id && item.status === 'inProgress')) {
+        throw notSent('Mini 会话或当前任务已改变，未停止其他任务。');
+      }
+    };
+    assertAuthority();
+    await sourceClient.rpc('turn/interrupt', { threadId: identity.threadId, turnId: turn.id }, identity.hostId,
+      { assertBeforeSend: assertAuthority });
   };
   const edit = editState?.key === key && editState.status === 'ready' ? editState.value : null;
   const thread = conversation.thread?.id === target.threadId ? conversation.thread : null;
@@ -503,7 +523,7 @@ export function MiniConversation(props: MiniConversationProps) {
     {target.threadId && <div className="yard-mini-conversation-messages" inert={!usable}>
       {conversation.loading ? <p role="status">Loading conversation...</p> : <StandaloneMessages client={props.client} hostId={target.hostId} thread={thread}
         editAccess={editAccess} editRecovery={edit?.recovery ?? null} editRebase={messageEditRebaseMarker(edit)} editHistory={{ order: 'ascending', tailComplete: conversation.historyComplete }}
-        onEditNavigationController={receiveEditor} onEditDraftChange={(value, origin, version) => props.edits.save(value, origin, version)}
+        onEditNavigationController={receiveEditor} onEditDraftChange={(value, origin, version, authority) => props.edits.save(value, origin, version, authority)}
         onPrepareEditRebase={(origin, version) => props.edits.prepareRebase(origin, version)} onCommitEditRebase={async candidate => {
           const recovered = await props.edits.commitRebase(candidate); void props.sessions.refresh(recovered.origin).catch(report); return recovered;
         }} onEdit={target.readOnly || editState?.key !== key || editState.status !== 'ready' ? undefined : onEdit}
