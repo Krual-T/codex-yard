@@ -10,7 +10,7 @@ import type { Browser, Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { record } from '../src/native/protocol.ts';
 import { createFakeCodex } from '../test/fake-codex.ts';
-import { isolatePublicVerifier } from './public-verifier-environment.ts';
+import { isolatePublicVerifier, openComposerModelOptions } from './public-verifier-environment.ts';
 
 const root = await mkdtemp(join(tmpdir(), 'aw-model-ui-'));
 const output = process.env.AGENTS_MODEL_EVIDENCE
@@ -145,7 +145,7 @@ async function verifyOverride(test: { field: 'model' | 'effort'; key: 'model' | 
     overriddenMetadata: { message: overrideMessage } });
   await page!.getByRole('status').filter({ hasText: overrideMessage }).waitFor({ timeout: 10000 });
   await page!.getByRole('alert').filter({ hasText: 'The saved configuration differs from your edit.' }).waitFor({ timeout: 10000 });
-  assert.equal(await page!.getByLabel(test.label).inputValue(), test.value, 'The unaccepted edit remains visible');
+  assert.equal(await displayedValue(test.label), test.value, 'The unaccepted edit remains visible');
   const effective = { version: after.version, activeProfile: 'work' as const, effective: before.profiles.work };
   const readback = await observedRead(reads, effective);
   const retained = await retainedOverride(operationId, test.field, test.value);
@@ -162,7 +162,7 @@ async function verifyOverride(test: { field: 'model' | 'effort'; key: 'model' | 
   await selectedDefault('模型', 'Fixture Alpha');
   await selectedDefault('推理强度', 'high');
   await settled('模型'); await settled('推理强度');
-  assert.equal(await page!.getByLabel('模型').inputValue(), before.profiles.work.model);
+  assert.equal(await displayedValue('模型'), before.profiles.work.model);
   assert.equal(await page!.getByLabel('推理强度').inputValue(), before.profiles.work.model_reasoning_effort);
   assert.deepEqual(readFixture(), after);
   const refreshed = await observedRead(refreshReads, effective);
@@ -178,16 +178,28 @@ async function verifyOverride(test: { field: 'model' | 'effort'; key: 'model' | 
   return operationId;
 }
 async function selectedDefault(label: string, value: string) {
+  await openComposerModelOptions(page!);
   await page!.waitForFunction(({ label, value }) => {
+    if (label === '模型') {
+      return document.querySelector('.standalone-composer__model-list button[aria-pressed="true"]')?.textContent?.includes(value) === true;
+    }
     const select = document.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`);
     return select?.selectedOptions[0]?.textContent?.includes(value) === true;
   }, { label, value }, { timeout: 10000 });
 }
 async function settled(label: string) {
   await page!.waitForFunction(label => {
+    if (label === '模型') {
+      const selected = document.querySelector<HTMLButtonElement>('.standalone-composer__model-list button[aria-pressed="true"]');
+      return selected !== null && !selected.disabled;
+    }
     const control = document.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`);
     return control !== null && !control.disabled;
   }, label, { timeout: 10000 });
+}
+async function displayedValue(label: string): Promise<string | null> {
+  if (label === '模型') return page!.locator('.standalone-composer__model-list button[aria-pressed="true"]').getAttribute('data-model');
+  return page!.getByLabel(label).inputValue();
 }
 function assertWriteReadBack() {
   const lastWrite = fake.calls('config/batchWrite').at(-1);
@@ -263,9 +275,9 @@ try {
       await page.goto(app.url, { waitUntil: 'commit' });
       await page.locator('[data-owned-renderer="true"]').waitFor();
       await selectedDefault('模型', 'Fixture Alpha');
-      assert.equal(await page.getByLabel('模型').locator('option[value="fixture-model"]').isDisabled(), false);
-      assert.equal(await page.getByLabel('模型').locator('option[value="fixture-beta"]').isDisabled(), false);
-      assert.equal(await page.getByLabel('模型').locator('option[value="fixture-hidden"]').count(), 0);
+      assert.equal(await page.locator('button[data-model="fixture-model"]').isDisabled(), false);
+      assert.equal(await page.locator('button[data-model="fixture-beta"]').isDisabled(), false);
+      assert.equal(await page.locator('button[data-model="fixture-hidden"]').count(), 0);
       await capture(label + '-before');
       if (profile) {
         for (const test of [
@@ -273,7 +285,9 @@ try {
           { field: 'model' as const, key: 'model' as const, label: '模型', value: 'fixture-beta' },
         ]) {
           phase = `override ${test.key}`;
-          await verifyOverride({ ...test, action: () => page!.getByLabel(test.label).selectOption(test.value) }, checks);
+          await verifyOverride({ ...test, action: () => test.field === 'model'
+            ? page!.locator('button[data-model="fixture-beta"]').click()
+            : page!.getByLabel(test.label).selectOption(test.value) }, checks);
         }
         phase = 'override rejection';
         rejectNext = true;
@@ -321,7 +335,7 @@ try {
       phase = 'save model';
       await capture(label + '-model-menu');
       const modelBefore = readFixture(), modelActions = hostActions.length;
-      await page.getByLabel('模型').selectOption('fixture-beta');
+      await page.locator('button[data-model="fixture-beta"]').click();
       await saved('fixture-beta', 'low');
       await settled('模型');
       assertWriteReadBack();

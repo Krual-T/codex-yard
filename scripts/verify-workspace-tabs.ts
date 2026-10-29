@@ -57,22 +57,35 @@ try {
   await page.getByText('标签栏验收内容', { exact: true }).waitFor({ timeout: 60000 });
   await capture('01-chat');
   const chatTab = page.getByRole('tab', { name: /工作区标签栏验收/ });
-  await chatTab.waitFor();
+  await page.locator('.yard-owned-sidebar-project').getByRole('button', { name: '另一个标签', exact: true }).click();
+  await page.getByRole('tab', { name: '另一个标签', exact: true }).and(page.locator('[aria-selected="true"]')).waitFor();
+  await chatTab.click();
+  await chatTab.and(page.locator('[aria-selected="true"]')).waitFor();
   assert.equal(await chatTab.getAttribute('aria-selected'), 'true');
   checks.push('The current chat is the selected owned workspace tab');
   const editor = page.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作)$/ });
   await editor.fill('标签切换后保留的草稿');
-  await page.getByRole('button', { name: 'Workspace files', exact: true }).click();
+  const sidePanelMenu = page.locator('summary[aria-label="Open side panel"]');
+  await sidePanelMenu.click();
+  await page.getByRole('menuitem', { name: 'Workspace files', exact: true }).click();
+  await sidePanelMenu.click();
   await capture('02-new-tab');
   await page.getByRole('button', { name: 'tabs-fixture.txt', exact: true }).click();
   await page.getByRole('tab', { name: 'tabs-fixture.txt', exact: true }).waitFor();
   await capture('03-files');
   checks.push('The owned workspace panel opens a real fixture file tab');
-  await page.getByRole('button', { name: '另一个标签', exact: true }).click();
+  await page.locator('.yard-owned-sidebar-project').getByRole('button', { name: '另一个标签', exact: true }).click();
   const secondTab = page.getByRole('tab', { name: '另一个标签', exact: true });
   await secondTab.and(page.locator('[aria-selected="true"]')).waitFor();
   await page.getByText('第二个对话', { exact: true }).waitFor({ timeout: 60000 });
   await page.locator('.yard-conversation:not([inert])').waitFor();
+  report.shortcutContext = await page.evaluate(() => ({
+    activeElement: document.activeElement?.outerHTML,
+    blockingOverlays: [...document.querySelectorAll('[role="dialog"], [role="menu"]')]
+      .filter(element => element.getClientRects().length > 0 && !element.closest('[hidden], [inert]'))
+      .map(element => ({ html: element.outerHTML, detailsOpen: element.closest('details')?.open ?? null,
+        visibility: getComputedStyle(element).visibility, bounds: element.getBoundingClientRect().toJSON() })),
+  }));
   await page.keyboard.press('Control+1');
   try {
     await chatTab.and(page.locator('[aria-selected="true"]')).waitFor({ timeout: 2000 });

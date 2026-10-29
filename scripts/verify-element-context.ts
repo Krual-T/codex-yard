@@ -14,7 +14,7 @@ import { chromium } from 'playwright-core';
 import type { BrowserContext, Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
-import { isolatePublicVerifier } from './public-verifier-environment.ts';
+import { isolatePublicVerifier, openChromePanel } from './public-verifier-environment.ts';
 
 // The test drives Chrome's actual DevTools picker through its shipped action.
 // Product code continues to use only official MCP, with no CDP picker.
@@ -108,7 +108,7 @@ try {
   await page.goto(app.url + '/local/' + id, { waitUntil: 'commit' });
   await page.locator('[data-owned-renderer="true"]').waitFor();
   await page.getByText('隔离验收已准备', { exact: true }).waitFor({ timeout: 60000 });
-  await page.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
+  await openChromePanel(page);
   await page.getByLabel('浏览器所在电脑').selectOption('server');
   const tab = page.getByLabel('已有 Chrome 标签');
   const option = tab.locator('option').filter({ hasText: new RegExp(fixtureUrl.replaceAll('.', '\\.') + '/?$') });
@@ -160,7 +160,7 @@ try {
     .some(input => ['和 Codex 一起工作', '与 Codex 协作', 'Work with Codex'].includes(input.getAttribute('aria-label') ?? '') && input.value === '保留这段草稿，请调整元素'));
   await page.locator('.standalone-composer__reference').filter({ hasText: '需要修改的按钮' }).waitFor();
   await capture('after-refresh');
-  await page.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
+  await openChromePanel(page);
   const references = page.getByRole('region', { name: '浏览器引用', exact: true });
   const annotationEditor = references.getByRole('textbox', { name: '浏览器引用批注' });
   await annotationEditor.waitFor();
@@ -214,11 +214,11 @@ try {
   checks.push('Installed companion pairs and quotes the selected element; a second reference can be deleted');
   await capture('paired-client-edited');
 
-  await page.getByRole('button', { name: '另一个对话', exact: true }).click();
+  await page.locator('.yard-owned-sidebar-project').getByRole('button', { name: '另一个对话', exact: true }).click();
   await editor.waitFor();
   assert.equal(await page.locator('.standalone-composer__reference').count(), 0);
   await editor.fill('另一个对话的草稿');
-  await page.getByRole('button', { name: '元素引用验收', exact: true }).click();
+  await page.locator('.yard-owned-sidebar-project').getByRole('button', { name: '元素引用验收', exact: true }).click();
   await page.locator('.standalone-composer__reference').filter({ hasText: '需要修改的按钮' }).waitFor();
   assert.equal(await editor.inputValue(), '保留这段草稿，请调整元素');
   await page.getByRole('button', { name: /^(发送|Send)$/ }).click();
@@ -229,7 +229,7 @@ try {
   const request = JSON.stringify(fake.calls('turn/start')[0]);
   for (const expected of [id, '保留这段草稿，请调整元素', '把按钮改成蓝色', '#selected', '需要修改的按钮', 'border-radius', fixtureUrl]) assert.ok(request.includes(expected), 'Missing model context: ' + expected);
   assert.doesNotMatch(request, /private-form-value/);
-  await page.getByRole('button', { name: '另一个对话', exact: true }).click();
+  await page.locator('.yard-owned-sidebar-project').getByRole('button', { name: '另一个对话', exact: true }).click();
   await page.waitForFunction(() => [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
     .some(input => ['和 Codex 一起工作', '与 Codex 协作', 'Work with Codex'].includes(input.getAttribute('aria-label') ?? '') && input.value === '另一个对话的草稿'));
   checks.push('Drafts and references are isolated by conversation; explicit send carries the selected context without private form values');
@@ -238,7 +238,7 @@ try {
   console.log('Checking reference handoff from a new draft into a new conversation');
   await page.getByRole('button', { name: 'New chat', exact: true }).first().click();
   await editor.fill('新对话也引用这个按钮');
-  await page.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
+  await openChromePanel(page);
   await page.getByLabel('浏览器所在电脑').selectOption('server');
   await option.waitFor({ state: 'attached' });
   await tab.selectOption((await option.getAttribute('value'))!);

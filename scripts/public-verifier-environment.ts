@@ -1,6 +1,23 @@
 import { constants } from 'node:fs';
 import { cp, mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
+import type { Page } from 'playwright-core';
+
+export async function openChromePanel(page: Page): Promise<void> {
+  const toggle = page.locator('summary[aria-label="Open side panel"]');
+  await toggle.click();
+  await page.getByRole('menuitem', { name: 'Open Chrome panel', exact: true }).click();
+  await toggle.click();
+}
+
+export async function openComposerModelOptions(page: Page): Promise<void> {
+  const menu = page.locator('details.standalone-composer__model');
+  if (await menu.getAttribute('open') === null) await menu.locator(':scope > summary').click();
+  const choices = menu.locator('details.standalone-composer__model-choices');
+  if (await choices.getAttribute('open') === null) await choices.locator(':scope > summary').click();
+  const advanced = menu.locator('details.standalone-composer__model-advanced');
+  if (await advanced.getAttribute('open') === null) await advanced.locator(':scope > summary').click();
+}
 
 /** Keep every verifier's host and child processes inside its disposable fixture. */
 export async function isolatePublicVerifier(root: string, npmCacheSeed?: string): Promise<void> {

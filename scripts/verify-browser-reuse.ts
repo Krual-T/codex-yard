@@ -11,7 +11,7 @@ import { chromium } from 'playwright-core';
 import type { Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
-import { isolatePublicVerifier } from './public-verifier-environment.ts';
+import { isolatePublicVerifier, openChromePanel } from './public-verifier-environment.ts';
 
 // Hold /tmp/agents-workbench-heavy.lock for this runner's entire lifecycle.
 const root = await mkdtemp(join(tmpdir(), 'aw-chrome-'));
@@ -159,7 +159,7 @@ try {
   });
   await capture('workbench-before');
   console.log('Opening the owned browser panel');
-  await nativePage.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
+  await openChromePanel(nativePage);
   const address = nativePage.getByLabel('网页地址', { exact: true });
   await nativePage.getByLabel('已有 Chrome 标签').waitFor({ timeout: 30000 });
   assert.equal(await nativePage.getByLabel('浏览器所在电脑').inputValue(), 'client');
@@ -321,7 +321,7 @@ try {
   await nativeB.goto(app.url + '/local/' + id);
   await nativeB.locator('[data-owned-renderer="true"]').waitFor();
   await nativeB.getByRole('link', { name: '打开浏览器验收页' }).waitFor({ timeout: 60000 });
-  await nativeB.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
+  await openChromePanel(nativeB);
   await nativeB.getByLabel('浏览器所在电脑').waitFor({ timeout: 30000 });
   assert.equal(await nativeB.getByLabel('浏览器所在电脑').inputValue(), 'client');
   const stopB = await pairClient(nativeB, endpointB, '验收电脑 B');
@@ -348,7 +348,7 @@ try {
   await nativeB.screenshot({ path: join(evidence, 'workbench-client-b.png') });
   await nativeB.bringToFront();
   await nativeB.reload({ waitUntil: 'commit' });
-  await nativeB.getByRole('button', { name: 'Open Chrome panel', exact: true }).click();
+  await openChromePanel(nativeB);
   await nativeB.getByRole('status').filter({ hasText: /^已配对$/ }).waitFor({ timeout: 60000 });
   const restoredId = await selectB.locator('option').filter({ hasText: fixtureUrl + '/computer-b' }).getAttribute('value');
   assert.ok(restoredId);

@@ -65,6 +65,7 @@ try {
   assert.equal(await editButton.isEnabled(), true, 'Queue Edit requires the main-composer and Yard queue-edit bindings');
   await editButton.click();
   const editor = page.getByRole('textbox', { name: /^(和 Codex 一起工作|与 Codex 协作)$/ });
+  const queue = page.getByRole('region', { name: '待发送消息', exact: true });
   await page.waitForFunction(text => [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
       .some(input => ['和 Codex 一起工作', '与 Codex 协作'].includes(input.getAttribute('aria-label') ?? '') && input.value === text), editText);
   await capture('editing');
@@ -76,14 +77,18 @@ try {
   await page.getByRole('button', { name: /^(排队|Queue)$/ }).click();
   await fake.waitFor(message => message.method === 'thread/queue/add');
   checks.push('Editing moves the original item into the composer and requeues it');
-  await page.getByText(changed, { exact: true }).waitFor();
+  await queue.getByText(changed, { exact: true }).waitFor();
+  await page.waitForFunction(() => [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
+    .some(input => ['和 Codex 一起工作', '与 Codex 协作'].includes(input.getAttribute('aria-label') ?? '') && input.value === ''));
   assert.deepEqual(fake.queues.get(threadId)?.[0]?.input, [{ type: 'text', text: changed, text_elements: [] }]);
   const added = '验收：另外排队';
   const addsBefore = fake.calls('thread/queue/add').length;
   await editor.fill(added);
   await page.getByRole('button', { name: /^(排队|Queue)$/ }).click();
-  await page.getByText(added, { exact: true }).waitFor();
+  await queue.getByText(added, { exact: true }).waitFor();
   await fake.waitFor(message => message.method === 'thread/queue/add');
+  await page.waitForFunction(() => [...document.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label]')]
+    .some(input => ['和 Codex 一起工作', '与 Codex 协作'].includes(input.getAttribute('aria-label') ?? '') && input.value === ''));
   for (let attempt = 0; attempt < 100 && (fake.queues.get(threadId)?.length ?? 0) < 2; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
@@ -96,7 +101,6 @@ try {
   const keyboardText = '验收：快捷键排队';
   await editor.fill(keyboardText);
   await editor.press('Control+Enter');
-  const queue = page.getByRole('region', { name: '待发送消息', exact: true });
   await queue.getByText(keyboardText, { exact: true }).waitFor();
   assert.equal(fake.calls('thread/queue/add').length, addsBefore + 2);
   assert.deepEqual(fake.queues.get(threadId)?.[2]?.input, [{ type: 'text', text: keyboardText, text_elements: [] }]);

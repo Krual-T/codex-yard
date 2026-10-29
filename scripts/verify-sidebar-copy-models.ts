@@ -10,7 +10,7 @@ import type { Browser, Locator, Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { record } from '../src/native/protocol.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
-import { isolatePublicVerifier } from './public-verifier-environment.ts';
+import { isolatePublicVerifier, openComposerModelOptions } from './public-verifier-environment.ts';
 
 const root = await mkdtemp(join(tmpdir(), 'yard-ui-bugs-'));
 const output = process.env.AGENTS_BUG_EVIDENCE
@@ -109,6 +109,19 @@ async function waitValue(locator: Locator, expected: string) {
     await delay(50);
   }
 }
+async function waitClipboard(current: Page, expected: string) {
+  const deadline = Date.now() + 5000;
+  while (await current.evaluate(() => navigator.clipboard.readText()) !== expected) {
+    assert.ok(Date.now() < deadline, 'Clipboard did not receive the exact copied text');
+    await delay(50);
+  }
+}
+async function waitModelValue(locator: Locator, expected: string) {
+  await locator.locator(`button[data-model="${expected}"][aria-pressed="true"]`).waitFor({ timeout: 10000 });
+}
+async function modelValue(locator: Locator): Promise<string | null> {
+  return locator.locator('button[aria-pressed="true"]').getAttribute('data-model');
+}
 async function waitWrite(start: number) {
   const deadline = Date.now() + 10000;
   while (fake.calls('config/batchWrite').length <= start) {
@@ -156,7 +169,7 @@ try {
     await copy.waitFor({ timeout: 60000 });
     await page.evaluate(() => navigator.clipboard.writeText('sentinel'));
     await copy.tap();
-    await page.waitForFunction(expected => navigator.clipboard.readText().then(text => text === expected), code, { timeout: 5000 });
+    await waitClipboard(page, code);
     checks.push(`${viewport.width}px: code copy preserves Unicode, tabs and newlines`);
 
     const folder = page.getByRole('button', { name: 'Active project', exact: true });
@@ -192,7 +205,7 @@ try {
     Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true, value: undefined });
   });
   await copy.click();
-  await page.waitForFunction(expected => navigator.clipboard.readText().then(text => text === expected), code, { timeout: 5000 });
+  await waitClipboard(page, code);
   checks.push('Desktop: legacy copy writes the actual clipboard when the async write API is unavailable');
   await page.evaluate(() => { document.execCommand = () => false; });
   await page.getByRole('button', { name: /^(Copy code|Copied)$/ }).click();
@@ -204,19 +217,20 @@ try {
   await setup(page);
   await page.goto(app.url, { waitUntil: 'commit' });
   await checkLocale(page);
-  const modelPicker = page.getByRole('combobox', { name: 'Model', exact: true });
+  await openComposerModelOptions(page);
+  const modelPicker = page.getByRole('group', { name: 'Model', exact: true });
   const effortPicker = page.getByRole('combobox', { name: 'Reasoning effort', exact: true });
-  await modelPicker.locator('option[value="gpt-6.1-sol"]').waitFor({ state: 'attached', timeout: 60000 });
-  await modelPicker.locator('option[value="gpt-6.1-terra"]').waitFor({ state: 'attached' });
-  assert.equal(await modelPicker.locator('option[value="gpt-6.1-sol"]').isDisabled(), false);
-  assert.equal(await modelPicker.locator('option[value="gpt-6.1-terra"]').isDisabled(), false);
-  assert.equal(await modelPicker.locator('option[value="hidden-fixture"]').count(), 0);
-  assert.equal(await modelPicker.locator('option[value="gpt-6.1-hidden-fixture"]').count(), 0);
+  await modelPicker.locator('button[data-model="gpt-6.1-sol"]').waitFor({ state: 'visible', timeout: 60000 });
+  await modelPicker.locator('button[data-model="gpt-6.1-terra"]').waitFor({ state: 'visible' });
+  assert.equal(await modelPicker.locator('button[data-model="gpt-6.1-sol"]').isDisabled(), false);
+  assert.equal(await modelPicker.locator('button[data-model="gpt-6.1-terra"]').isDisabled(), false);
+  assert.equal(await modelPicker.locator('button[data-model="hidden-fixture"]').count(), 0);
+  assert.equal(await modelPicker.locator('button[data-model="gpt-6.1-hidden-fixture"]').count(), 0);
   await modelPicker.screenshot({ path: join(output, 'models.png') });
   checks.push('Both visible 6.1 models are selectable and hidden models, including a 6.1 fixture, stay hidden');
   try {
-    await waitEnabled(modelPicker);
-    await waitValue(modelPicker, 'gpt-6-sol');
+    await waitEnabled(modelPicker.locator('button[aria-pressed="true"]'));
+    await waitModelValue(modelPicker, 'gpt-6-sol');
     assert.equal(readFixture().base.model, null, 'The effective model must not overwrite the null configured baseline');
     let before = readFixture();
     let writes = fake.calls('config/batchWrite').length;
@@ -228,23 +242,23 @@ try {
     assert.ok(fake.messages.slice(effortWrite + 1).some(message => message.method === 'config/read'), 'Save must re-read configuration');
     assert.deepEqual(readFixture().base, { model: null, model_reasoning_effort: 'low' });
     await page.reload({ waitUntil: 'commit' });
-    await checkLocale(page); await waitEnabled(effortPicker);
-    await waitValue(modelPicker, 'gpt-6-sol'); await waitValue(effortPicker, 'low');
+    await checkLocale(page); await openComposerModelOptions(page); await waitEnabled(effortPicker);
+    await waitModelValue(modelPicker, 'gpt-6-sol'); await waitValue(effortPicker, 'low');
     assert.equal(readFixture().base.model, null);
     assert.equal(fake.calls('config/batchWrite').length, writes + 1, 'Reload must not repeat the effort write');
     checks.push('Default effort is written with the versioned base target and survives reload with a null model baseline');
 
     before = readFixture(); writes = fake.calls('config/batchWrite').length;
-    await modelPicker.selectOption('gpt-6.1-sol');
-    await waitWrite(writes); await waitVersion(before.version); await waitEnabled(modelPicker);
+    await modelPicker.locator('button[data-model="gpt-6.1-sol"]').click();
+    await waitWrite(writes); await waitVersion(before.version); await waitEnabled(modelPicker.locator('button[aria-pressed="true"]'));
     assert.deepEqual(fake.calls('config/batchWrite').at(-1)?.params.edits,
       [{ keyPath: 'model', value: 'gpt-6.1-sol', mergeStrategy: 'upsert' }]);
     const modelWrite = fake.messages.lastIndexOf(fake.calls('config/batchWrite').at(-1)!);
     assert.ok(fake.messages.slice(modelWrite + 1).some(message => message.method === 'config/read'), 'Save must re-read configuration');
     assert.deepEqual(readFixture().base, { model: 'gpt-6.1-sol', model_reasoning_effort: 'low' });
     await page.reload({ waitUntil: 'commit' });
-    await checkLocale(page); await waitEnabled(modelPicker);
-    await waitValue(modelPicker, 'gpt-6.1-sol'); await waitValue(effortPicker, 'low');
+    await checkLocale(page); await openComposerModelOptions(page); await waitEnabled(modelPicker.locator('button[aria-pressed="true"]'));
+    await waitModelValue(modelPicker, 'gpt-6.1-sol'); await waitValue(effortPicker, 'low');
     assert.equal(fake.calls('config/batchWrite').length, writes + 1, 'Reload must not repeat the model write');
     checks.push('Selected default model survives a confirmed versioned write and reload');
   } catch (error) {
@@ -260,20 +274,22 @@ try {
   await setup(page);
   await page.goto(app.url, { waitUntil: 'commit' });
   await checkLocale(page);
-  const profileModel = page.getByRole('combobox', { name: 'Model', exact: true });
+  await openComposerModelOptions(page);
+  const profileModel = page.getByRole('group', { name: 'Model', exact: true });
   const profileEffort = page.getByRole('combobox', { name: 'Reasoning effort', exact: true });
-  await waitEnabled(profileModel); await waitEnabled(profileEffort);
-  await waitValue(profileModel, fixture.profiles.work.model!);
+  await waitEnabled(profileModel.locator('button[aria-pressed="true"]')); await waitEnabled(profileEffort);
+  await waitModelValue(profileModel, fixture.profiles.work.model!);
   await waitValue(profileEffort, fixture.profiles.work.model_reasoning_effort!);
   for (const test of [
-    { field: 'model_reasoning_effort' as const, value: 'high', control: profileEffort },
-    { field: 'model' as const, value: 'gpt-6.1-terra', control: profileModel },
+    { field: 'model_reasoning_effort' as const, value: 'high' },
+    { field: 'model' as const, value: 'gpt-6.1-terra' },
   ]) {
     try {
-      await waitEnabled(test.control);
+      await waitEnabled(test.field === 'model' ? profileModel.locator(`button[data-model="${test.value}"]`) : profileEffort);
       const before = readFixture(), writes = fake.calls('config/batchWrite').length, reads = configReads.length;
       assert.equal(before.activeProfile, 'work');
-      await test.control.selectOption(test.value);
+      if (test.field === 'model') await profileModel.locator(`button[data-model="${test.value}"]`).click();
+      else await profileEffort.selectOption(test.value);
       await waitWrite(writes); await waitVersion(before.version);
       const after = readFixture();
       const request = fake.calls('config/batchWrite').at(-1)?.params;
@@ -290,7 +306,8 @@ try {
         overriddenMetadata: { message: overrideMessage } });
       await page.getByRole('status').filter({ hasText: overrideMessage }).waitFor({ timeout: 10000 });
       await page.getByRole('alert').filter({ hasText: 'The saved configuration differs from your edit.' }).waitFor({ timeout: 10000 });
-      assert.equal(await test.control.inputValue(), test.value, 'The unaccepted edit remains visible for review');
+      assert.equal(test.field === 'model' ? await modelValue(profileModel) : await profileEffort.inputValue(),
+        test.value, 'The unaccepted edit remains visible for review');
       const readback = configReads.slice(reads).reverse().find(read => read.version === after.version);
       assert.deepEqual(readback, { version: after.version, activeProfile: 'work', effective: before.profiles.work });
       observation.readback = readback;
@@ -298,15 +315,16 @@ try {
       await capture(`profile-${test.field}-overridden`);
       const reloadReads = configReads.length;
       await page.reload({ waitUntil: 'commit' });
-      await checkLocale(page); await waitEnabled(profileModel); await waitEnabled(profileEffort);
-      await waitValue(profileModel, before.profiles.work.model!);
+      await checkLocale(page); await openComposerModelOptions(page);
+      await waitEnabled(profileModel.locator('button[aria-pressed="true"]')); await waitEnabled(profileEffort);
+      await waitModelValue(profileModel, before.profiles.work.model!);
       await waitValue(profileEffort, before.profiles.work.model_reasoning_effort!);
       assert.deepEqual(readFixture(), after, 'Reload must retain the base write and unchanged override');
       assert.equal(fake.calls('config/batchWrite').length, writes + 1, 'Reload must not repeat the base write');
       const refreshed = configReads.slice(reloadReads).reverse().find(read => read.version === after.version);
       assert.deepEqual(refreshed, { version: after.version, activeProfile: 'work', effective: before.profiles.work });
       observation.refreshed = refreshed;
-      observation.displayedAfterReload = { model: await profileModel.inputValue(), effort: await profileEffort.inputValue() };
+      observation.displayedAfterReload = { model: await modelValue(profileModel), effort: await profileEffort.inputValue() };
       checks.push(`Profile override: ${test.field} reload shows effective values without replaying the base write`);
     } catch (error) {
       gaps.push(`Profile ${test.field} verification: ${String(error)}`);
@@ -319,9 +337,10 @@ try {
   await setup(page);
   await page.goto(app.url + '/local/' + id, { waitUntil: 'commit' });
   await checkLocale(page);
+  await page.getByRole('button', { name: 'Copy code', exact: true }).waitFor({ timeout: 60000 });
+  await page.locator('.yard-conversation:not([inert])').waitFor();
   const firstTab = page.getByRole('tab', { name: 'Code example', exact: true });
-  await firstTab.and(page.locator('[aria-selected="true"]')).waitFor({ timeout: 60000 });
-  await page.getByRole('button', { name: 'Second conversation', exact: true }).click();
+  await page.locator('.yard-owned-sidebar-project').getByRole('button', { name: 'Second conversation', exact: true }).click();
   await page.getByRole('tab', { name: 'Second conversation', exact: true }).and(page.locator('[aria-selected="true"]')).waitFor();
   await page.getByText('No messages yet', { exact: true }).waitFor({ timeout: 60000 });
   await page.locator('.yard-conversation:not([inert])').waitFor();
