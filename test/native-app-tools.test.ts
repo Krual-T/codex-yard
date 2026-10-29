@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { test, type TestContext } from 'node:test';
 import { setImmediate } from 'node:timers/promises';
 import { CodexConnection } from '../lib/codex.ts';
-import { createNativeAppToolHost, type NativeAppToolsOptions } from '../lib/native-app-tools.ts';
+import { createNativeAppToolHost, type NativeAppToolsOptions, type NativeAppToolWriteContext } from '../lib/native-app-tools.ts';
+import { createStateMutations } from '../src/native/state-mutations.ts';
 import { record } from '../src/native/protocol.ts';
 import { catalog, schemas, delegationTurnInput, formatAssistantMessage, nativeParentThread, success, validateModel, ThreadWaiter } from '../lib/native-tool-kernel.ts';
 import type { NativeManager } from '../lib/native-tool-kernel.ts';
-import { agentItem, commandItem, createFakeCodex, fixtureThread, fixtureTurn } from './fake-codex.ts';
+import { agentItem, commandItem, createFakeCodex, fixtureThread, fixtureTurn, NO_REPLY } from './fake-codex.ts';
 
 async function fixture(t: TestContext, overrides: Partial<NativeAppToolsOptions> = {}) {
   const root = await mkdtemp('/tmp/yard-native-kernel-');
@@ -26,7 +28,8 @@ async function fixture(t: TestContext, overrides: Partial<NativeAppToolsOptions>
   }, hostIds: () => ['local'], globals,
     listProjects: async () => [{ projectId: root, projectKind: 'local', label: 'Fixture', path: root,
       hostId: 'local', hostDisplayName: null, isGitRepository: false }], projectlessRoot: root + '/workspaces',
-    configFor: () => ({ 'mcp_servers.codex_app': { enabled: true } }), persistGlobals: async () => {}, setMembership: async () => {}, ...overrides });
+    configFor: () => ({ 'mcp_servers.codex_app': { enabled: true } }), persistGlobals: async () => {},
+    write: async (_context, dispatch) => dispatch(), setMembership: async () => {}, ...overrides });
   let nextCall = 0;
   function call(tool: string, args: unknown, signal = new AbortController().signal, callId = String(++nextCall)) {
     return host.callTool({ callerSource: 'codex', hostId: 'local', namespace: 'codex_app', tool,
@@ -76,6 +79,235 @@ test('native wait cursors suppress repeated final text and reset foreign cursors
   assert.equal(record((repeated.polls as unknown[])[0]).latestAssistantMessage, null);
   const reset = data(await h.call('wait_threads', { targets: [{ threadId: 'target', afterCursor: 'another-generation:1' }], timeoutMs: 0 }));
   assert.equal(record((reset.polls as unknown[])[0]).cursorReset, true);
+});
+
+test('same connection reconnect replaces the passive manager and cursor generation', async t => {
+  const h = await fixture(t);
+  h.target.status = { type: 'active', activeFlags: [] };
+  h.target.turns = [fixtureTurn('running', [], 'inProgress')];
+  const first = data(await h.call('wait_threads', { targets: [{ threadId: 'target' }], timeoutMs: 0 }));
+  const cursor = record((first.polls as unknown[])[0]).cursor;
+  const oldSocket = h.connection.socket;
+  const nextRead = h.fake.calls('thread/turns/list').length + 1;
+  const pending = h.call('wait_threads', { targets: [{ threadId: 'target', afterCursor: cursor }], timeoutMs: 10_000 });
+  await h.fake.waitForCall('thread/turns/list', nextRead);
+  const closed = once(h.connection, 'status');
+  h.fake.disconnect(); await closed;
+  assert.equal(h.connection.connected, false);
+  const interrupted = data(await pending);
+  assert.match(record((interrupted.errors as unknown[])[0]).message as string, /disconnect/i);
+  assert.equal(h.connection.listenerCount('message'), 0);
+  await h.connection.connect();
+  assert.notEqual(h.connection.socket, oldSocket);
+  assert.equal(h.connection.listenerCount('message'), 0);
+  const second = data(await h.call('wait_threads', { targets: [{ threadId: 'target', afterCursor: cursor }], timeoutMs: 0 }));
+  const poll = record((second.polls as unknown[])[0]);
+  assert.equal(poll.cursorReset, true);
+  assert.notEqual(poll.cursor, cursor);
+  assert.equal(h.connection.listenerCount('message'), 0);
+});
+
+test('replacing a live host manager wakes its subscriber and detaches the old connection', async t => {
+  const remoteRoot = await mkdtemp('/tmp/yard-native-manager-swap-');
+  const nextFake = await createFakeCodex(remoteRoot);
+  const next = new CodexConnection(nextFake.socketPath);
+  await next.connect();
+  nextFake.threads.set('target', fixtureThread('target', remoteRoot,
+    { turns: [fixtureTurn('new-turn', [agentItem('final', 'New host generation')])] }));
+  let selected!: CodexConnection;
+  const h = await fixture(t, { connectionFor: async () => selected });
+  selected = h.connection;
+  t.after(async () => { next.close(); await nextFake.close(); await rm(remoteRoot, { recursive: true, force: true }); });
+  h.target.status = { type: 'active', activeFlags: [] };
+  h.target.turns = [fixtureTurn('old-turn', [], 'inProgress')];
+  const pending = h.call('wait_threads', { targets: [{ threadId: 'target' }], timeoutMs: 10_000 });
+  await h.fake.waitForCall('thread/turns/list');
+  await h.call('list_projects', {});
+  selected = next;
+  data(await h.call('read_thread', { threadId: 'target' }));
+  const result = data(await pending);
+  const poll = record((result.polls as unknown[])[0]);
+  assert.equal(record(poll.latestAssistantMessage).text, 'New host generation');
+  assert.equal(h.connection.listenerCount('message'), 0);
+  assert.equal(h.connection.listenerCount('status'), 0);
+  assert.equal(next.listenerCount('message'), 0);
+});
+
+test('all native conversation mutations pass their real host, target and method to the fence', async t => {
+  const writes: NativeAppToolWriteContext[] = [];
+  const h = await fixture(t, { write: async (context, dispatch) => { writes.push(context); return dispatch(); } });
+  h.fake.handlers.set('thread/read', params => {
+    const thread = h.fake.threads.get(String(params.threadId));
+    if (!thread) throw new Error('Thread not found');
+    return { thread: { ...thread, turns: params.includeTurns ? thread.turns : [] }, readState: { revision: 'r1', firstUnread: null } };
+  });
+  h.fake.handlers.set('thread/readState/update', () => ({}));
+  data(await h.call('set_thread_title', { threadId: 'target', title: 'Title' }));
+  data(await h.call('set_thread_archived', { threadId: 'target', archived: true }));
+  data(await h.call('set_thread_archived', { threadId: 'target', archived: false }));
+  data(await h.call('set_thread_read_state', { threadId: 'target', read: true }));
+  data(await h.call('fork_thread', { threadId: 'target' }));
+  data(await h.call('send_message_to_thread', { threadId: 'target', prompt: 'Continue' }));
+  const created = data(await h.call('create_thread', { target: { type: 'projectless' }, prompt: 'Start', title: 'New' }));
+  assert.deepEqual(writes.map(({ hostId, threadId, method }) => [hostId, threadId, method]), [
+    ['local', 'target', 'thread/name/set'], ['local', 'target', 'thread/archive'],
+    ['local', 'target', 'thread/unarchive'], ['local', 'target', 'thread/readState/update'],
+    ['local', 'target', 'thread/fork'], ['local', 'target', 'thread/resume'],
+    ['local', 'target', 'turn/start'], ['local', null, 'thread/start'],
+    ['local', created.threadId, 'thread/name/set'], ['local', created.threadId, 'turn/start'],
+  ]);
+  assert.ok(writes.every(value => value.signal instanceof AbortSignal));
+});
+
+test('remote targets keep their actual host and missing caller identity never defaults to local', async t => {
+  const remoteRoot = await mkdtemp('/tmp/yard-native-remote-write-');
+  const fake = await createFakeCodex(remoteRoot);
+  const remote = new CodexConnection(fake.socketPath);
+  await remote.connect();
+  fake.threads.set('remote-target', fixtureThread('remote-target', remoteRoot));
+  const writes: NativeAppToolWriteContext[] = [];
+  let local!: CodexConnection;
+  const h = await fixture(t, { hostIds: () => ['local', 'remote'], connectionFor: async hostId => hostId === 'remote' ? remote : local,
+    listProjects: async () => [{ projectId: 'remote-project', projectKind: 'remote', label: 'Remote', path: remoteRoot,
+      hostId: 'remote', hostDisplayName: 'Fixture', isGitRepository: false }],
+    write: async (context, dispatch) => { writes.push(context); return dispatch(); } });
+  local = h.connection;
+  t.after(async () => { remote.close(); await fake.close(); await rm(remoteRoot, { recursive: true, force: true }); });
+  data(await h.call('fork_thread', { threadId: 'remote-target' }));
+  const created = data(await h.call('create_thread', { target: { type: 'project', projectId: 'remote-project', environment: { type: 'local' } },
+    prompt: 'Remote', title: 'Remote title' }));
+  assert.deepEqual(writes.map(({ hostId, threadId, method }) => [hostId, threadId, method]), [
+    ['remote', 'remote-target', 'thread/fork'], ['remote', null, 'thread/start'],
+    ['remote', created.threadId, 'thread/name/set'], ['remote', created.threadId, 'turn/start'],
+  ]);
+  const before = h.fake.calls('thread/name/set').length;
+  const unknown = await h.host.callTool({ callerSource: 'codex', hostId: null, namespace: 'codex_app', tool: 'set_thread_title',
+    threadId: h.caller.id, turnId: 'calling-turn', callId: 'unknown-origin', arguments: { threadId: 'target', title: 'Unknown' } },
+  { signal: new AbortController().signal });
+  assert.equal(unknown.success, false);
+  assert.match(unknown.contentItems[0]!.text, /host identity is unavailable/);
+  assert.equal(h.fake.calls('thread/name/set').length, before);
+});
+
+test('missing fence refuses native writes before the daemon sees them', async t => {
+  const h = await fixture(t, { write: undefined });
+  const result = await h.call('set_thread_title', { threadId: 'target', title: 'Denied' });
+  assert.equal(result.success, false);
+  assert.match(result.contentItems[0]!.text, /write fence is unavailable/);
+  assert.equal(h.fake.calls('thread/name/set').length, 0);
+  const create = await h.call('create_thread', { target: { type: 'projectless' }, prompt: 'Denied' });
+  assert.equal(create.success, false);
+  assert.equal(h.fake.calls('thread/start').length, 0);
+  assert.equal((await readdir(h.root)).includes('workspaces'), false);
+});
+
+test('host fence rejection preserves the target and prevents daemon dispatch', async t => {
+  const seen: NativeAppToolWriteContext[] = [];
+  const h = await fixture(t, { write: async context => { seen.push(context); throw new Error('Pending injection blocks writes'); } });
+  const result = await h.call('set_thread_title', { threadId: 'target', title: 'Denied' });
+  assert.equal(result.success, false);
+  assert.match(result.contentItems[0]!.text, /Pending injection/);
+  assert.equal(h.fake.calls('thread/name/set').length, 0);
+  assert.equal(seen[0]!.threadId, 'target');
+  assert.equal(seen[0]!.hostId, 'local');
+  assert.equal(seen[0]!.connection, h.connection);
+  assert.equal(seen[0]!.socket, h.connection.socket);
+});
+
+test('a write queued in the host fence cannot follow its original connection onto a new socket', async t => {
+  let entered!: () => void, release!: () => void;
+  const queued = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const h = await fixture(t, { write: async (_context, dispatch) => { entered(); await gate; return dispatch(); } });
+  const pending = h.call('set_thread_title', { threadId: 'target', title: 'Old socket' });
+  try {
+    await queued;
+    const oldSocket = h.connection.socket, closed = once(h.connection, 'status');
+    h.fake.disconnect(); await closed;
+    await h.connection.connect();
+    assert.notEqual(h.connection.socket, oldSocket);
+    release();
+    const result = await pending;
+    assert.equal(result.success, false);
+    assert.match(result.contentItems[0]!.text, /host changed before the write/);
+    assert.equal(h.fake.calls('thread/name/set').length, 0);
+  } finally { release(); }
+});
+
+test('a cancelled write queued in the host fence never dispatches', async t => {
+  let entered!: () => void, release!: () => void;
+  const queued = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const h = await fixture(t, { write: async (_context, dispatch) => { entered(); await gate; return dispatch(); } });
+  const controller = new AbortController();
+  const pending = h.call('set_thread_title', { threadId: 'target', title: 'Cancelled' }, controller.signal);
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  try { await queued; controller.abort(); release(); await rejected; }
+  finally { release(); }
+  assert.equal(h.fake.calls('thread/name/set').length, 0);
+});
+
+test('an already dispatched write that disconnects is not replayed after reconnect', async t => {
+  const h = await fixture(t);
+  h.fake.handlers.set('thread/name/set', (_params, { socket }) => { socket.terminate(); return NO_REPLY; });
+  const first = await h.call('set_thread_title', { threadId: 'target', title: 'Uncertain' }, undefined, 'uncertain-call');
+  assert.equal(first.success, false);
+  assert.equal(h.fake.calls('thread/name/set').length, 1);
+  await h.connection.connect();
+  const repeated = await h.call('set_thread_title', { threadId: 'target', title: 'Uncertain' }, undefined, 'uncertain-call');
+  assert.deepEqual(repeated, first);
+  assert.equal(h.fake.calls('thread/name/set').length, 1);
+});
+
+test('native pins share the parent state transaction, cancellation and rollback', async t => {
+  const mutations = createStateMutations();
+  let entered!: () => void, release!: () => void, block = true, fail = false, fallbackWrites = 0;
+  const inside = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let globals!: Record<string, unknown>, persisted: Record<string, unknown> = {};
+  const h = await fixture(t, { persistGlobals: async () => { ++fallbackWrites; },
+    transactGlobals: (keys, signal, action) => mutations.run(async () => {
+      signal.throwIfAborted();
+      const previous = new Map(keys.map(key => [key, { present: Object.hasOwn(globals, key), value: globals[key] }]));
+      try {
+        action();
+        if (block) { entered(); await gate; block = false; }
+        if (fail) throw new Error('Shared persistence failed');
+        persisted = structuredClone(globals);
+      } catch (cause) {
+        for (const [key, before] of previous) {
+          if (before.present) globals[key] = before.value; else delete globals[key];
+        }
+        throw cause;
+      }
+    }) });
+  globals = h.globals;
+  const first = h.call('set_thread_pinned', { threadId: 'target', pinned: true });
+  try {
+    await inside;
+    let observed: unknown;
+    const other = mutations.run(() => { observed = globals['pinned-thread-ids']; globals.other = 'committed'; persisted = structuredClone(globals); });
+    const controller = new AbortController();
+    const second = h.call('set_thread_pinned', { threadId: 'target', pinned: false }, controller.signal);
+    const rejected = assert.rejects(second, { name: 'AbortError' });
+    await h.fake.waitForCall('thread/read', 2);
+    controller.abort(); release();
+    data(await first); await other; await rejected;
+    assert.deepEqual(observed, ['target']);
+    assert.equal(globals.other, 'committed');
+    assert.deepEqual(persisted, { 'pinned-thread-ids': ['target'], other: 'committed' });
+    assert.equal(fallbackWrites, 0);
+    fail = true;
+    const failure = await h.call('set_thread_pinned', { threadId: 'target', pinned: false });
+    assert.equal(failure.success, false);
+    assert.deepEqual(globals['pinned-thread-ids'], ['target']);
+    assert.equal(globals.other, 'committed');
+    assert.deepEqual(persisted, { 'pinned-thread-ids': ['target'], other: 'committed' });
+    fail = false;
+    data(await h.call('set_thread_pinned', { threadId: 'target', pinned: false }));
+    assert.deepEqual(globals['pinned-thread-ids'], []);
+    assert.deepEqual(persisted, { 'pinned-thread-ids': [], other: 'committed' });
+  } finally { release(); }
 });
 
 test('commentary does not wake native wait; cancellation does not interrupt its target', async t => {

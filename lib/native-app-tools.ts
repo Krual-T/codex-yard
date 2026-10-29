@@ -1,8 +1,9 @@
 import { mkdir, mkdtemp } from 'node:fs/promises';
 import { isAbsolute, join, resolve, sep } from 'node:path';
+import { WebSocket } from 'ws';
 import { CodexConnection } from './codex.ts';
 import { errorMessage, isRecord } from './codex-protocol.ts';
-import type { Page, RpcMessage, ThreadSummary, TurnSummary } from './codex-protocol.ts';
+import type { Page, RpcMessage, ThreadResponse, ThreadSummary, TurnSummary } from './codex-protocol.ts';
 import type { AppToolCall, AppToolDescriptor } from './app-tools.ts';
 import { catalog, schemas, ThreadWaiter, readHistory, success, failure, invalidArguments,
   validateModel, formatAssistantMessage, nativeParentThread, delegationTurnInput } from './native-tool-kernel.ts';
@@ -13,6 +14,17 @@ export interface NativeProject {
   projectId: string; projectKind: 'local' | 'remote'; label: string; path: string;
   hostId: string; hostDisplayName: string | null; isGitRepository: boolean;
 }
+export type NativeAppToolWriteMethod = 'thread/start' | 'thread/fork' | 'thread/resume' | 'thread/name/set'
+  | 'thread/archive' | 'thread/unarchive' | 'thread/readState/update' | 'turn/start';
+export interface NativeAppToolWriteContext {
+  hostId: string;
+  /** A new thread has no target ID until thread/start returns. */
+  threadId: string | null;
+  method: NativeAppToolWriteMethod;
+  signal: AbortSignal;
+  connection: CodexConnection;
+  socket: NonNullable<CodexConnection['socket']>;
+}
 export interface NativeAppToolsOptions {
   connectionFor(hostId: string): Promise<CodexConnection>;
   hostIds(): string[];
@@ -21,6 +33,10 @@ export interface NativeAppToolsOptions {
   configFor(hostId: string): Record<string, unknown>;
   globals: Record<string, unknown>;
   persistGlobals(keys: string[]): Promise<void>;
+  /** Run dispatch once inside the host's existing conversation write fence. */
+  write?<T>(context: NativeAppToolWriteContext, dispatch: () => Promise<T>): Promise<T>;
+  /** Own authority, action, persistence and rollback inside the shared state transaction. */
+  transactGlobals?(keys: string[], signal: AbortSignal, action: () => void): Promise<void>;
   setMembership(threadId: string, hostId: string, project: NativeProject | null, cwd: string): Promise<void>;
 }
 
@@ -30,8 +46,10 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
   const managers = new Map<string, NativeManager>();
   const connections = new Map<string, CodexConnection>();
   const statusListeners = new Map<string, Set<() => void>>();
-  const bindings: (() => void)[] = [];
+  const bindings = new Map<string, { connection: CodexConnection; socket: CodexConnection['socket'];
+    unbind: () => void; disposeManager: () => void }>();
   const calls = new Map<string, { result: Promise<ToolResult>; settled: boolean }>();
+  const stateTransactions = new Set<Promise<void>>();
   let stateQueue = Promise.resolve();
   const waiter = new ThreadWaiter({ getManagers: () => [...managers.values()],
     subscribe(hostId, listener) {
@@ -41,24 +59,49 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
     },
   }, formatAssistantMessage);
 
-  async function connectionFor(hostId: string) {
-    if (!options.hostIds().includes(hostId)) throw new Error('No connected Codex thread host found for hostId: ' + hostId);
-    const connection = await options.connectionFor(hostId);
-    if (connections.get(hostId) !== connection) {
-      connections.set(hostId, connection);
+  function notifyHost(hostId: string) {
+    for (const listener of statusListeners.get(hostId) ?? []) listener();
+  }
+  function refreshManager(hostId: string, connection: CodexConnection) {
+    const binding = bindings.get(hostId);
+    if (!binding || binding.connection !== connection) return;
+    if (binding.socket !== connection.socket || !managers.has(hostId)) {
+      binding.disposeManager();
+      const socket = connection.socket;
+      const subscriptions = new Set<() => void>();
+      const current = () => connections.get(hostId) === connection && connection.connected && !!socket
+        && connection.socket === socket && socket.readyState === WebSocket.OPEN && managers.get(hostId) === manager;
+      const checkCurrent = () => { if (!current()) throw new Error('Task host changed during passive read'); };
       const manager: NativeManager = {
         getHostId: () => hostId,
-        readThread: (id, params) => readThread(connection, id, params),
+        async readThread(id, params) {
+          checkCurrent();
+          const response = await readThread(connection, id, params);
+          checkCurrent();
+          return response;
+        },
         async listThreadTurns(id, params) {
+          checkCurrent();
           const { requestOptions, ...request } = params;
           const response = await connection.request<Page<TurnSummary>>('thread/turns/list', { threadId: id, ...request }, requestOptions);
+          checkCurrent();
           return { response };
         },
         addNotificationCallback(methods, listener, onError) {
-          const message = (value: RpcMessage) => { if (methods.includes(value.method)) listener(value); };
-          const status = () => { if (!connection.connected) onError?.(new Error('Task host disconnected during passive read')); };
+          if (!current()) {
+            let active = true;
+            queueMicrotask(() => { if (active) onError?.(new Error('Task host changed during passive read')); });
+            return () => { active = false; };
+          }
+          let active = true;
+          const message = (value: RpcMessage, source: CodexConnection['socket']) => {
+            if (active && current() && source === socket && methods.includes(value.method)) listener(value);
+          };
+          const status = () => { if (active && !current()) onError?.(new Error('Task host disconnected during passive read')); };
           connection.on('message', message); connection.on('status', status);
-          return () => { connection.off('message', message); connection.off('status', status); };
+          const unbind = () => { active = false; connection.off('message', message); connection.off('status', status); subscriptions.delete(unbind); };
+          subscriptions.add(unbind);
+          return unbind;
         },
         addThreadDeletedListener(listener, onError) {
           return this.addNotificationCallback(['thread/deleted'], value => {
@@ -66,13 +109,54 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
           }, onError);
         },
       };
+      binding.socket = socket;
+      binding.disposeManager = () => { for (const unbind of subscriptions) unbind(); };
       managers.set(hostId, manager);
-      const changed = () => { for (const listener of statusListeners.get(hostId) ?? []) listener(); };
-      connection.on('status', changed);
-      bindings.push(() => connection.off('status', changed));
-      changed();
     }
+    notifyHost(hostId);
+  }
+  async function connectionFor(hostId: string) {
+    if (!options.hostIds().includes(hostId)) throw new Error('No connected Codex thread host found for hostId: ' + hostId);
+    const connection = await options.connectionFor(hostId);
+    const previous = bindings.get(hostId);
+    if (previous?.connection !== connection) {
+      previous?.unbind(); previous?.disposeManager();
+      managers.delete(hostId);
+      connections.set(hostId, connection);
+      const status = () => refreshManager(hostId, connection);
+      connection.on('status', status);
+      bindings.set(hostId, { connection, socket: undefined, unbind: () => connection.off('status', status), disposeManager: () => {} });
+    }
+    refreshManager(hostId, connection);
     return connection;
+  }
+  function captureConnection(hostId: string, connection: CodexConnection) {
+    const socket = connection.socket;
+    if (!socket || !connection.connected || socket.readyState !== WebSocket.OPEN || connections.get(hostId) !== connection) {
+      throw new Error('Task host is disconnected before the write.');
+    }
+    return { hostId, connection, socket };
+  }
+  function isOriginal(original: ReturnType<typeof captureConnection>) {
+    return connections.get(original.hostId) === original.connection && original.connection.connected
+      && original.connection.socket === original.socket && original.socket.readyState === WebSocket.OPEN;
+  }
+  async function write<T>(original: ReturnType<typeof captureConnection>, threadId: string | null,
+    method: NativeAppToolWriteMethod, params: unknown, signal: AbortSignal): Promise<T> {
+    if (!options.write) throw new Error('Native tool conversation write fence is unavailable.');
+    let dispatched = false;
+    const result = await options.write({ hostId: original.hostId, threadId, method, signal,
+      connection: original.connection, socket: original.socket }, () => {
+      if (dispatched) throw new Error('Native tool write was already dispatched.');
+      signal.throwIfAborted();
+      if (!isOriginal(original)) {
+        throw new Error('Task host changed before the write was dispatched.');
+      }
+      dispatched = true;
+      return original.connection.request<T>(method, params, { mutating: true });
+    });
+    if (!dispatched) throw new Error('Native tool write was not dispatched by the host.');
+    return result;
   }
   async function readThread(connection: CodexConnection, threadId: string, params: NativeReadOptions = { includeTurns: false }) {
     const { requestOptions, ...request } = params;
@@ -84,14 +168,17 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
     // A local lookup must not wait for unrelated, possibly offline SSH hosts.
     // The native resolver still checks ambiguity when a fallback is needed.
     if (hostId) {
+      let original: ReturnType<typeof captureConnection> | undefined;
       try {
         const connection = await connectionFor(hostId);
-        const { thread, readState } = await readThread(connection, threadId, { includeTurns: false, requestOptions: { timeoutMs: 15_000 } });
+        original = captureConnection(hostId, connection);
+        const manager = managers.get(hostId)!;
+        const { thread, readState } = await manager.readThread(threadId, { includeTurns: false, requestOptions: { timeoutMs: 15_000 } }) as Awaited<ReturnType<typeof readThread>>;
         signal.throwIfAborted();
-        return { hostId, manager: managers.get(hostId)!, connection, thread, readState };
+        return { hostId, manager, connection, original, thread, readState };
       } catch (cause) {
         signal.throwIfAborted();
-        if (requireHost) throw cause;
+        if (requireHost || original && !isOriginal(original)) throw cause;
       }
     }
     await Promise.allSettled(options.hostIds().filter(id => !connections.get(id)?.connected).map(connectionFor));
@@ -99,11 +186,20 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
     const resolved = await waiter.resolveThreadHost({ preferredHostId: hostId, threadId, signal, requestOptions: { timeoutMs: 15_000 } });
     if (requireHost && resolved.hostId !== hostId) throw new Error(`Task ${threadId} belongs to host ${resolved.hostId}, not ${hostId}.`);
     const connection = await connectionFor(resolved.hostId);
-    const { thread, readState } = await readThread(connection, threadId);
+    const original = captureConnection(resolved.hostId, connection);
+    const manager = managers.get(resolved.hostId)!;
+    if (manager !== resolved.manager) throw new Error('Task host changed during passive read');
+    const { thread, readState } = await manager.readThread(threadId, { includeTurns: false }) as Awaited<ReturnType<typeof readThread>>;
     signal.throwIfAborted();
-    return { ...resolved, connection, thread, readState };
+    return { ...resolved, manager, connection, original, thread, readState };
   }
   function updateGlobals(keys: string[], signal: AbortSignal, action: () => void) {
+    if (options.transactGlobals) {
+      const result = options.transactGlobals(keys, signal, () => { signal.throwIfAborted(); action(); });
+      stateTransactions.add(result);
+      void result.finally(() => stateTransactions.delete(result)).catch(() => {});
+      return result;
+    }
     const result = stateQueue.catch(() => {}).then(async () => {
       signal.throwIfAborted();
       const before = Object.fromEntries(keys.map(key => [key, options.globals[key]]));
@@ -169,11 +265,13 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
     } while (cursor);
     return available;
   }
-  async function submit(connection: CodexConnection, threadId: string, prompt: string, args: NativeArguments, caller: AppToolCall, signal: AbortSignal) {
+  async function submit(original: ReturnType<typeof captureConnection>, threadId: string, prompt: string, args: NativeArguments, caller: AppToolCall, signal: AbortSignal) {
     signal.throwIfAborted();
+    const connection = original.connection;
     let rootTurnId: string | undefined;
     try {
-      const source = await connectionFor(caller.hostId ?? 'local');
+      if (!caller.hostId) throw new Error('Caller host identity is unavailable.');
+      const source = await connectionFor(caller.hostId);
       const { thread } = await readThread(source, caller.threadId, { includeTurns: true });
       const turn = thread.turns.find(turn => turn.id === caller.turnId) as (TurnSummary & { rootTurnId?: string | null }) | undefined;
       rootTurnId = turn?.rootTurnId ?? undefined;
@@ -181,12 +279,12 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
     signal.throwIfAborted();
     // turn/start is atomic for idle/active threads and preserves destination
     // settings when overrides are omitted. Never read-then-steer or retry.
-    await connection.request('turn/start', { threadId,
+    await write(original, threadId, 'turn/start', { threadId,
       ...delegationTurnInput({ appServerVersion: connection.server?.userAgent.match(/^[^/]+\/(\S+)/)?.[1] ?? null,
         sourceThreadId: caller.threadId, input: prompt, toolName: caller.tool }),
       parentTurnId: caller.turnId, ...(rootTurnId ? { rootTurnId } : {}),
       ...(args.model ? { model: args.model } : {}), ...(args.thinking ? { effort: args.thinking } : {}),
-    }, { mutating: true });
+    }, signal);
     return { threadId };
   }
   async function execute(caller: AppToolCall, signal: AbortSignal): Promise<ToolResult> {
@@ -198,7 +296,10 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
     const args = parsed.data;
     try {
       if (args.source === 'chatgpt') throw new Error('ChatGPT Work conversations require a connected ChatGPT host.');
-      const sourceHostId = caller.hostId ?? 'local';
+      if (!caller.hostId && caller.tool !== 'list_projects' && caller.tool !== 'list_threads') {
+        throw new Error('Caller host identity is unavailable.');
+      }
+      const sourceHostId = caller.hostId ?? '';
       let result: unknown;
       switch (caller.tool) {
         case 'list_projects': result = { schemaVersion: 2, projects: await options.listProjects() }; break;
@@ -231,6 +332,7 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
           break;
         }
         case 'create_thread': {
+          if (!options.write) throw new Error('Native tool conversation write fence is unavailable.');
           const target = args.target!;
           if (target.type === 'chatgptWorkCloud') throw new Error('ChatGPT Work cloud creation requires a connected ChatGPT host.');
           let project: NativeProject | null = null;
@@ -242,6 +344,7 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
             hostId = project.hostId; cwd = project.path;
           }
           const connection = await connectionFor(hostId);
+          const original = captureConnection(hostId, connection);
           if (args.model) { const message = validateModel(args.model, args.thinking, await models(connection)); if (message) throw new Error(message); }
           signal.throwIfAborted();
           if (target.type !== 'project') {
@@ -253,14 +356,14 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
             } else cwd = await mkdtemp(join(options.projectlessRoot, 'chat-'));
           }
           signal.throwIfAborted();
-          const { thread } = await connection.request('thread/start', { cwd, historyMode: 'paginated', config: {
+          const { thread } = await write<ThreadResponse>(original, null, 'thread/start', { cwd, historyMode: 'paginated', config: {
             ...options.configFor(hostId), ...(args.thinking ? { model_reasoning_effort: args.thinking } : {}),
-          }, ...(args.model ? { model: args.model } : {}) }, { mutating: true });
+          }, ...(args.model ? { model: args.model } : {}) }, signal);
           try {
             await options.setMembership(thread.id, hostId, project, cwd);
             signal.throwIfAborted();
-            if (args.title) await connection.request('thread/name/set', { threadId: thread.id, name: args.title }, { mutating: true });
-            await submit(connection, thread.id, args.prompt!, args, caller, signal);
+            if (args.title) await write(original, thread.id, 'thread/name/set', { threadId: thread.id, name: args.title }, signal);
+            await submit(original, thread.id, args.prompt!, args, caller, signal);
             result = { threadId: thread.id, hostId, ...(project ? {} : { projectlessOutputDirectory: cwd }) };
           } catch (cause) {
             return { ...failure(errorMessage(cause)), contentItems: [{ type: 'inputText', text: JSON.stringify({
@@ -275,7 +378,7 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
           if (args.environment?.type === 'worktree') throw new Error('Managed worktree setup is not connected in this Yard host.');
           const value = await resolveThread(threadId, sourceHostId, signal);
           signal.throwIfAborted();
-          const forked = await value.connection.request('thread/fork', { threadId, historyMode: 'paginated', config: options.configFor(value.hostId) }, { mutating: true });
+          const forked = await write<ThreadResponse>(value.original, threadId, 'thread/fork', { threadId, historyMode: 'paginated', config: options.configFor(value.hostId) }, signal);
           result = { threadId: forked.thread.id };
           break;
         }
@@ -296,17 +399,17 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
           signal.throwIfAborted();
           const loaded = await value.connection.request('thread/loaded/list', {});
           signal.throwIfAborted();
-          await value.connection.request('thread/resume', { threadId, excludeTurns: true,
+          await write(value.original, threadId, 'thread/resume', { threadId, excludeTurns: true,
             ...(!loaded.data.includes(threadId) ? { config: options.configFor(value.hostId) } : {}),
-          }, { mutating: true });
-          result = await submit(value.connection, threadId, args.prompt!, args, caller, signal);
+          }, signal);
+          result = await submit(value.original, threadId, args.prompt!, args, caller, signal);
           break;
         }
         case 'set_thread_title': {
           const threadId = args.threadId ?? caller.threadId;
           const value = await resolveThread(threadId, sourceHostId, signal);
           signal.throwIfAborted();
-          await value.connection.request('thread/name/set', { threadId, name: args.title }, { mutating: true });
+          await write(value.original, threadId, 'thread/name/set', { threadId, name: args.title }, signal);
           result = { threadId, title: args.title };
           break;
         }
@@ -314,7 +417,7 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
           const threadId = args.threadId ?? caller.threadId;
           const value = await resolveThread(threadId, args.hostId ?? sourceHostId, signal, args.hostId !== undefined);
           signal.throwIfAborted();
-          await value.connection.request(args.archived ? 'thread/archive' : 'thread/unarchive', { threadId }, { mutating: true });
+          await write(value.original, threadId, args.archived ? 'thread/archive' : 'thread/unarchive', { threadId }, signal);
           result = { threadId, archived: args.archived };
           break;
         }
@@ -334,8 +437,8 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
           const value = await resolveThread(threadId, args.hostId ?? sourceHostId, signal, args.hostId !== undefined);
           signal.throwIfAborted();
           if (!value.readState) throw new Error('Durable read state is unavailable for this thread.');
-          await value.connection.request('thread/readState/update', { threadId, expectedRevision: value.readState.revision,
-            operation: { type: args.read ? 'read' : 'unread' } }, { mutating: true });
+          await write(value.original, threadId, 'thread/readState/update', { threadId, expectedRevision: value.readState.revision,
+            operation: { type: args.read ? 'read' : 'unread' } }, signal);
           result = { threadId, hostId: value.hostId, read: args.read };
           break;
         }
@@ -354,7 +457,7 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
       signal.throwIfAborted();
       // Preserve the model's callId. Transport RPC IDs must never become the
       // execution identity, and reconnects never repeat a possibly sent write.
-      const key = JSON.stringify([caller.hostId ?? 'local', caller.threadId, caller.turnId, caller.callId]);
+      const key = JSON.stringify([caller.hostId ?? null, caller.threadId, caller.turnId, caller.callId]);
       const previous = calls.get(key);
       if (previous) return previous.result;
       if (calls.size >= 256) {
@@ -366,6 +469,11 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
       void call.result.finally(() => { call.settled = true; }).catch(() => {});
       return call.result;
     },
-    async close() { for (const unbind of bindings) unbind(); await stateQueue.catch(() => {}); },
+    async close() {
+      for (const binding of bindings.values()) { binding.unbind(); binding.disposeManager(); }
+      bindings.clear(); managers.clear(); connections.clear();
+      await stateQueue.catch(() => {});
+      await Promise.allSettled([...stateTransactions]);
+    },
   };
 }
