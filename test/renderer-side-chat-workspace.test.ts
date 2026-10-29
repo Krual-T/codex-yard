@@ -197,7 +197,7 @@ async function peer() {
           result = null;
         } else if (endpoint === 'queued-follow-up-send-lock-acquire') result = { acquired: true };
         else if (endpoint === 'queued-follow-up-send-lock-release') result = {};
-        else if (endpoint === 'get-setting') result = { value: body.key === 'composerPlainTextMode' ? false : 'queue', exists: true };
+        else if (endpoint === 'get-setting') result = { value: body.key === 'composerPlainTextMode' ? false : body.key === 'composerEnterBehavior' ? 'enter' : 'queue', exists: true };
         else if (endpoint === 'get-settings') result = {};
         else if (endpoint === 'get-persisted-atom') result = {};
         else throw Error('Fixture host endpoint not implemented: ' + endpoint);
@@ -880,7 +880,7 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
         await page.getByRole('textbox', { name: '和 Codex 一起工作' }).waitFor();
         await page.waitForFunction(() => window.sideChatRootFixture.history().canSubmit
           && !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft());
-        await page.locator('.yard-side-chat:visible').getByText(/无法读取队列/).waitFor();
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
         await page.evaluate(() => window.sideChatRootFixture.structuredDraft());
         await page.evaluate(() => window.sideChatRootFixture.holdNative());
         await page.getByRole('button', { name: '发送', exact: true }).click();
@@ -892,7 +892,7 @@ test('SideChatRoot composes the original workspace, shared sender and child draf
         const next = await page.evaluate(() => (window as any).switchPromise);
         await page.waitForFunction(id => window.sideChatRootFixture.child()?.identity.draftId === id
           && !!window.sideChatRootFixture.child()?.hasNavigation && window.sideChatRootFixture.canAcquireDraft(), next.draftId);
-        await page.locator('.yard-side-chat:visible').getByText(/无法读取队列/).waitFor();
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
         assert.equal(await page.evaluate(() => window.sideChatRootFixture.flushDraft()), true);
         await eventuallyAsync(() => page.evaluate(async () => Object.values((await window.sideChatRootFixture.sends()).requests).some(item => item.stage === 'failed')));
         assert.equal(p.nativeWrites.length, 0); assert.equal(p.fake.calls('turn/start').length, 0);
@@ -1549,7 +1549,8 @@ test('real workspace, IDB, browser client and native parent/provider use one syn
         await page.getByRole('button', { name: '打开侧聊' }).click();
         const input = page.getByRole('textbox', { name: '和 Codex 一起工作' }); await input.waitFor();
         p.failRevoke(true);
-        await page.getByRole('button', { name: '删除待发送消息' }).first().waitFor();
+        await page.waitForFunction(() => window.sideChatWorkspaceFixture.history().canSubmit);
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
         await input.fill('撤权失败时保留的草稿');
         assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.freezeNavigation()), true);
         assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.flushNavigation()), true);
@@ -1577,7 +1578,7 @@ test('real workspace, IDB, browser client and native parent/provider use one syn
         await page.waitForFunction(() => window.sideChatWorkspaceFixture.history().canSubmit);
         await input.fill('原导航草稿');
         await page.getByRole('button', { name: '发送', exact: true }).waitFor({ state: 'visible' });
-        await page.getByText(/无法读取队列/).waitFor();
+        assert.equal(p.fake.calls('thread/queue/list').length, 0);
         assert.equal(await page.evaluate(() => window.sideChatWorkspaceFixture.flushDraft()), true);
         await page.waitForFunction(() => window.sideChatWorkspaceFixture.pendingQueueReads() === 0
           && window.sideChatWorkspaceFixture.freezeNavigation());
