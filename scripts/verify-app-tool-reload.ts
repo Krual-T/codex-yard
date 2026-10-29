@@ -259,15 +259,36 @@ CODEX_APP_TOOLS_CALLER_HOST_ID="local"
   const preservedConfig = baseConfig + '\n[mcp_servers.unrelated_fixture]\ncommand="unused"\nenabled=false\n';
   await writeFile(join(home, 'config.toml'), preservedConfig);
   await yard.request('config/mcpServer/reload', null, { mutating: true });
+  // A local desktop can enable its bundled plugin while using a shared daemon.
+  // Install a real isolated plugin as a positive control, then verify that the
+  // explicit server definition wins the same-name registration collision.
+  phase = 'local desktop plugin precedence';
+  const marketplace = join(home, '.tmp/bundled-marketplaces/openai-bundled');
+  const plugin = join(marketplace, 'plugins/codex-app-tools');
+  await mkdir(join(plugin, '.codex-plugin'), { recursive: true });
+  await mkdir(join(marketplace, '.agents/plugins'), { recursive: true });
+  await writeFile(join(plugin, '.codex-plugin/plugin.json'), JSON.stringify({ name: 'codex-app-tools', version: '0.0.1',
+    description: 'Synthetic native host only', mcpServers: './.mcp.json' }));
+  await writeFile(join(plugin, '.mcp.json'), JSON.stringify({ mcpServers: { codex_app: appConfig['mcp_servers.codex_app'] } }));
+  const marketplacePath = join(marketplace, '.agents/plugins/marketplace.json');
+  await writeFile(marketplacePath, JSON.stringify({ name: 'openai-bundled', plugins: [{ name: 'codex-app-tools',
+    source: { source: 'local', path: './plugins/codex-app-tools' }, policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' } }] }));
+  await app.request('plugin/install', { marketplacePath, pluginName: 'codex-app-tools' }, { mutating: true });
+  await app.request('config/mcpServer/reload', null, { mutating: true });
+  const pluginThread = await app.request('thread/start', { cwd: root, historyMode: 'paginated' });
+  await turn(pluginThread.thread.id);
+  assert.deepEqual(await tools(pluginThread.thread.id), { status: 'connected', tools: ['native_app_probe'] });
+  const beforeApplyConfig = await readFile(join(home, 'config.toml'), 'utf8');
+  phase = 'explicit daemon registration';
   const plan = await configure();
   assert.equal(plan.existingDefinition, 'absent');
-  assert.equal(await readFile(join(home, 'config.toml'), 'utf8'), preservedConfig, 'planning does not write');
+  assert.equal(await readFile(join(home, 'config.toml'), 'utf8'), beforeApplyConfig, 'planning does not write');
   const beforeRegistration = await app.request<{ config: Record<string, unknown> }>('config/read', { includeLayers: false });
   assert.ok(isRecord(beforeRegistration.config.mcp_servers));
   const applied = await configure(true);
   assert.equal(applied.writeState, 'installed');
   assert.equal(typeof applied.backupPath, 'string');
-  assert.equal(await readFile(String(applied.backupPath), 'utf8'), preservedConfig);
+  assert.equal(await readFile(String(applied.backupPath), 'utf8'), beforeApplyConfig);
   assert.equal((await stat(String(applied.backupPath))).mode & 0o777, 0o600);
   const saved = await app.request<{ config: Record<string, unknown> }>('config/read', { includeLayers: false });
   assert.ok(isRecord(saved.config.mcp_servers));
@@ -315,7 +336,8 @@ CODEX_APP_TOOLS_CALLER_HOST_ID="local"
     verified: ['original-adapter', 'model-native-call-metadata', 'native-create-read-send-wait-fork-title-pin-readstate-archive',
       'app-yard-peer-continuation', 'simultaneous-clients-active-delegation', 'all-yard-pages-closed', 'healthy-native-mount-preserved',
       'registration-plan-read-only', 'registration-refuses-existing-definition', 'versioned-user-registration-and-private-backup',
-      'global-app-origin-three-clients', 'windows-native-host-offline', 'idle-native-mount-migration', 'host-restart-adapter-reconnection-and-durable-pins'] }));
+      'local-desktop-plugin-precedence', 'global-app-origin-three-clients', 'windows-native-host-offline',
+      'idle-native-mount-migration', 'host-restart-adapter-reconnection-and-durable-pins'] }));
 } catch (cause) {
   throw new Error('Native MCP verification failed at: ' + phase, { cause });
 } finally {

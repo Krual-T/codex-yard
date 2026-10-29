@@ -127,11 +127,16 @@ injection. This permits the explicit same-name definition above to serve SSH
 conversations without changing either App binary. This behavior was checked in
 the shipped code; the integration probe models App protocol clients.
 
-Connect both desktop Apps to the same execution host over SSH. A Linux App on
-that host should use a loopback SSH connection for these shared projects; its
-ordinary local project entry starts a separate stdio backend. Yard connects to
-the daemon's Unix socket. All clients then address the same thread IDs and
-server-side tool host. Desktop-local projects continue to use their own backend.
+Connect Windows App to the execution host over SSH. A Linux App on that host can
+connect directly to the same daemon using `CODEX_APP_SERVER_WS_URL`, retaining
+its local projects. Yard connects to the daemon's Unix socket. CLI 0.164.0 gives
+an explicit server definition precedence over a same-name plugin registration;
+the integration probe installs an enabled `codex-app-tools@openai-bundled` fixture
+and verifies the change from its original tool to all twelve registered tools.
+See the [versioned CLI registration rules](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/codex-mcp/src/catalog.rs).
+All clients then address the same thread IDs and server-side tool host. A normal
+Linux App launch without a shared-daemon endpoint can still start a separate
+stdio backend. Windows-local projects use their own execution host.
 
 Closing a desktop App or all Yard pages leaves the Node tool host running.
 Stopping that Node process stops tool service until it restarts. Run the host
@@ -173,7 +178,8 @@ all twelve tools through the official adapter, cross-client continuation, closed
 Yard pages, preservation of a healthy native mount and the old-mount lifecycle.
 It also exercises the configuration command, preservation of unrelated settings,
 private backups, new threads from global configuration, three simultaneous
-clients, removal of a simulated Windows tool host, idle migration and stable-pipe
+clients, precedence over a real enabled plugin fixture, removal of a simulated
+Windows tool host, idle migration and stable-pipe
 reconnection with durable pins after the Node host restarts.
 It uses no account, personal conversations or shared services and removes its
 temporary state on exit.

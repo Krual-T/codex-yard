@@ -58,6 +58,10 @@ The interface and tool adapter change only when their Git snapshot is updated; l
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765). To customize the server, copy `.env.example` to `.env`. `AGENTS_CODEX_BIN` selects a CLI executable; `AGENTS_CODEX_SOCKET` connects directly to an existing backend and skips automatic daemon startup. `AGENTS_APP_TOOLS_ADAPTER` overrides the vendored adapter if needed. Use a short private `AGENTS_DATA_DIR` when necessary: the complete Unix socket path must fit within 107 bytes.
 
+To share the twelve conversation tools with desktop clients using that daemon,
+preview `npm run tools:configure` from the deployed checkout. Add `-- --apply`
+after reviewing the plan. See [registration and migration](docs/native-app-tools.md#explicit-registration-for-app-and-yard).
+
 For remote access, set `AGENTS_PUBLIC_ORIGIN` to the exact HTTPS origin and use a private tunnel or an authenticated reverse proxy. The server listens on loopback. It exposes file access and command execution with the connected account's permissions; it does not provide a multi-user login system. See [deployment boundaries](SECURITY.md).
 
 The original interface contacts external configuration and event services. Normal Codex requests also use your configured model provider. A private network does not make model execution offline. Set standard proxy variables only if your network requires them.
