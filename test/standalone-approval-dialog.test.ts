@@ -366,18 +366,22 @@ test('approval UI preserves source, once-only outcomes, forms and input interact
     await dialog.getByText('Answer at least one question before submitting.').waitFor();
     assert.equal((await calls()).length, beforeEmpty);
 
+    const answer = dialog.getByLabel('Answer', {exact:true});
+    assert.equal(await dialog.getByLabel('Empty answer', {exact:true}).count(), 1);
+    assert.equal(await answer.count(), 0);
     await show('item/tool/requestUserInput', {questions:[{id:'q',question:'Answer',options:null}]});
-    await dialog.getByLabel('Answer').fill('Draft');
+    await answer.fill('Draft');
     const beforeEscape = (await calls()).length;
-    await dialog.getByLabel('Answer').evaluate(element => element.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape',isComposing:true,bubbles:true})));
+    await answer.evaluate(element => element.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape',isComposing:true,bubbles:true})));
     assert.equal((await calls()).length, beforeEscape);
     await page.evaluate(() => window.approvalHarness.failNext());
-    await dialog.getByLabel('Answer').press('Escape');
+    await answer.press('Escape');
     await dialog.getByText(/Synthetic interrupt failure/).waitFor();
-    assert.equal(await dialog.getByLabel('Answer').inputValue(), 'Draft');
+    assert.equal(await answer.inputValue(), 'Draft');
     const last = (await calls()).at(-1)!;
     assert.deepEqual(last.interrupt, {ref:last.ref,hostId:'ssh-test',threadId:'thread-a',turnId:'turn-a'});
     await hide(); await reopen();
+    assert.equal(await answer.inputValue(), 'Draft');
     assert.equal(await dialog.getByRole('button', {name:'Submit'}).isDisabled(), true);
     assert.equal((await calls()).length, beforeEscape + 1);
 

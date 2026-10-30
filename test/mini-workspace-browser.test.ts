@@ -245,6 +245,8 @@ test('MiniWorkspace composes the real Mini, editor and shared services', {
         await page.waitForFunction(() => !!(window as any).miniWorkspaceFixture?.ready());
         await open(page);
         assert.equal(await page.evaluate(() => (window as any).miniWorkspaceFixture.pointer()), pointer);
+        // The shell becomes interactive before the persisted draft is projected into its editor.
+        await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('.yard-mini-conversation textarea')?.value === 'reload retained content');
         assert.equal(await page.locator('.yard-mini-conversation textarea').first().inputValue(), 'reload retained content');
         assert.deepEqual(errors, []);
       } finally { await context.close(); }

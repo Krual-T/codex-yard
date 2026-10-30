@@ -16,9 +16,13 @@ test('known file save conflicts block another write across refresh until explici
     import { EditorView } from '@codemirror/view';
     import { WorkspacePanels } from './src/renderer/panels/WorkspacePanels.tsx';
     const text = 'base\\n';
+    let holdRead = false, releaseRead;
     const client = { async host(endpoint) {
       if (endpoint === 'workspace-directory-entries') return {entries: []};
-      if (endpoint === 'workspace-files') return {text};
+      if (endpoint === 'workspace-files') {
+        if (holdRead) await new Promise(resolve => { releaseRead = resolve; });
+        return {text};
+      }
       if (endpoint === 'read-file-binary') return {contentsBase64:btoa(text),mimeType:'text/plain'};
       if (endpoint === 'workspace-file-save') {
         sessionStorage.setItem('writes', String(Number(sessionStorage.getItem('writes') || 0) + 1));
@@ -32,7 +36,14 @@ test('known file save conflicts block another write across refresh until explici
       appearance:{theme:'light',codeFontSize:14,codeLineHeight:21},
       request:{id:'open',kind:'file',scopeId:'scope',hostId:'host',cwd:'/work',path:'file.txt'},
       onRequestConsumed(){}, onClose(){}};
-    window.fixture = { view() { return EditorView.findFromDOM(document.querySelector('.cm-content')); } };
+    window.fixture = {
+      holdRead() { holdRead = true; },
+      releaseRead() { holdRead = false; releaseRead?.(); },
+      view() {
+        const element = document.querySelector('.cm-content');
+        return element ? EditorView.findFromDOM(element) : null;
+      },
+    };
     createRoot(document.getElementById('root')).render(React.createElement(WorkspacePanels,props));
   ` }, bundle: true, write: false, format: 'iife', outdir: 'conflict-fixture', loader: { '.css': 'css' } });
   const script = bundle.outputFiles.find(file => file.path.endsWith('.js'))!.text;
@@ -75,7 +86,11 @@ test('known file save conflicts block another write across refresh until explici
     await page.keyboard.press('Control+s');
     assert.equal(await page.evaluate(() => sessionStorage.getItem('writes')), '1');
     assert.equal(await page.evaluate(() => (window as any).fixture.view().state.doc.toString()), 'draft base\n');
+    await page.evaluate(() => (window as any).fixture.holdRead());
     await page.getByRole('button', { name: 'Reload file' }).click();
+    await page.getByRole('status').filter({ hasText: 'Loading...' }).waitFor();
+    assert.equal(await page.evaluate(() => (window as any).fixture.view()), null);
+    await page.evaluate(() => (window as any).fixture.releaseRead());
     await page.waitForFunction(() => (window as any).fixture.view()?.state.doc.toString() === 'base\n');
     await page.evaluate(() => sessionStorage.setItem('mode', 'direct'));
     await editor.focus();
