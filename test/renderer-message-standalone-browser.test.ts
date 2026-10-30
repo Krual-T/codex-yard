@@ -26,6 +26,7 @@ declare global {
       removeTurn: () => void;
       clipboard: (mode: 'missing' | 'denied' | 'failed') => void;
     };
+    activeMermaidHarness: { stream: () => void };
   }
 }
 
@@ -402,6 +403,57 @@ test('standalone messages render CLI items and retain interactions while streami
     await page.getByText('No messages yet').waitFor();
     assert.deepEqual(errors, []);
     await page.close();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('an active streamed message retains the selected Mermaid source', {
+  skip: !existsSync(chromePath) && 'An isolated headless browser is unavailable', timeout: 120_000,
+}, async () => {
+  const bundle = await build({
+    stdin: { resolveDir: process.cwd(), loader: 'jsx', contents: `
+      import React from 'react';
+      import { createRoot } from 'react-dom/client';
+      import { StandaloneMessages } from './src/renderer/messages/StandaloneMessages.tsx';
+      const newline = String.fromCharCode(10), fence = String.fromCharCode(96).repeat(3);
+      const source = fence + 'mermaid' + newline + 'flowchart LR' + newline + '  A --> B' + newline + fence;
+      let text = source;
+      const client = { subscribe: () => () => {}, host: async () => { throw Error('unexpected host request'); },
+        rpc: async () => { throw Error('unexpected rpc'); } };
+      const root = createRoot(document.getElementById('root'));
+      const render = () => {
+        const thread = { id: 'thread', cwd: '/work', name: null, status: { type: 'active', activeFlags: [] },
+          turns: [{ id: 'turn', status: 'inProgress', itemsView: 'full',
+            items: [{ id: 'assistant', type: 'agentMessage', text }] }] };
+        root.render(React.createElement(StandaloneMessages, { client, hostId: 'local', thread }));
+      };
+      window.activeMermaidHarness = { stream() { text = source + newline + newline + 'Streamed update.'; render(); } };
+      render();
+    ` },
+    bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' },
+    plugins: [{ name: 'single-katex', setup(builder) {
+      builder.onResolve({ filter: /^katex$/ }, () => ({ path: require.resolve('katex') }));
+    } }],
+  });
+  const browser = await chromium.launch({ executablePath: chromePath, headless: true,
+    args: ['--no-sandbox', '--disable-background-networking'] });
+  try {
+    const page = await browser.newPage();
+    await page.route('**/*', (route) => route.abort());
+    const errors: string[] = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    await page.setContent('<div id="root"></div>');
+    await page.addScriptTag({ content: bundle.outputFiles[0]!.text });
+    const assistant = page.locator('[data-message-id="assistant"]');
+    await assistant.getByRole('button', { name: 'Show source' }).click();
+    assert.equal(await assistant.getByRole('button', { name: 'Show diagram' }).count(), 1);
+    assert.match(await assistant.locator('.yard-code-block pre').innerText(), /flowchart LR/);
+    await page.evaluate(() => window.activeMermaidHarness.stream());
+    await assistant.getByText('Streamed update.').waitFor();
+    assert.equal(await assistant.getByRole('button', { name: 'Show diagram' }).count(), 1);
+    assert.match(await assistant.locator('.yard-code-block pre').innerText(), /flowchart LR/);
+    assert.deepEqual(errors, []);
   } finally {
     await browser.close();
   }
