@@ -9,6 +9,8 @@ import type { ThreadSummary, TurnSummary } from '../lib/codex-protocol.ts';
 import { projectMessageOutputPreviews, projectMessageTurnPreviews } from '../src/renderer/messages/message-output-previews.ts';
 
 const citation = (path: string, purpose = 'output') => `:codex-file-citation{path="${path}" purpose="${purpose}"}`;
+const liveCitation = (path: string, kind = 'workbook', attrs = '') =>
+  `:codex-file-citation{path="${path}" mode="live" artifact_kind="${kind}" ${attrs}}`;
 const turn = (status: TurnSummary['status'], texts: string[]): TurnSummary => ({ id: 'turn', status, itemsView: 'full',
   items: texts.map((text, index) => ({ id: `assistant-${index}`, type: 'agentMessage', text })) });
 const thread = (value: TurnSummary): ThreadSummary => ({ id:'thread', cwd:'/work', name:null, status:{type:'idle'}, turns:[value] });
@@ -130,14 +132,89 @@ test('Google output follows original markdown, citation, read/write and deduplic
     {...written,tool:'unrecognized'},...value.items]}).google, []);
 });
 
+test('live artifact projection follows final output citation, page and deduplication gates', () => {
+  const first = liveCitation('  ref-sheet  ', 'workbook', 'label=" Quarterly "');
+  const slide = liveCitation('ref-slide', 'presentation', 'title="Outline"');
+  const page = '12345678-1234-1234-1234-123456789abc';
+  const pageFirst = liveCitation('ref-page-a', 'presentation', `page_id=" ${page} "`);
+  const text = [first, liveCitation('ref-sheet', 'presentation', 'label="Duplicate"'), slide,
+    pageFirst, liveCitation('ref-page-b', 'workbook', `page_id="${page}"`),
+    liveCitation('artifact_external_remote'), liveCitation('fallback-slide', 'presentation'),
+    liveCitation('source', 'workbook', 'purpose="source"'), liveCitation('other', 'workbook', 'purpose="other"'),
+    liveCitation('https://example.invalid/x'), liveCitation('bad-kind', 'document'),
+    liveCitation('bad-page', 'workbook', 'page_id="invalid"'), liveCitation('', 'workbook'),
+    '`' + liveCitation('inline') + '`', '```\n' + liveCitation('fenced') + '\n```',
+    ':codex-file-citation{path="unfinished" mode="live" artifact_kind="workbook"',
+    String.raw`:codex-file-citation{path="ref\"quoted" mode="live" artifact_kind="workbook" label="Name\"quoted"}`].join('\n\n');
+  const expected = [
+    {kind:'artifact-session',resourceKind:'spreadsheet',artifactRef:'ref-sheet',title:'Quarterly'},
+    {kind:'artifact-session',resourceKind:'presentation',artifactRef:'ref-slide',title:'Outline'},
+    {kind:'artifact-session',resourceKind:'presentation',artifactRef:'ref-page-a',title:'Slide',pageId:page},
+    {kind:'artifact-session',resourceKind:'spreadsheet',artifactRef:'artifact_external_remote',title:'Sheet'},
+    {kind:'artifact-session',resourceKind:'presentation',artifactRef:'fallback-slide',title:'Slide'},
+    {kind:'artifact-session',resourceKind:'spreadsheet',artifactRef:'ref"quoted',title:'Name"quoted'},
+  ];
+  assert.deepEqual(project(turn('completed', [text])).artifacts, expected);
+  assert.deepEqual(project(turn('failed', [text])).artifacts, expected);
+  assert.deepEqual(project(turn('inProgress', [text])).artifacts, []);
+  assert.deepEqual(project(turn('interrupted', [text])).artifacts, []);
+  assert.deepEqual(project(turn('completed', [first, 'Final assistant has no output.'])).artifacts, []);
+  assert.deepEqual(project(turn('completed', [`[external_agent_tool_call] ${first}`])).artifacts, []);
+  const partial = project({...turn('completed', [first]), itemsView:'summary'});
+  assert.deepEqual(partial.artifacts, []);
+  assert.equal(partial.incomplete, true);
+});
+
+test('live artifact output coexists with file and Google resources and suppresses website fallback', () => {
+  const live = liveCitation('ref-sheet', 'workbook', 'label="Sheet title"');
+  const google = ':codex-file-citation{path="https://docs.google.com/document/d/yard-fixture/edit" label="Doc"}';
+  const value = turn('completed', [`${citation('report.pdf')} ${google} ${live} http://localhost:19876/`]);
+  const projection = project(value, {status:'known',path:'/other'});
+  assert.equal(projection.entries.length, 0);
+  assert.equal(projection.google.length, 1);
+  assert.equal(projection.artifacts[0]?.title, 'Sheet title');
+  assert.equal(projection.website, null);
+  const withFile = project(value);
+  assert.equal(withFile.entries[0]?.path, '/work/report.pdf');
+  assert.equal(withFile.google.length, 1);
+  assert.equal(withFile.artifacts.length, 1);
+  assert.equal(withFile.website, null);
+});
+
+test('Sites output honors the verified gate, completion, hidden MCP and other output families', () => {
+  const site = {id:'site',type:'mcpToolCall',server:'codex_apps',tool:'sites.get_site',status:'completed',error:null,
+    arguments:{},result:{content:[],structuredContent:{project_id:'project',current_live_url:'https://site.invalid/path',title:'Site title'}}};
+  const base = turn('completed', [`${citation('report.pdf')} ${liveCitation('sheet')} http://localhost:19876/`]);
+  const value = {...base,items:[site,...base.items]};
+  const run = (candidate: TurnSummary, enabled?: boolean) => projectMessageTurnPreviews('local', thread(candidate), candidate, undefined, enabled);
+  assert.deepEqual(run(value, true).appgen, [{kind:'appgen',projectId:'project',url:'https://site.invalid/path',title:'Site title'}]);
+  assert.equal(run(value, true).entries.length, 1);
+  assert.equal(run(value, true).artifacts.length, 1);
+  assert.equal(run(value, true).website, null);
+  assert.equal(run(value, false).appgen.length, 0);
+  assert.equal(run(value).resourceUncertain, true);
+  assert.equal(run({...value,status:'inProgress'}, true).appgen.length, 0);
+  assert.equal(run({...value,status:'failed'}, true).appgen.length, 1);
+  assert.equal(run({...value,items:[{...site,status:'inProgress'},...base.items]}, true).appgen.length, 1);
+  assert.equal(run({...value,itemsView:'summary'}, true).appgen.length, 0);
+  const hidden = {...site,result:{content:[],structuredContent:{project_id:'project',url:'https://site.invalid/',
+    status:'succeeded',has_mcp:true,schedule_suggestion:{title:'Run',prompt:'Run a check'}}}};
+  const websiteTurn = turn('completed', ['http://localhost:19876/']);
+  const hiddenTurn = {...websiteTurn,items:[hidden,...websiteTurn.items]};
+  assert.equal(run(hiddenTurn, true).appgen.length, 0);
+  assert.equal(run(hiddenTurn, true).website, null);
+  assert.ok(run(hiddenTurn, false).website);
+});
+
 type Pending = { endpoint: string; params: { hostId: string; paths?: string[]; path?: string }; dispatched: boolean; denied: boolean };
 declare global {
   interface Window {
     outputHarness: {
-      calls: { pending: Pending[]; opens: unknown[]; browsers: unknown[]; forks: string[]; copies: string[] };
+      calls: { pending: Pending[]; opens: unknown[]; browsers: unknown[]; artifacts: unknown[]; forks: string[]; copies: string[] };
       render: (options: { host?: string; threadId?: string; actualThreadId?: string; cwd?: string; status?: string; texts?: string[];
         onOpen?: 'at' | 'plain' | 'throw' | 'none'; authority?: 'sync' | 'thenable'; sourceKey?: string;
         onBrowser?: 'normal' | 'throw' | 'none'; items?: Record<string, unknown>[]; itemsView?: string;
+        onArtifact?: 'normal' | 'throw' | 'none'; canOpenArtifactPage?: boolean; isSharedConversation?: boolean; appgenEnabled?: boolean;
         directory?: {status:'none'} | {status:'known';path:string} | {status:'unknown'} }) => void;
       renderBasicHtml: (text: string) => void;
       renderStandaloneMarkdown: (text: string) => void;
@@ -148,6 +225,7 @@ declare global {
       emit: (type: string, hostId?: string) => void;
       setAuthority: (valid: boolean) => void;
       checkFile: (index: number) => string;
+      checkArtifact: (index: number) => string;
     };
   }
 }
@@ -163,7 +241,7 @@ before(async () => {
     import {createRoot} from 'react-dom/client';
     import {StandaloneMessages} from './src/renderer/messages/StandaloneMessages.tsx';
     import {StandaloneMarkdown} from './src/renderer/markdown/StandaloneMarkdown.tsx';
-    const calls = {pending:[], opens:[], browsers:[], forks:[], copies:[]}, fileChecks = [], deferred = [], listeners = new Set();
+    const calls = {pending:[], opens:[], browsers:[], artifacts:[], forks:[], copies:[]}, fileChecks = [], artifactChecks = [], deferred = [], listeners = new Set();
     Object.defineProperty(navigator, 'clipboard', {configurable:true,value:{writeText:async text => calls.copies.push(text)}});
     const client = {rpc:async () => {throw Error('unexpected rpc')}, reply:async () => {throw Error('unexpected reply')},
       subscribe:fn => {listeners.add(fn); return () => listeners.delete(fn)},
@@ -176,7 +254,7 @@ before(async () => {
       render(options={}) {
         const {host='ssh-one',threadId='thread-one',actualThreadId=threadId,cwd='/work',status='completed',
           texts=[':codex-file-citation{path="report.md" purpose="output"}'],onOpen='at',onBrowser='normal',authority,sourceKey='one',directory,
-          items,itemsView='full'} = options;
+          items,itemsView='full',onArtifact='normal',canOpenArtifactPage,isSharedConversation,appgenEnabled} = options;
         const thread = {id:actualThreadId,cwd,name:null,status:{type:'idle'},turns:[{id:'turn-one',status,itemsView,
           items:items ?? texts.map((text,i) => ({id:'assistant-'+i,type:'agentMessage',text}))}]};
         const onOpenFileAt = onOpen === 'none' || onOpen === 'plain' ? undefined : location => {
@@ -186,13 +264,17 @@ before(async () => {
         const onOpenBrowser = onBrowser === 'none' ? undefined : target => {
           if (onBrowser === 'throw') throw Error('Original browser action rejected'); calls.browsers.push(target);
         };
-        const outputPreviewAuthority = authority ? {sourceKey, outputDirectory:directory, assertCurrent:() => {
+        const onOpenArtifactSession = onArtifact === 'none' ? undefined : location => {
+          if (onArtifact === 'throw') throw Error('Original artifact action rejected');
+          const {assertCurrent, ...target} = location; artifactChecks.push(assertCurrent); calls.artifacts.push(target);
+        };
+        const outputPreviewAuthority = authority ? {sourceKey, outputDirectory:directory, canOpenArtifactPage, isSharedConversation, appgenEnabled, assertCurrent:() => {
           if (!authorityValid) throw Error('Original page authority revoked');
           if (authority === 'thenable') return Promise.resolve();
         }} : undefined;
         root.render(<StandaloneMessages client={client} hostId={host} threadId={threadId} thread={thread} outputPreviewAuthority={outputPreviewAuthority}
           onOpenFileAt={onOpenFileAt} onOpenFile={onOpen === 'plain' ? path => calls.opens.push(path) : undefined}
-          onOpenBrowser={onOpenBrowser} onFork={id => calls.forks.push(id)} />);
+          onOpenBrowser={onOpenBrowser} onOpenArtifactSession={onOpenArtifactSession} onFork={id => calls.forks.push(id)} />);
       },
       renderBasicHtml(text) {
         root.render(<StandaloneMarkdown text={text} client={client} hostId="ssh-one" cwd="/work" allowBasicHtml
@@ -210,6 +292,8 @@ before(async () => {
       emit(type,hostId) {for(const listener of listeners) listener({type,hostId})},
       setAuthority(valid) {authorityValid=valid},
       checkFile(index) {try {if (typeof fileChecks[index] !== 'function') return 'missing'; fileChecks[index](); return 'current';}
+        catch(error) {return error.message}},
+      checkArtifact(index) {try {if (typeof artifactChecks[index] !== 'function') return 'missing'; artifactChecks[index](); return 'current';}
         catch(error) {return error.message}}
     };
   ` }, bundle: true, write: false, format: 'iife', jsx: 'automatic', loader: { '.css': 'empty' },
@@ -238,6 +322,254 @@ async function newPage(width = 1280): Promise<{ page: Page; errors: string[] }> 
 async function pending(page: Page, count: number) {
   await page.waitForFunction(n => window.outputHarness.calls.pending.length === n, count);
 }
+
+test('Sites card requires the verified gate and opens the original URL under its source authority',
+  { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
+    const { page, errors } = await newPage(390);
+    try {
+      const site = {id:'site',type:'mcpToolCall',server:'codex_apps',tool:'sites.get_site',status:'completed',error:null,
+        arguments:{},result:{content:[],structuredContent:{project_id:'fixture-project',current_live_url:'https://example.invalid/fixture?q=1',title:'Fixture site'}}};
+      const answer = {id:'answer',type:'agentMessage',text:'Done. http://localhost:19876/'};
+      await page.evaluate(items => window.outputHarness.render({host:'local',authority:'sync',items}), [site,answer]);
+      await page.getByRole('status').filter({hasText:'Could not verify app-generated'}).waitFor();
+      assert.equal(await page.getByRole('button', {name:'Open Fixture site'}).count(), 0);
+      await page.evaluate(items => window.outputHarness.render({host:'local',authority:'sync',appgenEnabled:true,items}), [site,answer]);
+      const card = page.locator('.yard-output-card').filter({hasText:'Fixture site'});
+      const open = card.getByRole('button', {name:'Open Fixture site'});
+      await open.waitFor();
+      assert.match(await card.innerText(), /Metadata unavailable/);
+      assert.equal(await card.locator('.yard-output-icon--appgen svg').count(), 1);
+      assert.equal(await card.locator('.yard-output-icon--appgen svg rect').count(), 4);
+      assert.equal(await card.getByRole('button', {name:'Open in'}).count(), 1);
+      assert.equal(await page.getByRole('button', {name:'Open Web preview'}).count(), 0);
+      await open.click();
+      assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.browsers), [
+        {hostId:'local',threadId:'thread-one',url:'https://example.invalid/fixture?q=1',source:'link'},
+      ]);
+      await page.evaluate(() => window.outputHarness.setAuthority(false));
+      await open.click();
+      await page.getByRole('alert').filter({hasText:'Original page authority revoked'}).waitFor();
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.browsers)).length, 1);
+      await page.evaluate(items => {window.outputHarness.setAuthority(true);
+        window.outputHarness.render({host:'local',authority:'sync',appgenEnabled:false,items});}, [site,answer]);
+      await page.getByRole('button', {name:'Open Web preview'}).waitFor();
+      assert.equal(await page.getByRole('button', {name:'Open Fixture site'}).count(), 0);
+      await page.evaluate(items => window.outputHarness.render({host:'local',authority:'sync',appgenEnabled:true,items}), [site,answer]);
+      await open.waitFor();
+      await page.evaluate(() => {
+        window.outputHarness.emit('codex-app-server-connection-changed', 'local');
+        (document.querySelector('[aria-label="Open Fixture site"]') as HTMLButtonElement).click();
+      });
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.browsers)).length, 1);
+      assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.pending), []);
+      assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+  });
+
+test('inline live citations capture the original message and connection authority',
+  { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
+    const { page, errors } = await newPage(390);
+    try {
+      const sheet = liveCitation('sheet-ref', 'workbook', 'purpose="source" label="Sheet source"');
+      const slide = liveCitation('slide-ref', 'presentation', 'label="Slide output"');
+      const text = `${sheet} ${slide}`;
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',texts:[text]}), text);
+      const body = page.locator('.yard-assistant-message > .yard-markdown');
+      const sheetButton = body.getByRole('button', {name:'Sheet source'});
+      const slideButton = body.getByRole('button', {name:'Slide output'});
+      await sheetButton.click();
+      await slideButton.click();
+      assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.artifacts), [
+        {hostId:'local',threadId:'thread-one',artifactRef:'sheet-ref',kind:'spreadsheet',title:'Sheet source'},
+        {hostId:'local',threadId:'thread-one',artifactRef:'slide-ref',kind:'presentation',title:'Slide output'},
+      ]);
+      assert.equal(await sheetButton.locator('svg').evaluate(element => getComputedStyle(element).color), 'rgb(0, 163, 71)');
+      assert.equal(await slideButton.locator('svg').evaluate(element => getComputedStyle(element).color), 'rgb(240, 92, 47)');
+      assert.equal(await page.evaluate(() => window.outputHarness.checkArtifact(0)), 'current');
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',texts:[text + ' changed']}), text);
+      await body.getByText('changed').waitFor();
+      assert.equal(await page.evaluate(() => window.outputHarness.checkArtifact(0)), 'The original message source changed.');
+      await sheetButton.click();
+      await page.evaluate(() => window.outputHarness.emit('codex-app-server-connection-changed', 'local'));
+      assert.equal(await page.evaluate(() => window.outputHarness.checkArtifact(2)), 'The original message source changed.');
+      await page.getByRole('button', {name:'Copy',exact:true}).click();
+      assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.copies), [`${text} changed`]);
+      await page.evaluate(text => window.outputHarness.render({host:'local',threadId:'next-thread',actualThreadId:'thread-one',texts:[text]}), text);
+      await sheetButton.click();
+      await page.getByRole('alert').filter({hasText:'The original message source changed.'}).waitFor();
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.artifacts)).length, 3);
+      assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+  });
+
+test('live artifact rows render original titles and dispatch the scoped parent action',
+  { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
+    const { page, errors } = await newPage(390);
+    try {
+      const text = `${liveCitation('yard_fixture_artifact', 'workbook', 'label="Fixture sheet"')} ` +
+        `${liveCitation('yard_fixture_slide', 'presentation', 'label="Fixture slide"')} http://localhost:19876/`;
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',texts:[text]}), text);
+      const rows = page.locator('.yard-output-card--artifact');
+      await rows.nth(1).getByRole('button', {name:'Open Fixture slide'}).waitFor();
+      assert.equal(await rows.count(), 2);
+      assert.match(await rows.nth(0).innerText(), /Fixture sheet\s+Sheet/);
+      assert.match(await rows.nth(1).innerText(), /Fixture slide\s+Slide/);
+      assert.equal(await page.getByRole('button', {name:'Open Web preview'}).count(), 0);
+      assert.equal(await page.locator('.yard-output-card--artifact .yard-output-menu').count(), 0);
+      await rows.nth(0).getByRole('button', {name:'Open Fixture sheet'}).click();
+      await rows.nth(1).getByRole('button', {name:'Open Fixture slide'}).click();
+      assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.artifacts), [
+        {hostId:'local',threadId:'thread-one',artifactRef:'yard_fixture_artifact',kind:'spreadsheet',title:'Fixture sheet'},
+        {hostId:'local',threadId:'thread-one',artifactRef:'yard_fixture_slide',kind:'presentation',title:'Fixture slide'},
+      ]);
+      assert.equal(await page.evaluate(() => window.outputHarness.checkArtifact(0)), 'current');
+      assert.deepEqual(await page.evaluate(() => [window.outputHarness.calls.pending, window.outputHarness.calls.opens,
+        window.outputHarness.calls.browsers]), [[], [], []]);
+      await page.evaluate(() => {
+        document.documentElement.style.setProperty('--yard-bg', '#1a2321');
+        document.documentElement.style.setProperty('--yard-fg', '#f0f5f3');
+        document.documentElement.style.setProperty('--yard-border', '#51615a');
+        document.documentElement.style.setProperty('--yard-surface', '#2b3934');
+        document.documentElement.style.setProperty('--yard-muted', '#acbcb4');
+      });
+      assert.equal(await rows.first().evaluate(element => getComputedStyle(element).backgroundColor), 'rgb(26, 35, 33)');
+      assert.equal(await rows.first().locator('.yard-output-icon').evaluate(element => getComputedStyle(element).backgroundColor), 'rgb(43, 57, 52)');
+      assert.equal(await rows.first().locator('small').evaluate(element => getComputedStyle(element).color), 'rgb(172, 188, 180)');
+      const bounds = await rows.evaluateAll(elements => elements.map(element => ({left:element.getBoundingClientRect().left,
+        right:element.getBoundingClientRect().right,viewport:innerWidth})));
+      assert.ok(bounds.every(value => value.left >= 0 && value.right <= value.viewport));
+      if (process.env.YARD_TEST_ARTIFACTS) await rows.first().screenshot({path:join(process.env.YARD_TEST_ARTIFACTS, 'live-workbook-narrow.png')});
+      assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+  });
+
+test('live artifact action keeps original source and connection guards through handoff',
+  { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
+    const { page, errors } = await newPage();
+    try {
+      const text = liveCitation('ref-sheet', 'workbook', 'label="Sheet title"');
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',texts:[text]}), text);
+      const open = page.locator('.yard-output-card--artifact').getByRole('button', {name:'Open Sheet title'});
+      await open.click();
+      assert.equal(await page.evaluate(() => window.outputHarness.checkArtifact(0)), 'current');
+      await page.evaluate(() => window.outputHarness.setAuthority(false));
+      assert.equal(await page.evaluate(() => window.outputHarness.checkArtifact(0)), 'Original page authority revoked');
+      await open.click();
+      await page.getByRole('alert').filter({hasText:'Original page authority revoked'}).waitFor();
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.artifacts)).length, 1);
+      await page.evaluate(text => { window.outputHarness.setAuthority(true);
+        window.outputHarness.render({host:'local',authority:'sync',sourceKey:'next',texts:[text]}); }, text);
+      await page.waitForFunction(() => !document.querySelector('[role=alert]'));
+      assert.equal(await page.evaluate(() => window.outputHarness.checkArtifact(0)), 'The original output source changed.');
+      await open.click();
+      await page.evaluate(() => {
+        window.outputHarness.emit('codex-app-server-connection-changed', 'local');
+        (document.querySelector('.yard-output-card--artifact [aria-label="Open Sheet title"]') as HTMLButtonElement).click();
+      });
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.artifacts)).length, 2);
+      assert.equal(await page.evaluate(() => window.outputHarness.checkArtifact(1)), 'The original output source changed.');
+      const third = liveCitation('ref-sheet', 'workbook', 'label="Third title"');
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',sourceKey:'third',onArtifact:'throw',texts:[text]}), third);
+      await page.locator('.yard-output-card--artifact').getByRole('button', {name:'Open Third title'}).click();
+      await page.getByRole('alert').filter({hasText:'Original artifact action rejected'}).waitFor();
+      assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+  });
+
+test('live artifact external and page references retain their distinct availability',
+  { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
+    const { page, errors } = await newPage();
+    try {
+      const pageId = '12345678-1234-1234-1234-123456789abc';
+      const external = liveCitation('artifact_external_remote', 'workbook', 'label="External"');
+      const linked = liveCitation('page-ref', 'presentation', `page_id="${pageId}" label="Linked page"`);
+      const text = `${external} ${linked}`;
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',texts:[text]}), text);
+      const rows = page.locator('.yard-output-card--artifact');
+      await rows.nth(1).getByText('Linked page').waitFor();
+      assert.equal(await rows.getByRole('button', {name:'Open Linked page'}).count(), 0);
+      await rows.getByRole('button', {name:'Open External'}).click();
+      assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.artifacts), [
+        {hostId:'local',threadId:'thread-one',artifactRef:'artifact_external_remote',kind:'spreadsheet',title:'External'},
+      ]);
+      await page.evaluate(text => window.outputHarness.render({host:'ssh-one',authority:'sync',sourceKey:'page',
+        canOpenArtifactPage:true,texts:[text]}), text);
+      await rows.getByRole('button', {name:'Open Linked page'}).click();
+      assert.equal(await rows.getByRole('button', {name:'Open External'}).count(), 0);
+      assert.deepEqual((await page.evaluate(() => window.outputHarness.calls.artifacts))[1],
+        {hostId:'ssh-one',threadId:'thread-one',artifactRef:'page-ref',kind:'presentation',title:'Linked page',pageId});
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',sourceKey:'shared',
+        isSharedConversation:true,texts:[text]}), text);
+      await page.waitForFunction(() => document.querySelectorAll('.yard-output-card--artifact').length === 2
+        && !document.querySelector('.yard-output-card--artifact [aria-label="Open External"]')
+        && !document.querySelector('.yard-output-card--artifact [aria-label="Open Linked page"]'));
+      assert.equal(await rows.getByRole('button', {name:'Open Linked page'}).count(), 0);
+      assert.deepEqual(await page.evaluate(() => [window.outputHarness.calls.pending,window.outputHarness.calls.opens]), [[], []]);
+      assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+  });
+
+test('live artifact rows wait for complete history and do not invent a missing parent action',
+  { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
+    const { page, errors } = await newPage();
+    try {
+      const text = liveCitation('ref-sheet');
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',itemsView:'summary',texts:[text]}), text);
+      await page.getByRole('status').filter({hasText:'turn history is complete'}).waitFor();
+      assert.equal(await page.locator('.yard-output-card--artifact').count(), 0);
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',itemsView:'full',onArtifact:'none',texts:[text]}), text);
+      await page.locator('.yard-output-card--artifact').getByRole('button', {name:'Open Sheet'}).click();
+      await page.getByRole('alert').filter({hasText:'Artifact session navigation is unavailable for this page.'}).waitFor();
+      assert.deepEqual(await page.evaluate(() => window.outputHarness.calls.artifacts), []);
+      assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+  });
+
+test('live artifact row survives file existence results without changing file precedence',
+  { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
+    const { page, errors } = await newPage();
+    try {
+      const text = `${citation('report.md')} ${liveCitation('ref-sheet')} http://localhost:19876/`;
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',texts:[text]}), text);
+      const sheet = page.locator('.yard-output-card--artifact').getByRole('button', {name:'Open Sheet'});
+      await sheet.waitFor();
+      await pending(page, 1);
+      assert.deepEqual((await page.evaluate(() => window.outputHarness.calls.pending[0]))?.params.paths, ['/work/report.md']);
+      await page.evaluate(() => { window.outputHarness.dispatch(0); window.outputHarness.resolve(0, ['/work/report.md']); });
+      await page.getByRole('button', {name:'Open report.md'}).waitFor();
+      assert.equal(await sheet.count(), 1);
+      assert.equal(await page.getByRole('button', {name:'Open report.md'}).count(), 1);
+      assert.equal(await page.getByRole('button', {name:'Open Web preview'}).count(), 0);
+      await sheet.click();
+      assert.deepEqual((await page.evaluate(() => window.outputHarness.calls.artifacts))[0],
+        {hostId:'local',threadId:'thread-one',artifactRef:'ref-sheet',kind:'spreadsheet',title:'Sheet'});
+      assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+  });
+
+test('live artifact resource lists preserve the original collapsed order and scope',
+  { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {
+    const { page, errors } = await newPage();
+    try {
+      const text = Array.from({length:5}, (_, index) => liveCitation(`ref-${index}`, 'workbook', `label="Sheet ${index}"`)).join(' ');
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',texts:[text]}), text);
+      const rows = page.locator('.yard-output-card--artifact');
+      const expand = page.getByRole('button', {name:'Show 2 more'});
+      await expand.waitFor();
+      assert.equal(await rows.count(), 3);
+      assert.match(await rows.nth(0).innerText(), /Sheet 0/);
+      assert.match(await rows.nth(2).innerText(), /Sheet 2/);
+      await expand.click();
+      assert.equal(await rows.count(), 5);
+      await rows.nth(4).getByRole('button', {name:'Open Sheet 4'}).click();
+      assert.equal((await page.evaluate(() => window.outputHarness.calls.artifacts)).length, 1);
+      await page.evaluate(text => window.outputHarness.render({host:'local',authority:'sync',sourceKey:'next',texts:[text]}), text);
+      await expand.waitFor();
+      assert.equal(await rows.count(), 3);
+      assert.equal(await page.evaluate(() => window.outputHarness.checkArtifact(0)), 'The original output source changed.');
+      assert.deepEqual(errors, []);
+    } finally { await page.close(); }
+  });
 
 test('website preview card is visible and opens the original scoped local URL',
   { skip: !hasChrome && 'Isolated Chrome is unavailable', timeout: 30_000 }, async () => {

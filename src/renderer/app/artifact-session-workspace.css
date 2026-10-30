@@ -1,0 +1,9 @@
+.yard-artifact-tabs { display:flex; align-items:center; gap:6px; min-width:0; height:44px; padding:6px 8px; overflow:auto; border-bottom:1px solid var(--yard-border); }
+.yard-artifact-tab { display:flex; flex:none; align-items:center; width:238px; max-width:60vw; height:32px; border:1px solid var(--yard-border); border-radius:8px; }
+.yard-artifact-tab button { display:flex; align-items:center; gap:5px; min-width:0; height:100%; border:0; background:transparent; color:inherit; }
+.yard-artifact-tab button[role=tab] { flex:1; padding:0 10px; text-align:start; }
+.yard-artifact-tab button[role=tab] span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.yard-artifact-tab button[aria-label] { padding:0 8px; color:var(--yard-muted); }
+.yard-artifact-tab button:hover { background:var(--yard-panel); }
+.yard-artifact-unavailable { display:grid; flex:1; min-height:0; place-items:center; padding:20px; color:var(--yard-muted); font-size:12px; text-align:center; }
+.yard-artifact-unavailable p { margin:0; }

@@ -34,9 +34,19 @@ async function fixture(t: TestContext) {
     let next = 0;
     return {
       async edit(operation: string, extra: Record<string, unknown> = {}) {
+        const readId = 'connection-' + ++next;
+        const read = await request({ type: 'mcp-request', hostId: 'local', request: {
+          id: readId, method: 'thread/read', params: { threadId: 'thread', includeTurns: false },
+        } }, value => value.type === 'mcp-response' && record(value.message).id === readId);
+        assert.equal(record(read.message).error, undefined);
+        const connection = messages.filter(value => value.type === 'codex-app-server-connection-changed'
+          && value.hostId === 'local').at(-1);
+        assert.equal(connection?.state, 'connected');
+        const daemonConnectionGeneration = connection.daemonConnectionGeneration;
+        assert.notEqual(daemonConnectionGeneration, undefined);
         const requestId = String(++next);
         return request({ type: 'fetch', requestId, url: 'vscode://codex/message-edit', body: JSON.stringify({
-          hostId: 'local', threadId: 'thread', operation, origin: { hostId: 'local', threadId: 'thread', turnId: 'source', itemId: 'user' },
+          hostId: 'local', threadId: 'thread', operation, daemonConnectionGeneration, origin: { hostId: 'local', threadId: 'thread', turnId: 'source', itemId: 'user' },
           clientUserMessageId: 'edited-client-id', expectedTurnIds: ['before', 'source'], turnParams: { input: [{ type: 'text', text: 'edited' }] }, ...extra,
         }) }, value => value.type === 'fetch-response' && value.requestId === requestId);
       },

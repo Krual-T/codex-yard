@@ -10,7 +10,7 @@ import type { Browser, Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { record } from '../src/native/protocol.ts';
 import { createFakeCodex } from '../test/fake-codex.ts';
-import { isolatePublicVerifier, openComposerModelOptions } from './public-verifier-environment.ts';
+import { isolatePublicVerifier, openComposerModelOptions, publicVerifierConfigurationFetch } from './public-verifier-environment.ts';
 
 const root = await mkdtemp(join(tmpdir(), 'aw-model-ui-'));
 const output = process.env.AGENTS_MODEL_EVIDENCE
@@ -250,7 +250,7 @@ try {
   const dataDir = join(root, 'data');
   app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: fake.socketPath, codexHome: join(root, 'codex'),
     hostCatalog: { hosts: [], projects: [], assignments: {} },
-    httpFetch: async () => new Response('External telemetry disabled for model fixture', { status: 503 }) });
+    httpFetch: publicVerifierConfigurationFetch });
   const appOrigin = app.url;
   assert.notEqual(new URL(appOrigin).port, '8765');
   browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome',

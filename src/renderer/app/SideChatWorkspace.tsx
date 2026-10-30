@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { ComposerDraft, MessageEditOrigin, SubmitAction, SubmitOptions, WorkbenchClient, WorkbenchDispatchOptions } from '../workbench-contract.ts';
+import type { ArtifactSessionTarget, ComposerDraft, MessageEditOrigin, SubmitAction, SubmitOptions, WorkbenchClient, WorkbenchDispatchOptions } from '../workbench-contract.ts';
 import type { ComposerDraftController, ComposerDraftLease, ComposerDraftOwner, ComposerSubmissionDescription, StandaloneComposerRuntimeProps } from '../composer/StandaloneComposer.tsx';
 import { saveComposerDraftConflict } from '../composer/composer-draft-store.ts';
 import { normalizeDraft } from '../composer/standalone-draft.ts';
@@ -104,6 +104,7 @@ export interface SideChatWorkspaceProps {
   outputPreviewAuthority?(identity: SideChatWorkspaceIdentity, threadId: string, cwd: string): MessageOutputPreviewAuthority;
   onOpenBrowser?(value: { hostId: string; threadId: string; url?: string; source?: 'link' }): void;
   onOpenVisualization?(value: { hostId: string; threadId: string; path: string }): void;
+  onOpenArtifactSession?(value: ArtifactSessionTarget): void;
   approvalOptions?: Partial<Omit<ApprovalDialogProps, 'request' | 'onRespond' | 'onUnsupported' | 'onCloseView' | 'onInputEscape'>>;
 }
 
@@ -647,7 +648,8 @@ function SideChatWorkspaceSession(props: SideChatWorkspaceProps & { runtime: Sid
         onEdit: edit?.childId === childId ? onEdit : undefined,
         onOpenFile: path => { if (childId) props.onOpenFile?.({ hostId: original.hostId, threadId: childId, path, cwd: original.cwd }); },
         onOpenFileAt: location => { if (childId) props.onOpenFile?.({ ...location, threadId: childId }); },
-        onOpenVisualization: props.onOpenVisualization, onOpenBrowser: props.onOpenBrowser }} />
+        onOpenVisualization: props.onOpenVisualization, onOpenBrowser: props.onOpenBrowser,
+        onOpenArtifactSession: props.onOpenArtifactSession }} />
     {approval && <div ref={approvalNode} inert={locked.current}><ApprovalDialog {...props.approvalOptions} {...approval}
       onBegin={ref => {
         if (locked.current || !childId || ref.hostId !== original.hostId) return false;

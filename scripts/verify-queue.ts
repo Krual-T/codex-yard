@@ -7,7 +7,7 @@ import { chromium } from 'playwright-core';
 import type { Browser, Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem, NO_REPLY } from '../test/fake-codex.ts';
-import { isolatePublicVerifier } from './public-verifier-environment.ts';
+import { isolatePublicVerifier, publicVerifierConfigurationFetch } from './public-verifier-environment.ts';
 
 const root = await mkdtemp(join(tmpdir(), 'aw-queue-ui-'));
 const output = process.env.AGENTS_QUEUE_EVIDENCE
@@ -45,7 +45,7 @@ try {
   const dataDir = join(root, 'data');
   app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: fake.socketPath, codexHome: join(root, 'codex'),
     hostCatalog: { hosts: [], projects: [], assignments: {} },
-    httpFetch: async () => new Response('External requests disabled for queue fixture', { status: 503 }) });
+    httpFetch: publicVerifierConfigurationFetch });
   browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome',
     headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-proxy-server',
       '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost'] });

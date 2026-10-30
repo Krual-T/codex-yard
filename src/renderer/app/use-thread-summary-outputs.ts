@@ -18,6 +18,8 @@ export interface ThreadSummaryOutputsOptions {
   snapshot: ConversationSnapshot;
   projectState: ProjectState | null;
   enabled: boolean;
+  /** The same current Sites evaluation used by Main and side-chat message outputs. */
+  appgenEnabled?: boolean;
   /** Must change with the parent's original page and connection/read generations. */
   sourceKey: string;
   assertCurrent(): void;
@@ -98,11 +100,11 @@ interface Saved {
 
 /** Read-only projection of the current conversation's known Outputs sources. */
 export function useThreadSummaryOutputs(options: ThreadSummaryOutputsOptions): ThreadSummaryOutputsResult {
-  const { client, hostId, threadId, snapshot, projectState, enabled, sourceKey, assertCurrent } = options;
+  const { client, hostId, threadId, snapshot, projectState, enabled, appgenEnabled, sourceKey, assertCurrent } = options;
   const [attempt, setAttempt] = useState(0), [connectionRevision, setConnectionRevision] = useState(0);
   // The parent supplies a fresh closure on render; sourceKey carries its authority epoch.
-  const scope = useMemo(() => ({ client, hostId, threadId, snapshot, projectState, enabled, sourceKey, assertCurrent, attempt, connectionRevision }),
-    [client, hostId, threadId, snapshot, projectState, enabled, sourceKey, attempt, connectionRevision]);
+  const scope = useMemo(() => ({ client, hostId, threadId, snapshot, projectState, enabled, appgenEnabled, sourceKey, assertCurrent, attempt, connectionRevision }),
+    [client, hostId, threadId, snapshot, projectState, enabled, appgenEnabled, sourceKey, attempt, connectionRevision]);
   const current = useRef<typeof scope | null>(scope); current.current = scope;
   const [saved, setSaved] = useState<Saved | null>(null);
   const savedRef = useRef(saved); savedRef.current = saved;
@@ -143,7 +145,7 @@ export function useThreadSummaryOutputs(options: ThreadSummaryOutputsOptions): T
         const thread = scope.snapshot.thread;
         const file = projectThreadSummaryFileOutputs({ hostId: scope.hostId, thread,
           historyComplete: scope.snapshot.historyComplete, streamGap: scope.snapshot.streamGap,
-          outputDirectory: threadOutputDirectory(scope.projectState, scope.hostId, scope.threadId) });
+          outputDirectory: threadOutputDirectory(scope.projectState, scope.hostId, scope.threadId), appgenEnabled: scope.appgenEnabled });
         const resource = projectThreadSummaryResourceOutputs({ hostId: scope.hostId, thread,
           historyComplete: scope.snapshot.historyComplete, streamGap: scope.snapshot.streamGap });
         const gaps = new Set<string>([...file.gaps, ...resource.gaps]);

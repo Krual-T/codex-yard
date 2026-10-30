@@ -2,7 +2,7 @@ import type { ThreadSummary, TurnSummary } from '../../../lib/codex-protocol.ts'
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { directiveFromMarkdown } from 'mdast-util-directive';
 import { directive } from 'micromark-extension-directive';
-import { projectThreadSummaryFileOutputs } from '../app/thread-summary-file-outputs.ts';
+import { projectThreadSummaryFileOutputs, projectTurnAppgenResources } from '../app/thread-summary-file-outputs.ts';
 import { normalizeFileCitationEscapes, outputFileCitationReferences } from '../markdown/file-citations.ts';
 
 const extensions = new Set(['avif', 'csv', 'doc', 'docx', 'gif', 'jpeg', 'jpg', 'md', 'mdx', 'pdf', 'png',
@@ -13,6 +13,9 @@ export type MessageOutputDirectory = { status: 'none' } | { status: 'known'; pat
 export type MessageWebsitePreview = { kind: 'website'; target: { type: 'url'; url: string } | { type: 'file'; path: string } };
 type GoogleKind = 'document' | 'spreadsheet' | 'presentation' | 'drive';
 export type MessageGooglePreview = { kind: 'google-drive'; resourceKind: GoogleKind; url: string; title: string };
+export type MessageArtifactPreview = { kind: 'artifact-session'; resourceKind: 'spreadsheet' | 'presentation';
+  artifactRef: string; title: string; pageId?: string };
+export type MessageAppgenPreview = { kind: 'appgen'; projectId: string; url: string; title: string };
 
 interface MarkdownNode {
   type: string; name?: string; url?: string; value?: string; alt?: string | null;
@@ -43,6 +46,73 @@ const googleUrlFields = ['documentUrl', 'document_url', 'fileUrl', 'file_url', '
   'spreadsheetUrl', 'spreadsheet_url', 'display_url', 'url', 'webViewLink', 'web_view_link'];
 function object(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+// The original citation tokenizer accepts escaped quotes in live attributes.
+function normalizeLiveCitationEscapes(source: string): string {
+  if (!source.includes('codex-file-citation') || (!source.includes('\\"') && !source.includes("\\'"))) return source;
+  const replacements: { start: number; end: number; value: string }[] = [];
+  for (const match of source.matchAll(/:codex-file-citation(?=\{)/gu)) {
+    const start = match.index;
+    if (start > 0 && source[start - 1] === ':') continue;
+    let escapes = 0;
+    for (let index = start - 1; index >= 0 && source[index] === '\\'; index--) escapes++;
+    if (escapes % 2) continue;
+    const open = start + match[0].length;
+    let quote = '', value = source.slice(start, open + 1), changed = false;
+    for (let index = open + 1; index < source.length && source[index] !== '\n' && source[index] !== '\r'; index++) {
+      const character = source[index] ?? '';
+      if (quote && character === '\\' && source[index + 1] === quote) {
+        value += quote === '"' ? '&#34;' : '&#39;';
+        changed = true;
+        index++;
+      } else {
+        value += character;
+        if (quote && character === quote) quote = '';
+        else if (!quote && (character === '"' || character === "'")) quote = character;
+        else if (!quote && character === '}') {
+          if (changed) replacements.push({ start, end: index + 1, value });
+          break;
+        }
+      }
+    }
+  }
+  for (const replacement of replacements.reverse()) {
+    source = source.slice(0, replacement.start) + replacement.value + source.slice(replacement.end);
+  }
+  return source;
+}
+
+/** Only the final assistant's valid live output citations become artifact rows. */
+function artifactPreviews(turn: TurnSummary): MessageArtifactPreview[] {
+  if (turn.itemsView !== 'full') return [];
+  const final = [...turn.items].reverse().find(item => item.type === 'agentMessage');
+  if (typeof final?.text !== 'string' || !final.text.includes('codex-file-citation')) return [];
+  const source = normalizeLiveCitationEscapes(normalizeFileCitationEscapes(final.text));
+  const root = fromMarkdown(source, { extensions: [directive()], mdastExtensions: [directiveFromMarkdown()] }) as unknown as MarkdownNode;
+  const result: MessageArtifactPreview[] = [], seen = new Set<string>();
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+  function visit(node: MarkdownNode): void {
+    if (['code', 'inlineCode', 'html', 'image', 'imageReference', 'definition'].includes(node.type)) return;
+    if (node.type === 'textDirective' && node.name === 'codex-file-citation') {
+      const attrs = node.attributes ?? {}, path = typeof attrs.path === 'string' ? attrs.path.trim() : '';
+      const pageId = typeof attrs.page_id === 'string' ? attrs.page_id.trim() : undefined;
+      if (!path || /^https?:\/\//iu.test(path) || attrs.mode !== 'live'
+        || (attrs.artifact_kind !== 'workbook' && attrs.artifact_kind !== 'presentation')
+        || Object.hasOwn(attrs, 'purpose') && attrs.purpose !== 'output'
+        || Object.hasOwn(attrs, 'page_id') && (!pageId || !uuid.test(pageId))) return;
+      const key = pageId == null ? `artifact:${path}` : `page:${pageId}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const resourceKind = attrs.artifact_kind === 'workbook' ? 'spreadsheet' : 'presentation';
+      const title = attrs.label?.trim() || attrs.title?.trim() || (resourceKind === 'spreadsheet' ? 'Sheet' : 'Slide');
+      result.push({ kind: 'artifact-session', resourceKind, artifactRef: path, title, ...(pageId ? { pageId } : {}) });
+      return;
+    }
+    for (const child of node.children ?? []) visit(child);
+  }
+  visit(root);
+  return result;
 }
 
 /** Derive only the Google resources the original completed-turn consumer could display. */
@@ -178,11 +248,12 @@ export function projectMessageOutputPreviews(turn: TurnSummary, cwd: string): Me
 
 /** Reuse the existing single-turn output projection for website and Markdown-link precedence. */
 export function projectMessageTurnPreviews(hostId: string, thread: ThreadSummary, turn: TurnSummary,
-  directory?: MessageOutputDirectory): { entries: MessageOutputPreview[]; website: MessageWebsitePreview | null; google: MessageGooglePreview[]; unavailable: boolean;
+  directory?: MessageOutputDirectory, appgenEnabled?: boolean): { entries: MessageOutputPreview[]; website: MessageWebsitePreview | null; google: MessageGooglePreview[];
+    artifacts: MessageArtifactPreview[]; appgen: MessageAppgenPreview[]; unavailable: boolean;
     resourceUncertain: boolean; incomplete: boolean } {
   const all = projectMessageOutputPreviews(turn, thread.cwd);
   const restricted = restrictMessageOutputDirectory(all, thread.cwd, directory);
-  if (turn.status !== 'completed' && turn.status !== 'failed') return { ...restricted, website: null, google: [], resourceUncertain: false, incomplete: false };
+  if (turn.status !== 'completed' && turn.status !== 'failed') return { ...restricted, website: null, google: [], artifacts: [], appgen: [], resourceUncertain: false, incomplete: false };
   const normalizedTurn = turn.status === 'failed' ? { ...turn, status: 'completed' as const } : turn;
   // The original edited-path collector includes delete paths; the Summary
   // projector otherwise omits them, so preserve them for website selection.
@@ -194,9 +265,13 @@ export function projectMessageTurnPreviews(hostId: string, thread: ThreadSummary
         ? { ...change, kind: { ...kind, type: 'add' } } : change;
     }) }) };
   const project = (outputDirectory: MessageOutputDirectory, value = websiteTurn) => projectThreadSummaryFileOutputs({ hostId,
-    thread: { ...thread, turns: [value] }, historyComplete: value.itemsView === 'full', streamGap: false, outputDirectory });
+    thread: { ...thread, turns: [value] }, historyComplete: value.itemsView === 'full', streamGap: false, outputDirectory, appgenEnabled });
   const unrestricted = project({ status: 'none' });
   const selected = directory && directory.status !== 'none' ? project(directory) : unrestricted;
+  const artifacts = unrestricted.gaps.includes('assistant-envelope-unsupported') ? [] : artifactPreviews(normalizedTurn);
+  const appgenCandidates = unrestricted.gaps.includes('assistant-envelope-unsupported') ? [] : projectTurnAppgenResources(normalizedTurn.items);
+  const appgen: MessageAppgenPreview[] = normalizedTurn.itemsView === 'full' && appgenEnabled === true
+    ? appgenCandidates.filter(entry => entry.hasMcp !== true).map(({projectId, url, title}) => ({kind:'appgen', projectId, url, title})) : [];
   const unknownDirectory = directory?.status === 'unknown'
     || directory?.status === 'known' && selected.gaps.includes('invalid-output-directory');
   const unrestrictedFileWebsite = unrestricted.websites.some(site => site.target.type === 'file');
@@ -209,18 +284,20 @@ export function projectMessageTurnPreviews(hostId: string, thread: ThreadSummary
     entries.push(previewForPath(entry.path));
   }
   const site = (unknownDirectory && !unavailable ? unrestricted : selected).websites[0];
-  const website = !entries.length && !unavailable && site
+  const website = !entries.length && !artifacts.length && !unavailable && site
     ? { kind: 'website' as const, target: site.target.type === 'url'
       ? { type: 'url' as const, url: site.target.url } : { type: 'file' as const, path: site.target.path } } : null;
-  const resourceUncertain = !entries.length && (unknownDirectory && !unavailable ? unrestricted : selected).gaps.includes('website-appgen-unknown');
+  const resourceUncertain = appgenEnabled === undefined && (appgenCandidates.length > 0
+    || !entries.length && (unknownDirectory && !unavailable ? unrestricted : selected).gaps.includes('website-appgen-unknown'));
   // A partial turn may be missing a higher-priority output. This projection is
   // only used to explain why the candidate is not actionable.
   const partial = normalizedTurn.itemsView !== 'full' && !entries.length && !unavailable
     ? project(directory?.status === 'known' ? directory : { status: 'none' }, { ...websiteTurn, itemsView: 'full' }) : null;
   const incomplete = Boolean(partial && (partial.websites.length || partial.gaps.includes('website-appgen-unknown')
-    || googlePreviews({ ...normalizedTurn, itemsView: 'full' }).length));
+    || googlePreviews({ ...normalizedTurn, itemsView: 'full' }).length
+    || artifactPreviews({ ...normalizedTurn, itemsView: 'full' }).length || appgenEnabled === true && appgenCandidates.length));
   const google = unrestricted.gaps.includes('assistant-envelope-unsupported') ? [] : googlePreviews(normalizedTurn);
-  return { entries, website, google, unavailable, resourceUncertain, incomplete };
+  return { entries, website, google, artifacts, appgen, unavailable, resourceUncertain, incomplete };
 }
 
 /** Apply the projectless output-directory fact supplied by the original parent. */

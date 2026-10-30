@@ -24,7 +24,7 @@ declare global {
     outputConsumer: {
       init(): Promise<void>;
       projectState(): Promise<ProjectState>;
-      show(hostId: string, threadId: string, snapshot: ConversationSnapshot, state: ProjectState | null, keepSource: boolean): void;
+      show(hostId: string, threadId: string, snapshot: ConversationSnapshot, state: ProjectState | null, keepSource: boolean, appgenEnabled?: boolean): void;
       value(): OutputValue;
       retry(): void;
       capture(index: number): void;
@@ -113,10 +113,10 @@ test('summary output consumer uses real host checks and rejects stale owner, con
         }
       },
       projectState:() => realHost('thread-project-state'),
-      show(hostId, threadId, snapshot, projectState, keepSource) {
+      show(hostId, threadId, snapshot, projectState, keepSource, appgenEnabled) {
         const original = keepSource ? authority : ++authority;
         const originalConnection = client.captureDaemonConnection(hostId);
-        const options = {client, hostId, threadId, snapshot, projectState, enabled:true, sourceKey:String(original),
+        const options = {client, hostId, threadId, snapshot, projectState, enabled:true, appgenEnabled, sourceKey:String(original),
           assertCurrent() {if (original !== authority) throw Error('original authority revoked'); originalConnection.assertOriginal();}};
         flushSync(() => root.render(<StrictMode><View options={options}/></StrictMode>));
       },
@@ -155,9 +155,9 @@ test('summary output consumer uses real host checks and rejects stale owner, con
   assert.deepEqual(projects.outputDirectories.map(item => [item.hostId, item.threadId, item.value]).sort(),
     [['local', 'same', '/workspace/out'], ['remote-fixture', 'same', '/remote/out']]);
   const ready = () => page.waitForFunction(() => !window.outputConsumer.value().loading);
-  const show = (hostId: string, value: ConversationSnapshot, state: ProjectState | null = projects, keepSource = false) =>
-    page.evaluate(({ hostId, value, state, keepSource }) => window.outputConsumer.show(hostId, 'same', value, state, keepSource),
-      { hostId, value, state, keepSource });
+  const show = (hostId: string, value: ConversationSnapshot, state: ProjectState | null = projects, keepSource = false, appgenEnabled?: boolean) =>
+    page.evaluate(({ hostId, value, state, keepSource, appgenEnabled }) => window.outputConsumer.show(hostId, 'same', value, state, keepSource, appgenEnabled),
+      { hostId, value, state, keepSource, appgenEnabled });
 
   const resource: ThreadItemSummary = { id: 'created', type: 'mcpToolCall', server: 'connector', tool: 'write', status: 'completed', error: null,
     appContext: { connectorId: 'fixture' }, result: { _meta: { 'openai/resourceActivities': { version: 1,
@@ -192,6 +192,20 @@ test('summary output consumer uses real host checks and rejects stale owner, con
   assert.equal(value.entries[0]?.outputKind, 'website'); assert.equal(value.entries[0]?.url, 'http://localhost:5199/');
   assert.deepEqual(value.entries[0]?.source, { hostId: 'local', threadId: 'same', cwd: '/workspace', turnId: 'turn', itemId: 'answer' });
   assert.equal(local.calls('fs/getMetadata').length, beforeWebsite);
+  const generatedSite = snapshot(thread('/workspace', [{ id: 'site', type: 'mcpToolCall', server: 'codex_apps', tool: 'sites.get_site',
+    status: 'completed', error: null, result: { structuredContent: { project_id: 'one', current_live_url: 'https://example.invalid/site' } } },
+    message('Preview http://localhost:5199/') ]));
+  await show('local', generatedSite); await ready();
+  value = await page.evaluate(() => window.outputConsumer.value());
+  assert.equal(value.entries.length, 0); assert.match(value.notice ?? '', /app-generated website/);
+  await show('local', generatedSite, projects, true, false); await ready();
+  value = await page.evaluate(() => window.outputConsumer.value());
+  assert.equal(value.entries[0]?.url, 'http://localhost:5199/'); assert.equal(value.notice, null);
+  await page.evaluate(() => window.outputConsumer.capture(0));
+  await show('local', generatedSite, projects, true, true); await ready();
+  value = await page.evaluate(() => window.outputConsumer.value());
+  assert.equal(value.entries.length, 0); assert.equal(value.notice, null);
+  assert.deepEqual(await page.evaluate(() => window.outputConsumer.capturedValidity()), { current: false, original: false });
   const htmlSite = snapshot(thread('/workspace', [{ id: 'change', type: 'fileChange', status: 'completed', changes: [
     { path: '/workspace/out/index.html', kind: { type: 'add' }, diff: '' },
   ] }, message('Website created.') ]));

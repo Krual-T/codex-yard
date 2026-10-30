@@ -21,6 +21,12 @@ mdast/micromark utilities and node-html-parser, with their packaged notices.
 
 ## Package dependencies
 
+The public Statsig JavaScript client is installed from the locked npm package
+`@statsig/js-client`. It evaluates the existing Sites feature gate through the
+host's restricted public configuration transport and retained browser storage.
+It is ISC-licensed and is not extracted from the App snapshot; its package
+license and notices apply.
+
 The npm dependencies are declared in `package.json` and locked in `package-lock.json`. They retain the licenses and notices distributed in their packages. `npm ci` installs them locally; `node_modules/` stays outside Git. The owned React application is bundled from `src/native/browser-entry.ts` and the authored renderer modules; its npm dependencies are not part of the App snapshot. Build output preserves embedded legal comments but does not collect every package license into `.local/renderer/`; distributors of generated assets must retain the applicable package licenses and notices alongside them.
 
 The owned file editor uses the MIT-licensed CodeMirror 6 packages for editing, commands, search and language support. These packages and their language parsers come from npm, with their packaged licenses; no original App editor bundle is copied into the source tree.

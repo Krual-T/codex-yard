@@ -2,7 +2,7 @@
 
 2026-10-29 用户范围修订：Mini/Pets 本次禁用，移除实际 App 挂载、入口和对主输入的租约控制；旧启用偏好不再唤起界面。保留已有草稿、身份指针、偏好数据与 Git 历史，不添加功能开关框架。SideChat 是独立临时侧聊能力，继续使用共享会话/草稿服务和真实主界面。
 
-实施设计 v25，2026-10-30。原稿恢复、协议来源、正常消息引用及 Main/SideChat 文件预览使用实际页面消费者；输入历史在事务前核对权威稿与技能归属，外部删除不能由旧 undo/redo 恢复。整个 `vendor/codex-app/` 已删除，覆盖当前 Yard Web 的 F00–F23 功能账，Mini/Pets 按上述用户裁决禁用。干净来源的安装、构建、实际启动和验收必须对应同一已提交来源；具体结果在独立交付材料记录。本设计替代固定函数注入方案，Git 历史只作为行为研究依据。
+实施设计 v26，2026-10-30。原稿恢复、协议来源、正常消息引用及 Main/SideChat 文件预览使用实际页面消费者；输入历史在事务前核对权威稿与技能归属，外部删除不能由旧 undo/redo 恢复。整个 `vendor/codex-app/` 已删除，覆盖当前 Yard Web 的 F00–F23 功能账，Mini/Pets 按上述用户裁决禁用。干净来源的安装、构建、实际启动和验收必须对应同一已提交来源；具体结果在独立交付材料记录。本设计替代固定函数注入方案，Git 历史只作为行为研究依据。
 
 ## 入口与现有能力
 
@@ -24,6 +24,14 @@
 ## 状态、路由与模块契约
 
 `app` 负责 shell、路由、WorkbenchClient、会话 reducer 和父级服务集成；`composer` 负责草稿、富文档、提交控件和持久 Main 队列；`messages`/`markdown` 负责消息与工具展示；`settings` 负责配置、主题和原编辑恢复。共享契约在 `src/renderer/workbench-contract.ts`；组件通过 props 接收真实客户端和当前 host/thread/cwd，直接使用 npm React。旧 renderer-migration 及资源注入入口已删除。
+
+消息产物复用现有 `thread-summary-file-outputs.ts` 的目录与网站优先级投影；普通文件、Google 文档、网页、live Sheet/Slide 和 Sites 保留各自的原入口。Main 和侧聊都传入捕获的 host/thread/cwd、消息内容、连接代次和父页面校验；文件两步读取继续使用 `FilePanelRequest.assertCurrent`，侧聊同时保留原 activation。成功文件标签不保存消息的一次性回调，之后 Reload 使用既有标签生命周期。
+
+live 引用的正文按钮及 turn-end 行通过 `ArtifactSessionTarget` 交给 App 的中央资源标签，不调用普通文件读取，也不复制会话状态。原消息 DOM、主输入和草稿保留；关闭标签返回原消息。当前 Web host 缺少 live artifact 服务时显示原文 `Live Artifact Sessions aren’t available in this app host.`，不冒称文档加载成功。外部及 Page 引用仍按各自可用性校验处理。
+
+Sites 使用锁定的公开 `@statsig/js-client`，仅恢复原 `637432221` 的读取。`use-appgen-gate.ts` 沿当前 daemon 的 `account/read`、原 `os-info`、既有 Statsig IndexedDB 存储与 `/api/http-fetch` 的公开配置 allowlist 初始化 SDK；不读取 auth.json、token 或私有身份端口。API-key 的匿名设备身份由当前浏览器稳定 ID 生成；ChatGPT 只提交公开账号已有字段，未知用户 ID 保持省略。配置 targeting 的历史 UI 版本26.1013.40934与Yard运行版本分开记录。保留 SDK 对完整当前 profile 匹配缓存的读取及异步刷新；跨 profile、partial 匹配或缺 gate 不作为有效评估。曝光和事件发送关闭，未知状态不阻止主输入。
+
+App 将同一次评估的值和来源传给 Main、侧聊与 Summary 的既有投影。已识别 true 才显示合格 Sites 回执，已识别 false 才采用对应分支；未知保留明确状态。账号、host、连接及页面恢复事件使旧来源同步失效，迟到配置响应不能恢复它。Site 点击仍走原链接偏好及精确回执 URL；Web host 不支持的元数据、Share 或云自动化不能由本地合成响应冒充，也不因此移除原 Site 入口。
 
 配置读取和写入共用 `config-write-targets.ts` 的实际 daemon home 校验。`server.ts` 在请求前后核对原连接、generation、home；实际 daemon home 与选定 host 不匹配时拒绝读取，避免把另一套配置标成当前来源。插件操作在原 operation 的 origin 中保留 source type；显示值相同的另一个来源不能消费旧回执，`okOverridden` 保留待用户核查。
 
@@ -52,6 +60,8 @@ App 的 ConversationSessions 按实际host/thread复用现有loadThread和thread
 上述完整分页适用于后端支持的持久会话。两版CLI的临时侧聊不支持turns/list；已接入的侧聊消费者沿原fork回执和原连接事件保留投影，不能将分页失败当空历史，也不能将metadata可读当新连接已订阅。
 
 首次进入无投影的会话可显示加载页。后台历史核对、完成事件、revert和断线恢复保留已挂载编辑器；历史完整标记先失效，只有完整读取后恢复。不能以加载占位卸载正在等待回执的编辑器，丢掉错误或内存稿。桥断线使全部实际host投影失效，单host daemon断线只影响该host；重连重新订阅，不能把旧连接回执作为新订阅证明。该服务没有第二套传输、发送账本或会话业务状态；CLI仍为历史权威。Main 与 SideChat 已接入，同一最终冻结来源的实际消费者验收另行记录。
+
+重复的同 state/daemon generation 通知不推进 App 连接读取代次。侧栏收到本 host 断线时立即撤销旧的已读状态和主机归属证据，不因此再次请求断开的 host；真实 connected 通知仍恢复读取。远程连接失败由原 Reconnect host 按钮显式重试，不以失败读取反馈环实现后台重连；浏览器 bridge 自身的原重连机制保留。
 
 订阅权限与历史完整性分开：缓存的 options/thread 不授权写入。最后一个 owner 离开时立即撤销权限、使读取代次和连续性失效；所有缓存项（含无 owner 的创建投影）在桥或所属 host 断线时失效。resume/unsubscribe 的结果未知时保持原操作围栏，复用 WorkbenchClient 既有 pending request 和 CodexConnection 的原请求迟到终态观察；仅同一原连接的终态能解除，观察超时不算终态，不重复订阅。重连另起实际订阅。被切走的活动区间保持缺口提示，后续 item/started 不抹掉已丢区间，直到完整终态历史核对。回退只使历史完整性失效，不清空已挂载编辑器的 thread。外部 archive 同步撤销 canSubmit，同时保持原 composer 挂载并 inert；恢复归档后可继续原稿。队列启动及发送在等待 ready 后再次核对实际 host/thread、导航代次、归档及活动 turn。
 

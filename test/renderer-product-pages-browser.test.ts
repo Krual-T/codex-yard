@@ -20,6 +20,10 @@ test('product parent connects real host reads, guarded writes and rejected produ
   const local = await createFakeCodex(directory);
   const remoteDir = join(directory, 'remote'); await mkdir(remoteDir);
   const remote = await createFakeCodex(remoteDir);
+  const localCodexHome = join(directory, 'codex'), remoteCodexHome = join(remoteDir, 'codex');
+  await mkdir(localCodexHome); await mkdir(remoteCodexHome);
+  local.handlers.set('initialize', () => ({ userAgent: 'codex/fixture', codexHome: localCodexHome }));
+  remote.handlers.set('initialize', () => ({ userAgent: 'codex/fixture', codexHome: remoteCodexHome }));
   const fileRpc = fileDaemonFixture();
   for (const method of fileMethods) local.handlers.set(method, params => fileRpc(method, params));
   const skillFile = join(directory, 'SKILL.md'); await writeFile(skillFile, 'Synthetic skill instructions');
@@ -45,10 +49,10 @@ test('product parent connects real host reads, guarded writes and rejected produ
   await writeFile(join(dataDir, 'projects.json'), JSON.stringify([{ path: '/local/project', name: 'Local project' }]));
   const { renderer, adapterPath } = await nativeFixture(directory);
   let externalRequests = 0;
-  const app = await createNativeWorkbench({ socketPath: local.socketPath, codexHome: join(directory, 'codex'), dataDir, workspace: directory,
+  const app = await createNativeWorkbench({ socketPath: local.socketPath, codexHome: localCodexHome, dataDir, workspace: directory,
     renderer, adapterPath, port: 0, hostCatalog: { hosts: [{ hostId: 'remote-ssh-fixture', displayName: 'Synthetic SSH', sshAlias: null,
       sshHost: 'synthetic', sshPort: null, identity: null }], projects: [{ id: 'remote-project', hostId: 'remote-ssh-fixture', label: 'Remote project', remotePath: '/remote/project' }], assignments: {} },
-    sshStream: (_host, onPaths) => { onPaths?.({ homeDirectory: remoteDir, codexHome: join(remoteDir, 'codex') }); return connect(remote.socketPath); },
+    sshStream: (_host, onPaths) => { onPaths?.({ homeDirectory: remoteDir, codexHome: remoteCodexHome }); return connect(remote.socketPath); },
     httpFetch: async () => { externalRequests++; throw new Error('Unexpected external HTTP'); } });
   const upgrades: unknown[] = [];
   app.server.prependListener('upgrade', request => { upgrades.push({ url: request.url, host: request.headers.host, origin: request.headers.origin, site: request.headers['sec-fetch-site'] }); });
@@ -107,7 +111,12 @@ test('product parent connects real host reads, guarded writes and rejected produ
 
   holdRemote = true;
   await show('/skills?hostId=remote-ssh-fixture');
-  await remote.waitForCall('skills/list');
+  try { await remote.waitForCall('skills/list'); }
+  catch (error) {
+    console.error('Remote skill request did not reach the daemon:', await page.locator('body').innerText(),
+      'remote methods:', remote.messages.map(message => message.method).filter(Boolean));
+    throw error;
+  }
   await show('/skills');
   await page.getByRole('button', { name: /Local skill/ }).waitFor();
   assert.ok(releaseRemote); (releaseRemote as () => void)();
