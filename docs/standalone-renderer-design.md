@@ -61,6 +61,8 @@ App 的 ConversationSessions 按实际host/thread复用现有loadThread和thread
 
 首次进入无投影的会话可显示加载页。后台历史核对、完成事件、revert和断线恢复保留已挂载编辑器；历史完整标记先失效，只有完整读取后恢复。不能以加载占位卸载正在等待回执的编辑器，丢掉错误或内存稿。桥断线使全部实际host投影失效，单host daemon断线只影响该host；重连重新订阅，不能把旧连接回执作为新订阅证明。该服务没有第二套传输、发送账本或会话业务状态；CLI仍为历史权威。Main 与 SideChat 已接入，同一最终冻结来源的实际消费者验收另行记录。
 
+重复的同 state/daemon generation 通知不推进 App 连接读取代次。侧栏收到本 host 断线时立即撤销旧的已读状态和主机归属证据，不因此再次请求断开的 host；真实 connected 通知仍恢复读取。远程连接失败由原 Reconnect host 按钮显式重试，不以失败读取反馈环实现后台重连；浏览器 bridge 自身的原重连机制保留。
+
 订阅权限与历史完整性分开：缓存的 options/thread 不授权写入。最后一个 owner 离开时立即撤销权限、使读取代次和连续性失效；所有缓存项（含无 owner 的创建投影）在桥或所属 host 断线时失效。resume/unsubscribe 的结果未知时保持原操作围栏，复用 WorkbenchClient 既有 pending request 和 CodexConnection 的原请求迟到终态观察；仅同一原连接的终态能解除，观察超时不算终态，不重复订阅。重连另起实际订阅。被切走的活动区间保持缺口提示，后续 item/started 不抹掉已丢区间，直到完整终态历史核对。回退只使历史完整性失效，不清空已挂载编辑器的 thread。外部 archive 同步撤销 canSubmit，同时保持原 composer 挂载并 inert；恢复归档后可继续原稿。队列启动及发送在等待 ready 后再次核对实际 host/thread、导航代次、归档及活动 turn。
 
 新会话先冻结提交版本和 clientUserMessageId，再 thread/start，保存真实 thread、设置、原稿身份及所选项目 ID。BrowserWorkbenchClient 在原响应结算时同步发布创建回执，使共享会话源采用该连接的真实订阅；不再保存 Entry.created 重复初始投影。绑定原稿、安装路由和事件监听后才 turn/start。实际 CLI0.164/0.163 的新空会话尚无 rollout，resume 和完整历史会拒绝。已知空历史的确定错误、匹配原创建记录和当前连接的非活动 includeTurns:false 元数据共同授予 canStartFirstTurn；它只供用户明确普通首发，queue/steer/edit 仍要求真实订阅 canSubmit。发送继续经过原 SendRecoveryStore 阶段、attempt/CID及完整提交版本；sending/unknown不因历史暂缺重发。首发接受即撤销空许可、保留输出缺口并再次核对实际订阅。断线、归档或最后owner离开均撤销许可；创建记录不授予新连接订阅。Leader两版实证显示明确首发可以执行且CID持久、但没有完成通知且仍notSubscribed；实际App和后续订阅消费者按此边界验收。

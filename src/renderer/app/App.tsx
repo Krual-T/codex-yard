@@ -127,7 +127,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
   const status = bridgeStatus === 'connected' ? hostStatuses[current.hostId] ?? 'connecting' : bridgeStatus;
   const connectionReadGeneration = useRef(0);
   const initialSettingsLoading = useRef(true);
-  const transportIdentity = useRef({ bridge: 'connecting', bridgeRevision: 0, hosts: {} as Record<string, { state: string; revision: number }> });
+  const transportIdentity = useRef({ bridge: 'connecting', bridgeRevision: 0, hosts: {} as Record<string, { state: string; revision: number; generation?: string }> });
   const mainGrantRevision = useRef(0);
   const mainSubmissionAuthorities = useRef(new WeakMap<() => void, {
     daemon: ReturnType<BrowserWorkbenchClient['captureDaemonConnection']>;
@@ -559,9 +559,14 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
         void reloadPreferences().catch(cause => setError(String(cause)));
       }
       if (event.type === 'codex-app-server-connection-changed' && typeof event.hostId === 'string') {
-        connectionReadGeneration.current++;
         const hostId = event.hostId, state = String(event.state);
-        transportIdentity.current.hosts[hostId] = { state, revision: (transportIdentity.current.hosts[hostId]?.revision ?? 0) + 1 };
+        const previous = transportIdentity.current.hosts[hostId];
+        const generation = typeof event.daemonConnectionGeneration === 'string' ? event.daemonConnectionGeneration : undefined;
+        // A failed read can report the same disconnected connection again.
+        // Only a real state/socket change revokes reads and starts a new epoch.
+        if (previous?.state === state && previous.generation === generation) return;
+        connectionReadGeneration.current++;
+        transportIdentity.current.hosts[hostId] = { state, generation, revision: (previous?.revision ?? 0) + 1 };
         setHostStatuses(previous => previous[hostId] === state ? previous : { ...previous, [hostId]: state });
         if (hostId === routeRef.current.hostId) {
           setSettingsSourceEpoch(value => value + 1);
@@ -624,7 +629,7 @@ export function App({ client }: { client: BrowserWorkbenchClient }) {
     void client.host<{ state: string }>('app-server-connection-state', { hostId }).then(value => {
       if (active && generation === connectionReadGeneration.current) {
         const previous = transportIdentity.current.hosts[hostId];
-        transportIdentity.current.hosts[hostId] = { state: value.state, revision: previous?.revision ?? 0 };
+        transportIdentity.current.hosts[hostId] = { ...previous, state: value.state, revision: previous?.revision ?? 0 };
         setHostStatuses(previous => ({ ...previous, [hostId]: value.state }));
       }
     }).catch(cause => { if (active && generation === connectionReadGeneration.current) setError(String(cause)); });

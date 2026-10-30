@@ -199,7 +199,15 @@ export function useSidebarBehavior(options: SidebarBehaviorOptions): SidebarBeha
     const unsubscribeClient = options.client.subscribe(event => {
       if (event.type === 'global-state-updated') void loadGlobals();
       if (event.type === 'mcp-notification' && event.hostId === options.hostId && event.method === 'thread/readState/changed') void loadRows();
-      if (event.type === 'codex-app-server-connection-changed') void loadRows();
+      if (event.type === 'codex-app-server-connection-changed' && event.hostId === options.hostId) {
+        if (event.state === 'connected') void loadRows();
+        else {
+          // Revoke old read/host evidence without issuing another request to
+          // the unavailable host: its failure would publish this event again.
+          rowGeneration.current++;
+          readsRef.current = {}; setReads({}); setResolved({});
+        }
+      }
     });
     void loadAtoms(); void loadGlobals(); void loadRows();
     return () => { active = false; unsubscribeAtoms(); unsubscribeClient(); };

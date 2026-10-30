@@ -260,10 +260,13 @@ try {
   assert.equal(await remoteDraft.inputValue(), 'KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
   assert.equal(remoteFake.calls('turn/start').length, 0);
   await remotePage.getByRole('button', { name: 'Reconnect host', exact: true }).click();
-  await remotePage.getByRole('alert').filter({ hasText: 'Synthetic remote connection is unavailable' }).waitFor();
+  await remotePage.locator('.yard-error[role="alert"]').filter({ hasText: 'Synthetic remote connection is unavailable' }).waitFor();
   assert.equal(await remoteDraft.inputValue(), 'KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
   assert.equal(remoteFake.calls('turn/start').length, 0);
   remoteAvailable = true;
+  // Making the fixture transport available does not notify the disconnected
+  // page. Exercise the actual retry button instead of relying on failed reads.
+  await remotePage.getByRole('button', { name: 'Reconnect host', exact: true }).click();
   await waitForHostConnected(remotePage, remoteHostId);
   assert.equal(await remoteDraft.inputValue(), 'KEEP_REMOTE_DRAFT_ACROSS_BRIDGE');
   assert.equal(remoteFake.calls('turn/start').length, 0);
