@@ -22,6 +22,7 @@ import { createSshProxyStream } from '../src/native/ssh.ts';
 import type { TerminalEvent } from '../src/native/terminal-protocol.ts';
 import { createFakeCodex } from '../test/fake-codex.ts';
 import { fileDaemonFixture } from '../test/file-daemon-fixture.ts';
+import { publicVerifierConfigurationFetch } from './public-verifier-environment.ts';
 import { TerminalSshFixture } from './verify-terminal-ssh.ts';
 
 const inheritedEnv = { ...process.env };
@@ -57,15 +58,17 @@ const targets = [
 ].filter(target => !projectFilter || projectFilter === target.projectId);
 let sshFixture: TerminalSshFixture | undefined;
 let sshConnections = 0, sshPathsVerified = false;
+let sshUnavailable = false;
+let reconnectGate: { hostId: string; release: () => void } | null = null;
 const sshStreams = new Set<Duplex>();
 const processes = new Map<string, { child: ChildProcessWithoutNullStreams; owner: string; pid?: number }>();
 const ownedPids = new Set<number>();
 let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
 let browser: Browser | undefined, page: Page | undefined;
 let checks: string[] = [], gaps: string[] = [], errors: string[] = [];
-let requests: { operation: string; args: unknown[] }[] = [];
+let requests: { at: number; operation: string; args: unknown[] }[] = [];
 let events: { at: number; event: TerminalEvent }[] = [];
-let connections: { hostId: string; state: string }[] = [];
+let connections: { at: number; hostId: string; state: string }[] = [];
 let sockets: { page: WebSocketRoute; server: WebSocketRoute; connected: boolean }[] = [];
 type InnerRpc = { connection: number; kind: 'request' | 'event'; method: string; handle?: string;
   cwd?: string; tty?: boolean; command?: string[]; size?: unknown; bytes?: number; interrupt?: boolean;
@@ -113,7 +116,8 @@ type ShortcutObservation = { at: number; hostId: string | null;
   focus: { tag: string; label: string | null; className: string } | null; defaultPrevented?: boolean };
 const results: { hostId: string; projectId: string; cwd: string; checks: string[]; gaps: string[]; errors: string[];
   requests: typeof requests; events: typeof events; connections: typeof connections; innerRpc: InnerRpc[]; firstShortcut?: ShortcutObservation | null;
-  unavailableShortcut?: ShortcutObservation | null }[] = [];
+  unavailableShortcut?: ShortcutObservation | null; unavailableToolbar?: { before: number; after: number };
+  explicitReconnect?: { clickAt: number; requestAt: number } }[] = [];
 const report: Record<string, unknown> = { renderer: 'owned', localPeer: 'synthetic local RPC with a real disposable local PTY',
   requestedSsh, realDaemonUsed: false, realSshUsed: false, physicalRemoteMachine: false, realInference: false, results };
 
@@ -228,6 +232,7 @@ try {
     sshStream: (host, onPaths) => {
       assert.equal(host.hostId, remoteHost);
       assert.ok(sshFixture);
+      if (sshUnavailable) throw new Error('Terminal fixture SSH host is temporarily unavailable');
       sshConnections++;
       const stream = createSshProxyStream(host, paths => {
         assert.deepEqual(paths, { homeDirectory: sshFixture!.home, codexHome: sshFixture!.codexHome });
@@ -238,7 +243,7 @@ try {
       stream.once('close', () => sshStreams.delete(stream));
       return stream;
     },
-    httpFetch: async () => new Response('External requests disabled for terminal fixture', { status: 503 }) });
+    httpFetch: publicVerifierConfigurationFetch });
   browser = await chromium.launch({ executablePath: chromePath,
     headless: true, env: fixtureEnv, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-proxy-server',
       '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost'] });
@@ -263,19 +268,33 @@ try {
     await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => { if (message.type() === 'error') errors.push('console: ' + message.text()); });
+    const observedPage = page;
     await page.routeWebSocket('**/native-host', route => {
       const socket = { page: route, server: route.connectToServer(), connected: false };
       sockets.push(socket);
       route.onMessage(raw => {
         const message = JSON.parse(String(raw));
-        if (message.type === 'fetch' && message.url?.endsWith('/terminal')) requests.push(JSON.parse(message.body));
+        if (message.type === 'fetch' && message.url?.endsWith('/terminal')) requests.push({ ...JSON.parse(message.body), at: Date.now() });
+        const gate = reconnectGate;
+        if (gate && message.type === 'mcp-request' && message.hostId === gate.hostId && message.request?.method === 'thread/list') {
+          const requestAt = Date.now();
+          void observedPage.evaluate(() => (window as Window & { yardTerminalReconnectClick?: number }).yardTerminalReconnectClick ?? null)
+            .then(clickAt => {
+              if (clickAt !== null && clickAt <= requestAt && reconnectGate === gate) {
+                results.at(-1)!.explicitReconnect = { clickAt, requestAt };
+                gate.release(); reconnectGate = null;
+              }
+              socket.server.send(raw);
+            }).catch(cause => { errors.push('Reconnect observation: ' + String(cause)); });
+          return;
+        }
         socket.server.send(raw);
       });
       socket.server.onMessage(raw => {
         const message = JSON.parse(String(raw));
         if (message.type === 'terminal-event') events.push({ at: Date.now(), event: message.event });
         if (message.type === 'codex-app-server-connection-changed') {
-          connections.push({ hostId: String(message.hostId), state: String(message.state) });
+          connections.push({ at: Date.now(), hostId: String(message.hostId), state: String(message.state) });
           // The page WebSocket reconnects through local first; the selected SSH
           // connection is opened by the next explicit host operation.
           if (message.hostId === 'local' && message.state === 'connected') socket.connected = true;
@@ -523,16 +542,39 @@ try {
     if (target.hostId !== 'local') assert.equal(localFake.calls('process/spawn').filter(call => call.params.tty === true).length, localSpawnCount);
     checks.push('Disconnect reaps processes; reconnect does not replay input or automatically create a shell');
     const beforeUnavailable = requests.filter(request => request.operation === 'create').length;
-    if (target.hostId === 'local') localFake.disconnectAll();
-    else for (const stream of sshStreams) stream.destroy();
+    const previousInitialize = localFake.handlers.get('initialize');
+    let releaseInitialize = () => {};
+    const initializeReady = new Promise<void>(resolve => { releaseInitialize = resolve; });
+    if (target.hostId === 'local') {
+      localFake.handlers.set('initialize', async params => {
+        await initializeReady;
+        return localFake.defaultResult('initialize', params);
+      });
+      localFake.disconnectAll();
+    } else {
+      sshUnavailable = true;
+      for (const stream of sshStreams) stream.destroy();
+    }
+    let availabilityRestored = false;
+    const restoreAvailability = () => {
+      if (availabilityRestored) return;
+      availabilityRestored = true;
+      if (target.hostId === 'local') {
+        if (previousInitialize) localFake.handlers.set('initialize', previousInitialize);
+        else localFake.handlers.delete('initialize');
+        releaseInitialize();
+      } else sshUnavailable = false;
+    };
     try {
       await until(() => latestHostState(target.hostId) === 'disconnected',
         'selected host disconnected while the browser is connected', 5000);
       await page.getByRole('status').filter({ hasText: 'Host disconnected' }).waitFor({ timeout: 5000 });
       const reconnect = page.getByRole('button', { name: 'Reconnect host', exact: true });
       if (!await reconnect.isVisible()) gaps.push('Disconnected host does not offer an explicit Reconnect host action');
+      assert.equal(latestHostState(target.hostId), 'disconnected', 'Host must remain unavailable before the shortcut');
       await page.keyboard.press('Control+Backquote');
       await delay(100);
+      assert.equal(latestHostState(target.hostId), 'disconnected', 'Host must remain unavailable after the shortcut');
       const unavailableShortcut = await page.evaluate(() =>
         (window as Window & { yardTerminalShortcut?: ShortcutObservation }).yardTerminalShortcut ?? null);
       results.at(-1)!.unavailableShortcut = unavailableShortcut;
@@ -542,7 +584,10 @@ try {
       if (!await feedback()) gaps.push('Unavailable terminal shortcut did not show a clear connection message');
       const toolbar = page.locator('.yard-panel-header').getByRole('button', { name: 'Create terminal tab', exact: true });
       if (await toolbar.isEnabled()) {
+        const before = Date.now();
         await toolbar.click();
+        results.at(-1)!.unavailableToolbar = { before, after: Date.now() };
+        assert.equal(latestHostState(target.hostId), 'disconnected', 'Host must remain unavailable after the toolbar action');
         if (!await feedback()) gaps.push('Unavailable terminal button did not clearly reject the action');
       }
       if (requests.filter(request => request.operation === 'create').length !== beforeUnavailable) {
@@ -552,7 +597,15 @@ try {
       if (await reconnect.isVisible()) {
         const beforeReconnect = requests.filter(request => request.operation === 'create').length;
         const reconnectConnectionStart = connections.length;
+        await reconnect.evaluate(button => {
+          delete (window as Window & { yardTerminalReconnectClick?: number }).yardTerminalReconnectClick;
+          button.addEventListener('click', () => {
+            (window as Window & { yardTerminalReconnectClick?: number }).yardTerminalReconnectClick = Date.now();
+          }, { capture: true, once: true });
+        });
+        reconnectGate = { hostId: target.hostId, release: restoreAvailability };
         await reconnect.click();
+        await until(() => reconnectGate === null, 'explicit reconnect request');
         await until(() => connections.slice(reconnectConnectionStart).some(connection => connection.hostId === target.hostId && connection.state === 'connected')
           && latestHostState(target.hostId) === 'connected', 'explicit host reconnect');
         assert.equal(requests.filter(request => request.operation === 'create').length, beforeReconnect,
@@ -562,6 +615,9 @@ try {
     } catch (error) {
       gaps.push('Disconnected host shortcut/reconnect verification: ' + String(error));
       await capture(target.projectId + '-host-unavailable-failure').catch(() => {});
+    } finally {
+      reconnectGate = null;
+      restoreAvailability();
     }
     await capture(target.projectId + '-terminal');
     assert.deepEqual(errors, []);
