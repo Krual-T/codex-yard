@@ -15,7 +15,8 @@ async function waitForBrowser(page: Page, predicate: () => Promise<unknown>) {
 }
 
 test('real Mini conversation uses shared sessions and preserves drafts through sends and failed transitions', {
-  skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 120_000,
+  // Sequential browser cases share this total budget with setup and cleanup.
+  skip: !existsSync('/usr/bin/google-chrome') && 'Google Chrome is unavailable', timeout: 180_000,
 }, async t => {
   const bundle = await build({ entryPoints: ['test/mini-conversation-fixture.tsx'], bundle: true, write: false,
     format: 'iife', loader: { '.css': 'empty' } });
