@@ -10,7 +10,7 @@ import type { Browser, Locator, Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { record } from '../src/native/protocol.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
-import { isolatePublicVerifier, openComposerModelOptions } from './public-verifier-environment.ts';
+import { isolatePublicVerifier, openComposerModelOptions, publicVerifierConfigurationFetch } from './public-verifier-environment.ts';
 
 const root = await mkdtemp(join(tmpdir(), 'yard-ui-bugs-'));
 const output = process.env.AGENTS_BUG_EVIDENCE
@@ -150,7 +150,7 @@ async function capture(name: string) {
 }
 try {
   app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: fake.socketPath, codexHome,
-    hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
+    hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: publicVerifierConfigurationFetch });
   browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome',
     env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C.UTF-8', HOME: join(root, 'home'), CODEX_HOME: codexHome,
       XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache'), XDG_DATA_HOME: join(root, 'xdg-data'),

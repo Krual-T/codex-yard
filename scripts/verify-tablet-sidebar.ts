@@ -7,7 +7,7 @@ import { chromium } from 'playwright-core';
 import type { Page, Locator } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { createFakeCodex, fixtureThread } from '../test/fake-codex.ts';
-import { isolatePublicVerifier } from './public-verifier-environment.ts';
+import { isolatePublicVerifier, publicVerifierConfigurationFetch } from './public-verifier-environment.ts';
 
 const root = await mkdtemp(join(tmpdir(), 'yard-tablet-'));
 const output = process.env.AGENTS_TABLET_EVIDENCE
@@ -28,7 +28,7 @@ for (let index = 0; index < 65; index++) {
   fake.threads.set(id, fixtureThread(id, index % 2 ? root : projectPath, { name: 'Tablet chat ' + String(index).padStart(2, '0'), updatedAt: 1700000000 + index }));
 }
 const app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: fake.socketPath, codexHome: join(root, 'codex'),
-  hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Fixture telemetry disabled', { status: 503 }) });
+  hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: publicVerifierConfigurationFetch });
 const browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome',
   headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-proxy-server',
     '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost'] });
@@ -90,7 +90,7 @@ try {
     await swipe(page, scrollBox.x + 80, scrollBox.y + 80, 150);
     await page.waitForFunction(before => (document.querySelector('.yard-owned-sidebar-scroll')?.scrollTop ?? 0) < before, projectScroll);
     checks.push(`${viewport.width}px: the reverse swipe scrolls upward`);
-    const recent = page.locator('.yard-owned-sidebar-recents ~ .yard-owned-sidebar-thread').first();
+    const recent = page.locator('.yard-owned-sidebar-recents + div > .yard-owned-sidebar-thread').first();
     await recent.evaluate(element => element.scrollIntoView({ block: 'center' }));
     const recentBox = await recent.boundingBox();
     assert.ok(recentBox);
