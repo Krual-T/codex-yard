@@ -68,7 +68,8 @@ try {
   const sidePanelMenu = page.locator('summary[aria-label="Open side panel"]');
   await sidePanelMenu.click();
   await page.getByRole('menuitem', { name: 'Workspace files', exact: true }).click();
-  await sidePanelMenu.click();
+  if (await sidePanelMenu.locator('..').getAttribute('open') !== null) await sidePanelMenu.click();
+  assert.equal(await sidePanelMenu.locator('..').getAttribute('open'), null);
   await capture('02-new-tab');
   await page.getByRole('button', { name: 'tabs-fixture.txt', exact: true }).click();
   await page.getByRole('tab', { name: 'tabs-fixture.txt', exact: true }).waitFor();
