@@ -210,18 +210,33 @@ test('agent mention insertion uses the real editor selection, history and clipbo
       const page = await open(doc), editor = page.getByRole('textbox', { name: 'Rich input' });
       const capture = () => page.evaluate(() => (window as any).agentFixture.capture());
       const insert = () => page.evaluate(() => (window as any).agentFixture.insert({ threadId: 'id', hostId: 'local', title: 'Chat' }));
+      await page.bringToFront();
       await editor.focus();
+      await editor.evaluate(element => {
+        const paragraph = element.querySelector('p')!, range = document.createRange(); range.selectNodeContents(paragraph); range.collapse(false);
+        const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+      });
       assert.equal(await capture(), true);
-      await editor.press('End'); await editor.type('!');
+      assert.equal(await editor.evaluate(element => {
+        const paragraph = element.querySelector('p')!, selection = window.getSelection();
+        if (document.activeElement !== element || !selection?.rangeCount) return false;
+        const range = selection.getRangeAt(0);
+        if (!range.collapsed || !paragraph.contains(range.endContainer)) return false;
+        const tail = document.createRange(); tail.selectNodeContents(paragraph); tail.setStart(range.endContainer, range.endOffset);
+        return tail.toString() === '';
+      }), true);
+      await page.keyboard.type('!');
       assert.equal(await insert(), false);
       assert.equal(await capture(), true);
-      await editor.press('ArrowLeft');
+      await page.keyboard.press('ArrowLeft');
       assert.equal(await insert(), false);
       assert.equal(await capture(), true);
       await page.evaluate(() => (window as any).agentFixture.disable());
       assert.equal(await insert(), false);
       assert.equal(await capture(), false);
       await page.evaluate(() => (window as any).agentFixture.enable());
+      assert.equal(await capture(), true);
       await editor.evaluate(element => element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })));
       assert.equal(await insert(), false);
       await editor.evaluate(element => element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
