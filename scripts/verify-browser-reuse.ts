@@ -184,8 +184,13 @@ try {
   await image.waitFor({ timeout: 30000 });
   await image.evaluate(async element => (element as HTMLImageElement).decode());
   report.reconnectAfterRefusal = { refusedConnections, visibleFailure: true, manualRefreshRecovered: true };
+  // Focusing expands the displayed address to its complete URL. Let React
+  // finish that focus update before Playwright selects the value to replace.
+  await address.focus();
   await address.fill(fixtureUrl + '/before');
+  assert.equal(await address.inputValue(), fixtureUrl + '/before');
   await Promise.all([target.waitForEvent('domcontentloaded'), address.press('Enter')]);
+  assert.equal(target.url(), fixtureUrl + '/before');
   await nativePage.getByRole('status').filter({ hasText: '点击画面后可键入' }).waitFor({ timeout: 30000 });
   assert.match(await target.locator('body').innerText(), /已有会话：已保留/);
   console.log('Checking screenshot coordinates and Chinese input');
@@ -217,7 +222,9 @@ try {
   await capture('workbench-input');
   report.panel = { ownedPanel: true, existingPageId: pageId, screenshotDisplayed: true, coordinateClick: true, fastKeyboardNoDelay: 'Fast123', chineseInput: true, screenshotChanged: true, targetFrameDenyHeaders: true };
   console.log('Checking the owned address bar, navigation and existing tab switching');
+  await address.focus();
   await address.fill(fixtureUrl + '/after');
+  assert.equal(await address.inputValue(), fixtureUrl + '/after');
   await address.press('Enter');
   await target.waitForFunction(url => location.href === url, fixtureUrl + '/after', { polling: 100 });
   const navigation = nativePage.getByRole('region', { name: '浏览器', exact: true });
