@@ -5,9 +5,10 @@ import type { Page } from 'playwright-core';
 
 export async function openChromePanel(page: Page): Promise<void> {
   const toggle = page.locator('summary[aria-label="Open side panel"]');
-  await toggle.click();
-  await page.getByRole('menuitem', { name: 'Open Chrome panel', exact: true }).click();
-  await toggle.click();
+  const menu = toggle.locator('..');
+  if (await menu.getAttribute('open') === null) await toggle.click();
+  await menu.getByRole('menuitem', { name: 'Open Chrome panel', exact: true }).click();
+  if (await menu.getAttribute('open') !== null) await toggle.click();
 }
 
 export async function openComposerModelOptions(page: Page): Promise<void> {
