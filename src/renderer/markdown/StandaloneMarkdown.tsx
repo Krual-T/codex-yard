@@ -137,7 +137,7 @@ function GoogleDocumentLinkIcon({ url }: { url: string }) {
 export function StandaloneMarkdown({ text, client, hostId, threadId, cwd, allowBasicHtml = false, onOpenFile, onOpenFileAt, onOpenVisualization, onOpenBrowser, onOpenArtifactCitation, onOpenImage }: StandaloneMarkdownProps) {
   const markdownText = useMemo(() => normalizeFileCitationEscapes(text), [text]);
   const components = useMemo<Components>(() => ({
-    pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+    pre: CodeBlock,
     a: ({ href, children, node }) => {
       if (!href) return <span>{children}</span>;
       if (href.startsWith('yard-artifact:')) {

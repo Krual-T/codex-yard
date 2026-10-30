@@ -449,10 +449,15 @@ test('an active streamed message retains the selected Mermaid source', {
     await assistant.getByRole('button', { name: 'Show source' }).click();
     assert.equal(await assistant.getByRole('button', { name: 'Show diagram' }).count(), 1);
     assert.match(await assistant.locator('.yard-code-block pre').innerText(), /flowchart LR/);
+    const codeBlock = await assistant.locator('.yard-code-block').elementHandle();
+    assert.ok(codeBlock);
     await page.evaluate(() => window.activeMermaidHarness.stream());
     await assistant.getByText('Streamed update.').waitFor();
     assert.equal(await assistant.getByRole('button', { name: 'Show diagram' }).count(), 1);
     assert.match(await assistant.locator('.yard-code-block pre').innerText(), /flowchart LR/);
+    assert.equal(await assistant.locator('.yard-code-block').evaluate((element, original) => element === original, codeBlock), true);
+    await assistant.getByRole('button', { name: 'Show diagram' }).click();
+    assert.equal(await assistant.getByRole('button', { name: 'Show source' }).count(), 1);
     assert.deepEqual(errors, []);
   } finally {
     await browser.close();
