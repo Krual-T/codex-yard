@@ -11,7 +11,7 @@ import { chromium } from 'playwright-core';
 import type { Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
-import { isolatePublicVerifier, openChromePanel } from './public-verifier-environment.ts';
+import { isolatePublicVerifier, openChromePanel, publicVerifierConfigurationFetch } from './public-verifier-environment.ts';
 
 // Hold /tmp/agents-workbench-heavy.lock for this runner's entire lifecycle.
 const root = await mkdtemp(join(tmpdir(), 'aw-chrome-'));
@@ -111,7 +111,7 @@ try {
   fake.threads.set(id, fixtureThread(id, root, { name: 'Chrome 原版面板验收', turns: [fixtureTurn('browser-turn', [agentItem('browser-message', `[打开浏览器验收页](${fixtureUrl}/external)`)])] }));
   const dataDir = join(root, 'data');
   const app = await createNativeWorkbench({ port: 0, socketPath: fake.socketPath, codexHome: join(root, 'codex-home'), dataDir, workspace: root,
-    httpFetch: async () => new Response('Isolated browser fixture: external telemetry disabled', { status: 503 }),
+    httpFetch: publicVerifierConfigurationFetch,
     hostCatalog: { hosts: [], projects: [], assignments: {} }, chromeConnection: { browserUrl: gatedEndpoint } });
   const closeApp = () => app.close();
   cleanup.push(closeApp);

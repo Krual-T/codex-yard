@@ -14,7 +14,7 @@ import { chromium } from 'playwright-core';
 import type { BrowserContext, Page } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
-import { isolatePublicVerifier, openChromePanel } from './public-verifier-environment.ts';
+import { isolatePublicVerifier, openChromePanel, publicVerifierConfigurationFetch } from './public-verifier-environment.ts';
 
 // The test drives Chrome's actual DevTools picker through its shipped action.
 // Product code continues to use only official MCP, with no CDP picker.
@@ -100,7 +100,7 @@ try {
   const dataDir = join(root, 'data');
   app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: fake.socketPath, codexHome: join(root, 'codex'),
     hostCatalog: { hosts: [], projects: [], assignments: {} }, chromeConnection: { browserUrl: browserURL },
-    httpFetch: async () => new Response('External telemetry disabled for element context fixture', { status: 503 }) });
+    httpFetch: publicVerifierConfigurationFetch });
   page = await browser.newPage();
   await page.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' ? route.continue() : route.abort());
   page.on('pageerror', error => errors.push(error.message));
