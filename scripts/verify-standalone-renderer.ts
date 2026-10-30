@@ -905,7 +905,10 @@ try {
   await page.getByRole('button', { name: 'Back to app', exact: true }).click();
   const workspaceTabs = page.locator('.yard-tab-strip [role="tab"]');
   assert(await workspaceTabs.count() >= 2);
-  await workspaceTabs.nth(1).click();
+  // Avoid restarting navigation when the second tab is already selected.
+  if (await workspaceTabs.nth(1).getAttribute('aria-selected') !== 'true') {
+    await workspaceTabs.nth(1).click();
+  }
   await page.waitForFunction(() => document.querySelectorAll('.yard-tab-strip [role="tab"]')[1]?.getAttribute('aria-selected') === 'true');
   await page.getByRole('textbox', { name: 'Work with Codex', exact: true }).click();
   await page.keyboard.press('Control+1');
