@@ -1,7 +1,22 @@
+import assert from 'node:assert/strict';
 import { constants } from 'node:fs';
 import { cp, mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import type { Page } from 'playwright-core';
+
+/** Evaluate the existing public Sites gate without contacting an external service. */
+export const publicVerifierConfigurationFetch: typeof fetch = async (input, init) => {
+  const url = new URL(input instanceof Request ? input.url : input);
+  assert.equal(url.origin, 'https://ab.chatgpt.com');
+  assert.equal(url.pathname, '/v1/initialize');
+  assert.equal(init?.method, 'POST');
+  return Response.json({
+    has_updates: true, time: Date.now(), hash_used: 'none',
+    feature_gates: { '637432221': { name: '637432221', value: false,
+      rule_id: 'public-verifier', secondary_exposures: [] } },
+    dynamic_configs: {}, layer_configs: {}, param_stores: {}, sdkParams: {},
+  });
+};
 
 export async function openChromePanel(page: Page): Promise<void> {
   const toggle = page.locator('summary[aria-label="Open side panel"]');
