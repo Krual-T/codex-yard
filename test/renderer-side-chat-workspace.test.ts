@@ -1337,7 +1337,8 @@ test('SideChatRoot original daemon disconnect handoff', { timeout: 100_000 }, as
   } finally { await browser.close(); }
 });
 
-test('real workspace, IDB, browser client and native parent/provider use one synthetic peer', { timeout: 100_000 }, async t => {
+// Sequential real-browser cases share this budget, including their setup and cleanup.
+test('real workspace, IDB, browser client and native parent/provider use one synthetic peer', { timeout: 150_000 }, async t => {
   const bundle = await build({ entryPoints: ['test/renderer-side-chat-workspace-fixture.tsx'], bundle: true, write: false,
     format: 'iife', loader: { '.css': 'empty' } });
   const browser = await chromium.launch({ executablePath: process.env.YARD_VALIDATION_CHROME_BIN || '/usr/bin/google-chrome',
