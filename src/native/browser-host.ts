@@ -33,6 +33,9 @@ Object.assign(window, { workbenchStageFiles: (selected: File[]) => files.stageFi
 Object.assign(window, { workbenchUploadLocalFileAttachments: (hostId: string, attachments: ObjectValue[]) => requestHost('upload-local-file-attachments', { hostId, attachments }) });
 const terminal = new BrowserTerminal((operation, args) => requestHost('terminal', { operation, args }));
 const publish = (message: HostMessage) => {
+  if (message.type === 'yard-model-providers-changed') {
+    window.dispatchEvent(new CustomEvent('yard-model-providers-changed', { detail: { hostId: message.hostId } })); return;
+  }
   mini.receive(message);
   if (message.type === 'terminal-event') { terminal.receive(message.event as TerminalEvent); return; }
   const request = message.type === 'fetch-response' && message.requestId ? hostRequests.get(message.requestId) : undefined;
@@ -48,6 +51,7 @@ const chrome = new BrowserChrome(requestHost, publish);
 Object.assign(window, { workbenchChrome: chrome });
 Object.assign(window, { workbenchResolveAutomation: (id: string) => requestHost('automation-run-resolve', { id, confirmed: true }) });
 Object.assign(window, { workbenchPortForwarding: (params: unknown) => requestHost('port-forwarding', params) });
+Object.assign(window, { workbenchModelProviders: (params: unknown) => requestHost('model-providers', params) });
 let socket: WebSocket;
 let opened: Promise<void>;
 let disposed = false;

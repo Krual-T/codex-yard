@@ -65,6 +65,8 @@ npm start
 
 The interface and tool adapter change only when their Git snapshot is updated; local Codex App updates do not replace them. Codex backend compatibility is validated separately from the UI snapshot. Package installation and model requests still need their normal network access.
 
+Settings → General → 模型供应商 reads config-defined providers and controls which appear in the composer. The model menu has two levels: provider, then model, with the existing effort control. DeepSeek Flash and V4 Pro use native Responses and expose Low/High/Max. This integration targets CLI 0.164.0; see [provider configuration, catalogs and compatibility](docs/model-providers.md).
+
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765). To customize the server, copy `.env.example` to `.env`. `AGENTS_CODEX_BIN` selects a CLI executable; `AGENTS_CODEX_SOCKET` connects directly to an existing backend and skips automatic daemon startup. `AGENTS_APP_TOOLS_ADAPTER` overrides the vendored adapter if needed. Use a short private `AGENTS_DATA_DIR` when necessary: the complete Unix socket path must fit within 107 bytes.
 
 The sidebar opens with up to 50 current local conversations, read directly from the backend while the full workspace loads. You can select a conversation immediately; the workspace keeps that selection when it takes over. This initial view includes project membership and available pins, and does not load conversation history. SSH lists and the composer become available as the full workspace starts. `npm run test:startup:ui` records both initial-list paint and workspace takeover; add `-- --check-handoff` to verify selection during startup.

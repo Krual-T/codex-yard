@@ -28,6 +28,7 @@
     "test:embedded-browser:ui": "node scripts/verify-embedded-browser.ts",
     "test:queue": "node --use-env-proxy scripts/verify-queue.ts",
     "test:model-settings": "node --use-env-proxy scripts/verify-model-settings.ts",
+    "test:model-providers:ui": "node --use-env-proxy scripts/verify-model-providers.ts",
     "test:visual": "node --use-env-proxy scripts/verify-visual-feedback.ts",
     "test:visualizations": "node --use-env-proxy scripts/verify-visualizations.ts",
     "test:tabs:ui": "node --use-env-proxy scripts/verify-workspace-tabs.ts",

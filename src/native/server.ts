@@ -17,7 +17,7 @@ import { createHostToolHandler } from '../../lib/host-tools.ts';
 import { createNativeAppToolHost } from '../../lib/native-app-tools.ts';
 import type { NativeProject } from '../../lib/native-app-tools.ts';
 import { projectRoot, rendererRoot, rendererVersion } from '../../lib/app-resources.ts';
-import { record, publicConfig, readMethods, writeMethods } from './protocol.ts';
+import { record, readMethods, writeMethods } from './protocol.ts';
 import type { HostMessage, ObjectValue } from './protocol.ts';
 import { createThreadProjects } from './thread-projects.ts';
 import { createThreadPins } from './thread-pins.ts';
@@ -60,6 +60,10 @@ import { adaptNewTabModule } from './new-tab-renderer.ts';
 import { adaptConversationHistory } from './conversation-history-renderer.ts';
 import { startupSidebar } from './startup-sidebar.ts';
 import { createBrowserNotifications, notificationRoute } from './notifications.ts';
+import { ModelProviders } from './model-providers.ts';
+import { ProviderRouting } from './provider-routing.ts';
+import { deepseekCatalog, isDeepseekProvider } from './deepseek-models.ts';
+import { adaptModelProviders } from './model-provider-renderer.ts';
 
 interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; httpFetch?: typeof fetch; notificationFetch?: typeof fetch; notificationIntervalMs?: number; hostCatalog?: HostCatalog; sshConfigPath?: string; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection }
 const mime: Record<string, string> = {
@@ -88,6 +92,7 @@ async function readRendererAsset(file: string, path: string, webRenderer: boolea
     content = adaptAutomationModule(path, content);
     content = adaptYardMenu(path, content);
     content = adaptNotificationSettings(path, content);
+    content = adaptModelProviders(path, content);
     content = adaptFilePreviewModule(path, content);
     content = adaptFileAttachmentModule(path, content);
     content = adaptNewTabModule(path, content);
@@ -212,6 +217,27 @@ export async function createNativeWorkbench(options: Options = {}) {
     if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(message));
   }
   function broadcast(message: unknown) { for (const client of clients.keys()) send(client, message); }
+  const modelProviders = new ModelProviders({ globals, persist });
+  const writtenCatalogs = new Set<string>();
+  const providerRouting = new ProviderRouting({
+    providers: modelProviders,
+    connections: hostId => [...(hostId === 'local' ? [control] : fileConnections.has(hostId) ? [fileConnections.get(hostId)!] : []), ...[...clients.values()].flatMap(connections => {
+      const connection = connections.get(hostId); return connection ? [connection] : [];
+    })],
+    async sessionConfig(hostId, provider, connection) {
+      const config = hostId === 'local' ? { ...hostTools.config } : {};
+      const catalog = await modelProviders.catalogPath(hostId, connection, provider);
+      if (catalog) return { ...config, model_catalog_json: catalog };
+      if (!isDeepseekProvider(await modelProviders.definition(hostId, connection, provider))) return config;
+      const path = hostId === 'local' ? join(dataDir, 'deepseek-models.json') : join(hostPaths.get(hostId)!.codexHome, 'yard-deepseek-models.json');
+      if (!writtenCatalogs.has(hostId)) {
+        if (hostId === 'local') await writeFile(path, deepseekCatalog, { mode: 0o600 });
+        else await connection.request('fs/writeFile', { path, dataBase64: Buffer.from(deepseekCatalog).toString('base64') }, { mutating: true });
+        writtenCatalogs.add(hostId);
+      }
+      return { ...config, model_catalog_json: path };
+    },
+  });
   const portForwarding = new PortForwarding({ hosts: sshHosts, rules: globals['port-forwarding-rules'], async save(rules) {
     const previous = globals['port-forwarding-rules'];
     globals['port-forwarding-rules'] = rules;
@@ -594,7 +620,8 @@ export async function createNativeWorkbench(options: Options = {}) {
         return;
       }
       send(client, message.id != null ? { type: 'mcp-request', hostId, request: message }
-        : { type: 'mcp-notification', hostId, method: message.method, params: message.params });
+        : { type: 'mcp-notification', hostId, method: message.method,
+          params: message.method === 'thread/settings/updated' ? providerRouting.present(hostId, message.params, String(params.threadId)) : message.params });
     });
     current.on('status', () => {
       // The daemon survives a client disconnect. Keep other hosts connected;
@@ -679,7 +706,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       // Installing packages and interactive MCP calls can outlast the normal
       // metadata deadline. Keep the selected connection and never replay writes.
       const pluginRequest = method.startsWith('plugin/') || method.startsWith('marketplace/') || method.startsWith('mcpServer/');
-      let result = await connection.request(method, requestParams, { mutating: writeMethods.has(method),
+      let result = await providerRouting.request(hostId, connection, method, requestParams, { mutating: writeMethods.has(method),
         ...(pluginRequest ? { timeoutMs: 300_000 } : {}) });
       if (method === 'turn/start') {
         const turn = record(record(result).turn);
@@ -691,7 +718,6 @@ export async function createNativeWorkbench(options: Options = {}) {
       if (method === 'thread/archive' || method === 'thread/unarchive') automations.threadArchived(hostId, String(params.threadId), method === 'thread/archive');
       if (method === 'thread/start' && record(record(result).thread).id) createdThreads.add(hostId + ':' + String(record(record(result).thread).id));
       if (method === 'thread/delete') createdThreads.delete(hostId + ':' + String(params.threadId));
-      if (method === 'config/read') result = publicConfig(result);
       // The renderer's browser.in-app capability reads experimentalFeature/list.
       // Manual Chrome transport includes pairing an access computer, even when
       // the optional service-machine Chrome is not configured.
@@ -731,6 +757,16 @@ export async function createNativeWorkbench(options: Options = {}) {
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
     if (automationEndpoints.has(endpoint)) return automations.fetch(endpoint, params);
     switch (endpoint) {
+      case 'model-providers': {
+        const connection = await connectedFor(client, connections, hostId);
+        if (params.operation === 'set-enabled') {
+          if (typeof params.id !== 'string' || typeof params.enabled !== 'boolean') throw new Error('供应商启停参数无效');
+          const result = await modelProviders.update(hostId, connection, params.id, params.enabled);
+          broadcast({ type: 'yard-model-providers-changed', hostId });
+          return result;
+        }
+        return modelProviders.snapshot(hostId, connection);
+      }
       case 'startup-sidebar': {
         const result = await control.request('thread/list', { limit: 50, sortKey: 'recency_at',
           archived: false, modelProviders: null, sourceKinds: [], useStateDbOnly: true });

@@ -1027,7 +1027,7 @@ test('native config and authentication replies never include provider secrets or
   h.fake.handlers.set('getAuthStatus', () => ({ authToken: 'token-secret', authMethod: 'apikey' }));
   const client = await h.connect();
   const config = await client.rpc(1, 'config/read');
-  assert.equal(config.result.config.model, 'fixture-model');
+  assert.equal(config.result.config.model, 'yard-model:fixture/fixture-model');
   assert.equal(config.result.config.profile, 'work');
   assert.deepEqual(config.result.config.features, { remote_connections: true });
   assert.doesNotMatch(JSON.stringify(config), /provider-secret|mcp-secret|profile-secret|secret-layer/);

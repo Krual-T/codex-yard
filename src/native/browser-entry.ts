@@ -20,6 +20,7 @@ import { installNewTab } from './new-tab-view.tsx';
 import { installBrowserNotifications } from './notification-view.tsx';
 import { installConversationHistory } from './conversation-history.ts';
 import { installTurnProgress } from './turn-progress.ts';
+import { installModelProviders } from './model-provider-view.tsx';
 import { mountStartupSidebar } from './startup-sidebar-view.tsx';
 import type { StartupSidebarBridge } from './startup-sidebar-view.tsx';
 
@@ -85,6 +86,7 @@ installStatsigStartup(application.rDr().StatsigClient, application.jPr(), async 
 });
 installAutomationRecovery(runtime.gzt());
 installTurnProgress(runtime.gzt());
+installModelProviders(runtime.gzt());
 installFilePreviews(runtime.gzt());
 installNewTab(runtime.gzt());
 const react = runtime.hMt();
