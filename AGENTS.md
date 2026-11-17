@@ -1,5 +1,15 @@
 # Development
 
+## Product invariant: independent operation
+
+Yard is an independent Codex client and capability host. All supported features, including plugin management and Computer Use, must build, start and operate when Codex App is not installed or is closed. Implement required host services in Yard or use explicitly documented standalone dependencies. Runtime access to an installed App's binaries, resources, private sockets or running process cannot satisfy this requirement. The checked-in, versioned UI/adapter snapshots may remain reference assets; the Codex CLI, model provider, OS permissions and documented plugin runtimes remain prerequisites.
+
+For each integration, verify the actual user action and capability lifecycle with the App installation unavailable. Closing the Yard page must preserve work owned by the persistent Yard service or Codex backend. Report supported platforms and remaining environment prerequisites precisely. Computer Use setup and service ownership are described in `docs/standalone-plugins.md`.
+
+## Development workflow
+
+This module is maintained in the LifeKernel repository at `projects/codex-yard/`. Read LifeKernel's `.agents/development.md` before starting work. Use LifeKernel topic branches and worktrees, then integrate completed changes into local `main`. Run the npm commands below from this module directory. The standalone GitHub repository preserves the project's publication history; this checkout is the development source of truth.
+
 Read README.md and CONTRIBUTING.md before changing the project. Use a focused topic branch and an isolated worktree for ongoing changes. Preserve existing user changes.
 
 Production modules and new scripts use strict TypeScript. New UI uses React. Prefer the existing Codex transport and host interfaces over a second implementation of the same capability.

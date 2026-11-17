@@ -1,7 +1,13 @@
 export type ObjectValue = Record<string, unknown>;
 export type RequestId = string | number;
-export interface RpcRequest { id: RequestId; method: string; params?: ObjectValue }
+export interface RpcRequest { id: RequestId; method: string; params?: ObjectValue | null }
 export interface RpcReply { id: RequestId; result?: unknown; error?: { code: number; message: string; data?: unknown } }
+export interface SidebarBootstrap {
+  catalogEntries: unknown[];
+  globalStateEntries: { key: string; value?: unknown }[];
+  workspaceRootOptions: { roots: string[]; canonicalPathByRoot: Record<string, string> };
+  projectlessWorkspaceRoot: { workspaceRoot: string };
+}
 export interface HostMessage extends ObjectValue {
   type: string;
   hostId?: string;
@@ -61,24 +67,36 @@ const sessionKeys = ['model', 'model_provider', 'model_reasoning_effort', 'profi
   'sandbox_mode', 'service_tier', 'approvals_reviewer', 'default_permissions'];
 export function publicConfig(result: unknown) {
   const config = record(record(result).config);
-  return { config: Object.fromEntries(sessionKeys.filter(key => key in config).map(key => [key, config[key]])), origins: {}, layers: null };
+  // The renderer gates its Connections page on this capability. Yard owns the
+  // SSH transport and catalog; advertising it does not edit the CLI's config.
+  return { config: { ...Object.fromEntries(sessionKeys.filter(key => key in config).map(key => [key, config[key]])),
+    features: { remote_connections: true } }, origins: {}, layers: null };
 }
 
 export const readMethods = new Set([
   'config/read', 'configRequirements/read', 'account/read', 'account/gatewayOAuth/read', 'getAuthStatus', 'model/list',
   'thread/list', 'thread/read', 'thread/turns/list', 'thread/items/list', 'thread/loaded/list',
+  'thread/search', 'thread/searchOccurrences', 'thread/timeline/list',
   'thread/goal/get', 'thread/queue/list', 'thread/readState/read', 'thread/metadata/read', 'thread/attachment/list',
   'skills/list', 'mcpServerStatus/list', 'collaborationMode/list', 'permissionProfile/list',
-  'experimentalFeature/list', 'app/list', 'plugin/installed', 'plugin/list', 'plugin/read',
+  'experimentalFeature/list', 'app/list', 'app/read', 'app/installed', 'plugin/installed', 'plugin/list', 'plugin/read',
+  'plugin/search', 'plugin/skill/read', 'plugin/share/list', 'mcpServer/resource/read',
+  'account/rateLimits/read', 'fuzzyFileSearch',
   'remoteControl/status/read',
   'hooks/list', 'externalAgentConfig/import/readHistories',
 ]);
 
 export const writeMethods = new Set([
-  'config/batchWrite',
+  'config/batchWrite', 'config/value/write', 'config/mcpServer/reload', 'skills/config/write',
+  'marketplace/add', 'marketplace/remove', 'marketplace/upgrade',
+  'plugin/install', 'plugin/uninstall', 'plugin/reconcile',
+  'plugin/share/save', 'plugin/share/updateTargets', 'plugin/share/checkout', 'plugin/share/delete',
+  'mcpServer/oauth/login', 'mcpServer/tool/call', 'mcpServer/event/stream/start', 'mcpServer/event/stream/stop',
   'thread/start', 'thread/fork', 'thread/inject_items', 'thread/resume', 'thread/unsubscribe', 'thread/name/set', 'thread/archive', 'thread/unarchive',
-  'thread/rollback', 'thread/revert', 'thread/readState/set', 'thread/settings/update', 'thread/delete',
-  'turn/start', 'turn/steer', 'turn/interrupt',
+  'thread/rollback', 'thread/revert', 'thread/compact/start', 'thread/readState/set', 'thread/settings/update', 'thread/delete',
+  'thread/backgroundTerminals/clean', 'thread/memoryMode/set', 'thread/metadata/update',
+  'turn/start', 'turn/steer', 'turn/interrupt', 'turn/settings/update',
+  'fuzzyFileSearch/sessionStart', 'fuzzyFileSearch/sessionUpdate', 'fuzzyFileSearch/sessionStop',
   'thread/queue/add', 'thread/queue/delete', 'thread/queue/update', 'thread/queue/reorder', 'thread/queue/start',
   'thread/goal/set', 'thread/goal/clear', 'thread/goal/update',
 ]);

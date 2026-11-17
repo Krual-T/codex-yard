@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { get } from 'node:http';
+import { createServer, get } from 'node:http';
 import { createConnection } from 'node:net';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, truncate } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -17,7 +17,7 @@ import { brandAssets } from '../src/native/visual-feedback.ts';
 import type { HostCatalog } from '../src/native/hosts.ts';
 import type { createSshProxyStream } from '../src/native/ssh.ts';
 import type { RemoteFileCommand } from '../src/native/files.ts';
-import { createFakeCodex, fixtureThread, NO_REPLY } from './fake-codex.ts';
+import { createFakeCodex, fixtureThread, fixtureTurn, NO_REPLY } from './fake-codex.ts';
 import { fileDaemonFixture } from './file-daemon-fixture.ts';
 import { fileMethods } from '../src/native/files.ts';
 import { nativeFixture } from './native-fixture.ts';
@@ -52,7 +52,7 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
       return messages.find(predicate)!;
     }
     function send(message: unknown) { socket.send(JSON.stringify(message)); }
-    async function rpc(id: number, method: string, params = {}, hostId = 'local') {
+    async function rpc(id: number, method: string, params: Record<string, unknown> | null = {}, hostId = 'local') {
       send({ type: 'mcp-request', hostId, request: { id, method, params } });
       return (await until(message => message.type === 'mcp-response' && message.hostId === hostId && message.message.id === id)).message;
     }
@@ -60,6 +60,164 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
   }
   return { root, fake, app, connect };
 }
+
+test('sidebar bootstrap seeds current project and pin queries before the renderer starts', async t => {
+  const h = await fixture(t);
+  const first = await h.connect();
+  const snapshot = (await first.until(message => message.type === 'yard-sidebar-bootstrap')).value;
+  assert.deepEqual(snapshot.catalogEntries, []);
+  assert.deepEqual(snapshot.workspaceRootOptions, { roots: [], canonicalPathByRoot: {} });
+  assert.equal(snapshot.projectlessWorkspaceRoot.workspaceRoot, join(h.root, 'data/workspaces'));
+  assert.ok(snapshot.globalStateEntries.some((entry: { key: string }) => entry.key === 'pinned-thread-ids'));
+  first.send({ type: 'fetch', requestId: 'pin', url: 'vscode://codex/set-thread-pinned',
+    body: JSON.stringify({ threadId: 'fresh-pin', pinned: true }) });
+  await first.until(message => message.requestId === 'pin');
+  const second = await h.connect();
+  const current = (await second.until(message => message.type === 'yard-sidebar-bootstrap')).value;
+  assert.deepEqual(current.globalStateEntries.find((entry: { key: string }) => entry.key === 'pinned-thread-ids').value, ['fresh-pin']);
+  assert.equal(current.globalStateEntries.some((entry: { key: string }) => entry.key === 'prompt-history'), false);
+});
+
+test('startup sidebar reads current bounded metadata before renderer ready through the existing daemon', async t => {
+  const h = await fixture(t);
+  h.fake.threads.set('first', fixtureThread('first', h.root, { name: 'First title',
+    turns: [fixtureTurn('past', [{ id: 'answer', type: 'agentMessage', text: 'not in sidebar' }])] }));
+  const client = await h.connect();
+  const read = async (requestId: string) => {
+    client.send({ type: 'fetch', requestId, url: 'vscode://codex/startup-sidebar', body: '{}' });
+    return (await client.until(message => message.requestId === requestId)).body;
+  };
+  const first = await read('startup-1');
+  assert.deepEqual(first.threads, [{ id: 'first', title: 'First title', projectId: null }]);
+  const request = h.fake.calls('thread/list').at(-1)!;
+  assert.equal(request.params.limit, 50);
+  assert.equal(request.params.useStateDbOnly, true);
+  assert.equal(request.params.archived, false);
+  h.fake.threads.get('first')!.name = 'Renamed';
+  assert.equal((await read('startup-2')).threads[0].title, 'Renamed');
+});
+
+async function publicPreview(url: string) {
+  // fetch normalizes Host to its URL; the reverse proxy preserves the public
+  // host, so exercise that request shape with the native HTTP client.
+  return new Promise<{ status: number | undefined; policy: string }>((resolve, reject) => {
+    get(url, { headers: { Host: 'workbench.example.ts.net:8765' } }, response => {
+      response.once('error', reject);
+      response.once('end', () => resolve({ status: response.statusCode, policy: String(response.headers['content-security-policy']) }));
+      response.resume();
+    }).once('error', reject);
+  });
+}
+
+test('local HTML links are read on the Yard host with bounded bytes and an isolated document', async t => {
+  const h = await fixture(t);
+  const markup = '<h1>LOCAL_HTML_OK</h1><script>window.ok=true</script>' + ' '.repeat(6 * 1024 * 1024);
+  const requests: string[] = [];
+  const upstream = createServer((request, response) => {
+    requests.push(request.url!);
+    assert.equal(request.headers.cookie, undefined);
+    assert.equal(request.headers.authorization, undefined);
+    if (request.url === '/redirect.html') { response.writeHead(302, { Location: '/gallery.html?q=1' }); response.end(); }
+    else if (request.url === '/data.html') { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end('{}'); }
+    else if (request.url === '/large.html') { response.writeHead(200, { 'Content-Type': 'text/html', 'Content-Length': 64 * 1024 * 1024 + 1 }); response.flushHeaders(); }
+    else { response.writeHead(200, { 'Content-Type': 'text/html' }); response.end(markup); }
+  });
+  await new Promise<void>(done => upstream.listen(0, '127.0.0.1', done));
+  t.after(() => new Promise<void>(done => { upstream.closeAllConnections(); upstream.close(() => done()); }));
+  const port = (upstream.address() as import('node:net').AddressInfo).port;
+  const preview = (url: string, extra: Record<string, string> = {}) => h.app.url + '/api/local-html-preview?' + new URLSearchParams({ url, ...extra });
+  const address = `http://localhost:${port}`;
+  const result = await fetch(preview(address + '/gallery.html?q=1'), { headers: { Cookie: 'secret=value', Authorization: 'Bearer secret' } });
+  assert.equal(result.status, 200);
+  assert.equal(await result.text(), markup);
+  assert.match(result.headers.get('content-security-policy')!, /sandbox allow-scripts;/);
+  assert.doesNotMatch(result.headers.get('content-security-policy')!, /allow-same-origin/);
+  assert.match(result.headers.get('content-security-policy')!, /connect-src data: blob:/);
+  assert.equal(result.headers.get('content-security-policy')!.split('frame-ancestors ')[1], "'self'");
+  assert.equal(result.headers.get('referrer-policy'), 'no-referrer');
+  assert.equal((await fetch(preview(address + '/gallery.html'), { method: 'POST' })).status, 405);
+  for (const url of ['http://example.com/gallery.html', 'http://127.0.0.2/gallery.html', 'file:///tmp/gallery.html',
+    'http://user:password@localhost/gallery.html', address + '/api']) {
+    assert.equal((await fetch(preview(url))).status, 400);
+  }
+  assert.equal((await fetch(preview(address + '/gallery.html', { hostId: 'remote-ssh:test' }))).status, 400);
+  assert.equal((await fetch(preview(address + '/redirect.html'))).status, 502);
+  assert.equal((await fetch(preview(address + '/data.html'))).status, 502);
+  assert.equal((await fetch(preview(address + '/large.html'))).status, 413);
+  assert.deepEqual(requests, ['/gallery.html?q=1', '/redirect.html', '/data.html', '/large.html']);
+  const securePreview = await publicPreview(preview(address + '/gallery.html'));
+  assert.equal(securePreview.status, 200);
+  assert.equal(securePreview.policy.split('frame-ancestors ')[1], 'https://workbench.example.ts.net:8765');
+  assert.equal((await fetch(preview(address + '/gallery.html'), { headers: { 'sec-fetch-site': 'cross-site' } })).status, 403);
+});
+
+test('SSH settings save new hosts, publish them to other pages, route connections immediately and retain the catalog after restart', async t => {
+  const seen: string[] = [];
+  let socketPath = '';
+  const sshStream: typeof createSshProxyStream = host => { seen.push(host.sshHost); return createConnection(socketPath); };
+  const h = await fixture(t, undefined, undefined, { sshStream });
+  socketPath = h.fake.socketPath;
+  const first = await h.connect(), second = await h.connect();
+  let sequence = 0;
+  async function host(endpoint: string, body: unknown = {}) {
+    const requestId = 'ssh-save-' + ++sequence;
+    first.send({ type: 'fetch', requestId, url: 'vscode://codex/' + endpoint, body: JSON.stringify(body) });
+    return first.until(message => message.type === 'fetch-response' && message.requestId === requestId);
+  }
+  const profile = { hostId: 'remote-ssh-codex-managed:fixture', displayName: 'Fixture host', alias: null,
+    hostname: 'user@fixture.example', sshPort: 2222, identity: '/server-only/key' };
+  const saved = await host('save-codex-managed-remote-ssh-connections', { remoteConnections: [profile] });
+  assert.equal(saved.responseType, 'success');
+  assert.equal(saved.body.remoteConnections[0].hostId, profile.hostId);
+  assert.equal(saved.body.remoteConnections[0].identity, null);
+  await second.until(message => message.type === 'shared-object-updated' && message.key === 'remote_ssh_connections' && message.value.length === 1);
+  assert.equal((await host('set-remote-connection-auto-connect', { hostId: profile.hostId, autoConnect: true })).body.state, 'connected');
+  assert.deepEqual(seen, ['user@fixture.example']);
+  assert.equal((await host('save-codex-managed-remote-ssh-connections', { remoteConnections: saved.body.remoteConnections })).responseType, 'success');
+  assert.equal(JSON.parse(await readFile(join(h.root, 'data/native-state.json'), 'utf8')).globals['codex-managed-remote-connections'][0].identity, '/server-only/key');
+  for (const bad of [{ ...profile, hostname: '-Fbad' }, { ...profile, sshPort: 0 }]) {
+    assert.equal((await host('save-codex-managed-remote-ssh-connections', { remoteConnections: [bad] })).responseType, 'error');
+  }
+  assert.equal((await host('refresh-remote-connections')).body.remoteConnections.length, 1);
+  assert.deepEqual((await first.rpc(90, 'thread/list', {}, profile.hostId)).result.data, []);
+  await assert.rejects(readFile(join(h.root, 'codex/.codex-global-state.json')), { code: 'ENOENT' });
+  await host('save-codex-managed-remote-ssh-connections', { remoteConnections: [{ ...profile, hostname: 'other.fixture' }] });
+  await first.rpc(91, 'thread/list', {}, profile.hostId);
+  assert.deepEqual(seen, ['user@fixture.example', 'other.fixture']);
+  await host('save-codex-managed-remote-ssh-connections', { remoteConnections: [] });
+  assert.equal((await host('refresh-remote-connections')).body.remoteConnections.length, 0);
+  assert.ok((await first.rpc(92, 'thread/list', {}, profile.hostId)).error);
+  await host('save-codex-managed-remote-ssh-connections', { remoteConnections: [profile] });
+  await h.app.close();
+  const restarted = await createNativeWorkbench({ socketPath, codexHome: join(h.root, 'codex'), dataDir: join(h.root, 'data'),
+    workspace: h.root, renderer: join(h.root, 'renderer'), adapterPath: join(h.root, 'renderer/renderer.json'), port: 0, sshStream,
+    hostCatalog: { hosts: [], projects: [], assignments: {} } });
+  try {
+    const status = await (await fetch(restarted.url + '/api/status')).json();
+    assert.ok(status.hosts.some((host: { hostId: string }) => host.hostId === profile.hostId));
+  } finally { await restarted.close(); }
+});
+
+test('sidebar pins persist, notify other pages, preserve concurrent additions during reorder and reject invalid orders', async t => {
+  const h = await fixture(t), first = await h.connect(), second = await h.connect();
+  let sequence = 0;
+  async function host(endpoint: string, body: unknown = {}) {
+    const requestId = 'pin-' + ++sequence;
+    first.send({ type: 'fetch', requestId, url: 'vscode://codex/' + endpoint, body: JSON.stringify(body) });
+    return first.until(message => message.type === 'fetch-response' && message.requestId === requestId);
+  }
+  assert.deepEqual((await host('list-pinned-threads')).body.threadIds, []);
+  await host('set-thread-pinned', { threadId: 'a', pinned: true });
+  await second.until(message => message.type === 'pinned-threads-updated');
+  await host('set-thread-pinned', { threadId: 'b', pinned: true, beforeThreadId: null });
+  await host('set-thread-pinned', { threadId: 'new', pinned: true });
+  await host('set-pinned-threads-order', { threadIds: ['b', 'a'], movedThreadId: 'b' });
+  assert.deepEqual((await host('list-pinned-threads')).body.threadIds, ['b', 'a', 'new']);
+  assert.equal((await host('set-pinned-threads-order', { threadIds: ['a', 'a'] })).responseType, 'error');
+  assert.equal((await host('set-thread-pinned', { threadId: '', pinned: true })).responseType, 'error');
+  await host('set-thread-pinned', { threadId: 'a', pinned: false });
+  assert.deepEqual(JSON.parse(await readFile(join(h.root, 'data/native-state.json'), 'utf8')).globals['pinned-thread-ids'], ['b', 'new']);
+});
 
 test('the renderer file endpoints browse and read real bytes, preserve empty directories and reject traversal', async t => {
   const h = await fixture(t), client = await h.connect();
@@ -99,6 +257,41 @@ test('the renderer file endpoints browse and read real bytes, preserve empty dir
   const large = join(root, 'large'); await writeFile(large, ''); await truncate(large, 10 * 1024 * 1024 + 1);
   assert.equal((await host('read-file', { path: large })).responseType, 'error');
   assert.equal((await host('read-file-binary', { path: large })).body.contentsBase64, null);
+  // The binary preview transport must cross the former 10 MiB limit without
+  // putting base64 into a WebSocket frame; text/RPC limits remain bounded.
+  const contentQuery = new URLSearchParams({ path: large, maxBytes: String(40 * 1024 * 1024) });
+  const content = await fetch(h.app.url + '/api/files/content?' + contentQuery);
+  assert.equal(content.status, 200);
+  assert.equal((await content.arrayBuffer()).byteLength, 10 * 1024 * 1024 + 1);
+  assert.equal(content.headers.get('cache-control'), 'no-store');
+  assert.match(content.headers.get('content-disposition')!, /^attachment;/);
+  contentQuery.set('maxBytes', String(10 * 1024 * 1024));
+  assert.equal((await fetch(h.app.url + '/api/files/content?' + contentQuery)).status, 413);
+  contentQuery.set('maxBytes', '-1');
+  assert.equal((await fetch(h.app.url + '/api/files/content?' + contentQuery)).status, 400);
+  const invalidContent: Record<string, string>[] = [{ path: empty }, { path: join(root, 'missing') }, { path: text, hostId: 'unknown' }];
+  for (const params of invalidContent) {
+    assert.equal((await fetch(h.app.url + '/api/files/content?' + new URLSearchParams(params))).status, 400);
+  }
+  const html = join(root, '中文.html'), markup = '<h1>HTML_RENDERED</h1><script>window.ok=true</script>';
+  await writeFile(html, markup);
+  const preview = await fetch(h.app.url + '/api/files/html-preview?' + new URLSearchParams({ path: html }));
+  assert.equal(await preview.text(), markup);
+  assert.equal(preview.headers.get('content-type'), 'text/html; charset=utf-8');
+  assert.match(preview.headers.get('content-security-policy')!, /sandbox allow-scripts;/);
+  assert.doesNotMatch(preview.headers.get('content-security-policy')!, /allow-same-origin/);
+  assert.match(preview.headers.get('content-security-policy')!, /connect-src data: blob:/);
+  assert.equal(preview.headers.get('content-security-policy')!.split('frame-ancestors ')[1], "'self'");
+  for (const route of ['/?app=skybridge', '/api/files/html-preview?' + new URLSearchParams({ path: html })]) {
+    const sandbox = await publicPreview(h.app.url + route);
+    assert.equal(sandbox.status, 200);
+    assert.equal(sandbox.policy.split('frame-ancestors ')[1], 'https://workbench.example.ts.net:8765');
+  }
+  assert.equal((await fetch(h.app.url + '/api/files/html-preview?' + new URLSearchParams({ path: text }))).status, 400);
+  await truncate(html, 5_000_001);
+  assert.equal((await fetch(h.app.url + '/api/files/html-preview?' + new URLSearchParams({ path: html }))).status, 200);
+  await truncate(html, 64 * 1024 * 1024 + 1);
+  assert.equal((await fetch(h.app.url + '/api/files/html-preview?' + new URLSearchParams({ path: html }))).status, 413);
   const query = new URLSearchParams({ path: binary, name: '中文产物.png' });
   const download = await fetch(h.app.url + '/api/files/download?' + query);
   assert.equal(download.status, 200);
@@ -157,11 +350,11 @@ test('browser uploads require an origin, preserve selected bytes and cannot over
   assert.equal(selected.label, '中文附件.bin');
   assert.equal((await fetch(h.app.url + '/api/files/upload?' + query, { method: 'POST', headers, body: 'overwrite' })).status, 400);
   assert.equal((await fetch(h.app.url + '/api/files/upload?' + new URLSearchParams({ uploadId: upload.uploadId, name: '../escape' }), { method: 'POST', headers, body: data })).status, 400);
-  const tooLarge = await fetch(h.app.url + '/api/files/upload?' + new URLSearchParams({ uploadId: upload.uploadId, name: 'too-large' }), { method: 'POST', headers, body: Buffer.alloc(10 * 1024 * 1024 + 1) });
+  const tooLarge = await fetch(h.app.url + '/api/files/upload?' + new URLSearchParams({ uploadId: upload.uploadId, name: 'too-large' }), { method: 'POST', headers, body: Buffer.alloc(64 * 1024 * 1024 + 1) });
   assert.equal(tooLarge.status, 400);
-  assert.match((await tooLarge.json()).error, /10 MiB/);
+  assert.match((await tooLarge.json()).error, /64 MiB/);
   assert.deepEqual(Buffer.from(await readFile(selected.fsPath)), data);
-  assert.ok(h.fake.calls('fs/writeFile').some((call: any) => call.params.path === selected.fsPath));
+  assert.equal(h.fake.calls('fs/writeFile').length, 0, 'staged bytes stay outside daemon JSON frames');
 });
 
 test('SSH file routing reads the selected host even when an identical local path exists', async t => {
@@ -200,6 +393,12 @@ test('SSH file routing reads the selected host even when an identical local path
   assert.deepEqual((await host('workspace-directory-entries', { workspaceRoot: root, directoryPath: '空目录' })).body.entries, []);
   const download = await fetch(h.app.url + '/api/files/download?' + new URLSearchParams({ hostId, path: join(root, '中文.txt') }));
   assert.equal(await download.text(), 'REMOTE_中文');
+  const content = await fetch(h.app.url + '/api/files/content?' + new URLSearchParams({ hostId, path: join(root, '中文.txt') }));
+  assert.equal(await content.text(), 'REMOTE_中文');
+  await writeFile(join(root, 'preview.html'), '<h1>LOCAL</h1>');
+  await writeFile(join(remoteRoot, 'preview.html'), '<h1>REMOTE_HTML</h1>');
+  const html = await fetch(h.app.url + '/api/files/html-preview?' + new URLSearchParams({ hostId, path: join(root, 'preview.html') }));
+  assert.equal(await html.text(), '<h1>REMOTE_HTML</h1>');
   assert.equal((await host('read-file', { path: '中文.txt' })).responseType, 'error');
   assert.equal((await host('read-file', { path: join(root, 'missing') })).responseType, 'error');
   assert.ok(calls.some(command => command.includes('timeout 10 head ')));
@@ -250,9 +449,17 @@ test('the local bootstrap serves the exact downloaded evaluations with their cap
     { data, metadata: { rendererVersion: user.appVersion, capturedAt, client: { user } } });
   const response = await fetch(h.app.url + '/api/configuration/bootstrap');
   assert.equal(response.status, 200);
-  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.headers.get('cache-control'), 'private, no-cache');
   assert.equal(response.headers.get('content-encoding'), 'gzip');
   assert.deepEqual(await response.json(), { rendererVersion: user.appVersion, capturedAt, user, data });
+  const tag = response.headers.get('etag')!;
+  assert.ok(tag);
+  const cached = await fetch(h.app.url + '/api/configuration/bootstrap', { headers: { 'If-None-Match': tag } });
+  assert.equal(cached.status, 304);
+  assert.equal(await cached.text(), '');
+  assert.equal(cached.headers.get('etag'), tag);
+  assert.equal(cached.headers.get('vary'), 'Accept-Encoding');
+  assert.equal((await fetch(h.app.url + '/api/configuration/bootstrap', { headers: { 'If-None-Match': 'W/"previous-capture"' } })).status, 200);
   assert.equal(requests, 0);
   const status = await (await fetch(h.app.url + '/api/status')).json();
   assert.deepEqual(status.configurationSnapshot, { capturedAt, bytes: Buffer.byteLength(data) });
@@ -822,11 +1029,12 @@ test('native config and authentication replies never include provider secrets or
   const config = await client.rpc(1, 'config/read');
   assert.equal(config.result.config.model, 'fixture-model');
   assert.equal(config.result.config.profile, 'work');
+  assert.deepEqual(config.result.config.features, { remote_connections: true });
   assert.doesNotMatch(JSON.stringify(config), /provider-secret|mcp-secret|profile-secret|secret-layer/);
   assert.equal((await client.rpc(2, 'getAuthStatus')).result.authToken, null);
-  const unknown = await client.rpc(3, 'config/value/write', { keyPath: 'model', value: 'changed' });
+  const unknown = await client.rpc(3, 'account/logout');
   assert.match(unknown.error.message, /尚未接入/);
-  assert.equal(h.fake.calls('config/value/write').length, 0);
+  assert.equal(h.fake.calls('account/logout').length, 0);
 });
 
 test('native prewarming, notifications and approval answers use the real RPC bridge once', async t => {
@@ -838,6 +1046,10 @@ test('native prewarming, notifications and approval answers use the real RPC bri
   const params = h.fake.calls('thread/start')[0].params;
   assert.ok(record(record(record(params.config)['mcp_servers.codex_app']).env).CODEX_APP_TOOLS_PIPE_PATH);
   assert.doesNotMatch(JSON.stringify(started), /CODEX_APP_TOOLS_PIPE_PATH/);
+  client.send({ type: 'thread-prewarm-start', hostId: 'local', request: { id: 'prewarm-omitted', method: 'thread/start' } });
+  const parameterless = (await client.until(message => message.type === 'mcp-response' && message.message.id === 'prewarm-omitted')).message;
+  assert.ok(parameterless.result.thread.id);
+  assert.ok(record(record(record(h.fake.calls('thread/start')[1]!.params.config)['mcp_servers.codex_app']).env).CODEX_APP_TOOLS_PIPE_PATH);
   h.fake.send({ method: 'item/agentMessage/delta', params: { threadId: started.result.thread.id, delta: 'streamed' } });
   assert.equal((await client.until(message => message.method === 'item/agentMessage/delta')).params.delta, 'streamed');
   h.fake.send({ id: 'approval', method: 'item/commandExecution/requestApproval', params: { threadId: started.result.thread.id } });
@@ -877,10 +1089,154 @@ test('official model config batches preserve profile targets, backend errors and
   assert.equal(h.fake.calls('config/batchWrite').length, 1);
 });
 
-test('lost turn and model config write replies report uncertainty without replaying', async t => {
+test('manual compaction preserves the selected host, progress events and backend errors', async t => {
+  const remoteRoot = await mkdtemp('/tmp/aw-compact-remote-'), remote = await createFakeCodex(remoteRoot);
+  t.after(async () => { await remote.close(); await rm(remoteRoot, { recursive: true, force: true }); });
+  const hostId = 'remote-ssh-discovered:compact-fixture';
+  const h = await fixture(t, undefined, undefined, {
+    hostCatalog: { hosts: [{ hostId, displayName: 'Compact fixture', sshAlias: 'fixture', sshHost: 'fixture', sshPort: null, identity: null }], projects: [], assignments: {} },
+    sshStream: () => createConnection(remote.socketPath),
+  });
+  const client = await h.connect(), params = { threadId: 'same-thread-id' };
+  for (const backend of [h.fake, remote]) backend.handlers.set('thread/compact/start', received => {
+    assert.deepEqual(received, params); return {};
+  });
+  assert.deepEqual((await client.rpc(1, 'thread/compact/start', params, hostId)).result, {});
+  assert.equal(remote.calls('thread/compact/start').length, 1);
+  assert.equal(h.fake.calls('thread/compact/start').length, 0);
+  const progress = { ...params, turnId: 'compact-turn', item: { type: 'contextCompaction', id: 'compact-item' } };
+  for (const method of ['item/started', 'item/completed']) {
+    remote.send({ method, params: progress });
+    const event = await client.until(message => message.type === 'mcp-notification' && message.method === method);
+    assert.equal(event.hostId, hostId);
+    assert.deepEqual(event.params, progress);
+  }
+  assert.deepEqual((await client.rpc(2, 'thread/compact/start', params)).result, {});
+  assert.equal(h.fake.calls('thread/compact/start').length, 1);
+  assert.equal(remote.calls('thread/compact/start').length, 1);
+  remote.handlers.set('thread/compact/start', () => {
+    throw Object.assign(new Error('Fixture compaction rejected'), { code: -32600, data: { kind: 'threadBusy' } });
+  });
+  const rejected = await client.rpc(3, 'thread/compact/start', params, hostId);
+  assert.deepEqual(rejected.error, { code: -32600, message: 'Fixture compaction rejected', data: { kind: 'threadBusy' } });
+  assert.equal(h.fake.calls('thread/compact/start').length, 1);
+});
+
+test('search, account and app reads preserve native cursors, match locations and host selection', async t => {
+  const remoteRoot = await mkdtemp('/tmp/aw-search-remote-'), remote = await createFakeCodex(remoteRoot);
+  t.after(async () => { await remote.close(); await rm(remoteRoot, { recursive: true, force: true }); });
+  const hostId = 'remote-ssh-discovered:search-fixture';
+  const h = await fixture(t, undefined, undefined, {
+    hostCatalog: { hosts: [{ hostId, displayName: 'Search fixture', sshAlias: 'fixture', sshHost: 'fixture', sshPort: null, identity: null }], projects: [], assignments: {} },
+    sshStream: () => createConnection(remote.socketPath),
+  });
+  const client = await h.connect();
+  const scenarios = [
+    ['thread/search', { searchTerm: '中文', cursor: 'page-2', archived: true, limit: 5 }, { data: [{ thread: { id: 'remote-match' } }], nextCursor: 'page-3' }],
+    ['thread/searchOccurrences', { threadId: 'same-id', searchTerm: '中文', limit: 5 }, { data: [{ itemId: 'remote-item', start: 4, end: 6 }], nextCursor: 'next-match' }],
+    ['thread/timeline/list', { threadId: 'same-id', cursor: 'older', limit: 10 }, { data: [{ type: 'contextCompaction', id: 'remote-compaction' }], nextCursor: null }],
+    ['account/rateLimits/read', {}, { rateLimits: { primary: { usedPercent: 42 } }, rateLimitsByLimitId: {} }],
+    ['app/read', { appIds: ['fixture-app'], includeTools: true }, { apps: [{ id: 'fixture-app', tools: [{ name: 'fixture-tool' }] }] }],
+    ['app/installed', { forceRefresh: true }, { apps: [{ id: 'fixture-app', callable: true }] }],
+    ['fuzzyFileSearch', { query: '中文', roots: ['/remote/workspace'], cancellationToken: 'fixture' }, { files: [{ path: '/remote/workspace/中文.ts' }] }],
+  ] as const;
+  let id = 0;
+  for (const [method, params, result] of scenarios) {
+    remote.handlers.set(method, received => { assert.deepEqual(received, params); return result; });
+    assert.deepEqual((await client.rpc(++id, method, params, hostId)).result, result);
+    assert.equal(remote.calls(method).length, 1);
+    assert.equal(h.fake.calls(method).length, 0);
+  }
+});
+
+test('file search sessions forward native query updates and completion notifications', async t => {
+  const h = await fixture(t), client = await h.connect(), sessionId = 'search-session';
+  for (const [id, method, params] of [
+    [1, 'fuzzyFileSearch/sessionStart', { sessionId, roots: [h.root] }],
+    [2, 'fuzzyFileSearch/sessionUpdate', { sessionId, query: '中文' }],
+    [3, 'fuzzyFileSearch/sessionStop', { sessionId }],
+  ] as const) {
+    h.fake.handlers.set(method, received => { assert.deepEqual(received, params); return {}; });
+    assert.deepEqual((await client.rpc(id, method, params)).result, {});
+    assert.equal(h.fake.calls(method).length, 1);
+    if (id !== 2) continue;
+    for (const event of [
+      { method: 'fuzzyFileSearch/sessionUpdated', params: { sessionId, query: '中文', files: [{ path: h.root + '/中文.ts' }] } },
+      { method: 'fuzzyFileSearch/sessionCompleted', params: { sessionId } },
+    ]) {
+      h.fake.send(event);
+      const notification = await client.until(message => message.type === 'mcp-notification' && message.method === event.method);
+      assert.equal(notification.hostId, 'local');
+      assert.deepEqual(notification.params, event.params);
+    }
+  }
+});
+
+test('session and settings controls retain native payloads, null params, host isolation and errors', async t => {
+  const remoteRoot = await mkdtemp('/tmp/aw-settings-remote-'), remote = await createFakeCodex(remoteRoot);
+  t.after(async () => { await remote.close(); await rm(remoteRoot, { recursive: true, force: true }); });
+  const hostId = 'remote-ssh-discovered:settings-fixture';
+  const h = await fixture(t, undefined, undefined, {
+    hostCatalog: { hosts: [{ hostId, displayName: 'Settings fixture', sshAlias: 'fixture', sshHost: 'fixture', sshPort: null, identity: null }], projects: [], assignments: {} },
+    sshStream: () => createConnection(remote.socketPath),
+  });
+  const reloadMessages: Record<string, unknown>[] = [];
+  remote.handlers.set('initialize', (params, { socket }) => {
+    socket.on('message', bytes => {
+      const message = record(JSON.parse(String(bytes)));
+      if (message.method === 'config/mcpServer/reload') reloadMessages.push(message);
+    });
+    return remote.defaultResult('initialize', params);
+  });
+  const client = await h.connect();
+  const scenarios = [
+    ['config/value/write', { keyPath: 'mcp_servers.fixture.enabled', value: false, mergeStrategy: 'upsert', expectedVersion: 'fixture-version', filePath: '/remote/config.toml' }],
+    ['config/mcpServer/reload', null],
+    ['skills/config/write', { path: '/remote/skills/fixture/SKILL.md', enabled: false }],
+    ['thread/backgroundTerminals/clean', { threadId: 'same-id' }],
+    ['thread/memoryMode/set', { threadId: 'same-id', mode: 'disabled' }],
+    ['thread/metadata/update', { threadId: 'same-id', gitInfo: { branch: 'fixture' } }],
+    ['turn/settings/update', { threadId: 'same-id', turnId: 'same-turn', approvalsReviewer: 'user' }],
+  ] as const;
+  let id = 0;
+  for (const [method, params] of scenarios) {
+    remote.handlers.set(method, received => {
+      if (params !== null) assert.deepEqual(received, params);
+      return { native: method };
+    });
+    assert.deepEqual((await client.rpc(++id, method, params, hostId)).result, { native: method });
+    assert.equal(remote.calls(method).length, 1);
+    assert.equal(h.fake.calls(method).length, 0);
+  }
+  assert.equal(reloadMessages[0]?.params, null);
+  // JSON omits undefined params, as the pinned renderer does for this method.
+  remote.handlers.set('config/mcpServer/reload', () => ({}));
+  client.send({ type: 'mcp-request', hostId, request: { id: 'reload-omitted', method: 'config/mcpServer/reload' } });
+  assert.deepEqual((await client.until(message => message.type === 'mcp-response' && message.message.id === 'reload-omitted')).message.result, {});
+  assert.equal(Object.hasOwn(reloadMessages[1]!, 'params'), false);
+  remote.handlers.set('config/value/write', () => {
+    throw Object.assign(new Error('Fixture version conflict'), { code: -32600, data: { kind: 'versionConflict' } });
+  });
+  assert.deepEqual((await client.rpc(++id, 'config/value/write', scenarios[0][1], hostId)).error,
+    { code: -32600, message: 'Fixture version conflict', data: { kind: 'versionConflict' } });
+  assert.equal(h.fake.calls('config/value/write').length, 0);
+});
+
+test('lost session and settings write replies report uncertainty without replaying', async t => {
   for (const [method, params] of [
     ['turn/start', { threadId: 'test', input: [] }],
     ['config/batchWrite', { edits: [{ keyPath: 'model', value: 'fixture-model', mergeStrategy: 'upsert' }], filePath: null, expectedVersion: null, reloadUserConfig: true }],
+    ['thread/compact/start', { threadId: 'test' }],
+    ['config/value/write', { keyPath: 'mcp_servers.fixture.enabled', value: false, mergeStrategy: 'upsert' }],
+    ['config/mcpServer/reload', null],
+    ['skills/config/write', { path: '/fixture/SKILL.md', enabled: false }],
+    ['thread/backgroundTerminals/clean', { threadId: 'test' }],
+    ['thread/memoryMode/set', { threadId: 'test', mode: 'disabled' }],
+    ['thread/metadata/update', { threadId: 'test', gitInfo: { branch: 'fixture' } }],
+    ['turn/settings/update', { threadId: 'test', turnId: 'turn', approvalsReviewer: 'user' }],
+    ['fuzzyFileSearch/sessionStart', { sessionId: 'search', roots: ['/fixture'] }],
+    ['fuzzyFileSearch/sessionUpdate', { sessionId: 'search', query: 'test' }],
+    ['fuzzyFileSearch/sessionStop', { sessionId: 'search' }],
   ] as const) await t.test(method, async t => {
     const h = await fixture(t), client = await h.connect();
     h.fake.handlers.set(method, (_params, { socket }) => { socket.terminate(); });

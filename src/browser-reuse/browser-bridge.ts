@@ -3,6 +3,8 @@ import { targetKey, chromeSnapshot } from './protocol.ts';
 import type { BrowserTarget, ChromeElementComment, ChromePanelState, ChromeRequest, ChromeTransport } from './protocol.ts';
 import type { ChromeConnections, ConnectionRequest } from './client-protocol.ts';
 
+export interface EmbeddedPage { url: string; revision: number; error?: string }
+
 export class BrowserChrome {
   private readonly listeners = new Map<string, Set<(state: ChromePanelState) => void>>();
   private readonly states = new Map<string, ChromePanelState>();
@@ -15,11 +17,89 @@ export class BrowserChrome {
   // The renderer owns its editing, removal and submission semantics.
   private comments: Record<string, unknown[]> = {};
   private clientKey?: string;
+  private embeddedEnabled = false;
+  private readonly embedded = new Map<string, EmbeddedPage & { history: string[]; index: number }>();
+  private readonly chromeTargets = new Set<string>();
+  private readonly pageListeners = new Map<string, Set<() => void>>();
   private readonly requestHost: (endpoint: string, body: unknown) => Promise<unknown>;
   private readonly publish: (message: HostMessage) => void;
   constructor(requestHost: (endpoint: string, body: unknown) => Promise<unknown>, publish: (message: HostMessage) => void) {
     this.requestHost = requestHost; this.publish = publish;
     try { this.comments = JSON.parse(localStorage.getItem('workbench.browser-comments.v1') || '{}'); } catch {}
+  }
+  enableEmbeddedPages() { this.embeddedEnabled = true; }
+  isEmbedded(target: BrowserTarget) { return this.embeddedEnabled && !this.chromeTargets.has(targetKey(target)); }
+  embeddedPage(target: BrowserTarget, initialUrl = 'about:blank'): EmbeddedPage {
+    const key = targetKey(target);
+    let page = this.embedded.get(key);
+    if (!page) {
+      let url = 'about:blank', error: string | undefined;
+      try { url = this.pageUrl(initialUrl); } catch (reason) { error = (reason as Error).message; }
+      page = { url, revision: 0, history: [url], index: 0, error };
+      this.embedded.set(key, page);
+    }
+    return page;
+  }
+  subscribePage(target: BrowserTarget, listener: () => void) {
+    const key = targetKey(target), listeners = this.pageListeners.get(key) ?? new Set();
+    listeners.add(listener); this.pageListeners.set(key, listeners);
+    return () => { listeners.delete(listener); if (!listeners.size) this.pageListeners.delete(key); };
+  }
+  setEmbedded(target: BrowserTarget, enabled: boolean) {
+    const key = targetKey(target);
+    this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
+    if (enabled) {
+      this.chromeTargets.delete(key);
+      void this.requestHost('chrome-browser', { ...target, operation: 'release', connection: this.connectionFor(target), clientKey: this.identity() }).catch(() => {});
+      this.publishPage(target);
+    } else {
+      this.chromeTargets.add(key);
+      for (const listener of this.pageListeners.get(key) ?? []) listener();
+    }
+  }
+  acceptsHostSnapshot(message: HostMessage) {
+    return message.type !== 'browser-sidebar-state' || !this.isEmbedded({ conversationId: String(message.conversationId), browserTabId: String(message.browserTabId) });
+  }
+  releaseView(target: BrowserTarget) {
+    const key = targetKey(target);
+    if (!this.isEmbedded(target)) void this.request({ ...target, operation: 'release' }).catch(() => {});
+    this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
+    this.embedded.delete(key); this.chromeTargets.delete(key); this.states.delete(key);
+    this.pageListeners.delete(key); this.connectionsByTarget.delete(key);
+  }
+  private pageUrl(value: string) {
+    if (value === 'about:blank') return value;
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('请输入不含账号密码的 HTTP 或 HTTPS 网址');
+    return url.href;
+  }
+  private publishPage(target: BrowserTarget) {
+    const key = targetKey(target), page = this.embedded.get(key);
+    if (!page) return;
+    for (const listener of this.pageListeners.get(key) ?? []) listener();
+    const blank = page.url === 'about:blank';
+    this.publish({ type: 'browser-sidebar-state', ...target, snapshot: {
+      ...chromeSnapshot({ url: blank ? '' : page.url,
+        title: blank ? 'New tab' : new URL(page.url).hostname,
+        canGoBack: page.index > 0, canGoForward: page.index < page.history.length - 1 }),
+      tabType: blank ? 'new-tab-page' : 'web',
+    } });
+  }
+  private pageCommand(target: BrowserTarget, command: ChromeRequest['command']) {
+    this.embeddedPage(target);
+    const key = targetKey(target), previous = this.embedded.get(key)!;
+    let page = { ...previous, error: undefined as string | undefined };
+    try {
+      if (command?.type === 'navigate' && command.url) {
+        const url = this.pageUrl(command.url);
+        page.history = [...page.history.slice(0, page.index + 1), url];
+        page.index = page.history.length - 1; page.url = url; page.revision++;
+      } else if (command?.type === 'reload') page.revision++;
+      else if (command?.type === 'go-back' && page.index > 0) { page.url = page.history[--page.index]!; page.revision++; }
+      else if (command?.type === 'go-forward' && page.index < page.history.length - 1) { page.url = page.history[++page.index]!; page.revision++; }
+      else return;
+    } catch (reason) { page.error = (reason as Error).message; }
+    this.embedded.set(key, page); this.publishPage(target);
   }
   setCommentConverter(converter: (comment: ChromeElementComment, line: number) => unknown) { this.commentConverter = converter; }
   setCommentRouteResolver(resolver: (route: string) => string | null) { this.commentRouteResolver = resolver; }
@@ -116,6 +196,7 @@ export class BrowserChrome {
     if (['set-design-modifier-pressed', 'clear-comments'].includes((message.command as ChromeRequest['command'])?.type ?? '')) return true;
     const target = { conversationId: String(message.conversationId), browserTabId: String(message.browserTabId) };
     const command = message.command as ChromeRequest['command'];
+    if (this.isEmbedded(target)) { this.pageCommand(target, command); return true; }
     const mountNavigation = () => {
       // A new tab has no webview until a snapshot arrives. Mount the error
       // surface too, so a refused initial connection has a visible retry.
@@ -136,6 +217,9 @@ export function chromeRpcService(Base: new () => object) {
   return new class extends Base {
     registerWebviewHostSession(_request: { rendererInstanceId: string }) { return true; }
     registerWebviewHost(_request: BrowserTarget & { hostGeneration: number; rendererInstanceId: string }) { return true; }
+    // DOM frames disappear on document reload. Let the renderer restore each
+    // tab from its existing durable route and submitted URL.
+    getPageRestoreResults(request: { pages: BrowserTarget[] }) { return request.pages.map(() => ({ status: 'missing' })); }
     syncView(_request: BrowserTarget & { mountGeneration: number; visible: boolean; presented: boolean }) { return; }
     waitForViewportSize() { return false; } // No native viewport resizing/handoff.
     cancelViewportWait() { return; }

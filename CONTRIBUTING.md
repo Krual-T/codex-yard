@@ -1,5 +1,7 @@
 # Contributing
 
+Work in LifeKernel's `projects/codex-yard/` module and follow LifeKernel's `.agents/development.md`. Completed work is committed and integrated into LifeKernel's local `main`; run the commands below from this module directory.
+
 Use a topic branch and keep each change focused. Production modules use strict TypeScript; new UI uses React and TypeScript. Reuse the existing Codex transport and host interfaces when extending a feature.
 
 Run `npm ci`, `npm run typecheck`, and `npm test` before submitting a change. These commands work without Codex App and include the vendored official adapter checks. Renderer integration changes require a full-UI check using the pinned App resource version and a validated Codex CLI backend. Keep the CLI/daemon and App reference versions separate in validation reports.

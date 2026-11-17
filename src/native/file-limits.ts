@@ -1,3 +1,5 @@
-// Base64 previews fit in the host's 16 MiB WebSocket frame. Browser downloads
-// use HTTP and uploads are checked before the picker transfers their bytes.
+// Text/RPC reads must fit the host's 16 MiB WebSocket frame after serialization.
+// Binary previews, uploads and downloads use HTTP instead.
 export const previewLimit = 10 * 1024 * 1024;
+// Binary documents travel over HTTP, outside the JSON WebSocket frame budget.
+export const fileTransferLimit = 64 * 1024 * 1024;

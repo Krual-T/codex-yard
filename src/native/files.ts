@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdir, mkdtemp, open, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, posix, resolve } from 'node:path';
@@ -7,15 +7,16 @@ import { fileURLToPath } from 'node:url';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { SshHost } from './ssh.ts';
 import type { ObjectValue } from './protocol.ts';
-import { previewLimit } from './file-limits.ts';
+import { fileTransferLimit, previewLimit } from './file-limits.ts';
+import { record } from './protocol.ts';
+import { visualizationSandboxPolicy } from './visualizations.ts';
 
-const downloadLimit = 64 * 1024 * 1024;
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 interface Metadata { isFile: boolean; isDirectory: boolean; sizeBytes: number; mtimeMs: number; createdAtMs: number | null }
 interface DaemonMetadata { isFile: boolean; isDirectory: boolean; isSymlink: boolean; modifiedAtMs: number; createdAtMs: number }
 interface DaemonEntry { fileName: string; isDirectory: boolean; isFile: boolean }
 export type FileRequest = (hostId: string, method: string, params: ObjectValue, mutating?: boolean) => Promise<unknown>;
-export type RemoteFileCommand = (host: SshHost, command: string, maxBytes: number, signal: AbortSignal) => Promise<Buffer>;
+export type RemoteFileCommand = (host: SshHost, command: string, maxBytes: number, signal: AbortSignal, input?: Buffer) => Promise<Buffer>;
 
 // Permission errors and daemon timeouts must not become an absent path.
 function missing(error: unknown) {
@@ -25,13 +26,13 @@ function missing(error: unknown) {
 
 // Non-interactive SSH uses the same registered profile as the daemon transport.
 // Frame stdout so login banners cannot become part of a downloaded binary.
-export const remoteFileCommand: RemoteFileCommand = (host, command, maxBytes, signal) => new Promise((done, reject) => {
+export const remoteFileCommand: RemoteFileCommand = (host, command, maxBytes, signal, input) => new Promise((done, reject) => {
   const marker = 'AW_FILE_' + randomBytes(16).toString('hex') + '\0';
   const args = ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8'];
   if (!host.sshAlias && host.identity) args.push('-i', host.identity);
   if (!host.sshAlias && host.sshPort) args.push('-p', String(host.sshPort));
   args.push('--', host.sshAlias || host.sshHost, 'exec /bin/sh -c ' + quote(`LC_ALL=C; export LC_ALL; printf '%s\\0' ${quote(marker.slice(0, -1))}; ${command}`));
-  execFile('ssh', args, { encoding: 'buffer', maxBuffer: maxBytes + 256 * 1024, timeout: 30_000, signal }, (error, stdout, stderr) => {
+  const child = execFile('ssh', args, { encoding: 'buffer', maxBuffer: maxBytes + 256 * 1024, timeout: input ? 120_000 : 30_000, signal }, (error, stdout, stderr) => {
     if (error) { reject(new Error('SSH 文件操作失败：' + (stderr.toString().trim().slice(-1000) || error.message))); return; }
     const at = stdout.indexOf(marker);
     if (at < 0) { reject(new Error('SSH 文件响应缺少边界')); return; }
@@ -39,6 +40,8 @@ export const remoteFileCommand: RemoteFileCommand = (host, command, maxBytes, si
     if (bytes.length > maxBytes) { reject(new Error('文件响应超出大小限制')); return; }
     done(bytes);
   });
+  // Upload bytes use SSH stdin, avoiding the daemon's JSON/Base64 frame limit.
+  child.stdin!.on('error', reject); child.stdin!.end(input);
 });
 
 export function contentKind(bytes: Uint8Array, partial = false): 'text' | 'binary' | 'image' | 'pdf' {
@@ -62,7 +65,11 @@ function mediaType(path: string, bytes: Buffer) {
   if (bytes.subarray(0, 5).toString() === '%PDF-') return 'application/pdf';
   const text = bytes.subarray(0, 512).toString('utf8').trimStart().toLowerCase();
   if (text.startsWith('<svg') || text.startsWith('<?xml') && text.includes('<svg')) return 'image/svg+xml';
-  const types: Record<string, string> = { '.svg': 'image/svg+xml', '.avif': 'image/avif', '.ico': 'image/x-icon', '.pdf': 'application/pdf', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.mp4': 'video/mp4', '.txt': 'text/plain', '.md': 'text/markdown', '.json': 'application/json' };
+  const types: Record<string, string> = { '.svg': 'image/svg+xml', '.avif': 'image/avif', '.ico': 'image/x-icon', '.pdf': 'application/pdf', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.mp4': 'video/mp4', '.txt': 'text/plain', '.md': 'text/markdown', '.markdown': 'text/markdown', '.json': 'application/json',
+    '.html': 'text/html', '.htm': 'text/html', '.csv': 'text/csv', '.tsv': 'text/tab-separated-values',
+    '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsm': 'application/vnd.ms-excel.sheet.macroEnabled.12',
+    '.ppt': 'application/vnd.ms-powerpoint', '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation' };
   return types[extname(path).toLowerCase()] || 'application/octet-stream';
 }
 
@@ -98,9 +105,9 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     if (!posix.isAbsolute(value)) throw new Error('SSH 文件需要远端绝对路径');
     return posix.normalize(value);
   }
-  async function remote(hostId: string, command: string, maxBytes = 1024 * 1024) {
+  async function remote(hostId: string, command: string, maxBytes = 1024 * 1024, input?: Buffer) {
     const controller = new AbortController(); controllers.add(controller);
-    try { return await (options.remoteCommand ?? remoteFileCommand)(options.hosts.get(hostId)!, command, maxBytes, controller.signal); }
+    try { return await (options.remoteCommand ?? remoteFileCommand)(options.hosts.get(hostId)!, command, maxBytes, controller.signal, input); }
     finally { controllers.delete(controller); }
   }
   async function daemonMetadata(hostId: string, target: string): Promise<DaemonMetadata> {
@@ -134,8 +141,8 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     // bounds a remote path replaced with a FIFO before head opens it.
     return remote(hostId, `test -f ${quote(target)} && timeout 10 head -c ${length} -- ${quote(target)}`, length);
   }
-  async function bytes(hostId: string, target: string, maxBytes: number) {
-    const info = await metadata(hostId, target);
+  async function bytes(hostId: string, target: string, maxBytes: number, knownMetadata?: Metadata) {
+    const info = knownMetadata ?? await metadata(hostId, target);
     if (!info.isFile) throw new Error('路径不是普通文件');
     if (info.sizeBytes > maxBytes) throw new Error('文件超出大小限制');
     const result = await prefix(hostId, target, Math.min(maxBytes + 1, info.sizeBytes + 1));
@@ -221,20 +228,33 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     return endpoint === 'read-file' ? { contents: data.toString('utf8') } : { contentsBase64: data.toString('base64'), mimeType: mediaType(target, data) };
   }
 
-  async function http(request: IncomingMessage, response: ServerResponse, url: URL) {
-    if (url.pathname === '/api/files/download' && ['GET', 'HEAD'].includes(request.method || '')) {
+  async function http(request: IncomingMessage, response: ServerResponse, url: URL, htmlPolicy = visualizationSandboxPolicy) {
+    if (['/api/files/download', '/api/files/content', '/api/files/html-preview'].includes(url.pathname) && ['GET', 'HEAD'].includes(request.method || '')) {
       const hostId = host(url.searchParams.get('hostId')), target = path(url.searchParams.get('path'), hostId);
       const name = filename(url.searchParams.get('name') || basename(target));
-      if (request.method === 'HEAD') {
-        const info = await metadata(hostId, target);
-        if (!info.isFile) throw new Error('路径不是普通文件');
-        if (info.sizeBytes > downloadLimit) throw new Error('文件超出大小限制');
-        response.writeHead(200, { 'Content-Length': info.sizeBytes }); response.end(); return true;
+      const content = url.pathname === '/api/files/content';
+      const html = url.pathname === '/api/files/html-preview';
+      if (html && !/\.html?$/i.test(target)) throw new Error('HTML 预览需要 .html 或 .htm 文件');
+      const maxBytes = content && url.searchParams.has('maxBytes') ? limit(Number(url.searchParams.get('maxBytes')), fileTransferLimit) : fileTransferLimit;
+      const info = await metadata(hostId, target);
+      if (!info.isFile) throw new Error('路径不是普通文件');
+      if (info.sizeBytes > maxBytes) {
+        if (content || html) {
+          response.writeHead(413, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+          response.end(request.method === 'HEAD' ? undefined : JSON.stringify({ error: '文件超出预览大小限制' })); return true;
+        }
+        throw new Error('文件超出大小限制');
       }
-      const data = await bytes(hostId, target, downloadLimit);
-      response.writeHead(200, { 'Content-Type': mediaType(target, data), 'Content-Length': data.length,
-        'Content-Disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(name).replaceAll("'", '%27') });
-      response.end(request.method === 'HEAD' ? undefined : data); return true;
+      if (request.method === 'HEAD') {
+        response.writeHead(200, { 'Content-Length': info.sizeBytes, 'Cache-Control': 'no-store' }); response.end(); return true;
+      }
+      const data = await bytes(hostId, target, maxBytes, info);
+      if (html) new TextDecoder('utf-8', { fatal: true }).decode(data);
+      response.writeHead(200, { 'Content-Type': html ? 'text/html; charset=utf-8' : mediaType(target, data), 'Content-Length': data.length,
+        'Cache-Control': 'no-store',
+        ...(html ? { 'Content-Security-Policy': htmlPolicy, 'X-Content-Type-Options': 'nosniff' }
+          : { 'Content-Disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(name).replaceAll("'", '%27') }) });
+      response.end(data); return true;
     }
     if (url.pathname === '/api/files/uploads' && request.method === 'POST') {
       await mkdir(join(options.dataDir, 'uploads'), { recursive: true, mode: 0o700 });
@@ -251,7 +271,7 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
       let size = 0; const chunks: Buffer[] = [];
       for await (const chunk of request.iterator({ destroyOnReturn: false })) {
         size += chunk.length;
-        if (size > previewLimit) { request.resume(); throw new Error('单个上传文件超过10 MiB'); }
+        if (size > fileTransferLimit) { request.resume(); throw new Error('单个上传文件超过64 MiB'); }
         chunks.push(chunk);
       }
       // Upload roots are private mkdtemp directories. Validate the nearest
@@ -263,10 +283,10 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
       }
       await options.request('local', 'fs/createDirectory', { path: dirname(target), recursive: true }, true);
       if (!within(root, await realpath(dirname(target)))) throw new Error('上传路径超出本次目录');
-      // fs/writeFile has no createNew/mode option. Reserve the new private
-      // upload with wx before the official write; retries cannot overwrite it.
-      await (await open(target, 'wx', 0o600)).close();
-      await options.request('local', 'fs/writeFile', { path: target, dataBase64: Buffer.concat(chunks).toString('base64') }, true);
+      // The service owns this private staging area. Write raw bytes so large
+      // uploads do not inherit the daemon's JSON/Base64 message ceiling.
+      const file = await open(target, 'wx', 0o600);
+      try { await file.writeFile(Buffer.concat(chunks)); } finally { await file.close(); }
       response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ label: basename(target), path: target, fsPath: target })); return true;
     }
     return false;
@@ -301,6 +321,30 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     directory.add(target); // A lost reply must never automatically overwrite it.
     return request('fs/writeFile', { path: target, dataBase64: data });
   }
+  async function uploadLocalFileAttachments(params: ObjectValue, hostId: string, codexHome: string) {
+    host(hostId);
+    if (hostId === 'local') throw new Error('附件传输仅用于已登记 SSH 主机');
+    if (!Array.isArray(params.attachments)) throw new Error('需要附件列表');
+    const result: ObjectValue[] = [];
+    // Copy one file at a time to bound memory during multi-file paste.
+    // Each fresh UUID also preserves equal filenames.
+    for (const value of params.attachments) {
+      const attachment = record(value), source = path(attachment.fsPath, 'local');
+      const data = await bytes('local', source, fileTransferLimit);
+      const directory = posix.join(codexHome, 'attachments', randomUUID());
+      const target = posix.join(directory, filename(basename(source)));
+      await attachmentRequest('fs/createDirectory', { path: directory }, hostId, codexHome);
+      if (data.length <= previewLimit) {
+        await attachmentRequest('fs/writeFile', { path: target, dataBase64: data.toString('base64') }, hostId, codexHome);
+      } else {
+        attachmentDirectories.get(hostId + ':' + directory)!.add(target);
+        // noclobber keeps the same create-once contract as the daemon path.
+        await remote(hostId, `umask 077; set -C; cat > ${quote(target)}`, 0, data);
+      }
+      result.push({ ...attachment, path: target, fsPath: target });
+    }
+    return result;
+  }
   async function rpc(method: string, params: ObjectValue, hostId: string, codexHome?: string): Promise<unknown> {
     host(hostId);
     const target = path(params.path, hostId);
@@ -313,5 +357,5 @@ export function createFiles(options: { dataDir: string; workspace: string; hosts
     if (!codexHome) throw new Error('附件主机尚未连接');
     return attachmentRequest(method, params, hostId, codexHome);
   }
-  return { fetch: fetchFile, http, rpc, attachmentRequest, close() { for (const controller of controllers) controller.abort(); uploads.clear(); attachmentDirectories.clear(); creatingAttachments.clear(); } };
+  return { fetch: fetchFile, http, rpc, attachmentRequest, uploadLocalFileAttachments, close() { for (const controller of controllers) controller.abort(); uploads.clear(); attachmentDirectories.clear(); creatingAttachments.clear(); } };
 }

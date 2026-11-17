@@ -10,6 +10,11 @@ await build({
 });
 await build({
   absWorkingDir: fileURLToPath(new URL('..', import.meta.url)),
+  entryPoints: ['src/native/notification-worker.ts'], outfile: '.local/notification-worker.js',
+  bundle: true, format: 'iife', target: ['safari17', 'chrome120'], logLevel: 'info',
+});
+await build({
+  absWorkingDir: fileURLToPath(new URL('..', import.meta.url)),
   entryPoints: ['src/native/browser-host.ts'], outfile: '.local/native-host.js',
   bundle: true, format: 'iife', target: ['safari17', 'chrome120'], sourcemap: true,
   logLevel: 'info',

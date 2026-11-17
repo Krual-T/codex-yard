@@ -24,6 +24,13 @@ function fixture(loadSnapshot?: () => Promise<StatsigConfigurationSnapshot | nul
     cacheSource = 'Cache';
     values = 'uninitialized';
     updates = 0;
+    navigationGate = { value: true, ruleID: 'navigation-rollout' };
+    otherGate = { value: true, ruleID: 'unrelated-rollout' };
+    gateOptions: unknown;
+    getFeatureGate(name: string, options?: unknown) {
+      this.gateOptions = options;
+      return name === '3085093835' ? this.navigationGate : this.otherGate;
+    }
     modelAvailability = { value: { available_models: ['old-model'], use_hidden_models: true } };
     otherConfig = { value: { enabled: true } };
     getDynamicConfig(name: string): { value: Record<string, unknown> } { return name === '107580212' ? this.modelAvailability : this.otherConfig; }
@@ -91,6 +98,23 @@ test('model visibility follows the backend across cached and refreshed catalogs 
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.client.getDynamicConfig('107580212').value.use_hidden_models, false);
   assert.equal(h.client.modelAvailability.value.use_hidden_models, true);
+});
+
+test('single-sidebar navigation survives refreshed rollout values without changing saved gates or other features', async () => {
+  const h = fixture(), originalCache = structuredClone(h.client.cache);
+  await h.client.initializeAsync();
+  const options = { disableExposureLog: true };
+  assert.deepEqual(h.client.getFeatureGate('3085093835', options), { value: false, ruleID: 'navigation-rollout' });
+  assert.equal(h.client.gateOptions, options);
+  assert.equal(h.client.navigationGate.value, true);
+  assert.equal(h.client.getFeatureGate('unrelated'), h.client.otherGate);
+
+  h.client.navigationGate = { value: true, ruleID: 'updated-navigation-rollout' };
+  h.remote.resolve(success('Network'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.client.getFeatureGate('3085093835'), { value: false, ruleID: 'updated-navigation-rollout' });
+  assert.equal(h.client.navigationGate.value, true);
+  assert.deepEqual(h.client.cache, originalCache);
 });
 
 test('first startup without a cache keeps the SDK network initialization and its options', async () => {

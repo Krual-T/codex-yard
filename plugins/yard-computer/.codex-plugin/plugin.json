@@ -1,0 +1,6 @@
+{
+  "name": "yard-computer",
+  "version": "0.1.0",
+  "description": "Operate an explicitly selected Linux X11 desktop from Codex Yard, without Codex App.",
+  "mcpServers": "./.mcp.json"
+}

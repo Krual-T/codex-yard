@@ -18,6 +18,7 @@ export interface StatsigStartupResult {
 
 export interface StatsigStartupClient {
   loadingStatus: string;
+  getFeatureGate(name: string, options?: unknown): { value: boolean };
   getDynamicConfig(name: string, options?: unknown): { value: Record<string, unknown> };
   dataAdapter: {
     getDataSync(user: StatsigStartupUser): {
@@ -56,6 +57,13 @@ export function installStatsigStartup(Client: StatsigStartupConstructor, core: S
     if (this.loadingStatus !== 'Uninitialized') {
       return initializeAsync.call(this, options);
     }
+    // Use the pinned renderer's single-sidebar layout. The navigation-rail
+    // experiment otherwise creates a second column for the same destinations.
+    const getFeatureGate = this.getFeatureGate.bind(this);
+    this.getFeatureGate = (name, gateOptions) => {
+      const gate = getFeatureGate(name, gateOptions);
+      return name === '3085093835' ? { ...gate, value: false } : gate;
+    };
     // The pinned desktop catalog can replace the daemon's model visibility
     // with an older allowlist. Yard follows each backend's `hidden` field.
     // Adapt the evaluated value, leaving saved and refreshed responses intact.

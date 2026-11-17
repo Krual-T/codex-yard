@@ -12,6 +12,16 @@ import { installChromeWebviews } from '../browser-reuse/webview.tsx';
 import type { BrowserRenderer } from '../browser-reuse/webview.tsx';
 import type { ChromeElementComment } from '../browser-reuse/protocol.ts';
 import type { ChromeWindow } from '../browser-reuse/browser-bridge.ts';
+import { installMobileInput } from './mobile-input.ts';
+import { installAutomationRecovery } from './browser-automation-recovery.ts';
+import { installPortForwarding } from './port-forwarding-view.tsx';
+import { installFilePreviews } from './file-preview-view.tsx';
+import { installNewTab } from './new-tab-view.tsx';
+import { installBrowserNotifications } from './notification-view.tsx';
+import { installConversationHistory } from './conversation-history.ts';
+import { installTurnProgress } from './turn-progress.ts';
+import { mountStartupSidebar } from './startup-sidebar-view.tsx';
+import type { StartupSidebarBridge } from './startup-sidebar-view.tsx';
 
 // This is the version boundary for the React modules that have not yet moved to
 // TypeScript. Use their React runtime so the existing tree keeps one dispatcher.
@@ -36,6 +46,8 @@ interface RendererApplication {
 }
 
 performance.mark('workbench-entry');
+installConversationHistory();
+installMobileInput();
 // Sidebar row drags capture touch pointers before native scrolling can start.
 // Keep touch taps (click) and the rows' actual buttons, while leaving mouse and
 // keyboard drag behavior with the original renderer.
@@ -56,6 +68,10 @@ client.n();
 client.t();
 runtime.fPt();
 runtime.uPt();
+if (!isMiniWindow) {
+  const startupBridge = (window as Window & { workbenchStartupSidebar?: StartupSidebarBridge }).workbenchStartupSidebar;
+  if (startupBridge) await mountStartupSidebar(runtime.gzt(), runtime.hMt(), startupBridge);
+}
 await import(assets.rpc);
 performance.mark('workbench-rpc-ready');
 const application = await runtime.lPt(() => import(assets.application) as Promise<RendererApplication>,
@@ -67,8 +83,15 @@ installStatsigStartup(application.rDr().StatsigClient, application.jPr(), async 
   if (!response.ok) throw new Error(`Local configuration snapshot returned HTTP ${response.status}`);
   return await response.json() as StatsigConfigurationSnapshot;
 });
-runtime.gzt();
+installAutomationRecovery(runtime.gzt());
+installTurnProgress(runtime.gzt());
+installFilePreviews(runtime.gzt());
+installNewTab(runtime.gzt());
 const react = runtime.hMt();
+installBrowserNotifications(runtime.gzt());
+if (!isMiniWindow) {
+  installPortForwarding(runtime.gzt(), react);
+}
 application.Ag();
 runtime.jmt();
 // External Chrome references are detached from native overlays. Omitting the

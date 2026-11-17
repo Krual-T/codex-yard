@@ -103,3 +103,65 @@ test('a failed first navigation mounts a retry surface with the original panel i
   assert.equal(requests, 2, 'A deliberate refresh reaches the host again');
   unsubscribe();
 });
+
+test('embedded pages navigate, reload and branch their address history without connecting to Chrome', () => {
+  const published: Record<string, unknown>[] = [];
+  const bridge = new BrowserChrome(async () => { throw new Error('Must stay on the visiting browser'); }, message => published.push(message));
+  bridge.enableEmbeddedPages();
+  const command = (type: string, url?: string) => bridge.intercept({ type: 'browser-sidebar-command', ...target, command: { type, url } });
+  command('navigate', 'https://first.test/path');
+  command('navigate', 'https://second.test/');
+  command('go-back');
+  assert.equal(bridge.embeddedPage(target).url, 'https://first.test/path');
+  command('go-forward');
+  assert.equal(bridge.embeddedPage(target).url, 'https://second.test/');
+  const before = bridge.embeddedPage(target);
+  command('reload');
+  assert.ok(bridge.embeddedPage(target).revision > before.revision);
+  command('go-back'); command('navigate', 'https://third.test/');
+  assert.equal((published.at(-1)!.snapshot as { canGoForward: boolean }).canGoForward, false);
+  const second = { ...target, browserTabId: 'other' };
+  assert.equal(bridge.embeddedPage(second, 'https://restored.test/').url, 'https://restored.test/');
+  assert.equal(bridge.embeddedPage(target).url, 'https://third.test/');
+  command('navigate', 'about:blank');
+  assert.equal((published.at(-1)!.snapshot as { tabType: string }).tabType, 'new-tab-page');
+  assert.equal((published.at(-1)!.snapshot as { url: string }).url, '');
+  command('navigate', 'https://third.test/');
+  assert.equal((published.at(-1)!.snapshot as { tabType: string }).tabType, 'web');
+  bridge.releaseView(target);
+  assert.equal(bridge.embeddedPage(target).url, 'about:blank');
+});
+
+test('embedded pages reject executable URLs and credentials while retaining the previous address', () => {
+  const bridge = new BrowserChrome(async () => { throw new Error('Must not proxy pages'); }, () => {});
+  bridge.enableEmbeddedPages();
+  bridge.embeddedPage(target, 'https://safe.test/');
+  for (const url of ['javascript:alert(1)', 'data:text/html,hello', 'file:///etc/passwd', 'https://user:secret@example.test/', 'invalid url']) {
+    bridge.intercept({ type: 'browser-sidebar-command', ...target, command: { type: 'navigate', url } });
+    assert.ok(bridge.embeddedPage(target).error);
+    assert.equal(bridge.embeddedPage(target).url, 'https://safe.test/');
+  }
+});
+
+test('switching back to an embedded page ignores pending Chrome results and host snapshots', async () => {
+  let resolveOld!: (state: import('../src/browser-reuse/protocol.ts').ChromePanelState) => void;
+  const requests: string[] = [];
+  const bridge = new BrowserChrome(async (_endpoint, value) => {
+    const request = value as { operation: string };
+    requests.push(request.operation);
+    if (request.operation === 'release') return {};
+    return new Promise(resolve => { resolveOld = resolve; });
+  }, () => {});
+  bridge.enableEmbeddedPages();
+  bridge.embeddedPage(target, 'https://page.test/');
+  bridge.setEmbedded(target, false);
+  const pending = bridge.request({ ...target, operation: 'state' });
+  bridge.setEmbedded(target, true);
+  resolveOld({ location: 'Old Chrome', pages: [], configured: true });
+  await pending;
+  assert.equal(bridge.getState(target), undefined);
+  assert.equal(bridge.embeddedPage(target).url, 'https://page.test/');
+  assert.equal(bridge.acceptsHostSnapshot({ type: 'browser-sidebar-state', ...target }), false);
+  assert.equal(bridge.acceptsHostSnapshot({ type: 'fetch-response' }), true);
+  assert.deepEqual(requests, ['state', 'release']);
+});

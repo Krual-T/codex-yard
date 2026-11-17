@@ -8,6 +8,16 @@ export function openClientBrowser(message: HostMessage): boolean {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
     throw new Error('浏览器链接需要使用不含凭据的 HTTP 或 HTTPS 地址');
   }
+  if (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+    && /\.html?$/i.test(url.pathname) && (message.hostId ?? 'local') === 'local'
+    && url.origin !== location.origin) {
+    const preview = new URL('/api/local-html-preview', location.origin);
+    preview.hash = url.hash;
+    url.hash = '';
+    preview.searchParams.set('url', url.href);
+    window.open(preview.href, '_blank', 'noopener,noreferrer');
+    return true;
+  }
   window.open(url.href, '_blank', 'noopener,noreferrer');
   return true;
 }

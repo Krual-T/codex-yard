@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { loadHostCatalog, publicHost } from '../src/native/hosts.ts';
+import { discoverSshAliases, loadHostCatalog, publicHost } from '../src/native/hosts.ts';
 
 test('desktop SSH profiles and project memberships are read without changing native state or exposing identity files', async t => {
   const root = await mkdtemp('/tmp/aw-hosts-test-');
@@ -23,4 +23,14 @@ test('desktop SSH profiles and project memberships are read without changing nat
   assert.deepEqual(Object.keys(catalog.assignments), ['remote']);
   assert.doesNotMatch(JSON.stringify(catalog.hosts.map(publicHost)), /\/private\/id|not-for-the-web/);
   assert.equal(await readFile(path, 'utf8'), state);
+});
+
+test('SSH discovery follows quoted Include files, ignores comments and host patterns, and terminates include cycles', async t => {
+  const root = await mkdtemp('/tmp/yard-ssh-config-');
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'conf.d'));
+  await writeFile(join(root, 'config'), 'Host work laptop *.example !excluded # comment is not an alias\nInclude "conf.d/*.conf" missing\n');
+  await writeFile(join(root, 'conf.d/hosts.conf'), 'Host "quoted" work\nInclude config\n');
+  assert.deepEqual(await discoverSshAliases(join(root, 'config')), ['laptop', 'quoted', 'work']);
+  assert.deepEqual(await discoverSshAliases(join(root, 'absent')), []);
 });

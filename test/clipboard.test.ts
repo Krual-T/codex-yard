@@ -2,6 +2,20 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { BrowserClipboard } from '../src/native/browser-clipboard.ts';
 import { previewLimit } from '../src/native/file-limits.ts';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { transform } from 'esbuild';
+import { rendererRoot } from '../lib/app-resources.ts';
+import { adaptFileAttachmentModule } from '../src/native/file-attachment-renderer.ts';
+
+test('file staging compiles against the pinned attachment manager and rejects an incompatible renderer', async () => {
+  const path = '/assets/app-initial-a68277f60b93.js';
+  const original = await readFile(join(rendererRoot, path));
+  const adapted = adaptFileAttachmentModule(path, original);
+  assert.notDeepEqual(adapted, original);
+  await transform(adapted.toString('utf8'), { loader: 'js' });
+  assert.throws(() => adaptFileAttachmentModule(path, Buffer.from('changed renderer')), /固定界面版本不匹配/);
+});
 
 test('clipboard images preserve bytes and receive distinct staging names, including concurrent images', async () => {
   const files: File[] = [];

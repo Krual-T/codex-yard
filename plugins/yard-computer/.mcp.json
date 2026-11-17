@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "yard_computer": {
+      "command": "node",
+      "args": ["./server.ts"],
+      "cwd": ".",
+      "env_vars": ["YARD_COMPUTER_DISPLAY", "YARD_COMPUTER_XAUTHORITY", "YARD_COMPUTER_IMPORT", "YARD_COMPUTER_XDOTOOL", "YARD_COMPUTER_XCLIP"],
+      "startup_timeout_sec": 10,
+      "tool_timeout_sec": 60
+    }
+  }
+}

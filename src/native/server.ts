@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { gzip } from 'node:zlib';
@@ -11,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { CodexConnection } from '../../lib/codex.ts';
 import { createAppTools } from '../../lib/app-tools.ts';
+import { computerConfig } from '../../lib/computer.ts';
 import { createHostToolHandler } from '../../lib/host-tools.ts';
 import { createNativeAppToolHost } from '../../lib/native-app-tools.ts';
 import type { NativeProject } from '../../lib/native-app-tools.ts';
@@ -18,12 +20,14 @@ import { projectRoot, rendererRoot, rendererVersion } from '../../lib/app-resour
 import { record, publicConfig, readMethods, writeMethods } from './protocol.ts';
 import type { HostMessage, ObjectValue } from './protocol.ts';
 import { createThreadProjects } from './thread-projects.ts';
+import { createThreadPins } from './thread-pins.ts';
 import type { ThreadProjectOperation } from './thread-projects.ts';
 import { configurationRequest, httpFailure } from './http-fetch.ts';
 import type { HttpWireRequest } from './http-fetch.ts';
 import { rendererAssets as assets } from './renderer-assets.ts';
+import { RendererCache } from './renderer-cache.ts';
 import { loadConfigurationSnapshot } from './configuration-snapshot.ts';
-import { loadHostCatalog, publicHost } from './hosts.ts';
+import { discoverSshAliases, loadHostCatalog, publicHost, savedSshHosts } from './hosts.ts';
 import type { HostCatalog } from './hosts.ts';
 import { createSshProxyStream } from './ssh.ts';
 import type { HostPaths } from './ssh.ts';
@@ -43,8 +47,21 @@ import type { ConnectionRequest } from '../browser-reuse/client-protocol.ts';
 import type { ChromeConnection } from '../browser-reuse/chrome-mcp.ts';
 import type { ChromeRequest } from '../browser-reuse/protocol.ts';
 import { adaptVisualizationModule, visualizationSandboxPolicy, webRendererPrefix } from './visualizations.ts';
+import { adaptThreadArchiveModule } from './thread-archives.ts';
+import { automationEndpoints, createAutomations } from './automations.ts';
+import { adaptAutomationModule } from './automation-renderer.ts';
+import { PortForwarding } from './port-forwarding.ts';
+import { adaptYardMenu } from './app-menu-renderer.ts';
+import { adaptNotificationSettings } from './notification-renderer.ts';
+import { adaptFilePreviewModule } from './file-preview-renderer.ts';
+import { adaptFileAttachmentModule } from './file-attachment-renderer.ts';
+import { localHtmlPreview } from './local-html-preview.ts';
+import { adaptNewTabModule } from './new-tab-renderer.ts';
+import { adaptConversationHistory } from './conversation-history-renderer.ts';
+import { startupSidebar } from './startup-sidebar.ts';
+import { createBrowserNotifications, notificationRoute } from './notifications.ts';
 
-interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; httpFetch?: typeof fetch; hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection }
+interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; httpFetch?: typeof fetch; notificationFetch?: typeof fetch; notificationIntervalMs?: number; hostCatalog?: HostCatalog; sshConfigPath?: string; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection }
 const mime: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript',
   '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
@@ -63,7 +80,24 @@ function acceptsGzip(value = '') {
   });
 }
 
+async function readRendererAsset(file: string, path: string, webRenderer: boolean) {
+  let content: Buffer = await readFile(file);
+  if (webRenderer && path.endsWith('.js')) {
+    content = adaptVisualizationModule(path, content);
+    content = adaptThreadArchiveModule(path, content);
+    content = adaptAutomationModule(path, content);
+    content = adaptYardMenu(path, content);
+    content = adaptNotificationSettings(path, content);
+    content = adaptFilePreviewModule(path, content);
+    content = adaptFileAttachmentModule(path, content);
+    content = adaptNewTabModule(path, content);
+    content = adaptConversationHistory(path, content);
+  }
+  return content;
+}
+
 export async function createNativeWorkbench(options: Options = {}) {
+  const computer = computerConfig();
   const port = options.port ?? Number(process.env.PORT || 8765);
   const codexHome = options.codexHome || process.env.CODEX_HOME || join(homedir(), '.codex');
   const workspace = await realpath(options.workspace || process.env.AGENTS_WORKSPACE || homedir());
@@ -83,18 +117,37 @@ export async function createNativeWorkbench(options: Options = {}) {
   if (metadata.version !== rendererVersion) throw new Error('仓库内的 App 资源版本不匹配，请核对 vendor/codex-app 与当前代码版本');
   const browserHost = await readFile(join(projectRoot, '.local', 'native-host.js'));
   const browserEntry = await readFile(join(projectRoot, '.local', 'workbench-entry.js'));
+  const notificationWorker = await readFile(join(projectRoot, '.local', 'notification-worker.js'));
   const sandboxScript = await readFile(join(projectRoot, '.local', 'visualization-sandbox.js'), 'utf8');
   const sandboxHtml = '<!doctype html><html><head><meta charset="utf-8"><title>Visualization</title></head><body><script>' +
     sandboxScript.replaceAll('</script', '<\\/script') + '</script></body></html>';
   const configurationSnapshot = await loadConfigurationSnapshot(join(dataDir, 'configuration-snapshot'), rendererVersion);
   const snapshotBody = configurationSnapshot ? Buffer.from(JSON.stringify(configurationSnapshot)) : null;
+  // The snapshot is fixed for this process. Revalidation avoids transferring
+  // megabytes on each reload while a changed capture gets a different tag.
+  const snapshotTag = snapshotBody ? 'W/"' + createHash('sha256').update(snapshotBody).digest('base64url') + '"' : null;
   const compressedSnapshot = snapshotBody ? await compress(snapshotBody, { level: 1 }) : null;
+  const rendererCache = new RendererCache();
+  // Adapt and compress the first modules once, before accepting page loads.
+  // Custom test renderers may intentionally contain no application modules.
+  if (!options.renderer) await Promise.all([
+    assets.client, assets.shared, assets.rpc, assets.application, assets.primary,
+    assets.locale, assets.applicationStyle, assets.userMessageStyle,
+  ].map(url => {
+    const path = url.slice(webRendererPrefix.length), file = resolve(renderer, '.' + path);
+    return rendererCache.load('web:' + file, () => readRendererAsset(file, path, true), true);
+  }));
   const html = withVisualFeedback((await readFile(join(renderer, 'index.html'), 'utf8'))
+    // Both the desktop document policy and our response policy apply to frames.
+    .replace('frame-src &#39;self&#39; blob:', 'frame-src &#39;self&#39; blob: http: https:')
     .replace('./assets/index-acf264e41d60.js', '/workbench-entry.js')
     .replaceAll('./assets/', webRendererPrefix + '/assets/')
     .replace('</head>', [assets.application, assets.rpc, assets.primary, assets.locale]
       .map(path => `<link rel="modulepreload" crossorigin href="${path}">`).join('') +
-      `<link rel="stylesheet" crossorigin href="${assets.applicationStyle}"></head>`)
+      // Bubble padding, radius and width are CSS-module variables. Load them
+      // before the first user message, including optimistic/new conversations.
+      [assets.applicationStyle, assets.userMessageStyle]
+        .map(path => `<link rel="stylesheet" crossorigin href="${path}">`).join('') + '</head>')
     .replace('<script type="module"', '<script src="/native-host.js"></script><script type="module"'));
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   await chmod(dataDir, 0o700);
@@ -108,6 +161,11 @@ export async function createNativeWorkbench(options: Options = {}) {
   settings['default-workspace-full-view'] ??= true;
   const catalog = options.hostCatalog ?? await loadHostCatalog(codexHome);
   const sshHosts = new Map(catalog.hosts.map(host => [host.hostId, host]));
+  if (Object.hasOwn(globals, 'codex-managed-remote-connections')) {
+    catalog.hosts = savedSshHosts(globals['codex-managed-remote-connections'], sshHosts);
+    sshHosts.clear();
+    for (const host of catalog.hosts) sshHosts.set(host.hostId, host);
+  }
   const hostPaths = new Map<string, HostPaths>([['local', { homeDirectory: homedir(), codexHome }]]);
   const fileConnections = new Map<string, CodexConnection>();
   const files = createFiles({ dataDir, workspace, hosts: sshHosts, remoteCommand: options.remoteFileCommand,
@@ -116,6 +174,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       let connection = hostId === 'local' ? control : fileConnections.get(hostId);
       if (!connection) {
         connection = new CodexConnection('', { createConnection: () => (options.sshStream ?? createSshProxyStream)(sshHosts.get(hostId)!, paths => hostPaths.set(hostId, paths)), connectTimeout: 20_000 });
+        connection.on('message', message => notifications.observe(hostId, message));
         fileConnections.set(hostId, connection);
       }
       await connection.connect();
@@ -153,7 +212,14 @@ export async function createNativeWorkbench(options: Options = {}) {
     if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(message));
   }
   function broadcast(message: unknown) { for (const client of clients.keys()) send(client, message); }
+  const portForwarding = new PortForwarding({ hosts: sshHosts, rules: globals['port-forwarding-rules'], async save(rules) {
+    const previous = globals['port-forwarding-rules'];
+    globals['port-forwarding-rules'] = rules;
+    try { await persist(); }
+    catch (error) { globals['port-forwarding-rules'] = previous; throw error; }
+  } });
   const threadProjects = createThreadProjects(globals, persist, broadcast, validHost);
+  const threadPins = createThreadPins(globals, persist, broadcast);
   const petOverlay = createPetOverlay(globals, settings, persist, broadcast);
   const petAssets = createPetAssets(codexHome);
   function remoteProfiles() {
@@ -178,14 +244,13 @@ export async function createNativeWorkbench(options: Options = {}) {
     let connection = hostId === 'local' ? control : fileConnections.get(hostId);
     if (!connection) {
       connection = new CodexConnection('', { createConnection: () => (options.sshStream ?? createSshProxyStream)(sshHosts.get(hostId)!, paths => hostPaths.set(hostId, paths)), connectTimeout: 20_000 });
+      connection.on('message', message => notifications.observe(hostId, message));
       fileConnections.set(hostId, connection);
     }
     await connection.connect();
     return connection;
   }
-  const nativeTools = createNativeAppToolHost({ connectionFor: toolConnection, hostIds: () => ['local', ...sshHosts.keys()],
-    globals, projectlessRoot: join(dataDir, 'workspaces'), configFor: hostId => hostId === 'local' ? hostTools.config : {},
-    async listProjects() {
+  async function listNativeProjects() {
       const local: NativeProject[] = Object.entries(record(globals['local-projects'])).flatMap(([id, value]) => {
         const project = record(value), roots = Array.isArray(project.rootPaths) ? project.rootPaths : [];
         const path = typeof roots[0] === 'string' ? roots[0] : id;
@@ -203,17 +268,39 @@ export async function createNativeWorkbench(options: Options = {}) {
         catch { /* A saved folder may be unavailable or outside Git. */ }
       }));
       return [...local, ...remote];
+  }
+  async function setNativeMembership(threadId: string, hostId: string, project: NativeProject | null, cwd: string) {
+    await threadProjects('setMembership', { threadId, hostId, projectless: project === null, assignment: project === null ? null :
+      project.projectKind === 'remote' ? { projectKind: 'remote', projectId: project.projectId, hostId } : { projectKind: 'local', projectId: project.projectId } });
+    if (!project) await threadProjects('updateProjectlessThread', { threadId, hostId, outputDirectory: cwd, workspaceRoot: join(dataDir, 'workspaces') });
+  }
+  const taskHost = { connectionFor: toolConnection, listProjects: listNativeProjects,
+    projectlessRoot: join(dataDir, 'workspaces'), configFor: (hostId: string) => hostId === 'local' ? hostTools.config : {},
+    setMembership: setNativeMembership };
+  // Acquire scheduler ownership before opening the shared tools socket.
+  const automations = createAutomations({ ...taskHost, dataDir, changed: () => broadcast({ type: 'automation-runs-updated' }),
+    runChanged(run) {
+      if (run.threadId && run.turnId) notifications.watch(run.hostId, run.threadId, run.turnId);
+      else if (run.status === 'failed') void notifications.publish({ id: 'automation-failed:' + run.id, kind: 'failed',
+        title: 'Yard · 定时任务启动失败', body: run.automationName.slice(0, 160),
+        url: run.threadId ? notificationRoute(run.hostId, run.threadId) : '/?initialRoute=%2Fautomations' }).catch(() => {});
     },
-    async persistGlobals(keys) { await persist(); broadcast({ type: 'global-state-updated', keys }); },
-    async setMembership(threadId, hostId, project, cwd) {
-      await threadProjects('setMembership', { threadId, hostId, projectless: project === null, assignment: project === null ? null :
-        project.projectKind === 'remote' ? { projectKind: 'remote', projectId: project.projectId, hostId } : { projectKind: 'local', projectId: project.projectId } });
-      if (!project) await threadProjects('updateProjectlessThread', { threadId, hostId, outputDirectory: cwd, workspaceRoot: join(dataDir, 'workspaces') });
+  });
+  const nativeTools = createNativeAppToolHost({ ...taskHost, hostIds: () => ['local', ...sshHosts.keys()], globals,
+    async persistGlobals(keys) {
+      await persist(); broadcast({ type: 'global-state-updated', keys });
+      if (keys.includes('pinned-thread-ids')) broadcast({ type: 'pinned-threads-updated' });
     },
   });
   const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'),
     tools: nativeTools.tools, callTool: nativeTools.callTool,
-  });
+  }).catch(async error => { await automations.close(); throw error; });
+  Object.assign(hostTools.config, computer);
+  const notifications = await createBrowserNotifications({ dataDir, connectionFor: toolConnection,
+    hostIds: () => ['local', ...remoteProfiles().filter(host => host.autoConnect).map(host => host.hostId)],
+    fetch: options.notificationFetch, intervalMs: options.notificationIntervalMs, subject: process.env.YARD_WEB_PUSH_SUBJECT })
+    .catch(async error => { await automations.close(); await hostTools.close(); await nativeTools.close(); throw error; });
+  control.on('message', message => notifications.observe('local', message));
   // A daemon request is broadcast to every page subscribed to its thread.
   // Retain each result through the turn so another page or a replay only replies.
   const legacyTitleCalls = new Map<string, Map<string, ReturnType<typeof callHostTool>>>();
@@ -222,6 +309,13 @@ export async function createNativeWorkbench(options: Options = {}) {
   }, 2000);
   reconnectControl.unref();
 
+  function sandboxPolicy(request: import('node:http').IncomingMessage) {
+    // Use the configured HTTPS parent explicitly for opaque-origin frames.
+    // Loopback pages retain their existing same-origin framing policy.
+    return publicOrigin && request.headers.host === new URL(publicOrigin).host
+      ? visualizationSandboxPolicy.replace("frame-ancestors 'self'", 'frame-ancestors ' + publicOrigin)
+      : visualizationSandboxPolicy;
+  }
   function allowed(request: import('node:http').IncomingMessage, requireOrigin = false, pageRoute = false) {
     const address = server.address();
     const actualPort = typeof address === 'object' && address ? address.port : port;
@@ -237,7 +331,7 @@ export async function createNativeWorkbench(options: Options = {}) {
   const server = createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:; frame-ancestors 'self'");
+    response.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:; frame-src 'self' blob: http: https:; frame-ancestors 'self'");
     try {
       const url = new URL(request.url!, 'http://local');
       let path = decodeURIComponent(url.pathname);
@@ -245,15 +339,35 @@ export async function createNativeWorkbench(options: Options = {}) {
       if (!allowed(request, false, pageRoute)) { response.writeHead(403); response.end(); return; }
       if (path === '/' && url.searchParams.get('app') === 'skybridge') {
         if (request.method !== 'GET') { response.writeHead(405); response.end(); return; }
-        response.setHeader('Content-Security-Policy', visualizationSandboxPolicy);
+        response.setHeader('Content-Security-Policy', sandboxPolicy(request));
         response.setHeader('Referrer-Policy', 'no-referrer');
         response.writeHead(200, { 'Content-Type': mime['.html'] }); response.end(sandboxHtml);
         return;
       }
+      if (path === '/api/notifications') {
+        if (request.method !== 'POST' || !allowed(request, true) || !request.headers['content-type']?.startsWith('application/json')) {
+          response.writeHead(403); response.end(); return;
+        }
+        try {
+          let body = '';
+          for await (const chunk of request) {
+            body += chunk;
+            if (Buffer.byteLength(body) > 16384) throw new Error('通知设置请求过大。');
+          }
+          const result = await notifications.request(JSON.parse(body));
+          response.writeHead(200, { 'Content-Type': mime['.json'] }); response.end(JSON.stringify(result));
+        } catch (error) {
+          response.writeHead(400, { 'Content-Type': mime['.json'] }); response.end(JSON.stringify({ error: (error as Error).message }));
+        }
+        return;
+      }
+      if (path === '/api/local-html-preview') {
+        await localHtmlPreview(request, response, url.searchParams, sandboxPolicy(request)); return;
+      }
       if (path.startsWith('/api/files/')) {
         if (request.method !== 'GET' && request.method !== 'HEAD' && !allowed(request, true)) { response.writeHead(403); response.end(); return; }
         try {
-          if (await files.http(request, response, new URL(request.url!, 'http://local'))) return;
+          if (await files.http(request, response, new URL(request.url!, 'http://local'), sandboxPolicy(request))) return;
         } catch (error) {
           response.writeHead(400, { 'Content-Type': mime['.json'] });
           response.end(JSON.stringify({ error: (error as Error).message })); return;
@@ -310,8 +424,14 @@ export async function createNativeWorkbench(options: Options = {}) {
       }
       if (path === '/api/configuration/bootstrap') {
         if (!snapshotBody) { response.writeHead(404); response.end(); return; }
-        const useGzip = acceptsGzip(request.headers['accept-encoding']);
+        response.setHeader('Cache-Control', 'private, no-cache');
+        response.setHeader('ETag', snapshotTag!);
         response.setHeader('Vary', 'Accept-Encoding');
+        if (request.headers['if-none-match']?.split(',').some(tag =>
+          tag.trim() === snapshotTag || tag.trim() === snapshotTag!.slice(2) || tag.trim() === '*')) {
+          response.writeHead(304); response.end(); return;
+        }
+        const useGzip = acceptsGzip(request.headers['accept-encoding']);
         if (useGzip) response.setHeader('Content-Encoding', 'gzip');
         response.writeHead(200, { 'Content-Type': mime['.json'] });
         response.end(request.method === 'HEAD' ? undefined : useGzip ? compressedSnapshot : snapshotBody);
@@ -322,6 +442,8 @@ export async function createNativeWorkbench(options: Options = {}) {
         response.end(JSON.stringify({ connected: control.connected, rendererVersion, workspace, clients: clients.size,
           appServerVersion: serverVersion(control),
           executionMode: 'shared-daemon',
+          scheduler: automations.status(),
+          notifications: notifications.status(),
           hosts: [{ hostId: 'local', transport: 'websocket' }, ...catalog.hosts.map(host => ({ hostId: host.hostId, transport: 'ssh-websocket' }))],
           pendingRequests: chromeClients.pendingRequests + httpRequests.size + control.pending.size + [...fileConnections.values(), ...[...clients.values()].flatMap(connections => [...connections.values()])].reduce((sum, connection) => sum + connection.pending.size, 0),
           configurationSnapshot: configurationSnapshot ? { capturedAt: configurationSnapshot.capturedAt, bytes: Buffer.byteLength(configurationSnapshot.data) } : null,
@@ -329,6 +451,10 @@ export async function createNativeWorkbench(options: Options = {}) {
       }
       if (path === '/native-host.js') { response.writeHead(200, { 'Content-Type': mime['.js'] }); response.end(browserHost); return; }
       if (path === '/workbench-entry.js') { response.writeHead(200, { 'Content-Type': mime['.js'] }); response.end(browserEntry); return; }
+      if (path === '/notification-worker.js') {
+        response.writeHead(200, { 'Content-Type': mime['.js'], 'Service-Worker-Allowed': '/' });
+        response.end(request.method === 'HEAD' ? undefined : notificationWorker); return;
+      }
       // Native route names are extensionless. Preserve the original asset tree.
       if (!extname(path) && !path.startsWith('/api/')) {
         response.writeHead(200, { 'Content-Type': mime['.html'] });
@@ -340,15 +466,18 @@ export async function createNativeWorkbench(options: Options = {}) {
       const assetRoot = path.startsWith('/brand/') ? join(projectRoot, 'public') : renderer;
       const file = resolve(assetRoot, '.' + path);
       if (!file.startsWith(assetRoot + sep)) { response.writeHead(404); response.end(); return; }
-      let content: Buffer = await readFile(file);
-      if (webRenderer && path.endsWith('.js')) content = adaptVisualizationModule(path, content);
-      if (path.startsWith('/assets/') && /-[a-f0-9]{8,}\.[^.]+$/.test(path)) {
+      const readAsset = () => readRendererAsset(file, path, webRenderer);
+      const immutable = path.startsWith('/assets/') && /-[a-f0-9]{8,}\.[^.]+$/.test(path);
+      const compressible = /\.(js|mjs|css|svg|json|wasm)$/.test(path);
+      const cached = immutable ? await rendererCache.load((webRenderer ? 'web:' : 'original:') + file, readAsset, compressible) : null;
+      let content = cached?.content ?? await readAsset();
+      if (immutable) {
         response.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       }
-      if (/\.(js|mjs|css|svg|json|wasm)$/.test(path)) {
+      if (compressible) {
         response.setHeader('Vary', 'Accept-Encoding');
         if (content.length > 1024 && acceptsGzip(request.headers['accept-encoding'])) {
-          content = await compress(content, { level: 1 });
+          content = cached?.compressed ?? await compress(content, { level: 1 });
           response.setHeader('Content-Encoding', 'gzip');
         }
       }
@@ -374,6 +503,19 @@ export async function createNativeWorkbench(options: Options = {}) {
   webSockets.on('connection', client => {
     const connections = new Map<string, CodexConnection>();
     clients.set(client, connections);
+    // Seed the pinned renderer's existing query-cache bootstrap before its
+    // modules mount, avoiding a separate request/update for each sidebar key.
+    send(client, { type: 'yard-sidebar-bootstrap', value: {
+      catalogEntries: [],
+      globalStateEntries: ['local-projects', 'remote-projects', 'selected-project', 'selected-remote-host-id',
+        'sidebar-project-thread-orders', 'thread-project-assignments', 'projectless-thread-ids',
+        'thread-projectless-output-directories', 'thread-workspace-root-hints', 'pinned-thread-ids',
+        'remote-connection-auto-connect-by-host-id', 'codex-managed-remote-connections']
+        .map(key => ({ key, value: globals[key] })),
+      workspaceRootOptions: { roots: projects.map(project => project.path),
+        canonicalPathByRoot: Object.fromEntries(projects.map(project => [project.path, project.path])) },
+      projectlessWorkspaceRoot: { workspaceRoot: join(dataDir, 'workspaces') },
+    } });
     const address = server.address() as import('node:net').AddressInfo;
     const browser = new ChromePanelRouter(chromeConnection, chromeClients, message => send(client, message), publicOrigin || `http://127.0.0.1:${address.port}`);
     browsers.set(client, browser);
@@ -423,6 +565,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     connections.set(hostId, connection);
     const current = connection;
     current.on('message', (message: { id?: string | number; method: string; params: unknown }) => {
+      notifications.observe(hostId, message);
       const params = record(message.params);
       if (hostId === 'local' && message.method === 'turn/completed') {
         legacyTitleCalls.delete(JSON.stringify([params.threadId, record(params.turn).id]));
@@ -475,6 +618,9 @@ export async function createNativeWorkbench(options: Options = {}) {
     if (await petOverlay.handle(message, value => send(client, value))) return;
     const hostId = message.hostId ?? 'local';
     validHost(hostId);
+    if (message.type === 'inbox-item-set-read-state' || message.type === 'inbox-automation-runs-mark-all-read') {
+      await automations.fetch(message.type, message); return;
+    }
     if (message.type === 'ready') {
       for (const key of ['host_config', 'remote_ssh_connections', 'remote_wsl_connections', 'remote_control_connections']) {
         send(client, { type: 'shared-object-updated', key, value: sharedObject(key) });
@@ -504,6 +650,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     if ((message.type === 'mcp-request' || message.type === 'thread-prewarm-start') && message.request) {
       const { method, id } = message.request;
       const params = { ...message.request.params };
+      let requestParams = message.request.params == null ? message.request.params : params;
       if (fileMethods.has(method)) {
         if (method === 'fs/createDirectory' || method === 'fs/writeFile') await connectedFor(client, connections, hostId);
         const result = await files.rpc(method, params, hostId, hostPaths.get(hostId)?.codexHome);
@@ -518,12 +665,30 @@ export async function createNativeWorkbench(options: Options = {}) {
       }
       if (hostId === 'local' && (method === 'thread/start' || method === 'thread/fork')) {
         params.config = { ...record(params.config), ...hostTools.config };
+        requestParams = params;
       }
       if (hostId === 'local' && method === 'thread/resume') {
         const loaded = await connection.request('thread/loaded/list', {});
-        if (!loaded.data.some(id => id === params.threadId)) params.config = { ...record(params.config), ...hostTools.config };
+        if (!loaded.data.some(id => id === params.threadId)) {
+          params.config = { ...record(params.config), ...hostTools.config };
+          requestParams = params;
+        }
       }
-      let result = await connection.request(method, params, { mutating: writeMethods.has(method) });
+      // Parameterless RPCs such as config/mcpServer/reload accept null or an
+      // omitted params field. Preserve that wire contract instead of sending {}.
+      // Installing packages and interactive MCP calls can outlast the normal
+      // metadata deadline. Keep the selected connection and never replay writes.
+      const pluginRequest = method.startsWith('plugin/') || method.startsWith('marketplace/') || method.startsWith('mcpServer/');
+      let result = await connection.request(method, requestParams, { mutating: writeMethods.has(method),
+        ...(pluginRequest ? { timeoutMs: 300_000 } : {}) });
+      if (method === 'turn/start') {
+        const turn = record(record(result).turn);
+        if (typeof turn.id === 'string') notifications.watch(hostId, String(params.threadId), turn.id);
+      }
+      if (method === 'thread/resume' || method.startsWith('thread/queue/')) {
+        void notifications.trackThread(hostId, String(params.threadId)).catch(() => {});
+      }
+      if (method === 'thread/archive' || method === 'thread/unarchive') automations.threadArchived(hostId, String(params.threadId), method === 'thread/archive');
       if (method === 'thread/start' && record(record(result).thread).id) createdThreads.add(hostId + ':' + String(record(record(result).thread).id));
       if (method === 'thread/delete') createdThreads.delete(hostId + ':' + String(params.threadId));
       if (method === 'config/read') result = publicConfig(result);
@@ -532,7 +697,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       // the optional service-machine Chrome is not configured.
       if (method === 'experimentalFeature/list') {
         const features = Array.isArray(record(result).data) ? record(result).data as ObjectValue[] : [];
-        result = { ...record(result), data: features.map(feature => feature.name === 'in_app_browser' ? { ...feature, enabled: true } : feature) };
+        result = { ...record(result), data: features.map(feature => feature.name === 'in_app_browser' || feature.name === 'in_app_local_automation' ? { ...feature, enabled: true } : feature) };
       }
       if (method === 'getAuthStatus') result = { ...record(result), authToken: null };
       send(client, { type: 'mcp-response', hostId, message: { id, result } });
@@ -564,10 +729,53 @@ export async function createNativeWorkbench(options: Options = {}) {
     const hostId = typeof params.hostId === 'string' ? params.hostId : 'local';
     validHost(hostId);
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
+    if (automationEndpoints.has(endpoint)) return automations.fetch(endpoint, params);
     switch (endpoint) {
+      case 'startup-sidebar': {
+        const result = await control.request('thread/list', { limit: 50, sortKey: 'recency_at',
+          archived: false, modelProviders: null, sourceKinds: [], useStateDbOnly: true });
+        return startupSidebar(result.data as unknown as ObjectValue[], globals);
+      }
+      case 'upload-local-file-attachments': {
+        await toolConnection(hostId);
+        const paths = hostPaths.get(hostId);
+        if (!paths) throw new Error('附件主机尚未连接');
+        return files.uploadLocalFileAttachments(params, hostId, paths.codexHome);
+      }
+      case 'port-forwarding': return portForwarding.request(params);
       case 'chrome-browser': return browsers.get(client)!.request(params as unknown as ChromeRequest);
       case 'chrome-connections': return chromeClients.connections(params as unknown as ConnectionRequest);
       case 'refresh-remote-connections': return { remoteConnections: remoteProfiles() };
+      case 'discover-remote-ssh-connections': return { sshAliases: await discoverSshAliases(options.sshConfigPath) };
+      case 'save-codex-managed-remote-ssh-connections': {
+        const hosts = savedSshHosts(params.remoteConnections, sshHosts);
+        const key = 'codex-managed-remote-connections', previous = globals[key];
+        globals[key] = hosts;
+        try { await persist(); }
+        catch (error) { if (globals[key] === hosts) { if (previous === undefined) delete globals[key]; else globals[key] = previous; } throw error; }
+        const next = new Map(hosts.map(host => [host.hostId, host]));
+        const changed = [...sshHosts].filter(([id, old]) => {
+          const host = next.get(id);
+          return !host || old.sshAlias !== host.sshAlias || old.sshHost !== host.sshHost || old.sshPort !== host.sshPort || old.identity !== host.identity;
+        });
+        catalog.hosts = hosts;
+        sshHosts.clear();
+        for (const host of hosts) sshHosts.set(host.hostId, host);
+        await portForwarding.hostsChanged(changed.map(([id]) => id));
+        const closing: Promise<unknown>[] = [];
+        for (const [id] of changed) {
+          for (const [page, connections] of clients) {
+            const connection = connections.get(id);
+            connections.delete(id);
+            closing.push((terminals.get(page)?.closeHost(id) ?? Promise.resolve()).finally(() => connection?.close()));
+            send(page, { type: 'codex-app-server-connection-changed', hostId: id, transport: 'websocket', state: 'disconnected' });
+          }
+          fileConnections.get(id)?.close(); fileConnections.delete(id); hostPaths.delete(id);
+        }
+        broadcast({ type: 'shared-object-updated', key: 'remote_ssh_connections', value: remoteProfiles() });
+        await Promise.all(closing);
+        return { remoteConnections: remoteProfiles() };
+      }
       case 'set-remote-connection-auto-connect': {
         if (!sshHosts.has(hostId) || typeof params.autoConnect !== 'boolean') throw new Error('需要 SSH 主机和连接状态');
         globals['remote-connection-auto-connect-by-host-id'] = {
@@ -595,6 +803,9 @@ export async function createNativeWorkbench(options: Options = {}) {
         return { state: connection?.connected ? 'connected' : connection?.connecting ? 'connecting' : 'disconnected', error: connection?.lastError ?? null };
       }
       case 'thread-projects': return threadProjects(params.operation as ThreadProjectOperation, params.value);
+      case 'list-pinned-threads': return threadPins.list();
+      case 'set-thread-pinned': return threadPins.set(params);
+      case 'set-pinned-threads-order': return threadPins.setOrder(params);
       case 'custom-avatars': return typeof params.avatarId === 'string' ? petAssets.loadAvatar(params.avatarId) : petAssets.load();
       case 'terminal': return terminals.get(client)!.request(params.operation as TerminalOperation, params.args as unknown[]);
       case 'queued-follow-up-send-lock-acquire':
@@ -650,12 +861,17 @@ export async function createNativeWorkbench(options: Options = {}) {
   try {
     await control.connect();
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
-  } catch (error) { clearInterval(reconnectControl); control.close(); await hostTools.close(); throw error; }
+    automations.start();
+    notifications.start();
+  } catch (error) { clearInterval(reconnectControl); await notifications.close(); await automations.close(); control.close(); await hostTools.close(); throw error; }
   return {
-    server, control,
+    server, control, automations, notifications,
     url: 'http://127.0.0.1:' + (server.address() as import('node:net').AddressInfo).port,
     async close() {
       clearInterval(reconnectControl);
+      await portForwarding.close();
+      await automations.close();
+      await notifications.close();
       chromeClients.close();
       files.close();
       await Promise.all([...browsers.values()].map(browser => browser.close()));

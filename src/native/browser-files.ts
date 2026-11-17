@@ -1,6 +1,6 @@
 import type { HostMessage, ObjectValue } from './protocol.ts';
 import { record } from './protocol.ts';
-import { previewLimit } from './file-limits.ts';
+import { fileTransferLimit } from './file-limits.ts';
 
 type RequestHost = (endpoint: string, params: ObjectValue) => Promise<unknown>;
 interface SelectedFile { label: string; path: string; fsPath: string }
@@ -21,11 +21,43 @@ function downloadBytes(bytes: Uint8Array, name: string) {
 }
 function decodeBase64(value: string) { return Uint8Array.from(atob(value), char => char.charCodeAt(0)); }
 function name(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) || 'download'; }
+function blobBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1]!);
+    reader.onerror = () => reject(reader.error ?? new Error('文件读取失败'));
+    reader.readAsDataURL(blob);
+  });
+}
 
 export class BrowserFiles {
   private readonly request: RequestHost;
+  private readonly paths = new WeakMap<File, string>();
   constructor(request: RequestHost) { this.request = request; }
-  read(value: WorkspaceRead) { return this.request('workspace-files', { operation: 'read', ...value }); }
+  getPathForFile(file: File): string | null { return this.paths.get(file) ?? null; }
+  async stageFiles(files: File[]): Promise<void> {
+    // Separate upload roots preserve equal filenames from different folders.
+    await Promise.all(files.filter(file => !this.paths.has(file)).map(file => this.importFiles([file], false)));
+  }
+  async read(value: WorkspaceRead) {
+    if (value.representation !== 'blob') return this.request('workspace-files', { operation: 'read', ...value });
+    const result = await this.readBinary({ ...value });
+    if (result.contentsBase64 == null) throw new Error('文件超出预览大小限制');
+    return { blob: result.contentsBase64 };
+  }
+  private async readBinary(value: ObjectValue) {
+    const query = new URLSearchParams({ hostId: String(value.hostId ?? 'local'), path: String(value.path ?? '') });
+    if (value.maxBytes != null) query.set('maxBytes', String(value.maxBytes));
+    const response = await fetch('/api/files/content?' + query);
+    // Keep the pinned renderer's size-limit contract. The large base64 string
+    // is delivered to its local callback, never through the 16 MiB WebSocket.
+    if (response.status === 413) return { contentsBase64: null };
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      throw new Error(record(failure).error as string || '文件读取失败');
+    }
+    return { contentsBase64: await blobBase64(await response.blob()), mimeType: response.headers.get('Content-Type') ?? 'application/octet-stream' };
+  }
   getMetadata(value: WorkspacePath) { return this.request('workspace-files', { operation: 'getMetadata', ...value }); }
   async saveCopy(value: WorkspacePath | { bytes: Uint8Array; fileName: string }) {
     if ('bytes' in value) downloadBytes(value.bytes, value.fileName);
@@ -63,9 +95,9 @@ export class BrowserFiles {
   intercept(message: HostMessage, publish: (value: HostMessage) => void): boolean {
     if (message.type !== 'fetch') return false;
     const endpoint = message.url?.split('/').at(-1);
-    if (!['pick-file', 'pick-files', 'save-file'].includes(endpoint || '')) return false;
+    if (!['pick-file', 'pick-files', 'save-file', 'read-file-binary'].includes(endpoint || '')) return false;
     const params = typeof message.body === 'string' ? record(JSON.parse(message.body)) : record(message.params);
-    const operation = endpoint === 'save-file' ? this.saveFile(params) : this.pick(endpoint === 'pick-file' ? { ...params, allowMultiple: false } : params).then(files => endpoint === 'pick-file' ? { file: files[0] ?? null } : { files });
+    const operation = endpoint === 'read-file-binary' ? this.readBinary(params) : endpoint === 'save-file' ? this.saveFile(params) : this.pick(endpoint === 'pick-file' ? { ...params, allowMultiple: false } : params).then(files => endpoint === 'pick-file' ? { file: files[0] ?? null } : { files });
     void operation.then(body => publish({ type: 'fetch-response', requestId: message.requestId, responseType: 'success', status: 200, headers: {}, body }),
       error => publish({ type: 'fetch-response', requestId: message.requestId, responseType: 'error', status: 400, error: error.message }));
     return true;
@@ -96,7 +128,7 @@ export class BrowserFiles {
   }
   async importFiles(files: File[], directory: boolean): Promise<SelectedFile[]> {
     if (!files.length) return [];
-    if (files.some(file => file.size > previewLimit)) throw new Error('单个上传文件超过10 MiB');
+    if (files.some(file => file.size > fileTransferLimit)) throw new Error('单个上传文件超过64 MiB');
     async function json(response: Response) {
       const result = await response.json(); if (!response.ok) throw new Error(result.error || '文件上传失败'); return result;
     }
@@ -105,7 +137,9 @@ export class BrowserFiles {
     for (const file of files) {
       const relativePath = directory ? file.webkitRelativePath : file.name;
       const query = new URLSearchParams({ uploadId: upload.uploadId, name: relativePath });
-      result.push(await json(await fetch('/api/files/upload?' + query, { method: 'POST', body: file })));
+      const selected = await json(await fetch('/api/files/upload?' + query, { method: 'POST', body: file })) as SelectedFile;
+      this.paths.set(file, selected.fsPath);
+      result.push(selected);
     }
     if (!directory) return result;
     const label = files[0]!.webkitRelativePath.split('/')[0]!;

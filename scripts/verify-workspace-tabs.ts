@@ -43,18 +43,39 @@ try {
   await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/local/' + threadId), { waitUntil: 'commit' });
   await page.getByText('标签栏验收内容', { exact: true }).waitFor({ timeout: 60000 });
   await capture('01-chat');
+  assert.equal(await page.locator('[data-app-navigation-rail]').count(), 0);
+  assert.ok(await page.locator('#app-shell-sidebar').isVisible());
+  checks.push('Single-sidebar navigation keeps the conversation list without a separate icon rail');
   const chatTab = page.getByRole('tab', { name: /工作区标签栏验收/ });
   await chatTab.waitFor();
   assert.equal(await chatTab.getAttribute('aria-selected'), 'true');
   checks.push('The current chat is the selected official workspace tab');
   const editor = page.getByRole('textbox', { name: '和 Codex 一起工作', exact: true });
   await editor.fill('标签切换后保留的草稿');
-  await page.getByRole('button', { name: '打开侧边面板标签页', exact: true }).click();
+  await page.getByRole('button', { name: '新标签页', exact: true }).click();
+  await page.getByRole('searchbox', { name: '搜索文件或输入网址', exact: true }).waitFor();
   await capture('02-new-tab');
-  await page.getByRole('menuitem', { name: /^文件/ }).click();
+  assert.equal(await page.locator('.yard-new-tab-card').getByText('更改', { exact: true }).count(), 0);
+  await page.getByRole('button', { name: '退出完整视图', exact: true }).click();
+  await page.getByRole('searchbox', { name: '搜索文件或输入网址', exact: true }).waitFor();
+  for (const viewport of [{ width: 800, height: 1100 }, { width: 1280, height: 800 }]) {
+    await page.setViewportSize(viewport);
+    await capture('02-side-panel-new-tab-' + viewport.width);
+    for (const label of ['终端', '侧边聊天', '文件']) {
+      assert.ok(await page.locator('.yard-new-tab-card').getByText(label, { exact: true }).isVisible());
+    }
+    assert.equal(await page.locator('.yard-new-tab-card').getByText('更改', { exact: true }).count(), 0);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  }
+  await page.reload({ waitUntil: 'commit' });
+  await page.getByRole('searchbox', { name: '搜索文件或输入网址', exact: true }).waitFor();
+  checks.push('The right-panel New tab keeps its search and cards in tablet portrait, landscape and after refresh');
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole('button', { name: '进入完整视图', exact: true }).click();
+  await page.locator('.yard-new-tab-card').filter({ hasText: /^文件$/ }).click();
   await page.getByRole('tab', { name: /文件/ }).waitFor();
   await capture('03-files');
-  checks.push('The official + menu opens the existing Files tab');
+  checks.push('The + button opens New tab and its Files card opens the existing Files tab without a Changes card');
   await page.keyboard.press('Control+1');
   await chatTab.and(page.locator('[aria-selected="true"]')).waitFor({ timeout: 3000 });
   checks.push('Ctrl+1 selects the chat through the official command handler');

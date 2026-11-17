@@ -1,5 +1,5 @@
 import { record, updatedAtom } from './protocol.ts';
-import type { HostMessage } from './protocol.ts';
+import type { HostMessage, ObjectValue, SidebarBootstrap } from './protocol.ts';
 import { BrowserHttpFetch } from './browser-http-fetch.ts';
 import { BrowserFiles } from './browser-files.ts';
 import { BrowserClipboard, writeClipboardText } from './browser-clipboard.ts';
@@ -13,14 +13,24 @@ import type { HttpRequest } from './http-fetch.ts';
 import type { AssignmentRequest, MembershipRequest, ProjectAssignment, ProjectlessRequest, ProjectlessThreadUpdate, ThreadProjectOperation } from './thread-projects.ts';
 import { BrowserChrome, chromeRpcService } from '../browser-reuse/browser-bridge.ts';
 import { visualizationService } from './visualizations.ts';
+import { HistoryStartup } from './history-startup.ts';
 
 const version = '26.1013.40934';
+const historyStartup = new HistoryStartup(new URLSearchParams(location.search).get('initialRoute'));
+window.addEventListener('yard-conversation-history-ready', () => {
+  requestAnimationFrame(() => requestAnimationFrame(() => historyStartup.release()));
+}, { once: true });
+window.addEventListener('pointerdown', () => historyStartup.release(), { once: true, capture: true });
+window.addEventListener('keydown', () => historyStartup.release(), { once: true, capture: true });
 const pending = new Map<string, HostMessage>();
 const connectedHosts = new Set<string>(['local']);
+let sidebarBootstrap: SidebarBootstrap | null = null;
 const rpcKey = (hostId: unknown, id: unknown) => 'rpc:' + String(hostId ?? 'local') + ':' + String(id);
 const workerKey = (workerId: unknown, id: unknown) => 'worker:' + String(workerId) + ':' + String(id);
 const hostRequests = new Map<string, { resolve(value: unknown): void; reject(error: Error): void }>();
 const files = new BrowserFiles(requestHost);
+Object.assign(window, { workbenchStageFiles: (selected: File[]) => files.stageFiles(selected) });
+Object.assign(window, { workbenchUploadLocalFileAttachments: (hostId: string, attachments: ObjectValue[]) => requestHost('upload-local-file-attachments', { hostId, attachments }) });
 const terminal = new BrowserTerminal((operation, args) => requestHost('terminal', { operation, args }));
 const publish = (message: HostMessage) => {
   mini.receive(message);
@@ -36,17 +46,46 @@ registerTerminalShortcut(window, () => publish({ type: 'toggle-terminal' }));
 const mini = createMiniHost(publish);
 const chrome = new BrowserChrome(requestHost, publish);
 Object.assign(window, { workbenchChrome: chrome });
+Object.assign(window, { workbenchResolveAutomation: (id: string) => requestHost('automation-run-resolve', { id, confirmed: true }) });
+Object.assign(window, { workbenchPortForwarding: (params: unknown) => requestHost('port-forwarding', params) });
 let socket: WebSocket;
 let opened: Promise<void>;
 let disposed = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let ownerRoute: string | null = null;
-function syncRoute() {
-  if (ownerRoute == null) return;
+let pendingNotificationRoute: string | null = null;
+function flushNotificationRoute() {
+  if (ownerRoute == null || pendingNotificationRoute == null) return;
+  const path = pendingNotificationRoute;
+  pendingNotificationRoute = null;
+  publish({ type: 'navigate-to-route', path });
+}
+if (!isMiniWindow && window.navigator && 'serviceWorker' in window.navigator) {
+  window.navigator.serviceWorker.addEventListener('message', event => {
+    const message = record(event.data);
+    if (event.origin !== location.origin || message.type !== 'yard-notification-navigate' || typeof message.url !== 'string') return;
+    let target: URL;
+    try { target = new URL(message.url, location.origin); } catch { return; }
+    if (target.origin !== location.origin || target.pathname !== '/') return;
+    const path = target.searchParams.get('initialRoute') || '/';
+    if (!path.startsWith('/') || new URL(path, location.origin).origin !== location.origin) return;
+    pendingNotificationRoute = path;
+    // The host loads before React; queue clicks until its first route is mounted.
+    flushNotificationRoute();
+    event.ports[0]?.postMessage(true);
+  });
+}
+function currentOwnerRoute() {
+  if (ownerRoute == null) return null;
   let route = ownerRoute;
   const bindings = record(record(JSON.parse(localStorage.getItem('native-atoms') || '{}'))['client-thread-bindings-v1']);
   const alias = route.startsWith('/local/') ? decodeURIComponent(route.slice('/local/'.length)) : null;
   if (alias && typeof bindings[alias] === 'string') route = '/local/' + bindings[alias];
+  return route;
+}
+function syncRoute() {
+  const route = currentOwnerRoute();
+  if (route == null) return;
   const url = new URL(location.href);
   if (route === '/') url.searchParams.delete('initialRoute'); else url.searchParams.set('initialRoute', route);
   history.replaceState(null, '', url);
@@ -62,10 +101,22 @@ function connect() {
   opened.catch(() => {});
   socket.addEventListener('message', event => {
     const message = JSON.parse(event.data);
+    if (message.type === 'yard-sidebar-bootstrap') {
+      sidebarBootstrap = message.value;
+      performance.mark('workbench-sidebar-bootstrap');
+      return;
+    }
+    if (sidebarBootstrap && (message.type === 'global-state-updated' || message.type === 'pinned-threads-updated')) {
+      const keys = message.type === 'pinned-threads-updated' ? ['pinned-thread-ids'] : message.keys;
+      // A concurrent edit before React initializes must use the current host
+      // read rather than seed an older value from this connection's snapshot.
+      sidebarBootstrap.globalStateEntries = sidebarBootstrap.globalStateEntries.filter(entry => !keys.includes(entry.key));
+    }
     if (message.hostId) connectedHosts.add(message.hostId);
     if (message.type === 'mcp-response') pending.delete(rpcKey(message.hostId, message.message.id));
     if (message.type === 'worker-response') pending.delete(workerKey(message.workerId, message.response.id));
     if (message.type === 'fetch-response') pending.delete('fetch:' + message.requestId);
+    if (!chrome.acceptsHostSnapshot(message)) return;
     publish(message);
   });
   socket.addEventListener('close', () => {
@@ -99,6 +150,10 @@ async function send(message: HostMessage) {
   if (chrome.intercept(message)) return;
   if (openClientBrowser(message)) return;
   if (message.type === 'log-message') return;
+  if (message.type === 'fetch' && message.url?.endsWith('/automation-create') && typeof message.body === 'string') {
+    const body = record(JSON.parse(message.body));
+    message = { ...message, body: JSON.stringify({ ...body, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }) };
+  }
   if (files.intercept(message, publish)) return;
   // The Web host does not consume desktop shared objects or runtime config
   // notifications. Avoid serializing the multi-megabyte Statsig snapshot.
@@ -118,8 +173,10 @@ async function send(message: HostMessage) {
     return;
   }
   if (message.type === 'browser-sidebar-owner-sync' && typeof message.ownerRoutePath === 'string') {
-    ownerRoute = message.ownerRoutePath; syncRoute(); return;
+    ownerRoute = message.ownerRoutePath; syncRoute(); flushNotificationRoute();
+    window.dispatchEvent(new Event('yard-workspace-route')); return;
   }
+  await historyStartup.wait(message);
   await opened;
   if (message.type === 'worker-request' && message.request) pending.set(workerKey(message.workerId, message.request.id), message);
   else if (message.request) pending.set(rpcKey(message.hostId, message.request.id), message);
@@ -139,6 +196,17 @@ function requestHost(endpoint: string, body: unknown) {
 function requestThreadProjects(operation: ThreadProjectOperation, value?: unknown) { return requestHost('thread-projects', { operation, value }); }
 
 Object.assign(window, {
+  workbenchStartupSidebar: {
+    load: () => requestHost('startup-sidebar', {}),
+    route: currentOwnerRoute,
+    navigate: (route: string) => {
+      pendingNotificationRoute = route;
+      const url = new URL(location.href);
+      if (route === '/') url.searchParams.delete('initialRoute'); else url.searchParams.set('initialRoute', route);
+      history.replaceState(null, '', url);
+      flushNotificationRoute();
+    },
+  },
   codexWindowType: 'electron',
   electronBridge: {
     windowType: 'electron', getPreloadStartedAtMs: () => performance.timeOrigin,
@@ -151,7 +219,7 @@ Object.assign(window, {
     getBuildFlavor: () => 'prod', getDesktopUserAgent: () => `Codex Desktop/${version} (X11; Linux; x64)`,
     getAppSessionId: () => 'agents-workbench-web', isDeviceCheckSupported: () => false, isIntelMacBuild: () => false,
     getSentryInitOptions: () => ({ appVersion: version, environment: 'local', codexAppSessionId: 'agents-workbench-web', dsn: '' }),
-    getInitialSidebarBootstrap: () => null,
+    getInitialSidebarBootstrap: () => sidebarBootstrap,
     getSharedObjectSnapshotValue: (key: string) => key === 'host_config' ? { id: 'local', kind: 'local' } : key === 'diff_comments' ? chrome.getCommentDrafts() : undefined,
     sendMessageFromView: send,
     sendWorkerMessageFromView: (workerId: string, message: HostMessage) => send({ ...message, workerId }),
@@ -163,7 +231,7 @@ Object.assign(window, {
       window.addEventListener('message', listener);
       return () => window.removeEventListener('message', listener);
     },
-    acknowledgeChunkedMessage: () => {}, getPathForFile: () => null, startFileDrag: () => false, startLinkDrag: () => {},
+    acknowledgeChunkedMessage: () => {}, getPathForFile: (file: File) => files.getPathForFile(file), startFileDrag: () => false, startLinkDrag: () => {},
     // Omit showContextMenu so the official helper uses its React menu fallback.
     getFastModeRolloutMetrics: async () => null, triggerSentryTestError: async () => {},
   },
@@ -191,6 +259,11 @@ window.addEventListener('message', async event => {
     flush() { return requestThreadProjects('flush'); }
     getThreadStartProjectId(value: ProjectAssignment) { return requestThreadProjects('getThreadStartProjectId', value); }
     updateProjectlessThread(value: ProjectlessThreadUpdate) { return requestThreadProjects('updateProjectlessThread', value); }
+  }
+  class PinnedThreads extends original.Eot {
+    list(value?: unknown) { return requestHost('list-pinned-threads', value ?? {}); }
+    set(value: unknown) { return requestHost('set-thread-pinned', value); }
+    setOrder(value: unknown) { return requestHost('set-pinned-threads-order', value); }
   }
   class HttpFetch extends original.Eot {
     private readonly transport = new BrowserHttpFetch();
@@ -224,7 +297,7 @@ window.addEventListener('message', async event => {
   const browserService = chromeRpcService(original.Eot);
   const visualizations = visualizationService(original.Eot, requestHost);
   class AppHost extends original.Eot {
-    get services() { return { ...(isMiniWindow ? { avatarOverlay: mini.service(original.Eot), settings: mini.settings(original.Eot, requestHost) } : {}), appInfo: new AppInfo(), httpFetch: new HttpFetch(), workspaceFiles: new WorkspaceFiles(), fileAttachments: new FileAttachments(), clipboard: new Clipboard(), openIn: new OpenIn(), threadProjectAssignments: new ThreadProjects(), customAvatars: new CustomAvatars(), terminal: terminalService, browserHost: browserService, visualizations, requestUserInputAutoResolution: {} }; }
+    get services() { return { ...(isMiniWindow ? { avatarOverlay: mini.service(original.Eot), settings: mini.settings(original.Eot, requestHost) } : {}), appInfo: new AppInfo(), httpFetch: new HttpFetch(), workspaceFiles: new WorkspaceFiles(), fileAttachments: new FileAttachments(), clipboard: new Clipboard(), openIn: new OpenIn(), threadProjectAssignments: new ThreadProjects(), pinnedThreads: new PinnedThreads(), customAvatars: new CustomAvatars(), terminal: terminalService, browserHost: browserService, visualizations, requestUserInputAutoResolution: {} }; }
     onRpcBroken() {}
   }
   original.kot(event.data.port, new AppHost());

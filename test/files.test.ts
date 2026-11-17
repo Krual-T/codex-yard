@@ -144,3 +144,52 @@ test('browser downloads and save-file report server failures without claiming su
   assert.equal(response.responseType, 'error');
   assert.match(String(response.error), /文件超出大小限制/);
 });
+
+test('browser binary previews distinguish size limits from filesystem errors', async t => {
+  const files = new BrowserFiles(async () => { throw new Error('Binary data must use HTTP'); });
+  let status = 413;
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ error: 'Permission denied' }, { status }));
+  const intercept = () => new Promise<HostMessage>(publish => {
+    assert.equal(files.intercept({ type: 'fetch', requestId: 'binary', url: 'vscode://codex/read-file-binary',
+      body: JSON.stringify({ hostId: 'remote-test', path: '/test.docx', maxBytes: 40 * 1024 * 1024 }) }, publish), true);
+  });
+  const limited = await intercept();
+  assert.equal(limited.responseType, 'success');
+  assert.deepEqual(limited.body, { contentsBase64: null });
+  status = 400;
+  const denied = await intercept();
+  assert.equal(denied.responseType, 'error');
+  assert.match(String(denied.error), /Permission denied/);
+});
+
+test('browser file staging preserves equal filenames, exact bytes and empty files without reuploading staged objects', async t => {
+  const files = new BrowserFiles(async () => { throw new Error('Staging uses HTTP'); });
+  const written = new Map<string, Buffer>();
+  let roots = 0;
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input), 'http://fixture');
+    if (url.pathname === '/api/files/uploads') return Response.json({ uploadId: String(++roots) });
+    const fsPath = '/uploads/' + url.searchParams.get('uploadId') + '/' + url.searchParams.get('name');
+    written.set(fsPath, Buffer.from(await (init?.body as File).arrayBuffer()));
+    return Response.json({ fsPath });
+  });
+  const selected = [new File([new Uint8Array([0, 255, 17])], '同名.bin'), new File(['中文'], '同名.bin'), new File([], '空文件.txt')];
+  assert.ok(selected.every(file => files.getPathForFile(file) === null));
+  await files.stageFiles(selected);
+  assert.equal(new Set(selected.map(file => files.getPathForFile(file))).size, 3);
+  for (const file of selected) assert.deepEqual(written.get(files.getPathForFile(file)!), Buffer.from(await file.arrayBuffer()));
+  await files.stageFiles(selected);
+  assert.equal(roots, 3);
+  assert.equal(files.getPathForFile(new File(['different'], '同名.bin')), null);
+});
+
+test('failed browser staging leaves no usable path and allows retry', async t => {
+  const files = new BrowserFiles(async () => ({})), file = new File(['retry'], 'retry.txt');
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ error: 'Upload unavailable' }, { status: 503 }));
+  await assert.rejects(files.stageFiles([file]), /Upload unavailable/);
+  assert.equal(files.getPathForFile(file), null);
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => String(input).endsWith('/uploads')
+    ? Response.json({ uploadId: 'retry' }) : Response.json({ fsPath: '/uploads/retry/retry.txt' }));
+  await files.stageFiles([file]);
+  assert.equal(files.getPathForFile(file), '/uploads/retry/retry.txt');
+});

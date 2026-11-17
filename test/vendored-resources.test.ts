@@ -22,7 +22,7 @@ test('a fresh host serves the checked-in interface, JavaScript, stylesheet and f
   assert.equal(status.rendererVersion, rendererVersion);
   const font = (await readdir(join(rendererRoot, 'assets'))).find(name => name.endsWith('.woff2'));
   assert.ok(font, 'The checked-in snapshot includes its fonts');
-  for (const asset of [rendererAssets.client, rendererAssets.applicationStyle, webRendererPrefix + '/assets/' + font]) {
+  for (const asset of [rendererAssets.client, rendererAssets.applicationStyle, rendererAssets.userMessageStyle, webRendererPrefix + '/assets/' + font]) {
     const response: Response = await fetch(app.url + asset);
     assert.equal(response.status, 200, asset);
     assert.deepEqual(Buffer.from(await response.arrayBuffer()), await readFile(join(rendererRoot, asset.slice(webRendererPrefix.length))));

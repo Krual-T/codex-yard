@@ -10,6 +10,7 @@ export const rendererAssets = {
   rpc: asset('rpc-e690e45d1264.js'),
   application: asset('app-initial-a68277f60b93.js'),
   applicationStyle: asset('app-initial-e7c27dd40beb.css'),
+  userMessageStyle: asset('user-message-5f3d424c6182.css'),
   primary: asset('app-primary-f5ea123a0407.js'),
   locale: asset('zh-CN-7ba80cbb133d.js'),
 };

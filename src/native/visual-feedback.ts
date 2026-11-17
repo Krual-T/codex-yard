@@ -33,6 +33,16 @@ const startupOverlay = `.startup-loader__overlay, ${startupContainer} ._Overlay_
 // locale. Keep its mode-switch button, accessible label and menu behavior.
 const sidebarWordmark = '#app-shell-sidebar button[aria-haspopup="menu"] span:has(> svg[viewBox="0 0 53.225983 18"])';
 const styles = `
+:root[data-workbench-mobile-viewport] #root {
+  position: fixed;
+  inset: var(--workbench-viewport-top) 0 auto;
+  height: var(--workbench-viewport-height);
+}
+/* The desktop shell sets 100svh inline. Use the available height at the
+   renderer's own zoom so its composer moves with the software keyboard. */
+:root[data-workbench-mobile-viewport] #root > [data-app-shell-frame] {
+  height: calc(100% / var(--codex-window-zoom, 1)) !important;
+}
 ${startupContainer} { animation: none; }
 ${startupLogo} {
   width: 56px; height: 56px; opacity: 1;

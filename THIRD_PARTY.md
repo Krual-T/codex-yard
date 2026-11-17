@@ -10,6 +10,14 @@ The project's MIT license applies to project-authored source and excludes `vendo
 
 Changes to Codex App's private module exports or host contracts can require updates to the version boundary in `src/native/renderer-assets.ts` and the corresponding host code. Compatibility with other renderer versions is not assumed. The CLI/daemon versions and the separate UI reference version are documented in README.md.
 
+The project-authored New tab surface in `src/native/new-tab-view.tsx` follows the
+layout and action composition inspected in App **26.1111.21308** (Windows package
+**26.1111.2228.0**, `webview/assets/async/350901.9887d1d57a.js`). It uses the
+checked-in renderer's action registry, search, menus, tab lifecycle and React
+runtime through `new-tab-renderer.ts`. The newer package is a development
+reference; its code and installed resources are not loaded at runtime, and the
+fixed upstream snapshot remains unchanged.
+
 ## Native conversation tool adapter and derived kernel
 
 `vendor/native-app-tools/26.1013.40934/server.mjs` is the unmodified official
@@ -34,6 +42,8 @@ changes. Neither runtime artifact starts or imports a desktop renderer.
 ## Package dependencies
 
 The npm dependencies are declared in `package.json` and locked in `package-lock.json`. They retain the licenses and notices distributed in their packages. `npm ci` installs them locally; `node_modules/` stays outside Git.
+
+`web-push` 4.0.0 (MPL-2.0) supplies Web Push encryption and VAPID signing. Its source and dependencies are installed as npm packages, retain their shipped notices, and are used by the server without modification. They are not included in the browser bundles or the Chrome companion.
 
 The Chrome companion bundles this project's transport and declares dependencies on `chrome-devtools-mcp` and `ws`. It is generated into `.local/` during the host build. It does not contain Chrome, browser profiles, cookies, or paired-device credentials.
 
