@@ -11,7 +11,7 @@ import { CodexConnection } from '../lib/codex.ts';
 import { createBrowserNotifications, defaultNotificationPreferences, notificationRoute } from '../src/native/notifications.ts';
 import type { BrowserNotification } from '../src/native/notifications.ts';
 import { createNativeWorkbench } from '../src/native/server.ts';
-import { createFakeCodex, fixtureThread, fixtureTurn } from './fake-codex.ts';
+import { agentItem, createFakeCodex, fixtureThread, fixtureTurn } from './fake-codex.ts';
 import { nativeFixture } from './native-fixture.ts';
 
 const require = createRequire(import.meta.url);
@@ -98,6 +98,76 @@ test('background approvals, device preferences, failed turns and interrupted tur
   thread.turns = [fixtureTurn('second', [], 'completed')]; h.service.watch('local', thread.id, 'second'); await h.service.tick();
   thread.turns = [fixtureTurn('stopped', [], 'interrupted')]; h.service.watch('local', thread.id, 'stopped'); await h.service.tick();
   assert.equal(h.device.payloads.length, 3);
+});
+
+test('async question items notify once per question without blocking flags, including replay and another question in the same turn', async t => {
+  const h = await fixture(t); await h.subscribe();
+  const question = { ...agentItem('question-1', 'Private question text'), delivery: 'async', questions: [{ title: 'Private question text' }] };
+  const thread = fixtureThread('async-task', h.root, { status: { type: 'active', activeFlags: [] }, turns: [fixtureTurn('turn', [question], 'inProgress')] });
+  h.fake.threads.set(thread.id, thread);
+  const event = { method: 'item/completed', params: { threadId: thread.id, turnId: 'turn', item: question } };
+  h.service.observe('local', { ...event, method: 'item/started' });
+  h.service.observe('local', event); h.service.observe('local', event);
+  await h.restart();
+  h.service.observe('local', event); await h.service.tick();
+  assert.equal(h.device.payloads.length, 1);
+  assert.equal(h.device.payloads[0].kind, 'waiting');
+  assert.equal(h.device.payloads[0].url, notificationRoute('local', thread.id));
+  assert.ok(!JSON.stringify(h.device.payloads).includes('Private question text'));
+  const next = { ...question, id: 'question-2' };
+  h.service.observe('local', { ...event, params: { ...event.params, item: next } });
+  h.service.observe('local', { ...event, params: { ...event.params, item: { ...next, id: 'ordinary-message', questions: null } } });
+  await h.service.close();
+  assert.deepEqual(h.device.payloads.map(payload => payload.kind), ['waiting', 'waiting']);
+  assert.notEqual(h.device.payloads[0].id, h.device.payloads[1].id);
+});
+
+test('async questions are reconciled after pages close, with incremental history and queued turns', async t => {
+  const h = await fixture(t); await h.subscribe();
+  const question = (id: string) => ({ ...agentItem(id, 'Question'), delivery: 'async', questions: [{ title: 'Question' }] });
+  const thread = fixtureThread('background-input', h.root, { status: { type: 'active', activeFlags: [] },
+    turns: [fixtureTurn('old', [question('old-question')]), fixtureTurn('turn', Array.from({ length: 150 }, (_, i) => agentItem('working-' + i, 'Working')), 'inProgress')] });
+  h.fake.threads.set(thread.id, thread); h.service.watch('local', thread.id, 'turn');
+  await h.service.tick();
+  assert.equal(h.device.payloads.length, 0);
+  thread.turns[1].items.push(question('background-question'));
+  await h.service.tick(); await h.service.tick();
+  assert.equal(h.device.payloads.length, 1);
+  assert.deepEqual(h.fake.calls('thread/items/list').at(-1)?.params.cursor, { type: 'item', itemId: 'background-question' });
+  await h.restart(); await h.service.tick(); assert.equal(h.device.payloads.length, 1);
+  thread.turns[1].status = 'completed';
+  thread.turns.push(fixtureTurn('queued-turn', [question('queued-question')], 'inProgress'));
+  await h.service.tick(); assert.equal(h.device.payloads.length, 2);
+  thread.turns[2].items.push(question('last-question')); thread.turns[2].status = 'completed'; thread.status = { type: 'idle' };
+  await h.service.tick();
+  assert.deepEqual(h.device.payloads.filter(payload => payload.kind === 'waiting').map(payload => JSON.parse(payload.id)[3]),
+    ['input:background-question', 'input:queued-question', 'input:last-question']);
+  assert.equal(h.fake.calls('thread/resume').length, 0);
+});
+
+test('disabling waiting reminders also filters async questions', async t => {
+  const h = await fixture(t); await h.subscribe({ completed: true, failed: true, waiting: false });
+  h.service.observe('local', { method: 'item/completed', params: { threadId: 'thread', turnId: 'turn',
+    item: { ...agentItem('question', 'Question'), delivery: 'async', questions: [{ title: 'Question' }] } } });
+  await h.service.close(); assert.equal(h.device.payloads.length, 0);
+});
+
+test('history recovery skips answered async cards and still reminds about a partially answered card', async t => {
+  const h = await fixture(t); await h.subscribe({ completed: false, failed: false, waiting: true });
+  const question = { ...agentItem('answered-card', 'Question'), delivery: 'async', questions: [{ title: 'Question' }] };
+  const partial = { ...question, id: 'partial-card', questions: [{ title: 'One' }, { title: 'Two' }] };
+  const reply = { id: 'answer', type: 'userMessage', content: [{ type: 'text', text: '<send_user_message_question_reply>\n' + JSON.stringify([
+    { questionItemId: JSON.stringify(['request_user_input_async', question.id, 0]), answer: 'Done' },
+    { questionItemId: JSON.stringify(['request_user_input_async', partial.id, 0]), answer: 'One' },
+  ]) + '\n</send_user_message_question_reply>' }] };
+  // The reply is on a later page than the questions.
+  const thread = fixtureThread('answered-input', h.root, { status: { type: 'active', activeFlags: [] }, turns: [fixtureTurn('turn',
+    [question, partial, ...Array.from({ length: 110 }, (_, i) => agentItem('work-' + i, 'Working')), reply], 'inProgress')] });
+  h.fake.threads.set(thread.id, thread); h.service.watch('local', thread.id, 'turn');
+  await h.service.tick();
+  assert.equal(h.device.payloads.length, 1); assert.match(h.device.payloads[0].id, /partial-card/);
+  thread.status = { type: 'idle' }; thread.turns[0].status = 'completed';
+  await h.service.tick(); assert.equal(h.device.payloads.length, 1);
 });
 
 test('queued turns completed while pages are closed are delivered in order and old history is not replayed', async t => {

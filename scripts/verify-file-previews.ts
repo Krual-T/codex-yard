@@ -169,9 +169,25 @@ try {
       assert.equal(await frame.locator('body').evaluate(() => { try { return !!parent.document; } catch { return false; } }), false);
       await page.getByRole('button', { name: '源码', exact: true }).click();
       await page.locator('[data-pierre-editor-surface]').waitFor();
+      const sourceEditor = await page.locator('[data-pierre-editor-surface]').elementHandle();
+      assert.equal(await page.locator('.yard-html-mode').filter({ has: page.locator('iframe') }).getAttribute('inert'), '');
       await page.getByRole('button', { name: '预览', exact: true }).click();
-      await frame.getByRole('heading').waitFor();
-      checks.push('HTML renders, executes its button, switches to source and cannot access the parent document');
+      await frame.getByRole('button', { name: 'CLICK_OK' }).waitFor();
+      await page.getByRole('button', { name: '源码', exact: true }).click();
+      assert.ok(await page.locator('[data-pierre-editor-surface]').evaluate((editor, previous) => editor === previous, sourceEditor));
+      // Rapid reversals must leave exactly one interactive mode and preserve
+      // the preview's state. The hidden mode stays out of keyboard navigation.
+      await page.getByRole('button', { name: '预览', exact: true }).click();
+      await page.getByRole('button', { name: '源码', exact: true }).click();
+      await page.getByRole('button', { name: '预览', exact: true }).click();
+      await frame.getByRole('button', { name: 'CLICK_OK' }).waitFor();
+      assert.equal(await page.locator('.yard-html-mode:not([inert])').count(), 1);
+      assert.equal(await page.locator('.yard-html-mode[inert]').getAttribute('aria-hidden'), 'true');
+      await page.waitForFunction(() => [...document.querySelectorAll('.yard-html-mode')].every(mode =>
+        !mode.getAnimations().some(animation => animation.playState === 'running')));
+      assert.equal(await page.locator('.yard-html-mode[inert]').evaluate(mode => getComputedStyle(mode).visibility), 'hidden');
+      await sourceEditor?.dispose();
+      checks.push('HTML retains preview and editor state across repeated/rapid mode switches; hidden content is inert and the sandbox blocks parent access');
     } else if (name.endsWith('.md')) {
       // The upstream rich-text preview marks its DOM as a textbox, so its
       // rendered heading and table cells are not exposed as ARIA roles.

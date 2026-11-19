@@ -18,7 +18,7 @@ This is an experimental, independent project with a TypeScript host and React ex
 
 - Continue conversations through the existing Codex daemon, including registered SSH hosts.
 - Discover and add SSH profiles in Settings → Connections, and pin chats from the sidebar menu.
-- Use project navigation, workspace tabs, conversation history, queued messages, file and image attachments, and temporary side chats.
+- Use project navigation, workspace tabs, conversation history, queued messages, and file and image attachments. New local and SSH side chats are saved in their parent conversation’s Summary on CLI 0.169.1 or later; closing their panel preserves their history and running work. See [side chats](docs/sidechat-threads.md).
 - Open local and SSH chats at the latest content with two turn summaries. A running turn also reads its recent activity to recover completed progress messages; its Work control can load the remaining activity. Scroll up for older messages. Persisted messages can appear while runtime restoration, model discovery and MCP status are still pending.
 - See retry or connection status during an active turn. After two minutes without observed progress, stop the task or copy a continuation draft with recent results and file paths for a new chat on the same host.
 - Browse files and use terminals through Codex's existing host interfaces.
@@ -37,19 +37,20 @@ The next product direction is a task dashboard: clarify and assign work, see whi
 
 | Component | Version | Role |
 | --- | --- | --- |
+| Codex | `0.169.1` | Required for persistent side chats and native parent/child relationships |
 | Codex | `0.164.0` | Verified deployment without the desktop App: automatic backend startup, web interface, and a real model reply |
 | Codex | `0.163.0` | Verified local and SSH conversations, files, terminals, and browser integration |
 | Codex App interface | `26.1013.40934` | Fixed UI reference and resource snapshot tracked in Git |
 | Node.js | `>=24.5` | Tested with `24.16.0`; server platform currently validated on Linux x64 |
 
-The table records tested versions and their validation scope. Other Codex versions have not yet been validated.
+Project, membership, pin and section migration is verified with Codex CLI 0.156.0 and 0.164.0. Read receipts require the 0.164.0 protocol. Older SSH backends retain their existing Yard sidebar state and migrate after an upgrade; connecting does not upgrade their CLI.
 
 ## Run from source
 
 With Node.js installed, install and sign in to the validated CLI version if needed:
 
 ```bash
-npm install -g @openai/codex@0.164.0
+npm install -g @openai/codex@0.169.1
 codex login
 ```
 
@@ -71,6 +72,8 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765). To customize the server, co
 
 The sidebar opens with up to 50 current local conversations, read directly from the backend while the full workspace loads. You can select a conversation immediately; the workspace keeps that selection when it takes over. This initial view includes project membership and available pins, and does not load conversation history. SSH lists and the composer become available as the full workspace starts. `npm run test:startup:ui` records both initial-list paint and workspace takeover; add `-- --check-handoff` to verify selection during startup.
 
+Unread state comes from app-server, shared with other clients of that backend. Automatic read acknowledgements and manual marks use its revision-guarded updates; old browser unread markers are removed. With chronological sorting, loaded conversations rank unread inactive threads first, active threads second, then other threads, newest first within each group. The initial request remains limited to 50; existing pagination continues without an extra history scan. Pinned and explicit manual orders stay in place. Projects, membership, pins, sections and compatible queued messages use the same backend. Legacy data is migrated per host; browser preferences retain cross-host navigation and unsent intent. See [State ownership and migration](docs/state-ownership.md).
+
 To share the twelve conversation tools with desktop clients using that daemon,
 preview `npm run tools:configure` from the deployed checkout. Add `-- --apply`
 after reviewing the plan. See [registration and migration](docs/native-app-tools.md#explicit-registration-for-app-and-yard).
@@ -79,7 +82,7 @@ For remote access, set `AGENTS_PUBLIC_ORIGIN` to the exact HTTPS origin and use 
 
 The original interface contacts external configuration and event services. Normal Codex requests also use your configured model provider. A private network does not make model execution offline. Set standard proxy variables only if your network requires them.
 
-SSH discovery reads explicit aliases from the server's `~/.ssh/config` and its `Include` files. Manual profiles and chat pins are saved in Yard's `native-state.json` under the data directory, and survive browser reloads and server restarts. The sidebar and conversation tools share the same pin list. Yard initially reads registered desktop SSH profiles; edits made in Yard stay in Yard's data directory.
+SSH discovery reads explicit aliases from the server's `~/.ssh/config` and its `Include` files. Manual profiles remain in Yard's `native-state.json`; chat pins and their order live in the selected host's app-server Pinned section. The sidebar and conversation tools share that backend state. Yard initially reads registered desktop SSH profiles; edits made in Yard stay in Yard's data directory.
 
 ## Web pages in the side panel
 
@@ -160,6 +163,8 @@ npm run test:app-tools
 ```
 
 Full UI validation scripts in `scripts/verify-*.ts` use a configured CLI backend and may create real test conversations or execute commands. Inspect a script's configuration before running it against your own account. GitHub CI runs the portable tests, not these live checks.
+
+`npm run test:read-state:cli` uses a disposable CLI `0.164.0`, a scripted loopback model provider and two independent Chromium contexts. It checks priority order, automatic and manual read marks, synchronization, reloads and legacy marker removal. It needs no personal account or external model requests. Evidence stays in ignored `.local/thread-read-state/`; `AGENTS_READ_STATE_EVIDENCE` selects its output directory.
 
 `npm run test:turn-progress:ui` uses the fixed renderer and a disposable backend to check silent waits, native retry events, resumed output, continuation drafts, native interruption, same-page navigation and phone layout. It requires Chromium; evidence stays in ignored `.local/turn-progress/`. Run it under the shared heavy-browser lock. The timer uses progress observed while viewing the turn; running tools and pending approvals keep their native status. Copying reads at most five recent turn summaries and keeps the current request and latest completed answer, omitting image data. Review the draft, stop the original task, then send it in a new chat on the same execution host. Codex owns network retries; Yard does not replay tasks or alter provider timeouts.
 

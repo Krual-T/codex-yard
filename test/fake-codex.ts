@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { join } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { record } from '../src/native/protocol.ts';
-import type { RpcId, ThreadItemSummary, TurnSummary } from '../lib/codex-protocol.ts';
+import type { RpcId, ThreadItemSummary, ThreadReadState, TurnSummary } from '../lib/codex-protocol.ts';
 
 interface FixtureTurn extends TurnSummary { [key: string]: unknown }
 interface FixtureThread {
@@ -65,6 +65,15 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
   const pausedQueues = new Set<string>();
   const threadModes = new Map<string, unknown>();
   const threadPermissions = new Map<string, Record<string, unknown>>();
+  const projects = new Map<string, Record<string, unknown>>();
+  const projectImports = new Map<string, string>();
+  const sections = new Map<string, { id: string; name: string; appearance: { icon: string | null; color: string | null } | null }>([
+    ['01984de2-8f74-7c91-a3b2-5c5e937cf318', { id: '01984de2-8f74-7c91-a3b2-5c5e937cf318', name: 'Pinned', appearance: null }],
+  ]);
+  const sectionMembers = new Map<string, string[]>();
+  const attachments = new Map<string, Record<string, unknown>[]>();
+  const readStates = new Map<string, ThreadReadState>();
+  let nextProject = 0, nextSection = 0, nextAttachment = 0, nextRevision = 0;
   const socketPath = join(root, 'codex.sock');
   let nextThread = 0;
   let nextTurn = 0;
@@ -77,6 +86,16 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
   }
 
   function invalid(message: string): never { throw Object.assign(new Error(message), { code: -32600 }); }
+  function notify(method: string, params: unknown) {
+    for (const socket of webSockets.clients) if (socket.readyState === WebSocket.OPEN) send({ method, params }, socket);
+  }
+  function receipt(id: string): ThreadReadState {
+    return readStates.get(id) ?? { revision: 'fixture-r0', firstUnread: null };
+  }
+  function page<T>(data: T[], params: Record<string, unknown>) {
+    const offset = Number(params.cursor || 0), end = offset + (Number(params.limit) || 100);
+    return { data: data.slice(offset, end), nextCursor: end < data.length ? String(end) : null };
+  }
   function threadFor(id: unknown): FixtureThread {
     const thread = typeof id === 'string' ? threads.get(id) : undefined;
     if (!thread) invalid('Thread not found');
@@ -91,10 +110,11 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
     if (!queue) { queue = []; queues.set(id, queue); }
     return queue;
   }
-  function queueChanged(threadId: string) { send({ method: 'thread/queue/changed', params: { threadId } }); }
+  function queueChanged(threadId: string) { notify('thread/queue/changed', { threadId }); }
   function settingsFor(thread: FixtureThread) {
     return { model: thread.model, modelProvider: thread.modelProvider, reasoningEffort: thread.reasoningEffort,
-      approvalPolicy: 'never', sandbox: { type: 'dangerFullAccess' }, serviceTier: null,
+      approvalPolicy: 'never', approvalsReviewer: 'user', activePermissionProfile: null,
+      sandbox: { type: 'dangerFullAccess' }, serviceTier: null,
       ...(threadModes.has(thread.id) ? { collaborationMode: threadModes.get(thread.id) } : {}),
       ...threadPermissions.get(thread.id) };
   }
@@ -118,7 +138,7 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
     const threadId = typeof params.threadId === 'string' ? params.threadId : '';
     const input: unknown[] = Array.isArray(params.input) ? params.input : [];
     switch (method) {
-      case 'initialize': return { userAgent: 'disposable-codex-fixture' };
+      case 'initialize': return { userAgent: 'disposable-codex-fixture/0.164.0' };
       case 'model/list': return { data: [{ id: 'fixture-id', model: 'fixture-model', displayName: 'Fixture model', isDefault: true,
         supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Low' }, { reasoningEffort: 'high', description: 'High' }] }] };
       case 'account/read': return { account: null, requiresOpenaiAuth: false };
@@ -136,9 +156,113 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
       case 'thread/loaded/list': return { data: [...loaded] };
       case 'thread/unsubscribe': return { status: 'unsubscribed' };
       case 'thread/backgroundTerminals/clean': return {};
+      case 'project/list': return page([...projects.values()].sort((a, b) => Number(a.position) - Number(b.position)), params);
+      case 'project/read': {
+        const project = projects.get(String(params.projectId));
+        if (!project) invalid('Project not found');
+        return { project };
+      }
+      case 'project/create':
+      case 'project/import': {
+        const known = projectImports.get(String(params.idempotencyKey));
+        if (known && projects.has(known)) return { project: projects.get(known) };
+        const id = 'fixture-project-' + ++nextProject;
+        const project = { id, name: params.name, roots: params.roots, metadata: params.metadata ?? {},
+          position: projects.size, createdAt: 1_700_000_000, updatedAt: 1_700_000_000, recencyAt: null };
+        projects.set(id, project); projectImports.set(String(params.idempotencyKey), id);
+        if (Array.isArray(params.threads)) for (const threadId of params.threads) threadFor(threadId).projectId = id;
+        notify('project/changed', { projectId: id });
+        return { project };
+      }
+      case 'project/update': {
+        const project = projects.get(String(params.projectId));
+        if (!project) invalid('Project not found');
+        for (const key of ['name', 'roots', 'metadata']) if (Object.hasOwn(params, key)) project[key] = params[key];
+        notify('project/changed', { projectId: project.id }); return { project };
+      }
+      case 'project/move': {
+        const id = String(params.projectId), project = projects.get(id);
+        if (!project) invalid('Project not found');
+        const ordered = [...projects.values()].sort((a, b) => Number(a.position) - Number(b.position)).filter(p => p.id !== id);
+        const before = params.beforeProjectId == null ? ordered.length : ordered.findIndex(p => p.id === params.beforeProjectId);
+        if (before < 0) invalid('Before project not found');
+        ordered.splice(before, 0, project); ordered.forEach((p, index) => { p.position = index; });
+        notify('project/changed', { projectId: id }); return {};
+      }
+      case 'project/delete': {
+        const id = String(params.projectId);
+        if (!projects.delete(id)) invalid('Project not found');
+        for (const thread of threads.values()) if (thread.projectId === id) thread.projectId = null;
+        notify('project/changed', { projectId: id }); return {};
+      }
+      case 'thread/metadata/update': {
+        const thread = threadFor(threadId);
+        if (params.projectId != null) {
+          if (params.projectId !== '' && !projects.has(String(params.projectId))) invalid('Project not found');
+          thread.projectId = params.projectId || null;
+          notify('thread/project/updated', { threadId, projectId: thread.projectId });
+        }
+        return {};
+      }
+      case 'threadSection/list': return page([...sections.values()], params);
+      case 'threadSection/create': {
+        const section = { id: 'fixture-section-' + ++nextSection, name: String(params.name),
+          appearance: params.appearance as { icon: string | null; color: string | null } | null ?? null };
+        sections.set(section.id, section); return { section };
+      }
+      case 'threadSection/update': {
+        const section = sections.get(String(params.sectionId));
+        if (!section) invalid('Section not found');
+        section.name = String(params.name);
+        if (Object.hasOwn(params, 'appearance')) section.appearance = params.appearance as typeof section.appearance;
+        for (const thread of threads.values()) if (record(thread.section).id === section.id) thread.section = { ...section };
+        return { section };
+      }
+      case 'threadSection/delete': {
+        const id = String(params.sectionId);
+        if (!sections.delete(id)) invalid('Section not found');
+        sectionMembers.delete(id);
+        for (const thread of threads.values()) if (record(thread.section).id === id) thread.section = null;
+        return {};
+      }
+      case 'thread/section/move': {
+        const thread = threadFor(threadId), sectionId = params.sectionId == null ? null : String(params.sectionId);
+        if (sectionId !== null && !sections.has(sectionId)) invalid('Section not found');
+        for (const [id, members] of sectionMembers) sectionMembers.set(id, members.filter(id => id !== threadId));
+        if (sectionId !== null) {
+          const members = sectionMembers.get(sectionId) ?? [];
+          const before = params.beforeThreadId == null ? members.length : members.indexOf(String(params.beforeThreadId));
+          if (before < 0) invalid('Before thread not found');
+          members.splice(before, 0, threadId); sectionMembers.set(sectionId, members);
+        }
+        thread.section = sectionId === null ? null : { ...sections.get(sectionId)! };
+        return {};
+      }
+      case 'thread/readState/update': {
+        threadFor(threadId);
+        if (receipt(threadId).revision !== params.expectedRevision) invalid('read state revision conflict');
+        const readState = { revision: 'fixture-r' + ++nextRevision, firstUnread: record(params.operation).type === 'read' ? null :
+          { type: 'turn', turnId: threads.get(threadId)!.turns.at(-1)?.id ?? 'fixture-unread' } } as ThreadReadState;
+        readStates.set(threadId, readState); notify('thread/readState/changed', { threadId, readState }); return { readState };
+      }
+      case 'thread/attachment/list': return page(attachments.get(threadId) ?? [], params);
+      case 'thread/attachment/add': {
+        threadFor(threadId);
+        const values = attachments.get(threadId) ?? [];
+        const known = values.find(value => value.identityKey === params.identityKey && value.attachmentType === params.attachmentType);
+        if (known) return { outcome: 'alreadyExists', attachment: known };
+        const attachment = { ...params, id: 'fixture-attachment-' + ++nextAttachment, createdAt: 1_700_000_000 };
+        values.push(attachment); attachments.set(threadId, values); return { outcome: 'created', attachment };
+      }
+      case 'thread/attachment/remove': {
+        const values = attachments.get(threadId) ?? [];
+        attachments.set(threadId, values.filter(value => value.id !== params.attachmentId)); return { deleted: true };
+      }
+      case 'thread/attachmentOwner/list': return { data: [], nextCursor: null };
       case 'thread/start': {
         const id = `fixture-thread-${++nextThread}`;
         const thread = fixtureThread(id, typeof params.cwd === 'string' ? params.cwd : root, { model: typeof params.model === 'string' ? params.model : 'fixture-model',
+          projectId: typeof params.projectId === 'string' ? params.projectId : null,
           reasoningEffort: String(record(params.config).model_reasoning_effort || 'high'),
           createdAt: 1_700_000_000 + nextThread, updatedAt: 1_700_000_000 + nextThread });
         threads.set(thread.id, thread);
@@ -179,16 +303,23 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
             ancestor = parent?.parentThreadId || (typeof parent?.source === 'object' ? parent.source.subAgent?.thread_spawn?.parent_thread_id : undefined);
           }
           const searchMatches = !params.searchTerm || [thread.name, thread.preview].some(value => value?.includes(String(params.searchTerm)));
-          return cwdMatches && searchMatches && (!params.ancestorThreadId || ancestor === params.ancestorThreadId) && archived.has(thread.id) === (params.archived === true) &&
+          return cwdMatches && searchMatches && (!Object.hasOwn(params, 'projectId') || thread.projectId === params.projectId) &&
+            (!Object.hasOwn(params, 'sectionId') || record(thread.section).id === params.sectionId || thread.section == null && params.sectionId == null) &&
+            (!params.ancestorThreadId || ancestor === params.ancestorThreadId) && archived.has(thread.id) === (params.archived === true) &&
             (!Array.isArray(params.sourceKinds) || !params.sourceKinds.length || params.sourceKinds.includes(source));
         }).sort((a, b) => {
+          if (params.sortKey === 'section_position') {
+            const members = sectionMembers.get(String(params.sectionId)) ?? [];
+            return members.indexOf(a.id) - members.indexOf(b.id);
+          }
           const key = params.sortKey === 'created_at' ? 'createdAt' : 'updatedAt';
           return (b[key] - a[key]) * (params.sortDirection === 'asc' ? -1 : 1);
         });
         const offset = Number(params.cursor || 0);
         const end = offset + (Number(params.limit) || 50);
         return { data: candidates.slice(offset, end).map(thread => ({ ...thread, turns: [] })),
-          nextCursor: end < candidates.length ? String(end) : null, backwardsCursor: null };
+          nextCursor: end < candidates.length ? String(end) : null, backwardsCursor: null,
+          readStates: Object.fromEntries(candidates.slice(offset, end).map(thread => [thread.id, receipt(thread.id)])) };
       }
       case 'thread/resume':
       case 'thread/read': {
@@ -200,7 +331,7 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
           invalid('Cannot resume an archived thread');
         }
         if (method === 'thread/resume') loaded.add(thread.id);
-        return { thread: { ...thread, turns: [] }, ...(method === 'thread/resume' ? settingsFor(thread) : {}) };
+        return { thread: { ...thread, turns: [] }, readState: receipt(thread.id), ...(method === 'thread/resume' ? settingsFor(thread) : {}) };
       }
       case 'thread/name/set': {
         const thread = threads.get(threadId);
@@ -245,7 +376,11 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
         const turn = threads.get(threadId)?.turns.find(turn => turn.id === params.turnId);
         const items = [...(turn?.items || [])];
         if (params.sortDirection === 'desc') items.reverse();
-        return { data: items.map(item => itemEntry(String(params.turnId), item)), nextCursor: null, backwardsCursor: null };
+        const anchor = record(params.cursor);
+        const offset = anchor.type === 'item' ? items.findIndex(item => item.id === anchor.itemId) + 1 : Number(params.cursor || 0);
+        const end = offset + (Number(params.limit) || 25);
+        return { data: items.slice(offset, end).map(item => itemEntry(String(params.turnId), item)),
+          nextCursor: end < items.length ? String(end) : null, backwardsCursor: null };
       }
       case 'thread/revert': {
         const thread = threadFor(threadId);
@@ -379,7 +514,8 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
   }
 
   return {
-    socketPath, messages, handlers, threads, archived, queues, loaded, threadModes, threadPermissions, changePermissions, send, defaultResult,
+    socketPath, messages, handlers, threads, archived, queues, loaded, threadModes, threadPermissions, projects, sections, sectionMembers,
+    attachments, readStates, changePermissions, send, defaultResult,
     broadcast(message: unknown) { for (const socket of webSockets.clients) if (socket.readyState === WebSocket.OPEN) send(message, socket); },
     calls(method: string) { return messages.filter(message => message.method === method && message.id != null); },
     waitFor,

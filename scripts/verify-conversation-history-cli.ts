@@ -143,11 +143,30 @@ try {
   await activity.click();
   await page.getByText('HISTORY_ACTIVITY_OK', { exact: false }).first().waitFor({ timeout: 10000 });
   checks.push('Original Worked control loads only its CLI turn; native command control shows the deferred output');
+  const sidebar = await page.locator('#app-shell-sidebar').elementHandle();
+  const sidebarTrigger = page.locator('[data-app-shell-sidebar-trigger]:visible').first();
+  await page.getByRole('textbox').last().fill('CLI sidebar draft');
+  for (const open of [false, true]) {
+    await sidebarTrigger.click();
+    await page.waitForFunction(open => document.querySelector('[data-app-shell-sidebar-open]')?.getAttribute('data-app-shell-sidebar-open') === String(open)
+      && !document.getAnimations().some(animation => animation.id === 'yard-sidebar-transition'), open);
+  }
+  assert.ok(await sidebar!.evaluate(element => element === document.querySelector('#app-shell-sidebar')));
+  assert.equal(await page.getByRole('textbox').last().innerText(), 'CLI sidebar draft');
+  await page.getByText('CLI response 0/3', { exact: true }).waitFor();
+  checks.push('Sidebar collapse/reopen retains its DOM, draft and real CLI conversation');
   await page.locator('[data-app-action-sidebar-thread-row]').filter({ hasText: 'CLI switch fixture' }).first().click();
   await page.getByText('CLI response 1/3', { exact: true }).waitFor({ timeout: 10000 });
   const editor = page.getByRole('textbox').last();
-  await editor.fill('Reply HISTORY_LIVE_OK'); await editor.press('Enter');
+  await editor.fill('Reply HISTORY_LIVE_OK');
+  const sendStarted = performance.now();
+  await editor.press('Enter');
+  const sentBubble = page.getByRole('region', { name: /^(Conversation|对话)$/ }).locator('.bg-user-message').filter({ hasText: 'Reply HISTORY_LIVE_OK' });
+  await sentBubble.waitFor({ timeout: 800 });
+  report.sendBubbleMs = Math.round(performance.now() - sendStarted);
   await page.getByText('HISTORY_LIVE_OK', { exact: true }).waitFor({ timeout: 30000 });
+  assert.equal(await sentBubble.count(), 1, 'the real CLI reply must retain one user bubble after admission');
+  checks.push('Existing-thread submission displays a local bubble immediately and reconciles with the real CLI turn');
   checks.push('Same-page switch continues the existing CLI conversation and displays its streamed reply');
   await app.control.request('turn/start', { threadId: ids[0],
     input: [{ type: 'text', text: 'HISTORY_COMMAND HISTORY_REENTER', text_elements: [] }] }, { mutating: true });

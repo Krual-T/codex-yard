@@ -1,8 +1,13 @@
 import { record } from './protocol.ts';
 import type { ObjectValue } from './protocol.ts';
+import type { BackendSidebarState } from './backend-sidebar-state.ts';
 
-/** UI and native conversation tools share the same durable Yard pin list. */
-export function createThreadPins(globals: ObjectValue, persist: () => Promise<void>, broadcast: (message: unknown) => void) {
+/** The production host supplies the backend shared with native conversation tools.
+ * The same legacy adapter also backs hosts without native section support.
+ */
+export function createThreadPins(globals: ObjectValue, persist: () => Promise<void>, broadcast: (message: unknown) => void,
+  backend?: Pick<BackendSidebarState, 'pins'>) {
+  if (backend) return backend.pins;
   const key = 'pinned-thread-ids';
   function ids() {
     const value = globals[key];

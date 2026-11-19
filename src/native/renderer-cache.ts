@@ -1,8 +1,9 @@
 import { promisify } from 'node:util';
-import { gzip } from 'node:zlib';
+import { brotliCompress, constants, gzip } from 'node:zlib';
 
 const compress = promisify(gzip);
-interface Asset { content: Buffer; compressed?: Buffer }
+const brotli = promisify(brotliCompress);
+interface Asset { content: Buffer; compressed?: Buffer; brotli?: Buffer }
 interface Entry { result: Promise<Asset>; size: number }
 
 /** Process-local cache for immutable renderer assets only. It also coalesces
@@ -14,7 +15,7 @@ export class RendererCache {
 
   constructor(limit = 64 * 1024 * 1024) { this.limit = limit; }
 
-  load(key: string, read: () => Promise<Buffer>, compressible: boolean): Promise<Asset> {
+  load(key: string, read: () => Promise<Buffer>, compressible: boolean, startupBundle = false): Promise<Asset> {
     const cached = this.entries.get(key);
     if (cached) {
       this.entries.delete(key);
@@ -23,9 +24,13 @@ export class RendererCache {
     }
     const entry: Entry = { size: 0, result: Promise.resolve().then(async () => {
       const content = await read();
-      const compressed = compressible && content.length > 1024 ? await compress(content, { level: 6 }) : undefined;
+      const shouldCompress = compressible && content.length > 1024;
+      const [compressed, brotliBody] = await Promise.all([
+        shouldCompress ? compress(content, { level: 6 }) : undefined,
+        shouldCompress && startupBundle ? brotli(content, { params: { [constants.BROTLI_PARAM_QUALITY]: 5 } }) : undefined,
+      ]);
       if (this.entries.get(key) === entry) {
-        entry.size = content.length + (compressed?.length ?? 0);
+        entry.size = content.length + (compressed?.length ?? 0) + (brotliBody?.length ?? 0);
         this.bytes += entry.size;
         while (this.bytes > this.limit && this.entries.size) {
           const oldest = this.entries.entries().next().value!;
@@ -33,7 +38,7 @@ export class RendererCache {
           this.bytes -= oldest[1].size;
         }
       }
-      return { content, compressed };
+      return { content, compressed, brotli: brotliBody };
     }).catch(error => {
       if (this.entries.get(key) === entry) this.entries.delete(key);
       throw error;

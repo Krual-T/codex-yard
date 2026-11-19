@@ -14,7 +14,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { chromium } from 'playwright-core';
 import type { BrowserContext, CDPSession, Page } from 'playwright-core';
+import { CodexConnection } from '../lib/codex.ts';
+import type { Page as RpcPage, TurnSummary } from '../lib/codex-protocol.ts';
 import { createNativeWorkbench } from '../src/native/server.ts';
+import { deepseekModels } from '../src/native/deepseek-models.ts';
 import type { BrowserNotification } from '../src/native/notifications.ts';
 
 const root = await mkdtemp('/tmp/yard-notifications-cli-'), codexHome = join(root, 'codex'), dataDir = join(root, 'data');
@@ -28,12 +31,20 @@ const subscription = { endpoint: 'https://fcm.googleapis.com/fcm/send/isolated-u
   p256dh: receiver.getPublicKey().toString('base64url'), auth: auth.toString('base64url'),
 } };
 let release: (() => void) | undefined;
+let releaseQuestion: (() => void) | undefined;
 let modelCalls = 0;
 const provider = createServer(async (request, response) => {
   let body = ''; for await (const chunk of request) body += chunk;
+  const input = JSON.parse(body).input as { type: string; call_id?: string }[];
+  const question = body.includes('ASYNC_INPUT_FIXTURE');
+  const questionAnswered = input.some(item => item.type === 'function_call_output' && item.call_id === 'async-question-fixture');
   if (body.includes('DELAYED_PUSH_FIXTURE')) await new Promise<void>(resolve => { release = resolve; });
-  const id = 'notification-response-' + ++modelCalls, item = { id: 'notification-message-' + modelCalls, type: 'message', role: 'assistant', status: 'completed',
-    content: [{ type: 'output_text', text: 'NOTIFICATION_FIXTURE_OK', annotations: [] }] };
+  if (question) await new Promise<void>(resolve => { if (questionAnswered) release = resolve; else releaseQuestion = resolve; });
+  const id = 'notification-response-' + ++modelCalls, item = question && !questionAnswered
+    ? { id: 'async-question-fixture', call_id: 'async-question-fixture', type: 'function_call', name: 'request_user_input_async',
+      arguments: JSON.stringify({ questions: [{ title: 'Which fixture option?', options: ['One', 'Two'] }] }), status: 'completed' }
+    : { id: 'notification-message-' + modelCalls, type: 'message', role: 'assistant', status: 'completed',
+      content: [{ type: 'output_text', text: 'NOTIFICATION_FIXTURE_OK', annotations: [] }] };
   response.writeHead(200, { 'Content-Type': 'text/event-stream' });
   for (const [type, data] of [
     ['response.created', { response: { id, object: 'response', status: 'in_progress', output: [] } }],
@@ -45,7 +56,9 @@ const provider = createServer(async (request, response) => {
 });
 await new Promise<void>(resolve => provider.listen(0, '127.0.0.1', resolve));
 const modelPort = (provider.address() as import('node:net').AddressInfo).port;
-await writeFile(join(codexHome, 'config.toml'), `model = "gpt-5.2-codex"\nmodel_provider = "fixture"\napproval_policy = "never"\nsandbox_mode = "read-only"\n[model_providers.fixture]\nname = "Notification fixture"\nbase_url = "http://127.0.0.1:${modelPort}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\n[features]\ncode_mode = false\n`);
+await writeFile(join(codexHome, 'models.json'), JSON.stringify({ models: [{ ...deepseekModels[0], slug: 'notification-fixture', display_name: 'Notification fixture',
+  experimental_supported_tools: ['request_user_input_async'] }] }));
+await writeFile(join(codexHome, 'config.toml'), `model = "notification-fixture"\nmodel_catalog_json = ${JSON.stringify(join(codexHome, 'models.json'))}\nmodel_provider = "fixture"\napproval_policy = "never"\nsandbox_mode = "read-only"\n[model_providers.fixture]\nname = "Notification fixture"\nbase_url = "http://127.0.0.1:${modelPort}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\n[features]\ncode_mode = false\n`);
 const socketPath = join(root, 'backend.sock');
 const child = spawn(process.env.AGENTS_TEST_CODEX_BIN ?? 'codex', ['app-server', '--listen', 'unix://' + socketPath], {
   env: { PATH: process.env.PATH, CODEX_HOME: codexHome, LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'],
@@ -53,6 +66,7 @@ const child = spawn(process.env.AGENTS_TEST_CODEX_BIN ?? 'codex', ['app-server',
 let backendLog = ''; child.stdout.on('data', chunk => { backendLog += chunk; }); child.stderr.on('data', chunk => { backendLog += chunk; });
 let startupError: Error | undefined; child.on('error', error => { startupError = error; });
 let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined, browserContext: BrowserContext | undefined, cdp: CDPSession | undefined, registrationId = '';
+let background: CodexConnection | undefined;
 const payloads: BrowserNotification[] = [], checks: string[] = [], errors: string[] = [];
 const report: Record<string, unknown> = { renderer: '26.1013.40934', checks, errors, pushTransport: 'local encrypted receiver + Chromium ServiceWorker.deliverPushMessage' };
 async function waitUntil(read: () => Promise<boolean>, label: string) {
@@ -230,6 +244,25 @@ try {
     await reopened.getByRole('textbox').last().waitFor({ timeout: 60000 });
     checks.push('With all Yard tabs closed, a worker notification click opens a new tab directly at the corresponding CLI conversation');
   }
+  for (const open of context.pages()) if (open.url().startsWith(app.url)) await open.close();
+  background = new CodexConnection(socketPath); await background.connect();
+  const inputThread = (await background.request('thread/start', { cwd: root })).thread;
+  const inputTurn = (await background.request('turn/start', { threadId: inputThread.id, input: [{ type: 'text', text: 'ASYNC_INPUT_FIXTURE' }] }, { mutating: true })).turn;
+  app.notifications.watch('local', inputThread.id, inputTurn.id);
+  await waitUntil(async () => !!releaseQuestion, 'async question model request');
+  background.close(); background = undefined; release = undefined; releaseQuestion!();
+  const inputUrl = '/?initialRoute=' + encodeURIComponent('/local/' + inputThread.id);
+  await waitUntil(async () => payloads.some(payload => payload.kind === 'waiting' && payload.url === inputUrl), 'background async question push');
+  const inputStatus = (await app.control.request('thread/read', { threadId: inputThread.id, includeTurns: false })).thread.status;
+  assert.deepEqual(inputStatus, { type: 'active', activeFlags: [] });
+  const inputTurns = await app.control.request<RpcPage<TurnSummary>>('thread/turns/list', { threadId: inputThread.id, limit: 1, itemsView: 'full' });
+  assert.ok(inputTurns.data[0].items.some(item => item.type === 'agentMessage' && item.delivery === 'async' && Array.isArray(item.questions) && item.questions.length));
+  await waitUntil(async () => (await notifications()).some(notification => notification.title === 'Yard · 任务需要你回答' && notification.data.url === inputUrl), 'async question worker notification');
+  await app.notifications.tick(); assert.equal(payloads.filter(payload => payload.kind === 'waiting' && payload.url === inputUrl).length, 1);
+  assert.equal(context.pages().filter(page => page.url().startsWith(app!.url)).length, 0);
+  checks.push('An actual CLI async question with no blocking flags notifies once through the worker after its originating connection and every Yard tab close');
+  await waitUntil(async () => !!release, 'async question accepted by CLI'); release!();
+  await waitUntil(async () => payloads.some(payload => payload.kind === 'completed' && payload.url === inputUrl), 'async question turn completion');
   report.payloadKinds = payloads.map(payload => payload.kind); report.status = app.notifications.status();
   assert.deepEqual(errors, []); report.ok = true;
 } catch (error) {
@@ -246,7 +279,7 @@ try {
   }
   report.failure = (error as Error).stack; await writeFile(join(output, 'backend.log'), backendLog); process.exitCode = 1;
 } finally {
-  release?.(); await browserContext?.close(); await app?.close(); child.kill('SIGTERM');
+  releaseQuestion?.(); release?.(); background?.close(); await browserContext?.close(); await app?.close(); child.kill('SIGTERM');
   if (child.exitCode === null && child.signalCode === null) await once(child, 'exit');
   await new Promise<void>(resolve => provider.close(() => resolve()));
   await writeFile(join(output, 'result.json'), JSON.stringify(report, null, 2) + '\n');

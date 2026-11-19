@@ -11,6 +11,7 @@ import WebSocket from 'ws';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { record, updatedAtom } from '../src/native/protocol.ts';
 import { createThreadProjects } from '../src/native/thread-projects.ts';
+import { PINNED_SECTION_ID, sidebarMetadata } from '../src/native/backend-sidebar-state.ts';
 import { BrowserHttpFetch } from '../src/native/browser-http-fetch.ts';
 import { rendererAssets } from '../src/native/renderer-assets.ts';
 import { brandAssets } from '../src/native/visual-feedback.ts';
@@ -53,8 +54,9 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
     }
     function send(message: unknown) { socket.send(JSON.stringify(message)); }
     async function rpc(id: number, method: string, params: Record<string, unknown> | null = {}, hostId = 'local') {
+      const start = messages.length;
       send({ type: 'mcp-request', hostId, request: { id, method, params } });
-      return (await until(message => message.type === 'mcp-response' && message.hostId === hostId && message.message.id === id)).message;
+      return (await until(message => messages.indexOf(message) >= start && message.type === 'mcp-response' && message.hostId === hostId && message.message.id === id)).message;
     }
     return { socket, send, until, rpc, messages };
   }
@@ -69,12 +71,14 @@ test('sidebar bootstrap seeds current project and pin queries before the rendere
   assert.deepEqual(snapshot.workspaceRootOptions, { roots: [], canonicalPathByRoot: {} });
   assert.equal(snapshot.projectlessWorkspaceRoot.workspaceRoot, join(h.root, 'data/workspaces'));
   assert.ok(snapshot.globalStateEntries.some((entry: { key: string }) => entry.key === 'pinned-thread-ids'));
+  h.fake.threads.set('fresh-pin', fixtureThread('fresh-pin', h.root));
   first.send({ type: 'fetch', requestId: 'pin', url: 'vscode://codex/set-thread-pinned',
     body: JSON.stringify({ threadId: 'fresh-pin', pinned: true }) });
-  await first.until(message => message.requestId === 'pin');
+  assert.equal((await first.until(message => message.requestId === 'pin')).responseType, 'success');
   const second = await h.connect();
   const current = (await second.until(message => message.type === 'yard-sidebar-bootstrap')).value;
   assert.deepEqual(current.globalStateEntries.find((entry: { key: string }) => entry.key === 'pinned-thread-ids').value, ['fresh-pin']);
+  assert.equal(record(h.fake.threads.get('fresh-pin')!.section).id, PINNED_SECTION_ID);
   assert.equal(current.globalStateEntries.some((entry: { key: string }) => entry.key === 'prompt-history'), false);
 });
 
@@ -89,12 +93,16 @@ test('startup sidebar reads current bounded metadata before renderer ready throu
   };
   const first = await read('startup-1');
   assert.deepEqual(first.threads, [{ id: 'first', title: 'First title', projectId: null }]);
+  assert.equal(first.locale, 'zh-CN');
   const request = h.fake.calls('thread/list').at(-1)!;
   assert.equal(request.params.limit, 50);
   assert.equal(request.params.useStateDbOnly, true);
   assert.equal(request.params.archived, false);
   h.fake.threads.get('first')!.name = 'Renamed';
   assert.equal((await read('startup-2')).threads[0].title, 'Renamed');
+  client.send({ type: 'fetch', requestId: 'startup-language', url: 'vscode://codex/set-setting', body: JSON.stringify({ key: 'localeOverride', value: 'en-US' }) });
+  await client.until(message => message.requestId === 'startup-language');
+  assert.equal((await read('startup-3')).locale, 'en-US');
 });
 
 async function publicPreview(url: string) {
@@ -198,8 +206,9 @@ test('SSH settings save new hosts, publish them to other pages, route connection
   } finally { await restarted.close(); }
 });
 
-test('sidebar pins persist, notify other pages, preserve concurrent additions during reorder and reject invalid orders', async t => {
+test('sidebar pins persist in the backend, notify other pages, preserve concurrent additions during reorder and reject invalid orders', async t => {
   const h = await fixture(t), first = await h.connect(), second = await h.connect();
+  for (const id of ['a', 'b', 'new']) h.fake.threads.set(id, fixtureThread(id, h.root));
   let sequence = 0;
   async function host(endpoint: string, body: unknown = {}) {
     const requestId = 'pin-' + ++sequence;
@@ -207,7 +216,7 @@ test('sidebar pins persist, notify other pages, preserve concurrent additions du
     return first.until(message => message.type === 'fetch-response' && message.requestId === requestId);
   }
   assert.deepEqual((await host('list-pinned-threads')).body.threadIds, []);
-  await host('set-thread-pinned', { threadId: 'a', pinned: true });
+  assert.equal((await host('set-thread-pinned', { threadId: 'a', pinned: true })).responseType, 'success');
   await second.until(message => message.type === 'pinned-threads-updated');
   await host('set-thread-pinned', { threadId: 'b', pinned: true, beforeThreadId: null });
   await host('set-thread-pinned', { threadId: 'new', pinned: true });
@@ -216,7 +225,32 @@ test('sidebar pins persist, notify other pages, preserve concurrent additions du
   assert.equal((await host('set-pinned-threads-order', { threadIds: ['a', 'a'] })).responseType, 'error');
   assert.equal((await host('set-thread-pinned', { threadId: '', pinned: true })).responseType, 'error');
   await host('set-thread-pinned', { threadId: 'a', pinned: false });
-  assert.deepEqual(JSON.parse(await readFile(join(h.root, 'data/native-state.json'), 'utf8')).globals['pinned-thread-ids'], ['b', 'new']);
+  assert.deepEqual(h.fake.sectionMembers.get(PINNED_SECTION_ID), ['b', 'new']);
+  assert.deepEqual((await host('list-pinned-threads')).body.threadIds, ['b', 'new']);
+  assert.equal(JSON.parse(await readFile(join(h.root, 'data/native-state.json'), 'utf8')).globals['pinned-thread-ids'], undefined);
+});
+
+test('explicit creation gives two same-name sections distinct native identities and deleting one preserves the other', async t => {
+  const h = await fixture(t), client = await h.connect();
+  let sequence = 0;
+  async function sections(params: Record<string, unknown>) {
+    const requestId = 'section-create-' + ++sequence;
+    client.send({ type: 'fetch', requestId, url: 'vscode://codex/pinned-thread-sections', body: JSON.stringify(params) });
+    const response = await client.until(message => message.type === 'fetch-response' && message.requestId === requestId);
+    assert.equal(response.responseType, 'success', JSON.stringify(response));
+    return response.body;
+  }
+  const first = await sections({ operation: 'create', logicalSectionId: 'ui-first', name: 'Same name' });
+  const second = await sections({ operation: 'create', logicalSectionId: 'ui-second', name: 'Same name' });
+  assert.equal(typeof first.id, 'string'); assert.equal(typeof second.id, 'string');
+  assert.notEqual(first.id, second.id);
+  assert.deepEqual([...h.fake.sections.values()].filter(section => section.name === 'Same name').map(section => section.id), [first.id, second.id]);
+  assert.equal(h.fake.calls('threadSection/create').length, 2);
+  assert.deepEqual((await sections({ operation: 'list' })).sections.map((section: { id: string }) => section.id), [first.id, second.id]);
+  assert.deepEqual(await sections({ operation: 'delete', sectionId: first.id }), { success: true });
+  assert.equal(h.fake.sections.has(first.id), false);
+  assert.deepEqual(h.fake.sections.get(second.id), second);
+  assert.deepEqual((await sections({ operation: 'list' })).sections, [{ ...second, threadIds: [], hostId: 'local' }]);
 });
 
 test('the renderer file endpoints browse and read real bytes, preserve empty directories and reject traversal', async t => {
@@ -679,6 +713,26 @@ test('native side-chat forks retain the official temporary contract and accept t
   assert.equal(h.fake.calls('turn/start').length, 0);
 });
 
+test('persistent sidechat requests fail before mutation on an old backend and forward the native contract on 0.169.1', async t => {
+  const h = await fixture(t);
+  h.fake.threads.set('parent', fixtureThread('parent', h.root));
+  const old = await h.connect();
+  const params = { threadId: 'parent', attachToSource: true, ephemeral: false, excludeTurns: true };
+  assert.match((await old.rpc(1, 'thread/fork', params)).error.message, /0\.169\.1/);
+  assert.equal(h.fake.calls('thread/fork').length, 0);
+  h.fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.169.1 (Linux)' }));
+  h.fake.handlers.set('thread/fork', input => ({ thread: fixtureThread('attached', h.root, {
+    attachedToThreadId: input.threadId, forkedFromId: input.threadId as string, ephemeral: false,
+  }) }));
+  const upgraded = await h.connect();
+  const result = (await upgraded.rpc(1, 'thread/fork', params)).result;
+  assert.equal(result.thread.attachedToThreadId, 'parent');
+  assert.equal(result.thread.ephemeral, false);
+  const request = h.fake.calls('thread/fork')[0]!.params;
+  for (const [field, value] of Object.entries(params)) assert.equal(request[field], value);
+  assert.ok(request.config, 'The existing standalone tool configuration stays on the fork');
+});
+
 test('SSH RPC, events and approvals retain their host and never receive a local tool socket', async t => {
   const root = await mkdtemp('/tmp/aw-remote-test-'), remote = await createFakeCodex(root);
   remote.handlers.set('fs/createDirectory', () => ({}));
@@ -700,8 +754,11 @@ test('SSH RPC, events and approvals retain their host and never receive a local 
   assert.equal(directory.responseType, 'success');
   assert.deepEqual(remote.calls('fs/createDirectory')[0].params, { path: '/remote/home/.codex/visualizations/test', recursive: true });
   assert.equal(h.fake.calls('fs/createDirectory').length, 0);
+  const remoteStartProject = await projectRequest(client, 'remote-start-project', 'getThreadStartProjectId',
+    { projectKind: 'remote', projectId: 'remote-project', hostId });
+  assert.equal(remoteStartProject.responseType, 'success');
   const [local, ssh] = await Promise.all([
-    client.rpc(1, 'thread/start', { cwd: h.root }), client.rpc(1, 'thread/start', { cwd: '/remote/project' }, hostId),
+    client.rpc(1, 'thread/start', { cwd: h.root }), client.rpc(1, 'thread/start', { cwd: '/remote/project', projectId: remoteStartProject.body }, hostId),
   ]);
   assert.equal(local.result.thread.cwd, h.root);
   assert.equal(ssh.result.thread.cwd, '/remote/project');
@@ -720,7 +777,10 @@ test('SSH RPC, events and approvals retain their host and never receive a local 
   const saved = await projectRequest(client, 'remote-assignment', 'setAssignment', { threadId: ssh.result.thread.id, hostId, assignment });
   assert.equal(saved.responseType, 'success');
   const persisted = JSON.parse(await readFile(join(h.root, 'data', 'native-state.json'), 'utf8'));
-  assert.equal(persisted.globals['thread-project-assignments'][ssh.result.thread.id].hostId, hostId);
+  const nativeRemoteProject = [...remote.projects.values()].find(project => record(project.metadata)[sidebarMetadata.legacyIds] === JSON.stringify(['remote-project']))!;
+  assert.equal(remote.threads.get(ssh.result.thread.id)!.projectId, nativeRemoteProject.id);
+  assert.equal(h.fake.threads.get(local.result.thread.id)!.projectId, null);
+  assert.equal(persisted.globals['thread-project-assignments'], undefined);
   const unknown = await client.rpc(2, 'thread/start', { cwd: '/wrong' }, 'remote-ssh-discovered:unknown');
   assert.match(unknown.error.message, /未登记/);
   assert.equal(remote.calls('thread/start').length, 1);
@@ -745,25 +805,188 @@ test('SSH RPC, events and approvals retain their host and never receive a local 
   assert.equal(remote.calls('thread/start').length, 1);
 });
 
-test('a project chat saves membership before its first turn, persists it and notifies other pages', async t => {
+test('a disconnected SSH host cannot block local sidebar refresh, order or sections and is not reconnected by those reads', async t => {
+  const root = await mkdtemp('/tmp/aw-sidebar-disconnect-'), remote = await createFakeCodex(root);
+  t.after(async () => { await remote.close(); await rm(root, { recursive: true, force: true }); });
+  const hostId = 'remote-ssh-discovered:sidebar', streams: ReturnType<typeof createConnection>[] = [];
+  const h = await fixture(t, undefined, undefined, {
+    hostCatalog: { hosts: [{ hostId, displayName: 'Remote sidebar', sshAlias: 'sidebar', sshHost: 'sidebar', sshPort: null, identity: null }], projects: [], assignments: {} },
+    sshStream: () => { const stream = createConnection(remote.socketPath); streams.push(stream); return stream; },
+  });
+  const client = await h.connect();
+  let sequence = 0;
+  async function host(endpoint: string, body: Record<string, unknown> = {}) {
+    const requestId = 'sidebar-disconnect-' + ++sequence;
+    client.send({ type: 'fetch', requestId, url: 'vscode://codex/' + endpoint, body: JSON.stringify(body) });
+    const response = await client.until(message => message.type === 'fetch-response' && message.requestId === requestId);
+    assert.equal(response.responseType, 'success', JSON.stringify(response));
+    return response.body;
+  }
+  const localProject = (await client.rpc(1, 'project/create', { name: 'Local project', roots: [{ path: h.root }] })).result.project;
+  const remoteProject = (await client.rpc(2, 'project/create', { name: 'Remote project', roots: [{ path: '/remote' }] }, hostId)).result.project;
+  const localSection = (await client.rpc(3, 'threadSection/create', { name: 'Local section', appearance: null })).result.section;
+  const remoteSection = (await client.rpc(4, 'threadSection/create', { name: 'Remote section', appearance: null }, hostId)).result.section;
+  for (const [backend, cwd, prefix, section] of [[h.fake, h.root, 'local', localSection], [remote, '/remote', 'remote', remoteSection]] as const) {
+    backend.threads.set(prefix + '-member', fixtureThread(prefix + '-member', cwd));
+    backend.threads.set(prefix + '-pin', fixtureThread(prefix + '-pin', cwd));
+    const executionHost = prefix === 'local' ? 'local' : hostId;
+    await client.rpc(5, 'thread/section/move', { threadId: prefix + '-member', sectionId: section.id }, executionHost);
+    await client.rpc(6, 'thread/section/move', { threadId: prefix + '-pin', sectionId: PINNED_SECTION_ID }, executionHost);
+  }
+  assert.deepEqual((await host('sidebar-orders')).projects, [
+    { id: localProject.id, hostId: 'local' }, { id: remoteProject.id, hostId },
+  ]);
+  assert.deepEqual((await host('pinned-thread-sections', { operation: 'list' })).hostIds, ['local', hostId]);
+  assert.equal(streams.length, 1);
+  const disconnectStart = client.messages.length;
+  for (const stream of streams) stream.destroy();
+  await client.until(message => client.messages.indexOf(message) >= disconnectStart &&
+    message.type === 'codex-app-server-connection-changed' && message.hostId === hostId && message.state === 'disconnected');
+  const attempts = streams.length, remoteRequests = remote.messages.length;
+  h.fake.sections.get(localSection.id)!.name = 'Local section after disconnect';
+  assert.deepEqual(await host('sidebar-refresh'), { success: true, failedHostIds: [] });
+  const order = await host('sidebar-orders');
+  assert.deepEqual(order.projects, [{ id: localProject.id, hostId: 'local' }]);
+  assert.deepEqual(order.pins, [{ id: 'local-pin', hostId: 'local' }]);
+  const sections = await host('pinned-thread-sections', { operation: 'list' });
+  assert.deepEqual(sections.hostIds, ['local']);
+  assert.deepEqual(sections.sections, [{ ...localSection, name: 'Local section after disconnect', threadIds: ['local-member'], hostId: 'local' }]);
+  assert.equal(streams.length, attempts, 'default sidebar reads must not reconnect a disconnected SSH transport');
+  assert.equal(remote.messages.length, remoteRequests, 'local sidebar reads must not send RPCs to the disconnected host');
+});
+
+test('an old SSH backend retains ordinary RPCs and legacy membership and pins, then migrates after a newer initialize on reconnect', async t => {
+  const root = await mkdtemp('/tmp/aw-sidebar-old-backend-'), remote = await createFakeCodex(root);
+  t.after(async () => { await remote.close(); await rm(root, { recursive: true, force: true }); });
+  const hostId = 'remote-ssh-discovered:old', streams: ReturnType<typeof createConnection>[] = [];
+  let version = '0.147.0';
+  remote.handlers.set('initialize', () => ({ userAgent: 'disposable-codex-fixture/' + version }));
+  const newerMethods = ['project/list', 'project/read', 'project/create', 'project/update', 'project/move', 'project/delete',
+    'threadSection/list', 'threadSection/create', 'threadSection/update', 'threadSection/delete', 'thread/metadata/update', 'thread/section/move'];
+  for (const method of newerMethods) remote.handlers.set(method, () => { throw new Error('Old backend does not support ' + method); });
+  const h = await fixture(t, undefined, undefined, {
+    hostCatalog: { hosts: [{ hostId, displayName: 'Old SSH', sshAlias: 'old', sshHost: 'old', sshPort: null, identity: null }],
+      projects: [{ hostId, id: 'old-project', remotePath: '/old', label: 'Old project' }], assignments: {} },
+    sshStream: () => { const stream = createConnection(remote.socketPath); streams.push(stream); return stream; },
+  });
+  remote.threads.set('old-chat', fixtureThread('old-chat', '/old'));
+  const client = await h.connect();
+  assert.equal((await client.rpc(1, 'thread/list', {}, hostId)).result.data[0].id, 'old-chat');
+  const initialized = await client.until(message => message.type === 'codex-app-server-initialized' && message.hostId === hostId);
+  assert.equal(initialized.appServerVersion, '0.147.0'); assert.equal(initialized.yardSidebarStateAvailable, false);
+  const assignment = { projectKind: 'remote', projectId: 'old-project', hostId };
+  assert.equal((await projectRequest(client, 'old-start-id', 'getThreadStartProjectId', assignment)).body, null);
+  assert.equal((await projectRequest(client, 'old-membership', 'setMembership', { threadId: 'old-chat', hostId, assignment, projectless: false })).responseType, 'success');
+  client.send({ type: 'fetch', requestId: 'old-pin', url: 'vscode://codex/set-thread-pinned', body: JSON.stringify({ threadId: 'old-chat', hostId, pinned: true }) });
+  assert.equal((await client.until(message => message.requestId === 'old-pin')).responseType, 'success');
+  const persisted = JSON.parse(await readFile(join(h.root, 'data/native-state.json'), 'utf8')).globals;
+  assert.deepEqual(persisted['thread-project-assignments'], { 'old-chat': assignment });
+  assert.deepEqual(persisted['pinned-thread-ids'], ['old-chat']);
+  assert.equal(persisted['remote-projects'][0].id, 'old-project');
+  assert.equal(remote.messages.some(message => newerMethods.includes(String(message.method))), false);
+  assert.deepEqual((await client.rpc(2, 'thread/list')).result.data, []);
+  const reconnectStart = client.messages.length;
+  for (const stream of streams) stream.destroy();
+  await client.until(message => client.messages.indexOf(message) >= reconnectStart &&
+    message.type === 'codex-app-server-connection-changed' && message.hostId === hostId && message.state === 'disconnected');
+  version = '0.164.0'; for (const method of newerMethods) remote.handlers.delete(method);
+  const upgraded = await client.rpc(3, 'thread/list', {}, hostId);
+  assert.equal(upgraded.error, undefined);
+  const project = [...remote.projects.values()][0]!;
+  assert.equal(upgraded.result.data[0].projectId, project.id);
+  assert.deepEqual(remote.sectionMembers.get(PINNED_SECTION_ID), ['old-chat']);
+  assert.equal((await client.until(message => client.messages.indexOf(message) >= reconnectStart &&
+    message.type === 'codex-app-server-initialized' && message.hostId === hostId)).yardSidebarStateAvailable, true);
+  const migrated = JSON.parse(await readFile(join(h.root, 'data/native-state.json'), 'utf8')).globals;
+  for (const key of ['remote-projects', 'thread-project-assignments', 'pinned-thread-ids']) assert.equal(migrated[key], undefined, key);
+});
+
+test('native create_thread resolves a cold remote legacy project before start and preserves old backend creation', async t => {
+  for (const version of ['0.164.0', '0.147.0']) await t.test(version, async t => {
+    const root = await mkdtemp('/tmp/aw-cold-remote-create-'), remote = await createFakeCodex(root);
+    t.after(async () => { await remote.close(); await rm(root, { recursive: true, force: true }); });
+    const hostId = 'remote-ssh-discovered:cold';
+    let connections = 0;
+    remote.handlers.set('initialize', () => ({ userAgent: 'disposable-codex-fixture/' + version }));
+    const h = await fixture(t, undefined, undefined, {
+      hostCatalog: { hosts: [{ hostId, displayName: 'Cold SSH', sshAlias: 'cold', sshHost: 'cold', sshPort: null, identity: null }],
+        projects: [{ hostId, id: 'legacy-project', remotePath: '/remote/project', label: 'Remote project' }], assignments: {} },
+      sshStream: () => { connections++; return createConnection(remote.socketPath); },
+    });
+    h.fake.threads.set('caller', fixtureThread('caller', h.root, { turns: [fixtureTurn('calling-turn')] }));
+    assert.equal(connections, 0);
+    const socket = createConnection(join(h.root, 'data/app-tools.sock'));
+    t.after(() => socket.destroy());
+    let buffer = Buffer.alloc(0);
+    const messages: Record<string, any>[] = [];
+    socket.on('data', chunk => {
+      buffer = Buffer.concat([buffer, typeof chunk === 'string' ? Buffer.from(chunk) : chunk]);
+      while (buffer.length >= 4 && buffer.length >= buffer.readUInt32LE(0) + 4) {
+        const size = buffer.readUInt32LE(0);
+        messages.push(JSON.parse(buffer.subarray(4, 4 + size).toString('utf8')));
+        buffer = buffer.subarray(4 + size); socket.emit('reply');
+      }
+    });
+    await once(socket, 'connect');
+    const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+      callerSource: 'codex', hostId: 'local', threadId: 'caller', turnId: 'calling-turn', callId: 'cold-create',
+      namespace: 'codex_app', tool: 'create_thread', arguments: { prompt: 'Work in the remote project',
+        target: { type: 'project', projectId: 'legacy-project', environment: { type: 'local' } } },
+    } }));
+    const header = Buffer.alloc(4); header.writeUInt32LE(body.length); socket.write(Buffer.concat([header, body]));
+    const signal = AbortSignal.timeout(5000);
+    while (!messages.length) await once(socket, 'reply', { signal });
+    const reply = messages[0]!;
+    assert.equal(reply.error, undefined, JSON.stringify(reply));
+    assert.equal(reply.result.success, true, JSON.stringify(reply));
+    const created = JSON.parse(reply.result.contentItems[0].text);
+    assert.equal(created.hostId, hostId); assert.equal(connections, 1);
+    const starts = remote.calls('thread/start'); assert.equal(starts.length, 1);
+    const saved = JSON.parse(await readFile(join(h.root, 'data/native-state.json'), 'utf8')).globals;
+    if (version === '0.164.0') {
+      const project = [...remote.projects.values()][0]!;
+      assert.notEqual(project.id, 'legacy-project'); assert.equal(starts[0]!.params.projectId, project.id);
+      assert.equal(remote.threads.get(created.threadId)!.projectId, project.id);
+      assert.equal(saved['thread-project-assignments'], undefined);
+      assert.equal(remote.calls('thread/metadata/update').length, 0, 'canonical projectId belongs in thread/start before a rollout exists');
+    } else {
+      assert.equal(Object.hasOwn(starts[0]!.params, 'projectId'), false);
+      assert.deepEqual(saved['thread-project-assignments'][created.threadId], { projectKind: 'remote', projectId: 'legacy-project', hostId });
+      assert.equal(remote.messages.some(message => String(message.method).startsWith('project/') || String(message.method).startsWith('threadSection/') ||
+        message.method === 'thread/metadata/update' || message.method === 'thread/section/move'), false);
+    }
+  });
+});
+
+test('a project chat saves backend membership before its first turn and notifies other pages', async t => {
   const h = await fixture(t), client = await h.connect(), other = await h.connect();
-  const { result: { thread } } = await client.rpc(1, 'thread/start', { cwd: h.root });
+  const project = (await client.rpc(90, 'project/create', { name: 'Fixture project', roots: [{ path: h.root }],
+    metadata: { [sidebarMetadata.legacyIds]: JSON.stringify([h.root]) }, idempotencyKey: 'membership-project' })).result.project;
   const assignment = { projectKind: 'local', projectId: h.root };
+  const startProject = await projectRequest(client, 'start-project', 'getThreadStartProjectId', assignment);
+  assert.equal(startProject.body, project.id);
+  const { result: { thread } } = await client.rpc(1, 'thread/start', { cwd: h.root, projectId: startProject.body });
+  const canonicalAssignment = { projectKind: 'local', projectId: project.id };
   const saved = await projectRequest(client, 'assign', 'setAssignment', { threadId: thread.id, hostId: 'local', assignment });
   assert.equal(saved.responseType, 'success');
   const event = await other.until(message => message.type === 'thread-project-memberships-updated');
-  assert.deepEqual(event.memberships[thread.id], { assignment, projectless: false });
+  assert.deepEqual(event.memberships[thread.id], { assignment: canonicalAssignment, projectless: false });
   const persisted = JSON.parse(await readFile(join(h.root, 'data', 'native-state.json'), 'utf8'));
-  assert.deepEqual(persisted.globals['thread-project-assignments'][thread.id], assignment);
+  assert.equal(h.fake.threads.get(thread.id)!.projectId, project.id);
+  assert.equal(h.fake.calls('thread/metadata/update').length, 0, 'thread/start already owns first-turn membership');
+  assert.equal(persisted.globals['thread-project-assignments'], undefined);
   assert.ok((await client.rpc(2, 'turn/start', { threadId: thread.id, input: [{ type: 'text', text: 'first project message' }] })).result);
   assert.equal(h.fake.calls('turn/start').length, 1);
-  const reloaded = createThreadProjects(persisted.globals, async () => {}, () => {});
-  const beforeMove = await reloaded('moveLocalProjectThreadsToProjectless', h.root);
-  assert.deepEqual(beforeMove, [{ threadId: thread.id, assignment, projectless: false }]);
+  const beforeMove = await projectRequest(client, 'move-projectless', 'moveLocalProjectThreadsToProjectless', h.root);
+  assert.deepEqual(beforeMove.body, [{ threadId: thread.id, assignment: canonicalAssignment, projectless: false }]);
+  assert.equal(h.fake.threads.get(thread.id)!.projectId, null);
 });
 
 test('concurrent membership writes retain both chats and invalid restore batches leave state untouched', async t => {
   const h = await fixture(t), a = await h.connect(), b = await h.connect();
+  const project = (await a.rpc(90, 'project/create', { name: 'Fixture project', roots: [{ path: h.root }],
+    metadata: { [sidebarMetadata.legacyIds]: JSON.stringify([h.root]) }, idempotencyKey: 'concurrent-project' })).result.project;
+  for (const id of ['chat-a', 'chat-b']) h.fake.threads.set(id, fixtureThread(id, h.root));
   const assignment = { projectKind: 'local', projectId: h.root };
   const writes = await Promise.all([
     projectRequest(a, 'a', 'setAssignment', { threadId: 'chat-a', assignment }),
@@ -772,7 +995,9 @@ test('concurrent membership writes retain both chats and invalid restore batches
   assert.ok(writes.every(reply => reply.responseType === 'success'));
   const before = await readFile(join(h.root, 'data', 'native-state.json'), 'utf8');
   const state = JSON.parse(before).globals;
-  assert.deepEqual(state['thread-project-assignments'], { 'chat-a': assignment });
+  assert.equal(h.fake.threads.get('chat-a')!.projectId, project.id);
+  assert.equal(h.fake.threads.get('chat-b')!.projectId, null);
+  assert.equal(state['thread-project-assignments'], undefined);
   assert.deepEqual(state['projectless-thread-ids'], ['chat-b']);
   const invalid = await projectRequest(a, 'invalid', 'restoreMemberships', [
     { threadId: 'chat-a', assignment: null, projectless: true },
@@ -795,8 +1020,8 @@ test('projectless hints persist and stale hint writes cannot resurrect removed m
   await projectRequest(client, 'stale', 'updateProjectlessThread', value);
   state = JSON.parse(await readFile(join(h.root, 'data', 'native-state.json'), 'utf8')).globals;
   assert.deepEqual(state['projectless-thread-ids'], []);
-  assert.deepEqual(state['thread-projectless-output-directories'], {});
-  assert.deepEqual(state['thread-workspace-root-hints'], {});
+  assert.equal(state['thread-projectless-output-directories'], undefined);
+  assert.equal(state['thread-workspace-root-hints'], undefined);
 });
 
 test('a failed membership save rejects, restores memory and allows a later save', async () => {
@@ -843,6 +1068,38 @@ test('hashed renderer assets are compressed and reusable while the HTML and owne
   assert.equal(await raw.text(), source);
   for (const path of ['/', '/workbench-entry.js', '/native-host.js', '/api/status']) {
     assert.equal((await fetch(h.app.url + path)).headers.get('cache-control'), 'no-store');
+  }
+  for (const name of ['workbench-entry.js', 'native-host.js']) {
+    const original = await readFile(new URL('../.local/' + name, import.meta.url), 'utf8');
+    const compressed = await fetch(h.app.url + '/' + name, { headers: { 'Accept-Encoding': 'gzip' } });
+    assert.equal(compressed.headers.get('content-encoding'), 'gzip');
+    assert.equal(compressed.headers.get('vary'), 'Accept-Encoding');
+    assert.equal(await compressed.text(), original);
+    const identity = await fetch(h.app.url + '/' + name, { headers: { 'Accept-Encoding': 'gzip;q=0, identity' } });
+    assert.equal(identity.headers.get('content-encoding'), null);
+    assert.equal(await identity.text(), original);
+    assert.equal(await (await fetch(h.app.url + '/' + name, { method: 'HEAD' })).text(), '');
+  }
+});
+
+test('startup assets negotiate Brotli while preserving gzip and identity', async t => {
+  const h = await fixture(t);
+  await mkdir(join(h.root, 'renderer', 'assets'));
+  const source = 'export const fixture = ' + JSON.stringify('startup translations '.repeat(400)) + ';';
+  await writeFile(join(h.root, 'renderer', 'assets', new URL(rendererAssets.locale, h.app.url).pathname.split('/').at(-1)!), source);
+  for (const [accept, expected] of [
+    ['gzip, br', 'br'],
+    ['gzip;q=0.3, BR;q=0.7', 'br'],
+    ['gzip;q=0.8, br;q=0.3', 'gzip'],
+    ['gzip, br;q=0', 'gzip'],
+    ['gzip;q=0, br;q=0, identity', null],
+  ] as const) {
+    const response = await fetch(h.app.url + rendererAssets.locale, { headers: { 'Accept-Encoding': accept } });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-encoding'), expected);
+    assert.equal(response.headers.get('vary'), 'Accept-Encoding');
+    assert.equal(response.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+    assert.equal(await response.text(), source);
   }
 });
 
@@ -1058,6 +1315,46 @@ test('native prewarming, notifications and approval answers use the real RPC bri
   assert.deepEqual((await h.fake.waitFor((message: Record<string, unknown>) => message.id === 'approval' && message.result)).result, { decision: 'decline' });
 });
 
+for (const replyFirst of [true, false]) test(`prewarms stay private across pages with ${replyFirst ? 'reply' : 'notification'} first, then publish the same ID once`, async t => {
+  const h = await fixture(t), a = await h.connect(), b = await h.connect();
+  await b.rpc(1, 'config/read');
+  h.fake.handlers.set('thread/start', (params, { message, send }) => {
+    const result = record(h.fake.defaultResult('thread/start', params));
+    // CLI can announce the ID before replying, even on another connection.
+    if (!replyFirst) h.fake.broadcast({ method: 'thread/started', params: { thread: result.thread } });
+    send({ id: message.id, result });
+    if (replyFirst) send({ method: 'thread/started', params: { thread: result.thread } });
+    return NO_REPLY;
+  });
+  a.send({ type: 'thread-prewarm-start', request: { id: 'private', method: 'thread/start', params: { cwd: h.root } } });
+  const { thread } = (await a.until(value => value.message?.id === 'private')).message.result;
+  h.fake.broadcast({ method: 'thread/started', params: { thread } });
+  for (const client of [a, b]) {
+    assert.equal((await client.rpc(2, 'thread/list')).result.data.length, 0);
+    assert.equal(client.messages.filter(value => value.method === 'thread/started').length, 0);
+  }
+  a.send({ type: 'fetch', requestId: 'private-startup', url: 'vscode://codex/startup-sidebar', body: '{}' });
+  const startup = await a.until(value => value.requestId === 'private-startup');
+  assert.deepEqual(startup.body.threads, []);
+  const { result: { turn } } = await b.rpc(3, 'turn/start', { threadId: thread.id, input: [{ type: 'text', text: 'First' }] });
+  h.fake.broadcast({ method: 'turn/started', params: { threadId: thread.id, turn } });
+  h.fake.broadcast({ method: 'thread/started', params: { thread } });
+  for (const client of [a, b]) {
+    assert.equal((await client.rpc(4, 'thread/list')).result.data[0].id, thread.id);
+    const starts = client.messages.filter(value => value.method === 'thread/started');
+    assert.equal(starts.length, 1); assert.equal(starts[0]!.params.thread.id, thread.id);
+  }
+  assert.match((await a.rpc(5, 'thread/delete', { threadId: thread.id })).error.message, /未使用/);
+  // A normal empty thread and an intentional name must not inherit prewarm policy.
+  const ordinary = fixtureThread('ordinary-empty', h.root), named = fixtureThread('named', h.root, { name: 'New chat' });
+  for (const value of [ordinary, named]) { h.fake.threads.set(value.id, value); h.fake.broadcast({ method: 'thread/started', params: { thread: value } }); }
+  const listed = (await a.rpc(6, 'thread/list')).result.data;
+  assert.ok(listed.some((value: { id: string }) => value.id === ordinary.id));
+  assert.ok(listed.some((value: { name: string }) => value.name === 'New chat'));
+  a.send({ type: 'thread-prewarm-start', request: { id: 'invalid-prewarm', method: 'turn/start', params: {} } });
+  assert.match((await a.until(value => value.message?.id === 'invalid-prewarm')).message.error.message, /只接受 thread\/start/);
+});
+
 test('official model config batches preserve profile targets, backend errors and the selected host', async t => {
   const remoteRoot = await mkdtemp('/tmp/aw-model-remote-'), remote = await createFakeCodex(remoteRoot);
   t.after(async () => { await remote.close(); await rm(remoteRoot, { recursive: true, force: true }); });
@@ -1098,7 +1395,9 @@ test('manual compaction preserves the selected host, progress events and backend
     sshStream: () => createConnection(remote.socketPath),
   });
   const client = await h.connect(), params = { threadId: 'same-thread-id' };
-  for (const backend of [h.fake, remote]) backend.handlers.set('thread/compact/start', received => {
+  let sendRemoteProgress: ((value: unknown) => void) | undefined;
+  for (const backend of [h.fake, remote]) backend.handlers.set('thread/compact/start', (received, context) => {
+    if (backend === remote) sendRemoteProgress = context.send;
     assert.deepEqual(received, params); return {};
   });
   assert.deepEqual((await client.rpc(1, 'thread/compact/start', params, hostId)).result, {});
@@ -1106,7 +1405,7 @@ test('manual compaction preserves the selected host, progress events and backend
   assert.equal(h.fake.calls('thread/compact/start').length, 0);
   const progress = { ...params, turnId: 'compact-turn', item: { type: 'contextCompaction', id: 'compact-item' } };
   for (const method of ['item/started', 'item/completed']) {
-    remote.send({ method, params: progress });
+    sendRemoteProgress!({ method, params: progress });
     const event = await client.until(message => message.type === 'mcp-notification' && message.method === method);
     assert.equal(event.hostId, hostId);
     assert.deepEqual(event.params, progress);
@@ -1305,18 +1604,62 @@ test('prewarm cleanup preserves existing, populated and running conversations', 
     return {};
   });
   assert.match((await client.rpc(1, 'thread/delete', { threadId: 'existing' })).error.message, /空预热对话/);
-  const { result: { thread } } = await client.rpc(2, 'thread/start', { cwd: h.root });
+  const prewarm = async (id: string) => {
+    client.send({ type: 'thread-prewarm-start', request: { id, method: 'thread/start', params: { cwd: h.root } } });
+    return (await client.until(value => value.message?.id === id)).message.result.thread;
+  };
+  const thread = await prewarm('populated');
   const stored = h.fake.threads.get(thread.id)!;
   stored.turns.push({ id: 'populated', items: [], status: 'completed' });
   assert.match((await client.rpc(3, 'thread/delete', { threadId: thread.id })).error.message, /已有内容/);
-  stored.turns.length = 0;
-  stored.status = { type: 'active' };
-  assert.match((await client.rpc(4, 'thread/delete', { threadId: thread.id })).error.message, /保留当前数据/);
+  const running = await prewarm('running');
+  h.fake.threads.get(running.id)!.status = { type: 'active' };
+  assert.match((await client.rpc(4, 'thread/delete', { threadId: running.id })).error.message, /保留当前数据/);
   assert.equal(h.fake.calls('thread/delete').length, 0);
-  stored.status = { type: 'idle' };
-  assert.deepEqual((await client.rpc(5, 'thread/delete', { threadId: thread.id })).result, {});
-  assert.equal(h.fake.calls('thread/delete').length, 1);
+  for (const historyMode of ['paginated', 'legacy']) {
+    const unused = await prewarm(historyMode);
+    h.fake.threads.get(unused.id)!.historyMode = historyMode;
+    assert.deepEqual((await client.rpc(5, 'thread/delete', { threadId: unused.id })).result, {});
+  }
+  assert.equal(h.fake.calls('thread/delete').length, 2);
   assert.ok(h.fake.threads.has('existing'));
+  assert.ok(h.fake.threads.has(thread.id)); assert.ok(h.fake.threads.has(running.id));
+});
+
+test('prewarm cleanup accepts the exact unmaterialized-history response and preserves other failures', async t => {
+  const h = await fixture(t), client = await h.connect();
+  h.fake.handlers.set('thread/delete', params => { h.fake.threads.delete(String(params.threadId)); return {}; });
+  for (const failure of ['unmaterialized', 'wrong-thread', 'wrong-code', 'unavailable']) {
+    client.send({ type: 'thread-prewarm-start', request: { id: failure, method: 'thread/start', params: { cwd: h.root } } });
+    const { thread } = (await client.until(value => value.message?.id === failure)).message.result;
+    h.fake.handlers.set('thread/turns/list', (_params, { message, send }) => {
+      send({ id: message.id, error: { code: failure === 'wrong-code' ? -32000 : -32600,
+        message: failure === 'unavailable' ? 'History temporarily unavailable' :
+          `thread ${failure === 'wrong-thread' ? 'another-thread' : thread.id} is not materialized yet; thread/turns/list is unavailable before first user message` } });
+      return NO_REPLY;
+    });
+    const reply = await client.rpc(1, 'thread/delete', { threadId: thread.id });
+    if (failure === 'unmaterialized') { assert.deepEqual(reply.result, {}); assert.ok(!h.fake.threads.has(thread.id)); }
+    else { assert.ok(reply.error); assert.ok(h.fake.threads.has(thread.id)); }
+  }
+  assert.equal(h.fake.calls('thread/delete').length, 1);
+});
+
+test('a first send while prewarm cleanup reads history prevents deletion', async t => {
+  const h = await fixture(t), a = await h.connect(), b = await h.connect();
+  await b.rpc(1, 'config/read');
+  a.send({ type: 'thread-prewarm-start', request: { id: 'cleanup-race', method: 'thread/start', params: { cwd: h.root } } });
+  const { thread } = (await a.until(value => value.message?.id === 'cleanup-race')).message.result;
+  let releaseHistory: () => void = () => {};
+  const history = new Promise<void>(resolve => { releaseHistory = resolve; });
+  h.fake.handlers.set('thread/turns/list', async () => { await history; return { data: [], nextCursor: null }; });
+  const deletion = a.rpc(2, 'thread/delete', { threadId: thread.id });
+  await h.fake.waitForCall('thread/turns/list');
+  await b.rpc(2, 'turn/start', { threadId: thread.id, input: [{ type: 'text', text: 'Keep this task' }] });
+  releaseHistory();
+  assert.match((await deletion).error.message, /未使用/);
+  assert.equal(h.fake.calls('thread/delete').length, 0);
+  assert.ok(h.fake.threads.has(thread.id));
 });
 
 test('persisted Chinese drafts retain native values and reject stale writes', () => {

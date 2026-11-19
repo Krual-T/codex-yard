@@ -10,7 +10,8 @@ import { homedir, hostname } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { CodexConnection } from '../../lib/codex.ts';
+import { CodexConnection, RpcError } from '../../lib/codex.ts';
+import type { RpcMessage } from '../../lib/codex.ts';
 import { createAppTools } from '../../lib/app-tools.ts';
 import { computerConfig } from '../../lib/computer.ts';
 import { createHostToolHandler } from '../../lib/host-tools.ts';
@@ -21,10 +22,12 @@ import { record, readMethods, writeMethods } from './protocol.ts';
 import type { HostMessage, ObjectValue } from './protocol.ts';
 import { createThreadProjects } from './thread-projects.ts';
 import { createThreadPins } from './thread-pins.ts';
+import { createBackendSidebarState } from './backend-sidebar-state.ts';
+import { PrewarmedThreads } from './prewarmed-threads.ts';
 import type { ThreadProjectOperation } from './thread-projects.ts';
 import { configurationRequest, httpFailure } from './http-fetch.ts';
 import type { HttpWireRequest } from './http-fetch.ts';
-import { rendererAssets as assets } from './renderer-assets.ts';
+import { rendererAssets as assets, startupApplicationFile } from './renderer-assets.ts';
 import { RendererCache } from './renderer-cache.ts';
 import { loadConfigurationSnapshot } from './configuration-snapshot.ts';
 import { discoverSshAliases, loadHostCatalog, publicHost, savedSshHosts } from './hosts.ts';
@@ -58,7 +61,15 @@ import { adaptFileAttachmentModule } from './file-attachment-renderer.ts';
 import { localHtmlPreview } from './local-html-preview.ts';
 import { adaptNewTabModule } from './new-tab-renderer.ts';
 import { adaptConversationHistory } from './conversation-history-renderer.ts';
+import { adaptStartupModule } from './startup-renderer.ts';
+import { adaptMessageSubmission } from './message-submission-renderer.ts';
 import { startupSidebar } from './startup-sidebar.ts';
+import { adaptThreadReadState } from './thread-read-state-renderer.ts';
+import { adaptStateConvergence } from './state-convergence-renderer.ts';
+import { adaptSidebarState } from './sidebar-state-renderer.ts';
+import { adaptSidebarLayout } from './sidebar-layout-renderer.ts';
+import { adaptSidechatThreads } from './sidechat-thread-renderer.ts';
+import { supportsAttachedThreads } from '../../lib/codex-protocol.ts';
 import { createBrowserNotifications, notificationRoute } from './notifications.ts';
 import { ModelProviders } from './model-providers.ts';
 import { ProviderRouting } from './provider-routing.ts';
@@ -76,13 +87,18 @@ const compress = promisify(gzip);
 function serverVersion(connection: CodexConnection) {
   return connection.server?.userAgent.match(/^[^/]+\/(\S+)/)?.[1] ?? null;
 }
-function acceptsGzip(value = '') {
-  return value.split(',').some(encoding => {
-    const [name, ...parameters] = encoding.trim().split(';');
-    const quality = parameters.find(parameter => parameter.trim().startsWith('q='));
-    return name === 'gzip' && (quality === undefined || Number(quality.trim().slice(2)) > 0);
-  });
+function encodingQuality(value: string | undefined, coding: 'gzip' | 'br') {
+  for (const encoding of value?.split(',') ?? []) {
+    const [name, ...parameters] = encoding.split(';');
+    if (name?.trim().toLowerCase() !== coding) continue;
+    const quality = parameters.find(parameter => /^\s*q\s*=/i.test(parameter));
+    const q = quality === undefined ? 1 : Number(quality.split('=')[1]?.trim());
+    return q > 0 && q <= 1 ? q : 0;
+  }
+  return 0;
 }
+const acceptsGzip = (value?: string) => encodingQuality(value, 'gzip') > 0;
+const brotliStartupBundles = new Set<string>([assets.shared, assets.application, assets.primary, assets.locale]);
 
 async function readRendererAsset(file: string, path: string, webRenderer: boolean) {
   let content: Buffer = await readFile(file);
@@ -97,6 +113,13 @@ async function readRendererAsset(file: string, path: string, webRenderer: boolea
     content = adaptFileAttachmentModule(path, content);
     content = adaptNewTabModule(path, content);
     content = adaptConversationHistory(path, content);
+    content = adaptThreadReadState(path, content);
+    content = adaptStateConvergence(path, content);
+    content = adaptSidebarState(path, content);
+    content = adaptSidechatThreads(path, content);
+    content = adaptSidebarLayout(path, content);
+    content = adaptStartupModule(path, content);
+    content = adaptMessageSubmission(path, content);
   }
   return content;
 }
@@ -109,6 +132,10 @@ export async function createNativeWorkbench(options: Options = {}) {
   const socketPath = options.socketPath || process.env.AGENTS_CODEX_SOCKET || join(codexHome, 'app-server-control', 'app-server-control.sock');
   const dataDir = options.dataDir || process.env.AGENTS_DATA_DIR || join(projectRoot, '.local');
   const renderer = options.renderer || rendererRoot;
+  function loadWebResource(file: string, path: string, webRenderer: boolean) {
+    const staged = !options.renderer && webRenderer && path === '/assets/' + startupApplicationFile;
+    return readRendererAsset(staged ? join(projectRoot, '.local', startupApplicationFile) : file, path, webRenderer);
+  }
   const publicOrigin = options.publicOrigin ?? process.env.AGENTS_PUBLIC_ORIGIN ?? '';
   const chromeConnection = options.chromeConnection ?? chromeConnectionFromEnv();
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid PORT');
@@ -122,6 +149,9 @@ export async function createNativeWorkbench(options: Options = {}) {
   if (metadata.version !== rendererVersion) throw new Error('仓库内的 App 资源版本不匹配，请核对 vendor/codex-app 与当前代码版本');
   const browserHost = await readFile(join(projectRoot, '.local', 'native-host.js'));
   const browserEntry = await readFile(join(projectRoot, '.local', 'workbench-entry.js'));
+  const [compressedBrowserHost, compressedBrowserEntry] = await Promise.all([
+    compress(browserHost, { level: 6 }), compress(browserEntry, { level: 6 }),
+  ]);
   const notificationWorker = await readFile(join(projectRoot, '.local', 'notification-worker.js'));
   const sandboxScript = await readFile(join(projectRoot, '.local', 'visualization-sandbox.js'), 'utf8');
   const sandboxHtml = '<!doctype html><html><head><meta charset="utf-8"><title>Visualization</title></head><body><script>' +
@@ -140,7 +170,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     assets.locale, assets.applicationStyle, assets.userMessageStyle,
   ].map(url => {
     const path = url.slice(webRendererPrefix.length), file = resolve(renderer, '.' + path);
-    return rendererCache.load('web:' + file, () => readRendererAsset(file, path, true), true);
+    return rendererCache.load('web:' + file, () => loadWebResource(file, path, true), true, brotliStartupBundles.has(url));
   }));
   const html = withVisualFeedback((await readFile(join(renderer, 'index.html'), 'utf8'))
     // Both the desktop document policy and our response policy apply to frames.
@@ -153,6 +183,9 @@ export async function createNativeWorkbench(options: Options = {}) {
       // before the first user message, including optimistic/new conversations.
       [assets.applicationStyle, assets.userMessageStyle]
         .map(path => `<link rel="stylesheet" crossorigin href="${path}">`).join('') + '</head>')
+    // The initial view owns its CSS. Download workspace styles without blocking
+    // that view; the browser entry enables and awaits them before root.render.
+    .replaceAll('<link rel="stylesheet"', '<link rel="preload" as="style" data-yard-workspace-style')
     .replace('<script type="module"', '<script src="/native-host.js"></script><script type="module"'));
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   await chmod(dataDir, 0o700);
@@ -179,7 +212,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       let connection = hostId === 'local' ? control : fileConnections.get(hostId);
       if (!connection) {
         connection = new CodexConnection('', { createConnection: () => (options.sshStream ?? createSshProxyStream)(sshHosts.get(hostId)!, paths => hostPaths.set(hostId, paths)), connectTimeout: 20_000 });
-        connection.on('message', message => notifications.observe(hostId, message));
+        connection.on('message', message => observeBackend(hostId, message));
         fileConnections.set(hostId, connection);
       }
       await connection.connect();
@@ -187,12 +220,17 @@ export async function createNativeWorkbench(options: Options = {}) {
     },
   });
   function validHost(hostId: string) { if (hostId !== 'local' && !sshHosts.has(hostId)) throw new Error('未登记的执行主机：' + hostId); }
-  if (!globals['remote-projects']) globals['remote-projects'] = catalog.projects;
-  globals['thread-project-assignments'] = { ...catalog.assignments, ...record(globals['thread-project-assignments']) };
-  const projects = await load('projects.json', []) as { path: string; name: string }[];
-  if (!globals['local-projects']) globals['local-projects'] = Object.fromEntries(projects.map(project => [project.path, {
-    id: project.path, name: project.name, rootPaths: [project.path], createdAt: Date.now(), updatedAt: Date.now(),
-  }]));
+  // The desktop catalog and old projects file are migration input once. A
+  // later backend deletion must survive a restart of Yard.
+  if (globals['yard-legacy-catalog-imported'] !== true) {
+    globals['remote-projects'] ??= catalog.projects;
+    globals['thread-project-assignments'] = { ...catalog.assignments, ...record(globals['thread-project-assignments']) };
+    const projects = await load('projects.json', []) as { path: string; name: string }[];
+    globals['local-projects'] ??= Object.fromEntries(projects.map(project => [project.path, {
+      id: project.path, name: project.name, rootPaths: [project.path], createdAt: Date.now(), updatedAt: Date.now(),
+    }]));
+    globals['yard-legacy-catalog-imported'] = true;
+  }
   const clients = new Map<WebSocket, Map<string, CodexConnection>>();
   const terminals = new Map<WebSocket, TerminalHost>();
   const browsers = new Map<WebSocket, ChromePanelRouter>();
@@ -200,13 +238,28 @@ export async function createNativeWorkbench(options: Options = {}) {
     chromeConnection && 'autoConnect' in chromeConnection && chromeConnection.windowsSsh
       ? chromeConnection.windowsSsh.host : hostname() });
   const queuedSendLocks = createQueuedSendLocks();
-  const createdThreads = new Set<string>();
+  const prewarmedThreads = new PrewarmedThreads({
+    publish(hostId, thread) {
+      const message = { method: 'thread/started', params: { thread } };
+      observeVisibleBackend(hostId, message);
+      for (const [client, connections] of clients) if (connections.has(hostId)) {
+        send(client, { type: 'mcp-notification', hostId, ...message });
+      }
+    },
+    async expire(hostId, threadId) {
+      const connection = await toolConnection(hostId);
+      await guardPrewarmDelete(hostId, threadId, connection);
+      await connection.request('thread/delete', { threadId }, { mutating: true });
+      prewarmedThreads.forget(hostId, threadId);
+    },
+    onError: error => console.error('Prewarm cleanup:', error instanceof Error ? error.message : error),
+  });
   const unsupported = new Set<string>();
   const httpRequests = new Set<AbortController>();
   const control = new CodexConnection(socketPath, { cwd: workspace });
   let persistQueue = Promise.resolve();
   function persist() {
-    const snapshot = JSON.stringify({ globals, settings }, null, 2) + '\n';
+    const snapshot = JSON.stringify({ globals: sidebar.persistenceGlobals(), settings }, null, 2) + '\n';
     persistQueue = persistQueue.catch(() => {}).then(async () => {
       await writeFile(join(dataDir, 'native-state.json.tmp'), snapshot, { mode: 0o600 });
       await rename(join(dataDir, 'native-state.json.tmp'), join(dataDir, 'native-state.json'));
@@ -217,6 +270,24 @@ export async function createNativeWorkbench(options: Options = {}) {
     if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(message));
   }
   function broadcast(message: unknown) { for (const client of clients.keys()) send(client, message); }
+  function observeBackend(hostId: string, message: Pick<RpcMessage, 'method' | 'params' | 'id'>, forward?: () => void) {
+    const params = record(message.params);
+    const deliver = () => { observeVisibleBackend(hostId, message); forward?.(); };
+    if (message.method === 'thread/started') { prewarmedThreads.started(hostId, params.thread, deliver); return; }
+    if (message.method === 'turn/started' && typeof params.threadId === 'string') prewarmedThreads.publish(hostId, params.threadId);
+    if (message.method === 'thread/deleted' && typeof params.threadId === 'string') prewarmedThreads.forget(hostId, params.threadId);
+    deliver();
+  }
+  function observeVisibleBackend(hostId: string, message: Pick<RpcMessage, 'method' | 'params' | 'id'>) {
+    notifications.observe(hostId, message);
+    automations.observe(hostId, message);
+    void sidebar.observeBackend(hostId, message).catch(error => console.error('Sidebar refresh:', error.message));
+    if (message.method === 'thread/readState/changed' || message.method === 'thread/status/changed') {
+      for (const [client, connections] of clients) if (connections.has(hostId)) {
+        send(client, { type: 'mcp-notification', hostId, method: message.method, params: message.params });
+      }
+    }
+  }
   const modelProviders = new ModelProviders({ globals, persist });
   const writtenCatalogs = new Set<string>();
   const providerRouting = new ProviderRouting({
@@ -244,13 +315,38 @@ export async function createNativeWorkbench(options: Options = {}) {
     try { await persist(); }
     catch (error) { globals['port-forwarding-rules'] = previous; throw error; }
   } });
-  const threadProjects = createThreadProjects(globals, persist, broadcast, validHost);
-  const threadPins = createThreadPins(globals, persist, broadcast);
+  const sidebar = createBackendSidebarState({ globals, persist, publish: broadcast, validHost,
+    isThreadVisible: (hostId, threadId) => !prewarmedThreads.isHidden(hostId, threadId),
+    supportsHost(hostId) {
+      const connection = hostId === 'local' ? control : [...clients.values()].map(connections => connections.get(hostId))
+        .find(connection => connection?.connected) ?? fileConnections.get(hostId) ?? [...clients.values()].map(connections => connections.get(hostId))
+        .find(connection => connection?.server);
+      const [major, minor] = (connection ? serverVersion(connection) ?? '' : '').split('.').map(Number);
+      return major! > 0 || major === 0 && minor! >= 156;
+    },
+    knownHostIds: () => ['local', ...sshHosts.keys()],
+    hostIds: () => [...new Set(['local', ...[...fileConnections].filter(([, connection]) => connection.connected).map(([id]) => id),
+      ...[...clients.values()].flatMap(connections => [...connections].filter(([, connection]) => connection.connected).map(([id]) => id))])],
+    async request(hostId, method, params, mutating) {
+      const page = [...clients.values()].map(connections => connections.get(hostId)).find(connection => connection?.connected);
+      const result = await (page ?? await toolConnection(hostId)).request(method, params, { mutating });
+      return method === 'thread/list' ? prewarmedThreads.filterList(hostId, result) : result;
+    } });
+  const threadProjects = createThreadProjects(globals, persist, broadcast, validHost, sidebar);
+  const threadPins = createThreadPins(globals, persist, broadcast, sidebar);
   const petOverlay = createPetOverlay(globals, settings, persist, broadcast);
   const petAssets = createPetAssets(codexHome);
   function remoteProfiles() {
     const preferences = record(globals['remote-connection-auto-connect-by-host-id']);
     return catalog.hosts.map(host => ({ ...publicHost(host), autoConnect: preferences[host.hostId] === true }));
+  }
+  function projectRoots(hostId = 'local') {
+    if (sidebar.supportsHost(hostId)) return sidebar.projects(hostId).flatMap(project => project.roots.map(root => root.path));
+    if (hostId === 'local') return Object.values(record(globals['local-projects'])).flatMap(value => {
+      const paths = record(value).rootPaths; return Array.isArray(paths) ? paths.filter((path): path is string => typeof path === 'string') : [];
+    });
+    return (Array.isArray(globals['remote-projects']) ? globals['remote-projects'] as ObjectValue[] : [])
+      .filter(project => project.hostId === hostId && typeof project.remotePath === 'string').map(project => String(project.remotePath));
   }
   function sharedObject(key: string) {
     if (key === 'host_config') return { id: 'local', kind: 'local' };
@@ -261,7 +357,7 @@ export async function createNativeWorkbench(options: Options = {}) {
   const callHostTool = createHostToolHandler({
     connection: control,
     knownThread: async (id: string) => control.request('thread/read', { threadId: id, includeTurns: false }),
-    listProjects: async () => ({ projects, workspace }),
+    listProjects: async () => ({ projects: (await listNativeProjects()).map(project => ({ path: project.path, name: project.label })), workspace }),
     listThreads: async params => control.request('thread/list', { ...params, archived: false }),
     readThread: async params => control.request('thread/read', { threadId: params.threadId, includeTurns: true }),
   });
@@ -270,13 +366,42 @@ export async function createNativeWorkbench(options: Options = {}) {
     let connection = hostId === 'local' ? control : fileConnections.get(hostId);
     if (!connection) {
       connection = new CodexConnection('', { createConnection: () => (options.sshStream ?? createSshProxyStream)(sshHosts.get(hostId)!, paths => hostPaths.set(hostId, paths)), connectTimeout: 20_000 });
-      connection.on('message', message => notifications.observe(hostId, message));
+      connection.on('message', message => observeBackend(hostId, message));
       fileConnections.set(hostId, connection);
     }
     await connection.connect();
     return connection;
   }
+  async function guardPrewarmDelete(hostId: string, threadId: string, connection: CodexConnection) {
+    const assertUnused = () => {
+      if (!prewarmedThreads.isHidden(hostId, threadId)) throw new Error('仅清理本次宿主创建且未使用的空预热对话');
+    };
+    assertUnused();
+    const { thread } = await connection.request('thread/read', { threadId, includeTurns: false });
+    let hasTurns: boolean;
+    if (record(thread).historyMode === 'paginated') {
+      try {
+        const history = record(await connection.request('thread/turns/list', { threadId, limit: 1, itemsView: 'notLoaded' }));
+        if (!Array.isArray(history.data)) throw new Error('无法核对预热对话历史，保留当前数据');
+        hasTurns = history.data.length > 0;
+      } catch (error) {
+        // The CLI keeps unused prewarms in memory and explicitly reports that
+        // history is unavailable until the first user message materializes it.
+        if (!(error instanceof RpcError && error.code === -32600 && error.message ===
+            `thread ${threadId} is not materialized yet; thread/turns/list is unavailable before first user message`)) throw error;
+        hasTurns = false;
+      }
+    } else hasTurns = (await connection.request('thread/read', { threadId, includeTurns: true })).thread.turns.length > 0;
+    if (hasTurns || thread.status.type !== 'idle') {
+      prewarmedThreads.publish(hostId, threadId);
+      throw new Error('对话已有内容或正在运行，保留当前数据');
+    }
+    assertUnused();
+    await automations.beforeThreadDelete(hostId, threadId);
+    assertUnused();
+  }
   async function listNativeProjects() {
+      await sidebar.ensureHost('local');
       const local: NativeProject[] = Object.entries(record(globals['local-projects'])).flatMap(([id, value]) => {
         const project = record(value), roots = Array.isArray(project.rootPaths) ? project.rootPaths : [];
         const path = typeof roots[0] === 'string' ? roots[0] : id;
@@ -295,12 +420,16 @@ export async function createNativeWorkbench(options: Options = {}) {
       }));
       return [...local, ...remote];
   }
-  async function setNativeMembership(threadId: string, hostId: string, project: NativeProject | null, cwd: string) {
+  async function setNativeMembership(threadId: string, hostId: string, project: NativeProject | null, cwd: string, startedThread?: import('../../lib/codex-protocol.ts').ThreadSummary) {
+    if (startedThread) await sidebar.observeResponse(hostId, 'thread/start', { thread: startedThread });
     await threadProjects('setMembership', { threadId, hostId, projectless: project === null, assignment: project === null ? null :
       project.projectKind === 'remote' ? { projectKind: 'remote', projectId: project.projectId, hostId } : { projectKind: 'local', projectId: project.projectId } });
     if (!project) await threadProjects('updateProjectlessThread', { threadId, hostId, outputDirectory: cwd, workspaceRoot: join(dataDir, 'workspaces') });
   }
   const taskHost = { connectionFor: toolConnection, listProjects: listNativeProjects,
+    supportsSidebarState: sidebar.supportsHost,
+    projectIdForStart: async (project: NativeProject, hostId: string) => await threadProjects('getThreadStartProjectId', {
+      projectKind: project.projectKind, projectId: project.projectId, ...(project.projectKind === 'remote' ? { hostId } : {}) }) as string | null,
     projectlessRoot: join(dataDir, 'workspaces'), configFor: (hostId: string) => hostId === 'local' ? hostTools.config : {},
     setMembership: setNativeMembership };
   // Acquire scheduler ownership before opening the shared tools socket.
@@ -312,12 +441,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         url: run.threadId ? notificationRoute(run.hostId, run.threadId) : '/?initialRoute=%2Fautomations' }).catch(() => {});
     },
   });
-  const nativeTools = createNativeAppToolHost({ ...taskHost, hostIds: () => ['local', ...sshHosts.keys()], globals,
-    async persistGlobals(keys) {
-      await persist(); broadcast({ type: 'global-state-updated', keys });
-      if (keys.includes('pinned-thread-ids')) broadcast({ type: 'pinned-threads-updated' });
-    },
-  });
+  const nativeTools = createNativeAppToolHost({ ...taskHost, hostIds: () => ['local', ...sshHosts.keys()], globals, pins: sidebar.pins });
   const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'),
     tools: nativeTools.tools, callTool: nativeTools.callTool,
   }).catch(async error => { await automations.close(); throw error; });
@@ -326,7 +450,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     hostIds: () => ['local', ...remoteProfiles().filter(host => host.autoConnect).map(host => host.hostId)],
     fetch: options.notificationFetch, intervalMs: options.notificationIntervalMs, subject: process.env.YARD_WEB_PUSH_SUBJECT })
     .catch(async error => { await automations.close(); await hostTools.close(); await nativeTools.close(); throw error; });
-  control.on('message', message => notifications.observe('local', message));
+  control.on('message', message => observeBackend('local', message));
   // A daemon request is broadcast to every page subscribed to its thread.
   // Retain each result through the turn so another page or a replay only replies.
   const legacyTitleCalls = new Map<string, Map<string, ReturnType<typeof callHostTool>>>();
@@ -475,8 +599,16 @@ export async function createNativeWorkbench(options: Options = {}) {
           configurationSnapshot: configurationSnapshot ? { capturedAt: configurationSnapshot.capturedAt, bytes: Buffer.byteLength(configurationSnapshot.data) } : null,
           unsupported: [...unsupported], error: control.lastError })); return;
       }
-      if (path === '/native-host.js') { response.writeHead(200, { 'Content-Type': mime['.js'] }); response.end(browserHost); return; }
-      if (path === '/workbench-entry.js') { response.writeHead(200, { 'Content-Type': mime['.js'] }); response.end(browserEntry); return; }
+      if (path === '/native-host.js' || path === '/workbench-entry.js') {
+        const useGzip = acceptsGzip(request.headers['accept-encoding']);
+        const content = path === '/native-host.js' ? browserHost : browserEntry;
+        const compressed = path === '/native-host.js' ? compressedBrowserHost : compressedBrowserEntry;
+        response.setHeader('Vary', 'Accept-Encoding');
+        if (useGzip) response.setHeader('Content-Encoding', 'gzip');
+        response.writeHead(200, { 'Content-Type': mime['.js'] });
+        response.end(request.method === 'HEAD' ? undefined : useGzip ? compressed : content);
+        return;
+      }
       if (path === '/notification-worker.js') {
         response.writeHead(200, { 'Content-Type': mime['.js'], 'Service-Worker-Allowed': '/' });
         response.end(request.method === 'HEAD' ? undefined : notificationWorker); return;
@@ -492,17 +624,24 @@ export async function createNativeWorkbench(options: Options = {}) {
       const assetRoot = path.startsWith('/brand/') ? join(projectRoot, 'public') : renderer;
       const file = resolve(assetRoot, '.' + path);
       if (!file.startsWith(assetRoot + sep)) { response.writeHead(404); response.end(); return; }
-      const readAsset = () => readRendererAsset(file, path, webRenderer);
+      const readAsset = () => loadWebResource(file, path, webRenderer);
       const immutable = path.startsWith('/assets/') && /-[a-f0-9]{8,}\.[^.]+$/.test(path);
       const compressible = /\.(js|mjs|css|svg|json|wasm)$/.test(path);
-      const cached = immutable ? await rendererCache.load((webRenderer ? 'web:' : 'original:') + file, readAsset, compressible) : null;
+      const cached = immutable ? await rendererCache.load((webRenderer ? 'web:' : 'original:') + file, readAsset, compressible,
+        webRenderer && brotliStartupBundles.has(webRendererPrefix + path)) : null;
       let content = cached?.content ?? await readAsset();
       if (immutable) {
         response.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       }
       if (compressible) {
         response.setHeader('Vary', 'Accept-Encoding');
-        if (content.length > 1024 && acceptsGzip(request.headers['accept-encoding'])) {
+        const accept = request.headers['accept-encoding'];
+        const gzipQuality = encodingQuality(accept, 'gzip');
+        const brotliQuality = cached?.brotli ? encodingQuality(accept, 'br') : 0;
+        if (cached?.brotli && brotliQuality > 0 && brotliQuality >= gzipQuality) {
+          content = cached.brotli;
+          response.setHeader('Content-Encoding', 'br');
+        } else if (content.length > 1024 && gzipQuality > 0) {
           content = cached?.compressed ?? await compress(content, { level: 1 });
           response.setHeader('Content-Encoding', 'gzip');
         }
@@ -538,8 +677,8 @@ export async function createNativeWorkbench(options: Options = {}) {
         'thread-projectless-output-directories', 'thread-workspace-root-hints', 'pinned-thread-ids',
         'remote-connection-auto-connect-by-host-id', 'codex-managed-remote-connections']
         .map(key => ({ key, value: globals[key] })),
-      workspaceRootOptions: { roots: projects.map(project => project.path),
-        canonicalPathByRoot: Object.fromEntries(projects.map(project => [project.path, project.path])) },
+      workspaceRootOptions: { roots: projectRoots(),
+        canonicalPathByRoot: Object.fromEntries(projectRoots().map(path => [path, path])) },
       projectlessWorkspaceRoot: { workspaceRoot: join(dataDir, 'workspaces') },
     } });
     const address = server.address() as import('node:net').AddressInfo;
@@ -576,7 +715,8 @@ export async function createNativeWorkbench(options: Options = {}) {
       state: connection.connected ? 'connected' : 'disconnected', error: connection.lastError });
     if (connection.connected) {
       const version = serverVersion(connection);
-      send(client, { type: 'codex-app-server-initialized', hostId, transport: 'websocket', isSnapshot, appServerVersion: version, installedCodexVersion: version });
+      send(client, { type: 'codex-app-server-initialized', hostId, transport: 'websocket', isSnapshot, appServerVersion: version,
+        installedCodexVersion: version, yardSidebarStateAvailable: sidebar.supportsHost(hostId) });
     }
   }
 
@@ -590,8 +730,8 @@ export async function createNativeWorkbench(options: Options = {}) {
     } : { cwd: workspace });
     connections.set(hostId, connection);
     const current = connection;
-    current.on('message', (message: { id?: string | number; method: string; params: unknown }) => {
-      notifications.observe(hostId, message);
+    current.on('message', (message: { id?: string | number; method: string; params: unknown }) => observeBackend(hostId, message, () => {
+      if (message.method === 'thread/readState/changed' || message.method === 'thread/status/changed') return;
       const params = record(message.params);
       if (hostId === 'local' && message.method === 'turn/completed') {
         legacyTitleCalls.delete(JSON.stringify([params.threadId, record(params.turn).id]));
@@ -622,7 +762,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       send(client, message.id != null ? { type: 'mcp-request', hostId, request: message }
         : { type: 'mcp-notification', hostId, method: message.method,
           params: message.method === 'thread/settings/updated' ? providerRouting.present(hostId, message.params, String(params.threadId)) : message.params });
-    });
+    }));
     current.on('status', () => {
       // The daemon survives a client disconnect. Keep other hosts connected;
       // the renderer restores subscriptions when this host reconnects.
@@ -638,6 +778,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       send(client, { type: 'codex-app-server-connection-changed', hostId, transport: 'websocket', state: 'disconnected', error: (error as Error).message });
       throw error;
     }
+    await sidebar.ensureHost(hostId);
     return connection;
   }
 
@@ -676,6 +817,8 @@ export async function createNativeWorkbench(options: Options = {}) {
     }
     if ((message.type === 'mcp-request' || message.type === 'thread-prewarm-start') && message.request) {
       const { method, id } = message.request;
+      const isPrewarm = message.type === 'thread-prewarm-start';
+      if (isPrewarm && method !== 'thread/start') throw new Error('预热通道只接受 thread/start');
       const params = { ...message.request.params };
       let requestParams = message.request.params == null ? message.request.params : params;
       if (fileMethods.has(method)) {
@@ -685,10 +828,11 @@ export async function createNativeWorkbench(options: Options = {}) {
       }
       const connection = await connectedFor(client, connections, hostId);
       if (!readMethods.has(method) && !writeMethods.has(method)) { unsupported.add(method); throw new Error('Web 宿主尚未接入：' + method); }
+      if (method === 'thread/fork' && params.attachToSource === true && !supportsAttachedThreads(serverVersion(connection))) {
+        throw new Error('保存侧边对话需要该主机运行 Codex CLI 0.169.1 或更新版本；请先更新后端进程。');
+      }
       if (method === 'thread/delete') {
-        if (!createdThreads.has(hostId + ':' + String(params.threadId))) throw new Error('仅清理本次宿主创建的空预热对话');
-        const { thread } = await connection.request('thread/read', { threadId: params.threadId, includeTurns: true });
-        if (thread.turns?.length || thread.status?.type !== 'idle') throw new Error('对话已有内容，保留当前数据');
+        await guardPrewarmDelete(hostId, String(params.threadId), connection);
       }
       if (hostId === 'local' && (method === 'thread/start' || method === 'thread/fork')) {
         params.config = { ...record(params.config), ...hostTools.config };
@@ -706,8 +850,16 @@ export async function createNativeWorkbench(options: Options = {}) {
       // Installing packages and interactive MCP calls can outlast the normal
       // metadata deadline. Keep the selected connection and never replay writes.
       const pluginRequest = method.startsWith('plugin/') || method.startsWith('marketplace/') || method.startsWith('mcpServer/');
-      let result = await providerRouting.request(hostId, connection, method, requestParams, { mutating: writeMethods.has(method),
-        ...(pluginRequest ? { timeoutMs: 300_000 } : {}) });
+      if (method === 'turn/start' && typeof params.threadId === 'string') prewarmedThreads.publish(hostId, params.threadId);
+      const execute = () => method.startsWith('project/') || method.startsWith('threadSection/') || method === 'thread/section/move'
+        ? sidebar.request(hostId, method, params)
+        : providerRouting.request(hostId, connection, method, requestParams, { mutating: writeMethods.has(method),
+          ...(pluginRequest ? { timeoutMs: 300_000 } : {}) });
+      let result = isPrewarm ? await prewarmedThreads.start(hostId, execute) : await execute();
+      if (method === 'thread/list') result = prewarmedThreads.filterList(hostId, result);
+      const responseThreadId = record(record(result).thread).id;
+      if (typeof responseThreadId !== 'string' || !prewarmedThreads.isHidden(hostId, responseThreadId)) await sidebar.observeResponse(hostId, method, result);
+      if (method === 'thread/metadata/update' && Object.hasOwn(params, 'projectId')) await sidebar.getAssignment(String(params.threadId), hostId);
       if (method === 'turn/start') {
         const turn = record(record(result).turn);
         if (typeof turn.id === 'string') notifications.watch(hostId, String(params.threadId), turn.id);
@@ -716,8 +868,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         void notifications.trackThread(hostId, String(params.threadId)).catch(() => {});
       }
       if (method === 'thread/archive' || method === 'thread/unarchive') automations.threadArchived(hostId, String(params.threadId), method === 'thread/archive');
-      if (method === 'thread/start' && record(record(result).thread).id) createdThreads.add(hostId + ':' + String(record(record(result).thread).id));
-      if (method === 'thread/delete') createdThreads.delete(hostId + ':' + String(params.threadId));
+      if (method === 'thread/delete') prewarmedThreads.forget(hostId, String(params.threadId));
       // The renderer's browser.in-app capability reads experimentalFeature/list.
       // Manual Chrome transport includes pairing an access computer, even when
       // the optional service-machine Chrome is not configured.
@@ -754,6 +905,8 @@ export async function createNativeWorkbench(options: Options = {}) {
   async function fetchHost(endpoint: string, params: ObjectValue, client: WebSocket, connections: Map<string, CodexConnection>): Promise<unknown> {
     const hostId = typeof params.hostId === 'string' ? params.hostId : 'local';
     validHost(hostId);
+    const sidebarHostIds = () => [...new Set(['local', ...[...connections].filter(([, connection]) => connection.connected).map(([id]) => id)])]
+      .filter(id => sidebar.supportsHost(id));
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
     if (automationEndpoints.has(endpoint)) return automations.fetch(endpoint, params);
     switch (endpoint) {
@@ -768,9 +921,81 @@ export async function createNativeWorkbench(options: Options = {}) {
         return modelProviders.snapshot(hostId, connection);
       }
       case 'startup-sidebar': {
-        const result = await control.request('thread/list', { limit: 50, sortKey: 'recency_at',
-          archived: false, modelProviders: null, sourceKinds: [], useStateDbOnly: true });
-        return startupSidebar(result.data as unknown as ObjectValue[], globals);
+        const result = prewarmedThreads.filterList('local', await control.request('thread/list', { limit: 50, sortKey: 'recency_at',
+          archived: false, modelProviders: null, sourceKinds: [], useStateDbOnly: true }));
+        await sidebar.observeThreadList('local', result);
+        return startupSidebar(result.data as unknown as ObjectValue[], globals, result.readStates ?? {},
+          typeof settings.localeOverride === 'string' ? settings.localeOverride : 'zh-CN');
+      }
+      case 'sidebar-refresh': {
+        const ids = sidebarHostIds();
+        const results = await Promise.allSettled(ids.map(id => sidebar.refreshHost(id)));
+        const failedHostIds = ids.filter((_, index) => results[index]?.status === 'rejected');
+        return { success: failedHostIds.length === 0, failedHostIds };
+      }
+      case 'sidebar-orders': {
+        if (params.operation === 'project-order') { await sidebar.setGlobal('project-order', params.ids); return { success: true }; }
+        const hostIds = sidebarHostIds();
+        const pins = await Promise.all(hostIds.map(async id => ({ id, pins: await sidebar.pins.list({ hostId: id })
+          .catch(() => ({ threadIds: sidebar.cachedSectionSnapshot(id).pinnedThreadIds })) })));
+        return { projects: hostIds.flatMap(id => sidebar.projects(id).map(project => ({ id: project.id, hostId: id }))),
+          pins: pins.flatMap(({ id, pins }) => pins.threadIds.map(threadId => ({ id: threadId, hostId: id }))),
+          aliases: globals['app-server-project-id-by-legacy-project-id-by-host'] ?? {} };
+      }
+      case 'sidebar-sections': {
+        await connectedFor(client, connections, hostId);
+        if (params.operation === 'snapshot') return sidebar.sectionSnapshot(hostId);
+        if (params.operation === 'merge' || params.operation === 'replace') {
+          return sidebar.setSections(hostId, params.sections as Parameters<typeof sidebar.setSections>[1], { mode: params.operation,
+            ...(Array.isArray(params.deleteSectionIds) ? { deleteSectionIds: params.deleteSectionIds as string[] } : {}) });
+        }
+        throw new Error('无效的分组操作');
+      }
+      case 'pinned-thread-sections': {
+        const operation = String(params.operation);
+        if (operation === 'list') {
+          const hostIds = typeof params.hostId === 'string' ? sidebar.supportsHost(hostId) ? [hostId] : [] : sidebarHostIds();
+          const groups = await Promise.all(hostIds.map(async id => ({ id, snapshot: await sidebar.sectionSnapshot(id)
+            .catch(error => { if (id === 'local' || typeof params.hostId === 'string') throw error; return sidebar.cachedSectionSnapshot(id); }) })));
+          return { hostIds, sections: groups.flatMap(({ id, snapshot }) => snapshot.sections.map(section => ({ ...section, hostId: id }))) };
+        }
+        await connectedFor(client, connections, hostId);
+        if (operation === 'members') {
+          const snapshot = await sidebar.sectionSnapshot(hostId);
+          return snapshot.sections.find(section => section.id === params.sectionId)?.threadIds ?? [];
+        }
+        if (operation === 'create') {
+          if (typeof params.logicalSectionId !== 'string' || typeof params.name !== 'string') throw new Error('无效的分组参数');
+          const section = record(record(await sidebar.request(hostId, 'threadSection/create', { name: params.name, appearance: null })).section);
+          const id = String(section.id);
+          if (typeof params.threadIdToMove === 'string') {
+            const connection = await toolConnection(hostId);
+            const current = await connection.request('thread/read', { threadId: params.threadIdToMove, includeTurns: false });
+            if (params.previousSectionId !== undefined && current.thread.section?.id !== (params.previousSectionId ?? undefined)) throw new Error('会话分组已变化，请刷新后重试');
+            await sidebar.request(hostId, 'thread/section/move', { threadId: params.threadIdToMove, sectionId: id });
+          }
+          return section;
+        }
+        if (operation === 'update') return record(await sidebar.request(hostId, 'threadSection/update', {
+          sectionId: params.sectionId, name: params.name })).section;
+        if (operation === 'delete') { await sidebar.request(hostId, 'threadSection/delete', { sectionId: params.sectionId }); return { success: true }; }
+        if (operation === 'move') {
+          const connection = connectionFor(client, connections, hostId);
+          const current = await connection.request('thread/read', { threadId: params.threadId, includeTurns: false });
+          if (params.previousSectionId !== undefined && (current.thread.section?.id ?? null) !== params.previousSectionId) return { success: false };
+          await sidebar.request(hostId, 'thread/section/move', { threadId: params.threadId, sectionId: params.sectionId ?? null,
+            ...(params.beforeThreadId !== undefined ? { beforeThreadId: params.beforeThreadId } : {}) });
+          return { success: true };
+        }
+        throw new Error('无效的分组操作');
+      }
+      case 'thread-read-state': {
+        if (typeof params.threadId !== 'string' || !params.threadId) throw new Error('无效的会话ID');
+        const connection = await connectedFor(client, connections, hostId);
+        if (params.unread === undefined) return connection.request('thread/read', { threadId: params.threadId, includeTurns: false });
+        if (typeof params.unread !== 'boolean' || typeof params.expectedRevision !== 'string') throw new Error('无效的未读状态参数');
+        return connection.request('thread/readState/update', { threadId: params.threadId,
+          operation: { type: params.unread ? 'unread' : 'read' }, expectedRevision: params.expectedRevision }, { mutating: true });
       }
       case 'upload-local-file-attachments': {
         await toolConnection(hostId);
@@ -807,6 +1032,7 @@ export async function createNativeWorkbench(options: Options = {}) {
             send(page, { type: 'codex-app-server-connection-changed', hostId: id, transport: 'websocket', state: 'disconnected' });
           }
           fileConnections.get(id)?.close(); fileConnections.delete(id); hostPaths.delete(id);
+          await sidebar.forgetHost(id);
         }
         broadcast({ type: 'shared-object-updated', key: 'remote_ssh_connections', value: remoteProfiles() });
         await Promise.all(closing);
@@ -838,7 +1064,18 @@ export async function createNativeWorkbench(options: Options = {}) {
         if (connection) notifyConnection(client, hostId, connection, true);
         return { state: connection?.connected ? 'connected' : connection?.connecting ? 'connecting' : 'disconnected', error: connection?.lastError ?? null };
       }
-      case 'thread-projects': return threadProjects(params.operation as ThreadProjectOperation, params.value);
+      case 'thread-projects': {
+        if (params.operation === 'getThreadStartProjectId') {
+          const assignment = record(params.value);
+          if (assignment.projectKind === 'remote') {
+            const id = typeof assignment.hostId === 'string' ? assignment.hostId :
+              (Array.isArray(globals['remote-projects']) ? globals['remote-projects'] as ObjectValue[] : [])
+                .find(project => project.id === assignment.projectId)?.hostId;
+            if (typeof id === 'string') await connectedFor(client, connections, id);
+          }
+        }
+        return threadProjects(params.operation as ThreadProjectOperation, params.value);
+      }
       case 'list-pinned-threads': return threadPins.list();
       case 'set-thread-pinned': return threadPins.set(params);
       case 'set-pinned-threads-order': return threadPins.setOrder(params);
@@ -860,8 +1097,13 @@ export async function createNativeWorkbench(options: Options = {}) {
         primaryNumberShortcutTarget: settings['primary-number-shortcut-target'] ?? 'tabs' };
       case 'get-setting': return { value: settings[String(params.key)] };
       case 'set-setting': settings[String(params.key)] = params.value; await persist(); petOverlay.settingChanged(String(params.key)); return { success: true };
-      case 'get-global-state': return { value: globals[String(params.key)] };
-      case 'set-global-state': globals[String(params.key)] = params.value; await persist(); broadcast({ type: 'global-state-updated', keys: [params.key] }); return { success: true };
+      case 'get-global-state': await sidebar.ensureHost('local'); return { value: globals[String(params.key)] };
+      case 'set-global-state': {
+        const key = String(params.key);
+        if (sidebar.ownsGlobal(key)) await sidebar.setGlobal(key, params.value);
+        else { globals[key] = params.value; await persist(); broadcast({ type: 'global-state-updated', keys: [key] }); }
+        return { success: true };
+      }
       case 'os-info': return { platform: 'linux', osVersion: 'Web', osRelease: 'Web', isSystemBackdropSupported: false, isVsCodeRunningInsideWsl: false, isCodexRunningInsideWsl: false };
       case 'locale-info': return { ideLocale: 'zh-CN', systemLocale: 'zh-CN' };
       case 'codex-home':
@@ -882,8 +1124,8 @@ export async function createNativeWorkbench(options: Options = {}) {
         return { cwd, outputDirectory: cwd, workspaceRoot };
       }
       case 'workspace-root-options': {
-        const roots = hostId === 'local' ? projects.map(project => project.path)
-          : catalog.projects.filter(project => project.hostId === hostId).map(project => project.remotePath);
+        await sidebar.ensureHost(hostId);
+        const roots = projectRoots(hostId);
         return { roots, canonicalPathByRoot: Object.fromEntries(roots.map(path => [path, path])) };
       }
       case 'mcp-codex-config': return { config: {} }; // Private session adapter is merged on the server.
@@ -896,14 +1138,16 @@ export async function createNativeWorkbench(options: Options = {}) {
   }
   try {
     await control.connect();
+    await sidebar.ensureHost('local');
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
     automations.start();
     notifications.start();
-  } catch (error) { clearInterval(reconnectControl); await notifications.close(); await automations.close(); control.close(); await hostTools.close(); throw error; }
+  } catch (error) { prewarmedThreads.close(); clearInterval(reconnectControl); await notifications.close(); await automations.close(); control.close(); await hostTools.close(); throw error; }
   return {
     server, control, automations, notifications,
     url: 'http://127.0.0.1:' + (server.address() as import('node:net').AddressInfo).port,
     async close() {
+      prewarmedThreads.close();
       clearInterval(reconnectControl);
       await portForwarding.close();
       await automations.close();

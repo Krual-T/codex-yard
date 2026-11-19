@@ -69,13 +69,37 @@ export interface TurnSummary {
 export interface ThreadSummary {
   id: string;
   name: string | null;
+  preview?: string;
+  ephemeral?: boolean;
+  forkedFromId?: string | null;
+  /** Experimental in CLI 0.169.1; independent of subagent parentThreadId. */
+  attachedToThreadId?: string | null;
   cwd: string;
   turns: TurnSummary[];
   status: { type: 'idle' | 'notLoaded' | 'systemError' } | { type: 'active'; activeFlags: string[] };
+  createdAt?: number;
+  updatedAt?: number;
+  recencyAt?: number | null;
+  projectId?: string | null;
+  section?: { id: string; name: string; appearance?: { icon: string | null; color: string | null } | null } | null;
+}
+export interface ThreadReadState {
+  firstUnread: { type: 'threadStart' } | { type: 'turn'; turnId: string } | null;
+  revision: string;
+}
+export interface ThreadListResponse extends Page<ThreadSummary> {
+  readStates?: Record<string, ThreadReadState> | null;
+  backwardsCursor?: string | null;
 }
 export interface InitializeResponse { userAgent: string; codexHome?: string; platformFamily?: string; platformOs?: string }
 export interface Page<T> { data: T[]; nextCursor: string | null }
-export interface ThreadResponse extends ThreadSettingsResponse { thread: ThreadSummary }
+export function supportsAttachedThreads(version: string | null | undefined): boolean {
+  const match = version?.match(/\b(\d+)\.(\d+)\.(\d+)\b/);
+  if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number) as [number, number, number];
+  return major > 0 || minor > 169 || minor === 169 && patch >= 1;
+}
+export interface ThreadResponse extends ThreadSettingsResponse { thread: ThreadSummary; readState?: ThreadReadState | null }
 
 // Declaration merging may add host-specific methods. Dynamic forwarding remains
 // unknown, and callers of newer methods can supply an explicit response type.
@@ -89,7 +113,8 @@ export interface RpcResponses {
   'thread/start': ThreadResponse;
   'thread/resume': ThreadResponse;
   'thread/fork': ThreadResponse;
-  'thread/list': Page<ThreadSummary>;
+  'thread/list': ThreadListResponse;
+  'thread/readState/update': { readState: ThreadReadState };
   'thread/loaded/list': Page<string>;
   'thread/name/set': Record<string, never>;
   'thread/archive': Record<string, never>;

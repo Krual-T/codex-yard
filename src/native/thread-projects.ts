@@ -13,6 +13,17 @@ export interface ProjectlessThreadUpdate extends Pick<MembershipUpdate, 'threadI
   outputDirectory?: string | null;
   workspaceRoot?: string | null;
 }
+export interface BackendProjectMemberships {
+  supportsHost(hostId: string): boolean;
+  ensureHost(hostId: string): Promise<void>;
+  resolveProjectId(hostId: string, projectId: string): string | undefined;
+  getAssignment(threadId: string, hostId: string): Promise<ProjectAssignment | null>;
+  setAssignment(threadId: string, hostId: string, value: ProjectAssignment | null): Promise<ProjectAssignment | null>;
+  restoreAssignment(threadId: string, hostId: string, previous: ProjectAssignment | null, expected: ProjectAssignment | null): Promise<unknown>;
+  hostForThread(threadId: string): string;
+  projectThreadIds(hostId: string, projectId: string): Promise<string[]>;
+  stageClientAssignments(assignments: ObjectValue): () => void;
+}
 export type ThreadProjectOperation = 'setAssignment' | 'setProjectless' | 'setMembership' | 'restoreMemberships'
   | 'assignIfUnassigned' | 'moveLocalProjectThreadsToProjectless' | 'reset' | 'flush'
   | 'getThreadStartProjectId' | 'updateProjectlessThread';
@@ -50,6 +61,7 @@ function update(value: unknown, requireAssignment: boolean, requireProjectless: 
         validHost(target);
         if (item.hostId !== undefined && hostId !== target) throw new Error('项目与会话执行主机不一致');
         result.assignment.hostId = target;
+        result.hostId = target;
       }
     }
   }
@@ -68,9 +80,24 @@ function sameAssignment(left: unknown, right: ProjectAssignment | null) {
 // Replaces the native thread-project service at its RPC boundary. Project
 // assignment and projectless status are independent fields in that contract.
 export function createThreadProjects(globals: ObjectValue, persist: () => Promise<void>, publish: (message: unknown) => void,
-  validHost: (hostId: string) => void = hostId => { if (hostId !== 'local') throw new Error('当前仅支持本机'); }) {
+  validHost: (hostId: string) => void = hostId => { if (hostId !== 'local') throw new Error('当前仅支持本机'); },
+  backend?: BackendProjectMemberships) {
   let pending = Promise.resolve<unknown>(undefined);
   const removedProjectlessThreads = new Set<string>();
+
+  function parseUpdate(value: unknown, requireAssignment: boolean, requireProjectless: boolean) {
+    const item = update(value, requireAssignment, requireProjectless, validHost);
+    if (item.assignment?.projectKind === 'remote' && !item.assignment.hostId) {
+      const projects = Array.isArray(globals['remote-projects']) ? globals['remote-projects'] as unknown[] : [];
+      const hostId = projects.map(record).find(project => project.id === item.assignment!.projectId)?.hostId;
+      if (typeof hostId === 'string') {
+        validHost(hostId);
+        if (record(value).hostId !== undefined && item.hostId !== hostId) throw new Error('项目与会话执行主机不一致');
+        item.hostId = hostId; item.assignment.hostId = hostId;
+      }
+    }
+    return item;
+  }
 
   function enqueue(action: () => Promise<unknown>) {
     const result = pending.catch(() => {}).then(action);
@@ -96,12 +123,26 @@ export function createThreadProjects(globals: ObjectValue, persist: () => Promis
     const assignments = { ...record(globals[assignmentKey]) };
     const projectless = new Set(Array.isArray(globals[projectlessKey]) ? globals[projectlessKey] as string[] : []);
     const before = new Map<string, ThreadMembership>();
+    const written: { threadId: string; hostId: string; previous: ProjectAssignment | null; expected: ProjectAssignment | null }[] = [];
+    let restoreClient: (() => void) | undefined;
+    try {
     for (const item of updates) {
-      const current = { assignment: (assignments[item.threadId] as ProjectAssignment | undefined) ?? null, projectless: projectless.has(item.threadId) };
+      const hostId = item.hostId ?? backend?.hostForThread(item.threadId) ?? 'local';
+      const previous = (assignments[item.threadId] as ProjectAssignment | undefined) ?? null;
+      const nativeAssignment = backend && backend.supportsHost(hostId) && item.assignment !== undefined && record(item.assignment).projectOrigin !== 'chatgpt' &&
+        (item.assignment !== null || record(previous).projectOrigin !== 'chatgpt');
+      const nativePrevious = nativeAssignment ? await backend.getAssignment(item.threadId, hostId) : null;
+      const current = { assignment: record(previous).projectOrigin === 'chatgpt' ? previous : nativeAssignment ? nativePrevious : previous,
+        projectless: projectless.has(item.threadId) };
       if (onlyUnassigned && (current.assignment !== null || current.projectless)) continue;
       if (!before.has(item.threadId)) before.set(item.threadId, current);
       if (item.assignment !== undefined) {
-        if (item.assignment === null) delete assignments[item.threadId]; else assignments[item.threadId] = item.assignment;
+        let next = item.assignment;
+        if (nativeAssignment) {
+          next = await backend.setAssignment(item.threadId, hostId, next);
+          written.push({ threadId: item.threadId, hostId, previous: nativePrevious, expected: next });
+        }
+        if (next === null) delete assignments[item.threadId]; else assignments[item.threadId] = next;
       }
       if (item.projectless !== undefined) {
         if (item.projectless) projectless.add(item.threadId); else projectless.delete(item.threadId);
@@ -116,45 +157,74 @@ export function createThreadProjects(globals: ObjectValue, persist: () => Promis
       if (a || p) memberships[threadId] = current;
     }
     const values: ObjectValue = { ...extra };
-    if (assignmentsChanged) values[assignmentKey] = assignments;
+    const clientChanged = [...before].some(([id, previous]) => record(previous.assignment).projectOrigin === 'chatgpt' || record(assignments[id]).projectOrigin === 'chatgpt' ||
+      backend && !backend.supportsHost(updates.find(item => item.threadId === id)?.hostId ?? backend.hostForThread(id)));
+    if (assignmentsChanged && (!backend || clientChanged)) values[assignmentKey] = assignments;
+    if (assignmentsChanged && clientChanged && backend) restoreClient = backend.stageClientAssignments(assignments);
     if (projectlessChanged) values[projectlessKey] = [...projectless];
-    if (Object.keys(values).length) await commit(values, memberships);
+    if (Object.keys(values).length || Object.keys(memberships).length) await commit(values, memberships);
     return Object.keys(memberships).map(threadId => ({ threadId, ...before.get(threadId)! }));
+    } catch (error) {
+      restoreClient?.();
+      const rollbackErrors: unknown[] = [];
+      for (const write of written.reverse()) {
+        try { await backend!.restoreAssignment(write.threadId, write.hostId, write.previous, write.expected); }
+        catch (rollbackError) { rollbackErrors.push(rollbackError); }
+      }
+      if (rollbackErrors.length) throw new AggregateError([error, ...rollbackErrors], '项目归属更新失败，部分回滚需要刷新后核对', { cause: error });
+      throw error;
+    }
   }
 
   return async function request(operation: ThreadProjectOperation, value: unknown): Promise<unknown> {
     switch (operation) {
       case 'setAssignment': {
-        const item = update(value, true, false, validHost);
+        const item = parseUpdate(value, true, false);
         return enqueue(async () => { await apply([item]); });
       }
       case 'setProjectless': {
-        const item = update(value, false, true, validHost);
+        const item = parseUpdate(value, false, true);
         return enqueue(async () => { await apply([item]); });
       }
       case 'setMembership': {
-        const item = update(value, true, true, validHost);
+        const item = parseUpdate(value, true, true);
         return enqueue(async () => { await apply([item]); });
       }
       case 'restoreMemberships':
       case 'assignIfUnassigned': {
         if (!Array.isArray(value)) throw new Error('需要项目归属列表');
-        const items = value.map(item => update(item, true, true, validHost));
+        const items = value.map(item => parseUpdate(item, true, true));
         return enqueue(async () => { await apply(items, operation === 'assignIfUnassigned'); });
       }
       case 'moveLocalProjectThreadsToProjectless': {
         if (typeof value !== 'string' || !value) throw new Error('需要项目 ID');
-        return enqueue(() => apply(Object.entries(record(globals[assignmentKey])).flatMap(([threadId, item]) =>
-          record(item).projectKind === 'local' && record(item).projectId === value ? [{ threadId, assignment: null, projectless: true }] : [])));
+        return enqueue(async () => {
+          const ids = backend ? await backend.projectThreadIds('local', value) : Object.entries(record(globals[assignmentKey])).flatMap(([threadId, item]) =>
+            record(item).projectKind === 'local' && record(item).projectId === value ? [threadId] : []);
+          return apply(ids.map(threadId => ({ threadId, hostId: 'local', assignment: null, projectless: true })));
+        });
       }
       case 'reset': return enqueue(async () => {
         const ids = new Set([...Object.keys(record(globals[assignmentKey])), ...(Array.isArray(globals[projectlessKey]) ? globals[projectlessKey] as string[] : [])]);
         await apply([...ids].map(threadId => ({ threadId, assignment: null, projectless: false })));
       });
       case 'flush': await pending.catch(() => {}); return;
-      case 'getThreadStartProjectId': assignment(value); return null; // No cloud project mapping in the local Web host.
+      case 'getThreadStartProjectId': {
+        const item = assignment(value);
+        if (!backend || item === null || record(item).projectOrigin === 'chatgpt') return null;
+        const remote = Array.isArray(globals['remote-projects']) ? globals['remote-projects'] as unknown[] : [];
+        const hostId = item.projectKind === 'local' ? 'local' : item.hostId ??
+          remote.map(record).find(project => project.id === item.projectId)?.hostId;
+        if (typeof hostId !== 'string') throw new Error('需要远端项目的执行主机');
+        validHost(hostId);
+        if (!backend.supportsHost(hostId)) return null;
+        await backend.ensureHost(hostId);
+        const id = backend.resolveProjectId(hostId, item.projectId);
+        if (!id) throw new Error('项目不存在：' + item.projectId);
+        return id;
+      }
       case 'updateProjectlessThread': {
-        const params = record(value), item = update(value, false, params.projectless !== undefined, validHost);
+        const params = record(value), item = parseUpdate(value, false, params.projectless !== undefined);
         for (const key of ['outputDirectory', 'workspaceRoot']) {
           if (params[key] !== undefined && params[key] !== null && typeof params[key] !== 'string') throw new Error('无效的工作目录');
         }

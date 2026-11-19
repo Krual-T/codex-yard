@@ -8,6 +8,7 @@ import { createAutomations } from '../src/native/automations.ts';
 import type { Automation, AutomationRun } from '../src/native/automations.ts';
 import { nextOccurrence } from '../src/native/automation-recurrence.ts';
 import { CodexConnection } from '../lib/codex.ts';
+import type { ThreadReadState } from '../lib/codex-protocol.ts';
 import { createFakeCodex, NO_REPLY, fixtureTurn, agentItem } from './fake-codex.ts';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { nativeFixture } from './native-fixture.ts';
@@ -20,11 +21,34 @@ async function fixture(t: import('node:test').TestContext) {
   await connection.connect();
   let time = Date.parse('2026-11-06T12:00:00Z'), available = true;
   const memberships: string[] = [];
+  const readStates = new Map<string, ThreadReadState>();
+  let revision = 0;
+  function receipt(threadId: string) {
+    if (!readStates.has(threadId)) readStates.set(threadId, { revision: String(++revision),
+      firstUnread: { type: 'threadStart' } });
+    return readStates.get(threadId)!;
+  }
+  function mark(threadId: string, firstUnread: ThreadReadState['firstUnread']) {
+    const state = { firstUnread, revision: String(++revision) }; readStates.set(threadId, state);
+    fake.send({ method: 'thread/readState/changed', params: { threadId, readState: state } });
+    return state;
+  }
+  fake.handlers.set('thread/read', params => ({ ...fake.defaultResult('thread/read', params) as object,
+    readState: receipt(String(params.threadId)) }));
+  fake.handlers.set('thread/readState/update', params => {
+    const threadId = String(params.threadId);
+    if (receipt(threadId).revision !== params.expectedRevision) throw new Error('read state revision conflict');
+    const operation = params.operation as { type: string };
+    const latest = fake.threads.get(threadId)?.turns.at(-1);
+    return { readState: mark(threadId, operation.type === 'read' ? null : latest ? { type: 'turn', turnId: latest.id } : { type: 'threadStart' }) };
+  });
+  fake.handlers.set('thread/turns/list', params => ({ data: fake.threads.get(String(params.threadId))?.turns ?? [], nextCursor: null }));
   const options = { dataDir, projectlessRoot: join(root, 'workspaces'), now: () => time,
     connectionFor: async () => { if (!available) throw new Error('Backend offline'); return connection; },
     listProjects: async () => [{ projectId: 'project', projectKind: 'local' as const, hostId: 'local', path: root, label: 'Fixture', hostDisplayName: null, isGitRepository: false }],
     configFor: () => ({}), setMembership: async (id: string) => { memberships.push(id); }, changed() {}, intervalMs: 10 };
   let service = createAutomations(options);
+  connection.on('message', message => service.observe('local', message));
   t.after(async () => { await service.close(); connection.close(); await fake.close(); await rm(root, { recursive: true, force: true }); });
   async function create(extra: Record<string, unknown> = {}) {
     return (await service.fetch('automation-create', { params: { name: 'Review', prompt: 'Review the latest day', kind: 'cron', projectId: 'project',
@@ -35,8 +59,22 @@ async function fixture(t: import('node:test').TestContext) {
     for (let i = 0; i < 100; i++) { if (!(await history()).some(run => run.status === 'starting')) return; await delay(10); }
     throw new Error('Dispatch did not settle');
   }
-  return { root, fake, dataDir, connection, options, create, history, settled, memberships,
+  function persisted(id: string) {
+    const db = new DatabaseSync(join(dataDir, 'automations.sqlite'));
+    try { return JSON.parse(String(db.prepare('SELECT data FROM automation_runs WHERE id=?').get(id)!.data)) as Record<string, unknown>; }
+    finally { db.close(); }
+  }
+  async function completed() {
+    const task = await create({ status: 'PAUSED' });
+    await service.fetch('automation-run-now', { id: task.id }); await settled();
+    const run = (await history())[0], thread = fake.threads.get(run.threadId!)!;
+    thread.turns[0].status = 'completed'; thread.turns[0].items.push(agentItem('answer', 'Backend result')); thread.status = { type: 'idle' };
+    return (await history())[0];
+  }
+  return { root, fake, dataDir, connection, options, create, history, settled, memberships, readStates, mark,
+    completed, persisted,
     get service() { return service; }, setTime: (at: number) => { time = at; }, offline: () => { available = false; },
+    online: () => { available = true; },
     async restart() { await service.close(); service = createAutomations(options); return service; } };
 }
 
@@ -65,6 +103,7 @@ test('a running server schedules with no browser, desktop files or desktop proce
   h.service.start();
   await h.fake.waitFor(message => message.method === 'turn/start'); await h.settled();
   assert.equal(h.fake.calls('thread/start').length, 1);
+  assert.equal(h.fake.calls('thread/start')[0].params.projectId, 'project');
   assert.equal(h.fake.calls('turn/start').length, 1);
   const run = (await h.history())[0];
   assert.equal(h.fake.calls('turn/start')[0].params.clientUserMessageId, run.id);
@@ -123,7 +162,7 @@ test('uncertain turn delivery is recovered by the persisted client message ID, n
     h.fake.defaultResult('turn/start', params); return NO_REPLY;
   });
   await h.service.fetch('automation-run-now', { id: task.id }); await h.settled();
-  assert.equal((await h.history())[0].status, 'uncertain');
+  assert.equal((await h.history())[0].status, 'running');
   await h.restart(); await h.service.tick();
   assert.equal((await h.history())[0].status, 'running');
   assert.notEqual((await h.history())[0].turnId, 'other-user-turn');
@@ -145,17 +184,23 @@ test('an unknown thread creation blocks repeats and requires explicit acknowledg
 
 test('a delayed history reply cannot undo read, archive or explicit release changes', async t => {
   const h = await fixture(t), task = await h.create();
-  h.fake.handlers.set('turn/start', params => { h.fake.defaultResult('turn/start', params); return NO_REPLY; });
+  h.fake.handlers.set('turn/start', params => {
+    h.fake.defaultResult('turn/start', params); h.fake.threads.get(String(params.threadId))!.status = { type: 'idle' }; return NO_REPLY;
+  });
   await h.service.fetch('automation-run-now', { id: task.id }); await h.settled();
   const run = (await h.history())[0];
   h.fake.threads.get(run.threadId!)!.status = { type: 'idle' };
   let entered!: () => void, release!: () => void;
   const reading = new Promise<void>(resolve => { entered = resolve; });
   const held = new Promise<void>(resolve => { release = resolve; });
-  h.fake.handlers.set('thread/turns/list', async params => { entered(); await held; return h.fake.defaultResult('thread/turns/list', params); });
+  let paused = false;
+  h.fake.handlers.set('thread/turns/list', async params => {
+    if (!paused) { paused = true; entered(); await held; }
+    return h.fake.defaultResult('thread/turns/list', params);
+  });
   const checking = h.service.tick(); await reading;
   await h.service.fetch('inbox-item-set-read-state', { id: run.id, isRead: true });
-  h.service.threadArchived('local', run.threadId!, true);
+  await h.connection.request('thread/archive', { threadId: run.threadId }, { mutating: true });
   await h.service.fetch('automation-run-resolve', { id: run.id, confirmed: true });
   release(); await checking;
   const current = (await h.history())[0];
@@ -183,12 +228,161 @@ test('inbox read state survives restart and deleted task history is retained', a
   assert.equal(Number(db.prepare('SELECT count(*) AS n FROM automation_runs').get()!.n), 1); db.close();
 });
 
+test('existing runs use backend results while a small terminal history survives disconnection and deletion', async t => {
+  const h = await fixture(t), run = await h.completed();
+  const stored = h.persisted(run.id);
+  assert.equal(stored.phase, 'settled');
+  for (const key of ['status', 'summary', 'error', 'readAt', 'archived']) assert.equal(Object.hasOwn(stored, key), false, key);
+  const turn = h.fake.threads.get(run.threadId!)!.turns[0];
+  turn.status = 'failed'; turn.error = { message: 'Backend failure' }; turn.items[1].text = 'Backend corrected result';
+  const live = (await h.history())[0];
+  assert.equal(live.status, 'failed'); assert.equal(live.error, 'Backend failure'); assert.equal(live.summary, 'Backend corrected result');
+  await h.service.fetch('inbox-item-set-read-state', { id: run.id, isRead: true });
+  await h.service.fetch('automation-run-archive', { id: run.id });
+  await h.service.beforeThreadDelete('local', run.threadId!);
+  h.offline(); await h.restart();
+  const offline = (await h.history())[0];
+  assert.equal(offline.summary, live.summary); assert.equal(offline.archived, true); assert.ok(offline.readAt);
+  assert.match(h.service.status().diagnostic!, /offline/);
+  await assert.rejects(h.service.fetch('inbox-items', {}), /offline/);
+  h.online(); h.fake.threads.delete(run.threadId!);
+  h.service.observe('local', { method: 'thread/deleted', params: { threadId: run.threadId } });
+  await h.restart();
+  const deleted = (await h.history())[0];
+  assert.equal(deleted.status, 'failed'); assert.equal(deleted.summary, live.summary); assert.equal(deleted.archived, true); assert.ok(deleted.readAt);
+  assert.equal((await h.service.fetch('inbox-items', {}) as { items: { status: string }[] }).items[0].status, 'ARCHIVED');
+  assert.equal(h.fake.calls('turn/start').length, 1);
+});
+
+test('inbox writes share revision guarded receipts and backend archive state across clients and restarts', async t => {
+  const h = await fixture(t), run = await h.completed();
+  const inbox = async () => await h.service.fetch('inbox-items', {}) as { items: { readAt: number | null; status: string }[]; unreadRunCounts: { total: number } };
+  assert.equal((await inbox()).unreadRunCounts.total, 1);
+  h.mark(run.threadId!, null); await delay(10);
+  assert.equal((await inbox()).unreadRunCounts.total, 0);
+  h.mark(run.threadId!, { type: 'turn', turnId: run.turnId! }); await delay(10);
+  const revision = h.readStates.get(run.threadId!)!.revision;
+  await h.service.fetch('inbox-item-set-read-state', { id: run.id, isRead: true });
+  assert.equal(h.fake.calls('thread/readState/update').at(-1)!.params.expectedRevision, revision);
+  assert.equal(h.readStates.get(run.threadId!)!.firstUnread, null);
+  await h.service.fetch('automation-run-archive', { id: run.id });
+  assert.ok(h.fake.archived.has(run.threadId!)); assert.equal((await inbox()).items[0].status, 'ARCHIVED');
+  await h.connection.request('thread/unarchive', { threadId: run.threadId }, { mutating: true }); await delay(10);
+  assert.equal((await inbox()).items[0].status, 'PENDING_REVIEW');
+  h.fake.archived.add(run.threadId!); await h.restart();
+  assert.equal((await inbox()).items[0].status, 'ARCHIVED');
+  assert.equal(h.fake.calls('turn/start').length, 1);
+});
+
+test('failed inbox writes do not claim success or retry a conflicting or uncertain mutation', async t => {
+  const h = await fixture(t), run = await h.completed();
+  h.fake.handlers.set('thread/readState/update', () => { throw new Error('read state revision conflict'); });
+  await assert.rejects(h.service.fetch('inbox-item-set-read-state', { id: run.id, isRead: true }), /revision conflict/);
+  assert.equal(h.fake.calls('thread/readState/update').length, 1); assert.equal((await h.history())[0].readAt, null);
+  h.fake.handlers.set('thread/archive', () => NO_REPLY);
+  await assert.rejects(h.service.fetch('automation-run-archive', { id: run.id }), /结果待确认/);
+  assert.equal(h.fake.calls('thread/archive').length, 1); assert.equal((await h.history())[0].archived, false);
+  h.fake.handlers.set('thread/list', () => { throw new Error('Archive query offline'); });
+  await assert.rejects(h.service.fetch('inbox-items', {}), /Archive query offline/);
+  assert.equal(h.fake.calls('turn/start').length, 1);
+});
+
+test('legacy affirmative inbox marks migrate once without replaying the scheduled prompt', async t => {
+  const h = await fixture(t), run = await h.completed();
+  const db = new DatabaseSync(join(h.dataDir, 'automations.sqlite'));
+  db.prepare('UPDATE automation_runs SET status=?,data=? WHERE id=?').run('completed', JSON.stringify({ ...run,
+    summary: 'Legacy summary', readAt: run.createdAt + 1, archived: true }), run.id); db.close();
+  await h.restart();
+  const inbox = await h.service.fetch('inbox-items', {}) as { items: { status: string; description: string; readAt: number | null }[] };
+  assert.equal(inbox.items[0].status, 'ARCHIVED'); assert.equal(inbox.items[0].description, 'Backend result'); assert.ok(inbox.items[0].readAt);
+  assert.equal(h.readStates.get(run.threadId!)!.firstUnread, null); assert.ok(h.fake.archived.has(run.threadId!));
+  assert.equal(h.persisted(run.id).migration, undefined);
+  await h.restart(); await h.service.fetch('inbox-items', {});
+  assert.equal(h.fake.calls('thread/readState/update').length, 1); assert.equal(h.fake.calls('thread/archive').length, 1);
+  assert.equal(h.fake.calls('turn/start').length, 1);
+});
+
+test('a failed legacy migration remains visible and is not automatically replayed', async t => {
+  const h = await fixture(t), run = await h.completed(), update = h.fake.handlers.get('thread/readState/update')!;
+  const db = new DatabaseSync(join(h.dataDir, 'automations.sqlite'));
+  db.prepare('UPDATE automation_runs SET status=?,data=? WHERE id=?').run('completed', JSON.stringify({ ...run,
+    readAt: run.createdAt + 1, archived: false }), run.id); db.close();
+  h.fake.handlers.set('thread/readState/update', () => { throw new Error('read state revision conflict'); });
+  await h.restart(); await h.service.fetch('inbox-items', {}); await h.service.fetch('inbox-items', {});
+  assert.equal(h.fake.calls('thread/readState/update').length, 1); assert.match(h.service.status().diagnostic!, /同步失败/);
+  assert.equal((await h.history())[0].readAt, null);
+  h.fake.handlers.set('thread/readState/update', update);
+  await h.service.fetch('inbox-item-set-read-state', { id: run.id, isRead: true });
+  assert.equal(h.persisted(run.id).migration, undefined); assert.ok((await h.history())[0].readAt);
+});
+
+test('reviewing an earlier scheduled result preserves newer unread messages and per-turn intent', async t => {
+  const h = await fixture(t), run = await h.completed(), thread = h.fake.threads.get(run.threadId!)!;
+  thread.turns.push(fixtureTurn('later-turn', [agentItem('later-answer', 'Later response')]));
+  h.mark(run.threadId!, { type: 'turn', turnId: run.turnId! }); await delay(10);
+  await h.service.fetch('inbox-item-set-read-state', { id: run.id, isRead: true });
+  assert.deepEqual(h.readStates.get(run.threadId!)!.firstUnread, { type: 'turn', turnId: run.turnId });
+  assert.equal(h.fake.calls('thread/readState/update').length, 0);
+  assert.ok((await h.history())[0].readAt); assert.equal(h.persisted(run.id).turnRead, true);
+  await h.restart(); assert.ok((await h.history())[0].readAt);
+  h.mark(run.threadId!, null); await delay(10); assert.equal(h.persisted(run.id).turnRead, undefined);
+  h.mark(run.threadId!, { type: 'turn', turnId: 'later-turn' }); await delay(10);
+  assert.ok((await h.history())[0].readAt);
+  await h.service.fetch('inbox-item-set-read-state', { id: run.id, isRead: false });
+  assert.equal((await h.history())[0].readAt, null); assert.equal(h.persisted(run.id).turnRead, false);
+  h.mark(run.threadId!, null); await delay(10); assert.ok((await h.history())[0].readAt);
+});
+
+test('shutdown waits for an active backend projection before closing the run database', async t => {
+  const h = await fixture(t), run = await h.completed();
+  let entered!: () => void, release!: () => void;
+  const reading = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  h.fake.handlers.set('thread/turns/list', async params => {
+    entered(); await held; return h.fake.defaultResult('thread/turns/list', params);
+  });
+  const pending = h.history(); await reading;
+  let closed = false;
+  const closing = h.service.close().then(() => { closed = true; });
+  await delay(10); assert.equal(closed, false);
+  release(); assert.equal((await pending)[0].id, run.id); await closing;
+  assert.doesNotThrow(() => h.service.observe('local', { method: 'thread/deleted', params: { threadId: run.threadId } }));
+});
+
+test('a delayed inbox projection preserves newer receipt and archive notifications', async t => {
+  const h = await fixture(t), run = await h.completed();
+  let entered!: () => void, release!: () => void, paused = false;
+  const reading = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  h.fake.handlers.set('thread/turns/list', async params => {
+    if (!paused) { paused = true; entered(); await held; }
+    return h.fake.defaultResult('thread/turns/list', params);
+  });
+  const pending = h.service.fetch('inbox-items', {}); await reading;
+  await h.service.fetch('inbox-item-set-read-state', { id: run.id, isRead: true });
+  await h.service.fetch('automation-run-archive', { id: run.id });
+  release();
+  const value = await pending as { items: { readAt: number | null; status: string }[] };
+  assert.ok(value.items[0].readAt); assert.equal(value.items[0].status, 'ARCHIVED');
+});
+
+test('marking an empty starting run read does not acknowledge its future backend messages', async t => {
+  const h = await fixture(t), task = await h.create({ status: 'PAUSED' });
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  h.fake.handlers.set('thread/start', async params => { await held; return h.fake.defaultResult('thread/start', params); });
+  const result = await h.service.fetch('automation-run-now', { id: task.id }) as { run: AutomationRun };
+  await h.service.fetch('inbox-automation-runs-mark-all-read', {});
+  release(); await h.settled();
+  assert.equal(h.persisted(result.run.id).localInbox, undefined);
+  assert.equal((await h.history())[0].readAt, null);
+});
+
 test('native workbench starts its own scheduler and refuses a second owner before replacing tools', async t => {
   const root = await mkdtemp('/tmp/yard-schedule-host-');
   const fake = await createFakeCodex(root), native = await nativeFixture(root);
   const options = { ...native, dataDir: join(root, 'data'), socketPath: fake.socketPath, codexHome: join(root, 'absent-desktop'), workspace: root, port: 0 };
-  const app = await createNativeWorkbench(options);
-  t.after(async () => { await app.close(); await fake.close(); await rm(root, { recursive: true, force: true }); });
+  let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined;
+  t.after(async () => { await app?.close(); await fake.close(); await rm(root, { recursive: true, force: true }); });
+  app = await createNativeWorkbench(options);
   const status = await fetch(app.url + '/api/status').then(r => r.json()) as { clients: number; scheduler: { running: boolean } };
   assert.equal(status.clients, 0); assert.equal(status.scheduler.running, true);
   await assert.rejects(createNativeWorkbench(options), /已有 Yard/);

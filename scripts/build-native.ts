@@ -43,5 +43,9 @@ await build({
   absWorkingDir: fileURLToPath(new URL('..', import.meta.url)),
   entryPoints: ['src/native/browser-entry.ts'], outfile: '.local/workbench-entry.js',
   bundle: true, format: 'esm', target: ['safari17', 'chrome120'], sourcemap: true,
+  minify: true, define: { 'process.env.NODE_ENV': '"production"' },
   logLevel: 'info',
+});
+execFileSync(process.execPath, ['--max-old-space-size=1400', 'scripts/build-startup-application.ts'], {
+  cwd: project, stdio: 'inherit',
 });

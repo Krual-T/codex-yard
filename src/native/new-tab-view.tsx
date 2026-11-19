@@ -38,12 +38,13 @@ const css = `
 .yard-new-tab-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .yard-new-tab-heading h3 { margin:0; font-size:14px; font-weight:500; }
 .yard-new-tab-cards { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
-.yard-new-tab-card { display:flex; flex-direction:column; align-items:flex-start; justify-content:center; gap:12px; min-width:0; min-height:88px; border:0; border-radius:16px; padding:16px 24px; background:var(--alpha-04); text-align:start; cursor:pointer; font:inherit; }
+.yard-new-tab-card { display:flex; flex-direction:column; align-items:flex-start; justify-content:center; gap:12px; min-width:0; min-height:88px; border:0; border-radius:16px; padding:16px 24px; background:var(--alpha-04); text-align:start; cursor:pointer; font:inherit; transition:background-color var(--yard-motion-fast,100ms) ease-out,transform var(--yard-motion-fast,100ms) var(--yard-motion-ease,ease-out); }
 .yard-new-tab-card:hover { background:var(--alpha-08); }
+.yard-new-tab-card:active { transform:translateY(1px); }
 .yard-new-tab-card svg { width:16px; height:16px; }
 .yard-new-tab-card span { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; }
 .yard-new-tab-card:focus-visible,.yard-new-tab-more:focus-visible { outline:2px solid currentColor; outline-offset:3px; }
-.yard-new-tab-more { display:flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:6px; cursor:pointer; }
+.yard-new-tab-more { display:flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:6px; cursor:pointer; transition:background-color var(--yard-motion-fast,100ms) ease-out; }
 .yard-new-tab-more:hover { background:var(--alpha-04); }
 @container (max-width:440px) { .yard-new-tab-card { padding-inline:16px; } }
 @container (max-width:320px) { .yard-new-tab-cards { grid-template-columns:repeat(2,minmax(0,1fr)); } }

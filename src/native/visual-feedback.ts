@@ -33,6 +33,25 @@ const startupOverlay = `.startup-loader__overlay, ${startupContainer} ._Overlay_
 // locale. Keep its mode-switch button, accessible label and menu behavior.
 const sidebarWordmark = '#app-shell-sidebar button[aria-haspopup="menu"] span:has(> svg[viewBox="0 0 53.225983 18"])';
 const styles = `
+:root { --yard-motion-fast:100ms; --yard-motion-normal:160ms; --yard-motion-ease:cubic-bezier(.2,0,.2,1); }
+:root[data-reduced-motion="true"] { --yard-motion-fast:0s; --yard-motion-normal:0s; }
+@media (prefers-reduced-motion:reduce) { :root { --yard-motion-fast:0s; --yard-motion-normal:0s; } }
+/* Radix Presence keeps closed menus mounted until their CSS animation ends.
+   Animate the content, leaving the positioning wrapper and focus lifecycle alone. */
+[data-radix-menu-content] { --yard-menu-x:0px; --yard-menu-y:-4px; }
+[data-radix-menu-content][data-side="top"] { --yard-menu-y:4px; }
+[data-radix-menu-content][data-side="left"] { --yard-menu-x:4px; --yard-menu-y:0px; }
+[data-radix-menu-content][data-side="right"] { --yard-menu-x:-4px; --yard-menu-y:0px; }
+[data-radix-menu-content][data-state="open"] { animation:yard-menu-in var(--yard-motion-normal) var(--yard-motion-ease); }
+[data-radix-menu-content][data-state="closed"] { pointer-events:none; animation:yard-menu-out var(--yard-motion-fast) ease-in forwards; }
+@keyframes yard-menu-in { from { opacity:0; transform:translate(var(--yard-menu-x),var(--yard-menu-y)); } to { opacity:1; transform:translate(0,0); } }
+@keyframes yard-menu-out { from { opacity:1; } to { opacity:0; } }
+/* The native border variable only reaches the Win32 top fade. Keep its value
+   stable across the rest of the content tree when the sidebar border toggles. */
+._MainContentSurface_etoz9_2 { --app-shell-main-content-border-width: var(--border-width-hairline); }
+._MainContentSurface_etoz9_2:not(._MainContentLeftBorder_etoz9_2) ._MainContentTopFade_etoz9_2 {
+  --app-shell-main-content-border-width: 0px;
+}
 :root[data-workbench-mobile-viewport] #root {
   position: fixed;
   inset: var(--workbench-viewport-top) 0 auto;

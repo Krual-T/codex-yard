@@ -24,9 +24,10 @@ async function capture(name: string) {
 }
 try {
   const threadId = '00000000-0000-4000-8000-000000000155';
-  fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.163.0 (Linux)' }));
+  fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.164.0 (Linux)' }));
   fake.handlers.set('account/gatewayOAuth/read', () => ({ providerId: 'fixture', providerName: 'Fixture', required: false, status: null, error: null }));
-  fake.handlers.set('thread/resume', params => ({ ...fake.defaultResult('thread/resume', params), turnsBackwardsCursor: '0', itemsBackwardsCursor: '0' }));
+  fake.handlers.set('thread/resume', params => ({ ...fake.defaultResult('thread/resume', params), approvalsReviewer: 'user',
+    activePermissionProfile: null, turnsBackwardsCursor: '0', itemsBackwardsCursor: '0' }));
   fake.threads.set(threadId, fixtureThread(threadId, root, { name: '待发消息编辑与删除验收', status: { type: 'active', activeFlags: [] },
     turns: [fixtureTurn('running-turn', [agentItem('running-message', '队列验收正在进行')], 'inProgress')] }));
   const editText = '验收：编辑这条待发消息';
@@ -46,22 +47,22 @@ try {
   await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/local/' + threadId), { waitUntil: 'commit' });
   await page.getByText(editText, { exact: true }).waitFor({ timeout: 60000 });
   await capture('before');
-  await page.getByRole('button', { name: '删除排队的消息', exact: true }).nth(1).click();
+  await page.getByRole('button', { name: /^(?:删除排队的消息|Delete queued message)$/ }).nth(1).click();
   await page.getByText(deleteText, { exact: true }).waitFor({ state: 'detached' });
   assert.equal(fake.queues.get(threadId)?.length, 1);
-  await page.getByRole('button', { name: '排队消息操作', exact: true }).click();
+  await page.getByRole('button', { name: /^(?:排队消息操作|Queued message actions)$/ }).click();
   await capture('edit-menu');
-  await page.getByRole('menuitem', { name: /^编辑/ }).click();
-  const editor = page.getByRole('textbox', { name: '和 Codex 一起工作', exact: true });
+  await page.getByRole('menuitem', { name: /^(?:编辑|Edit)/ }).click();
+  const editor = page.getByRole('textbox', { name: /^(?:和 Codex 一起工作|Work with Codex)$/ });
   await editor.getByText(editText, { exact: true }).waitFor();
   assert.equal(fake.queues.get(threadId)?.length, 0);
   await capture('editing');
   const changed = '验收：修改后重新排队';
   await editor.fill(changed);
-  await page.getByRole('button', { name: '排队', exact: true }).click();
+  await page.getByRole('button', { name: /^(?:排队|Queue)$/ }).click();
   await page.getByRole('group', { name: new RegExp(changed) }).waitFor();
   await fake.waitFor(message => message.method === 'thread/queue/add');
-  await page.getByRole('status').filter({ hasText: /^正在发送$/ }).waitFor({ state: 'detached' });
+  await page.getByRole('status').filter({ hasText: /^(?:正在发送|Sending)$/ }).waitFor({ state: 'detached' });
   assert.deepEqual(fake.queues.get(threadId)?.[0]?.input, [{ type: 'text', text: changed + '\n', text_elements: [] }]);
   assert.equal(fake.calls('thread/queue/delete').length, 2);
   assert.equal(fake.calls('thread/queue/add').length, 1);

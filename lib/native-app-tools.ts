@@ -17,11 +17,16 @@ export interface NativeAppToolsOptions {
   connectionFor(hostId: string): Promise<CodexConnection>;
   hostIds(): string[];
   listProjects(): Promise<NativeProject[]>;
+  projectIdForStart?(project: NativeProject, hostId: string): Promise<string | null>;
+  supportsSidebarState?(hostId: string): boolean;
   projectlessRoot: string;
   configFor(hostId: string): Record<string, unknown>;
   globals: Record<string, unknown>;
-  persistGlobals(keys: string[]): Promise<void>;
-  setMembership(threadId: string, hostId: string, project: NativeProject | null, cwd: string): Promise<void>;
+  pins: {
+    list(value: { hostId: string; signal?: AbortSignal }): Promise<{ threadIds: string[] }>;
+    set(value: { threadId: string; hostId: string; pinned: boolean }, signal?: AbortSignal): Promise<unknown>;
+  };
+  setMembership(threadId: string, hostId: string, project: NativeProject | null, cwd: string, startedThread?: ThreadSummary): Promise<void>;
 }
 
 /** Native business rules live in the copied kernel. This module supplies real
@@ -32,7 +37,6 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
   const statusListeners = new Map<string, Set<() => void>>();
   const bindings: (() => void)[] = [];
   const calls = new Map<string, { result: Promise<ToolResult>; settled: boolean }>();
-  let stateQueue = Promise.resolve();
   const waiter = new ThreadWaiter({ getManagers: () => [...managers.values()],
     subscribe(hostId, listener) {
       const listeners = statusListeners.get(hostId) ?? new Set();
@@ -103,53 +107,40 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
     signal.throwIfAborted();
     return { ...resolved, connection, thread, readState };
   }
-  function updateGlobals(keys: string[], signal: AbortSignal, action: () => void) {
-    const result = stateQueue.catch(() => {}).then(async () => {
-      signal.throwIfAborted();
-      const before = Object.fromEntries(keys.map(key => [key, options.globals[key]]));
-      action();
-      const applied = Object.fromEntries(keys.map(key => [key, options.globals[key]]));
-      try { await options.persistGlobals(keys); }
-      catch (cause) {
-        for (const key of keys) if (options.globals[key] === applied[key]) {
-          if (before[key] === undefined) delete options.globals[key]; else options.globals[key] = before[key];
-        }
-        throw cause;
-      }
-    });
-    stateQueue = result;
-    return result;
-  }
-  function pinnedIds() {
-    const value = options.globals['pinned-thread-ids'];
-    return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [];
-  }
-  function threadSummary(thread: ThreadSummary, hostId: string) {
+  function threadSummary(thread: ThreadSummary, hostId: string, receipt?: { firstUnread?: unknown } | null) {
     const metadata = thread as ThreadSummary & { preview?: string; updatedAt?: number; readState?: unknown };
-    const assignments = isRecord(options.globals['thread-project-assignments']) ? options.globals['thread-project-assignments'] : {};
-    const savedAssignment = assignments[thread.id];
-    const assignment = isRecord(savedAssignment) ? savedAssignment : {};
-    return { id: thread.id, kind: 'codex', projectId: assignment.projectId ?? null, hostId,
+    let projectId = thread.projectId ?? null;
+    if (options.supportsSidebarState?.(hostId) === false) {
+      const assignments = options.globals['thread-project-assignments'];
+      const assignment = isRecord(assignments) ? assignments[thread.id] : undefined;
+      const remoteProjects = Array.isArray(options.globals['remote-projects']) ? options.globals['remote-projects'] : [];
+      const owner = isRecord(assignment) && assignment.projectKind === 'remote' ? assignment.hostId ??
+        remoteProjects.find(project => isRecord(project) && project.id === assignment.projectId)?.hostId : 'local';
+      projectId = isRecord(assignment) && owner === hostId && typeof assignment.projectId === 'string' ? assignment.projectId : null;
+    }
+    return { id: thread.id, kind: 'codex', projectId, hostId,
       status: thread.status.type, cwd: thread.cwd, updatedAt: metadata.updatedAt ?? null,
       title: thread.name?.trim() || thread.id, summary: metadata.preview?.trim().slice(0, 600) || null,
-      isUnread: isRecord(metadata.readState) ? metadata.readState.firstUnread != null : null };
+      isUnread: receipt ? receipt.firstUnread != null : null };
   }
   async function listThreads(limit: number, signal: AbortSignal) {
-    const pinned = pinnedIds();
     const unavailableHosts: { hostId: string; reason: string }[] = [];
-    const all = (await Promise.all(options.hostIds().map(async hostId => {
+    const results = await Promise.all(options.hostIds().map(async hostId => {
       try {
         const connection = await connectionFor(hostId);
-        const page = await connection.request('thread/list', { archived: false, limit: limit + pinned.length,
+        const pins = await options.pins.list({ hostId, signal });
+        const page = await connection.request('thread/list', { archived: false, limit: limit + pins.threadIds.length,
           sortKey: 'updated_at', sourceKinds: ['cli', 'vscode', 'appServer'], useStateDbOnly: true });
-        return page.data.map(thread => threadSummary(thread, hostId));
-      } catch { unavailableHosts.push({ hostId, reason: 'thread_list_unavailable' }); return []; }
-    }))).flat();
+        return { pins: pins.threadIds, threads: page.data.map(thread => threadSummary(thread, hostId, page.readStates?.[thread.id])) };
+      } catch { unavailableHosts.push({ hostId, reason: 'thread_list_unavailable' }); return { pins: [], threads: [] }; }
+    }));
+    const pinned = [...new Set(results.flatMap(result => result.pins))];
+    const all = results.flatMap(result => result.threads);
     signal.throwIfAborted();
     const pinnedThreads = await Promise.all(pinned.map(async (id, index) => {
       let thread = all.find(value => value.id === id);
       if (!thread) {
-        try { const value = await resolveThread(id, undefined, signal); thread = threadSummary(value.thread, value.hostId); }
+        try { const value = await resolveThread(id, undefined, signal); thread = threadSummary(value.thread, value.hostId, value.readState); }
         catch { /* Preserve the native pinned placeholder. */ }
       }
       return { ...(thread ?? { id, kind: 'codex', projectId: null, hostId: null, status: 'notLoaded', cwd: null,
@@ -208,7 +199,7 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
           const connection = await connectionFor(hostId);
           const page = await connection.request('thread/list', { archived: true, cursor: args.cursor ?? null, limit: args.limit ?? 10,
             sortKey: 'updated_at', useStateDbOnly: true });
-          result = { threads: page.data.map(thread => threadSummary(thread, hostId)), nextCursor: page.nextCursor };
+          result = { threads: page.data.map(thread => threadSummary(thread, hostId, page.readStates?.[thread.id])), nextCursor: page.nextCursor };
           break;
         }
         case 'read_thread': {
@@ -242,6 +233,8 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
             hostId = project.hostId; cwd = project.path;
           }
           const connection = await connectionFor(hostId);
+          const projectId = project ? options.projectIdForStart ? await options.projectIdForStart(project, hostId) : project.projectId : null;
+          if (project && projectId) project = { ...project, projectId };
           if (args.model) { const message = validateModel(args.model, args.thinking, await models(connection)); if (message) throw new Error(message); }
           signal.throwIfAborted();
           if (target.type !== 'project') {
@@ -253,11 +246,11 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
             } else cwd = await mkdtemp(join(options.projectlessRoot, 'chat-'));
           }
           signal.throwIfAborted();
-          const { thread } = await connection.request('thread/start', { cwd, historyMode: 'paginated', config: {
+          const { thread } = await connection.request('thread/start', { cwd, historyMode: 'paginated', ...(projectId ? { projectId } : {}), config: {
             ...options.configFor(hostId), ...(args.thinking ? { model_reasoning_effort: args.thinking } : {}),
           }, ...(args.model ? { model: args.model } : {}) }, { mutating: true });
           try {
-            await options.setMembership(thread.id, hostId, project, cwd);
+            await options.setMembership(thread.id, hostId, project, cwd, thread);
             signal.throwIfAborted();
             if (args.title) await connection.request('thread/name/set', { threadId: thread.id, name: args.title }, { mutating: true });
             await submit(connection, thread.id, args.prompt!, args, caller, signal);
@@ -320,12 +313,9 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
         }
         case 'set_thread_pinned': {
           const threadId = args.threadId!;
-          await resolveThread(threadId, sourceHostId, signal);
+          const value = await resolveThread(threadId, sourceHostId, signal);
           signal.throwIfAborted();
-          await updateGlobals(['pinned-thread-ids'], signal, () => {
-            const ids = pinnedIds().filter(id => id !== threadId);
-            options.globals['pinned-thread-ids'] = args.pinned ? [threadId, ...ids] : ids;
-          });
+          await options.pins.set({ threadId, hostId: value.hostId, pinned: args.pinned! }, signal);
           result = { threadId, pinned: args.pinned };
           break;
         }
@@ -366,6 +356,6 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
       void call.result.finally(() => { call.settled = true; }).catch(() => {});
       return call.result;
     },
-    async close() { for (const unbind of bindings) unbind(); await stateQueue.catch(() => {}); },
+    async close() { for (const unbind of bindings) unbind(); },
   };
 }

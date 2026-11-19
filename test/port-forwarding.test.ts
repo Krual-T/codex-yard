@@ -6,6 +6,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import WebSocket from 'ws';
+import { transform } from 'esbuild';
 import { PortForwarding } from '../src/native/port-forwarding.ts';
 import type { PortForwardRule, PortForwardSnapshot } from '../src/native/port-forwarding.ts';
 import { adaptYardMenu } from '../src/native/app-menu-renderer.ts';
@@ -139,6 +140,13 @@ test('the pinned Yard product menu replaces Work with forwarding while preservin
   assert.match(adapted, /triggerButton:I,children:\[\(0,p3.jsx\)\(Ta.Item,\{[^\]]*端口转发管理[^\]]*,te\]/);
   assert.doesNotMatch(adapted, /triggerButton:I,children:\[ee,te\]/);
   assert.throws(() => adaptYardMenu(path, Buffer.from('different renderer')), /版本不匹配/);
+  await transform(adapted, { loader: 'js' });
+  const sharedPath = '/assets/app-shared-61271c39e3c5.js';
+  const shared = await readFile(join(rendererRoot, sharedPath));
+  const menuMotion = adaptYardMenu(sharedPath, shared);
+  assert.notDeepEqual(menuMotion, shared);
+  await transform(menuMotion.toString(), { loader: 'js' });
+  assert.throws(() => adaptYardMenu(sharedPath, Buffer.from('different renderer')), /版本不匹配/);
 });
 
 test('host forwarding controls keep running after the creating browser disconnects and persist rules across host restart', async t => {

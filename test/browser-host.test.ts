@@ -3,6 +3,12 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 
+function browserStorage() {
+  const values = new Map<string, string>();
+  return { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => values.delete(key), key: (index: number) => [...values.keys()][index] ?? null, get length() { return values.size; } };
+}
+
 test('equal RPC ids on separate hosts retain separate pending results after the browser connection is lost', async () => {
   const received: any[] = [], sockets: BrowserSocket[] = [];
   class BrowserSocket extends EventTarget {
@@ -12,9 +18,10 @@ test('equal RPC ids on separate hosts retain separate pending results after the 
     send(value: string) { this.sent.push(JSON.parse(value)); }
     message(value: unknown) { this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) })); }
   }
-  const window: any = { postMessage: (message: unknown) => received.push(message), addEventListener() {} };
+  const window: any = Object.assign(new EventTarget(), { postMessage: (message: unknown) => received.push(message) });
+  const document = Object.assign(new EventTarget(), { visibilityState: 'visible', hasFocus: () => true, querySelector: () => null });
   runInNewContext(await readFile(new URL('../.local/native-host.js', import.meta.url), 'utf8'), {
-    window, WebSocket: BrowserSocket, URLSearchParams, location: { origin: 'http://workbench.test', href: 'http://workbench.test/' },
+    window, document, localStorage: browserStorage(), WebSocket: BrowserSocket, URLSearchParams, location: { origin: 'http://workbench.test', href: 'http://workbench.test/' },
     setTimeout() {}, matchMedia: () => ({ matches: false }), performance: { timeOrigin: 0 },
   });
   const socket = sockets[0]!;
@@ -33,6 +40,13 @@ test('equal RPC ids on separate hosts retain separate pending results after the 
   assert.equal(failures[0].message.error.data.uncertain, true);
   assert.equal(socket.sent.length, 2);
   assert.ok(received.some(message => message.type === 'codex-app-server-connection-changed' && message.hostId === remote && message.state === 'disconnected'));
+  await window.electronBridge.sendMessageFromView({ type: 'electron-window-focus-request' });
+  assert.equal(received.at(-1).type, 'electron-window-focus-changed');
+  assert.equal(received.at(-1).isFocused, true);
+  document.visibilityState = 'hidden';
+  document.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(received.at(-1).isFocused, false);
+  assert.equal(socket.sent.length, 2, 'focus stays on the visiting browser even when the socket is lost');
 });
 
 test('renderer browser links open on the visiting client before a socket or server round trip', async () => {
@@ -40,7 +54,7 @@ test('renderer browser links open on the visiting client before a socket or serv
   class BrowserSocket extends EventTarget { send(value: unknown) { sent.push(value); } }
   const window: any = { open: (...args: unknown[]) => calls.push(args), addEventListener() {} };
   runInNewContext(await readFile(new URL('../.local/native-host.js', import.meta.url), 'utf8'), {
-    window, WebSocket: BrowserSocket, URL, URLSearchParams, location: { origin: 'http://workbench.test', href: 'http://workbench.test/' },
+    window, document: Object.assign(new EventTarget(), { querySelector: () => null }), localStorage: browserStorage(), WebSocket: BrowserSocket, URL, URLSearchParams, location: { origin: 'http://workbench.test', href: 'http://workbench.test/' },
     setTimeout() {}, matchMedia: () => ({ matches: false }), performance: { timeOrigin: 0 },
   });
   // Leave the socket unopened: a real click must preserve user activation.
@@ -66,7 +80,7 @@ test('edits received before React starts invalidate the corresponding sidebar bo
   class BrowserSocket extends EventTarget { constructor() { super(); socket = this; } send() {} }
   const window: any = { addEventListener() {}, postMessage() {} };
   runInNewContext(await readFile(new URL('../.local/native-host.js', import.meta.url), 'utf8'), {
-    window, WebSocket: BrowserSocket, URLSearchParams,
+    window, document: Object.assign(new EventTarget(), { querySelector: () => null }), localStorage: browserStorage(), WebSocket: BrowserSocket, URLSearchParams,
     location: { origin: 'http://workbench.test', pathname: '/', href: 'http://workbench.test/' },
     setTimeout() {}, matchMedia: () => ({ matches: false }), performance: { timeOrigin: 0, mark() {} },
   });

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { generateRequestDetails, generateVAPIDKeys } from 'web-push';
 import type { PushSubscription, VapidKeys } from 'web-push';
 import type { CodexConnection } from '../../lib/codex.ts';
-import type { RpcMessage, TurnSummary, Page } from '../../lib/codex-protocol.ts';
+import type { RpcMessage, ThreadItemSummary, TurnSummary, Page } from '../../lib/codex-protocol.ts';
 import { record } from './protocol.ts';
 
 export type NotificationKind = 'completed' | 'failed' | 'waiting';
@@ -16,7 +16,10 @@ interface Device {
   subscription: PushSubscription; preferences: NotificationPreferences;
   lastSuccess: number | null; lastError: string | null;
 }
-interface Watch { hostId: string; threadId: string; turnId: string; waiting?: boolean; waitingTurnId?: string; waitingSequence?: number }
+interface Watch {
+  hostId: string; threadId: string; turnId: string; waiting?: boolean; waitingTurnId?: string; waitingSequence?: number;
+  inputCursor?: { turnId: string; itemId: string };
+}
 interface State { keys: VapidKeys; devices: Device[]; watches: Watch[]; sent: string[] }
 export interface NotificationOptions {
   dataDir: string;
@@ -53,6 +56,26 @@ function preferences(value: unknown): NotificationPreferences {
 }
 const keyFor = (hostId: string, threadId: string) => JSON.stringify([hostId, threadId]);
 const turnEventId = (hostId: string, threadId: string, turnId: string, kind: string) => JSON.stringify([hostId, threadId, turnId, kind]);
+function answeredQuestions(items: ThreadItemSummary[]) {
+  const answered = new Set<string>();
+  for (const item of items) {
+    if (item.type !== 'userMessage' || !Array.isArray(item.content)) continue;
+    for (const part of item.content) {
+      const content = record(part);
+      if (content.type !== 'text' || typeof content.text !== 'string') continue;
+      const reply = content.text.trim().match(/^<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>$/);
+      if (!reply) continue;
+      try {
+        const values: unknown = JSON.parse(reply[1]);
+        if (Array.isArray(values)) for (const value of values) {
+          const id = record(value).questionItemId;
+          if (typeof id === 'string') answered.add(id);
+        }
+      } catch { /* Ordinary user text is not a structured question response. */ }
+    }
+  }
+  return answered;
+}
 export function notificationRoute(hostId: string, threadId: string) {
   return '/?initialRoute=' + encodeURIComponent('/' + encodeURIComponent(hostId) + '/' + encodeURIComponent(threadId));
 }
@@ -156,6 +179,15 @@ export async function createBrowserNotifications(options: NotificationOptions) {
     const watched = watches.get(keyFor(hostId, threadId));
     if (watched?.waiting) { watched.waiting = false; background(save()); }
   }
+  function notifyInput(hostId: string, threadId: string, turnId: string, item: ThreadItemSummary, answered?: ReadonlySet<string>) {
+    if (item.type !== 'agentMessage' || item.delivery !== 'async' || !Array.isArray(item.questions) || !item.questions.length) return Promise.resolve();
+    if (answered && item.questions.every((_, index) => answered.has(JSON.stringify(['request_user_input_async', item.id, index])))) return Promise.resolve();
+    watch(hostId, threadId, turnId);
+    // Async questions leave the turn running. Each card is a separate reminder,
+    // independent of the blocking approval/input episode and its active flags.
+    return publish({ id: turnEventId(hostId, threadId, turnId, 'input:' + item.id), kind: 'waiting',
+      title: 'Yard · 任务需要你回答', body: '打开对话，查看并回答问题。', url: notificationRoute(hostId, threadId) });
+  }
   function observe(hostId: string, message: Pick<RpcMessage, 'method' | 'params' | 'id'>) {
     if (closed || !state.devices.length) return;
     const params = record(message.params), threadId = params.threadId;
@@ -169,6 +201,10 @@ export async function createBrowserNotifications(options: NotificationOptions) {
     if (message.method === 'thread/status/changed') {
       const status = record(params.status);
       if (status.type !== 'active' || Array.isArray(status.activeFlags) && !status.activeFlags.some(flag => /approval|input/i.test(String(flag)))) clearWaiting(hostId, threadId);
+    }
+    if (message.method === 'item/completed' && typeof params.turnId === 'string') {
+      const item = record(params.item);
+      if (typeof item.id === 'string') background(notifyInput(hostId, threadId, params.turnId, item as ThreadItemSummary));
     }
     if (message.id != null && /(?:requestApproval|requestUserInput|requestPermissions|elicitation\/request)$/.test(message.method)) {
       const turnId = typeof params.turnId === 'string' ? params.turnId : watches.get(keyFor(hostId, threadId))?.turnId;
@@ -185,6 +221,31 @@ export async function createBrowserNotifications(options: NotificationOptions) {
       } catch { /* A host may be offline; existing watches are retained. */ }
     }
   }
+  async function reconcileInputs(watched: Watch, connection: CodexConnection) {
+    const { hostId, threadId } = watched;
+    const turns = await connection.request<Page<TurnSummary>>('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'summary' });
+    const turnId = turns.data[0]?.id;
+    if (!turnId) return;
+    let cursor: string | { type: 'item'; itemId: string } | null = watched.inputCursor?.turnId === turnId
+      ? { type: 'item', itemId: watched.inputCursor.itemId } : null;
+    const items: ThreadItemSummary[] = [];
+    const cursors = new Set<string>();
+    do {
+      const page: Page<{ item: ThreadItemSummary }> = await connection.request('thread/items/list', {
+        threadId, turnId, sortDirection: 'asc', limit: 100, ...(cursor ? { cursor } : {}),
+      });
+      for (const { item } of page.data) items.push(item);
+      cursor = page.nextCursor;
+      if (cursor && cursors.has(cursor)) throw new Error('通知观察的消息分页游标未前进。');
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
+    const answered = answeredQuestions(items);
+    for (const item of items) await notifyInput(hostId, threadId, turnId, item, answered);
+    const lastItemId = items.at(-1)?.id;
+    if (lastItemId && watches.get(keyFor(hostId, threadId)) === watched) {
+      watched.inputCursor = { turnId, itemId: lastItemId }; await save();
+    }
+  }
   async function reconcile(watched: Watch) {
     const { hostId, threadId, turnId } = watched;
     const connection = await options.connectionFor(hostId);
@@ -192,6 +253,9 @@ export async function createBrowserNotifications(options: NotificationOptions) {
     if (thread.status.type === 'active') {
       if (thread.status.activeFlags.some(flag => /approval|input/i.test(flag))) await notifyWaiting(hostId, threadId, turnId);
       else clearWaiting(hostId, threadId);
+      // A disconnected page receives no item events. Read only new items from
+      // the latest turn; queued turns may already have replaced the watched one.
+      await reconcileInputs(watched, connection);
       return;
     }
     let cursor: string | null = null, found = false;
@@ -204,7 +268,11 @@ export async function createBrowserNotifications(options: NotificationOptions) {
       if (cursor) cursors.add(cursor);
     } while (!found && cursor);
     if (!found) return; // Never infer a terminal state from missing history.
-    for (const turn of turns.reverse()) await notifyTurn(hostId, threadId, turn);
+    const answered = answeredQuestions(turns.flatMap(turn => turn.items));
+    for (const turn of turns.reverse()) {
+      for (const item of turn.items) await notifyInput(hostId, threadId, turn.id, item, answered);
+      await notifyTurn(hostId, threadId, turn);
+    }
     // Queued messages can begin while no browser is connected. Retain their
     // thread until the backend queue is empty, without pinning a subscription.
     const queue = await connection.request<Page<unknown>>('thread/queue/list', { threadId, limit: 1 });

@@ -13,21 +13,41 @@ import type { HttpRequest } from './http-fetch.ts';
 import type { AssignmentRequest, MembershipRequest, ProjectAssignment, ProjectlessRequest, ProjectlessThreadUpdate, ThreadProjectOperation } from './thread-projects.ts';
 import { BrowserChrome, chromeRpcService } from '../browser-reuse/browser-bridge.ts';
 import { visualizationService } from './visualizations.ts';
-import { HistoryStartup } from './history-startup.ts';
+import { HistoryStartup, initialWorkspaceRoute } from './history-startup.ts';
+import { BrowserThreadReadState } from './browser-thread-read-state.ts';
+import { BrowserStateConvergence } from './browser-state-convergence.ts';
+import { BrowserSidebarSections, sectionAtom } from './browser-sidebar-sections.ts';
+import { BrowserSidebarOrders } from './browser-sidebar-orders.ts';
+import { BrowserSidechatThreads } from './browser-sidechat-threads.ts';
 
 const version = '26.1013.40934';
-const historyStartup = new HistoryStartup(new URLSearchParams(location.search).get('initialRoute'));
+const historyStartup = new HistoryStartup(initialWorkspaceRoute(
+  document.querySelector<HTMLMetaElement>('meta[name="initial-route"]')?.content, location.search, location.pathname), 15_000, !isMiniWindow);
+window.addEventListener('yard-workspace-ready', () => historyStartup.workspaceReady(), { once: true });
 window.addEventListener('yard-conversation-history-ready', () => {
   requestAnimationFrame(() => requestAnimationFrame(() => historyStartup.release()));
 }, { once: true });
-window.addEventListener('pointerdown', () => historyStartup.release(), { once: true, capture: true });
-window.addEventListener('keydown', () => historyStartup.release(), { once: true, capture: true });
+const startupInteraction = (event: Event) => historyStartup.interact(event.target instanceof Element &&
+  event.target.closest('#app-shell-sidebar, [data-yard-startup-thread-row]') !== null);
+window.addEventListener('pointerdown', startupInteraction, { capture: true });
+window.addEventListener('keydown', startupInteraction, { capture: true });
+window.addEventListener('wheel', startupInteraction, { capture: true, passive: true });
 const pending = new Map<string, HostMessage>();
 const connectedHosts = new Set<string>(['local']);
+const nativeSidebarHosts = new Set<string>(['local']);
+Object.assign(window, { workbenchSidebarSupportsHost: (hostId: string) => nativeSidebarHosts.has(hostId) });
 let sidebarBootstrap: SidebarBootstrap | null = null;
 const rpcKey = (hostId: unknown, id: unknown) => 'rpc:' + String(hostId ?? 'local') + ':' + String(id);
 const workerKey = (workerId: unknown, id: unknown) => 'worker:' + String(workerId) + ':' + String(id);
 const hostRequests = new Map<string, { resolve(value: unknown): void; reject(error: Error): void }>();
+const threadReadState = new BrowserThreadReadState((hostId, params) => requestHost('thread-read-state', { hostId, ...params }));
+Object.assign(window, { workbenchThreadReadState: threadReadState });
+const stateConvergence = new BrowserStateConvergence(localStorage);
+Object.assign(window, { workbenchStateConvergence: stateConvergence });
+const sidebarSections = new BrowserSidebarSections(localStorage, params => requestHost('sidebar-sections', params), () => [...nativeSidebarHosts]);
+const sidebarOrders = new BrowserSidebarOrders(localStorage, params => requestHost('sidebar-orders', params));
+const sidechatThreads = new BrowserSidechatThreads();
+Object.assign(window, { workbenchSidechatThreads: sidechatThreads });
 const files = new BrowserFiles(requestHost);
 Object.assign(window, { workbenchStageFiles: (selected: File[]) => files.stageFiles(selected) });
 Object.assign(window, { workbenchUploadLocalFileAttachments: (hostId: string, attachments: ObjectValue[]) => requestHost('upload-local-file-attachments', { hostId, attachments }) });
@@ -45,6 +65,25 @@ const publish = (message: HostMessage) => {
     else request.resolve(message.body);
   } else window.postMessage(message, location.origin);
 };
+let lastSidebarRefresh = 0;
+async function refreshSidebar() {
+  if (Date.now() - lastSidebarRefresh < 1000) return;
+  lastSidebarRefresh = Date.now();
+  sidechatThreads.refresh();
+  try {
+    await requestHost('sidebar-refresh', {});
+    for (const [key, value] of Object.entries(await sidebarOrders.load())) publish({ type: 'persisted-atom-updated', key, value });
+    publish({ type: 'persisted-atom-updated', key: sectionAtom, value: await sidebarSections.load() });
+  } catch (error) { console.warn('侧栏后端状态刷新失败，重连后重试', error); }
+}
+const publishFocus = () => {
+  const isFocused = document.visibilityState === 'visible' && document.hasFocus();
+  publish({ type: 'electron-window-focus-changed', isFocused, occurredAtMs: Date.now() });
+  if (isFocused && socket?.readyState === WebSocket.OPEN) void refreshSidebar();
+};
+window.addEventListener('focus', publishFocus);
+window.addEventListener('blur', publishFocus);
+document.addEventListener('visibilitychange', publishFocus);
 registerTerminalShortcut(window, () => publish({ type: 'toggle-terminal' }));
 const mini = createMiniHost(publish);
 const chrome = new BrowserChrome(requestHost, publish);
@@ -116,8 +155,32 @@ function connect() {
       // read rather than seed an older value from this connection's snapshot.
       sidebarBootstrap.globalStateEntries = sidebarBootstrap.globalStateEntries.filter(entry => !keys.includes(entry.key));
     }
-    if (message.hostId) connectedHosts.add(message.hostId);
-    if (message.type === 'mcp-response') pending.delete(rpcKey(message.hostId, message.message.id));
+    if (message.type === 'codex-app-server-connection-changed' && message.hostId) {
+      if (message.state === 'connected' && !connectedHosts.has(message.hostId)) {
+        connectedHosts.add(message.hostId);
+        if (socket.readyState === WebSocket.OPEN) void refreshSidebar();
+      } else if (message.state !== 'connected' && message.hostId !== 'local') {
+        connectedHosts.delete(message.hostId); nativeSidebarHosts.delete(message.hostId);
+      }
+    }
+    if (message.type === 'codex-app-server-initialized' && message.hostId) {
+      if (message.yardSidebarStateAvailable) nativeSidebarHosts.add(message.hostId);
+      else nativeSidebarHosts.delete(message.hostId);
+      if (socket.readyState === WebSocket.OPEN) void refreshSidebar();
+    }
+    if (message.type === 'shared-object-updated' && message.key === 'remote_ssh_connections' && Array.isArray(message.value)) {
+      const registered = ['local', ...message.value.map((host: ObjectValue) => host.hostId).filter((id: unknown): id is string => typeof id === 'string')];
+      for (const id of connectedHosts) if (!registered.includes(id)) connectedHosts.delete(id);
+      for (const id of nativeSidebarHosts) if (!registered.includes(id)) nativeSidebarHosts.delete(id);
+      void sidebarSections.retainHosts(registered).then(value => publish({ type: 'persisted-atom-updated', key: sectionAtom, value }))
+        .catch(error => console.warn('主机分组刷新失败，重连后重试', error));
+    }
+    if (message.type === 'mcp-response') {
+      const key = rpcKey(message.hostId, message.message.id);
+      threadReadState.observe(message, pending.get(key));
+      sidechatThreads.observe(message, pending.get(key));
+      pending.delete(key);
+    } else { threadReadState.observe(message); sidechatThreads.observe(message); }
     if (message.type === 'worker-response') pending.delete(workerKey(message.workerId, message.response.id));
     if (message.type === 'fetch-response') pending.delete('fetch:' + message.requestId);
     if (!chrome.acceptsHostSnapshot(message)) return;
@@ -127,6 +190,8 @@ function connect() {
     if (disposed) return;
     terminal.disconnected();
     for (const hostId of connectedHosts) publish({ type: 'codex-app-server-connection-changed', hostId, transport: 'websocket', state: 'disconnected' });
+    connectedHosts.clear(); connectedHosts.add('local');
+    nativeSidebarHosts.clear(); nativeSidebarHosts.add('local');
     for (const message of pending.values()) {
       if (message.type === 'worker-request' && message.request) publish({ type: 'worker-response', workerId: message.workerId, response: {
         id: message.request.id, method: message.request.method, result: { type: 'error', error: { message: '宿主连接已断开' } },
@@ -137,7 +202,7 @@ function connect() {
       else publish({ type: 'fetch-response', requestId: message.requestId, responseType: 'error', status: 503, error: '宿主连接已断开' });
     }
     pending.clear();
-    reconnectTimer = setTimeout(() => { connect(); void send({ type: 'ready' }).catch(() => {}); }, 2000);
+    reconnectTimer = setTimeout(() => { connect(); void send({ type: 'ready' }).then(refreshSidebar).catch(() => {}); }, 2000);
   });
 }
 connect();
@@ -150,6 +215,7 @@ if (isMiniWindow) window.addEventListener('pagehide', event => {
   hostRequests.clear();
 });
 async function send(message: HostMessage) {
+  if (message.type === 'electron-window-focus-request') { publishFocus(); return; }
   if (mini.handle(message)) return;
   if (chrome.intercept(message)) return;
   if (openClientBrowser(message)) return;
@@ -163,11 +229,37 @@ async function send(message: HostMessage) {
   // notifications. Avoid serializing the multi-megabyte Statsig snapshot.
   if (message.type === 'shared-object-set' || message.type === 'codex-runtimes-config-changed') return;
   if (message.type === 'persisted-atom-sync-request') {
+    localStorage.removeItem('codex:persisted-atom:unread-thread-ids-by-host-v1');
     const saved = record(JSON.parse(localStorage.getItem('native-atoms') || '{}'));
+    if ('unread-thread-ids-by-host-v1' in saved) {
+      delete saved['unread-thread-ids-by-host-v1'];
+      localStorage.setItem('native-atoms', JSON.stringify(saved));
+    }
+    try { saved[sectionAtom] = await sidebarSections.load(); }
+    catch (error) { console.warn('旧分组迁移暂未完成，已保留原始记录', error); saved[sectionAtom] = sidebarSections.value(); }
+    try { Object.assign(saved, await sidebarOrders.load()); }
+    catch (error) { console.warn('侧栏顺序迁移暂未完成，已保留原始记录', error); }
     publish({ type: 'persisted-atom-sync', state: { 'electron:onboarding-projectless-completed': true, ...saved }, canWritePrimaryWindowTabPersistence: true });
     return;
   }
   if (message.type === 'persisted-atom-update') {
+    if (message.key === 'unread-thread-ids-by-host-v1') return;
+    if (stateConvergence.isDerivedAtom(String(message.key))) return;
+    if (sidebarOrders.owns(String(message.key))) {
+      const key = String(message.key);
+      const value = await sidebarOrders.update(key, message.deleted ? [] : updatedAtom(sidebarOrders.value(key), message));
+      publish({ type: 'persisted-atom-updated', key, value }); return;
+    }
+    if (message.key === sectionAtom) {
+      try {
+        const value = await sidebarSections.replace(message.deleted ? {} : updatedAtom(sidebarSections.value(), message));
+        publish({ type: 'persisted-atom-updated', key: sectionAtom, value });
+      } catch (error) {
+        console.error('分组保存失败', error);
+        publish({ type: 'persisted-atom-updated', key: sectionAtom, value: await sidebarSections.load().catch(() => sidebarSections.value()) });
+      }
+      return;
+    }
     const saved = record(JSON.parse(localStorage.getItem('native-atoms') || '{}'));
     if (message.deleted) delete saved[String(message.key)];
     else saved[String(message.key)] = updatedAtom(saved[String(message.key)] ?? saved[String(record(message.recordUpdate).legacyStorageKey)], message);
@@ -183,7 +275,10 @@ async function send(message: HostMessage) {
   await historyStartup.wait(message);
   await opened;
   if (message.type === 'worker-request' && message.request) pending.set(workerKey(message.workerId, message.request.id), message);
-  else if (message.request) pending.set(rpcKey(message.hostId, message.request.id), message);
+  else if (message.request) {
+    threadReadState.begin(message);
+    pending.set(rpcKey(message.hostId, message.request.id), message);
+  }
   if (message.type === 'worker-request-cancel') pending.delete(workerKey(message.workerId, message.id));
   if (message.type === 'fetch') pending.set('fetch:' + message.requestId, message);
   socket.send(JSON.stringify(message));
@@ -268,6 +363,12 @@ window.addEventListener('message', async event => {
     list(value?: unknown) { return requestHost('list-pinned-threads', value ?? {}); }
     set(value: unknown) { return requestHost('set-thread-pinned', value); }
     setOrder(value: unknown) { return requestHost('set-pinned-threads-order', value); }
+    listSections(value?: ObjectValue) { return requestHost('pinned-thread-sections', { ...value, operation: 'list' }); }
+    listSectionThreadIds(value: ObjectValue) { return requestHost('pinned-thread-sections', { ...value, operation: 'members' }); }
+    createSection(value: ObjectValue) { return requestHost('pinned-thread-sections', { ...value, operation: 'create' }); }
+    updateSection(value: ObjectValue) { return requestHost('pinned-thread-sections', { ...value, operation: 'update' }); }
+    deleteSection(value: ObjectValue) { return requestHost('pinned-thread-sections', { ...value, operation: 'delete' }); }
+    setThreadSection(value: ObjectValue) { return requestHost('pinned-thread-sections', { ...value, operation: 'move' }); }
   }
   class HttpFetch extends original.Eot {
     private readonly transport = new BrowserHttpFetch();

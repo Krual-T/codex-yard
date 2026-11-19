@@ -5,6 +5,7 @@ import { setImmediate } from 'node:timers/promises';
 import { CodexConnection } from '../lib/codex.ts';
 import { createNativeAppToolHost, type NativeAppToolsOptions } from '../lib/native-app-tools.ts';
 import { record } from '../src/native/protocol.ts';
+import { createBackendSidebarState, PINNED_SECTION_ID } from '../src/native/backend-sidebar-state.ts';
 import { catalog, schemas } from '../vendor/native-app-tools/26.1013.40934/portable-tools.mjs';
 import { agentItem, commandItem, createFakeCodex, fixtureThread, fixtureTurn } from './fake-codex.ts';
 
@@ -17,6 +18,8 @@ async function fixture(t: TestContext, overrides: Partial<NativeAppToolsOptions>
   const target = fixtureThread('target', root, { turns: [fixtureTurn('finished', [agentItem('answer', '**Answer** &amp; result')])] });
   fake.threads.set(caller.id, caller); fake.threads.set(target.id, target);
   const globals: Record<string, unknown> = {};
+  const sidebar = createBackendSidebarState({ globals, persist: async () => {}, publish() {},
+    request: async (_hostId, method, params, mutating) => connection.request(method, params, { mutating }) });
   const connectedHosts: string[] = [];
   const host = createNativeAppToolHost({ connectionFor: async hostId => {
     connectedHosts.push(hostId);
@@ -25,14 +28,14 @@ async function fixture(t: TestContext, overrides: Partial<NativeAppToolsOptions>
   }, hostIds: () => ['local'], globals,
     listProjects: async () => [{ projectId: root, projectKind: 'local', label: 'Fixture', path: root,
       hostId: 'local', hostDisplayName: null, isGitRepository: false }], projectlessRoot: root + '/workspaces',
-    configFor: () => ({ 'mcp_servers.codex_app': { enabled: true } }), persistGlobals: async () => {}, setMembership: async () => {}, ...overrides });
+    configFor: () => ({ 'mcp_servers.codex_app': { enabled: true } }), pins: sidebar.pins, setMembership: async () => {}, ...overrides });
   let nextCall = 0;
   function call(tool: string, args: unknown, signal = new AbortController().signal, callId = String(++nextCall)) {
     return host.callTool({ callerSource: 'codex', hostId: 'local', namespace: 'codex_app', tool,
       threadId: caller.id, turnId: 'calling-turn', callId, arguments: args }, { signal });
   }
   t.after(async () => { await host.close(); connection.close(); await fake.close(); await rm(root, { recursive: true, force: true }); });
-  return { root, fake, connection, caller, target, call, host, globals, connectedHosts };
+  return { root, fake, connection, caller, target, call, host, globals, connectedHosts, sidebar };
 }
 function data(value: { success: boolean; contentItems: { text: string }[] }) {
   assert.equal(value.success, true, JSON.stringify(value));
@@ -63,6 +66,25 @@ test('native read history preserves turn cursors and caps only explicitly includ
   assert.deepEqual(item.output, { text: '012', truncated: true, originalChars: 10 });
   assert.equal(h.fake.calls('thread/resume').length, 0);
   assert.equal(h.fake.calls('turn/start').length, 0);
+});
+
+test('thread summaries use host-scoped legacy membership on old backends and native project IDs after upgrade', async t => {
+  let native = false;
+  const h = await fixture(t, { supportsSidebarState: () => native,
+    pins: { list: async () => ({ threadIds: [] }), set: async () => ({ success: true }) } });
+  h.target.projectId = 'native-target'; h.caller.projectId = 'native-caller';
+  h.globals['thread-project-assignments'] = { target: { projectKind: 'local', projectId: 'legacy-target' },
+    caller: { projectKind: 'remote', projectId: 'other-host-project', hostId: 'ssh' } };
+  const threads = async () => (data(await h.call('list_threads', { limit: 10 })).threads as unknown[]).map(record);
+  const legacy = await threads();
+  assert.equal(legacy.find(thread => thread.id === 'target')!.projectId, 'legacy-target');
+  assert.equal(legacy.find(thread => thread.id === 'caller')!.projectId, null, 'a legacy assignment on another host must not leak into this summary');
+  delete (h.globals['thread-project-assignments'] as Record<string, unknown>).target;
+  assert.equal((await threads()).find(thread => thread.id === 'target')!.projectId, null);
+  native = true;
+  const upgraded = await threads();
+  assert.equal(upgraded.find(thread => thread.id === 'target')!.projectId, 'native-target');
+  assert.equal(upgraded.find(thread => thread.id === 'caller')!.projectId, 'native-caller');
 });
 
 test('native wait cursors suppress repeated final text and reset foreign cursors', async t => {
@@ -109,7 +131,9 @@ test('native send keeps destination settings and replays one business call witho
   const input = h.fake.calls('turn/start')[0]!.params;
   assert.equal(input.model, undefined); assert.equal(input.effort, undefined);
   assert.equal(input.parentTurnId, 'calling-turn'); assert.equal(input.rootTurnId, 'original-root');
-  assert.match(JSON.stringify(input.input), /codex_delegation/);
+  assert.deepEqual(input.input, []);
+  assert.equal(record(input.toolOutput).namespace, 'codex_app');
+  assert.match(String(record(input.toolOutput).output), /codex_delegation/);
   assert.equal(h.fake.calls('turn/steer').length, 0);
 });
 
@@ -189,26 +213,29 @@ test('cancelling a queued pin write leaves the completed write in place', async 
   let release!: () => void, started!: () => void, writes = 0;
   const blocked = new Promise<void>(resolve => { release = resolve; });
   const persisting = new Promise<void>(resolve => { started = resolve; });
-  const h = await fixture(t, { persistGlobals: async () => { ++writes; started(); await blocked; } });
+  const h = await fixture(t);
+  h.fake.handlers.set('thread/section/move', async params => { ++writes; started(); await blocked; return h.fake.defaultResult('thread/section/move', params); });
   const first = h.call('set_thread_pinned', { threadId: 'target', pinned: true });
   try {
     await persisting;
     const controller = new AbortController();
     const second = h.call('set_thread_pinned', { threadId: 'target', pinned: false }, controller.signal);
     const rejected = assert.rejects(second, { name: 'AbortError' });
-    await h.fake.waitForCall('thread/read', 2); await setImmediate();
+    await h.fake.waitForCall('thread/read', 3); await setImmediate();
     controller.abort(); release();
     data(await first); await rejected;
     assert.equal(writes, 1); assert.deepEqual(h.globals['pinned-thread-ids'], ['target']);
   } finally { release(); }
 });
 
-test('failed pin persistence restores the prior pins and permits a subsequent write', async t => {
+test('failed backend pin mutation preserves native membership and permits a subsequent write', async t => {
   let fail = true;
-  const h = await fixture(t, { persistGlobals: async () => { if (fail) throw new Error('Fixture disk failure'); } });
-  h.globals['pinned-thread-ids'] = ['caller'];
+  const h = await fixture(t);
+  await h.sidebar.pins.set({ threadId: 'caller', pinned: true });
+  h.fake.handlers.set('thread/section/move', params => { if (fail) throw new Error('Fixture backend failure'); return h.fake.defaultResult('thread/section/move', params); });
   const rejected = await h.call('set_thread_pinned', { threadId: 'target', pinned: true });
   assert.equal(rejected.success, false); assert.deepEqual(h.globals['pinned-thread-ids'], ['caller']);
+  assert.equal(h.target.section, null); assert.deepEqual(h.fake.sectionMembers.get(PINNED_SECTION_ID), ['caller']);
   fail = false;
   data(await h.call('set_thread_pinned', { threadId: 'target', pinned: true }));
   assert.deepEqual(h.globals['pinned-thread-ids'], ['target', 'caller']);

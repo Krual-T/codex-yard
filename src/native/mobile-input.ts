@@ -2,7 +2,7 @@
 const composerInput = '[data-codex-composer="true"], textarea[id^="pending-"]';
 const composerRoot = '[data-codex-composer-root]';
 
-export function installMobileInput(): void {
+export function installMobileInput(): (previous: HTMLElement, next: HTMLElement) => void {
   const touch = matchMedia('(pointer: coarse)');
   let editingRoot: Element | null = null;
   const interaction = (event: Event) => {
@@ -24,8 +24,12 @@ export function installMobileInput(): void {
     focus.call(this, options);
   };
 
+  function transferFocus(previous: HTMLElement, next: HTMLElement): void {
+    if (editingRoot?.contains(previous)) editingRoot = next.closest(composerRoot) ?? next;
+    next.focus({ preventScroll: true });
+  }
   const viewport = window.visualViewport;
-  if (!viewport) return;
+  if (!viewport) return transferFocus;
   const html = document.documentElement;
   let frame = 0;
   const update = () => {
@@ -47,4 +51,5 @@ export function installMobileInput(): void {
   window.addEventListener('resize', schedule, { passive: true });
   touch.addEventListener('change', schedule);
   update();
+  return transferFocus;
 }

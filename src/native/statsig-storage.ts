@@ -29,6 +29,20 @@ export async function openStatsigStorage(): Promise<StatsigStorageProvider> {
     transaction.oncomplete = () => resolve();
     transaction.onabort = () => reject(transaction.error);
   });
+  // Migrate the whole SDK namespace, including stable ID and session metadata.
+  // Existing IndexedDB values win; remove legacy values only after commit.
+  const legacy = new Map(Object.keys(localStorage).filter(key => key.startsWith('statsig.'))
+    .flatMap(key => { const value = localStorage.getItem(key); return value == null ? [] : [[key, value] as const]; }));
+  if (legacy.size > 0) {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction('values', 'readwrite');
+      const store = transaction.objectStore('values');
+      for (const [key, value] of legacy) if (!values.has(key)) { store.put(value, key); values.set(key, value); }
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => reject(transaction.error);
+    });
+    for (const [key, value] of legacy) if (localStorage.getItem(key) === value) localStorage.removeItem(key);
+  }
   function update(key: string, value?: string) {
     const transaction = database.transaction('values', 'readwrite');
     const store = transaction.objectStore('values');
@@ -39,10 +53,9 @@ export async function openStatsigStorage(): Promise<StatsigStorageProvider> {
     isReady: () => true,
     isReadyResolver: () => null,
     getProviderName: () => 'IndexedDB',
-    // Preserve the SDK's existing stable ID and session metadata on first use.
-    getItem: key => values.get(key) ?? localStorage.getItem(key),
+    getItem: key => values.get(key) ?? null,
     setItem(key, value) { update(key, value); values.set(key, value); },
     removeItem(key) { update(key); values.delete(key); localStorage.removeItem(key); },
-    getAllKeys: () => [...new Set([...values.keys(), ...Object.keys(localStorage).filter(key => key.startsWith('statsig.'))])],
+    getAllKeys: () => [...values.keys()],
   };
 }

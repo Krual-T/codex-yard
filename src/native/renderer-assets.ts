@@ -2,13 +2,14 @@
 // so the original application keeps one React runtime and shared module state.
 import { webRendererPrefix } from './visualizations.ts';
 const asset = (name: string) => webRendererPrefix + '/assets/' + name;
+export const startupApplicationFile = 'app-initial-a68277f60b93.js';
 export const rendererAssets = {
   miniRoute: '/avatar-overlay?initialRoute=%2Favatar-overlay',
   mini: asset('avatar-overlay-native-page-d1ea5f6255c7.js'),
   client: asset('index.client-17f4cd7252fb.js'),
   shared: asset('app-shared-61271c39e3c5.js'),
   rpc: asset('rpc-e690e45d1264.js'),
-  application: asset('app-initial-a68277f60b93.js'),
+  application: asset(startupApplicationFile),
   applicationStyle: asset('app-initial-e7c27dd40beb.css'),
   userMessageStyle: asset('user-message-5f3d424c6182.css'),
   primary: asset('app-primary-f5ea123a0407.js'),

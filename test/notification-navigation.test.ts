@@ -58,7 +58,7 @@ test('the browser queues a notification during startup and uses the native route
     navigator: { serviceWorker: { addEventListener(_type: string, listener: typeof receive) { receive = listener; } } },
   });
   runInNewContext(await readFile(new URL('../.local/native-host.js', import.meta.url), 'utf8'), {
-    window, Event, WebSocket: Socket, URL, URLSearchParams, location: { origin, href: origin + '/' },
+    window, document: Object.assign(new EventTarget(), { querySelector: () => null }), Event, WebSocket: Socket, URL, URLSearchParams, location: { origin, href: origin + '/' },
     localStorage: { getItem: () => savedAtoms }, history: { replaceState() {} },
     setTimeout() {}, matchMedia: () => ({ matches: false }), performance: { timeOrigin: 0 },
   });

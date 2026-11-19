@@ -56,6 +56,10 @@ async function waitUntil<T>(read: () => Promise<T>, matches: (value: T) => boole
   throw new Error('Condition timed out');
 }
 async function history() { return (await app!.automations.fetch('automation-runs', {}) as { items: AutomationRun[] }).items; }
+async function inbox() { return await app!.automations.fetch('inbox-items', {}) as {
+  items: { id: string; readAt: number | null; status: string; description: string }[];
+  unreadRunCounts: { total: number };
+}; }
 try {
   if (process.env.AGENTS_TEST_MASKED_APP) {
     assert.deepEqual(await readdir(process.env.AGENTS_TEST_MASKED_APP), []);
@@ -76,10 +80,30 @@ try {
   await app.close(); app = await createNativeWorkbench(appOptions);
   await app.automations.tick();
   assert.equal((await history())[0].id, run.id);
-  const turns = await app.control.request<Page<TurnSummary>>('thread/turns/list', { threadId: run.threadId, itemsView: 'full' });
+  const turns = await app.control.request<Page<TurnSummary>>('thread/turns/list', { threadId: run.threadId, itemsView: 'summary' });
   assert.equal(turns.data.length, 1);
   assert.ok(turns.data[0].items.some(item => item.type === 'userMessage' && item.clientId === run.id));
   checks.push('CLI preserves the run client message ID and restart does not resend');
+  const scheduled = (await history())[0];
+  let receipt = (await app.control.request('thread/read', { threadId: scheduled.threadId, includeTurns: false })).readState;
+  assert.ok(receipt);
+  await app.control.request('thread/readState/update', { threadId: scheduled.threadId, expectedRevision: receipt.revision,
+    operation: { type: 'unread' } }, { mutating: true });
+  assert.equal((await inbox()).items.find(item => item.id === scheduled.id)!.readAt, null);
+  await app.automations.fetch('inbox-item-set-read-state', { id: scheduled.id, isRead: true });
+  receipt = (await app.control.request('thread/read', { threadId: scheduled.threadId, includeTurns: false })).readState;
+  assert.ok(receipt); assert.equal(receipt.firstUnread, null);
+  await app.control.request('thread/readState/update', { threadId: scheduled.threadId, expectedRevision: receipt.revision,
+    operation: { type: 'unread' } }, { mutating: true });
+  await app.automations.fetch('inbox-automation-runs-mark-all-read', {});
+  assert.equal((await inbox()).unreadRunCounts.total, 0);
+  await app.automations.fetch('automation-run-archive', { id: scheduled.id });
+  const archived = await app.control.request<Page<{ id: string }>>('thread/list', { archived: true, modelProviders: [], sourceKinds: [], useStateDbOnly: true });
+  assert.ok(archived.data.some(thread => thread.id === scheduled.threadId));
+  assert.equal((await inbox()).items.find(item => item.id === scheduled.id)!.status, 'ARCHIVED');
+  await app.control.request('thread/unarchive', { threadId: scheduled.threadId }, { mutating: true });
+  await waitUntil(inbox, value => value.items.find(item => item.id === scheduled.id)!.status === 'PENDING_REVIEW');
+  checks.push('Without a browser, inbox and external CLI clients share receipts, archive and unarchive');
   const approvalTask = await app.automations.fetch('automation-create', { params: { name: 'Approval fixture', prompt: 'APPROVAL_FIXTURE',
     rrule: 'FREQ=DAILY', status: 'PAUSED', timeZone: 'UTC' } }) as { item: { id: string } };
   const backgroundRequests: RpcMessage[] = [];
@@ -102,6 +126,15 @@ try {
   await waitUntil(async () => { await app!.automations.tick(); return (await history())[0]; }, r => r.status === 'completed');
   checks.push('After Yard restart, a later conversation connection receives and answers the pending approval');
   assert.equal((await history())[0].id, run.id);
+  await app.automations.fetch('automation-run-archive', { id: scheduled.id });
+  await app.automations.beforeThreadDelete('local', scheduled.threadId!);
+  await app.control.request('thread/delete', { threadId: scheduled.threadId }, { mutating: true });
+  await app.close(); app = await createNativeWorkbench(appOptions);
+  const deleted = (await history()).find(item => item.id === scheduled.id)!;
+  assert.equal(deleted.status, 'completed'); assert.equal(deleted.summary, 'SCHEDULE_STANDALONE_OK');
+  assert.equal(deleted.archived, true); assert.ok(deleted.readAt);
+  assert.equal((await inbox()).items.find(item => item.id === scheduled.id)!.status, 'ARCHIVED');
+  checks.push('An archived scheduled result keeps its history and receipt after backend deletion and Yard restart');
   if (process.argv.includes('--ui')) {
     const ui = spawn(process.execPath, ['scripts/verify-automations.ts'], { cwd: process.cwd(),
       env: { ...process.env, AGENTS_TEST_CODEX_SOCKET: socketPath, AGENTS_TEST_CODEX_HOME: codexHome,
