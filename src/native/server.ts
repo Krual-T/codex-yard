@@ -76,7 +76,7 @@ import { ProviderRouting } from './provider-routing.ts';
 import { deepseekCatalog, isDeepseekProvider } from './deepseek-models.ts';
 import { adaptModelProviders } from './model-provider-renderer.ts';
 
-interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; httpFetch?: typeof fetch; notificationFetch?: typeof fetch; notificationIntervalMs?: number; hostCatalog?: HostCatalog; sshConfigPath?: string; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection }
+interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; embeddingOrigins?: string[]; httpFetch?: typeof fetch; notificationFetch?: typeof fetch; notificationIntervalMs?: number; hostCatalog?: HostCatalog; sshConfigPath?: string; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection }
 const mime: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript',
   '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
@@ -137,6 +137,14 @@ export async function createNativeWorkbench(options: Options = {}) {
     return readRendererAsset(staged ? join(projectRoot, '.local', startupApplicationFile) : file, path, webRenderer);
   }
   const publicOrigin = options.publicOrigin ?? process.env.AGENTS_PUBLIC_ORIGIN ?? '';
+  const embeddingOrigins = options.embeddingOrigins ?? (process.env.AGENTS_EMBEDDING_ORIGINS ?? '').split(/\s+/).filter(Boolean);
+  for (const origin of embeddingOrigins) {
+    let url: URL;
+    try { url = new URL(origin); } catch { throw new Error('AGENTS_EMBEDDING_ORIGINS 必须是精确 HTTP 或 HTTPS 来源，以空格分隔'); }
+    if (!['http:', 'https:'].includes(url.protocol) || url.origin !== origin || url.username || url.password || url.hostname.includes('*')) {
+      throw new Error('AGENTS_EMBEDDING_ORIGINS 必须是精确 HTTP 或 HTTPS 来源，以空格分隔');
+    }
+  }
   const chromeConnection = options.chromeConnection ?? chromeConnectionFromEnv();
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid PORT');
   if (publicOrigin) {
@@ -462,9 +470,10 @@ export async function createNativeWorkbench(options: Options = {}) {
   function sandboxPolicy(request: import('node:http').IncomingMessage) {
     // Use the configured HTTPS parent explicitly for opaque-origin frames.
     // Loopback pages retain their existing same-origin framing policy.
-    return publicOrigin && request.headers.host === new URL(publicOrigin).host
+    const policy = publicOrigin && request.headers.host === new URL(publicOrigin).host
       ? visualizationSandboxPolicy.replace("frame-ancestors 'self'", 'frame-ancestors ' + publicOrigin)
       : visualizationSandboxPolicy;
+    return policy + (embeddingOrigins.length ? ' ' + embeddingOrigins.join(' ') : '');
   }
   function allowed(request: import('node:http').IncomingMessage, requireOrigin = false, pageRoute = false) {
     const address = server.address();
@@ -474,14 +483,20 @@ export async function createNativeWorkbench(options: Options = {}) {
     const hosts = allowedOrigins.map(origin => new URL(origin).host);
     const documentNavigation = pageRoute && !requireOrigin && request.method === 'GET' &&
       request.headers['sec-fetch-mode'] === 'navigate' && request.headers['sec-fetch-dest'] === 'document';
+    let embeddedNavigation = false;
+    if (pageRoute && !requireOrigin && request.method === 'GET' && request.headers['sec-fetch-mode'] === 'navigate'
+      && request.headers['sec-fetch-dest'] === 'iframe' && request.headers.referer) {
+      try { embeddedNavigation = embeddingOrigins.includes(new URL(request.headers.referer).origin); } catch {}
+    }
     return hosts.includes(request.headers.host || '') &&
-      (request.headers['sec-fetch-site'] !== 'cross-site' || documentNavigation) &&
-      (!request.headers.origin ? !requireOrigin : allowedOrigins.includes(request.headers.origin));
+      (request.headers['sec-fetch-site'] !== 'cross-site' || documentNavigation || embeddedNavigation) &&
+      (!request.headers.origin ? !requireOrigin : allowedOrigins.includes(request.headers.origin)
+        || embeddedNavigation && embeddingOrigins.includes(request.headers.origin));
   }
   const server = createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:; frame-src 'self' blob: http: https:; frame-ancestors 'self'");
+    response.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:; frame-src 'self' blob: http: https:; frame-ancestors 'self'" + (embeddingOrigins.length ? ' ' + embeddingOrigins.join(' ') : ''));
     try {
       const url = new URL(request.url!, 'http://local');
       let path = decodeURIComponent(url.pathname);

@@ -24,7 +24,7 @@ import { fileMethods } from '../src/native/files.ts';
 import { nativeFixture } from './native-fixture.ts';
 
 async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fetch, snapshot?: { data: string; metadata: unknown },
-  remote: { hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand } = {}) {
+  remote: { hostCatalog?: HostCatalog; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; embeddingOrigins?: string[] } = {}) {
   const root = await mkdtemp('/tmp/aw-native-test-');
   const fake = await createFakeCodex(root);
   const fileRpc = fileDaemonFixture();
@@ -62,6 +62,36 @@ async function fixture(t: import('node:test').TestContext, httpFetch?: typeof fe
   }
   return { root, fake, app, connect };
 }
+
+test('preview embedding permits only explicit parent origins and keeps APIs restricted to this instance', async t => {
+  const parent = 'https://trusted.example.ts.net:8765';
+  const h = await fixture(t, undefined, undefined, { embeddingOrigins: [parent, 'http://127.0.0.1:8765'] });
+  const page = await fetch(h.app.url + '/');
+  assert.equal(page.headers.get('content-security-policy')!.split('frame-ancestors ')[1], "'self' " + parent + ' http://127.0.0.1:8765');
+  const headers = { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe', referer: parent + '/?initialRoute=test' };
+  // Native HTTP preserves the browser's navigation metadata; fetch replaces its mode.
+  const navigation = (path: string, requestHeaders = headers) => new Promise<number | undefined>((resolve, reject) => {
+    get(h.app.url + path, { headers: requestHeaders }, response => {
+      response.on('error', reject); response.on('end', () => resolve(response.statusCode)); response.resume();
+    }).on('error', reject);
+  });
+  assert.equal(await navigation('/'), 200);
+  assert.equal(await navigation('/', { ...headers, referer: 'https://untrusted.example/' }), 403);
+  assert.equal(await navigation('/', { ...headers, referer: '' }), 403);
+  assert.equal(await navigation('/api/status'), 403);
+  assert.equal((await fetch(h.app.url + '/api/status', { headers: { origin: parent } })).status, 403);
+  const sandbox = await fetch(h.app.url + '/?app=skybridge');
+  assert.match(sandbox.headers.get('content-security-policy')!, new RegExp(parent.replaceAll('.', '\\.')));
+  const isolated = await fixture(t);
+  assert.equal((await fetch(isolated.app.url + '/')).headers.get('content-security-policy')!.split('frame-ancestors ')[1], "'self'");
+});
+
+test('preview embedding rejects wildcards, URL paths, credentials and directive injection', async () => {
+  for (const origin of ['*', 'https://*.example.com', 'https://example.com/path', 'https://user:password@example.com',
+    "https://example.com; frame-ancestors *", 'data:text/html,test']) {
+    await assert.rejects(createNativeWorkbench({ workspace: '/tmp', embeddingOrigins: [origin] }), /AGENTS_EMBEDDING_ORIGINS/);
+  }
+});
 
 test('sidebar bootstrap seeds current project and pin queries before the renderer starts', async t => {
   const h = await fixture(t);

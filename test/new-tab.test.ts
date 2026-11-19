@@ -7,7 +7,7 @@ import { rendererRoot } from '../lib/app-resources.ts';
 import { adaptNewTabModule } from '../src/native/new-tab-renderer.ts';
 
 test('New tab adapters compile against the pinned renderer and reject a changed version boundary', async () => {
-  for (const name of ['app-initial-a68277f60b93.js', 'thread-app-shell-chrome-f65cc9d3a9eb.js', 'tab-content-7090d8d5ae50.js', 'native-page-ccd33c3eab0c.js', 'thread-side-panel-new-tab-17ea66857c53.js', 'app-primary-f5ea123a0407.js']) {
+  for (const name of ['app-initial-a68277f60b93.js', 'open-handler-96382bc3d49a.js', 'thread-app-shell-chrome-f65cc9d3a9eb.js', 'tab-content-7090d8d5ae50.js', 'native-page-ccd33c3eab0c.js', 'thread-side-panel-new-tab-17ea66857c53.js', 'app-primary-f5ea123a0407.js']) {
     const source = await readFile(join(rendererRoot, 'assets', name));
     const adapted = adaptNewTabModule('/assets/' + name, source);
     assert.notDeepEqual(adapted, source, name);

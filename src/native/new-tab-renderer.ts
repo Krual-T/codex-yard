@@ -5,6 +5,14 @@ export function adaptNewTabModule(path: string, content: Buffer): Buffer {
   const edits: [string, string][] = [];
   if (path === '/assets/app-initial-a68277f60b93.js') {
     edits.push([
+      '?()=>[...N7r.keys()].some(t=>t({conversationId:e,href:$c(r),initiator:a,hostId:i,title:f?.textContent?.trim()})):void 0,',
+      '?()=>e!=null&&tme(r)&&window.workbenchOpenConversationLink?.({type:`open-in-browser`,conversationId:e,url:$c(r),hostId:i,initiator:a})||[...N7r.keys()].some(t=>t({conversationId:e,href:$c(r),initiator:a,hostId:i,title:f?.textContent?.trim()})):void 0,',
+    ], [
+      // The pinned renderer can handle a link entirely in its own message bus.
+      // Route its ordinary website fallback through Yard before the native opener.
+      '||Kc.dispatchMessage(`open-in-browser`,{...e==null?{}:{clickModifiers:e}',
+      '||t!=null&&c!==`external-browser`&&m!==!0&&n==null&&p==null&&window.workbenchOpenConversationLink?.({type:`open-in-browser`,conversationId:t,url:$c(i),hostId:a,initiator:o,source:f,openTarget:c,clickModifiers:e,presentationIntent:d})||Kc.dispatchMessage(`open-in-browser`,{...e==null?{}:{clickModifiers:e}',
+    ], [
       'if(!o&&!s){let e=n??l,r;return t[3]===e?r=t[4]:(r=(0,GCl.jsx)(PCl,{showWhenEmpty:!0,target:`right`,title:e}),t[3]=e,t[4]=r),r}',
       '',
     ], [
@@ -16,6 +24,16 @@ export function adaptNewTabModule(path: string, content: Buffer): Buffer {
     ], [
       'getIcon:()=>(0,U1o.jsx)(_De,{}),getTitle:e=>e.get(fh)',
       'getIcon:()=>window.workbenchNewTabIcon?.()??(0,U1o.jsx)(_De,{}),getTitle:e=>e.get(fh)',
+    ]);
+  } else if (path === '/assets/open-handler-96382bc3d49a.js') {
+    // Yard's iframe renderer is available even when the backend's separate
+    // browser-agent capability is disabled. Only Yard-created link actions opt in.
+    edits.push([
+      'l=n.get(ut,{name:`browser.in-app`});',
+      'l=e.yardEmbedded===!0?{isCapable:!0,isLoading:!1,isError:!1}:n.get(ut,{name:`browser.in-app`});',
+    ], [
+      'p===`split`&&!n.get(Tt)',
+      'p===`split`&&e.yardEmbedded!==!0&&!n.get(Tt)',
     ]);
   } else if (path === '/assets/thread-app-shell-chrome-f65cc9d3a9eb.js') {
     edits.push([

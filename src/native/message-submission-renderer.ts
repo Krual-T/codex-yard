@@ -13,7 +13,10 @@ function yardPreparingViewState() {
   }, { autoDispose: true });
 }
 function yardPrepareUserMessage(scope, key, text, cwd) {
-  const message = ZHo({ context: { ...scope.get(nJ), prompt: text }, cwd, text });
+  const context = scope.get(nJ);
+  if (!text.trim() && !context.imageAttachments?.length && !context.addedFiles?.length && !context.fileAttachments?.length
+      && !context.uploadedFileAttachments?.length) return null;
+  const message = ZHo({ context: { ...context, prompt: text }, cwd, text });
   scope.set(yardPreparingState(), key, messages => [...messages, message]);
   return { id: message.id, deferred: false,
     update(text) {
@@ -30,17 +33,31 @@ export { yardPrepareUserMessage, yardPreparingViewState };
 `;
 
 const preparingView = `
-import { yardPreparingViewState } from "./app-initial-a68277f60b93.js";
+import { yardPreparingViewState, Ui as yardPreparingImage, Wi as yardInitPreparingImage } from "./app-initial-a68277f60b93.js";
+import { i as yardPreparingFile, c as yardInitPreparingFile } from "./user-message-attachments-9d0c60d2f476.js";
 function yardPreparingUserMessage({ conversationId, hostId, message }) {
+  yardInitPreparingImage();
+  yardInitPreparingFile();
+  const images = message.context.imageAttachments ?? [];
+  const files = [...message.context.addedFiles ?? [], ...message.context.fileAttachments ?? [],
+    ...message.context.uploadedFileAttachments ?? []];
+  const hasAttachments = images.length > 0 || files.length > 0;
   const end = (0, NA.useRef)(null);
   (0, NA.useLayoutEffect)(() => {
     end.current?.scrollIntoView({ block: "end" });
   }, [message.id]);
   return (0, PA.jsxs)("div", {
     ref: end, className: "py-4", "data-yard-preparing-message": message.id,
-    children: [(0, PA.jsx)(Jv, { speaker: "user" }), (0, PA.jsx)(sy, {
+    children: [(0, PA.jsx)(Jv, { speaker: "user" }), hasAttachments ? (0, PA.jsxs)("div", {
+      className: "mb-2 flex flex-wrap items-center justify-end gap-2",
+      children: [images.map(image => (0, PA.jsx)(yardPreparingImage, {
+        src: image.previewSrc ?? image.src, filename: image.filename, previewEnabled: false,
+      }, image.id)), files.map(file => (0, PA.jsx)(yardPreparingFile, {
+        attachment: file, cwd: message.cwd, hostId,
+      }, file.upload?.fileId ?? file.path))],
+    }) : null, (0, PA.jsx)(sy, {
       message: message.text, cwd: message.cwd, threadId: conversationId, hostId,
-      hideActions: true, sentAtMs: null,
+      hasExternalAttachments: hasAttachments, hideActions: true, sentAtMs: null,
     })],
   });
 }
@@ -63,15 +80,17 @@ if (yardSubmission == null && o.type === "local" && s.get(jT)?.type === "local"
     && !a.isResponseInProgress && a.submitButtonMode !== "stop"
     && u.followUpSubmitAction !== "queue"
     && yardThreadId != null && !u.aeonInitialization && u.navigation !== "background"
-    && _ == null && e.editingQueuedMessagePosition == null && yardText.trim()
+    && _ == null && e.editingQueuedMessagePosition == null
     && !yardText.trimStart().startsWith("/")) {
   yardSubmission = yardPrepareUserMessage(s, {
     hostId: s.get(g_, yardThreadId), threadId: yardThreadId,
   }, yardText, o.cwd);
-  yardPreparing.current = yardSubmission;
-  u = { ...u, yardPreparingSubmission: yardSubmission };
-  if (u.clear !== false && u.promptRawOverride == null && u.persistedPromptRawOverride == null)
-    yardClearSubmittedComposer(yardSubmission, l, e);
+  if (yardSubmission) {
+    yardPreparing.current = yardSubmission;
+    u = { ...u, yardPreparingSubmission: yardSubmission };
+    if (u.clear !== false && u.promptRawOverride == null && u.persistedPromptRawOverride == null)
+      yardClearSubmittedComposer(yardSubmission, l, e);
+  }
 }
 try {
 if((d||a.submitBlockReason==="loading-local-config")`;

@@ -65,6 +65,7 @@ const publish = (message: HostMessage) => {
     else request.resolve(message.body);
   } else window.postMessage(message, location.origin);
 };
+Object.assign(window, { workbenchOpenConversationLink: (message: HostMessage) => openClientBrowser(message, publish) });
 let lastSidebarRefresh = 0;
 async function refreshSidebar() {
   if (Date.now() - lastSidebarRefresh < 1000) return;
@@ -218,7 +219,7 @@ async function send(message: HostMessage) {
   if (message.type === 'electron-window-focus-request') { publishFocus(); return; }
   if (mini.handle(message)) return;
   if (chrome.intercept(message)) return;
-  if (openClientBrowser(message)) return;
+  if (openClientBrowser(message, publish)) return;
   if (message.type === 'log-message') return;
   if (message.type === 'fetch' && message.url?.endsWith('/automation-create') && typeof message.body === 'string') {
     const body = record(JSON.parse(message.body));

@@ -50,9 +50,9 @@ test('equal RPC ids on separate hosts retain separate pending results after the 
 });
 
 test('renderer browser links open on the visiting client before a socket or server round trip', async () => {
-  const calls: unknown[][] = [], sent: unknown[] = [];
+  const calls: unknown[][] = [], sent: unknown[] = [], received: any[] = [];
   class BrowserSocket extends EventTarget { send(value: unknown) { sent.push(value); } }
-  const window: any = { open: (...args: unknown[]) => calls.push(args), addEventListener() {} };
+  const window: any = { open: (...args: unknown[]) => calls.push(args), postMessage: (message: unknown) => received.push(message), addEventListener() {} };
   runInNewContext(await readFile(new URL('../.local/native-host.js', import.meta.url), 'utf8'), {
     window, document: Object.assign(new EventTarget(), { querySelector: () => null }), localStorage: browserStorage(), WebSocket: BrowserSocket, URL, URLSearchParams, location: { origin: 'http://workbench.test', href: 'http://workbench.test/' },
     setTimeout() {}, matchMedia: () => ({ matches: false }), performance: { timeOrigin: 0 },
@@ -72,6 +72,20 @@ test('renderer browser links open on the visiting client before a socket or serv
     await assert.rejects(window.electronBridge.sendMessageFromView({ type: 'open-in-browser', url }));
   }
   assert.equal(calls.length, 4);
+  for (const url of ['https://example.com/page', 'http://127.0.0.1:8784/gallery.html?q=1#anchor']) {
+    await window.electronBridge.sendMessageFromView({ type: 'open-in-browser', conversationId: 'test-thread', hostId: 'local', url });
+  }
+  assert.deepEqual(received.map(message => [message.type, message.conversationId, message.url, message.presentationIntent]), [
+    ['toggle-browser-panel', 'test-thread', 'https://example.com/page', 'split'],
+    ['toggle-browser-panel', 'test-thread', 'http://workbench.test/api/local-html-preview?url=http%3A%2F%2F127.0.0.1%3A8784%2Fgallery.html%3Fq%3D1#anchor', 'split'],
+  ]);
+  assert.equal(calls.length, 4, 'ordinary conversation links use the panel without opening another browser tab');
+  for (const options of [{ openTarget: 'external-browser' }, { useExternalBrowser: true },
+    { disposition: 'new-background-tab', clickModifiers: { ctrlKey: true } }]) {
+    await window.electronBridge.sendMessageFromView({ type: 'open-in-browser', conversationId: 'test-thread', url: 'https://example.com/external', ...options });
+  }
+  assert.equal(calls.length, 7, 'explicit external and modified clicks retain an external browser destination');
+  assert.equal(received.length, 2);
   assert.equal(sent.length, 0);
 });
 

@@ -1,6 +1,6 @@
 // Run after build, under /tmp/agents-workbench-heavy.lock. Disposable backend only.
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright-core';
@@ -17,6 +17,19 @@ if (process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT) {
 }
 await writeFile(join(dataDir, 'projects.json'), JSON.stringify([{ name: 'Message fixture', path: root }]));
 const fake = await createFakeCodex(root);
+fake.handlers.set('fs/createDirectory', async params => {
+  const path = String(params.path);
+  assert.ok(path.startsWith(root + '/'), 'fixture writes must stay in the disposable directory');
+  await mkdir(path, { recursive: Boolean(params.recursive) });
+  return {};
+});
+fake.handlers.set('fs/getMetadata', async params => {
+  const path = String(params.path);
+  assert.ok(path.startsWith(root + '/'), 'fixture reads must stay in the disposable directory');
+  const info = await stat(path);
+  return { isFile: info.isFile(), isDirectory: info.isDirectory(), isSymlink: false,
+    createdAtMs: info.birthtimeMs, modifiedAtMs: info.mtimeMs };
+});
 const checks: string[] = [], timings: Record<string, number> = {}, errors: string[] = [];
 const report: Record<string, unknown> = { checks, timings, errors, renderer: '26.1013.40934' };
 const releases: (() => void)[] = [];
@@ -33,14 +46,16 @@ const failureId = '00000000-0000-4000-8000-000000000004';
 const configId = '00000000-0000-4000-8000-000000000005';
 const queueId = '00000000-0000-4000-8000-000000000006';
 const orderId = '00000000-0000-4000-8000-000000000007';
-const threadIds = [readyId, resumeId, cancelId, failureId, configId, queueId, orderId];
+const imageOnlyId = '00000000-0000-4000-8000-000000000008';
+const pdfOnlyId = '00000000-0000-4000-8000-000000000009';
+const threadIds = [readyId, resumeId, cancelId, failureId, configId, queueId, orderId, imageOnlyId, pdfOnlyId];
 const configGate = gate();
 let preparationGate = gate();
 const queueGate = gate();
 let holdPreparation = true;
 let holdConfig = false;
 const resumeGates = new Map([[resumeId, gate()], [cancelId, gate()]]);
-const turnGates = new Map([[readyId, gate()], [resumeId, gate()], [failureId, gate()], [configId, gate()]]);
+const turnGates = new Map([[readyId, gate()], [resumeId, gate()], [failureId, gate()], [configId, gate()], [imageOnlyId, gate()], [pdfOnlyId, gate()]]);
 let rejectNextTurn = true;
 for (const [index, id] of threadIds.entries()) {
   fake.threads.set(id, fixtureThread(id, root, { name: 'Message fixture ' + index, turns: [fixtureTurn('previous-' + index, [
@@ -93,6 +108,36 @@ async function open(id: string) {
   await page!.goto(app!.url + '/?initialRoute=' + encodeURIComponent('/local/' + id), { waitUntil: 'commit' });
   await page!.getByText('Previous reply ' + threadIds.indexOf(id), { exact: true }).waitFor({ timeout: 30000 });
 }
+async function attachFiles(includeImage = true) {
+  if (includeImage) {
+    await page!.getByRole('textbox').last().evaluate(async editor => {
+      const files = new DataTransfer();
+      const canvas = document.createElement('canvas');
+      canvas.width = 80; canvas.height = 60;
+      canvas.getContext('2d')!.fillRect(0, 0, 80, 60);
+      const png = await new Promise<Blob>(done => canvas.toBlob(blob => done(blob!), 'image/png'));
+      files.items.add(new File([png], '发送验收.png', { type: 'image/png' }));
+      editor.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: files }));
+    });
+    await page!.waitForFunction(() => [...document.images].some(image => image.naturalWidth === 80 && image.naturalHeight === 60));
+  }
+  await page!.getByRole('textbox').last().evaluate(editor => {
+    const files = new DataTransfer();
+    files.items.add(new File(['%PDF-1.4\n% Yard attachment fixture\n%%EOF'], '发送验收.pdf', { type: 'application/pdf' }));
+    editor.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: files }));
+  });
+  await page!.getByText('发送验收.pdf', { exact: true }).first().waitFor();
+  await page!.getByRole('button', { name: '发送验收.pdf', exact: true }).waitFor();
+}
+async function assertPreparingAttachments(includeImage = true) {
+  const preparing = page!.locator('[data-yard-preparing-message]');
+  await preparing.getByText('发送验收.pdf', { exact: true }).waitFor({ timeout: 800 });
+  assert.equal(await preparing.locator('img').count(), includeImage ? 1 : 0);
+  if (includeImage) await page!.waitForFunction(() => {
+    const image = document.querySelector<HTMLImageElement>('[data-yard-preparing-message] img');
+    return image?.naturalWidth === 80 && image?.naturalHeight === 60;
+  });
+}
 async function send(text: string, method: 'enter' | 'click' = 'enter') {
   const editor = page!.getByRole('textbox').last();
   await editor.fill(text);
@@ -144,7 +189,7 @@ async function waitTurn(id: string, text: string) {
 async function finish(id: string, text: string) {
   const thread = fake.threads.get(id)!;
   // The response is processed before these authoritative streamed items.
-  await page!.getByRole('textbox').last().filter({ hasText: text }).waitFor({ state: 'hidden', timeout: 10000 });
+  if (text) await page!.getByRole('textbox').last().filter({ hasText: text }).waitFor({ state: 'hidden', timeout: 10000 });
   await page!.waitForFunction(() => document.querySelector('[data-yard-preparing-message]') == null, undefined, { timeout: 10000 });
   const turn = thread.turns.at(-1)!;
   assert.equal(turn.status, 'inProgress');
@@ -158,9 +203,11 @@ async function finish(id: string, text: string) {
   turn.items.push(answer); turn.status = 'completed'; thread.status = { type: 'idle' };
   fake.broadcast({ method: 'turn/completed', params: { threadId: id, turn } });
   await page!.getByText(answerText, { exact: true }).waitFor({ timeout: 10000 });
-  assert.equal(await bubble(text).count(), 1, 'server confirmation must replace the preparation bubble');
-  const maxCount = await page!.evaluate(() => (window as unknown as { yardSendProbe: { maxCount: number } }).yardSendProbe.maxCount);
-  assert.equal(maxCount, 1, 'handoff must never render two copies of a message');
+  if (text) {
+    assert.equal(await bubble(text).count(), 1, 'server confirmation must replace the preparation bubble');
+    const maxCount = await page!.evaluate(() => (window as unknown as { yardSendProbe: { maxCount: number } }).yardSendProbe.maxCount);
+    assert.equal(maxCount, 1, 'handoff must never render two copies of a message');
+  }
 }
 try {
   app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: fake.socketPath,
@@ -186,12 +233,16 @@ try {
   await page.addLocatorHandler(page.getByRole('button', { name: /^(Continue with current model|继续使用当前模型)$/ }), async button => { await button.click(); });
 
   await open(readyId);
+  await attachFiles();
   await send('IMMEDIATE_READY', 'click');
+  await assertPreparingAttachments();
   await page.waitForTimeout(500);
   await page.screenshot({ path: join(output, 'preparation-held.png') });
   await assertMessageOrder('IMMEDIATE_READY');
   holdPreparation = false; preparationGate.release();
-  await waitTurn(readyId, 'IMMEDIATE_READY');
+  const readyRequest = await waitTurn(readyId, 'IMMEDIATE_READY');
+  assert.match(JSON.stringify(readyRequest.params.input), /发送验收\.pdf/);
+  assert.match(JSON.stringify(readyRequest.params.input), /localImage/);
   const nextDraft = '下一条草稿 **保留格式**';
   await page.getByRole('textbox').last().fill(nextDraft);
   await page.screenshot({ path: join(output, 'ready-admission-held.png') });
@@ -205,7 +256,7 @@ try {
   await page.reload({ waitUntil: 'commit' });
   await bubble('IMMEDIATE_READY').waitFor({ timeout: 30000 });
   assert.equal(await bubble('IMMEDIATE_READY').count(), 1);
-  checks.push('Ready thread clears the composer with the immediate bubble; admission and streaming preserve the next draft and one user bubble');
+  checks.push('Image thumbnail and PDF card appear with the immediate bubble; native admission retains both attachments, the next draft and one user message');
 
   await open(resumeId);
   await fake.waitFor(message => message.method === 'thread/resume' && message.params.threadId === resumeId, 10000);
@@ -255,6 +306,7 @@ try {
   checks.push('Switching threads cancels deferred submission, clears its placeholder and retains the original draft');
 
   await open(failureId);
+  await attachFiles();
   await send('RETRY_AFTER_REJECTION');
   await waitTurn(failureId, 'RETRY_AFTER_REJECTION');
   turnGates.get(failureId)!.release();
@@ -269,6 +321,8 @@ try {
     await page.getByRole('button', { name: /^(重试|Retry)$/ }).click();
   }
   await fake.waitFor(() => fake.calls('turn/start').filter(message => message.params.threadId === failureId).length === 2, 15000);
+  const retries = fake.calls('turn/start').filter(message => message.params.threadId === failureId);
+  assert.deepEqual(retries[1]!.params.input, retries[0]!.params.input, 'explicit retry must preserve the submitted image and PDF');
   await finish(failureId, 'RETRY_AFTER_REJECTION');
   checks.push('A definitive rejection removes the preparing bubble, retains the native recovery message and allows one explicit retry');
 
@@ -313,6 +367,26 @@ try {
     'queue submission must never flash a sending bubble');
   assert.equal(fake.calls('turn/start').filter(message => message.params.threadId === queueId).length, 0);
   checks.push('An active-turn follow-up remains in the queue and never flashes a sending bubble while admission waits');
+
+  for (const [id, includeImage] of [[imageOnlyId, true], [pdfOnlyId, false]] as const) {
+    await open(id);
+    await attachFiles(includeImage);
+    holdPreparation = true; preparationGate = gate();
+    await page.getByRole('button', { name: /^(发送|Send)$/ }).click();
+    await assertPreparingAttachments(includeImage);
+    assert.equal((await page.getByRole('textbox').last().innerText()).trim(), '');
+    assert.equal(fake.calls('turn/start').filter(message => message.params.threadId === id).length, 0);
+    await page.screenshot({ path: join(output, includeImage ? 'attachments-only.png' : 'pdf-only.png') });
+    holdPreparation = false; preparationGate.release();
+    const attachmentRequest = await fake.waitFor(message => message.method === 'turn/start' && message.params.threadId === id, 15000);
+    assert.match(JSON.stringify(attachmentRequest.params.input), /发送验收\.pdf/);
+    if (includeImage) assert.match(JSON.stringify(attachmentRequest.params.input), /localImage/);
+    turnGates.get(id)!.release();
+    await finish(id, '');
+    assert.equal(fake.calls('turn/start').filter(message => message.params.threadId === id).length, 1);
+    checks.push(includeImage ? 'An attachment-only message immediately shows its image thumbnail and PDF card, then submits both once'
+      : 'A PDF-only message immediately shows its filename card without waiting for native preparation, then submits once');
+  }
   assert.deepEqual(errors, []);
   assert.equal(fake.calls('thread/queue/add').filter(message => message.params.threadId !== queueId).length, 0,
     'ordinary sends must preserve immediate-send semantics');

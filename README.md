@@ -86,9 +86,13 @@ SSH discovery reads explicit aliases from the server's `~/.ssh/config` and its `
 
 ## Web pages in the side panel
 
+Ordinary clicks on web links in conversations open in the right panel. Modified clicks and an explicit external-browser destination keep opening in the visiting device's browser. Links outside a conversation, including authentication flows, keep their external destination.
+
 New tab has one central file/URL search. Enter a URL to render it inside Yard using the visiting device's browser; the address bar and navigation controls appear after a page opens. Text entry, scrolling, links and forms run in that page. Reloading Yard restores the submitted URL; the address controls track URLs entered in Yard. Cross-origin navigation within a page cannot update Yard's address bar or navigation history.
 
 Sites must allow embedding with `frame-ancestors` / `X-Frame-Options`. Their login sessions depend on the browser's third-party cookie and storage policies, and HTTPS Yard pages require HTTPS target sites except where the browser permits local origins. Yard preserves the site's policies. Web pages need no companion or desktop App. The page toolbar for Chrome pairing has been removed. Loopback addresses in direct pages refer to the visiting device.
+
+Yard itself allows only same-origin embedding by default. To show a separate Yard development preview in the panel, set `AGENTS_EMBEDDING_ORIGINS` **on the preview instance** to the exact trusted parent origins, separated by spaces (for example `"http://127.0.0.1:8765 https://workbench.example.com:8765"`). Different ports count as different origins. Use the preview's HTTPS address when accessing Yard remotely. This permits the trusted site to embed and control the preview UI; it does not add parent origins to the API or WebSocket allowlist. A reverse proxy in front of the preview must also permit document navigation from the trusted parent.
 
 ## Pasting and dropping files
 
