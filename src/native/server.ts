@@ -1017,6 +1017,10 @@ export async function createNativeWorkbench(options: Options = {}) {
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
     if (automationEndpoints.has(endpoint)) return automations.fetch(endpoint, params);
     switch (endpoint) {
+      case 'thread-goal-objective': {
+        await connectedFor(client, connections, hostId);
+        return files.goalObjective(params, hostId, hostPaths.get(hostId)!.codexHome);
+      }
       case 'development-preview': {
         if (typeof params.url !== 'string') throw new Error('需要开发预览网址');
         return developmentPreviews.open(params.url, hostId);

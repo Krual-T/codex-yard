@@ -787,10 +787,10 @@ for await (const line of createInterface({input: process.stdin})) {
             await newTab.getByRole('button', { name: 'Files', exact: true }).waitFor();
             await terminalTab.waitFor({ state: 'hidden' });
             assert.equal(terminalCount('close'), beforeRightClose, 'Switching tabs keeps the right-side PTY.');
-            await newTab.getByRole('button', { name: 'Close tab', exact: true }).click();
+            await newTab.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
             await terminalLine.waitFor();
             assert.equal(terminalCount('create'), beforeRightCreate + 1);
-            await rightTerminal.getByRole('button', { name: 'Close tab', exact: true }).click();
+            await rightTerminal.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
             await terminalTab.waitFor({ state: 'detached' });
             assert.equal(terminalCount('close'), beforeRightClose + 1);
             assert.equal(await editor.textContent(), 'Keep the parent draft.');
@@ -811,7 +811,7 @@ for await (const line of createInterface({input: process.stdin})) {
             await filesPanel.getByRole('button', { name: fileFolder, exact: true }).waitFor();
             assert.ok(directoryCalls.every(call => call.workspaceRoot === workspace));
             assert.ok(directoryCalls.some(call => call.directoryPath === fileFolder));
-            await filesPanel.getByRole('button', { name: 'Close tab', exact: true }).click();
+            await filesPanel.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
             await page.getByRole('button', { name: 'Open right sidebar', exact: true }).click();
             const fileQuery = newTab.getByRole('searchbox', { name: '搜索文件或输入网址', exact: true });
             await fileQuery.fill('yard-source-fixture');
@@ -821,7 +821,7 @@ for await (const line of createInterface({input: process.stdin})) {
             assert.deepEqual(fileSearchCalls.map(call => ({ query: call.query, roots: call.roots })), [
               { query: 'yard-source-fixture', roots: [workspace] },
             ]);
-            await filesPanel.getByRole('button', { name: 'Close tab', exact: true }).click();
+            await filesPanel.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
             assert.equal(await editor.textContent(), 'Keep the parent draft.');
             const chatActions = page.getByRole('button', { name: 'Chat actions', exact: true });
             await chatActions.click();
@@ -842,7 +842,7 @@ for await (const line of createInterface({input: process.stdin})) {
             assert.deepEqual(forks, [{ threadId: thread.id, attachToSource: true, ephemeral: false, excludeTurns: true }]);
             assert.equal(await page.locator('[data-app-action-sidebar-thread-id="local:' + childId + '"]').count(), 0);
             await childEditor.fill('Keep the side chat draft.');
-            await child.getByRole('button', { name: 'Close tab', exact: true }).click();
+            await child.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
             await main.getByText(reentryAnswer, { exact: true }).waitFor();
             assert.equal(await editor.textContent(), 'Keep the parent draft.');
             sidechatEnd.release();
@@ -880,7 +880,7 @@ for await (const line of createInterface({input: process.stdin})) {
             await page.screenshot({ path: join(output, 'desktop-side-chat.png') });
 
             await page.setViewportSize({ width: 390, height: 844 });
-            await child.getByRole('button', { name: 'Close tab', exact: true }).click();
+            await child.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
             await page.getByRole('button', { name: 'Hide sidebar', exact: true }).click();
             await summary.click();
             await editor.fill('');

@@ -4,6 +4,7 @@ import { applyTurnItemEvent, isActivity } from './turn-item-events.ts';
 import { isSourceItem, type SourceItemsByTurn } from './conversation-sources-model.ts';
 import { placeRequestActivity } from './turn-request-activity.ts';
 import { mcpAppUri } from './mcp-app-model.ts';
+import { conversationScope, pendingMessages } from './pending-messages.ts';
 
 export type WorkspaceTurn = TurnSummary & { diff?: string; retryMessage?: string };
 const empty: readonly WorkspaceTurn[] = [];
@@ -292,6 +293,7 @@ export class TurnStream {
       this.frame = undefined;
       this.snapshot = [...this.turns.values()];
       this.sourceSnapshot = this.sourceItems;
+      pendingMessages.confirm(conversationScope(this.threadId, this.hostId), this.snapshot);
       for (const listener of this.listeners) listener();
     });
   }

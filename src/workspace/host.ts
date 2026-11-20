@@ -97,7 +97,7 @@ export async function listSubagents(parentId: string, hostId: string) {
 
 export { WorkspaceRequestError };
 
-function request<T>(method: string, params: Record<string, unknown>, options?: { type?: string; hostId?: string }) {
+export function request<T>(method: string, params: Record<string, unknown>, options?: { type?: string; hostId?: string }) {
   return requestWorkspaceRpc<T>(sendHostMessage, method, params, options);
 }
 
@@ -289,9 +289,9 @@ export async function stageComposerFile(file: File, hostId = 'local'): Promise<P
   return { name: file.name, path, image: /^image\/(?:png|jpeg|gif|webp)$/i.test(file.type) };
 }
 
-function startTurn(threadId: string, text: string, attachments: readonly PromptAttachment[], hostId = 'local') {
+function startTurn(threadId: string, text: string, attachments: readonly PromptAttachment[], hostId = 'local', clientUserMessageId = crypto.randomUUID() as string) {
   return request<{ turn: TurnSummary }>('turn/start', {
-    threadId, clientUserMessageId: crypto.randomUUID(),
+    threadId, clientUserMessageId,
     input: composerInput(text, attachments),
   }, { hostId });
 }
@@ -336,14 +336,14 @@ export async function replaceLatestMessage(threadId: string, turnId: string, inp
 }
 
 export async function sendExistingThread(threadId: string, text: string, stillSelected: () => boolean,
-  attachments: readonly PromptAttachment[] = [], hostId = 'local') {
+  attachments: readonly PromptAttachment[] = [], hostId = 'local', clientUserMessageId?: string) {
   await ensureSignedIn(hostId);
   if (!stillSelected()) throw new Error('The conversation changed before the message was sent.');
   const resumed = await resumeThread(threadId, hostId);
   if (resumed.thread.id !== threadId || !stillSelected()) throw new Error('The conversation changed before the message was sent.');
   // Send on the resumed native session, leaving its permissions and model
   // configuration in the daemon. Do not retry a turn whose outcome is unknown.
-  return startTurn(threadId, text, attachments, hostId);
+  return startTurn(threadId, text, attachments, hostId, clientUserMessageId);
 }
 
 export function resumeThread(threadId: string, hostId = 'local') {
@@ -495,7 +495,7 @@ export function onSidebarChanged(update: (change: SidebarChange) => void) {
 }
 
 export async function sendNewThread(projectId: string | undefined, text: string, stillComposing: () => boolean,
-  observe: (id: string) => void, permissionChoice?: string, attachments: readonly PromptAttachment[] = []) {
+  observe: (id: string) => void, permissionChoice?: string, attachments: readonly PromptAttachment[] = [], clientUserMessageId?: string) {
   const check = () => {
     if (!stillComposing()) throw new Error('The workspace changed before the message was sent.');
   };
@@ -509,7 +509,7 @@ export async function sendNewThread(projectId: string | undefined, text: string,
     ...(projectId ? { projectId } : {}), ...(permissionChoice ? { yardPermissionChoice: permissionChoice } : {}) }, { type: 'thread-prewarm-start' });
   check();
   observe(thread.id);
-  const { turn } = await startTurn(thread.id, text, attachments);
+  const { turn } = await startTurn(thread.id, text, attachments, 'local', clientUserMessageId);
   return { thread, turn };
 }
 

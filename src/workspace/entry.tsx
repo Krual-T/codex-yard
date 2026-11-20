@@ -1,12 +1,12 @@
 import { Archive, ArrowLeft, ArrowRight, AtSign, CalendarClock, ChevronDown, PanelLeft, Pin, PinOff, SquarePen, SquareTerminal } from 'lucide-react';
 import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
-import { parseWorkspaceThreadRoute, sourceWorkspaceRoute, workspaceThreadRoute } from '../native/history-startup.ts';
+import { parseWorkspaceThreadRoute, sourceWorkspaceRoute, usesPinnedToolRenderer, workspaceThreadRoute } from '../native/history-startup.ts';
 import type { StartupHost, StartupProject, StartupProjectSelection, StartupSidebar, StartupThread } from '../native/startup-sidebar.ts';
 import { activeTurnBeforeArchive, archiveThread, browserAtoms, forkConversation, initialHistory, interruptTurn, olderSidebar, onSidebarChanged, onThreadName, projectSections, remoteHosts, renameThread, selectLocalProject, sendExistingThread, sendNewThread, setThreadPinned, sidebar, sidechats, updateSidebarProject, WorkspaceRequestError, type SidebarChange } from './host.ts';
 import { Composer, type ComposerHandle } from './composer.tsx';
 import { AsyncQuestionsProvider } from './async-questions.tsx';
-import { Transcript, useConversation } from './conversation.tsx';
+import { HomePendingMessages, Transcript, useConversation } from './conversation.tsx';
 import type { ConversationView } from './conversation.tsx';
 import { ConversationPanels } from './conversation-panels.tsx';
 import { McpAppTabs } from './mcp-app.tsx';
@@ -24,6 +24,7 @@ import { SidebarProjectRow } from './sidebar-project.tsx';
 import { WorkspaceSearch, type WorkspaceCommand } from './workspace-search.tsx';
 import { WorkspaceIcon } from './workspace-icon.tsx';
 import { WorkspaceOutputLinks } from './message-markdown.tsx';
+import { SidebarSplitter } from './sidebar-splitter.tsx';
 import './workspace.css';
 import './activity-style.css';
 
@@ -44,6 +45,7 @@ const canGoForward = () => browserNavigation?.canGoForward ?? true;
 const initialRoute = currentRoute();
 const recent = sidebar();
 function openRoute(route: string): ConversationView | undefined {
+  if (usesPinnedToolRenderer(route)) return;
   const thread = parseWorkspaceThreadRoute(route);
   if (!thread) return;
   const { threadId, hostId } = thread;
@@ -384,7 +386,10 @@ function App() {
   }, []);
   useEffect(() => onThreadName(rememberName), [rememberName]);
   useEffect(() => {
-    const update = () => { generation.current++; setFault(undefined); setView(openRoute(currentRoute())); };
+    const update = () => {
+      if (usesPinnedToolRenderer(currentRoute())) { location.replace(location.href); return; }
+      generation.current++; setFault(undefined); setView(openRoute(currentRoute()));
+    };
     window.addEventListener('popstate', update);
     return () => window.removeEventListener('popstate', update);
   }, []);
@@ -533,9 +538,14 @@ function App() {
     return () => window.removeEventListener('message', shortcut);
   }, [toggleTerminal]);
   const navigate = useCallback((to: string, prepared?: ConversationView) => {
-    generation.current++;
     const url = new URL('/', location.href);
     if (to !== '/') url.searchParams.set('initialRoute', to);
+    if (usesPinnedToolRenderer(to)) {
+      url.searchParams.set('workspaceReturn', currentRoute());
+      location.assign(url);
+      return;
+    }
+    generation.current++;
     window.history.pushState(null, '', url);
     setFault(undefined); setView(prepared ?? openRoute(to));
   }, []);
@@ -543,7 +553,7 @@ function App() {
     const receive = (event: MessageEvent) => {
       if (event.source !== window || event.origin !== location.origin || event.data?.type !== 'navigate-to-route' ||
           typeof event.data.path !== 'string') return;
-      if (event.data.path === '/' || parseWorkspaceThreadRoute(event.data.path)) navigate(event.data.path);
+      if (event.data.path === '/' || usesPinnedToolRenderer(event.data.path) || parseWorkspaceThreadRoute(event.data.path)) navigate(event.data.path);
     };
     window.addEventListener('message', receive);
     return () => window.removeEventListener('message', receive);
@@ -690,6 +700,7 @@ function App() {
             await refreshSidebar(owner);
           }}
           pin={pin} archive={requestArchive} projectArchived={archiveRows} connect={connect} select={navigate} loadOlder={loadOlder} commands={commands} />
+        <SidebarSplitter />
       </aside>
       <div className="yard-source-workspace" ref={workspace}>
       <McpAppTabs value={id ? mcpAppTabs : null}>
@@ -713,27 +724,28 @@ function App() {
             subagents={subagents} openSubagent={(childId, name) => panels.current?.openSubagent(childId, name)}
             stop={turnId => composer.current?.stop(turnId) ?? Promise.resolve()}
             runMessageEdit={run => composer.current?.runMessageEdit(run) ?? Promise.reject(new Error('The editor is not ready.'))} />
-        </WorkspaceOutputLinks> : <div className="yard-source-welcome">
+        </WorkspaceOutputLinks> : <HomePendingMessages><div className="yard-source-welcome">
           <div className="relative size-14" data-testid="home-icon" aria-hidden="true" />
           <div className="heading-xl text-center text-default">{project ? <>
             <span className="inline-block max-w-full">What should we work on in <button type="button" popoverTarget={projectMenu}
               aria-haspopup="dialog" className="yard-source-home-project inline-block max-w-full cursor-interaction align-baseline break-words whitespace-normal underline decoration-text-tertiary decoration-dotted decoration-[1px] underline-offset-4 hover:text-secondary">{project.label}?</button></span>
           </> : 'What should we build?'}</div>
-        </div>}
+        </div></HomePendingMessages>}
         <div className="yard-source-composer">
           <Composer ref={composer} key={route ?? '/'} scope={id ? hostId === 'local' ? id : hostId + ':' + id : 'new-conversation'} label={id ? 'Work with Codex' : 'Do anything'}
+            openGoal={(threadId, hostId) => panels.current?.openGoal(threadId, hostId)}
             stream={stream} historyTurns={page?.turns} projectId={id ? undefined : projectId} destinationKnown={!!id || homeDestinationKnown}
             openChanges={id && hostId === 'local' ? openChanges : undefined}
             openQueuedSidechat={id && sidechats.supportsHost(hostId) ? async item => {
               await panels.current?.openQueuedSidechat(item);
             } : undefined}
             projects={id ? undefined : { menuId: projectMenu, options: data?.projects ?? [], selected: project, select: chooseProject }}
-            onSend={stream ? page ? async (text, _permission, attachments) => {
+            onSend={stream ? page ? async (text, _permission, attachments, clientUserMessageId) => {
               const sendingGeneration = generation.current;
               const stillSelected = () => generation.current === sendingGeneration;
-              const { turn } = await sendExistingThread(stream.threadId, text, stillSelected, attachments, stream.hostId);
+              const { turn } = await sendExistingThread(stream.threadId, text, stillSelected, attachments, stream.hostId, clientUserMessageId);
               if (stillSelected()) stream.acknowledge(turn);
-            } : undefined : homeDestinationKnown ? async (text, permissionChoice, attachments) => {
+            } : undefined : homeDestinationKnown ? async (text, permissionChoice, attachments, clientUserMessageId) => {
               const sendingGeneration = generation.current;
               const stillComposing = () => generation.current === sendingGeneration && currentRoute() === '/';
               let prepared: TurnStream | undefined;
@@ -741,7 +753,7 @@ function App() {
                 const { thread, turn } = await sendNewThread(projectId, text, stillComposing, id => {
                   prepared = new TurnStream(id);
                   prepared.connect();
-                }, permissionChoice, attachments);
+                }, permissionChoice, attachments, clientUserMessageId);
                 prepared!.acknowledge(turn);
                 const item: StartupThread = { id: thread.id, projectId: thread.projectId ?? projectId ?? null,
                   title: thread.name?.trim() || text.trim().split('\n')[0]!.slice(0, 240) || attachments[0]?.name || thread.preview?.trim() || 'New chat' };

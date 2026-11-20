@@ -1,4 +1,4 @@
-import { AtSign, Bot, Diff, Download, Folders, Globe, MessageSquare, MessageSquarePlus, SquareTerminal, Workflow, X } from 'lucide-react';
+import { AtSign, Bot, Diff, Download, Folders, MessageSquare, MessageSquarePlus, SquareTerminal, Workflow } from 'lucide-react';
 import { WorkspaceIcon } from './workspace-icon.tsx';
 import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { Ref, RefObject } from 'react';
@@ -28,17 +28,23 @@ import { McpAppTabContent, type McpAppTab } from './mcp-app.tsx';
 import type { ChromeWindow } from '../browser-reuse/browser-bridge.ts';
 import { WorkspaceOutputLinks } from './message-markdown.tsx';
 import { openClientBrowser } from '../native/client-browser.ts';
+import './tool-tabs.css';
+import { ConversationGoalEditor, useConversationGoal } from './conversation-goal.tsx';
+import { GoalIcon } from './conversation-goal-icons.tsx';
+import { SummarySection } from './summary-section.tsx';
 
 const fallbackTitle = (index: number) => index === 1 ? 'Side chat' : 'Side chat ' + index;
 type Tool = { kind: 'new'; placeholder?: boolean; working?: boolean; error?: string } | { kind: 'chat'; view: ConversationView; error?: string } |
   { kind: 'agent'; view: ConversationView; title: string } |
   { kind: 'output'; file: OutputFile } | { kind: 'terminal'; session: WorkspaceTerminalSession; number: number } |
   { kind: 'files'; cwd: string; query?: string } | { kind: 'browser'; view: WorkspaceBrowserView } |
-  { kind: 'changes'; turnId: string; expanded: boolean } | { kind: 'sources' } | { kind: 'mcp-app'; app: McpAppTab };
+  { kind: 'changes'; turnId: string; expanded: boolean } | { kind: 'sources' } | { kind: 'mcp-app'; app: McpAppTab } |
+  { kind: 'goal'; threadId: string; hostId: string };
 type ToolTab = { id: string; tool: Tool };
 
-function Sidechat({ view, transferError, openOutput, openSubagent, openPage }: {
+function Sidechat({ view, transferError, openOutput, openSubagent, openPage, openGoal }: {
   view: ConversationView; transferError?: string; openOutput(file: OutputFile): void; openSubagent: OpenSubagent; openPage(url: string): void;
+  openGoal(threadId: string, hostId: string): void;
 }) {
   const { page, fault, more } = useConversation(view);
   const composer = useRef<ComposerHandle>(null);
@@ -54,13 +60,18 @@ function Sidechat({ view, transferError, openOutput, openSubagent, openPage }: {
     </WorkspaceOutputLinks>
     <div className="yard-source-composer">
       <Composer ref={composer} scope={stream.hostId === 'local' ? stream.threadId : stream.hostId + ':' + stream.threadId}
-        label="Work with Codex" stream={stream} historyTurns={page?.turns}
-        onSend={page ? async (text, _permission, attachments) => {
-          const { turn } = await sendExistingThread(stream.threadId, text, () => alive.current, attachments, stream.hostId);
+        label="Work with Codex" stream={stream} historyTurns={page?.turns} openGoal={openGoal}
+        onSend={page ? async (text, _permission, attachments, clientUserMessageId) => {
+          const { turn } = await sendExistingThread(stream.threadId, text, () => alive.current, attachments, stream.hostId, clientUserMessageId);
           if (alive.current) stream.acknowledge(turn);
         } : undefined} />
     </div>
   </AsyncQuestionsProvider>;
+}
+
+function GoalTab({ threadId, hostId }: { threadId: string; hostId: string }) {
+  const controller = useConversationGoal(threadId, hostId);
+  return <ConversationGoalEditor key={`${hostId}:${threadId}:${controller.goal?.objective ?? ''}`} controller={controller} />;
 }
 
 export type ConversationPanelsHandle = {
@@ -72,6 +83,7 @@ export type ConversationPanelsHandle = {
   openChanges: OpenTurnChanges;
   openMcpApp(app: McpAppTab): void;
   closeMcpApp(id: string): void;
+  openGoal(threadId: string, hostId: string): void;
 };
 export function ConversationPanels({ ref, parentId, hostId, workspace, createOutput, attachSource, insertPlugin, cwd, turns, stream, subagents, openBottomTerminal }: {
   ref?: Ref<ConversationPanelsHandle>;
@@ -147,6 +159,31 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
   const tab = tabs.find(row => row.id === selected) ?? tabs.at(-1);
   const expanded = tab?.tool.kind === 'changes' ? tab.tool.expanded : toolsExpanded;
   const rightOpen = !!tab && tabVisible;
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+  useEffect(() => {
+    if (!rightOpen) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const release = () => { clearTimeout(timer); timer = undefined; setShowShortcuts(false); };
+    const press = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.altKey || event.shiftKey || !(mac ? event.metaKey : event.ctrlKey)) return;
+      if (event.key === (mac ? 'Meta' : 'Control') && !event.repeat && !timer) {
+        timer = setTimeout(() => setShowShortcuts(true), 500);
+      }
+      if (!/^[1-9]$/.test(event.key)) return;
+      const index = Number(event.key) - 1;
+      const next = document.dir === 'rtl' ? tabs.at(-1 - index) : tabs[index];
+      if (!next || document.querySelector('dialog:modal')) return;
+      event.preventDefault();
+      setSelected(next.id);
+    };
+    const up = (event: KeyboardEvent) => { if (event.key === (mac ? 'Meta' : 'Control')) release(); };
+    window.addEventListener('keydown', press); window.addEventListener('keyup', up); window.addEventListener('blur', release);
+    return () => {
+      release();
+      window.removeEventListener('keydown', press); window.removeEventListener('keyup', up); window.removeEventListener('blur', release);
+    };
+  }, [rightOpen, tabs, mac]);
   const summaryOpen = !rightOpen && (inline ? pinned : popoverOpen);
   useEffect(() => {
     if (!summaryOpen || inline) return;
@@ -175,7 +212,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
 
   const rows = mergeSidechats(sidechats, hostId, branch.children, [], branch.loaded, fallbackTitle);
   const labels = { new: 'New tab', chat: 'Side chat', agent: 'Subagent', output: 'Output preview', terminal: 'Terminal', files: 'Files', browser: 'Browser',
-    changes: 'Changes', sources: 'Sources', 'mcp-app': 'Tool app' };
+    changes: 'Changes', sources: 'Sources', 'mcp-app': 'Tool app', goal: 'Goal' };
   const tabButton = (id: string) => tabId + '-button-' + id;
   const tabPanel = (id: string) => tabId + '-panel-' + id;
   function toolTitle(tool: Tool) {
@@ -209,6 +246,11 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
     const existing = tabs.find(row => row.tool.kind === 'agent' && row.tool.view.stream.threadId === id);
     showTab({ kind: 'agent', view: { stream: new TurnStream(id, hostId) }, title }, existing);
     setToolsExpanded(true);
+  }
+
+  function openGoal(threadId: string, goalHost: string) {
+    showTab({ kind: 'goal', threadId, hostId: goalHost },
+      tabs.find(row => row.tool.kind === 'goal' && row.tool.threadId === threadId && row.tool.hostId === goalHost));
   }
 
   function closeTab(target = tab, restoreFocus = true) {
@@ -283,6 +325,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
     openOutput,
     openPage,
     openSubagent,
+    openGoal,
     openMcpApp(app) {
       const existing = tabs.find(row => row.id === app.id);
       showTab({ kind: 'mcp-app', app }, existing, app.id);
@@ -345,20 +388,20 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
     {summaryOpen && <aside className="yard-source-summary rounded-2xl bg-surface-elevated-secondary electron:elevation-prominent" id={summaryId} ref={summarySurface}
       aria-label="Conversation summary" data-summary-inline={inline} data-summary-panel-variant="summary" data-summary-panel-density="default">
       <Outputs create={createOutput} cwd={cwd} turns={turns} choose={openOutput} hostId={hostId} />
-      {subagents.size > 0 && <section className="yard-source-subagent-list">
-        <h2>Subagents</h2>
+      {subagents.size > 0 && <SummarySection key={`${hostId}:${parentId}:subagents`} sectionKey="subagents"
+        title="Subagents" itemCount={subagents.size} className="yard-source-subagent-list">
         {[...subagents].map(([id, child]) => <AgentLink key={id} id={id} name={subagentTitle(child)}
           status={child.status.type === 'active' ? 'running' : undefined} open={openSubagent} />)}
-      </section>}
-      {rows.length > 0 && <section className="yard-source-sidechat-list">
-        <h2>Side chats</h2>
+      </SummarySection>}
+      {rows.length > 0 && <SummarySection key={`${hostId}:${parentId}:side-chats`} sectionKey="side-chats"
+        title="Side chats" itemCount={rows.length} className="yard-source-sidechat-list">
         {rows.map(row => <button type="button" key={row.conversationId}
           data-attached-thread-id={row.conversationId} onClick={() => openChild(row.conversationId)}>
           <MessageSquare size={14} aria-hidden="true" /><span dir="auto">{row.title}</span>
           {row.isResponseInProgress && <span className="yard-source-sidechat-activity" aria-label="In progress" />}
         </button>)}
-      </section>}
-      <SourcesSummary data={sources} openDetails={openSources} openFile={openSourceFile} attach={attachSource} cwd={cwd} insertPlugin={insertPlugin} hostId={hostId} />
+      </SummarySection>}
+      <SourcesSummary key={`${hostId}:${parentId}:sources`} data={sources} openDetails={openSources} openFile={openSourceFile} attach={attachSource} cwd={cwd} insertPlugin={insertPlugin} hostId={hostId} />
       {branch.error && <p role="alert">{branch.error}</p>}
     </aside>}
     {tab && <aside className="yard-source-sidechat" id={tabId} hidden={!rightOpen} data-expanded={expanded} data-tool-kind={tab.tool.kind}
@@ -375,24 +418,30 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
             if (!next) return;
             event.preventDefault(); setSelected(next.id); document.getElementById(tabButton(next.id))?.focus();
           }}>
-          {tabs.map(row => {
+          {tabs.map((row, index) => {
             const { id, tool } = row;
             const button = <button type="button" role="tab" key={id} id={tabButton(id)} aria-selected={id === tab.id}
-            tabIndex={id === tab.id ? 0 : -1} aria-controls={tabPanel(id)} title={tool.kind === 'browser' ? undefined : toolTitle(tool)} onClick={() => setSelected(id)}>
+            tabIndex={id === tab.id ? 0 : -1} aria-controls={tabPanel(id)} aria-label={toolTitle(tool)}
+            title={tool.kind === 'browser' ? undefined : toolTitle(tool)} onClick={() => setSelected(id)}
+            onAuxClick={event => { if (event.button === 1) { event.preventDefault(); closeTab(row); } }}
+            onMouseDown={event => { if (event.button === 1) event.preventDefault(); }}>
             {tool.kind === 'agent' ? <Bot className="yard-source-subagent-icon" size={14} aria-hidden="true" /> :
-              tool.kind === 'terminal' ? <SquareTerminal size={14} aria-hidden="true" /> : tool.kind === 'browser' ? <Globe size={14} aria-hidden="true" /> :
+              tool.kind === 'terminal' ? <WorkspaceIcon name="tabTerminal" /> : tool.kind === 'browser' || tool.kind === 'new' ? <WorkspaceIcon name="tabBrowser" /> :
+              tool.kind === 'chat' ? <WorkspaceIcon name="tabChat" /> : tool.kind === 'output' ? <WorkspaceIcon name="tabFile" /> :
+              tool.kind === 'files' ? <WorkspaceIcon name="tabFiles" /> :
               tool.kind === 'changes' ? <Diff size={14} aria-hidden="true" /> : tool.kind === 'sources' ? <Workflow size={13} aria-hidden="true" /> :
-              tool.kind === 'mcp-app' ? <AtSign size={14} aria-hidden="true" /> : null}
-            <span>{tool.kind === 'browser' ? <BrowserTabTitle view={tool.view} /> : toolTitle(tool)}</span>
+              tool.kind === 'mcp-app' ? <AtSign size={14} aria-hidden="true" /> : tool.kind === 'goal' ? <GoalIcon name="goal" size={16} /> : null}
+            <span className="yard-source-tool-tab-title">{tool.kind === 'browser' ? <BrowserTabTitle view={tool.view} /> : toolTitle(tool)}</span>
+            {showShortcuts && index < 9 && <kbd aria-hidden="true">{mac ? '⌘' : 'Ctrl+'}{document.dir === 'rtl' ? tabs.length - index : index + 1}</kbd>}
             </button>;
-            const labeledClose = tool.kind === 'sources' || tool.kind === 'mcp-app';
-            const closeLabel = labeledClose ? 'Close ' + toolTitle(tool) + ' tab' : undefined;
-            return labeledClose ? <div className="yard-source-labeled-tab" key={id} data-active={id === tab.id}>
+            const closeLabel = 'Close ' + toolTitle(tool) + ' tab';
+            return <div className="yard-source-labeled-tab" key={id} data-active={id === tab.id}>
               {button}
-              <button type="button" title={closeLabel} aria-label={closeLabel} onClick={() => closeTab(row)}>
-                <X size={12} aria-hidden="true" />
+              <button type="button" title={closeLabel} aria-label={closeLabel} data-app-shell-tab-close-button="" tabIndex={-1}
+                onMouseDown={event => event.preventDefault()} onClick={() => closeTab(row)}>
+                <WorkspaceIcon name="close" size={14} />
               </button>
-            </div> : button;
+            </div>;
           })}
         </div>
         <button type="button" aria-label="New tab" title="New tab" onClick={() => {
@@ -402,8 +451,6 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
         {tab.tool.kind === 'output' && <a aria-label="Download output" title="Download output" href={outputFileUrl(tab.tool.file, 'download', hostId)}>
           <Download size={14} aria-hidden="true" />
         </a>}
-        {tab.tool.kind !== 'sources' && tab.tool.kind !== 'mcp-app' && !(tab.tool.kind === 'new' && tab.tool.placeholder) &&
-          <button type="button" aria-label="Close tab" title="Close tab" onClick={() => closeTab()}><X size={14} /></button>}
         <button type="button" className="yard-source-tool-expand" aria-pressed={expanded} aria-label={expanded ? 'Exit full screen' : 'Enter full screen'}
           title={expanded ? 'Exit full screen' : 'Enter full screen'} onClick={() =>
             tab.tool.kind === 'changes' ? replaceTab(tab.id, { ...tab.tool, expanded: !expanded }) : setToolsExpanded(value => !value)}>
@@ -432,12 +479,13 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
         return <div className="yard-source-tool-panel" key={id} role="tabpanel" id={panel.panelId} aria-labelledby={panel.labelId} hidden={!visible}>
           {tool.kind === 'mcp-app' ? <McpAppTabContent app={tool.app} /> :
             tool.kind === 'output' ? <OutputPreview file={tool.file} hostId={hostId} /> : tool.kind === 'chat' ?
-            <Sidechat view={tool.view} transferError={tool.error} openOutput={openOutput} openSubagent={openSubagent} openPage={openPage} /> :
-            tool.kind === 'agent' ? <Sidechat view={tool.view} openOutput={openOutput} openSubagent={openSubagent} openPage={openPage} /> :
+            <Sidechat view={tool.view} transferError={tool.error} openOutput={openOutput} openSubagent={openSubagent} openPage={openPage} openGoal={openGoal} /> :
+            tool.kind === 'agent' ? <Sidechat view={tool.view} openOutput={openOutput} openSubagent={openSubagent} openPage={openPage} openGoal={openGoal} /> :
             tool.kind === 'files' ? <WorkspaceFiles root={tool.cwd} initialQuery={tool.query} hostId={hostId} /> : tool.kind === 'browser' ?
             <BrowserTab view={tool.view}>{newTools}</BrowserTab> : tool.kind === 'sources' ?
             <SourcesPanel data={sources} openFile={openSourceFile} openPage={url => openBrowser(undefined, url)} /> : tool.kind === 'changes' && stream ?
-            <TurnChangesPanel key={tool.turnId} turnId={tool.turnId} stream={stream} turns={turns} cwd={cwd} /> : newTools}
+            <TurnChangesPanel key={tool.turnId} turnId={tool.turnId} stream={stream} turns={turns} cwd={cwd} /> :
+            tool.kind === 'goal' ? <GoalTab threadId={tool.threadId} hostId={tool.hostId} /> : newTools}
         </div>;
       })}
     </aside>}

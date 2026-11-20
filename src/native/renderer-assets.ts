@@ -38,6 +38,11 @@ export const workspaceIconNames = {
   plus: 'plus-lg-light-16',
   close: 'xmark-md-light-16',
   closeSmall: 'xmark-md-light-12',
+  tabBrowser: 'globe-light-16',
+  tabChat: 'chat-bubble-light-16',
+  tabFile: 'document-light-16',
+  tabTerminal: 'terminal-light-16',
+  tabFiles: 'folder-on-folder-light-16',
   panelExpand: 'arrow-up-right-arrow-down-left-sm-light-16',
   panelCollapse: 'arrow-down-left-arrow-up-right-sm-light-16',
   toolFind: 'magnifying-glass-md-light-16',
@@ -51,6 +56,8 @@ export const workspaceIconNames = {
   asyncQuestion: 'chat-bubble-questionmark-light-16',
   pencil: 'pencil-light-16',
   microphone: 'microphone-light-16',
+  usageGauge: 'gauge-light-16',
+  goalRevert: 'arrow-uturn-left-light-16',
   toolRetry: 'wifi-light-16',
   ...(Object.fromEntries(Object.entries(projectIconCatalog).flatMap(([id, [, name]]) => name
     ? [['project:' + id, name], ['picker:' + id, name.replace(/-16$/, '-20')]] : [])) as

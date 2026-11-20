@@ -26,6 +26,12 @@ fake.threads.set(threadId, thread);
 fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.169.1 (Linux)' }));
 fake.handlers.set('getAuthStatus', () => ({ authMethod: 'apikey', authToken: null, requiresOpenaiAuth: false }));
 fake.handlers.set('account/gatewayOAuth/read', () => ({ providerId: 'fixture', providerName: 'Fixture', required: false, status: null, error: null }));
+let authGate: Promise<void> | undefined, steerGate: Promise<void> | undefined;
+fake.handlers.set('account/read', async params => {
+  const wait = authGate; authGate = undefined;
+  await wait;
+  return fake.defaultResult('account/read', params);
+});
 fake.handlers.set('thread/resume', params => ({ ...fake.defaultResult('thread/resume', params),
   turnsBackwardsCursor: '0', itemsBackwardsCursor: '0' }));
 fake.handlers.set('thread/turns/list', params => ({ data: [...thread.turns].reverse().map(turn => ({ ...turn,
@@ -39,7 +45,9 @@ fake.handlers.set('turn/start', params => {
   return result;
 });
 let rejectReply = false;
-fake.handlers.set('turn/steer', params => {
+fake.handlers.set('turn/steer', async params => {
+  const wait = steerGate; steerGate = undefined;
+  await wait;
   if (rejectReply) { rejectReply = false; throw new Error('Fixture reply rejected'); }
   const turn = thread.turns.at(-1)!;
   const item = { id: 'steer-' + fake.calls('turn/steer').length, type: 'userMessage',
@@ -87,8 +95,27 @@ try {
   const transcript = page.getByRole('region', { name: 'Conversation', exact: true });
   await transcript.getByText('Saved fixture.', { exact: true }).waitFor({ timeout: 25_000 });
   const editor = page.getByRole('textbox', { name: 'Work with Codex', exact: true }).first();
+  let admit!: () => void;
+  if (source) authGate = new Promise<void>(resolve => { admit = resolve; });
   await editor.fill('Start the fixture.'); await editor.press('Enter');
+  if (source) {
+    const preparing = transcript.locator('[data-preparing-message]');
+    await preparing.getByText('Start the fixture.', { exact: true }).waitFor();
+    assert.equal(fake.calls('turn/start').length, 0, 'The bubble appears before authentication and resume finish.');
+    assert.equal((await editor.innerText()).trim(), '');
+    await editor.fill('The next draft stays intact.');
+    await snapshot('optimistic-start');
+    admit();
+  }
   await fake.waitForCall('turn/start');
+  if (source) {
+    await transcript.locator('[data-preparing-message]').waitFor({ state: 'detached' });
+    assert.equal(await transcript.getByText('Start the fixture.', { exact: true }).count(), 1);
+    assert.equal(await editor.innerText(), 'The next draft stays intact.');
+    await editor.fill('');
+    checks.push('Start appears before authentication/resume, clears the editor and preserves the next draft',
+      'A canonical client ID replaces the optimistic bubble exactly once');
+  }
   const turn = thread.turns.at(-1)!;
   const finish = (item: ThreadItemSummary) => {
     turn.items.push(item);
@@ -108,7 +135,13 @@ try {
     await page.getByRole('menuitem', { name: 'Turn on queueing', exact: true }).click();
     await editor.fill('Follow-up at this point.');
     await page.getByRole('button', { name: 'Queue', exact: true }).waitFor();
+    steerGate = new Promise<void>(resolve => { admit = resolve; });
     await editor.press('Control+Enter');
+    await transcript.locator('[data-preparing-message]').getByText('Follow-up at this point.', { exact: true }).waitFor();
+    assert.equal((await editor.innerText()).trim(), '');
+    await order(['Progress before the follow-up.', 'Follow-up at this point.']
+      .map(text => transcript.getByText(text, { exact: true })));
+    admit();
   } else {
     await editor.fill('Follow-up at this point.'); await editor.press('Enter');
   }
@@ -125,6 +158,18 @@ try {
       .map(text => transcript.getByText(text, { exact: true })));
     checks.push('Ctrl+Enter reverses both queue modes', 'Queued messages stay outside the transcript',
       'Follow-ups stay between their surrounding activity, including after reload', 'One Work disclosure per turn');
+    steerGate = new Promise<void>(resolve => { admit = resolve; });
+    rejectReply = true;
+    await editor.fill('Recover this rejected follow-up.');
+    await editor.press('Control+Enter');
+    await transcript.locator('[data-preparing-message]').getByText('Recover this rejected follow-up.', { exact: true }).waitFor();
+    await editor.fill('Keep my newer draft too.');
+    admit();
+    await page.getByRole('alert').filter({ hasText: 'Fixture reply rejected' }).waitFor();
+    assert.equal(await transcript.getByText('Recover this rejected follow-up.', { exact: true }).count(), 0);
+    assert.equal(await editor.innerText(), 'Recover this rejected follow-up.\n\nKeep my newer draft too.');
+    await editor.fill('');
+    checks.push('Known rejection removes the optimistic bubble and restores both the submitted and newer draft');
   }
   const question = { ...agentItem('async-question', 'May the isolated fixture continue?'), phase: 'final_answer', delivery: 'async',
     questions: [{ title: 'May the isolated fixture continue?', options: ['Continue', 'Wait'] },

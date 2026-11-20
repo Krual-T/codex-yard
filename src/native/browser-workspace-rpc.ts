@@ -15,7 +15,7 @@ export function requestWorkspaceRpc<T>(send: Send, method: string, params: Recor
   const id = crypto.randomUUID();
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => fail(new WorkspaceRequestError('The host did not respond.',
-      ['turn/start', 'turn/steer', 'thread/fork', 'thread/revert', 'thread/settings/update', 'config/batchWrite'].includes(method) ||
+      ['turn/start', 'turn/steer', 'thread/fork', 'thread/revert', 'thread/settings/update', 'thread/goal/set', 'thread/goal/clear', 'config/batchWrite'].includes(method) ||
         method.startsWith('thread/queue/') && method !== 'thread/queue/list')), 60_000);
     function done() {
       clearTimeout(timer);
@@ -36,6 +36,25 @@ export function requestWorkspaceRpc<T>(send: Send, method: string, params: Recor
     }
     window.addEventListener('message', receive);
     void send({ type, hostId, request: { id, method, params } }).catch(fail);
+  });
+}
+
+/** Uses the same authenticated host bridge as the original webview fetch API. */
+export function requestWorkspaceFetch<T>(send: Send, endpoint: string, params: Record<string, unknown>, hostId = 'local'): Promise<T> {
+  const requestId = crypto.randomUUID();
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => fail(new WorkspaceRequestError('The host did not respond.', params.operation === 'create')), 60_000);
+    function done() { clearTimeout(timer); window.removeEventListener('message', receive); }
+    function fail(error: unknown) { done(); reject(error); }
+    function receive(event: MessageEvent<HostMessage>) {
+      if (event.source !== window || event.origin !== location.origin || event.data?.type !== 'fetch-response' ||
+          event.data.requestId !== requestId) return;
+      done();
+      if (event.data.responseType === 'success') resolve(event.data.body as T);
+      else reject(new WorkspaceRequestError(typeof event.data.error === 'string' ? event.data.error : 'The host request failed.', false));
+    }
+    window.addEventListener('message', receive);
+    void send({ type: 'fetch', hostId, requestId, url: 'vscode://codex/' + endpoint, body: JSON.stringify({ ...params, hostId }) }).catch(fail);
   });
 }
 

@@ -328,7 +328,7 @@ async function verifyTimeline(url: string) {
       await transcript.getByRole('button', { name: '原版截图', exact: true }).focus();
       await page.keyboard.press('Enter');
       await page.getByRole('tabpanel', { name: 'native.png', exact: true }).getByRole('img', { name: 'native.png', exact: true }).waitFor();
-      await page.getByRole('button', { name: 'Close tab', exact: true }).click();
+      await page.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
       await transcript.getByRole('button', { name: '说明文件', exact: true }).focus();
       await page.keyboard.press('Space');
       await page.getByRole('tabpanel', { name: 'report.md', exact: true }).getByText('Verified message file link.', { exact: true }).waitFor();
@@ -901,7 +901,7 @@ async function verifyTimeline(url: string) {
         await tab.waitFor();
         await appFrame.getByText(detailAfterDock, { exact: true }).waitFor();
         await otherTab.click();
-        await page.getByRole('button', { name: 'Close tab', exact: true }).click();
+        await page.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
         await tab.waitFor();
       }
       await page.getByRole('button', { name: 'Close Fixture tab', exact: true }).click();
@@ -1545,7 +1545,7 @@ async function verifyTimeline(url: string) {
       await page.getByText('Fixture attachment contents.', { exact: true }).waitFor();
       assert.ok(await page.getByRole('link', { name: 'Download output', exact: true }).isVisible());
       await paneSnapshot('sources-attachment');
-      await page.getByRole('button', { name: 'Close tab', exact: true }).click();
+      await page.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
       if (preview) {
         if (!await viewAll.isVisible() && await summaryToggle.getAttribute('aria-expanded') === 'false') await summaryToggle.click();
         await viewAll.click();
@@ -1579,7 +1579,7 @@ async function verifyTimeline(url: string) {
     await childTranscript.waitFor();
     await paneSnapshot('agent-pane');
     if (source) {
-      await page.getByRole('button', { name: 'Close tab', exact: true }).click();
+      await page.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
       await answer.waitFor();
       assert.equal(await editor.innerText(), 'Keep this draft in the parent.');
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);

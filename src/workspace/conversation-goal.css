@@ -1,0 +1,50 @@
+/* BQe / Nb.Row, pinned 26.1013.40934. This rail sits directly above the composer. */
+.yard-conversation-goal { min-width: 0; border: 1px solid var(--color-border); border-bottom: 0; border-radius: 16px 16px 0 0; background: var(--color-surface-elevated-secondary, var(--color-surface)); color: var(--color-text-primary); }
+.yard-goal-row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 10px; font-size: var(--text-size-chat, 14px); }
+.yard-goal-title { display: flex; flex: 1; min-width: 0; min-height: var(--height-token-button-composer, 28px); gap: 8px; align-items: center; text-align: start; color: var(--color-text-secondary); cursor: pointer; }
+.yard-goal-icon { display: flex; flex-shrink: 0; width: 12px; height: 16px; align-items: center; justify-content: center; color: color-mix(in srgb, var(--color-text-tertiary) 70%, transparent); }
+.yard-goal-summary { display: flex; min-width: 0; flex: 1; align-items: center; overflow: hidden; padding-block: 4px; line-height: 20px; overflow-wrap: anywhere; }
+.yard-goal-label { flex-shrink: 0; color: var(--color-text-primary); }
+.yard-goal-objective { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-inline-start: 4px; }
+.yard-goal-progress { flex-shrink: 0; margin-inline-start: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.yard-goal-actions { display: flex; align-items: center; flex-shrink: 0; gap: 4px; }
+.yard-goal-actions button { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 8px; color: var(--color-text-secondary); cursor: pointer; }
+.yard-goal-actions button:hover:not(:disabled), .yard-goal-editor-toolbar button:hover:not(:disabled) { background: var(--color-background-primary-ghost-hover); }
+.yard-goal-title:disabled, .yard-goal-actions button:disabled, .yard-goal-editor-toolbar button:disabled { opacity: .5; cursor: default; }
+.yard-goal-error { padding: 6px 12px; font-size: 13px; color: var(--color-text-danger); overflow-wrap: anywhere; }
+.yard-goal-loading { animation: yard-goal-spin 1s linear infinite; }
+@keyframes yard-goal-spin { to { transform: rotate(360deg); } }
+.yard-goal-editor { display: flex; min-height: 0; height: 100%; flex-direction: column; background: var(--color-surface); color: var(--color-text-primary); }
+.yard-goal-editor-toolbar { display: flex; align-items: center; flex-shrink: 0; min-height: 40px; gap: 4px; padding: 4px 12px; border-bottom: 1px solid var(--color-border); font-size: 14px; }
+.yard-goal-editor-toolbar > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-inline-end: auto; color: var(--color-text-secondary); user-select: none; }
+.yard-goal-editor-toolbar button { display: grid; place-items: center; height: 28px; min-width: 28px; border-radius: 8px; cursor: pointer; }
+.yard-goal-editor-toolbar .yard-goal-save { padding-inline: 12px; border-radius: 16px; background: var(--color-text-primary); color: var(--color-surface); }
+.yard-goal-editor-toolbar .yard-goal-save:hover:not(:disabled) { background: var(--color-text-primary); opacity: .85; }
+.yard-goal-editor-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: var(--spacing-panel, 16px); }
+.yard-goal-editor-scroll > div { min-height: 100%; }
+.yard-goal-editor .ProseMirror { min-height: 100%; white-space: pre-wrap; overflow-wrap: anywhere; outline: none; font: inherit; font-size: 16px; line-height: 24px; }
+.yard-goal-editor .ProseMirror p { margin: 0; }
+.yard-goal-editor .ProseMirror h1, .yard-goal-editor .ProseMirror h2, .yard-goal-editor .ProseMirror h3,
+.yard-goal-editor .ProseMirror h4, .yard-goal-editor .ProseMirror h5, .yard-goal-editor .ProseMirror h6 { font: inherit; font-weight: 600; }
+.yard-goal-editor .ProseMirror h1 { font-size: var(--text-heading-lg); }
+.yard-goal-editor .ProseMirror h2 { font-size: var(--text-heading-md); }
+.yard-goal-editor .ProseMirror h3 { font-size: var(--text-heading-sm); }
+.yard-goal-editor .ProseMirror strong { font-weight: 600; }
+.yard-goal-editor .ProseMirror a { color: var(--color-text-accent, var(--color-text-primary)); text-decoration: underline; text-underline-offset: 2px; }
+.yard-goal-editor .ProseMirror ul, .yard-goal-editor .ProseMirror ol { margin: 0; padding-inline-start: 24px; }
+.yard-goal-editor .ProseMirror ul { list-style: disc; }
+.yard-goal-editor .ProseMirror ol { list-style: decimal; }
+.yard-goal-editor .ProseMirror ul ul { list-style: circle; }
+.yard-goal-editor .ProseMirror ul ul ul { list-style: square; }
+.yard-goal-editor .ProseMirror li[data-task-list-item] { display: flex; align-items: flex-start; gap: 6px; list-style: none; }
+.yard-goal-editor .ProseMirror li[data-task-list-item] > input { flex-shrink: 0; margin-top: 5px; accent-color: var(--color-text-primary); }
+.yard-goal-editor .ProseMirror blockquote { border-inline-start: calc(var(--codex-chat-font-size, 16px) / 4) solid var(--color-border); margin-inline: 0; padding-inline-start: 12px; }
+.yard-goal-editor .ProseMirror pre { margin: 0; padding: 8px; border-radius: var(--radius-xl, 12px); background: var(--color-surface-secondary); overflow-x: auto; white-space: pre; tab-size: 4; font-family: var(--font-mono); font-size: var(--codex-chat-code-font-size, 14px); line-height: 20px; }
+.yard-goal-editor .ProseMirror code { font-family: var(--font-mono, monospace); font-size: .875em; }
+.yard-goal-editor .ProseMirror :not(pre) > code { padding: 2px 4px; border-radius: var(--radius-sm, 4px); background: var(--color-surface-secondary); }
+.yard-goal-editor .ProseMirror table { border-collapse: collapse; width: 100%; font-size: 14px; }
+.yard-goal-editor .ProseMirror td, .yard-goal-editor .ProseMirror th { padding: 4px 8px; border: 1px solid var(--color-border); }
+.yard-goal-editor .ProseMirror th { font-weight: 600; }
+.yard-goal-editor .ProseMirror hr { border-top: 1px solid var(--color-border); }
+.yard-goal-editor .ProseMirror p:only-child:empty::before { content: attr(data-placeholder); color: var(--color-text-tertiary); pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .yard-goal-loading { animation-duration: 2s; } }

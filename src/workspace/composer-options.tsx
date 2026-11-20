@@ -6,6 +6,7 @@ import { sessionSettings, threadSettings } from '../../lib/session-settings.ts';
 import { modelIdentity, modelSelection } from '../native/model-selection.ts';
 import { browserAtoms, composerModelPage, composerModels, composerPermissions, onThreadSettings, projectRoot, readComposerConfig, resumeThread,
   saveComposerModel, updateComposerThread, WorkspaceRequestError, writeAtom, type ComposerModel, type ComposerPermission } from './host.ts';
+import { ContextUsageIndicator, type ConversationUsageController } from './conversation-usage.tsx';
 
 type Settings = {
   key: string;
@@ -321,7 +322,7 @@ function ModelPicker({ options, catalog, close }: { options: Options; catalog?: 
   </>;
 }
 
-export function ComposerToolbar({ options, disabled }: { options: Options; disabled: boolean }) {
+export function ComposerToolbar({ options, usage, disabled }: { options: Options; usage: ConversationUsageController; disabled: boolean }) {
   const values = options.settings?.values;
   const picked = permissionId(options);
   const hostId = options.hostId;
@@ -361,6 +362,8 @@ export function ComposerToolbar({ options, disabled }: { options: Options; disab
           </button>;
         })}
     </>}</Menu>
+    <div className="yard-source-model-trigger-group">
+    <ContextUsageIndicator usage={usage.contextUsage} />
     <Menu name={modelName + (effort ? ' ' + (powerLabels[effort] ?? effort) : '')} placement="end" opening={models.refresh}
       disabled={!options.settings || options.pending || disabled} label={<span><span>{modelName}</span>
         {effort && <span className="text-tertiary">{powerLabels[effort] ?? effort}</span>}<ChevronDown size={12} aria-hidden="true" />
@@ -368,5 +371,6 @@ export function ComposerToolbar({ options, disabled }: { options: Options; disab
       {close => models.error ? <p role="alert" className="yard-source-toolbar-intro">{models.error}</p> :
         !models.value ? <p role="status" className="yard-source-toolbar-intro">Loading…</p> : <ModelPicker options={options} catalog={models.value} close={close} />}
     </Menu>
+    </div>
   </>;
 }

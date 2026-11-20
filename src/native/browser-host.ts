@@ -28,6 +28,14 @@ const pinnedToolDocument = document.querySelector('meta[name="yard-pinned-tool"]
 const pinnedReturn = pinnedToolDocument ? new URLSearchParams(location.search).get('workspaceReturn') : null;
 const initialRoute = sourceWorkspaceDocument ? sourceWorkspaceRoute(location) : initialWorkspaceRoute(
   document.querySelector<HTMLMetaElement>('meta[name="initial-route"]')?.content, location.search, location.pathname);
+if (pinnedToolDocument) window.addEventListener('popstate', event => {
+  // A history entry can belong to the React workspace. Let the server select
+  // its renderer before the pinned router interprets that conversation route.
+  const route = sourceWorkspaceRoute(location);
+  if (usesPinnedToolRenderer(route)) return;
+  event.stopImmediatePropagation();
+  location.replace(location.href);
+}, { capture: true });
 const historyStartup = new HistoryStartup(initialRoute, 15_000, !isMiniWindow);
 window.addEventListener('yard-workspace-ready', () => historyStartup.workspaceReady(), { once: true });
 window.addEventListener('yard-conversation-history-ready', () => {

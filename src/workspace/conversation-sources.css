@@ -1,5 +1,4 @@
 .yard-source-sources-summary { margin: 6px 8px 0; padding-block-start: 9px; }
-.yard-source-sources-summary > header { display: flex; align-items: center; justify-content: space-between; padding-inline: 12px 4px; color: var(--color-text-tertiary); font-size: 13px; }
 .yard-source-sources-summary .yard-source-output-add:hover { background: var(--color-background-primary-ghost-hover); }
 .yard-source-sources-list { margin: 0; padding: 0; }
 .yard-source-sources-list > li, .yard-source-sources-view, .yard-source-sources-file {

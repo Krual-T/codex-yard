@@ -9,6 +9,7 @@ import { listComposerPlugins } from './host.ts';
 import type { PluginMention } from './output-types.ts';
 import type { PromptAttachment } from './composer-input.ts';
 import type { TurnStream } from './turn-stream.ts';
+import { SummarySection } from './summary-section.tsx';
 import './conversation-sources.css';
 
 const emptyItems: SourceItemsByTurn = new Map();
@@ -121,27 +122,18 @@ type SourceActions = { openFile(file: PromptAttachment): void };
 export function SourcesSummary({ data, openDetails, openFile, attach, insertPlugin, cwd, hostId }: SourceActions & {
   data: ConversationSources; openDetails(): void; attach(): void; insertPlugin(mention: PluginMention): void; cwd?: string; hostId: string;
 }) {
-  const section = useId();
-  const [expanded, setExpanded] = useState(true);
   const hasWeb = data.web.searchCount > 0 || data.web.pages.length > 0;
-  if (!data.integrations.length && !hasWeb && !data.files.length) return null;
-  return <section className="yard-source-sources-summary">
-    <header>
-      <button type="button" className="yard-source-output-heading" aria-expanded={expanded} aria-controls={section}
-        onClick={() => setExpanded(value => !value)}><span>Sources</span>
-        {expanded ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />}
-      </button>
-      <SourceMenu attach={attach} cwd={cwd} insertPlugin={insertPlugin} hostId={hostId} />
-    </header>
-    <div id={section} hidden={!expanded}>
-      <ul aria-label="Sources" className="yard-source-sources-list">
-        <SourcesFiles files={data.files} openFile={openFile} />
-        {data.integrations.map(integration => <li key={integration.id}><Workflow size={14} aria-hidden="true" /><span>{integration.name}</span></li>)}
-        {hasWeb && <li><Globe size={14} aria-hidden="true" /><span>Web search</span></li>}
-      </ul>
-      <button type="button" className="yard-source-sources-view" onClick={openDetails}><Workflow size={14} aria-hidden="true" />View all</button>
-    </div>
-  </section>;
+  const itemCount = data.integrations.length + data.files.length + Number(hasWeb);
+  if (!itemCount) return null;
+  return <SummarySection sectionKey="sources" title="Sources" itemCount={itemCount} className="yard-source-sources-summary"
+    actions={<SourceMenu attach={attach} cwd={cwd} insertPlugin={insertPlugin} hostId={hostId} />}>
+    <ul aria-label="Sources" className="yard-source-sources-list">
+      <SourcesFiles files={data.files} openFile={openFile} />
+      {data.integrations.map(integration => <li key={integration.id}><Workflow size={14} aria-hidden="true" /><span>{integration.name}</span></li>)}
+      {hasWeb && <li><Globe size={14} aria-hidden="true" /><span>Web search</span></li>}
+    </ul>
+    <button type="button" className="yard-source-sources-view" onClick={openDetails}><Workflow size={14} aria-hidden="true" />View all</button>
+  </SummarySection>;
 }
 
 function SourceDisclosure({ label, children }: { label: string; children: ReactNode }) {

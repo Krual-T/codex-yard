@@ -277,7 +277,7 @@ try {
   await page.getByRole('button', { name: 'Open right sidebar', exact: true }).click();
   await childEditor.waitFor();
   assert.equal(remote.calls('turn/start').length, 1, 'reopening a tool never resends a message');
-  await sidechat.getByRole('button', { name: 'Close tab', exact: true }).click();
+  await sidechat.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
   report.checks.push('Saved SSH side chats stay in the right sidebar; equal child IDs retain separate drafts and send only to their own host');
 
   for (const [row, name, owner] of [[localRow, 'Local', 'local'], [remoteRow, 'Remote', hostId]] as const) {
@@ -290,7 +290,7 @@ try {
     assert.equal(new URL(href, app.url).searchParams.get('hostId') ?? 'local', owner);
     const bytes = await context.request.get(app.url + href);
     assert.equal(await bytes.text(), name + ' output on its own host');
-    await preview.getByRole('button', { name: 'Close tab', exact: true }).click();
+    await preview.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
     await page.getByRole('button', { name: 'Open right sidebar', exact: true }).click();
     const newTab = page.getByRole('complementary', { name: 'New tab', exact: true });
     await newTab.getByRole('button', { name: 'Files', exact: true }).click();
@@ -307,7 +307,7 @@ try {
     await files.getByText(name + ' nested file', { exact: true }).waitFor();
     const fileDownload: URL = new URL((await files.getByRole('link', { name: 'Download file', exact: true }).getAttribute('href'))!, app.url);
     assert.equal(fileDownload.searchParams.get('hostId') ?? 'local', owner);
-    await files.getByRole('button', { name: 'Close tab', exact: true }).click();
+    await files.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
   }
   assert.ok(remote.calls('fs/readDirectory').some(call => call.params.path === remoteDir));
   assert.ok(remote.calls('fuzzyFileSearch').length > 0 && local.calls('fuzzyFileSearch').length > 0);
@@ -316,7 +316,7 @@ try {
   await summary.locator('.yard-source-sources-summary').getByRole('button', { name: 'detail.txt', exact: true }).click();
   const sourcePreview = page.getByRole('complementary', { name: 'Output preview', exact: true });
   await sourcePreview.getByText('Remote nested file', { exact: true }).waitFor();
-  await sourcePreview.getByRole('button', { name: 'Close tab', exact: true }).click();
+  await sourcePreview.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
   await showSummary();
   await summary.getByRole('button', { name: 'Attach files or connect apps', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Use plugins', exact: true }).click();
@@ -335,7 +335,7 @@ try {
   assert.equal(fork?.params.attachToSource, true);
   assert.equal(local.calls('thread/fork').length, 0);
   await childEditor.fill('Remote new side chat draft');
-  await sidechat.getByRole('button', { name: 'Close tab', exact: true }).click();
+  await sidechat.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
   assert.equal(await editor.innerText(), 'remote draft kept');
   report.checks.push('New SSH side chats fork on the remote daemon without replacing the parent or its draft');
   await page.screenshot({ path: join(output, 'remote-summary.png') });
@@ -393,7 +393,7 @@ try {
   assert.deepEqual(moved?.params.input, queued.input);
   assert.equal(remote.queues.get(threadId)?.length, 0);
   await childEditor.waitFor();
-  await sidechat.getByRole('button', { name: 'Close tab', exact: true }).click();
+  await sidechat.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
 
   const retry = { id: 'remote-queued-rejected', clientUserMessageId: 'queued-recovery',
     input: [...composerInput('Recover the remote queued draft', [{ path: join(remoteDir, 'nested/detail.txt'), name: 'detail.txt', image: false }])] };
@@ -409,7 +409,7 @@ try {
   assert.equal(remote.queues.get(threadId)?.length, 0);
   assert.equal(local.calls('thread/queue/delete').length, 0);
   assert.equal(local.calls('turn/start').length, 0);
-  await sidechat.getByRole('button', { name: 'Close tab', exact: true }).click();
+  await sidechat.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.locator('.yard-source-main').getByText('Remote history on its own host', { exact: true }).waitFor();
   await showSummary();
@@ -420,7 +420,7 @@ try {
   assert.equal(recoveredFile.searchParams.get('hostId'), hostId);
   assert.equal(recoveredFile.searchParams.get('path'), join(remoteDir, 'nested/detail.txt'));
   assert.equal(remote.calls('turn/start').length, 4, 'a rejected transfer restores the draft without replaying it');
-  await sidechat.getByRole('button', { name: 'Close tab', exact: true }).click();
+  await sidechat.locator('.yard-source-labeled-tab[data-active="true"] > [data-app-shell-tab-close-button]').click();
   report.checks.push('Queued SSH messages transfer once; an explicit rejection preserves the remote draft and attachments across reload');
 
   await localRow.click();

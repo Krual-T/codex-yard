@@ -5,6 +5,8 @@ import { createRoot } from 'react-dom/client';
 import { mountBrowserPet } from '../native/browser-pet.ts';
 import type { HostMessage } from '../native/protocol.ts';
 import { profileLabel, sendHostMessage } from './host.ts';
+import { AccountUsageSummary, useConversationUsage } from './conversation-usage.tsx';
+import { rateLimitBuckets } from './conversation-metrics.ts';
 
 export const workspacePlugins = '/?initialRoute=/plugins';
 let petMounted = false;
@@ -22,6 +24,7 @@ function mountPet() {
 }
 
 export function SidebarProfile({ returnRoute }: { returnRoute?: string }) {
+  const usage = useConversationUsage(null, 'local');
   const id = React.useId();
   const helpId = React.useId();
   const trigger = React.useRef<HTMLButtonElement>(null);
@@ -139,10 +142,15 @@ export function SidebarProfile({ returnRoute }: { returnRoute?: string }) {
         if (event.target !== event.currentTarget) return;
         const open = event.newState === 'open';
         setShowProfile(open);
+        if (open) void usage.refresh();
         if (open && !event.currentTarget.contains(document.activeElement)) event.currentTarget.focus();
       }}>
       <div role="menuitem" aria-disabled="true">{label}</div>
       <div role="separator" />
+      {rateLimitBuckets(usage.rateLimits).length > 0 && <>
+        <div role="group" aria-label="Usage remaining"><AccountUsageSummary rateLimits={usage.rateLimits} /></div>
+        <div role="separator" />
+      </>}
       <button type="button" role="menuitem" tabIndex={-1} onClick={() => { closeProfile(); togglePet(); }}>
         <Ghost size={14} aria-hidden="true" />{petOpen ? 'Hide Pet' : 'Show Pet'}<kbd>Alt+Super+P</kbd>
       </button>

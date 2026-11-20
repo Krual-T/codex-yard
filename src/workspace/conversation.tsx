@@ -24,6 +24,7 @@ import { TurnChangeCard, type OpenTurnChanges } from './turn-changes-view.tsx';
 import { isInputRequest, useTurnRequest } from './turn-requests.tsx';
 import { WorkspaceIcon } from './workspace-icon.tsx';
 import { turnTimeline } from './turn-timeline.ts';
+import { conversationScope, pendingMessages, usePendingMessages, withPendingMessages } from './pending-messages.ts';
 
 let messageDate: Intl.DateTimeFormat | undefined;
 let messageTime: Intl.DateTimeFormat | undefined;
@@ -99,7 +100,7 @@ const PromptMessage = memo(function PromptMessage({ item, hostId, startedAt, edi
   const replies = questionReplies(item);
   if (replies.length) return <AsyncQuestionReplyMessage item={item} />;
   const copyText = parts.map(part => part.text).join('\n');
-  return <div className="yard-source-user-turn">
+  return <div className="yard-source-user-turn" data-preparing-message={item.preparing ? String(item.clientId) : undefined}>
     <h4 className="sr-only">You said:</h4>
     {images.length > 0 && <ConversationImages images={images} hostId={hostId} />}
     {parts.some(part => part.text || part.attachments.length) &&
@@ -127,6 +128,17 @@ const PromptMessage = memo(function PromptMessage({ item, hostId, startedAt, edi
 
 type History = Awaited<ReturnType<typeof history>>;
 export type ConversationView = { stream: TurnStream; pending?: Promise<History>; seed?: History };
+
+export function HomePendingMessages({ children }: { children: ReactNode }) {
+  const pending = usePendingMessages('new-conversation');
+  if (!pending.length) return children;
+  return <div className="yard-source-transcript overflow-y-auto" role="region" aria-label="Conversation">
+    <div className="yard-source-transcript-content">
+      {withPendingMessages([], pending).flatMap(turn => turn.items.map(item =>
+        <PromptMessage key={item.id} item={item} hostId="local" />))}
+    </div>
+  </div>;
+}
 
 export function useConversation(view?: ConversationView, onPersisted?: (id: string, hostId: string) => void) {
   const [selected, setSelected] = useState<{ view: ConversationView; page: History }>();
@@ -225,7 +237,9 @@ export function Transcript({ page, stream, more, branch, openChanges, stop, runM
   const request = useTurnRequest(stream.threadId, stream.hostId);
   const live = useSyncExternalStore(stream.subscribe, stream.read);
   const inspectedTurnId = useSyncExternalStore(stream.subscribe, stream.readInspectedTurn);
-  const turns = useMemo(() => mergeLiveTurns(page?.turns, live, inspectedTurnId), [page?.turns, live, inspectedTurnId]);
+  const pending = usePendingMessages(conversationScope(stream.threadId, stream.hostId));
+  useEffect(() => { pendingMessages.confirm(conversationScope(stream.threadId, stream.hostId), page?.turns ?? []); }, [stream, page?.turns]);
+  const turns = useMemo(() => withPendingMessages(mergeLiveTurns(page?.turns, live, inspectedTurnId), pending), [page?.turns, live, inspectedTurnId, pending]);
   const [openedAt] = useState(() => Date.now() / 1000);
   const [workOpen, setWorkOpen] = useState(new Map<string, boolean>());
   const last = turns.at(-1);
@@ -277,6 +291,13 @@ export function Transcript({ page, stream, more, branch, openChanges, stop, runM
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
+  const lastPreparation = pending.at(-1)?.id;
+  useLayoutEffect(() => {
+    if (lastPreparation && scroller.current) {
+      follow.current = true;
+      scroller.current.scrollTop = scroller.current.scrollHeight;
+    }
+  }, [lastPreparation]);
   const [canScrollToEnd, setCanScrollToEnd] = useState(false);
   const earlierAnchor = useRef<{ element: HTMLElement; offset: number; cursor: string } | null>(null);
   const requestingEarlier = useRef(false);
@@ -332,7 +353,7 @@ export function Transcript({ page, stream, more, branch, openChanges, stop, runM
       Load earlier messages <ChevronRight size={14} aria-hidden="true" />
     </button> : null}
     {turns.map((turn, index) => {
-      const active = turn.status === 'inProgress';
+      const active = turn.status === 'inProgress' && !turn.id.startsWith('preparing:');
       const waiting = active && request && (request.turnId === turn.id || request.turnId === null) ? request : undefined;
       const awaitingEdit = waiting?.kind === 'file' ? waiting.itemId : undefined;
       const answers = turn.items.filter((item): item is ThreadItemSummary & { text: string } =>
@@ -377,7 +398,7 @@ export function Transcript({ page, stream, more, branch, openChanges, stop, runM
             changes={item === lastAnswer ? changes : undefined} />;
           if (edit?.turnId === turn.id && edit.itemId === item.id) return <React.Fragment key={item.id}>{inlineEdit}</React.Fragment>;
           const canEdit = !edit && item === editItem && !!latestPrompt;
-          return <PromptMessage key={item.id} item={item} hostId={stream.hostId}
+          return <PromptMessage key={typeof item.clientId === 'string' ? item.clientId : item.id} item={item} hostId={stream.hostId}
             startedAt={item === firstPrompt ? turn.startedAt : undefined} editButton={canEdit ? editButton : undefined}
             edit={canEdit ? () => {
               setEdit({ turnId: turn.id, itemId: item.id, prompt: latestPrompt });

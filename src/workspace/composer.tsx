@@ -1,5 +1,5 @@
 import { ArrowUp, Check, FolderClosed, Mic, Square, X } from 'lucide-react';
-import { useCallback, useId, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore, type Ref } from 'react';
+import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore, type Ref } from 'react';
 import { baseKeymap, splitBlock } from 'prosemirror-commands';
 import { closeHistory, history, redo, undo } from 'prosemirror-history';
 import { keymap } from 'prosemirror-keymap';
@@ -21,6 +21,9 @@ import { ComposerChanges, type OpenTurnChanges } from './turn-changes-view.tsx';
 import { editForRequest, isBlockingRequest, TurnRequestCard, useTurnRequest } from './turn-requests.tsx';
 import { QueuedMessages, queuedPrompt, useQueuedMessages } from './queued-messages.tsx';
 import { ProjectMarker } from './project-marker.tsx';
+import { pendingMessages, usePendingMessages } from './pending-messages.ts';
+import { ConversationGoal, useConversationGoal } from './conversation-goal.tsx';
+import { useConversationUsage } from './conversation-usage.tsx';
 
 const draftKey = 'composer-prompt-drafts-v1';
 const draftFilesKey = 'yard-recovered-composer-files-v1';
@@ -224,7 +227,7 @@ export type ComposerHandle = { appendOutput(type: OutputType): void; insertPlugi
   openAttachmentPicker(): void; focus(): void; stop(turnId: string): Promise<void>;
   runMessageEdit: RunMessageEdit };
 
-export function Composer({ ref, scope, label, projectId, projects, stream, historyTurns, onSend, openQueuedSidechat, openChanges, destinationKnown = true }: {
+export function Composer({ ref, scope, label, projectId, projects, stream, historyTurns, onSend, openQueuedSidechat, openGoal, openChanges, destinationKnown = true }: {
   ref?: Ref<ComposerHandle>;
   scope: string; label: string;
   projectId?: string;
@@ -232,14 +235,17 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
   projects?: ProjectPicker;
   stream?: TurnStream;
   historyTurns?: TurnSummary[];
-  onSend?: (text: string, permissionChoice: string | undefined, attachments: readonly PromptAttachment[]) => Promise<void | (() => void)>;
+  onSend?: (text: string, permissionChoice: string | undefined, attachments: readonly PromptAttachment[], clientUserMessageId: string) => Promise<void | (() => void)>;
   openQueuedSidechat?(item: QueuedSubmission): Promise<void>;
   openChanges?: OpenTurnChanges;
+  openGoal?(threadId: string, hostId: string): void;
 }) {
   const hostId = stream?.hostId ?? 'local';
   const questionOpen = useAsyncQuestionOpen();
   const historyScope = scope === 'new-conversation' ? globalHistory : scope;
   const options = useComposerOptions(stream?.threadId, projectId, hostId, destinationKnown);
+  const goal = useConversationGoal(stream?.threadId, hostId);
+  const usage = useConversationUsage(stream?.threadId, hostId);
   const attachments = useComposerAttachments(JSON.stringify([scope, projectId]), hostId);
   const compact = questionOpen && !attachments.items.length;
   const layout = compact ? 'single-line' : 'multiline';
@@ -247,6 +253,8 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
   const attachmentPicker = useRef<HTMLInputElement>(null);
   const view = useRef<EditorView | null>(null);
   const recoveredFiles = useRef<PromptAttachment[]>([]);
+  const preparing = useRef<{ id: string; doc: Node; text: string; files: readonly PromptAttachment[] } | undefined>(undefined);
+  const preparations = usePendingMessages(scope);
   const busy = useRef(false);
   const queueBusy = useRef(false);
   const stopRequested = useRef<string | undefined>(undefined);
@@ -267,6 +275,32 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
   const [populated, setPopulated] = useState(() => typeof drafts()[scope] === 'string' && !!String(drafts()[scope]).trim());
   const [status, setStatus] = useState<'idle' | 'sending' | 'uncertain'>('idle');
   const [failure, setFailure] = useState<string>();
+  function persistDraft(text: string) {
+    const current = drafts();
+    // Keep the submitted draft recoverable until delivery is known, while
+    // allowing the user to type their next message in the cleared editor.
+    const saved = [preparing.current?.text, text].filter(Boolean).join('\n\n');
+    if (saved) current[scope] = saved; else delete current[scope];
+    void writeAtom(draftKey, current).catch(console.error);
+  }
+  function releasePreparation(id: string) {
+    const held = preparing.current;
+    if (held?.id !== id) return;
+    preparing.current = undefined;
+    if (view.current) persistDraft(promptText(view.current.state.doc));
+    else {
+      const saved = String(drafts()[scope] ?? '');
+      persistDraft(saved === held.text ? '' : saved.startsWith(held.text + '\n\n') ? saved.slice(held.text.length + 2) : saved);
+    }
+    removeAttachments([], held.files.map(file => file.path));
+  }
+  useEffect(() => {
+    const held = preparing.current;
+    if (status === 'uncertain' && held && !preparations.some(message => message.id === held.id)) {
+      releasePreparation(held.id);
+      busy.current = false; setStatus('idle'); setFailure(undefined);
+    }
+  }, [preparations, status]);
   const stop = useCallback(async (turnId: string) => {
     if (!stream || activeTurn !== turnId || stopRequested.current === turnId) return;
     stopRequested.current = turnId;
@@ -322,11 +356,8 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
     const saved = drafts()[scope];
     recoveredFiles.current = draftFiles(scope);
     const editor = mountPromptEditor(mount.current!, typeof saved === 'string' ? saved : '', label, text => {
-      const current = drafts();
       setPopulated(!!text.trim());
-      if (text) current[scope] = text;
-      else delete current[scope];
-      void writeAtom(draftKey, current).catch(console.error);
+      persistDraft(text);
     }, { 'data-codex-composer': 'true', 'data-composer-markdown': '' }, historyScope);
     view.current = editor;
     if (recoveredFiles.current.length) attachments.restore(recoveredFiles.current);
@@ -351,21 +382,35 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
     if ((!text.trim() && !attachments.items.length) || editor.composing) return;
     busy.current = true;
     setStatus('sending'); setFailure(undefined);
+    const sent = attachments.items;
+    const files = sent.flatMap(row => row.file ? [row.file] : []);
+    const clientUserMessageId = crypto.randomUUID();
+    const mode = reverseFollowUp ? queue.mode === 'queue' ? 'steer' : 'queue' : queue.mode;
+    const queued = !!stream && (!!activeTurn || editingQueued) && (editingQueued || mode === 'queue');
+    if (!queued) {
+      const latest = stream && mergeLiveTurns(historyTurns, stream.read()).at(-1);
+      preparing.current = { id: clientUserMessageId, doc, text, files };
+      pendingMessages.add(scope, { id: clientUserMessageId, input: composerInput(text, files), startedAt: Date.now() / 1000,
+        ...(activeTurn ? { turnId: activeTurn, after: latest?.items.at(-1)?.id } : {}) });
+      recoveredFiles.current = [...recoveredFiles.current, ...files.filter(file => !recoveredFiles.current.some(row => row.path === file.path))];
+      void saveDraftFiles(scope, recoveredFiles.current).catch(console.error);
+      editor.dispatch(closeHistory(editor.state.tr).delete(0, doc.content.size));
+      attachments.remove(sent.map(row => row.id));
+    }
     try {
-      const sent = attachments.items;
-      const files = sent.flatMap(row => row.file ? [row.file] : []);
       let accepted: void | (() => void) = undefined;
       if (stream && (activeTurn || editingQueued)) {
-        const mode = reverseFollowUp ? queue.mode === 'queue' ? 'steer' : 'queue' : queue.mode;
-        if (editingQueued || mode === 'queue') await enqueueMessage(stream.threadId, text, files, hostId);
-        else await steerTurn(stream.threadId, activeTurn!, composerInput(text, files), hostId);
+        if (queued) await enqueueMessage(stream.threadId, text, files, hostId);
+        else await steerTurn(stream.threadId, activeTurn!, composerInput(text, files), hostId, clientUserMessageId);
         queue.refresh();
         setEditingQueued(false);
-      } else accepted = await onSend(text, options.draftPermission?.id, files);
+      } else accepted = await onSend(text, options.draftPermission?.id, files, clientUserMessageId);
       rememberPrompt(historyScope, doc);
       // A later edit or a different workspace must not be cleared by this reply.
-      if (view.current === editor && editor.state.doc.eq(doc)) editor.dispatch(editor.state.tr.delete(0, doc.content.size));
+      if (queued && view.current === editor && editor.state.doc.eq(doc)) editor.dispatch(editor.state.tr.delete(0, doc.content.size));
       removeAttachments(sent.map(row => row.id), files.map(file => file.path));
+      releasePreparation(clientUserMessageId);
+      if (!stream) pendingMessages.remove(scope, clientUserMessageId);
       setStatus('idle'); busy.current = false;
       accepted?.();
     } catch (error) {
@@ -373,6 +418,17 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
         setStatus('uncertain');
         setFailure('Delivery is unknown. Check the conversation before trying again.');
       } else {
+        if (!queued) {
+          pendingMessages.remove(scope, clientUserMessageId);
+          preparing.current = undefined;
+          if (view.current === editor) {
+            const current = editor.state.doc;
+            const recovered = promptText(current).trim() ? schema.node('doc', null, doc.content.append(current.content)) : doc;
+            const transaction = closeHistory(editor.state.tr).replaceWith(0, current.content.size, recovered.content);
+            editor.dispatch(transaction.setSelection(Selection.atEnd(transaction.doc)));
+            attachments.restore(files);
+          }
+        }
         setFailure(error instanceof Error ? error.message : String(error));
         setStatus('idle'); busy.current = false;
       }
@@ -466,6 +522,8 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
           if (current()) stream.acknowledge(turn);
         }
       })} />}
+    {!blocked && goal.goal && goal.goal.status !== 'complete' && openGoal && stream &&
+      <ConversationGoal controller={goal} onEdit={() => openGoal(stream.threadId, hostId)} />}
     {request && <TurnRequestCard key={JSON.stringify([request.hostId, request.threadId, request.id])}
       request={request} edit={requestedEdit} interrupt={turnId => {
         void stop(turnId).catch(error => setFailure(error instanceof Error ? error.message : String(error)));
@@ -494,7 +552,7 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
         </div>
         <div className="yard-source-composer-footer">
           <AttachmentPicker key={projectId ?? scope} add={attachments.add} disabled={status !== 'idle'} picker={attachmentPicker} />
-          <ComposerToolbar key={stream?.threadId ?? projectId ?? 'new'} options={options} disabled={status !== 'idle'} />
+          <ComposerToolbar key={stream?.threadId ?? projectId ?? 'new'} options={options} usage={usage} disabled={status !== 'idle'} />
           <button type="button" aria-label="Dictate" className="yard-source-dictate" disabled>
             <Mic size={16} aria-hidden="true" />
           </button>

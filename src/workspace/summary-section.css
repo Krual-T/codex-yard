@@ -1,0 +1,31 @@
+.yard-summary-section { flex: none; min-width: 0; }
+.yard-summary-section > .yard-summary-section-header {
+  display: flex; align-items: center; justify-content: flex-start; gap: 8px;
+  height: 28px; min-width: 0; padding: 0 4px 2px 12px;
+  color: var(--color-text-secondary); font-size: 13px; line-height: 20px; font-weight: 400;
+}
+/* Pinned SummarySection header: -ms-[3.5px], gap-1.5, py-0.5,
+   ps-[3.5px], pe-1. The 20x21 down-chevron retains its original optical inset. */
+.yard-summary-section > .yard-summary-section-header > .yard-summary-section-toggle {
+  display: inline-flex; flex: 1; align-items: center; justify-content: flex-start; gap: 6px;
+  min-width: 0; min-height: 0; width: auto; margin-inline-start: -3.5px; padding: 2px 4px 2px 3.5px;
+  border: 0; border-radius: 12px; background: transparent; color: inherit;
+  text-align: start; font: inherit; cursor: pointer;
+}
+.yard-summary-section-toggle:focus-visible { outline: 2px solid var(--color-ring); outline-offset: -2px; }
+.yard-summary-section-header > .yard-summary-section-toggle > .yard-summary-section-title {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.yard-summary-section-count { flex: none; color: var(--color-text-tertiary); }
+.yard-summary-section-chevron {
+  display: block; flex: none; width: 12px; height: 12px; opacity: 0;
+  stroke: currentColor; stroke-width: .6; transform: rotate(0deg); transition: transform 150ms;
+}
+.yard-summary-section-toggle:is(:hover, :focus-visible, [aria-expanded="false"]) > .yard-summary-section-chevron { opacity: 1; }
+.yard-summary-section-toggle[aria-expanded="false"] > .yard-summary-section-chevron { transform: rotate(-90deg); }
+.yard-summary-section-content {
+  min-width: 0; min-height: 0; max-height: min(50svh, calc(100svh - 128px));
+  overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: contain;
+}
+.yard-summary-section-content[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) { .yard-summary-section-chevron { transition: none; } }

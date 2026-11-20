@@ -12,7 +12,7 @@ const Markdown = lazy(async () => {
     return { default: ({ text, streaming }: { text: string; streaming: boolean }) => <MessageMarkdown text={text} lex={lexMessage} streaming={streaming} /> };
   } catch { return { default: PlainMessage }; }
 });
-const markdownSyntax = /(^|\n)(?: {0,3}(?:#{1,6}\s|[-+*>]\s|\d+[.)]\s|```|~~~|\|.+|---\s*$)| {4}\S)|[*_`~\[<]|https?:\/\//m;
+const markdownSyntax = /\n[\t ]*\n|(^|\n)(?: {0,3}(?:#{1,6}\s|[-+*>]\s|\d+[.)]\s|```|~~~|\|.+|---\s*$)| {4}\S)|[*_`~\[<]|https?:\/\//m;
 
 export function MessageBody({ text, streaming = false }: { text: string; streaming?: boolean }) {
   const plain = <PlainMessage text={text} />;

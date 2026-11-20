@@ -1,0 +1,29 @@
+/* Pinned FBi tab geometry: h-8, ps-2.5, gap-2, pe-1.75; the close action is
+   positioned in the tab and only appears on hover for inactive tabs. */
+.yard-source-sidechat-tabbar .yard-source-tool-tabs .yard-source-labeled-tab {
+  position: relative; flex: 0 1 238px; min-width: 88px; max-width: 238px; width: 238px; padding: 0;
+  border: 1px solid transparent; border-radius: 8px;
+}
+.yard-source-sidechat-tabbar .yard-source-labeled-tab[data-active="true"] {
+  border-color: var(--color-border);
+  background: var(--color-surface-elevated-secondary, var(--color-surface));
+  box-shadow: var(--shadow-sm, 0 1px 2px #00000008);
+}
+:root[data-theme="dark"] .yard-source-sidechat-tabbar .yard-source-labeled-tab[data-active="true"] { background: var(--color-background-primary-ghost-hover); }
+.yard-source-sidechat-tabbar .yard-source-tool-tabs .yard-source-labeled-tab > button[role="tab"] {
+  width: 100%; height: 30px; gap: 8px; padding: 4px 7px 4px 10px; border-radius: 7px;
+  color: var(--color-text-tertiary); font-size: var(--text-sm); line-height: 20px;
+}
+.yard-source-sidechat-tabbar .yard-source-labeled-tab > button[role="tab"]:hover { background: transparent; }
+.yard-source-sidechat-tabbar .yard-source-labeled-tab[data-active="true"] > button[role="tab"] { color: var(--color-text-primary); }
+.yard-source-tool-tab-title { flex: 1; text-align: start; }
+.yard-source-sidechat-tabbar .yard-source-tool-tabs .yard-source-labeled-tab > button:not([role="tab"]) {
+  position: absolute; inset-inline-end: 6px; top: 50%; translate: 0 -50%;
+  min-width: 20px; width: 20px; height: 24px; padding: 0;
+}
+.yard-source-labeled-tab:is([data-active="true"], :hover, :focus-within) > button[role="tab"] { padding-inline-end: 29px !important; }
+.yard-source-labeled-tab[data-active="false"]:is(:hover, :focus-within) { background: var(--color-background-primary-ghost-hover); }
+.yard-source-tool-tabs kbd {
+  flex: none; padding: 0 6px; border-radius: 999px; background: var(--color-background-primary-ghost-hover);
+  color: var(--color-text-tertiary); font: inherit; font-size: var(--text-sm); line-height: 18px;
+}

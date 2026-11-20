@@ -1,0 +1,12 @@
+.yard-source-sidebar { position: relative; }
+.yard-source-sidebar-splitter {
+  position: absolute; z-index: 31; inset-block: 0; inset-inline-end: -4px; width: 8px;
+  touch-action: none; cursor: col-resize; outline: none;
+}
+.yard-source-sidebar-splitter::after {
+  content: ""; position: absolute; inset-block: var(--radius-2xl-base, 16px); inset-inline-start: 4px;
+  width: 1px; background: var(--color-border-strong, var(--color-border)); opacity: 0; pointer-events: none;
+}
+.yard-source-sidebar-splitter:is(:hover, :focus-visible, [data-dragging="true"])::after { opacity: 1; }
+.yard-source-sidebar-splitter:focus-visible { box-shadow: inset 0 0 0 2px var(--color-ring); }
+@media (max-width: 767px) { .yard-source-sidebar-splitter { display: none; } }
