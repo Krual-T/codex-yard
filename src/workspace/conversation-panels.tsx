@@ -1,10 +1,10 @@
 import { AtSign, Bot, Diff, Download, Folders, MessageSquare, MessageSquarePlus, SquareTerminal, Workflow } from 'lucide-react';
 import { WorkspaceIcon } from './workspace-icon.tsx';
-import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { Ref, RefObject } from 'react';
 import type { ThreadSummary, TurnSummary } from '../../lib/codex-protocol.ts';
 import { mergeSidechats } from '../native/sidechat-thread-view.ts';
-import { Composer, recoverQueuedDraft, type ComposerHandle } from './composer.tsx';
+import { Composer, recoverQueuedDraft, type ComposerHandle, type ComposerImageAttachments } from './composer.tsx';
 import { Transcript, useConversation } from './conversation.tsx';
 import { AsyncQuestionsProvider } from './async-questions.tsx';
 import type { ConversationView } from './conversation.tsx';
@@ -16,7 +16,7 @@ import { OutputPreview } from './output-preview.tsx';
 import { attachmentOutput, outputFileUrl, type OutputFile, type OutputType, type PluginMention } from './output-types.ts';
 import { SourcesPanel, SourcesSummary, useConversationSources } from './conversation-sources.tsx';
 import type { PromptAttachment } from './composer-input.ts';
-import { TurnStream } from './turn-stream.ts';
+import { mergeLiveTurns, TurnStream } from './turn-stream.ts';
 import { AgentLink, subagentTitle, type OpenSubagent } from './turn-agents.tsx';
 import { TurnChangesPanel, type OpenTurnChanges } from './turn-changes-view.tsx';
 import { NewTab, newTabMenu } from './new-tab-tools.tsx';
@@ -32,6 +32,50 @@ import './tool-tabs.css';
 import { ConversationGoalEditor, useConversationGoal } from './conversation-goal.tsx';
 import { GoalIcon } from './conversation-goal-icons.tsx';
 import { SummarySection } from './summary-section.tsx';
+import { extractGeneratedImages, type EditableImage } from './image-edit-model.ts';
+
+const GeneratedImageEditor = lazy(() => import('./generated-image-editor.tsx'));
+type ImageEditorTarget = { composer(): ComposerHandle | null; stream: TurnStream; turns?: readonly TurnSummary[];
+  readHistory?(): readonly TurnSummary[] | undefined; title?: string; ownerTabId?: string };
+type ImageEditorTool = { kind: 'image-editor'; target: ImageEditorTarget; images: readonly EditableImage[]; selectedId: string };
+const emptyImageAttachments: ComposerImageAttachments = { images: [], comments: [] };
+
+function ImageEditorTab({ tool, visible, select }: { tool: ImageEditorTool; visible: boolean; select(id: string): void }) {
+  const { target } = tool;
+  const live = useSyncExternalStore(target.stream.subscribe, target.stream.read);
+  const history = target.readHistory?.() ?? target.turns;
+  const known = useRef(new Map(tool.images.map(image => [image.id, image])));
+  const images = useMemo(() => {
+    for (const image of tool.images) known.current.set(image.id, image);
+    for (const turn of mergeLiveTurns(history, live)) for (const image of extractGeneratedImages(turn.items, turn.id, turn.startedAt ?? undefined)) known.current.set(image.id, image);
+    return [...known.current.values()].map((image, index) => ({ ...image, label: 'Generated image ' + (index + 1) }));
+  }, [tool.images, history, live]);
+  const subscribe = useCallback((listener: () => void) => target.composer()?.subscribeImageAttachments(listener) ?? (() => {}), [target]);
+  const snapshot = useCallback(() => target.composer()?.imageAttachments() ?? emptyImageAttachments, [target]);
+  const attached = useSyncExternalStore(subscribe, snapshot);
+  const loading = useMemo(() => {
+    const pending = mergeLiveTurns(history, live).flatMap(turn => turn.items.flatMap(item =>
+      item.type === 'imageGeneration' && (item.status === 'inProgress' || item.status === 'in_progress') && !images.some(image => image.id === item.id)
+        ? [{ id: item.id, turnId: turn.id, startedAt: turn.startedAt ?? undefined }] : []));
+    if (attached.pendingEditId && !pending.length) pending.push({ id: 'optimistic-image-edit:' + attached.pendingEditId,
+      turnId: attached.pendingEditId, startedAt: undefined });
+    return pending;
+  }, [history, live, images, attached.pendingEditId]);
+  const seen = useRef(new Set(tool.images.map(image => image.id)));
+  useEffect(() => {
+    const all = [...images, ...loading], newest = all.filter(image => !seen.current.has(image.id)).at(-1);
+    for (const image of all) seen.current.add(image.id);
+    if (newest && visible) select(newest.id);
+  }, [images, loading, visible, select]);
+  return <Suspense fallback={null}><GeneratedImageEditor images={images} selectedId={tool.selectedId} hostId={target.stream.hostId}
+    loadingImages={loading}
+    visible={visible} onSelectImage={select} attachedImages={attached.images} attachedComments={attached.comments}
+    onAction={async action => {
+      const composer = target.composer();
+      if (!composer) throw new Error('The editor is not ready.');
+      await composer.imageEdit(action);
+    }} /></Suspense>;
+}
 
 const fallbackTitle = (index: number) => index === 1 ? 'Side chat' : 'Side chat ' + index;
 type Tool = { kind: 'new'; placeholder?: boolean; working?: boolean; error?: string } | { kind: 'chat'; view: ConversationView; error?: string } |
@@ -39,21 +83,26 @@ type Tool = { kind: 'new'; placeholder?: boolean; working?: boolean; error?: str
   { kind: 'output'; file: OutputFile } | { kind: 'terminal'; session: WorkspaceTerminalSession; number: number } |
   { kind: 'files'; cwd: string; query?: string } | { kind: 'browser'; view: WorkspaceBrowserView } |
   { kind: 'changes'; turnId: string; expanded: boolean } | { kind: 'sources' } | { kind: 'mcp-app'; app: McpAppTab } |
-  { kind: 'goal'; threadId: string; hostId: string };
+  { kind: 'goal'; threadId: string; hostId: string } | ImageEditorTool;
 type ToolTab = { id: string; tool: Tool };
 
-function Sidechat({ view, transferError, openOutput, openSubagent, openPage, openGoal }: {
+function Sidechat({ view, transferError, openOutput, openSubagent, openPage, openGoal, openImages, tabId }: {
   view: ConversationView; transferError?: string; openOutput(file: OutputFile): void; openSubagent: OpenSubagent; openPage(url: string): void;
   openGoal(threadId: string, hostId: string): void;
+  tabId: string; openImages(images: readonly EditableImage[], selectedId: string, target: ImageEditorTarget): void;
 }) {
   const { page, fault, more } = useConversation(view);
+  const imageHistory = useRef(page?.turns);
+  imageHistory.current = page?.turns;
   const composer = useRef<ComposerHandle>(null);
   const alive = useRef(false);
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const { stream } = view;
   return <AsyncQuestionsProvider stream={stream} history={page?.turns}>
     {(transferError || fault) && <p role="alert">{transferError ?? fault}</p>}
-    <WorkspaceOutputLinks value={{ cwd: page?.thread?.cwd ?? '', open: openOutput, openPage }}>
+    <WorkspaceOutputLinks value={{ cwd: page?.thread?.cwd ?? '', open: openOutput, openPage,
+      openImages: (images, selectedId) => openImages(images, selectedId, { composer: () => composer.current, stream, turns: page?.turns,
+        readHistory: () => imageHistory.current, title: page?.thread?.name ?? undefined, ownerTabId: tabId }) }}>
     <Transcript page={page} stream={stream} more={more} label="Side chat conversation" openSubagent={openSubagent}
       stop={turnId => composer.current?.stop(turnId) ?? Promise.resolve()}
       runMessageEdit={run => composer.current?.runMessageEdit(run) ?? Promise.reject(new Error('The editor is not ready.'))} />
@@ -61,8 +110,8 @@ function Sidechat({ view, transferError, openOutput, openSubagent, openPage, ope
     <div className="yard-source-composer">
       <Composer ref={composer} scope={stream.hostId === 'local' ? stream.threadId : stream.hostId + ':' + stream.threadId}
         label="Work with Codex" stream={stream} historyTurns={page?.turns} openGoal={openGoal}
-        onSend={page ? async (text, _permission, attachments, clientUserMessageId) => {
-          const { turn } = await sendExistingThread(stream.threadId, text, () => alive.current, attachments, stream.hostId, clientUserMessageId);
+        onSend={page ? async (text, _permission, attachments, clientUserMessageId, options) => {
+          const { turn } = await sendExistingThread(stream.threadId, text, () => alive.current, attachments, stream.hostId, clientUserMessageId, options);
           if (alive.current) stream.acknowledge(turn);
         } : undefined} />
     </div>
@@ -84,6 +133,7 @@ export type ConversationPanelsHandle = {
   openMcpApp(app: McpAppTab): void;
   closeMcpApp(id: string): void;
   openGoal(threadId: string, hostId: string): void;
+  openImages(images: readonly EditableImage[], selectedId: string, target: ImageEditorTarget): void;
 };
 export function ConversationPanels({ ref, parentId, hostId, workspace, createOutput, attachSource, insertPlugin, cwd, turns, stream, subagents, openBottomTerminal }: {
   ref?: Ref<ConversationPanelsHandle>;
@@ -122,6 +172,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
   const summaryTrigger = useRef<HTMLButtonElement>(null);
   const summarySurface = useRef<HTMLElement>(null);
   const rightTrigger = useRef<HTMLButtonElement>(null);
+  const rightPane = useRef<HTMLElement>(null);
 
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => {
@@ -159,6 +210,34 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
   const tab = tabs.find(row => row.id === selected) ?? tabs.at(-1);
   const expanded = tab?.tool.kind === 'changes' ? tab.tool.expanded : toolsExpanded;
   const rightOpen = !!tab && tabVisible;
+  const imageTarget = rightOpen && tab?.tool.kind === 'image-editor' ? tab.tool.target : undefined;
+  useLayoutEffect(() => {
+    const pane = rightPane.current, editor = imageTarget?.composer();
+    if (!pane || !editor) return;
+    const origin = editor.element()?.closest<HTMLElement>('.yard-source-main, .yard-source-sidechat');
+    if (!origin) return;
+    const measure = () => {
+      const box = pane.getBoundingClientRect();
+      const container = origin.getBoundingClientRect();
+      const scale = pane.offsetWidth > 0 ? box.width / pane.offsetWidth : 1;
+      const width = Math.min(560, Math.max(0, box.width / scale - 24));
+      editor.placeImageEditor({ left: (box.left - container.left + (box.width - width * scale) / 2) / scale,
+        bottom: (container.bottom - box.bottom) / scale + 16, width });
+      const form = editor.element();
+      if (form) pane.style.setProperty('--right-panel-composer-overlay-reserve', Math.max(118, form.getBoundingClientRect().height / scale + 16) + 'px');
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(pane);
+    observer.observe(origin);
+    if (editor.element()) observer.observe(editor.element()!);
+    window.addEventListener('resize', measure);
+    measure();
+    return () => {
+      observer.disconnect(); window.removeEventListener('resize', measure);
+      editor.placeImageEditor();
+      pane.style.removeProperty('--right-panel-composer-overlay-reserve');
+    };
+  }, [imageTarget]);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
   useEffect(() => {
@@ -212,7 +291,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
 
   const rows = mergeSidechats(sidechats, hostId, branch.children, [], branch.loaded, fallbackTitle);
   const labels = { new: 'New tab', chat: 'Side chat', agent: 'Subagent', output: 'Output preview', terminal: 'Terminal', files: 'Files', browser: 'Browser',
-    changes: 'Changes', sources: 'Sources', 'mcp-app': 'Tool app', goal: 'Goal' };
+    changes: 'Changes', sources: 'Sources', 'mcp-app': 'Tool app', goal: 'Goal', 'image-editor': 'Image editor' };
   const tabButton = (id: string) => tabId + '-button-' + id;
   const tabPanel = (id: string) => tabId + '-panel-' + id;
   function toolTitle(tool: Tool) {
@@ -221,6 +300,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
     if (tool.kind === 'output') return tool.file.name;
     if (tool.kind === 'terminal') return 'Terminal ' + tool.number;
     if (tool.kind === 'mcp-app') return tool.app.name;
+    if (tool.kind === 'image-editor') return tool.target.title ?? 'Generated image';
     return labels[tool.kind];
   }
 
@@ -253,12 +333,24 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
       tabs.find(row => row.tool.kind === 'goal' && row.tool.threadId === threadId && row.tool.hostId === goalHost));
   }
 
+  function openImages(images: readonly EditableImage[], selectedId: string, target: ImageEditorTarget) {
+    const historyImages = target.turns?.flatMap(turn => extractGeneratedImages(turn.items, turn.id, turn.startedAt ?? undefined)) ?? [];
+    const available = [...new Map([...historyImages, ...images].map(image => [image.id, image])).values()];
+    const existing = tabs.find(row => row.tool.kind === 'image-editor' && row.tool.target.stream === target.stream);
+    const next: ImageEditorTool = { kind: 'image-editor', images: available, selectedId, target };
+    if (existing) replaceTab(existing.id, next);
+    showTab(next, existing);
+    setToolsExpanded(true);
+  }
+
   function closeTab(target = tab, restoreFocus = true) {
     if (!target) return;
     opening.current.delete(target.id);
-    setTabs(current => current.filter(row => row.id !== target.id));
-    if (target !== tab) return;
-    const index = tabs.indexOf(target), next = tabs[index + 1] ?? tabs[index - 1];
+    const retained = (row: ToolTab) => row.id !== target.id &&
+      !(row.tool.kind === 'image-editor' && row.tool.target.ownerTabId === target.id);
+    setTabs(current => current.filter(retained));
+    if (!tab || retained(tab)) return;
+    const index = tabs.indexOf(tab), next = tabs.slice(index + 1).find(retained) ?? tabs.slice(0, index).filter(retained).at(-1);
     setSelected(next?.id);
     if (!next) {
       setTabVisible(false);
@@ -326,6 +418,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
     openPage,
     openSubagent,
     openGoal,
+    openImages,
     openMcpApp(app) {
       const existing = tabs.find(row => row.id === app.id);
       showTab({ kind: 'mcp-app', app }, existing, app.id);
@@ -404,7 +497,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
       <SourcesSummary key={`${hostId}:${parentId}:sources`} data={sources} openDetails={openSources} openFile={openSourceFile} attach={attachSource} cwd={cwd} insertPlugin={insertPlugin} hostId={hostId} />
       {branch.error && <p role="alert">{branch.error}</p>}
     </aside>}
-    {tab && <aside className="yard-source-sidechat" id={tabId} hidden={!rightOpen} data-expanded={expanded} data-tool-kind={tab.tool.kind}
+    {tab && <aside ref={rightPane} className="yard-source-sidechat" id={tabId} hidden={!rightOpen} data-expanded={expanded} data-tool-kind={tab.tool.kind}
       aria-label={labels[tab.tool.kind]}>
       {rightOpen && !expanded && <WorkspaceSplitter workspace={workspace} pane={tabId} ratio={paneRatio} />}
       <div className="yard-source-sidechat-tabbar">
@@ -430,7 +523,8 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
               tool.kind === 'chat' ? <WorkspaceIcon name="tabChat" /> : tool.kind === 'output' ? <WorkspaceIcon name="tabFile" /> :
               tool.kind === 'files' ? <WorkspaceIcon name="tabFiles" /> :
               tool.kind === 'changes' ? <Diff size={14} aria-hidden="true" /> : tool.kind === 'sources' ? <Workflow size={13} aria-hidden="true" /> :
-              tool.kind === 'mcp-app' ? <AtSign size={14} aria-hidden="true" /> : tool.kind === 'goal' ? <GoalIcon name="goal" size={16} /> : null}
+              tool.kind === 'mcp-app' ? <AtSign size={14} aria-hidden="true" /> : tool.kind === 'goal' ? <GoalIcon name="goal" size={16} /> :
+              tool.kind === 'image-editor' ? <WorkspaceIcon name="toolImage" /> : null}
             <span className="yard-source-tool-tab-title">{tool.kind === 'browser' ? <BrowserTabTitle view={tool.view} /> : toolTitle(tool)}</span>
             {showShortcuts && index < 9 && <kbd aria-hidden="true">{mac ? '⌘' : 'Ctrl+'}{document.dir === 'rtl' ? tabs.length - index : index + 1}</kbd>}
             </button>;
@@ -460,6 +554,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
       {tabs.map(({ id, tool }) => {
         const panel = { panelId: tabPanel(id), labelId: tabButton(id) };
         const visible = id === tab.id && rightOpen;
+        const ownsImageComposer = imageTarget?.ownerTabId === id;
         if (tool.kind === 'terminal') return <TerminalPanel key={id} session={tool.session} visible={visible} tab={panel} />;
         const newTools = (tool.kind === 'new' || tool.kind === 'browser') && <NewTab menu={newTabMenu} actions={[
               ...(cwd ? [{ id: 'terminal', title: 'Terminal', icon: <SquareTerminal size={16} aria-hidden="true" /> }] : []),
@@ -476,16 +571,20 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
               {tool.kind === 'new' && tool.working && <p role="status">Opening side chat…</p>}
               {tool.kind === 'new' && tool.error && <p role="alert">{tool.error}</p>}
             </NewTab>;
-        return <div className="yard-source-tool-panel" key={id} role="tabpanel" id={panel.panelId} aria-labelledby={panel.labelId} hidden={!visible}>
+        return <div className="yard-source-tool-panel" key={id} role="tabpanel" id={panel.panelId} aria-labelledby={panel.labelId}
+          hidden={!visible && !ownsImageComposer} data-image-composer-owner={ownsImageComposer ? '' : undefined}>
           {tool.kind === 'mcp-app' ? <McpAppTabContent app={tool.app} /> :
             tool.kind === 'output' ? <OutputPreview file={tool.file} hostId={hostId} /> : tool.kind === 'chat' ?
-            <Sidechat view={tool.view} transferError={tool.error} openOutput={openOutput} openSubagent={openSubagent} openPage={openPage} openGoal={openGoal} /> :
-            tool.kind === 'agent' ? <Sidechat view={tool.view} openOutput={openOutput} openSubagent={openSubagent} openPage={openPage} openGoal={openGoal} /> :
+            <Sidechat view={tool.view} transferError={tool.error} openOutput={openOutput} openSubagent={openSubagent} openPage={openPage} openGoal={openGoal}
+              openImages={openImages} tabId={id} /> :
+            tool.kind === 'agent' ? <Sidechat view={tool.view} openOutput={openOutput} openSubagent={openSubagent} openPage={openPage} openGoal={openGoal}
+              openImages={openImages} tabId={id} /> :
             tool.kind === 'files' ? <WorkspaceFiles root={tool.cwd} initialQuery={tool.query} hostId={hostId} /> : tool.kind === 'browser' ?
             <BrowserTab view={tool.view}>{newTools}</BrowserTab> : tool.kind === 'sources' ?
             <SourcesPanel data={sources} openFile={openSourceFile} openPage={url => openBrowser(undefined, url)} /> : tool.kind === 'changes' && stream ?
             <TurnChangesPanel key={tool.turnId} turnId={tool.turnId} stream={stream} turns={turns} cwd={cwd} /> :
-            tool.kind === 'goal' ? <GoalTab threadId={tool.threadId} hostId={tool.hostId} /> : newTools}
+            tool.kind === 'goal' ? <GoalTab threadId={tool.threadId} hostId={tool.hostId} /> :
+            tool.kind === 'image-editor' ? <ImageEditorTab tool={tool} visible={visible} select={selectedId => replaceTab(id, { ...tool, selectedId })} /> : newTools}
         </div>;
       })}
     </aside>}

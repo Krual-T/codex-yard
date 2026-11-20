@@ -388,7 +388,7 @@ export function Transcript({ page, stream, more, branch, openChanges, stop, runM
               externalInput={block === lastActivity && waiting?.kind === 'mcp' ? waiting.elicitation : undefined} />
           </React.Fragment>;
           if (block.kind === 'images') return <React.Suspense key={block.key} fallback={null}>
-            <GeneratedImages items={block.items} active={active} hostId={stream.hostId} />
+            <GeneratedImages items={block.items} active={active} hostId={stream.hostId} turnId={turn.id} startedAt={turn.startedAt} />
           </React.Suspense>;
           const { item } = block;
           if (block.kind === 'question') return <AsyncQuestionMessage key={block.key} item={item} active={active} />;

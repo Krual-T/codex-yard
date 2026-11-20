@@ -517,6 +517,8 @@ function App() {
     if (hostId === 'local' && unlistedThreads.current.has(id)) void refreshSidebar(hostId).catch(console.error);
   }, [refreshSidebar]);
   const { page, more, fault: historyFault } = useConversation(view, refreshRecent);
+  const imageHistory = useRef(page?.turns);
+  imageHistory.current = page?.turns;
   const subagents = useSubagentDirectory(page?.thread ? id : undefined, hostId);
   const terminalCwd = page?.thread?.cwd;
   const terminalAvailable = id ? !!terminalCwd : homeDestinationKnown;
@@ -719,7 +721,9 @@ function App() {
         {(fault || historyFault) && <p role="alert">{fault ?? historyFault}</p>}
         {!id && data && !homeDestinationKnown && <p role="status">Choose a project for this chat.</p>}
         {stream ? <WorkspaceOutputLinks value={
-          { cwd: page?.thread?.cwd ?? '', open: file => panels.current?.openOutput(file), openPage: url => panels.current?.openPage(url) }}>
+          { cwd: page?.thread?.cwd ?? '', open: file => panels.current?.openOutput(file), openPage: url => panels.current?.openPage(url),
+            openImages: (images, selectedId) => panels.current?.openImages(images, selectedId, { composer: () => composer.current, stream,
+              turns: page?.turns, readHistory: () => imageHistory.current, title }) }}>
           <Transcript key={route} page={page} stream={stream} more={more} branch={branch} openChanges={hostId === 'local' ? openChanges : undefined}
             subagents={subagents} openSubagent={(childId, name) => panels.current?.openSubagent(childId, name)}
             stop={turnId => composer.current?.stop(turnId) ?? Promise.resolve()}
@@ -740,10 +744,10 @@ function App() {
               await panels.current?.openQueuedSidechat(item);
             } : undefined}
             projects={id ? undefined : { menuId: projectMenu, options: data?.projects ?? [], selected: project, select: chooseProject }}
-            onSend={stream ? page ? async (text, _permission, attachments, clientUserMessageId) => {
+            onSend={stream ? page ? async (text, _permission, attachments, clientUserMessageId, options) => {
               const sendingGeneration = generation.current;
               const stillSelected = () => generation.current === sendingGeneration;
-              const { turn } = await sendExistingThread(stream.threadId, text, stillSelected, attachments, stream.hostId, clientUserMessageId);
+              const { turn } = await sendExistingThread(stream.threadId, text, stillSelected, attachments, stream.hostId, clientUserMessageId, options);
               if (stillSelected()) stream.acknowledge(turn);
             } : undefined : homeDestinationKnown ? async (text, permissionChoice, attachments, clientUserMessageId) => {
               const sendingGeneration = generation.current;

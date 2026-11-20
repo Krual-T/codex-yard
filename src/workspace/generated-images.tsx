@@ -1,41 +1,20 @@
-import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
+import { useContext, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import type { ThreadItemSummary } from '../../lib/codex-protocol.ts';
-import type { PromptImage } from './composer-input.ts';
 import { imageSrc, ImagePreview } from './conversation-images.tsx';
 import { ImageGenerationLoading } from './image-generation-loading.tsx';
 import './generated-images.css';
-
-type GeneratedImage = { id: string; image: PromptImage };
-
-// Pinned renderer L3t/R3t: prefer the saved image, then normalize the result.
-// Route filesystem sources through the existing host-aware file endpoint.
-function generatedImage(item: ThreadItemSummary): GeneratedImage | undefined {
-  const name = 'generated-image.png';
-  const path = typeof item.savedPath === 'string' ? item.savedPath.trim() : '';
-  if (path) return { id: item.id, image: { path, name } };
-  const result = typeof item.result === 'string' ? item.result.trim() : '';
-  if (!result) return undefined;
-  let localPath: string | undefined;
-  if (/^(?:file|app):\/\//i.test(result)) {
-    try { localPath = decodeURIComponent(new URL(result).pathname.replace(/^\/@fs(?=\/)/, '')); }
-    catch { return undefined; }
-  } else if (/^(?:\/|[a-z]:[\\/]|\\\\)/i.test(result)) localPath = result.replace(/^\/@fs(?=\/)/, '');
-  if (localPath) return { id: item.id, image: { path: localPath, name } };
-  if (/^(?:data:image\/|https?:\/\/)/i.test(result)) return { id: item.id, image: { url: result, name } };
-  if (/^[a-z\d+/]+={0,2}$/i.test(result)) return { id: item.id, image: { url: 'data:image/png;base64,' + result, name } };
-  return undefined;
-}
+import { WorkspaceOutputLinks } from './message-markdown.tsx';
+import { extractGeneratedImages } from './image-edit-model.ts';
 
 /** Pinned GeneratedImageGallery, layout="thumbnails" and schema I/F. */
-export default function GeneratedImages({ items, active, hostId }: {
-  items: readonly ThreadItemSummary[]; active: boolean; hostId: string;
+export default function GeneratedImages({ items, active, hostId, turnId, startedAt }: {
+  items: readonly ThreadItemSummary[]; active: boolean; hostId: string; turnId: string; startedAt?: number | null;
 }) {
+  const links = useContext(WorkspaceOutputLinks);
   const generations = items.filter(item => item.type === 'imageGeneration');
-  const images = generations.flatMap(item => {
-    const image = generatedImage(item);
-    return image ? [image] : [];
-  });
-  const pending = active ? generations.filter(item => !generatedImage(item) &&
+  const images = extractGeneratedImages(generations, turnId, startedAt ?? undefined);
+  const loaded = new Set(images.map(image => image.id));
+  const pending = active ? generations.filter(item => !loaded.has(item.id) &&
     (item.status === 'inProgress' || item.status === 'in_progress')).length : 0;
   const [selectedId, setSelectedId] = useState<string>();
   const [previewId, setPreviewId] = useState<string>();
@@ -65,7 +44,7 @@ export default function GeneratedImages({ items, active, hostId }: {
   return <div className="yard-source-generated-images" data-thumbnails={rail || undefined}>
     {selected ? <div className="yard-source-generated-main" style={style} ref={main}>
       <button type="button" className="yard-source-generated-image" aria-label={'Generated image ' + (selectedIndex + 1)}
-        onClick={() => setPreviewId(selected.id)} data-testid="generated-image-preview">
+        onClick={() => links?.openImages ? links.openImages(images, selected.id) : setPreviewId(selected.id)} data-testid="generated-image-preview">
         <img key={src} src={src} alt={'Generated image ' + (selectedIndex + 1)} referrerPolicy="no-referrer"
           decoding="async" onLoad={event => {
             const image = event.currentTarget;

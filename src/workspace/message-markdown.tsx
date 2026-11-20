@@ -6,8 +6,10 @@ import { MessageCopy } from './message-copy.tsx';
 import { workspaceOutputFromLink, type OutputFile } from './output-types.ts';
 import { WorkspaceIcon } from './workspace-icon.tsx';
 import './message-links.css';
+import type { EditableImage } from './image-edit-model.ts';
 
-export const WorkspaceOutputLinks = createContext<{ cwd: string; open(file: OutputFile): void; openPage?(url: string): void } | null>(null);
+export const WorkspaceOutputLinks = createContext<{ cwd: string; open(file: OutputFile): void; openPage?(url: string): void;
+  openImages?(images: readonly EditableImage[], selectedId: string): void } | null>(null);
 const StreamingMarkdown = createContext(false);
 
 const languages: Record<string, string> = { sh: 'Bash', bash: 'Bash', shell: 'Bash', ts: 'TypeScript', typescript: 'TypeScript',

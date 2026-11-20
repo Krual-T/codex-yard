@@ -289,10 +289,14 @@ export async function stageComposerFile(file: File, hostId = 'local'): Promise<P
   return { name: file.name, path, image: /^image\/(?:png|jpeg|gif|webp)$/i.test(file.type) };
 }
 
-function startTurn(threadId: string, text: string, attachments: readonly PromptAttachment[], hostId = 'local', clientUserMessageId = crypto.randomUUID() as string) {
+export type SubmissionOptions = { turnTrigger?: 'image_edit' };
+
+function startTurn(threadId: string, text: string, attachments: readonly PromptAttachment[], hostId = 'local', clientUserMessageId = crypto.randomUUID() as string,
+  options?: SubmissionOptions) {
   return request<{ turn: TurnSummary }>('turn/start', {
     threadId, clientUserMessageId,
     input: composerInput(text, attachments),
+    ...(options?.turnTrigger ? { turnTrigger: options.turnTrigger } : {}),
   }, { hostId });
 }
 
@@ -336,14 +340,14 @@ export async function replaceLatestMessage(threadId: string, turnId: string, inp
 }
 
 export async function sendExistingThread(threadId: string, text: string, stillSelected: () => boolean,
-  attachments: readonly PromptAttachment[] = [], hostId = 'local', clientUserMessageId?: string) {
+  attachments: readonly PromptAttachment[] = [], hostId = 'local', clientUserMessageId?: string, options?: SubmissionOptions) {
   await ensureSignedIn(hostId);
   if (!stillSelected()) throw new Error('The conversation changed before the message was sent.');
   const resumed = await resumeThread(threadId, hostId);
   if (resumed.thread.id !== threadId || !stillSelected()) throw new Error('The conversation changed before the message was sent.');
   // Send on the resumed native session, leaving its permissions and model
   // configuration in the daemon. Do not retry a turn whose outcome is unknown.
-  return startTurn(threadId, text, attachments, hostId, clientUserMessageId);
+  return startTurn(threadId, text, attachments, hostId, clientUserMessageId, options);
 }
 
 export function resumeThread(threadId: string, hostId = 'local') {

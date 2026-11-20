@@ -15,6 +15,8 @@ const narrow = process.argv.includes('--narrow');
 const dark = process.argv.includes('--dark');
 const preview = process.argv.includes('--preview');
 const generated = process.argv.includes('--generated');
+const canvas = process.argv.includes('--canvas');
+assert.ok(!canvas || generated, 'Canvas probes require --generated.');
 assert.ok(!preview || source, 'Preview requires --source.');
 const evidence = resolve(process.env.AGENTS_IMAGE_MESSAGE_EVIDENCE ?? '.local/workspace-message-images');
 const root = await mkdtemp('/tmp/yard-message-images-');
@@ -55,6 +57,44 @@ async function imageSize(image: Locator) {
   });
 }
 
+async function inspectCanvas() {
+  const dismiss = page.getByRole('button', { name: 'Dismiss', exact: true });
+  if (await dismiss.isVisible()) await dismiss.click();
+  const access = page.getByRole('button', { name: 'Dismiss Full access warning for this session', exact: true });
+  if (await access.isVisible()) await access.click();
+  async function capture(name: string) {
+    await delay(150);
+    await screenshot(name);
+    const controls = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('button,input,textarea,[role="menuitem"],[role="slider"],img')]
+      .filter(element => { const box = element.getBoundingClientRect(); return box.width && box.height && getComputedStyle(element).visibility !== 'hidden'; })
+      .map(element => {
+        const box = element.getBoundingClientRect(), style = getComputedStyle(element);
+        return { tag: element.tagName, label: element.getAttribute('aria-label'), text: element.textContent?.trim(),
+          role: element.getAttribute('role'), alt: element.getAttribute('alt'), className: element.className,
+          html: element.outerHTML.slice(0, 4500), x: box.x, y: box.y, width: box.width, height: box.height,
+          fontSize: style.fontSize, color: style.color, background: style.backgroundColor, borderRadius: style.borderRadius };
+      }));
+    await writeFile(join(evidence, name + '.json'), JSON.stringify(controls, null, 2));
+  }
+  await capture('canvas-focused');
+  await page.getByRole('button', { name: 'Resize', exact: true }).click();
+  await capture('canvas-resize');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Remove', exact: true }).click();
+  await capture('canvas-remove');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).first().click();
+  await page.getByRole('button', { name: 'Comment', exact: true }).click();
+  await capture('canvas-comment');
+  const image = page.getByRole('img', { name: 'Generated image 2', exact: true }).last();
+  const bounds = await image.boundingBox(); assert.ok(bounds);
+  await page.mouse.click(bounds.x + bounds.width * .3, bounds.y + bounds.height * .3);
+  await capture('canvas-comment-draft');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).first().click();
+  await page.getByRole('button', { name: 'Canvas view', exact: true }).click();
+  await capture('canvas-multiple');
+}
+
 async function verifyGeneratedImages(images: string[], first: string, mainId: string) {
   const second = join(root, 'generated tall.png');
   await writeFile(second, Buffer.from(images[1]!.split(',')[1]!, 'base64'));
@@ -89,15 +129,15 @@ async function verifyGeneratedImages(images: string[], first: string, mainId: st
   const checks = ['base64 generation history', 'thumbnail selection and natural aspect ratios'];
   if (source) {
     await selected(2).click();
-    const modal = page.getByRole('dialog', { name: 'Image preview', exact: true });
-    await modal.getByRole('img', { name: 'Generated image 2', exact: true }).waitFor();
+    const imageEditor = page.locator('.yard-source-image-editor');
+    await imageEditor.getByRole('img', { name: 'Generated image 2', exact: true }).waitFor();
     const downloaded = page.waitForEvent('download');
-    await modal.getByRole('button', { name: 'Download image', exact: true }).click();
+    await imageEditor.getByRole('button', { name: 'Download', exact: true }).click();
     const download = await downloaded;
     assert.deepEqual(await readFile((await download.path())!), Buffer.from(images[1]!.split(',')[1]!, 'base64'));
     await page.keyboard.press('ArrowLeft');
-    await modal.getByRole('img', { name: 'Generated image 1', exact: true }).waitFor();
-    await page.keyboard.press('Escape');
+    await imageEditor.getByRole('img', { name: 'Generated image 1', exact: true }).waitFor();
+    await page.locator('.yard-source-sidechat-tabbar').getByRole('button', { name: /^Close .+ tab$/ }).click();
     await transcript.getByRole('button', { name: 'Generated image 2', exact: true }).waitFor();
     await transcript.getByRole('button', { name: /^Worked for/ }).first().click();
     const viewed = transcript.getByRole('button', { name: 'Viewed 2 images', exact: true });
@@ -149,6 +189,7 @@ async function verifyGeneratedImages(images: string[], first: string, mainId: st
     await selected(2).click();
     await page.getByRole('button', { name: 'Remove BG', exact: true }).waitFor({ timeout: 10_000 });
     await screenshot('generated-native-canvas');
+    if (canvas) await inspectCanvas();
   }
   await writeFile(join(evidence, 'geometry.json'), JSON.stringify({ wide, tall, checks }, null, 2) + '\n');
   assert.deepEqual(errors, []);

@@ -1,5 +1,5 @@
 import { ArrowUp, Check, FolderClosed, Mic, Square, X } from 'lucide-react';
-import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore, type Ref } from 'react';
+import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type Ref } from 'react';
 import { baseKeymap, splitBlock } from 'prosemirror-commands';
 import { closeHistory, history, redo, undo } from 'prosemirror-history';
 import { keymap } from 'prosemirror-keymap';
@@ -10,7 +10,7 @@ import type { TurnSummary } from '../../lib/codex-protocol.ts';
 import type { StartupProject } from '../native/startup-sidebar.ts';
 import { record } from '../native/protocol.ts';
 import { browserAtoms, deleteQueuedSubmission, enqueueMessage, interruptTurn, reorderQueuedSubmissions, startQueuedSubmission, steerTurn,
-  WorkspaceRequestError, writeAtom, type QueuedSubmission } from './host.ts';
+  stageComposerFile, WorkspaceRequestError, writeAtom, type QueuedSubmission, type SubmissionOptions } from './host.ts';
 import { ComposerToolbar, FullAccessNotice, useComposerOptions } from './composer-options.tsx';
 import { AttachmentCard, AttachmentPicker, useComposerAttachments } from './composer-attachments.tsx';
 import { composerInput, type PromptAttachment } from './composer-input.ts';
@@ -24,6 +24,8 @@ import { ProjectMarker } from './project-marker.tsx';
 import { pendingMessages, usePendingMessages } from './pending-messages.ts';
 import { ConversationGoal, useConversationGoal } from './conversation-goal.tsx';
 import { useConversationUsage } from './conversation-usage.tsx';
+import { imageCommentPrompt, imageEditPrompt, type EditableImage, type ImageCommentGroup, type ImageEditAction } from './image-edit-model.ts';
+import './image-edit-composer.css';
 
 const draftKey = 'composer-prompt-drafts-v1';
 const draftFilesKey = 'yard-recovered-composer-files-v1';
@@ -62,9 +64,17 @@ function draftFiles(scope: string): PromptAttachment[] {
   const files = record(browserAtoms()[draftFilesKey])[scope];
   if (!Array.isArray(files)) return [];
   return files.flatMap(value => {
-    const { name, path, image } = record(value);
+    const { name, path, image, generatedImage } = record(value);
+    const generated = record(generatedImage);
     return typeof name === 'string' && typeof path === 'string' && path.startsWith('/') && typeof image === 'boolean'
-      ? [{ name, path, image }] : [];
+      ? [{ name, path, image, ...(image && typeof generated.id === 'string' && typeof generated.label === 'string'
+        && Array.isArray(generated.comments) ? { generatedImage: { id: generated.id, label: generated.label,
+          comments: generated.comments.flatMap(value => {
+            const comment = record(value);
+            return typeof comment.id === 'string' && typeof comment.text === 'string' &&
+              typeof comment.x === 'number' && typeof comment.y === 'number' ? [{ id: comment.id, text: comment.text,
+                x: Math.max(0, Math.min(1, comment.x)), y: Math.max(0, Math.min(1, comment.y)) }] : [];
+          }) } } : {}) }] : [];
   });
 }
 async function saveDraftFiles(scope: string, files: readonly PromptAttachment[]) {
@@ -223,8 +233,16 @@ function ProjectRail({ menuId, options, selected, select }: ProjectPicker) {
 const noStream = () => () => {};
 
 export type RunMessageEdit = (run: (stillSelected: () => boolean) => Promise<void>) => Promise<void>;
+export type ImageComposerPlacement = { left: number; bottom: number; width: number };
+export type ComposerImageAttachments = { images: readonly string[]; comments: readonly ImageCommentGroup[]; pendingEditId?: string };
+const emptyImageAttachments: ComposerImageAttachments = { images: [], comments: [] };
 export type ComposerHandle = { appendOutput(type: OutputType): void; insertPlugin(mention: PluginMention): void;
   openAttachmentPicker(): void; focus(): void; stop(turnId: string): Promise<void>;
+  imageEdit(action: ImageEditAction): Promise<void>;
+  element(): HTMLFormElement | null;
+  placeImageEditor(placement?: ImageComposerPlacement): void;
+  imageAttachments(): ComposerImageAttachments;
+  subscribeImageAttachments(listener: () => void): () => void;
   runMessageEdit: RunMessageEdit };
 
 export function Composer({ ref, scope, label, projectId, projects, stream, historyTurns, onSend, openQueuedSidechat, openGoal, openChanges, destinationKnown = true }: {
@@ -235,7 +253,8 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
   projects?: ProjectPicker;
   stream?: TurnStream;
   historyTurns?: TurnSummary[];
-  onSend?: (text: string, permissionChoice: string | undefined, attachments: readonly PromptAttachment[], clientUserMessageId: string) => Promise<void | (() => void)>;
+  onSend?: (text: string, permissionChoice: string | undefined, attachments: readonly PromptAttachment[], clientUserMessageId: string,
+    options?: SubmissionOptions) => Promise<void | (() => void)>;
   openQueuedSidechat?(item: QueuedSubmission): Promise<void>;
   openChanges?: OpenTurnChanges;
   openGoal?(threadId: string, hostId: string): void;
@@ -247,7 +266,40 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
   const goal = useConversationGoal(stream?.threadId, hostId);
   const usage = useConversationUsage(stream?.threadId, hostId);
   const attachments = useComposerAttachments(JSON.stringify([scope, projectId]), hostId);
-  const compact = questionOpen && !attachments.items.length;
+  const [imagePlacement, setImagePlacement] = useState<ImageComposerPlacement>();
+  const [pendingImageEdit, setPendingImageEdit] = useState<string>();
+  const form = useRef<HTMLFormElement>(null);
+  useLayoutEffect(() => {
+    const wrapper = form.current?.parentElement;
+    if (!wrapper || !imagePlacement) return;
+    // Keep the original editor mounted, including selection and undo history.
+    // The wrapper is the named query container; positioning the form inside it
+    // would make that container the form's fixed-position containing block.
+    const placement = { position: 'absolute', left: imagePlacement.left + 'px', right: 'auto',
+      bottom: imagePlacement.bottom + 'px', width: imagePlacement.width + 'px',
+      'z-index': '60', visibility: 'visible', margin: '0' };
+    const previous = Object.keys(placement).map(key => [key, wrapper.style.getPropertyValue(key), wrapper.style.getPropertyPriority(key)]);
+    for (const [key, value] of Object.entries(placement)) wrapper.style.setProperty(key, value);
+    return () => { for (const [key, value, priority] of previous) {
+      if (value) wrapper.style.setProperty(key!, value, priority); else wrapper.style.removeProperty(key!);
+    } };
+  }, [imagePlacement]);
+  const compact = (questionOpen || !!imagePlacement) && !attachments.items.length;
+  const imageListeners = useRef(new Set<() => void>());
+  const imageSnapshot = useMemo<ComposerImageAttachments>(() => ({
+    ...(pendingImageEdit ? { pendingEditId: pendingImageEdit } : {}),
+    images: attachments.items.flatMap(row => row.file?.generatedImage ? [row.file.generatedImage.id] : []),
+    comments: attachments.items.flatMap(row => {
+      const file = row.file, image = file?.generatedImage;
+      return file && image ? [{ image: { id: image.id, label: image.label, image: { path: file.path, name: file.name } }, comments: image.comments }] : [];
+    }),
+  }), [attachments.items, pendingImageEdit]);
+  const imageSnapshotRef = useRef(emptyImageAttachments);
+  const stagedImages = useRef(new Map<string, Promise<PromptAttachment>>());
+  useLayoutEffect(() => {
+    imageSnapshotRef.current = imageSnapshot;
+    for (const listener of imageListeners.current) listener();
+  }, [imageSnapshot]);
   const layout = compact ? 'single-line' : 'multiline';
   const mount = useRef<HTMLDivElement>(null);
   const attachmentPicker = useRef<HTMLInputElement>(null);
@@ -287,6 +339,7 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
     const held = preparing.current;
     if (held?.id !== id) return;
     preparing.current = undefined;
+    setPendingImageEdit(current => current === id ? undefined : current);
     if (view.current) persistDraft(promptText(view.current.state.doc));
     else {
       const saved = String(drafts()[scope] ?? '');
@@ -316,6 +369,12 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
   }, [activeTurn, stream]);
   useImperativeHandle(ref, () => ({
     focus() { view.current?.focus(); },
+    imageEdit,
+    element: () => form.current,
+    placeImageEditor(placement) { setImagePlacement(before => before?.left === placement?.left &&
+      before?.bottom === placement?.bottom && before?.width === placement?.width ? before : placement); },
+    imageAttachments: () => imageSnapshotRef.current,
+    subscribeImageAttachments(listener) { imageListeners.current.add(listener); return () => { imageListeners.current.delete(listener); }; },
     openAttachmentPicker() { if (status === 'idle') attachmentPicker.current?.click(); },
     insertPlugin(mention) {
       const editor = view.current;
@@ -351,7 +410,8 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
       editor.dispatch(transaction.replaceWith(transaction.selection.from, transaction.selection.to, prompt));
       editor.dispatch(closeHistory(editor.state.tr));
     },
-  }), [stop, status, options.pending, blocked]);
+  }), [stop, status, options.pending, options.draftPermission?.id, blocked, attachments.items, attachments.pending,
+    onSend, queue.mode, activeTurn, historyTurns]);
   useLayoutEffect(() => {
     const saved = drafts()[scope];
     recoveredFiles.current = draftFiles(scope);
@@ -360,6 +420,7 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
       persistDraft(text);
     }, { 'data-codex-composer': 'true', 'data-composer-markdown': '' }, historyScope);
     view.current = editor;
+    stagedImages.current.clear();
     if (recoveredFiles.current.length) attachments.restore(recoveredFiles.current);
     return () => { view.current = null; editor.destroy(); };
   }, [scope, label, historyScope]);
@@ -374,45 +435,151 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
     attachments.remove(ids);
   }
 
-  async function submit(reverseFollowUp = false) {
+  function prepareGeneratedImage(image: EditableImage): Promise<PromptAttachment> {
+    const key = JSON.stringify([image.id, image.image]);
+    let file = stagedImages.current.get(key);
+    if (!file) {
+      file = (async () => {
+        const name = image.label + '.png';
+        const source = image.image;
+        const attachment = source.path !== undefined ? { name, path: source.path, image: true } : await (async () => {
+          let blob: Blob;
+          const data = /^data:(image\/[a-z0-9.+-]+)(;base64)?,([\s\S]*)$/i.exec(source.url!);
+          if (data) {
+            const bytes = data[2] ? Uint8Array.from(atob(data[3]!), character => character.charCodeAt(0))
+              : new TextEncoder().encode(decodeURIComponent(data[3]!));
+            blob = new Blob([bytes], { type: data[1] });
+          } else {
+            const response = await fetch(source.url!, { credentials: 'omit', referrerPolicy: 'no-referrer' });
+            if (!response.ok) throw new Error('Could not prepare image attachment.');
+            blob = await response.blob();
+          }
+          if (!blob.type.startsWith('image/')) throw new Error('Could not prepare image attachment.');
+          return stageComposerFile(new File([blob], name, { type: blob.type }), hostId);
+        })();
+        return { ...attachment, image: true, generatedImage: { id: image.id, label: image.label, comments: [] } };
+      })();
+      stagedImages.current.set(key, file);
+      void file.catch(() => { if (stagedImages.current.get(key) === file) stagedImages.current.delete(key); });
+    }
+    return file;
+  }
+
+  async function imageEdit(action: ImageEditAction) {
     const editor = view.current;
-    if (!editor || !onSend || busy.current || queueBusy.current || blocked || options.pending || attachments.pending) return;
+    if (!editor || busy.current || queueBusy.current || blocked || attachments.pending) {
+      throw new Error('Wait for the current message operation to finish.');
+    }
+    if (action.kind === 'edit') {
+      if (!onSend || options.pending) throw new Error('The conversation is not ready to send an image edit.');
+      busy.current = true; setStatus('sending'); setFailure(undefined);
+      const id = crypto.randomUUID();
+      const queued = !!stream && !!activeTurn && queue.mode === 'queue';
+      try {
+        const original = await prepareGeneratedImage(action.image);
+        const files: PromptAttachment[] = [original];
+        if (action.operation === 'remove') {
+          if (!action.mask) throw new Error('Brush over what you want to remove.');
+          const mask = await stageComposerFile(new File([action.mask], 'selection-mask.png', { type: 'image/png' }), hostId);
+          files.push({ ...mask, generatedImage: { id: action.image.id + ':mask', label: 'Selection mask', comments: [] } });
+        }
+        if (view.current !== editor) throw new Error('The conversation changed before the image edit was sent.');
+        const text = imageEditPrompt(action);
+        if (!queued) {
+          setPendingImageEdit(id);
+          const latest = stream && mergeLiveTurns(historyTurns, stream.read()).at(-1);
+          preparing.current = { id, doc: editor.state.doc, text: '', files: [] };
+          pendingMessages.add(scope, { id, input: composerInput(text, files), startedAt: Date.now() / 1000,
+            ...(activeTurn ? { turnId: activeTurn, after: latest?.items.at(-1)?.id } : {}) });
+        }
+        if (stream && activeTurn) {
+          if (queued) await enqueueMessage(stream.threadId, text, files, hostId);
+          else await steerTurn(stream.threadId, activeTurn, composerInput(text, files), hostId, id);
+          queue.refresh();
+        } else { const accepted = await onSend(text, options.draftPermission?.id, files, id, { turnTrigger: 'image_edit' }); accepted?.(); }
+        releasePreparation(id);
+        setStatus('idle'); busy.current = false;
+      } catch (error) {
+        if (error instanceof WorkspaceRequestError && error.uncertain) {
+          setStatus('uncertain'); setFailure('Delivery is unknown. Check the conversation before trying again.');
+        } else {
+          pendingMessages.remove(scope, id);
+          if (preparing.current?.id === id) preparing.current = undefined;
+          setPendingImageEdit(current => current === id ? undefined : current);
+          setStatus('idle'); busy.current = false;
+          setFailure(error instanceof Error ? error.message : String(error));
+        }
+        throw error;
+      }
+      return;
+    }
+    busy.current = true; setStatus('sending');
+    try {
+      const groups = action.kind === 'comments' ? action.groups : action.images.map(image => ({ image, comments: [] }));
+      const files = await Promise.all(groups.map(async group => ({ ...await prepareGeneratedImage(group.image),
+        generatedImage: { id: group.image.id, label: group.image.label, comments: group.comments } })));
+      if (view.current !== editor) throw new Error('The conversation changed before the image was attached.');
+      attachments.replaceGenerated(files);
+      recoveredFiles.current = [...attachments.items.flatMap(row => row.file && !row.file.generatedImage ? [row.file] : []), ...files];
+      await saveDraftFiles(scope, recoveredFiles.current);
+    } finally { busy.current = false; setStatus('idle'); }
+    if (action.kind === 'comments' && action.submit && !await submit(false, recoveredFiles.current)) {
+      throw new Error('The image comments were not confirmed. Review the conversation before trying again.');
+    }
+  }
+
+  async function submit(reverseFollowUp = false, preparedFiles?: readonly PromptAttachment[]) {
+    const editor = view.current;
+    if (!editor || !onSend || busy.current || queueBusy.current || blocked || options.pending || attachments.pending) return false;
     const doc = editor.state.doc;
     const text = promptText(doc);
-    if ((!text.trim() && !attachments.items.length) || editor.composing) return;
+    if ((!text.trim() && !attachments.items.length && !preparedFiles?.length) || editor.composing) return false;
     busy.current = true;
     setStatus('sending'); setFailure(undefined);
     const sent = attachments.items;
-    const files = sent.flatMap(row => row.file ? [row.file] : []);
+    const files = preparedFiles ?? sent.flatMap(row => row.file ? [row.file] : []);
+    const sentIds = [...sent.map(row => row.id), ...(preparedFiles?.flatMap(file =>
+      file.generatedImage ? ['image-playground:' + file.generatedImage.id] : []) ?? [])];
+    let imageNumber = 0;
+    const commentGroups = files.flatMap(file => {
+      if (!file.image) return [];
+      imageNumber++;
+      return file.generatedImage ? [{ image: { id: file.generatedImage.id, label: file.generatedImage.label,
+        image: { path: file.path, name: file.name } }, comments: file.generatedImage.comments, imageNumber }] : [];
+    });
+    const submittedText = imageCommentPrompt(commentGroups, text);
+    const submissionOptions: SubmissionOptions | undefined = files.some(file => file.generatedImage) ? { turnTrigger: 'image_edit' } : undefined;
     const clientUserMessageId = crypto.randomUUID();
     const mode = reverseFollowUp ? queue.mode === 'queue' ? 'steer' : 'queue' : queue.mode;
     const queued = !!stream && (!!activeTurn || editingQueued) && (editingQueued || mode === 'queue');
     if (!queued) {
+      if (submissionOptions) setPendingImageEdit(clientUserMessageId);
       const latest = stream && mergeLiveTurns(historyTurns, stream.read()).at(-1);
       preparing.current = { id: clientUserMessageId, doc, text, files };
-      pendingMessages.add(scope, { id: clientUserMessageId, input: composerInput(text, files), startedAt: Date.now() / 1000,
+      pendingMessages.add(scope, { id: clientUserMessageId, input: composerInput(submittedText, files), startedAt: Date.now() / 1000,
         ...(activeTurn ? { turnId: activeTurn, after: latest?.items.at(-1)?.id } : {}) });
       recoveredFiles.current = [...recoveredFiles.current, ...files.filter(file => !recoveredFiles.current.some(row => row.path === file.path))];
       void saveDraftFiles(scope, recoveredFiles.current).catch(console.error);
       editor.dispatch(closeHistory(editor.state.tr).delete(0, doc.content.size));
-      attachments.remove(sent.map(row => row.id));
+      attachments.remove(sentIds);
     }
     try {
       let accepted: void | (() => void) = undefined;
       if (stream && (activeTurn || editingQueued)) {
-        if (queued) await enqueueMessage(stream.threadId, text, files, hostId);
-        else await steerTurn(stream.threadId, activeTurn!, composerInput(text, files), hostId, clientUserMessageId);
+        if (queued) await enqueueMessage(stream.threadId, submittedText, files, hostId);
+        else await steerTurn(stream.threadId, activeTurn!, composerInput(submittedText, files), hostId, clientUserMessageId);
         queue.refresh();
         setEditingQueued(false);
-      } else accepted = await onSend(text, options.draftPermission?.id, files, clientUserMessageId);
+      } else accepted = await onSend(submittedText, options.draftPermission?.id, files, clientUserMessageId, submissionOptions);
       rememberPrompt(historyScope, doc);
       // A later edit or a different workspace must not be cleared by this reply.
       if (queued && view.current === editor && editor.state.doc.eq(doc)) editor.dispatch(editor.state.tr.delete(0, doc.content.size));
-      removeAttachments(sent.map(row => row.id), files.map(file => file.path));
+      removeAttachments(sentIds, files.map(file => file.path));
       releasePreparation(clientUserMessageId);
       if (!stream) pendingMessages.remove(scope, clientUserMessageId);
       setStatus('idle'); busy.current = false;
       accepted?.();
+      return true;
     } catch (error) {
       if (error instanceof WorkspaceRequestError && error.uncertain) {
         setStatus('uncertain');
@@ -421,6 +588,7 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
         if (!queued) {
           pendingMessages.remove(scope, clientUserMessageId);
           preparing.current = undefined;
+          setPendingImageEdit(current => current === clientUserMessageId ? undefined : current);
           if (view.current === editor) {
             const current = editor.state.doc;
             const recovered = promptText(current).trim() ? schema.node('doc', null, doc.content.append(current.content)) : doc;
@@ -432,6 +600,7 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
         setFailure(error instanceof Error ? error.message : String(error));
         setStatus('idle'); busy.current = false;
       }
+      return false;
     }
   }
 
@@ -482,7 +651,8 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
   const home = scope === 'new-conversation';
   const hasInput = populated || attachments.items.length > 0;
   const followUp = stream && (activeTurn || editingQueued) ? editingQueued || queue.mode === 'queue' ? 'Queue' : 'Steer' : 'Send message';
-  return <form className="min-w-0 w-full" data-codex-composer-root="" data-composer-placement={home ? 'home' : 'thread'}
+  return <form ref={form} className="min-w-0 w-full" data-codex-composer-root="" data-composer-placement={home ? 'home' : 'thread'}
+    data-image-preview-composer={imagePlacement ? '' : undefined} data-image-preview-compact={imagePlacement && compact ? '' : undefined}
     data-async-question-open={compact || undefined}
     onSubmit={event => { event.preventDefault(); void submit(); }}
     onPasteCapture={event => {

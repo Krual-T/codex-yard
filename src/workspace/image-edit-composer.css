@@ -1,0 +1,35 @@
+[data-image-preview-composer] {
+  margin: 0;
+  isolation: isolate;
+  max-width: none;
+}
+[data-image-preview-composer][data-image-preview-compact] [data-composer-body] {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) repeat(4, 28px);
+  align-items: center;
+  min-height: 44px;
+  padding: 4px 8px;
+  column-gap: 1px;
+  border-radius: 24px;
+}
+[data-image-preview-composer][data-image-preview-compact] [data-composer-input] {
+  grid-column: 2;
+  min-width: 0;
+  padding-inline: 5px;
+  margin: 0;
+}
+[data-image-preview-composer][data-image-preview-compact] :is([data-rich-text-layout], .ProseMirror) { min-height: 24px; }
+[data-image-preview-composer] .ProseMirror { max-height: min(128px, 28svh); overflow-y: auto; }
+[data-image-preview-composer][data-image-preview-compact] .ProseMirror { line-height: 24px; }
+[data-image-preview-composer][data-image-preview-compact] .yard-source-composer-footer { display: contents; }
+[data-image-preview-composer][data-image-preview-compact] .yard-source-add-context { grid-row: 1; grid-column: 1; }
+[data-image-preview-composer][data-image-preview-compact] .yard-source-model-trigger-group { grid-row: 1; grid-column: 3; }
+[data-image-preview-composer][data-image-preview-compact] .yard-source-toolbar-start { grid-row: 1; grid-column: 4; }
+[data-image-preview-composer][data-image-preview-compact] .yard-source-dictate { grid-row: 1; grid-column: 5; }
+[data-image-preview-composer][data-image-preview-compact] .yard-source-send { grid-row: 1; grid-column: 6; }
+[data-image-preview-composer][data-image-preview-compact] .yard-source-toolbar-trigger { justify-content: center; width: 28px; padding: 0; }
+[data-image-preview-composer][data-image-preview-compact] .yard-source-toolbar-end > span > :not(.yard-source-compact-model-icon),
+[data-image-preview-composer][data-image-preview-compact] .yard-source-toolbar-start > span > :not(:first-child) { display: none; }
+[data-image-preview-composer][data-image-preview-compact] .yard-source-compact-model-icon { display: block; }
+.yard-source-tool-panel[data-image-composer-owner] { display: contents; }
+.yard-source-tool-panel[data-image-composer-owner] > :not(.yard-source-composer) { display: none; }

@@ -44,11 +44,17 @@ export function useComposerAttachments(scope: string, hostId: string) {
 
   function restore(files: readonly PromptAttachment[]) {
     if (!files.length) return;
-    setState(previous => ({ scope, items: [...previous.items, ...files.filter(file => !previous.items.some(row => row.file?.path === file.path))
-      .map(file => ({ id: crypto.randomUUID(), name: file.name, file }))] }));
+    setState(previous => ({ scope, items: [...previous.items, ...files.filter(file => !previous.items.some(row =>
+      file.generatedImage ? row.file?.generatedImage?.id === file.generatedImage.id : row.file?.path === file.path))
+      .map(file => ({ id: file.generatedImage ? 'image-playground:' + file.generatedImage.id : crypto.randomUUID(), name: file.name, file }))] }));
   }
 
-  return { items, pending: items.some(row => !row.file), error: state.scope === scope ? state.error : undefined, add, remove, restore };
+  function replaceGenerated(files: readonly PromptAttachment[]) {
+    setState(previous => ({ scope, items: [...previous.items.filter(row => !row.file?.generatedImage),
+      ...files.map(file => ({ id: 'image-playground:' + file.generatedImage!.id, name: file.name, file }))] }));
+  }
+
+  return { items, pending: items.some(row => !row.file), error: state.scope === scope ? state.error : undefined, add, remove, restore, replaceGenerated };
 }
 
 export function AttachmentPicker({ add, disabled, picker }: { add(files: File[]): void; disabled: boolean; picker: RefObject<HTMLInputElement | null> }) {

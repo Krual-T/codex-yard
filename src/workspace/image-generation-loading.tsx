@@ -7,7 +7,11 @@ const cycle = (value: number) => value % 1 <= .5 ? value % 1 * 2 : 2 - value % 1
 const mix = (from: number, to: number, amount: number) => from + (to - from) * amount;
 
 /** The pinned image-loading-state y/B dot field, with its visibility and motion guards. */
-export function ImageGenerationLoading({ thumbnail = false }: { thumbnail?: boolean }) {
+export function ImageGenerationLoading({ thumbnail: small = false, presentation = 'default' }: {
+  thumbnail?: boolean; presentation?: 'default' | 'playground' | 'single' | 'thumbnail';
+}) {
+  const thumbnail = small || presentation === 'thumbnail';
+  const editor = presentation === 'single' || presentation === 'playground';
   const field = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -43,7 +47,7 @@ export function ImageGenerationLoading({ thumbnail = false }: { thumbnail?: bool
       const size2 = .78 * mix(sizes[2]!, sizes[3]!, smooth(progress(5)));
       context!.save(); context!.setTransform(dpr, 0, 0, dpr, 0, 0);
       context!.clearRect(0, 0, width, height); context!.fillStyle = color;
-      const radius = thumbnail ? .75 : Math.max(.55, spacing * .08);
+      const radius = thumbnail ? .75 : editor ? 1.5 : Math.max(.55, spacing * .08);
       yPositions.forEach((y, row) => {
         const normalY = yPositions.length === 1 ? .5 : row / (yPositions.length - 1);
         xPositions.forEach((x, column) => {
@@ -64,7 +68,7 @@ export function ImageGenerationLoading({ thumbnail = false }: { thumbnail?: bool
       width = Math.max(0, Math.floor(box.width)); height = Math.max(0, Math.floor(box.height));
       dpr = Math.max(1, window.devicePixelRatio || 1);
       surface!.width = Math.floor(width * dpr); surface!.height = Math.floor(height * dpr);
-      spacing = thumbnail ? 6 : Math.max(1, 12 / dpr);
+      spacing = thumbnail ? 6 : editor ? 14 : Math.max(1, 12 / dpr);
       const columns = Math.max(1, Math.floor(width / spacing)), rows = Math.max(1, Math.floor(height / spacing));
       const offsetX = (width - (columns - 1) * spacing) * .5, offsetY = (height - (rows - 1) * spacing) * .5;
       xPositions = Array.from({ length: columns }, (_, index) => offsetX + index * spacing);
@@ -91,7 +95,7 @@ export function ImageGenerationLoading({ thumbnail = false }: { thumbnail?: bool
       resize.disconnect(); intersection.disconnect(); theme.disconnect();
       motion.removeEventListener('change', preferences); document.removeEventListener('visibilitychange', schedule);
     };
-  }, [thumbnail]);
+  }, [thumbnail, editor]);
   return <div className="yard-source-image-generation-loading" aria-busy="true" aria-label="Generating image...">
     <div className="yard-source-image-generation-dots" ref={field}><canvas ref={canvas} aria-hidden="true" /></div>
   </div>;
