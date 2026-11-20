@@ -68,6 +68,8 @@ npm start
 
 打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。将 `.env.example` 复制为 `.env` 后可设置端口、数据目录、工作目录和连接地址。`AGENTS_CODEX_BIN` 指定 CLI 可执行文件；`AGENTS_CODEX_SOCKET` 直接连接已有后端并跳过自动启动；`AGENTS_APP_TOOLS_ADAPTER` 可覆盖仓库内的工具适配器路径。Unix socket 的完整路径上限为 107 字节，隔离工作树宜设置较短的私有数据目录。
 
+要让 Yard、CLI 和桌面 App 共用一个常驻进程，选定唯一的 `CODEX_HOME`，再将三个入口连接到它的 daemon。具体配置见[共享后端接入，含 Windows/WSL](docs/shared-backend.md)。桌面端的连接方式需要按实际 App 版本核对。
+
 要让连接同一 daemon 的桌面端共用十二项对话工具，在已部署的检出目录执行 `npm run tools:configure` 查看配置计划，确认后追加 `-- --apply`。配置备份、旧会话迁移和三端接入方式见[注册说明](docs/native-app-tools.md#explicit-registration-for-app-and-yard)。
 
 跨设备访问时，用私有隧道或带身份认证的 HTTPS 反向代理，并将 `AGENTS_PUBLIC_ORIGIN` 设为完整且精确的 HTTPS 来源。服务只监听回环地址；它可以访问文件和执行命令，没有多用户登录系统。[部署边界](SECURITY.md)
@@ -110,11 +112,13 @@ Markdown 文件预览通过 Yard 的文件接口加载引用图片，沿用文�
 
 转发支持 TCP，包括 HTTP、数据库和 SSH。关闭网页后保持运行；SSH 断线时显示错误，点击“转发到本机”重连。Yard 重启会停止转发并保留规则，需要手动启动。修改 SSH 连接会停止相关转发。数据经过 Yard，两端都必须能从 Yard 访问。
 
-## 插件与 Computer Use
+## 独立工具与插件接入
 
 Plugins 页面通过所选 Codex 主机的原生协议管理 marketplace、安装和卸载插件，并发起 MCP 授权。已有 Skills 和 MCP 工具沿用后端配置。依赖特定应用宿主的插件，还需要为 Yard 准备能够独立运行的对应服务。
 
-Yard 自带 Linux X11 的 Computer Use 运行时，支持截图、鼠标、键盘、文本输入、拖拽和滚动。安装 `xdotool`、ImageMagick、`xclip` 和 util-linux，在 Yard 的 `.env` 中设置 `YARD_COMPUTER_DISPLAY`，需要时另设 `YARD_COMPUTER_XAUTHORITY`，启动后新开本机对话即可使用。无显示器服务器可以使用虚拟 X11 桌面；控制目标始终是 Yard 执行机器上选定的桌面。[设置、插件包与运行边界](docs/standalone-plugins.md)
+仓库 marketplace 提供 `yard-node` 持久 JavaScript、`yard-artifacts` 本地 Word/PDF/表格/PPT/模板工作流，以及 `yard-computer` 的 Linux X11 和显式选择的 Windows 主屏驱动，均使用独立依赖。浏览器控制接公开的 Chrome DevTools MCP，标题整理接已有插件。配置中“启用”后，仍需确认插件安装、运行时到位和实际操作成功。
+
+Linux Computer Use 需要 `xdotool`、ImageMagick、`xclip` 和 util-linux，在 Yard 的 `.env` 设置 `YARD_COMPUTER_DISPLAY`，需要时另设 `YARD_COMPUTER_XAUTHORITY`，再新开本机对话。Windows 需要独立 Windows Node，且进程必须处在已登录、未锁定的交互桌面会话；SSH/服务的 Session 0 无法控制该桌面。[安装命令、文件运行时、浏览器与标题接入、平台边界和验收步骤](docs/standalone-plugins.md)
 
 ## 定时任务
 

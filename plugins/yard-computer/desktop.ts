@@ -83,7 +83,7 @@ function key(value: unknown): string {
   if (!name) throw new Error(`不支持的键名：${value}。使用 Ctrl、Alt、Shift、Super、Enter、方向键、F1–F24 或单个字母/数字。`);
   return name;
 }
-function action(value: unknown): DesktopAction {
+export function desktopAction(value: unknown): DesktopAction {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('需要桌面动作对象。');
   const input = value as Record<string, unknown>;
   const coordinates = (...names: string[]) => { for (const name of names) integer(input[name], name, 0, 32767); };
@@ -138,7 +138,7 @@ export class X11Desktop {
     // One mouse/keyboard belongs to the display; concurrent MCP calls must stay ordered.
     const next = this.pending.then(async () => {
       signal?.throwIfAborted();
-      const request = action(value);
+      const request = desktopAction(value);
       if (!/^:[0-9]+(?:\.0)?$/.test(this.display)) {
         throw new Error('请显式配置 YARD_COMPUTER_DISPLAY 为本机 X11 screen 0（例如 :99 或 :99.0）。Wayland 需要切换到 X11。');
       }

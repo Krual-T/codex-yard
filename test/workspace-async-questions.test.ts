@@ -24,3 +24,18 @@ test('the original reply envelope survives history and accepted steering without
   assert.deepEqual(questionReplies({ id: 'reply', type: 'userMessage', content: [{ type: 'text', text:
     '<send_user_message_question_reply>invalid</send_user_message_question_reply>' }] }), []);
 });
+
+test('multiple Chinese responses retain exact option text and their source IDs across history', () => {
+  const source = { id: '原问题-"一"', type: 'agentMessage', questions: [
+    { title: '是否继续？', options: ['是', '保持'] }, { title: '补充说明？' },
+  ] };
+  const questions = asyncQuestions(source);
+  const replies = questions.map((question, index) => ({ questionItemId: question.id, question: question.title,
+    answer: index ? '中文输入\n保留第二行和 "引号"' : '是' }));
+  assert.notEqual(questions[0]?.id, questions[1]?.id);
+  assert.deepEqual(JSON.parse(questions[0]!.id), ['request_user_input_async', source.id, 0]);
+  assert.deepEqual(questionReplies({ id: 'history', type: 'userMessage',
+    content: [{ type: 'text', text: questionReplyText(replies) }] }), replies);
+  assert.deepEqual(questionReplies({ id: 'pending', type: 'steeringUserMessage', status: 'rejected',
+    input: [{ type: 'text', text: questionReplyText(replies) }] }), []);
+});

@@ -1,6 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import type { Readable, Writable } from 'node:stream';
 import { X11Desktop } from './desktop.ts';
+import { WindowsDesktop } from './windows.ts';
 
 export const computerTool = {
   name: 'computer',
@@ -24,12 +25,16 @@ export const computerTool = {
 } as const;
 
 export type ComputerContent = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string };
-export interface ComputerExecutor { execute(action: unknown, signal?: AbortSignal): Promise<ComputerContent[]> }
+export interface ComputerExecutor { platform?: string; execute(action: unknown, signal?: AbortSignal): Promise<ComputerContent[]> }
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 /** Newline JSON-RPC, over stdio only. The daemon owns session approvals and the
  * process lifecycle; the desktop driver owns cross-process input serialization. */
 export async function serveComputer(input: Readable, output: Writable, desktop: ComputerExecutor, signal?: AbortSignal): Promise<void> {
+  const tool = desktop.platform === 'windows' ? { ...computerTool,
+    description: 'Observe and operate the explicitly configured Windows primary monitor. Start with screenshot; use its physical pixels with origin at top left. Every success returns a fresh PNG. Unicode typing uses SendInput and preserves the clipboard. The signed-in desktop must be unlocked; elevated targets, UAC and service sessions are not supported. Failed input may already have changed the desktop and is never retried. No Codex App is required.',
+    inputSchema: { ...computerTool.inputSchema, properties: { ...computerTool.inputSchema.properties,
+      text: { type: 'string', minLength: 1, maxLength: 1000, description: 'Unicode text entered into the focused control using SendInput, without touching the clipboard.' } } } } : computerTool;
   let buffer = '', initialized = false;
   input.setEncoding('utf8');
   const pending = new Map<string | number, AbortController>();
@@ -59,13 +64,13 @@ export async function serveComputer(input: Readable, output: Writable, desktop: 
     if (value.method === 'initialize') {
       initialized = true;
       reply(id, { result: { protocolVersion: params.protocolVersion === '2024-11-05' ? '2024-11-05' : '2025-03-26',
-        capabilities: { tools: {} }, serverInfo: { name: 'yard-computer', version: '0.1.0' },
-        instructions: 'Use computer screenshot before acting. This tool controls the explicitly configured execution-host X11 display. Follow the user authorization and normal session approvals.' } });
+        capabilities: { tools: {} }, serverInfo: { name: 'yard-computer', version: '0.2.0' },
+        instructions: 'Use computer screenshot before acting. This tool controls the explicitly configured execution-host desktop. Follow the user authorization and normal session approvals.' } });
       return;
     }
     if (!initialized) { reply(id, { error: { code: -32002, message: 'Initialize the MCP session first.' } }); return; }
     if (value.method === 'ping') { reply(id, { result: {} }); return; }
-    if (value.method === 'tools/list') { reply(id, { result: { tools: [computerTool] } }); return; }
+    if (value.method === 'tools/list') { reply(id, { result: { tools: [tool] } }); return; }
     if (value.method !== 'tools/call') { reply(id, { error: { code: -32601, message: 'Unknown MCP method.' } }); return; }
     if (params.name !== 'computer') { reply(id, { error: { code: -32602, message: 'Unknown tool.' } }); return; }
     if (pending.has(id) || pending.size >= 16) {
@@ -103,7 +108,9 @@ export async function serveComputer(input: Readable, output: Writable, desktop: 
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const desktop = new X11Desktop({ display: process.env.YARD_COMPUTER_DISPLAY,
+  const driver = process.argv.find(arg => arg.startsWith('--driver='))?.slice('--driver='.length) || process.env.YARD_COMPUTER_DRIVER || 'x11';
+  if (!['windows', 'x11'].includes(driver)) throw new Error('Choose --driver=windows or --driver=x11.');
+  const desktop = driver === 'windows' ? new WindowsDesktop() : new X11Desktop({ display: process.env.YARD_COMPUTER_DISPLAY,
     xauthority: process.env.YARD_COMPUTER_XAUTHORITY, importCommand: process.env.YARD_COMPUTER_IMPORT,
     xdotoolCommand: process.env.YARD_COMPUTER_XDOTOOL, xclipCommand: process.env.YARD_COMPUTER_XCLIP });
   const shutdown = new AbortController();

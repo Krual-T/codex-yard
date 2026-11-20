@@ -289,7 +289,7 @@ export async function stageComposerFile(file: File, hostId = 'local'): Promise<P
   return { name: file.name, path, image: /^image\/(?:png|jpeg|gif|webp)$/i.test(file.type) };
 }
 
-export type SubmissionOptions = { turnTrigger?: 'image_edit' };
+export type SubmissionOptions = { turnTrigger?: 'image_edit' | 'send_user_message_async_question' };
 
 function startTurn(threadId: string, text: string, attachments: readonly PromptAttachment[], hostId = 'local', clientUserMessageId = crypto.randomUUID() as string,
   options?: SubmissionOptions) {

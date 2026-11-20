@@ -3,7 +3,8 @@ import { imageSrc } from './conversation-images.tsx';
 import type { EditableImage, ImageComment, ImageCommentGroup, ImageEditAction } from './image-edit-model.ts';
 import { ImageEditorIcon, type ImageEditorIconName } from './image-editor-icons.tsx';
 import { ImageGenerationLoading } from './image-generation-loading.tsx';
-import { attachmentUrl } from './output-types.ts';
+import { browserAtoms, writeAtom } from './host.ts';
+import { GeneratedImageMenu, downloadImageCopy, type GeneratedImageMenuTarget } from './generated-image-menu.tsx';
 import { WorkspaceIcon } from './workspace-icon.tsx';
 import './generated-images.css';
 import './generated-image-editor.css';
@@ -16,9 +17,9 @@ export type GeneratedImageEditorProps = {
   visible: boolean;
   attachedImages?: readonly string[];
   attachedComments?: readonly ImageCommentGroup[];
-  onSelectImage(id: string): void;
-  onAction(action: ImageEditAction): Promise<void>;
-};
+  onOpenImage?(image: EditableImage): void;
+} & ({ readOnly?: false; onSelectImage(id: string): void; onAction(action: ImageEditAction): Promise<void> }
+  | { readOnly: true; onSelectImage?: never; onAction?: never });
 
 type View = 'focused' | 'canvas';
 type Mode = 'view' | 'comment' | 'remove';
@@ -29,6 +30,7 @@ type CommentDraft = ImageComment & { imageId: string; saved: boolean };
 type LoadingImageItem = { id: string; turnId?: string; startedAt?: number; loading: true };
 type CanvasImage = EditableImage | LoadingImageItem;
 const noLoadingImages: NonNullable<GeneratedImageEditorProps['loadingImages']> = [];
+const canvasGuideAtom = 'has-dismissed-image-canvas-view-coachmark-v1';
 const ratios = [
   ['square', 'Square', '1:1'], ['portrait', 'Portrait', '3:4'], ['story', 'Story', '9:16'],
   ['landscape', 'Landscape', '4:3'], ['widescreen', 'Widescreen', '16:9'],
@@ -96,10 +98,80 @@ function LoadingImage({ thumbnail = false, single = false, size }: { thumbnail?:
   </div>;
 }
 
+function GeneratedImageRail({ images, activeId, hostId, disabled, onSelect, onContextMenu }: {
+  images: readonly CanvasImage[]; activeId?: string; hostId: string; disabled: boolean; onSelect(id: string): void;
+  onContextMenu(event: React.MouseEvent<HTMLElement>, image: EditableImage): void;
+}) {
+  // Pinned local-generated-image-side-panel $n: 46px thumbnail, 54px pitch,
+  // 6px inset. Wheel deltas move a virtual cursor, even when the rail fits.
+  const rail = useRef<HTMLDivElement>(null);
+  const position = useRef(29);
+  const observedId = useRef<string | undefined>(undefined);
+  const wheelHandler = useRef<(event: WheelEvent) => void>(() => {});
+  const contentHeight = 12 + Math.max(0, images.length - 1) * 54 + 46;
+  function scrollToPosition() {
+    const element = rail.current;
+    if (!element) return;
+    const center = Math.min(contentHeight, element.clientHeight) / 2;
+    element.scrollTop = Math.max(0, Math.min(position.current - center, element.scrollHeight - element.clientHeight));
+  }
+  function select(index: number) {
+    const image = images[index];
+    if (disabled || !image) return;
+    position.current = 29 + index * 54;
+    observedId.current = image.id;
+    onSelect(image.id); scrollToPosition();
+  }
+  useLayoutEffect(() => {
+    if (activeId !== observedId.current) {
+      position.current = 29 + Math.max(0, images.findIndex(image => image.id === activeId)) * 54;
+      observedId.current = activeId;
+    }
+    scrollToPosition();
+  }, [activeId, images.length]);
+  wheelHandler.current = event => {
+    if (event.ctrlKey || disabled) return;
+    event.preventDefault();
+    const element = rail.current;
+    if (!element) return;
+    const delta = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY * 16
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? event.deltaY * element.clientHeight : event.deltaY;
+    position.current = Math.max(29, Math.min(position.current + delta, 29 + (images.length - 1) * 54));
+    scrollToPosition();
+    const image = images[Math.round((position.current - 29) / 54)];
+    if (image && image.id !== activeId) { observedId.current = image.id; onSelect(image.id); }
+  };
+  useEffect(() => {
+    const element = rail.current;
+    if (!element) return;
+    const handler = (event: WheelEvent) => wheelHandler.current(event);
+    // React's delegated wheel listener is passive; this rail owns the gesture.
+    element.addEventListener('wheel', handler, { passive: false });
+    return () => element.removeEventListener('wheel', handler);
+  }, []);
+  return <div ref={rail} className="yard-image-editor-thumbnails" aria-label="Generated images">
+    {images.map((image, index) => <button key={image.id} type="button"
+      aria-label={'loading' in image ? `Generating image ${index + 1}` : image.label}
+      aria-pressed={image.id === activeId} aria-current={image.id === activeId ? 'true' : undefined}
+      title={'loading' in image ? 'Generating image…' : image.label} disabled={disabled}
+      onContextMenu={event => { if (!('loading' in image)) onContextMenu(event, image); }}
+      onClick={() => select(index)} onKeyDown={event => {
+        const direction = event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1
+          : event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : 0;
+        if (!direction) return;
+        event.preventDefault(); event.stopPropagation();
+        select(Math.max(0, images.findIndex(image => image.id === activeId)) + direction);
+      }}>
+      {'loading' in image ? <LoadingImage thumbnail /> : <img src={imageSrc(image.image, hostId)} alt="" draggable={false} loading="lazy" referrerPolicy="no-referrer" />}
+    </button>)}
+    <div className="yard-image-editor-thumbnail-tail" aria-hidden="true" />
+  </div>;
+}
+
 /** Pinned image-side-panel/local-generated-image-side-panel behavior, with the
  * composer attachment state owned by the containing workspace. */
 export default function GeneratedImageEditor({ images, loadingImages = noLoadingImages, selectedId, hostId, visible,
-  attachedImages, attachedComments, onSelectImage, onAction }: GeneratedImageEditorProps) {
+  attachedImages, attachedComments, onSelectImage, onAction, onOpenImage, readOnly = false }: GeneratedImageEditorProps) {
   const [view, setView] = useState<View>('focused');
   const [mode, setMode] = useState<Mode>('view');
   const [multiple, setMultiple] = useState(false);
@@ -119,6 +191,9 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
   const [strokeCount, setStrokeCount] = useState(0);
   const [pending, setPending] = useState<string>();
   const [error, setError] = useState<string>();
+  const [imageMenu, setImageMenu] = useState<GeneratedImageMenuTarget>();
+  const [guideDismissed, setGuideDismissed] = useState(() => browserAtoms()[canvasGuideAtom] === true);
+  const [guideReady, setGuideReady] = useState(() => matchMedia('(prefers-reduced-motion: reduce)').matches || document.documentElement.dataset.reducedMotion === 'true');
   const root = useRef<HTMLDivElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const brush = useRef<HTMLCanvasElement>(null);
@@ -138,6 +213,7 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
   const current = requestedImage ?? (requestedLoading ? undefined : images.find(image => image.id === previousImage.current) ?? images[0]);
   const loadingCurrent = requestedLoading ?? (current ? undefined : pendingImages[0]);
   const activeId = loadingCurrent?.id ?? current?.id;
+  const showGuide = !readOnly && visible && Boolean(activeId) && guideReady && !guideDismissed && mode === 'view' && !pending && !draft;
   const allImages: CanvasImage[] = [...images, ...pendingImages.map(image => ({ ...image, loading: true as const }))];
   const imageIds = new Set(images.map(image => image.id));
   const selected = (optimisticSelection ?? attachedImages ?? localSelection).filter(id => imageIds.has(id));
@@ -202,6 +278,30 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
     return () => document.removeEventListener('keydown', handler);
   }, [visible]);
   useEffect(() => () => animation.current?.cancel(), []);
+  useEffect(() => {
+    if (guideReady || guideDismissed || readOnly || !visible || !activeId) return;
+    const timer = window.setTimeout(() => setGuideReady(true), 500);
+    return () => window.clearTimeout(timer);
+  }, [guideReady, guideDismissed, readOnly, visible, activeId]);
+  useEffect(() => {
+    if (readOnly) return;
+    const motion = matchMedia('(prefers-reduced-motion: reduce)');
+    const changed = () => { if (motion.matches || document.documentElement.dataset.reducedMotion === 'true') setGuideReady(true); };
+    motion.addEventListener('change', changed);
+    const preference = new MutationObserver(changed);
+    preference.observe(document.documentElement, { attributes: true, attributeFilter: ['data-reduced-motion'] });
+    return () => { motion.removeEventListener('change', changed); preference.disconnect(); };
+  }, [readOnly]);
+  useEffect(() => {
+    const stored = () => { if (browserAtoms()[canvasGuideAtom] === true) setGuideDismissed(true); };
+    const receive = (event: MessageEvent) => {
+      if (event.source === window && event.origin === location.origin && event.data?.type === 'persisted-atom-updated'
+        && event.data.key === canvasGuideAtom && event.data.value === true) setGuideDismissed(true);
+    };
+    window.addEventListener('storage', stored); window.addEventListener('message', receive);
+    return () => { window.removeEventListener('storage', stored); window.removeEventListener('message', receive); };
+  }, []);
+  useEffect(() => { if (!visible) setImageMenu(undefined); }, [visible]);
   useLayoutEffect(() => {
     if (menu) root.current?.querySelector<HTMLButtonElement>('[role="menu"] [role="menuitem"]')?.focus();
   }, [menu]);
@@ -214,11 +314,41 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
     finally { busy.current = false; setPending(undefined); }
   }
 
+  function applyAction(action: ImageEditAction) {
+    if (readOnly || !onAction) return Promise.reject(new Error('The image is read-only.'));
+    return onAction(action);
+  }
+
+  function dismissGuide() {
+    setGuideDismissed(true);
+    void writeAtom(canvasGuideAtom, true).catch(reason => setError(reason instanceof Error ? reason.message : String(reason)));
+  }
+
+  function openImageMenu(event: React.MouseEvent<HTMLElement>, image: EditableImage, focused = false) {
+    if (pending || busy.current || failures.has(image.id) || event.target instanceof Element && event.target.closest('input, textarea, [contenteditable="true"], [role="textbox"]')) return;
+    if (focused && (mode !== 'view' || draft || !(event.target instanceof HTMLImageElement))) return;
+    const picture = event.currentTarget.querySelector<HTMLImageElement>('img');
+    if (!picture?.complete || !picture.naturalWidth) return;
+    event.preventDefault(); event.stopPropagation(); setMenu(undefined);
+    setImageMenu({ image, x: event.clientX, y: event.clientY, trigger: event.currentTarget });
+  }
+
+  async function addToChat(image: EditableImage) {
+    if (readOnly || selected.includes(image.id) || groups.some(group => group.image.id === image.id)) return;
+    const ids = [...new Set([...selected, ...groups.map(group => group.image.id), image.id])];
+    const next = ids.flatMap(id => {
+      const existing = groups.find(group => group.image.id === id);
+      const item = images.find(item => item.id === id);
+      return existing ? [existing] : item ? [{ image: item, comments: [] }] : [];
+    });
+    if (await syncComments(next)) setLocalSelection(ids);
+  }
+
   async function selectImages(ids: readonly string[]) {
     const next = [...new Set(ids)].filter(id => imageIds.has(id));
     if (busy.current) return;
     setOptimisticSelection(next);
-    const ok = await perform('selection', () => onAction({ kind: 'selection', images: next.flatMap(id => {
+    const ok = await perform('selection', () => applyAction({ kind: 'selection', images: next.flatMap(id => {
       const image = images.find(image => image.id === id); return image ? [image] : [];
     }) }));
     if (ok) setLocalSelection(next);
@@ -229,7 +359,7 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
     if (busy.current) return false;
     const ordered = [...next].sort((left, right) => images.findIndex(image => image.id === left.image.id) - images.findIndex(image => image.id === right.image.id));
     setOptimisticComments(ordered);
-    const ok = await perform('comments', () => onAction({ kind: 'comments', groups: ordered, ...submit ? { submit: true } : {} }));
+    const ok = await perform('comments', () => applyAction({ kind: 'comments', groups: ordered, ...submit ? { submit: true } : {} }));
     if (ok) setLocalComments(submit ? [] : ordered);
     setOptimisticComments(undefined);
     return ok;
@@ -238,8 +368,8 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
   async function leaveComments() {
     if (busy.current) return false;
     const ok = await perform('comments', async () => {
-      await onAction({ kind: 'comments', groups: [] });
-      await onAction({ kind: 'selection', images: [] });
+      await applyAction({ kind: 'comments', groups: [] });
+      await applyAction({ kind: 'selection', images: [] });
     });
     if (ok) { setLocalComments([]); setLocalSelection([]); setDraft(undefined); setMode('view'); setMultiple(false); }
     return ok;
@@ -249,10 +379,12 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
     if (busy.current || draft || id === activeId) return;
     activeStroke.current = undefined;
     setFocusedZoom(undefined); setMenu(undefined); setStrokes([]); setStrokeCount(0);
-    onSelectImage(id);
+    onSelectImage?.(id);
   }
 
   async function changeView(next: View) {
+    if (readOnly) return;
+    dismissGuide();
     if (busy.current || next === view || mode === 'remove') return;
     const hasComments = groups.some(group => group.comments.length > 0);
     if (current) {
@@ -267,7 +399,7 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
     if (next === 'canvas' && current && !hasComments) { lastCanvasImage.current = current.id; void selectImages([current.id]); }
     else if (multiple && !hasComments) {
       const id = selected.includes(lastCanvasImage.current) ? lastCanvasImage.current : selected.at(-1);
-      if (id) { onSelectImage(id); void selectImages([id]); } else void selectImages([]);
+      if (id) { onSelectImage?.(id); void selectImages([id]); } else void selectImages([]);
     }
   }
 
@@ -281,7 +413,7 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
   function activateCanvas(image: EditableImage) {
     if (busy.current) return;
     lastCanvasImage.current = image.id;
-    onSelectImage(image.id);
+    onSelectImage?.(image.id);
     void selectImages(multiple ? selected.includes(image.id) ? selected.filter(id => id !== image.id) : [...selected, image.id] : [image.id]);
   }
 
@@ -290,7 +422,7 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
     const next = !multiple; setMultiple(next);
     if (!next) {
       const id = selected.includes(lastCanvasImage.current) ? lastCanvasImage.current : selected.at(-1);
-      if (id) { onSelectImage(id); void selectImages([id]); } else void selectImages([]);
+      if (id) { onSelectImage?.(id); void selectImages([id]); } else void selectImages([]);
     }
   }
 
@@ -327,7 +459,7 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
   async function edit(operation: 'remove-background' | 'resize', ratio?: string) {
     if (!current) return;
     setMenu(undefined);
-    await perform(operation, () => onAction({ kind: 'edit', image: current, operation, ...ratio ? { ratio } : {} }));
+    await perform(operation, () => applyAction({ kind: 'edit', image: current, operation, ...ratio ? { ratio } : {} }));
   }
 
   async function sendMask() {
@@ -338,7 +470,7 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
       canvas.width = dimensions.width; canvas.height = dimensions.height;
       drawStrokes(canvas, strokes.slice(0, strokeCount), true);
       const mask = await new Promise<Blob>((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not create the image mask.')), 'image/png'));
-      await onAction({ kind: 'edit', image: current, operation: 'remove', mask });
+      await applyAction({ kind: 'edit', image: current, operation: 'remove', mask });
     });
     if (ok) { setStrokes([]); setStrokeCount(0); setMode('view'); }
   }
@@ -385,9 +517,7 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
 
   function download() {
     if (!current) return;
-    const anchor = document.createElement('a'); anchor.download = current.image.name;
-    anchor.href = current.image.path !== undefined ? attachmentUrl(hostId, current.image.path, true, current.image.name) : current.image.url;
-    anchor.click();
+    void downloadImageCopy(current, hostId).catch(reason => setError(reason instanceof Error ? reason.message : String(reason)));
   }
 
   keyHandler.current = event => {
@@ -427,7 +557,8 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
     const size = sizes[image.id];
     const active = image.id === current?.id;
     const style: CSSProperties | undefined = !canvas && size ? { width: size.width * percent / 100, height: size.height * percent / 100 } : undefined;
-    return <div key={image.id} className="yard-image-editor-frame" data-image-id={image.id} data-canvas={canvas}
+    return <div key={image.id} className="yard-image-editor-frame" tabIndex={-1} data-image-id={image.id} data-canvas={canvas}
+      onContextMenu={event => openImageMenu(event, image, !canvas)}
       data-active={canvas && (mode === 'comment' ? Boolean(imageDraft || comments.length) : multiple ? selected.includes(image.id) : active)} style={style}>
       <img data-editor-image={image.id} data-ready={Boolean(size)} src={imageSrc(image.image, hostId)}
         alt={canvas ? '' : image.label} draggable={false} referrerPolicy="no-referrer" decoding="async"
@@ -485,22 +616,25 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
   }
 
   return <div ref={root} className="yard-source-image-editor" hidden={!visible} data-view={view} data-mode={mode}
-    data-active-image={activeId} aria-busy={Boolean(pending || loadingCurrent)} onPointerDown={event => {
+    data-active-image={activeId} data-read-only={readOnly} data-owner-host={hostId} aria-busy={Boolean(pending || loadingCurrent)} onPointerDown={event => {
       if (!(event.target instanceof Element) || event.target.closest('[data-editor-menu], .yard-image-editor-popover')) return;
       setMenu(undefined);
     }}>
     {!activeId ? <div className="yard-image-editor-empty" role="status">No generated images</div> : <>
-      {mode !== 'remove' && <div className="yard-image-editor-view-switch" role="group" aria-label="Image view">
+      {!readOnly && mode !== 'remove' && <div className="yard-image-editor-view-switch" role="group" aria-label="Image view" data-guide={showGuide}>
         <button type="button" aria-label="Focused view" title="Focused view" aria-pressed={view === 'focused'} disabled={Boolean(pending)} onClick={() => void changeView('focused')}><ImageEditorIcon name="focused" /></button>
         <button type="button" aria-label="Canvas view" title="Canvas view" aria-pressed={view === 'canvas'} disabled={Boolean(pending)} onClick={() => void changeView('canvas')}><ImageEditorIcon name="canvas" /></button>
+        {showGuide && <div className="yard-image-editor-coachmark" data-image-canvas-coachmark="" role="dialog"
+          aria-label={view === 'focused' ? 'Try Canvas view' : 'Try focused view'}>
+          <strong>{view === 'focused' ? 'Try Canvas view' : 'Try focused view'}</strong>
+          <p>Switch between a focused image and all generated images</p>
+          <button type="button" aria-label="Dismiss" data-image-canvas-coachmark-dismiss="" onClick={dismissGuide}><WorkspaceIcon name="closeSmall" size={12} /></button>
+        </div>}
       </div>}
-      {view === 'focused' && mode !== 'remove' && allImages.length > 1 && <div className="yard-image-editor-thumbnails" aria-label="Generated images">
-        {allImages.map((image, index) => <button key={image.id} type="button" aria-label={'loading' in image ? `Generating image ${index + 1}` : image.label} aria-pressed={image.id === activeId}
-          title={'loading' in image ? 'Generating image…' : image.label} disabled={Boolean(pending || draft)} onClick={() => navigate(image.id)}>
-          {'loading' in image ? <LoadingImage thumbnail /> : <img src={imageSrc(image.image, hostId)} alt="" draggable={false} loading="lazy" referrerPolicy="no-referrer" />}
-        </button>)}
-      </div>}
-      <div className="yard-image-editor-toolbar" role="toolbar" aria-label="Image editing tools">
+      {!readOnly && view === 'focused' && mode !== 'remove' && allImages.length > 1 && <GeneratedImageRail
+        images={allImages} activeId={activeId} hostId={hostId} disabled={Boolean(pending || draft)} onSelect={navigate}
+        onContextMenu={openImageMenu} />}
+      {!readOnly && <div className="yard-image-editor-toolbar" role="toolbar" aria-label="Image editing tools">
         {mode === 'view' ? view === 'focused' ? <>
           <ToolButton icon="comment" disabled={Boolean(pending || !current || failures.has(current.id))} onClick={() => void changeMode('comment')}>Comment</ToolButton>
           <ToolButton icon="removeBackground" disabled={Boolean(pending || !current || failures.has(current.id))} onClick={() => void edit('remove-background')}>Remove BG</ToolButton>
@@ -524,7 +658,7 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
           <button type="button" className="yard-image-editor-icon-button" aria-label="Cancel" title="Cancel" disabled={Boolean(pending)}
             onClick={() => { if (mode === 'comment') void leaveComments(); else { activeStroke.current = undefined; setMode('view'); setStrokes([]); setStrokeCount(0); } }}><WorkspaceIcon name="closeSmall" size={12} /></button>
         </>}
-      </div>
+      </div>}
       <div className="yard-image-editor-top-right">
         {view === 'focused' && <button type="button" className="yard-image-editor-download" aria-label="Download" title="Download" disabled={!current || failures.has(current.id)} onClick={download}><ImageEditorIcon name="download" /></button>}
         <div className="yard-image-editor-menu-anchor" data-editor-menu>
@@ -566,6 +700,11 @@ export default function GeneratedImageEditor({ images, loadingImages = noLoading
       </div>}
       {pending && mode === 'view' && <div className="yard-image-editor-pending" role="status"><WorkspaceIcon name="runningSpinner" size={14} className="yard-image-editor-spinner" />{pending === 'remove-background' ? 'Removing background…' : pending === 'resize' ? 'Resizing image…' : 'Updating…'}</div>}
       {error && <div className="yard-image-editor-error" role="alert">{error}<button type="button" aria-label="Dismiss error" onClick={() => setError(undefined)}><WorkspaceIcon name="closeSmall" size={12} /></button></div>}
+      {visible && imageMenu && <GeneratedImageMenu target={imageMenu} hostId={hostId} canAdd={!readOnly}
+        onAdd={addToChat} onOpen={image => {
+          if (onOpenImage) onOpenImage(image);
+          else window.open(imageSrc(image.image, hostId), '_blank', 'noopener,noreferrer');
+        }} onError={setError} close={() => setImageMenu(undefined)} />}
     </>}
   </div>;
 }

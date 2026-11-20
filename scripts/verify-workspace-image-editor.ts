@@ -9,6 +9,7 @@ import { chromium, type Browser, type Locator, type Page } from 'playwright-core
 import type { ThreadItemSummary } from '../lib/codex-protocol.ts';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { attachedPrompt } from '../src/workspace/composer-input.ts';
+import { attachmentUrl } from '../src/workspace/output-types.ts';
 import { agentItem, createFakeCodex, fixtureThread, fixtureTurn } from '../test/fake-codex.ts';
 import { fileDaemonFixture } from '../test/file-daemon-fixture.ts';
 
@@ -267,6 +268,7 @@ try {
     join(homedir(), '.cache/ms-playwright/chromium-1228/chrome-linux64/chrome'), headless: true,
     args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, colorScheme: 'light', reducedMotion: 'reduce' });
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   page.setDefaultTimeout(10_000);
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/api/files/upload?*', async route => {
@@ -308,12 +310,30 @@ try {
   const steer = fixture('steer', true), queue = fixture('queue', true), sendReject = fixture('send-reject'), uploadReject = fixture('upload-reject');
   const race = fixture('upload-race'), other = fixture('other-thread');
   const visual = fixture('visual'), generation = fixture('generation'), uncertainEdit = fixture('uncertain-edit');
+  const railFixture = fixture('thumbnail-navigation');
+  const railTurn = fake.threads.get(railFixture.id)!.turns[0]!;
+  const extraRailIds = Array.from({ length: 8 }, (_, index) => 'thumbnail-navigation-extra-' + index);
+  railTurn.items.splice(railTurn.items.length - 1, 0, ...extraRailIds.map(id => ({ id, type: 'imageGeneration',
+    status: 'completed', result: images[0]!.split(',')[1]! })));
+  const railIds = [...railFixture.imageIds, ...extraRailIds];
+  const menuFixture = fixture('context-menu');
+  const menuPath = join(root, 'context menu source.png'); await writeFile(menuPath, firstBytes);
+  const menuImageUrl = app.url + attachmentUrl('local', menuPath);
+  fake.threads.get(menuFixture.id)!.turns[0]!.items.find(item => item.id === menuFixture.imageIds[0])!.result = menuImageUrl;
   fake.queues.set(queue.id, [{ id: 'existing-queue-item', input: [{ type: 'text', text: 'Existing queued fixture', text_elements: [] }], clientUserMessageId: null }]);
 
   activeCase = 'basic';
   await openThread(basic); await draft('Preserve this initial draft.');
   const originalEditor = await editor().elementHandle(); assert.ok(originalEditor);
   await openImage(basic, 2); await assertDraft('Preserve this initial draft.');
+  const guide = panel().locator('[data-image-canvas-coachmark]');
+  await guide.waitFor(); assert.match(await guide.innerText(), /Try Canvas view/);
+  assert.match(await guide.innerText(), /Switch between a focused image and all generated images/);
+  await capture('00-first-image-view-guide');
+  await page.getByRole('button', { name: 'Close Canvas basic tab', exact: true }).click();
+  await panel().waitFor({ state: 'detached' });
+  await openImage(basic, 2); await guide.waitFor();
+  assert.ok(await editor().evaluate((element, original) => element === original, originalEditor), 'closing and reopening the image view remounted its owner Composer');
   assert.ok(await editor().evaluate((element, original) => element === original, originalEditor), 'opening the editor remounted the Composer DOM');
   const composerBox = await composer().boundingBox(), panelBox = await panel().boundingBox();
   assert.ok(composerBox && panelBox);
@@ -329,6 +349,7 @@ try {
   const zoomSize = await panel().getByRole('img', { name: 'Generated image 2', exact: true }).boundingBox(); assert.ok(zoomSize);
   assert.ok(Math.abs(zoomSize.width - 128) < 1 && Math.abs(zoomSize.height - 240) < 1, '100% zoom must render natural image dimensions');
   await panel().getByRole('button', { name: 'Canvas view', exact: true }).click();
+  await guide.waitFor({ state: 'detached' });
   assert.equal(await panel().getAttribute('data-view'), 'canvas');
   assert.equal(await panel().locator('[data-image-id]').count(), 2, 'Canvas must aggregate both generated images');
   await panel().getByRole('button', { name: 'Multi-select', exact: true }).click();
@@ -340,6 +361,120 @@ try {
   assert.equal(await panel().getAttribute('data-view'), 'focused'); await assertDraft('Preserve this initial draft.');
   await capture('01-focused-and-preserved-composer');
   checks.basic = { downloadBytes: secondBytes.length, zoomSize, composerDomPreserved: true, multiSelect: true };
+
+  activeCase = 'image-context-menu';
+  await openThread(menuFixture); await draft('Keep the image menu draft.'); await openImage(menuFixture);
+  assert.equal(await panel().locator('[data-image-canvas-coachmark]').count(), 0,
+    'choosing a view must persist the guide dismissal after a full page navigation');
+  checks.coachmark = { firstUse: true, closingWithoutDismissalPreservesGuide: true, viewSelectionPersistsDismissal: true };
+  const actions = page.getByRole('menu', { name: 'Image actions', exact: true });
+  const focusedImage = () => panel().locator('img[data-editor-image="' + menuFixture.imageIds[0] + '"]');
+  const context = async (target = focusedImage()) => { await target.click({ button: 'right' }); await actions.waitFor(); };
+  await context();
+  const menuOrder = await actions.getByRole('menuitem').allTextContents();
+  assert.deepEqual(menuOrder.filter(label => label !== 'Open in File Manager'),
+    ['Open image in new tab', 'Copy image address', 'Add to chat', 'Copy image', 'Download a copy']);
+  await actions.getByRole('menuitem', { name: 'Copy image address', exact: true }).click();
+  await until(async () => await page!.evaluate(() => navigator.clipboard.readText()) === menuImageUrl,
+    'Copy image address did not copy the original HTTP source');
+  await context(); await actions.getByRole('menuitem', { name: 'Copy image', exact: true }).click();
+  await until(async () => await page!.evaluate(async () => (await navigator.clipboard.read()).some(item => item.types.includes('image/png'))),
+    'Copy image did not write a PNG ClipboardItem');
+  const copiedImage = await page.evaluate(async () => {
+    const items = await navigator.clipboard.read();
+    const png = items.find(item => item.types.includes('image/png')); if (!png) return null;
+    const blob = await png.getType('image/png'), bitmap = await createImageBitmap(blob);
+    const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
+    const context = canvas.getContext('2d')!; context.drawImage(bitmap, 0, 0); bitmap.close();
+    return { type: blob.type, width: canvas.width, height: canvas.height,
+      corner: Array.from(context.getImageData(0, 0, 1, 1).data), center: Array.from(context.getImageData(160, 80, 1, 1).data) };
+  });
+  assert.deepEqual(copiedImage, { type: 'image/png', width: 320, height: 160, corner: [230, 90, 36, 255], center: [22, 68, 185, 255] });
+  await context(); const copyDownload = page.waitForEvent('download');
+  await actions.getByRole('menuitem', { name: 'Download a copy', exact: true }).click();
+  assert.deepEqual(await readFile((await (await copyDownload).path())!), firstBytes);
+  await context(); await actions.getByRole('menuitem', { name: 'Add to chat', exact: true }).click();
+  await context(); await actions.getByRole('menuitem', { name: 'Add to chat', exact: true }).click();
+  assert.equal(await composer().locator('.yard-source-image-attachment').count(), 1, 'Add to chat duplicated its stable generated attachment');
+  await assertDraft('Keep the image menu draft.');
+  await context(); await actions.getByRole('menuitem', { name: 'Open image in new tab', exact: true }).click();
+  const readOnly = page.locator('.yard-source-image-editor[data-read-only="true"]:visible'); await readOnly.waitFor();
+  assert.equal(await readOnly.getByRole('button', { name: 'Remove BG', exact: true }).count(), 0);
+  assert.equal(await readOnly.getByRole('button', { name: 'Comment', exact: true }).count(), 0);
+  assert.equal(await readOnly.locator('[data-image-canvas-coachmark]').count(), 0);
+  await readOnly.getByRole('img', { name: 'Generated image 1', exact: true }).waitFor();
+  await capture('06-image-read-only-tab');
+  await page.getByRole('button', { name: 'Close Generated image 1 tab', exact: true }).click();
+  await panel().locator('[data-editor-image="' + menuFixture.imageIds[0] + '"]').waitFor();
+  await assertDraft('Keep the image menu draft.');
+  const thumbnail = panel().locator('.yard-image-editor-thumbnails').getByRole('button', { name: 'Generated image 2', exact: true }).locator('img');
+  await context(thumbnail);
+  assert.equal(await actions.getByRole('menuitem', { name: 'Copy image address', exact: true }).count(), 0,
+    'a local saved image must not offer a misleading public image address');
+  await page.keyboard.press('Escape');
+  await mode('Comment');
+  const commentTarget = panel().getByRole('button', { name: 'Image comment surface', exact: true });
+  await commentTarget.click({ button: 'right' }); assert.equal(await actions.count(), 0, 'the focused image menu must be blocked while editing');
+  await commentTarget.click({ position: { x: 30, y: 25 } });
+  const commentInput = panel().getByRole('textbox', { name: 'Add comment', exact: true });
+  await commentInput.fill('Preserve native text context menu.'); await commentInput.click({ button: 'right' });
+  assert.equal(await actions.count(), 0); await commentInput.press('Escape');
+  await panel().getByRole('button', { name: 'Canvas view', exact: true }).click();
+  const canvasCard = panel().locator('[data-image-id="' + menuFixture.imageIds[1] + '"]');
+  await until(async () => await canvasCard.locator('img[data-editor-image]').evaluate(node =>
+    (node as HTMLImageElement).complete && (node as HTMLImageElement).naturalWidth > 0), 'Canvas context image did not become ready');
+  await context(canvasCard);
+  const canvasDownload = page.waitForEvent('download');
+  await actions.getByRole('menuitem', { name: 'Download a copy', exact: true }).click();
+  assert.deepEqual(await readFile((await (await canvasDownload).path())!), secondBytes);
+  await assertDraft('Keep the image menu draft.');
+  checks.contextMenu = { menuOrder, copyAddress: true, clipboardPng: copiedImage, downloadBytes: true, stableAddToChat: true,
+    internalReadOnlyTab: true, focusedThumbnailAndCanvas: true, nativeTextContextMenu: true, focusedEditingBlocksMenu: true };
+
+  activeCase = 'thumbnail-navigation';
+  await page.setViewportSize({ width: 1440, height: 740 });
+  await openThread(railFixture); await draft('Keep the thumbnail navigation draft.', false); await openImage(railFixture);
+  const rail = panel().locator('.yard-image-editor-thumbnails');
+  const activeImage = async (id: string) => until(async () => await panel().getAttribute('data-active-image') === id,
+    'the thumbnail gesture did not select the expected generated image');
+  const wheel = (deltaY: number, deltaMode = 0, ctrlKey = false) => rail.evaluate((node, options) => {
+    const event = new WheelEvent('wheel', { ...options, bubbles: true, cancelable: true });
+    node.dispatchEvent(event); return event.defaultPrevented;
+  }, { deltaY, deltaMode, ctrlKey });
+  assert.equal(await rail.getByRole('button').count(), 10);
+  assert.equal(await wheel(20), true); assert.equal(await panel().getAttribute('data-active-image'), railIds[0]);
+  await wheel(8); await activeImage(railIds[1]!);
+  await wheel(4, 1); await activeImage(railIds[2]!);
+  const beforeControl = await panel().getAttribute('data-active-image');
+  assert.equal(await wheel(600, 0, true), false, 'Ctrl+wheel must remain available to browser zoom');
+  assert.equal(await panel().getAttribute('data-active-image'), beforeControl);
+  await wheel(99_999); await activeImage(railIds.at(-1)!);
+  assert.ok(await rail.evaluate(node => node.scrollTop) > 0, 'selecting an offscreen image must scroll its thumbnail into view');
+  const lastThumbnail = rail.getByRole('button').last();
+  await lastThumbnail.focus(); await lastThumbnail.press('ArrowDown'); await activeImage(railIds.at(-1)!);
+  await lastThumbnail.press('ArrowUp'); await activeImage(railIds.at(-2)!);
+  await wheel(-99_999); await activeImage(railIds[0]!);
+  const firstThumbnail = rail.getByRole('button').first();
+  await firstThumbnail.focus(); await firstThumbnail.press('ArrowLeft'); await activeImage(railIds[0]!);
+  await firstThumbnail.press('ArrowRight'); await activeImage(railIds[1]!);
+  await wheel(1, 2); await activeImage(railIds.at(-1)!);
+  await firstThumbnail.click(); await activeImage(railIds[0]!);
+  const railRect = await rail.boundingBox(); assert.ok(railRect);
+  await page.mouse.move(railRect.x + railRect.width / 2, railRect.y + 18);
+  await page.mouse.wheel(0, 54); await activeImage(railIds[1]!);
+  await mode('Comment');
+  const commentSurface = panel().getByRole('button', { name: 'Image comment surface', exact: true });
+  await commentSurface.click({ position: { x: 20, y: 20 } });
+  const unsavedComment = panel().getByRole('textbox', { name: 'Add comment', exact: true });
+  await unsavedComment.fill('Preserve this unsaved image comment.');
+  assert.equal(await wheel(200), false);
+  assert.equal(await panel().getAttribute('data-active-image'), railIds[1]);
+  assert.equal(await unsavedComment.inputValue(), 'Preserve this unsaved image comment.');
+  await assertDraft('Keep the thumbnail navigation draft.', false);
+  await capture('05-thumbnail-navigation');
+  checks.railNavigation = { accumulatedPixels: true, lineAndPageUnits: true, nativeWheel: true,
+    boundaryAndKeyboard: true, controlWheelUnchanged: true, unsavedCommentPreserved: true };
+  await page.setViewportSize({ width: 1440, height: 1000 });
 
   activeCase = 'empty-editor-layout';
   await page.setViewportSize({ width: 1440, height: 900 });

@@ -1,0 +1,6 @@
+{
+  "name": "yard-artifacts",
+  "version": "0.1.0",
+  "description": "Create, edit and inspect local Word, PDF, spreadsheet and presentation files using standalone public libraries; reuse local templates",
+  "skills": "./skills/"
+}

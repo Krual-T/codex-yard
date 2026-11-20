@@ -1,0 +1,9 @@
+/* Pinned sites-end-resource Xv: a muted question above each answer in the
+   ordinary user bubble, with 4 px inside a pair and 12 px between pairs. */
+.yard-source-user-message:has(> .yard-source-async-replies) { min-width: 0; overflow: hidden; }
+.yard-source-async-replies { display: flex; min-width: 0; flex-direction: column; gap: 12px; font-size: var(--codex-chat-font-size, 14px); }
+.yard-source-async-reply { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.yard-source-async-reply-question { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .7; }
+.yard-source-async-reply .yard-source-message-markdown { font-size: inherit; line-height: inherit; }
+.yard-source-async-reply .yard-source-message-markdown > :first-child { margin-block-start: 0; }
+.yard-source-async-reply .yard-source-message-markdown > :last-child { margin-block-end: 0; }

@@ -69,6 +69,8 @@ Settings → General → 模型供应商 reads config-defined providers and cont
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765). To customize the server, copy `.env.example` to `.env`. `AGENTS_CODEX_BIN` selects a CLI executable; `AGENTS_CODEX_SOCKET` connects directly to an existing backend and skips automatic daemon startup. `AGENTS_APP_TOOLS_ADAPTER` overrides the vendored adapter if needed. Use a short private `AGENTS_DATA_DIR` when necessary: the complete Unix socket path must fit within 107 bytes.
 
+To make Yard, CLI and the desktop App use one persistent process, choose one `CODEX_HOME` and connect each client to its daemon. See [shared backend setup, including Windows/WSL](docs/shared-backend.md). The desktop transport depends on the installed App version.
+
 The sidebar opens with up to 50 current local conversations, read directly from the backend while the full workspace loads. You can select a conversation immediately; the workspace keeps that selection when it takes over. This initial view includes project membership and available pins, and does not load conversation history. SSH lists and the composer become available as the full workspace starts. `npm run test:startup:ui` records both initial-list paint and workspace takeover; add `-- --check-handoff` to verify selection during startup.
 
 Unread state comes from app-server, shared with other clients of that backend. Automatic read acknowledgements and manual marks use its revision-guarded updates; old browser unread markers are removed. With chronological sorting, loaded conversations rank unread inactive threads first, active threads second, then other threads, newest first within each group. The initial request remains limited to 50; existing pagination continues without an extra history scan. Pinned and explicit manual orders stay in place. Projects, membership, pins, sections and compatible queued messages use the same backend. Legacy data is migrated per host; browser preferences retain cross-host navigation and unsent intent. See [State ownership and migration](docs/state-ownership.md).
@@ -125,11 +127,13 @@ Yard connects to both devices and relays traffic through SSH, with a reverse lis
 
 TCP services including HTTP, databases and SSH are supported. Closing the page keeps forwarding active. Disconnected SSH tunnels report an error and can be restarted manually. Restarting Yard stops tunnels and preserves rules for manual startup; changing an SSH profile stops its tunnels. Yard must be able to reach both endpoints and carries all forwarded traffic.
 
-## Plugins and Computer Use
+## Standalone tools and plugins
 
 The Plugins page uses the selected Codex host's native marketplace, plugin installation/removal and MCP authorization APIs. Existing Skills and MCP tools keep using the backend's configuration. Plugins that depend on an application-specific host also need that service to run independently of Codex App.
 
-Yard supplies its own Linux X11 Computer Use runtime: screenshots, mouse, keyboard, text entry, dragging and scrolling. Install `xdotool`, ImageMagick, `xclip` and util-linux, set `YARD_COMPUTER_DISPLAY` (and `YARD_COMPUTER_XAUTHORITY` when needed) in Yard's `.env`, then start Yard and open a new local conversation. A virtual X11 desktop works on headless hosts. The selected desktop runs on the Yard execution machine. [Setup, plugin package and runtime boundaries](docs/standalone-plugins.md).
+The repository marketplace includes `yard-node` for persistent JavaScript, `yard-artifacts` for local Word/PDF/spreadsheet/PPT/template workflows, and `yard-computer` for Linux X11 or an explicitly selected Windows primary monitor. Each uses standalone dependencies. Browser control connects through the public Chrome DevTools MCP; task titles use the existing title organizer plugin. An enabled configuration entry still needs an installed package, runtime and successful operation.
+
+For Linux Computer Use, install `xdotool`, ImageMagick, `xclip` and util-linux, set `YARD_COMPUTER_DISPLAY` (and `YARD_COMPUTER_XAUTHORITY` when needed) in Yard's `.env`, then open a new local conversation. Windows requires independent Windows Node in an unlocked interactive desktop session; SSH/service Session 0 cannot control that desktop. [Installation commands, artifact runtime, browser/title setup, platform limits and acceptance checks](docs/standalone-plugins.md).
 
 ## Scheduled tasks
 

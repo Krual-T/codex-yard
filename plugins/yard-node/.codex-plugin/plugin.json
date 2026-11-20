@@ -1,0 +1,7 @@
+{
+  "name": "yard-node",
+  "version": "0.1.0",
+  "description": "Persistent JavaScript with standalone Node.js, without Codex App",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

@@ -1,0 +1,16 @@
+/* Pinned generated-image-context-menu Se -> app-shared Hxn: text-only rows. */
+.yard-generated-image-menu {
+  position: fixed; inset: auto; margin: 0; min-width: 180px; max-width: calc(100vw - 16px);
+  max-height: calc(100svh - 16px); overflow: auto; padding: var(--app-menu-gutter, 4px);
+  border: 0; border-radius: var(--radius-2xl); outline: 0;
+  color: var(--color-text-primary); background: var(--color-surface-elevated-secondary);
+  box-shadow: 0 0 0 .5px var(--color-border), 0px 4px 8px -2px #0000001a;
+}
+.yard-source-image-editor .yard-generated-image-menu > button {
+  display: flex; align-items: center; justify-content: flex-start; width: 100%; min-height: 28px;
+  margin: 0; padding: var(--app-menu-item-padding, 4px 8px); border: 0; border-radius: var(--radius-xl);
+  color: inherit; background: transparent;
+  font-family: var(--font-ui-family, var(--font-sans-default)); font-size: var(--text-sm); line-height: var(--text-sm--line-height);
+  text-align: start; white-space: nowrap; cursor: pointer;
+}
+.yard-source-image-editor .yard-generated-image-menu > button:is(:hover, :focus-visible) { outline: 0; background: var(--color-background-primary-ghost-hover); }

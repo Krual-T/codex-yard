@@ -8,10 +8,13 @@ import { MessageBody } from './message-body.tsx';
 import { WorkspaceIcon } from './workspace-icon.tsx';
 import { MessageActions } from './message-actions.tsx';
 import { MessageCopy } from './message-copy.tsx';
+import './async-questions.css';
 
+type Draft = { value: string; option?: number };
 type Session = { active: boolean; questions: AsyncQuestion[]; selected?: AsyncQuestion; answers: ReadonlyMap<string, string>;
-  drafts: ReadonlyMap<string, string>; pending: boolean; error?: string;
-  select(id: string): void; open(ids: string[]): void; close(): void; write(id: string, value: string): void; advance(answer?: string): void };
+  drafts: ReadonlyMap<string, Draft>; pending: boolean; error?: string;
+  hasQuestion(id: string): boolean; select(id: string): void; open(ids: string[]): void; close(): void;
+  write(id: string, value: string, option?: number): void; advance(answer?: string): void };
 const Context = createContext<Session | null>(null);
 const noStream = () => () => {};
 const empty: readonly TurnSummary[] = [];
@@ -24,39 +27,41 @@ export function AsyncQuestionsProvider({ stream, history, children }: {
   const turns = useMemo(() => mergeLiveTurns(history, live), [history, live]);
   const latest = turns.at(-1);
   const active = latest?.status === 'inProgress';
-  const allQuestions = useMemo(() => latest?.items.flatMap(asyncQuestions) ?? [], [latest]);
+  const allQuestions = useMemo(() => turns.flatMap(turn => turn.items.flatMap(asyncQuestions)), [turns]);
+  const latestQuestions = useMemo(() => latest?.items.flatMap(asyncQuestions) ?? [], [latest]);
   const replies = useMemo(() => new Map(turns.flatMap(turn => turn.items.flatMap(questionReplies))
     .map(reply => [reply.questionItemId, reply.answer])), [turns]);
   const [selection, setSelection] = useState<{ id: string | null; ids: string[]; seen: string[] }>();
-  const [drafts, setDrafts] = useState(new Map<string, string>());
+  const [drafts, setDrafts] = useState(new Map<string, Draft>());
   const [submitted, setSubmitted] = useState(new Map<string, string>());
   const [skipped, setSkipped] = useState(new Set<string>());
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const sending = useRef(false);
   const answers = new Map([...replies, ...submitted]);
-  const outstanding = allQuestions.filter(question => !answers.has(question.id) && !skipped.has(question.id));
+  const outstanding = latestQuestions.filter(question => !answers.has(question.id) && !skipped.has(question.id));
   const chosen = allQuestions.find(question => question.id === selection?.id);
   const questions = chosen ? allQuestions.filter(question => selection?.ids.includes(question.id)) :
     outstanding.filter(question => !selection?.seen.includes(question.id));
-  const selected = active ? chosen ?? questions[0] : undefined;
+  // Only running turns open automatically. An explicit answer remains usable
+  // when that turn finishes or a newer turn starts.
+  const selected = chosen ?? (active ? questions[0] : undefined);
   function select(id: string | null, ids = questions.map(question => question.id)) {
     setSelection({ id, ids, seen: allQuestions.map(question => question.id) }); setError(undefined);
   }
   async function advance(answer?: string) {
     if (!stream || !latest || !selected || sending.current) return;
     select(selected.id);
-    const nextDrafts = new Map([...answers, ...drafts]);
-    if (answer?.trim()) nextDrafts.set(selected.id, answer.trim());
-    else nextDrafts.delete(selected.id);
+    const nextDrafts = new Map(drafts);
+    nextDrafts.set(selected.id, answer?.trim() ? { ...drafts.get(selected.id), value: answer.trim() } : { value: '' });
     setDrafts(nextDrafts);
-    const next = outstanding.find(question => questions.indexOf(question) > questions.indexOf(selected));
+    const next = questions[questions.indexOf(selected) + 1];
     if (next) {
       if (!answer?.trim()) setSkipped(previous => new Set(previous).add(selected.id));
       select(next.id); return;
     }
     const responses = questions.flatMap(question => {
-      const value = nextDrafts.get(question.id)?.trim();
+      const value = (nextDrafts.get(question.id)?.value ?? answers.get(question.id))?.trim();
       return value ? [{ questionItemId: question.id, question: question.title, answer: value }] : [];
     });
     if (!responses.length) { setSkipped(previous => new Set(previous).add(selected.id)); select(null); return; }
@@ -66,7 +71,8 @@ export function AsyncQuestionsProvider({ stream, history, children }: {
       const current = mergeLiveTurns(history, stream.read()).at(-1);
       if (current?.status === 'inProgress') await steerTurn(stream.threadId, current.id, composerInput(text), stream.hostId);
       else {
-        const { turn } = await sendExistingThread(stream.threadId, text, () => true, [], stream.hostId);
+        const { turn } = await sendExistingThread(stream.threadId, text, () => true, [], stream.hostId, undefined,
+          { turnTrigger: 'send_user_message_async_question' });
         stream.acknowledge(turn);
       }
       setSubmitted(previous => new Map([...previous, ...responses.map(reply => [reply.questionItemId, reply.answer] as const)]));
@@ -75,20 +81,26 @@ export function AsyncQuestionsProvider({ stream, history, children }: {
     finally { sending.current = false; setPending(false); }
   }
   return <Context value={{ active, questions, selected, answers, drafts, pending, error, select,
+    hasQuestion: id => allQuestions.some(question => question.id === id),
     open: ids => { if (ids[0]) select(ids[0], ids); }, close: () => select(null),
-    write: (id, value) => setDrafts(previous => new Map(previous).set(id, value)), advance: answer => void advance(answer) }}>
+    write: (id, value, option) => {
+      // Pin the current question before its delayed choice click or text edit:
+      // an intervening turn/completed must not cancel the user's response.
+      if (selection?.id !== id) select(id);
+      setDrafts(previous => new Map(previous).set(id, { value, option }));
+    }, advance: answer => void advance(answer) }}>
     {children}
   </Context>;
 }
 
 export function useAsyncQuestionOpen() { return !!useContext(Context)?.selected; }
 
-export function AsyncQuestionMessage({ item, active }: { item: ThreadItemSummary; active: boolean }) {
+export function AsyncQuestionMessage({ item }: { item: ThreadItemSummary; active: boolean }) {
   const session = useContext(Context);
   return <>
     {asyncQuestions(item).map(question => <article className="yard-source-agent-message" key={question.id}>
       <MessageBody text={question.title} />
-      {active && session && !session.selected && !session.answers.has(question.id) && <button type="button"
+      {session?.hasQuestion(question.id) && !session.selected && !session.answers.has(question.id) && <button type="button"
         className={action + ' border-default bg-transparent text-default not-disabled:hover:bg-primary-ghost-hover mt-3'}
         disabled={session.pending} onClick={() => session.open([question.id])}><WorkspaceIcon name="asyncQuestion" />Answer question</button>}
     </article>)}
@@ -100,16 +112,16 @@ export function AsyncQuestionReplyMessage({ item }: { item: ThreadItemSummary })
   const replies = questionReplies(item);
   return <div className="yard-source-user-turn"><h4 className="sr-only">You said:</h4>
     <div className="yard-source-user-message bg-user-message text-user-message rounded-2xl _bubble_168sz_1" data-user-message-bubble="true">
-      <div className="flex flex-col gap-3 text-size-chat">
-        {replies.map(reply => <div key={reply.questionItemId} className="flex flex-col gap-1">
-          <span className="truncate opacity-70" title={reply.question}>{reply.question}</span>
+      <div className="yard-source-async-replies" data-source-async-question-replies="">
+        {replies.map(reply => <div key={reply.questionItemId} className="yard-source-async-reply" data-question-item-id={reply.questionItemId}>
+          <span className="yard-source-async-reply-question" title={reply.question}>{reply.question}</span>
           <MessageBody text={reply.answer} />
         </div>)}
       </div>
     </div>
     <MessageActions>
       <MessageCopy label="Copy message" text={replies.map(reply => reply.question + '\n' + reply.answer).join('\n\n')} messageAction />
-      {session?.active && replies.some(reply => session.answers.has(reply.questionItemId)) && <button type="button" aria-label="Edit response"
+      {session && replies.some(reply => session.hasQuestion(reply.questionItemId)) && <button type="button" aria-label="Edit response"
         disabled={session.pending} onClick={() => session.open(replies.map(reply => reply.questionItemId))}><WorkspaceIcon name="edit" /></button>}
     </MessageActions>
   </div>;
@@ -122,9 +134,11 @@ export function AsyncQuestionPanel({ hidden }: { hidden?: boolean }) {
   const question = session?.selected;
   const panel = useRef<HTMLElement>(null);
   const advancing = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const composing = useRef(false);
   const [choice, setChoice] = useState<string>();
   useEffect(() => {
     setChoice(undefined);
+    composing.current = false;
     if (question) {
       if (question.options.length) panel.current?.focus();
       else input.current?.focus();
@@ -133,11 +147,13 @@ export function AsyncQuestionPanel({ hidden }: { hidden?: boolean }) {
   }, [question?.id]);
   if (!session || !question || hidden) return null;
   const index = session.questions.indexOf(question), last = index === session.questions.length - 1;
-  const draft = session.drafts.get(question.id) ?? session.answers.get(question.id) ?? '';
+  const priorAnswer = session.answers.get(question.id) ?? '';
+  const priorOption = question.options.indexOf(priorAnswer);
+  const draft = session.drafts.get(question.id) ?? { value: priorAnswer, option: priorOption < 0 ? undefined : priorOption };
   const inline = question.options.length > 0;
-  function choose(option: string) {
+  function choose(option: string, index: number) {
     if (advancing.current || session!.pending) return;
-    session!.write(question!.id, option); setChoice(option);
+    session!.write(question!.id, option, index); setChoice(option);
     // Pinned nB gives the selected choice 180 ms before advancing.
     advancing.current = setTimeout(() => {
       advancing.current = undefined;
@@ -149,12 +165,16 @@ export function AsyncQuestionPanel({ hidden }: { hidden?: boolean }) {
     <textarea ref={input} key={question.id} rows={1}
       className="min-w-0 flex-1 self-center resize-none border-0 bg-transparent p-0 text-sm leading-5 focus:outline-none field-sizing-content"
       aria-label={inline ? 'Or write your own response' : 'Reply…'} placeholder={inline ? 'Or write your own response' : 'Reply…'}
-      value={question.options.includes(draft) ? '' : draft} disabled={session.pending}
+      value={draft.option === undefined ? draft.value : ''} disabled={session.pending}
       onChange={event => session.write(question.id, event.target.value)}
-      onFocus={() => { clearTimeout(advancing.current); advancing.current = undefined; setChoice(undefined); }}
+      onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
+      onFocus={() => {
+        clearTimeout(advancing.current); advancing.current = undefined; setChoice(undefined);
+        if (draft.option !== undefined) session.write(question.id, '');
+      }}
       onKeyDown={event => {
-        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-          event.preventDefault(); event.stopPropagation(); if (draft.trim()) session.advance(draft);
+        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !composing.current && event.nativeEvent.keyCode !== 229) {
+          event.preventDefault(); event.stopPropagation(); if (draft.value.trim()) session.advance(draft.value);
         }
       }} />
     <button type="button" disabled aria-label="Dictate" className="flex h-token-button-composer aspect-square shrink-0 items-center justify-center text-tertiary"><WorkspaceIcon name="microphone" /></button>
@@ -168,7 +188,7 @@ export function AsyncQuestionPanel({ hidden }: { hidden?: boolean }) {
       if (event.target instanceof HTMLElement && event.target.closest('textarea,input')) return;
       const choice = Number(event.key) - 1;
       if (/^[1-9]$/.test(event.key) && question.options[choice]) {
-        event.preventDefault(); choose(question.options[choice]!);
+        event.preventDefault(); choose(question.options[choice]!, choice);
       }
     }}>
     <div className="flex items-start justify-between border-border/70 ps-4 pe-3 pt-4 pb-2">
@@ -194,10 +214,10 @@ export function AsyncQuestionPanel({ hidden }: { hidden?: boolean }) {
       const delta = event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : 0;
       if (current >= 0 && delta) { event.preventDefault(); buttons[(current + delta + buttons.length) % buttons.length]?.focus(); }
     }}>
-      {question.options.map((option, index) => <button type="button" role="radio" aria-checked={draft === option} key={index}
+      {question.options.map((option, index) => <button type="button" role="radio" aria-checked={draft.option === index} key={index}
         aria-label={option}
         className={'group flex min-h-8 w-full cursor-interaction items-center gap-2 px-2 py-1.5 text-start text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-within:bg-text/5 rounded-xl hover:bg-text/5' + (choice === option ? ' bg-text/5' : '')}
-        disabled={session.pending} onClick={() => choose(option)}><span aria-hidden="true" className="flex size-5 shrink-0 items-center justify-center rounded-xs border text-xs leading-none font-medium self-start border-default bg-text/5 text-codex-description">{index + 1}</span>
+        disabled={session.pending} onClick={() => choose(option, index)}><span aria-hidden="true" className="flex size-5 shrink-0 items-center justify-center rounded-xs border text-xs leading-none font-medium self-start border-default bg-text/5 text-codex-description">{index + 1}</span>
         <span className="min-w-0 text-sm font-medium wrap-anywhere">{option}</span>
         <WorkspaceIcon name="back" className="ms-auto rotate-180 text-codex-description opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100" /></button>)}
     </div>}
@@ -212,7 +232,7 @@ export function AsyncQuestionPanel({ hidden }: { hidden?: boolean }) {
       <div className="flex items-center gap-2 place-self-end">
       <button type="button" disabled={session.pending} className={action + ' border-default bg-primary-soft-alpha not-disabled:hover:bg-primary-ghost-hover'}
         data-request-input-dismiss="" onClick={() => session.advance()}>Skip</button>
-      <button type="button" disabled={session.pending || !draft.trim()} className={action + ' border-default bg-primary-solid not-disabled:hover:bg-text/80 text-primary-solid'} onClick={() => session.advance(draft)}>
+      <button type="button" disabled={session.pending || !draft.value.trim()} className={action + ' border-default bg-primary-solid not-disabled:hover:bg-text/80 text-primary-solid'} onClick={() => session.advance(draft.value)}>
         {!last ? 'Next' : session.answers.has(question.id) ? 'Send update' : 'Send'}
       </button>
       </div>

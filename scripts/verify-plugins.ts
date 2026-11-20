@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { once } from 'node:events';
-import { access, cp, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -56,17 +56,22 @@ try {
   app = await createNativeWorkbench({ port: 0, dataDir, workspace, socketPath, codexHome,
     hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
   report.cli = app.control.server?.userAgent;
-  socket = new WebSocket(app.url.replace('http', 'ws') + '/native-host', { origin: app.url });
   const messages: Record<string, any>[] = [];
-  socket.on('message', data => { messages.push(JSON.parse(String(data))); socket!.emit('received'); });
-  await once(socket, 'open');
+  async function connect() {
+    const connection = new WebSocket(app!.url.replace('http', 'ws') + '/native-host', { origin: app!.url });
+    connection.on('message', data => { messages.push(JSON.parse(String(data))); connection.emit('received'); });
+    await once(connection, 'open');
+    socket = connection;
+  }
+  await connect();
   let sequence = 0;
   async function rpc<T = Record<string, any>>(method: string, params: unknown = {}): Promise<T> {
     const id = ++sequence;
-    socket!.send(JSON.stringify({ type: 'mcp-request', hostId: 'local', request: { id, method, params } }));
+    const connection = socket!;
+    connection.send(JSON.stringify({ type: 'mcp-request', hostId: 'local', request: { id, method, params } }));
     const signal = AbortSignal.timeout(30000);
     let reply;
-    while (!(reply = messages.find(value => value.type === 'mcp-response' && value.message.id === id))) await once(socket!, 'received', { signal });
+    while (!(reply = messages.find(value => value.type === 'mcp-response' && value.message.id === id))) await once(connection, 'received', { signal });
     if (reply.message.error) throw new Error(method + ': ' + JSON.stringify(reply.message.error));
     return reply.message.result as T;
   }
@@ -90,6 +95,17 @@ try {
   const skills = await rpc('skills/list', { cwds: [workspace], forceReload: true });
   assert.ok(skills.data.flatMap((value: any) => value.skills).some((value: any) => value.name === 'yard-computer:use-computer' && value.pluginId === 'yard-computer@codex-yard'));
   checks.push('The installed plugin contributes its Skill to the actual CLI inventory');
+  for (const name of ['yard-node', 'yard-artifacts']) {
+    await rpc('plugin/install', { marketplacePath, pluginName: name, installAttemptId: 'yard-validation-' + name });
+    const plugin = await rpc('plugin/read', { marketplacePath, pluginName: name });
+    assert.equal(plugin.plugin.summary.installed, true);
+    assert.equal(plugin.plugin.summary.enabled, true);
+  }
+  const allSkills = await rpc('skills/list', { cwds: [workspace], forceReload: true });
+  for (const name of ['yard-node:javascript', 'yard-artifacts:files']) {
+    assert.ok(allSkills.data.flatMap((value: any) => value.skills).some((value: any) => value.name === name));
+  }
+  checks.push('The real CLI installs standalone JavaScript and file-artifact packages and loads both Skills');
   if (process.argv.includes('--ui')) {
     const output = resolve(process.env.AGENTS_PLUGINS_EVIDENCE ?? '.local/plugins-cli');
     await mkdir(output, { recursive: true });
@@ -121,11 +137,36 @@ try {
   assert.equal(unavailable.isError, true);
   assert.match(JSON.stringify(unavailable.content), /display|DISPLAY/);
   checks.push('Actual CLI launches the plugin MCP and returns actionable missing-display errors instead of importing desktop services');
+  const nodeInventory = await rpc('mcpServerStatus/list', { threadId, serverName: 'yard_node' });
+  assert.ok(nodeInventory.data.some((value: any) => Object.keys(value.tools ?? {}).includes('evaluate')));
+  const evaluate = (code: string) => rpc('mcpServer/tool/call', { threadId, server: 'yard_node', tool: 'evaluate', arguments: { code } });
+  const evaluated = await evaluate('let count = 41; await Promise.resolve(); ++count');
+  assert.notEqual(evaluated.isError, true, JSON.stringify(evaluated));
+  assert.match(JSON.stringify(evaluated.content), /42/);
+  const image = await evaluate('yardNode.emitImage({bytes:Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X6AAAAABJRU5ErkJggg==","base64"),mimeType:"image/png"})');
+  assert.ok(image.content.some((value: any) => value.type === 'image' && value.mimeType === 'image/png'));
+  checks.push('Actual CLI evaluates persistent JavaScript with top-level await and receives an image tool result');
+  const started = join(workspace, 'started'), completed = join(workspace, 'completed');
+  void evaluate(`var fs = await yardNode.import('node:fs/promises'); await fs.writeFile(${JSON.stringify(started)}, 'started'); await new Promise(resolve => setTimeout(resolve, 1200)); count += 1; await fs.writeFile(${JSON.stringify(completed)}, 'completed'); count`).catch(() => {});
+  const workDeadline = Date.now() + 15000;
+  for (;;) { try { await access(started); break; } catch { assert.ok(Date.now() < workDeadline, 'JavaScript did not start'); await delay(30); } }
+  socket!.terminate();
+  for (;;) { try { assert.equal(await readFile(completed, 'utf8'), 'completed'); break; } catch { assert.ok(Date.now() < workDeadline, 'JavaScript stopped with the Yard connection'); await delay(30); } }
+  await connect();
+  assert.match(JSON.stringify((await evaluate('count')).content), /43/);
+  checks.push('Started JavaScript completes after the Yard client disconnects, and the same kernel retains its variable after reconnecting');
+  await rpc('mcpServer/tool/call', { threadId, server: 'yard_node', tool: 'reset', arguments: {} });
+  assert.match(JSON.stringify((await evaluate('typeof count')).content), /undefined/);
+  checks.push('The real CLI resets the standalone JavaScript kernel');
+  for (const name of ['yard-node', 'yard-artifacts']) {
+    await rpc('plugin/uninstall', { pluginId: name + '@codex-yard' });
+    assert.equal((await rpc('plugin/read', { marketplacePath, pluginName: name })).plugin.summary.installed, false);
+  }
   await rpc('plugin/uninstall', { pluginId: 'yard-computer@codex-yard' });
   const removed = await rpc('plugin/read', { marketplacePath, pluginName: 'yard-computer' });
   assert.equal(removed.plugin.summary.installed, false);
   const removedSkills = await rpc('skills/list', { cwds: [workspace], forceReload: true });
-  assert.ok(!removedSkills.data.flatMap((value: any) => value.skills).some((value: any) => value.pluginId === 'yard-computer@codex-yard'));
+  assert.ok(!removedSkills.data.flatMap((value: any) => value.skills).some((value: any) => ['yard-computer@codex-yard', 'yard-node@codex-yard', 'yard-artifacts@codex-yard'].includes(value.pluginId)));
   checks.push('Uninstall removes the package and its Skill from the real CLI inventory');
   await rpc('marketplace/remove', { marketplaceName: 'codex-yard' });
   checks.push('The native marketplace registration is removed through the same bridge');

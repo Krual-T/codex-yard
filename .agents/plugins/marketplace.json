@@ -2,6 +2,16 @@
   "name": "codex-yard",
   "plugins": [
     {
+      "name": "yard-artifacts",
+      "source": { "source": "local", "path": "./plugins/yard-artifacts" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" }
+    },
+    {
+      "name": "yard-node",
+      "source": { "source": "local", "path": "./plugins/yard-node" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" }
+    },
+    {
       "name": "yard-computer",
       "source": { "source": "local", "path": "./plugins/yard-computer" },
       "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" }

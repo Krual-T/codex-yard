@@ -40,7 +40,9 @@ type ImageEditorTarget = { composer(): ComposerHandle | null; stream: TurnStream
 type ImageEditorTool = { kind: 'image-editor'; target: ImageEditorTarget; images: readonly EditableImage[]; selectedId: string };
 const emptyImageAttachments: ComposerImageAttachments = { images: [], comments: [] };
 
-function ImageEditorTab({ tool, visible, select }: { tool: ImageEditorTool; visible: boolean; select(id: string): void }) {
+function ImageEditorTab({ tool, visible, select, openImage }: {
+  tool: ImageEditorTool; visible: boolean; select(id: string): void; openImage(image: EditableImage, hostId: string): void;
+}) {
   const { target } = tool;
   const live = useSyncExternalStore(target.stream.subscribe, target.stream.read);
   const history = target.readHistory?.() ?? target.turns;
@@ -70,6 +72,7 @@ function ImageEditorTab({ tool, visible, select }: { tool: ImageEditorTool; visi
   return <Suspense fallback={null}><GeneratedImageEditor images={images} selectedId={tool.selectedId} hostId={target.stream.hostId}
     loadingImages={loading}
     visible={visible} onSelectImage={select} attachedImages={attached.images} attachedComments={attached.comments}
+    onOpenImage={image => openImage(image, target.stream.hostId)}
     onAction={async action => {
       const composer = target.composer();
       if (!composer) throw new Error('The editor is not ready.');
@@ -83,7 +86,7 @@ type Tool = { kind: 'new'; placeholder?: boolean; working?: boolean; error?: str
   { kind: 'output'; file: OutputFile } | { kind: 'terminal'; session: WorkspaceTerminalSession; number: number } |
   { kind: 'files'; cwd: string; query?: string } | { kind: 'browser'; view: WorkspaceBrowserView } |
   { kind: 'changes'; turnId: string; expanded: boolean } | { kind: 'sources' } | { kind: 'mcp-app'; app: McpAppTab } |
-  { kind: 'goal'; threadId: string; hostId: string } | ImageEditorTool;
+  { kind: 'goal'; threadId: string; hostId: string } | { kind: 'image-preview'; image: EditableImage; hostId: string } | ImageEditorTool;
 type ToolTab = { id: string; tool: Tool };
 
 function Sidechat({ view, transferError, openOutput, openSubagent, openPage, openGoal, openImages, tabId }: {
@@ -291,7 +294,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
 
   const rows = mergeSidechats(sidechats, hostId, branch.children, [], branch.loaded, fallbackTitle);
   const labels = { new: 'New tab', chat: 'Side chat', agent: 'Subagent', output: 'Output preview', terminal: 'Terminal', files: 'Files', browser: 'Browser',
-    changes: 'Changes', sources: 'Sources', 'mcp-app': 'Tool app', goal: 'Goal', 'image-editor': 'Image editor' };
+    changes: 'Changes', sources: 'Sources', 'mcp-app': 'Tool app', goal: 'Goal', 'image-editor': 'Image editor', 'image-preview': 'Image preview' };
   const tabButton = (id: string) => tabId + '-button-' + id;
   const tabPanel = (id: string) => tabId + '-panel-' + id;
   function toolTitle(tool: Tool) {
@@ -301,6 +304,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
     if (tool.kind === 'terminal') return 'Terminal ' + tool.number;
     if (tool.kind === 'mcp-app') return tool.app.name;
     if (tool.kind === 'image-editor') return tool.target.title ?? 'Generated image';
+    if (tool.kind === 'image-preview') return tool.image.label;
     return labels[tool.kind];
   }
 
@@ -340,6 +344,13 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
     const next: ImageEditorTool = { kind: 'image-editor', images: available, selectedId, target };
     if (existing) replaceTab(existing.id, next);
     showTab(next, existing);
+    setToolsExpanded(true);
+  }
+
+  function openImagePreview(image: EditableImage, ownerHostId: string) {
+    const existing = tabs.find(row => row.tool.kind === 'image-preview' && row.tool.hostId === ownerHostId && row.tool.image.id === image.id);
+    if (existing) replaceTab(existing.id, { kind: 'image-preview', image, hostId: ownerHostId });
+    showTab({ kind: 'image-preview', image, hostId: ownerHostId }, existing);
     setToolsExpanded(true);
   }
 
@@ -524,7 +535,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
               tool.kind === 'files' ? <WorkspaceIcon name="tabFiles" /> :
               tool.kind === 'changes' ? <Diff size={14} aria-hidden="true" /> : tool.kind === 'sources' ? <Workflow size={13} aria-hidden="true" /> :
               tool.kind === 'mcp-app' ? <AtSign size={14} aria-hidden="true" /> : tool.kind === 'goal' ? <GoalIcon name="goal" size={16} /> :
-              tool.kind === 'image-editor' ? <WorkspaceIcon name="toolImage" /> : null}
+              tool.kind === 'image-editor' || tool.kind === 'image-preview' ? <WorkspaceIcon name="toolImage" /> : null}
             <span className="yard-source-tool-tab-title">{tool.kind === 'browser' ? <BrowserTabTitle view={tool.view} /> : toolTitle(tool)}</span>
             {showShortcuts && index < 9 && <kbd aria-hidden="true">{mac ? '⌘' : 'Ctrl+'}{document.dir === 'rtl' ? tabs.length - index : index + 1}</kbd>}
             </button>;
@@ -584,7 +595,9 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
             <SourcesPanel data={sources} openFile={openSourceFile} openPage={url => openBrowser(undefined, url)} /> : tool.kind === 'changes' && stream ?
             <TurnChangesPanel key={tool.turnId} turnId={tool.turnId} stream={stream} turns={turns} cwd={cwd} /> :
             tool.kind === 'goal' ? <GoalTab threadId={tool.threadId} hostId={tool.hostId} /> :
-            tool.kind === 'image-editor' ? <ImageEditorTab tool={tool} visible={visible} select={selectedId => replaceTab(id, { ...tool, selectedId })} /> : newTools}
+            tool.kind === 'image-editor' ? <ImageEditorTab tool={tool} visible={visible} select={selectedId => replaceTab(id, { ...tool, selectedId })} openImage={openImagePreview} /> :
+            tool.kind === 'image-preview' ? <Suspense fallback={null}><GeneratedImageEditor readOnly images={[tool.image]} selectedId={tool.image.id}
+              hostId={tool.hostId} visible={visible} onOpenImage={image => openImagePreview(image, tool.hostId)} /></Suspense> : newTools}
         </div>;
       })}
     </aside>}
