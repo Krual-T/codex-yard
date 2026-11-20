@@ -7,11 +7,12 @@ import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { readFile, writeFile, mkdir, mkdtemp, rename, realpath, chmod } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
-import { basename, dirname, extname, join, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { CodexConnection, RpcError } from '../../lib/codex.ts';
 import type { RpcMessage } from '../../lib/codex.ts';
+import { permissionStart, publicPermissions } from '../../lib/permissions.ts';
 import { createAppTools } from '../../lib/app-tools.ts';
 import { computerConfig } from '../../lib/computer.ts';
 import { createHostToolHandler } from '../../lib/host-tools.ts';
@@ -29,6 +30,7 @@ import { configurationRequest, httpFailure } from './http-fetch.ts';
 import type { HttpWireRequest } from './http-fetch.ts';
 import { rendererAssets as assets, startupApplicationFile } from './renderer-assets.ts';
 import { RendererCache } from './renderer-cache.ts';
+import { initialWorkspaceRoute, usesPinnedToolRenderer } from './history-startup.ts';
 import { loadConfigurationSnapshot } from './configuration-snapshot.ts';
 import { discoverSshAliases, loadHostCatalog, publicHost, savedSshHosts } from './hosts.ts';
 import type { HostCatalog } from './hosts.ts';
@@ -50,6 +52,7 @@ import type { ConnectionRequest } from '../browser-reuse/client-protocol.ts';
 import type { ChromeConnection } from '../browser-reuse/chrome-mcp.ts';
 import type { ChromeRequest } from '../browser-reuse/protocol.ts';
 import { adaptVisualizationModule, visualizationSandboxPolicy, webRendererPrefix } from './visualizations.ts';
+import { mcpAppSandboxHtml, mcpAppSandboxPath, mcpAppSandboxPolicy } from './mcp-app-sandbox.ts';
 import { adaptThreadArchiveModule } from './thread-archives.ts';
 import { automationEndpoints, createAutomations } from './automations.ts';
 import { adaptAutomationModule } from './automation-renderer.ts';
@@ -64,20 +67,24 @@ import { adaptNewTabModule } from './new-tab-renderer.ts';
 import { adaptConversationHistory } from './conversation-history-renderer.ts';
 import { adaptStartupModule } from './startup-renderer.ts';
 import { adaptMessageSubmission } from './message-submission-renderer.ts';
-import { startupSidebar } from './startup-sidebar.ts';
+import { sidebarProjectRoots, sidebarThreadProject, startupProjectSelection, startupSidebar } from './startup-sidebar.ts';
+import type { SidebarProjectDetails } from './startup-sidebar.ts';
+import { readProjectAppearance } from './project-appearance.ts';
 import { adaptThreadReadState } from './thread-read-state-renderer.ts';
 import { adaptStateConvergence } from './state-convergence-renderer.ts';
 import { adaptSidebarState } from './sidebar-state-renderer.ts';
 import { adaptSidebarLayout } from './sidebar-layout-renderer.ts';
 import { adaptSidechatThreads } from './sidechat-thread-renderer.ts';
 import { supportsAttachedThreads } from '../../lib/codex-protocol.ts';
+import type { ThreadListResponse } from '../../lib/codex-protocol.ts';
 import { createBrowserNotifications, notificationRoute } from './notifications.ts';
 import { ModelProviders } from './model-providers.ts';
+import { modelSelection } from './model-selection.ts';
 import { ProviderRouting } from './provider-routing.ts';
 import { deepseekCatalog, isDeepseekProvider } from './deepseek-models.ts';
 import { adaptModelProviders } from './model-provider-renderer.ts';
 
-interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; adapterPath?: string; publicOrigin?: string; embeddingOrigins?: string[]; httpFetch?: typeof fetch; notificationFetch?: typeof fetch; notificationIntervalMs?: number; hostCatalog?: HostCatalog; sshConfigPath?: string; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection }
+interface Options { port?: number; socketPath?: string; codexHome?: string; dataDir?: string; workspace?: string; renderer?: string; sourceWorkspace?: boolean; adapterPath?: string; publicOrigin?: string; embeddingOrigins?: string[]; httpFetch?: typeof fetch; notificationFetch?: typeof fetch; notificationIntervalMs?: number; hostCatalog?: HostCatalog; sshConfigPath?: string; sshStream?: typeof createSshProxyStream; remoteFileCommand?: RemoteFileCommand; chromeConnection?: ChromeConnection }
 const mime: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript',
   '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
@@ -85,6 +92,14 @@ const mime: Record<string, string> = {
   '.wasm': 'application/wasm', '.json': 'application/json', '.mp3': 'audio/mpeg',
 };
 const compress = promisify(gzip);
+const defaultAppLocale = 'zh-CN';
+function workspaceLocale(override: unknown) {
+  if (typeof override === 'string') {
+    try { return Intl.getCanonicalLocales(override.trim().replaceAll('_', '-'))[0] ?? defaultAppLocale; }
+    catch { /* Use the same default as locale-info. */ }
+  }
+  return defaultAppLocale;
+}
 function serverVersion(connection: CodexConnection) {
   return connection.server?.userAgent.match(/^[^/]+\/(\S+)/)?.[1] ?? null;
 }
@@ -161,9 +176,11 @@ export async function createNativeWorkbench(options: Options = {}) {
   const metadata = JSON.parse(await readFile(join(renderer, 'renderer.json'), 'utf8'));
   if (metadata.version !== rendererVersion) throw new Error('仓库内的 App 资源版本不匹配，请核对 vendor/codex-app 与当前代码版本');
   const browserHost = await readFile(join(projectRoot, '.local', 'native-host.js'));
-  const browserEntry = await readFile(join(projectRoot, '.local', 'workbench-entry.js'));
-  const [compressedBrowserHost, compressedBrowserEntry] = await Promise.all([
+  const browserEntry = await readFile(join(projectRoot, '.local', options.sourceWorkspace ? 'source-workspace.js' : 'workbench-entry.js'));
+  const sourceStyle = options.sourceWorkspace ? await readFile(join(projectRoot, '.local', 'source-workspace.css')) : null;
+  const [compressedBrowserHost, compressedBrowserEntry, compressedSourceStyle] = await Promise.all([
     compress(browserHost, { level: 6 }), compress(browserEntry, { level: 6 }),
+    sourceStyle ? compress(sourceStyle, { level: 6 }) : null,
   ]);
   const notificationWorker = await readFile(join(projectRoot, '.local', 'notification-worker.js'));
   const sandboxScript = await readFile(join(projectRoot, '.local', 'visualization-sandbox.js'), 'utf8');
@@ -178,17 +195,29 @@ export async function createNativeWorkbench(options: Options = {}) {
   const rendererCache = new RendererCache();
   // Adapt and compress the first modules once, before accepting page loads.
   // Custom test renderers may intentionally contain no application modules.
-  if (!options.renderer) await Promise.all([
+  if (!options.renderer && !options.sourceWorkspace) await Promise.all([
     assets.client, assets.shared, assets.rpc, assets.application, assets.primary,
     assets.locale, assets.applicationStyle, assets.userMessageStyle,
   ].map(url => {
     const path = url.slice(webRendererPrefix.length), file = resolve(renderer, '.' + path);
     return rendererCache.load('web:' + file, () => loadWebResource(file, path, true), true, brotliStartupBundles.has(url));
   }));
-  const html = withVisualFeedback((await readFile(join(renderer, 'index.html'), 'utf8'))
+  const sourceHtml = options.sourceWorkspace ? withVisualFeedback([
+    '<!doctype html><html lang="' + defaultAppLocale + '"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Codex Yard</title>',
+    '<meta name="yard-source-workspace" content="true">',
+    // Start the independent host connection while the browser fetches CSS.
+    '<script src="/native-host.js"></script>',
+    '<style>@layer theme, base, components, utilities;</style>',
+    ...[assets.sharedStyle, assets.applicationStyle, assets.userMessageStyle, '/source-workspace.css']
+      .map(path => '<link rel="stylesheet" href="' + path + '">'),
+    '<script type="module" src="/workbench-entry.js"></script>',
+    '</head><body><div id="root"></div></body></html>',
+  ].join('')) : null;
+  const pinnedHtml = withVisualFeedback((await readFile(join(renderer, 'index.html'), 'utf8'))
     // Both the desktop document policy and our response policy apply to frames.
     .replace('frame-src &#39;self&#39; blob:', 'frame-src &#39;self&#39; blob: http: https:')
-    .replace('./assets/index-acf264e41d60.js', '/workbench-entry.js')
+    .replace('./assets/index-acf264e41d60.js', options.sourceWorkspace ? '/workbench-pinned-entry.js' : '/workbench-entry.js')
     .replaceAll('./assets/', webRendererPrefix + '/assets/')
     .replace('</head>', [assets.application, assets.rpc, assets.primary, assets.locale]
       .map(path => `<link rel="modulepreload" crossorigin href="${path}">`).join('') +
@@ -200,6 +229,8 @@ export async function createNativeWorkbench(options: Options = {}) {
     // that view; the browser entry enables and awaits them before root.render.
     .replaceAll('<link rel="stylesheet"', '<link rel="preload" as="style" data-yard-workspace-style')
     .replace('<script type="module"', '<script src="/native-host.js"></script><script type="module"'));
+  const pinnedToolHtml = options.sourceWorkspace
+    ? pinnedHtml.replace('<head>', '<head><meta name="yard-pinned-tool" content="true">') : pinnedHtml;
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   await chmod(dataDir, 0o700);
   async function load(name: string, fallback: unknown) {
@@ -514,6 +545,13 @@ export async function createNativeWorkbench(options: Options = {}) {
         response.writeHead(200, { 'Content-Type': mime['.html'] }); response.end(sandboxHtml);
         return;
       }
+      if (path === mcpAppSandboxPath) {
+        if (request.method !== 'GET') { response.writeHead(405); response.end(); return; }
+        response.setHeader('Content-Security-Policy', mcpAppSandboxPolicy);
+        response.setHeader('Referrer-Policy', 'no-referrer');
+        response.writeHead(200, { 'Content-Type': mime['.html'] }); response.end(mcpAppSandboxHtml);
+        return;
+      }
       if (path === '/api/notifications') {
         if (request.method !== 'POST' || !allowed(request, true) || !request.headers['content-type']?.startsWith('application/json')) {
           response.writeHead(403); response.end(); return;
@@ -619,6 +657,34 @@ export async function createNativeWorkbench(options: Options = {}) {
           configurationSnapshot: configurationSnapshot ? { capturedAt: configurationSnapshot.capturedAt, bytes: Buffer.byteLength(configurationSnapshot.data) } : null,
           unsupported: [...unsupported], error: control.lastError })); return;
       }
+      if (path === '/source-workspace.css' && sourceStyle) {
+        const useGzip = compressedSourceStyle && acceptsGzip(request.headers['accept-encoding']);
+        response.setHeader('Vary', 'Accept-Encoding');
+        if (useGzip) response.setHeader('Content-Encoding', 'gzip');
+        response.writeHead(200, { 'Content-Type': mime['.css'] });
+        response.end(request.method === 'HEAD' ? undefined : useGzip ? compressedSourceStyle : sourceStyle);
+        return;
+      }
+      if (path === '/workbench-pinned-entry.js' && sourceHtml && (request.method === 'GET' || request.method === 'HEAD')) {
+        const entry = await rendererCache.load('pinned-tool-entry', () => readFile(join(projectRoot, '.local', 'workbench-entry.js')), true);
+        const useGzip = entry.compressed && acceptsGzip(request.headers['accept-encoding']);
+        response.setHeader('Vary', 'Accept-Encoding');
+        if (useGzip) response.setHeader('Content-Encoding', 'gzip');
+        response.writeHead(200, { 'Content-Type': mime['.js'] });
+        response.end(request.method === 'HEAD' ? undefined : useGzip ? entry.compressed : entry.content);
+        return;
+      }
+      if (options.sourceWorkspace && /^\/source-chunks\/(?:(?:output-files|port-forwarding-view)-[a-z0-9]+\.js|terminal-runtime-[a-z0-9]+\.(?:js|css)|project-emojis-[a-f0-9]{12}\.json)$/i.test(path) &&
+          (request.method === 'GET' || request.method === 'HEAD')) {
+        const chunk = join(projectRoot, '.local', path.slice(1));
+        const cached = await rendererCache.load('source:' + chunk, () => readFile(chunk), true);
+        const useGzip = cached.compressed && acceptsGzip(request.headers['accept-encoding']);
+        response.setHeader('Vary', 'Accept-Encoding');
+        if (useGzip) response.setHeader('Content-Encoding', 'gzip');
+        response.writeHead(200, { 'Content-Type': mime[extname(path)]!, 'Cache-Control': 'public, max-age=31536000, immutable' });
+        response.end(request.method === 'HEAD' ? undefined : useGzip ? cached.compressed : cached.content);
+        return;
+      }
       if (path === '/native-host.js' || path === '/workbench-entry.js') {
         const useGzip = acceptsGzip(request.headers['accept-encoding']);
         const content = path === '/native-host.js' ? browserHost : browserEntry;
@@ -635,6 +701,10 @@ export async function createNativeWorkbench(options: Options = {}) {
       }
       // Native route names are extensionless. Preserve the original asset tree.
       if (!extname(path) && !path.startsWith('/api/')) {
+        const route = initialWorkspaceRoute(null, url.search, path);
+        const html = sourceHtml && !usesPinnedToolRenderer(route)
+          ? sourceHtml.replace('<html lang="' + defaultAppLocale + '">', '<html lang="' + workspaceLocale(settings.localeOverride) + '">')
+          : pinnedToolHtml;
         response.writeHead(200, { 'Content-Type': mime['.html'] });
         response.end(path === '/' ? html : html.replace('<head>', '<head><meta name="initial-route" content="' + path.replaceAll('"', '&quot;').replaceAll('<', '&lt;') + '">'));
         return;
@@ -854,6 +924,23 @@ export async function createNativeWorkbench(options: Options = {}) {
       if (method === 'thread/delete') {
         await guardPrewarmDelete(hostId, String(params.threadId), connection);
       }
+      if (options.sourceWorkspace && (method === 'thread/start' || method === 'thread/settings/update') &&
+          typeof params.yardPermissionChoice === 'string') {
+        const starting = method === 'thread/start';
+        const current = starting ? null : await connection.request('thread/resume', { threadId: params.threadId, excludeTurns: true });
+        const cwd = current?.thread.cwd ?? params.cwd;
+        if (typeof cwd !== 'string') throw new Error('No workspace is selected.');
+        const model = current?.model ?? (typeof params.model === 'string' ? params.model : undefined);
+        const choices = await connection.permissionCatalog(cwd, {
+          model: modelSelection(model)?.model ?? model ?? undefined,
+          projectless: starting && !params.projectId,
+          current: { approvalsReviewer: current?.approvalsReviewer },
+        });
+        const selected = choices.find(choice => choice.id === params.yardPermissionChoice && choice.allowed);
+        if (!selected) throw new Error('This permission is no longer available. Reopen the menu to refresh it.');
+        Object.assign(params, starting ? permissionStart(selected) : selected.native);
+        delete params.yardPermissionChoice;
+      }
       if (hostId === 'local' && (method === 'thread/start' || method === 'thread/fork')) {
         params.config = { ...record(params.config), ...hostTools.config };
         requestParams = params;
@@ -934,6 +1021,15 @@ export async function createNativeWorkbench(options: Options = {}) {
         if (typeof params.url !== 'string') throw new Error('需要开发预览网址');
         return developmentPreviews.open(params.url, hostId);
       }
+      case 'source-workspace-permissions': {
+        if (!options.sourceWorkspace) throw new Error('The source workspace is disabled.');
+        const connection = await connectedFor(client, connections, hostId);
+        const model = typeof params.model === 'string' ? modelSelection(params.model)?.model ?? params.model : undefined;
+        return publicPermissions(await connection.permissionCatalog(typeof params.cwd === 'string' ? params.cwd : workspace, {
+          model, projectless: params.projectless === true,
+          current: params.automaticReview === true ? { approvalsReviewer: 'auto_review' } : undefined,
+        }));
+      }
       case 'model-providers': {
         const connection = await connectedFor(client, connections, hostId);
         if (params.operation === 'set-enabled') {
@@ -945,11 +1041,102 @@ export async function createNativeWorkbench(options: Options = {}) {
         return modelProviders.snapshot(hostId, connection);
       }
       case 'startup-sidebar': {
-        const result = prewarmedThreads.filterList('local', await control.request('thread/list', { limit: 50, sortKey: 'recency_at',
-          archived: false, modelProviders: null, sourceKinds: [], useStateDbOnly: true }));
-        await sidebar.observeThreadList('local', result);
-        return startupSidebar(result.data as unknown as ObjectValue[], globals, result.readStates ?? {},
-          typeof settings.localeOverride === 'string' ? settings.localeOverride : 'zh-CN');
+        if (hostId !== 'local' && !options.sourceWorkspace) throw new Error('The source workspace is disabled.');
+        const searchTerm = options.sourceWorkspace && typeof params.searchTerm === 'string' ? params.searchTerm.trim().slice(0, 240) : '';
+        const cursor = options.sourceWorkspace && !searchTerm && typeof params.cursor === 'string' ? params.cursor : undefined;
+        const connection = hostId === 'local' ? control : await connectedFor(client, connections, hostId);
+        const result = prewarmedThreads.filterList(hostId, await connection.request('thread/list', { limit: 50, sortKey: 'recency_at',
+          archived: false, modelProviders: null, sourceKinds: [], useStateDbOnly: true,
+          ...(searchTerm ? { searchTerm } : {}), ...(cursor === undefined ? {} : { cursor }) }));
+        if (!searchTerm) await sidebar.observeThreadList(hostId, result);
+        const pins = hostId === 'local' ? undefined : (await sidebar.pins.list({ hostId })).threadIds;
+        const snapshot = startupSidebar(result.data as unknown as ObjectValue[], globals, result.readStates ?? {}, hostId, pins, workspaceLocale(settings.localeOverride));
+        if (options.sourceWorkspace && !searchTerm) {
+          snapshot.nextCursor = result.nextCursor;
+          if (hostId === 'local' && cursor === undefined) snapshot.selectedProject = startupProjectSelection(globals['selected-project']);
+        }
+        return snapshot;
+      }
+      case 'source-workspace-hosts': {
+        if (!options.sourceWorkspace) throw new Error('The source workspace is disabled.');
+        return remoteProfiles().map(({ hostId, displayName, autoConnect }) => ({ hostId, displayName, autoConnect }));
+      }
+      case 'source-sidebar-project': {
+        if (!options.sourceWorkspace || typeof params.projectId !== 'string') throw new Error('Invalid workspace project.');
+        const connection = hostId === 'local' ? control : await connectedFor(client, connections, hostId);
+        await sidebar.ensureHost(hostId);
+        const project = sidebarProjectRoots(globals, hostId).find(project => project.id === params.projectId);
+        if (!project) throw new Error('The project is no longer available.');
+        if (params.operation === 'pin' && typeof params.pinned === 'boolean') {
+          await sidebar.setProjectPinned(hostId, project.id, params.pinned);
+          return { success: true };
+        }
+        if (params.operation === 'appearance') {
+          const appearance = readProjectAppearance(params.appearance);
+          if (params.appearance !== null && !appearance) throw new Error('Invalid project marker.');
+          await sidebar.setProjectAppearance(hostId, project.id, appearance);
+          return { success: true };
+        }
+        if (params.operation === 'folders') return { roots: project.paths };
+        if (params.operation === 'edit') {
+          const name = typeof params.name === 'string' ? params.name.trim() : '';
+          if (!name || name.length > 240) throw new Error('Enter a valid project name.');
+          let roots: string[] | undefined;
+          if (params.roots !== undefined) {
+            if (!Array.isArray(params.roots) || !params.roots.length || params.roots.length > 16 ||
+                !params.roots.every((root): root is string => typeof root === 'string' && !root.includes('\0') && isAbsolute(root))) {
+              throw new Error('Select one or more project folders.');
+            }
+            roots = [...new Set(params.roots)];
+            await Promise.all(roots.filter(path => !project.paths.includes(path)).map(async path => {
+              const metadata = record(await files.fetch('workspace-files', { hostId, path, operation: 'getMetadata' }));
+              if (metadata.kind !== 'directory') throw new Error('A source folder is unavailable: ' + path);
+            }));
+          }
+          await sidebar.editProject(hostId, project.id, { name, roots });
+          return { success: true };
+        }
+        if (params.operation === 'remove') {
+          await sidebar.editProject(hostId, project.id, null);
+          const selection = startupProjectSelection(globals['selected-project']);
+          if (hostId === 'local' && selection?.type === 'local' && selection.projectId === project.id) {
+            globals['selected-project'] = null;
+            await persist();
+            broadcast({ type: 'global-state-updated', keys: ['selected-project'] });
+          }
+          return { success: true };
+        }
+        if (params.operation !== 'read' && params.operation !== 'archive-targets') throw new Error('Invalid project operation.');
+        const canonical = sidebar.resolveProjectId(hostId, project.id);
+        const projectFor = sidebarThreadProject(globals, hostId);
+        const visible = new Map<string, boolean>();
+        // A project can display both explicitly assigned conversations and
+        // older unassigned conversations that were opened in its folder.
+        const scopes = [...(canonical ? [{ projectId: canonical }] : []), ...(project.paths.length ? [{ cwd: project.paths }] : [])];
+        const more = await Promise.all(scopes.map(async filter => {
+          const cursors = new Set<string>();
+          let cursor: string | null = null;
+          do {
+            const page: ThreadListResponse = prewarmedThreads.filterList(hostId, await connection.request('thread/list', {
+              limit: 100, cursor, useStateDbOnly: true, archived: false, sourceKinds: [], ...filter,
+            }));
+            for (const thread of page.data) {
+              const row = record(thread);
+              if (!thread.id || thread.ephemeral || row.threadSource === 'ambient_suggestions' || projectFor(row) !== project.id) continue;
+              visible.set(thread.id, thread.status?.type === 'active');
+            }
+            cursor = page.nextCursor;
+            if (cursor == null || cursors.has(cursor)) break;
+            cursors.add(cursor);
+          } while (cursors.size < 5);
+          return cursor != null;
+        }));
+        const partial = !canonical || more.some(Boolean);
+        if (params.operation === 'archive-targets') {
+          if (partial) throw new Error('The complete project chat list is unavailable. Archive individual chats instead.');
+          return [...visible.keys()].sort();
+        }
+        return { roots: project.paths, count: visible.size, active: [...visible.values()].filter(Boolean).length, partial } satisfies SidebarProjectDetails;
       }
       case 'sidebar-refresh': {
         const ids = sidebarHostIds();
@@ -1129,7 +1316,7 @@ export async function createNativeWorkbench(options: Options = {}) {
         return { success: true };
       }
       case 'os-info': return { platform: 'linux', osVersion: 'Web', osRelease: 'Web', isSystemBackdropSupported: false, isVsCodeRunningInsideWsl: false, isCodexRunningInsideWsl: false };
-      case 'locale-info': return { ideLocale: 'zh-CN', systemLocale: 'zh-CN' };
+      case 'locale-info': return { ideLocale: defaultAppLocale, systemLocale: defaultAppLocale };
       case 'codex-home':
       case 'home-directory': {
         if (hostId !== 'local') await connectedFor(client, connections, hostId);
@@ -1200,7 +1387,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (!daemon.socketPath) throw new Error('Codex CLI did not return a daemon socket. Check the supported CLI versions in README.md.');
     socketPath = daemon.socketPath;
   }
-  const app = await createNativeWorkbench({ socketPath });
+  const app = await createNativeWorkbench({ socketPath, sourceWorkspace: process.env.AGENTS_SOURCE_WORKSPACE === '1' });
   console.log(JSON.stringify({ url: app.url, rendererVersion, mode: 'Codex CLI daemon' }));
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => { void app.close().then(() => process.exit(0)); });
 }

@@ -16,6 +16,8 @@ import { agentItem, createFakeCodex, fixtureThread, fixtureTurn } from '../test/
 import type { Page as RpcPage, TurnSummary } from '../lib/codex-protocol.ts';
 
 const root = await mkdtemp('/tmp/yard-embedded-');
+const sourceWorkspace = process.argv.includes('--source');
+const compactProbe = process.argv.includes('--compact');
 const output = resolve(process.env.AGENTS_EMBEDDED_EVIDENCE ?? '.local/embedded-browser');
 await mkdir(output, { recursive: true });
 const fake = process.env.AGENTS_EMBEDDED_TEST_SOCKET ? undefined : await createFakeCodex(root);
@@ -45,7 +47,9 @@ if (fake) {
     })),
   }));
 }
+const webRequests: string[] = [];
 const website = createServer((request, response) => {
+  webRequests.push(request.url ?? '');
   response.setHeader('Content-Type', 'text/html; charset=utf-8');
   response.setHeader('Cache-Control', 'no-store');
   if (request.url === '/assets/script.js') {
@@ -73,7 +77,7 @@ if (fake) fake.threads.set(threadId, fixtureThread(threadId, root, { name: '内�
 ])] }));
 const dataDir = join(root, 'data');
 if (process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT) await cp(process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT, join(dataDir, 'configuration-snapshot'), { recursive: true });
-const createApp = () => createNativeWorkbench({ port: tailscale ? appPort : 0, publicOrigin: tailscale ? `https://${dnsName}:${appPort}` : '', workspace: root, dataDir,
+const createApp = () => createNativeWorkbench({ port: tailscale ? appPort : 0, publicOrigin: tailscale ? `https://${dnsName}:${appPort}` : '', workspace: root, dataDir, sourceWorkspace,
   socketPath: process.env.AGENTS_EMBEDDED_TEST_SOCKET ?? fake!.socketPath,
   codexHome: process.env.AGENTS_EMBEDDED_TEST_CODEX_HOME ?? join(root, 'codex'),
   hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
@@ -108,7 +112,8 @@ await seed.goto((deniedLease?.origin ?? site) + '/seed'); await seed.close();
 const page = await context.newPage();
 page.setDefaultTimeout(15000);
 const errors: string[] = [], checks: string[] = [], commands: string[] = [];
-const report: Record<string, unknown> = { renderer: '26.1013.40934', cli: app.control.server?.userAgent, realDaemonUsed: !fake, tailscale, serviceHost: process.platform, errors, checks };
+const report: Record<string, unknown> = { renderer: sourceWorkspace ? 'source' : '26.1013.40934', cli: app.control.server?.userAgent, realDaemonUsed: !fake, tailscale, serviceHost: process.platform, errors, checks };
+webRequests.length = 0;
 const consoleMessages: string[] = [];
 page.on('console', message => { if (message.type() === 'error') consoleMessages.push(message.text()); });
 await page.addInitScript(() => {
@@ -128,8 +133,11 @@ async function capture(name: string) {
   await writeFile(join(output, name + '.txt'), await page.locator('body').ariaSnapshot());
 }
 async function navigate(url: string) {
-  const address = page.getByRole('textbox', { name: /^(搜索或输入网址|Search or enter URL)$/ });
+  const address = page.getByRole('textbox', { name: /^(搜索或输入网址|Search or enter (?:a )?URL)$/ });
   await address.fill(url); await address.press('Enter');
+}
+async function activate(button: ReturnType<Page['getByRole']>) {
+  if (sourceWorkspace) await button.click(); else await button.tap();
 }
 try {
   if (process.env.AGENTS_TEST_MASKED_APP) { assert.deepEqual(await readdir(process.env.AGENTS_TEST_MASKED_APP), []); report.desktopInstallationUnavailable = true; }
@@ -145,35 +153,43 @@ try {
     await frame().getByText('API已加载', { exact: true }).waitFor();
     await frame().getByText('WebSocket已连接', { exact: true }).waitFor();
     assert.equal(await frame().locator('#fixture-style').evaluate(element => getComputedStyle(element).color), 'rgb(12, 34, 56)');
-    assert.equal((await page.getByRole('textbox', { name: /^(搜索或输入网址|Search or enter URL)$/ }).inputValue()).replace(/^http:\/\//, ''), (site + '/one').replace(/^http:\/\//, ''));
+    assert.equal((await page.getByRole('textbox', { name: /^(搜索或输入网址|Search or enter (?:a )?URL)$/ }).inputValue()).replace(/^http:\/\//, ''), (site + '/one').replace(/^http:\/\//, ''));
     if (tailscale) assert.equal(new URL((await page.locator('iframe[title="网页内容"]:visible').getAttribute('src'))!).protocol, 'https:');
     checks.push('A loopback link retains its source address and loads root-based CSS, scripts, API and WebSocket through its resolved origin');
     const chat = await editor.boundingBox(), web = await page.locator('iframe[title="网页内容"]:visible').boundingBox();
     assert.ok(chat && web && web.x >= chat.x + chat.width, 'A blue link must reveal the right panel alongside the chat even from full view');
     checks.push('A link from the initial full chat view reveals the website to the right of the still-visible composer');
   }
-  const full = page.getByRole('button', { name: /^(退出完整视图|Exit full view)$/ });
+  const requestsAfterInitialLink = webRequests.length;
+  const full = page.getByRole('button', { name: /^(退出完整视图|Exit full (?:view|screen))$/ });
   if (await full.count()) await full.click();
   await page.getByRole('button', { name: /^(隐藏侧边栏|Hide sidebar)$/ }).click();
   const newTab = page.getByRole('button', { name: /^(新(?:建)?标签页|New tab)$/ }).first();
-  if (!await page.getByRole('searchbox', { name: '搜索文件或输入网址', exact: true }).count()) await newTab.click();
-  const navigation = page.getByRole('group', { name: /^(导航|Navigation)$/ });
-  const address = page.getByRole('textbox', { name: /^(搜索或输入网址|Search or enter URL)$/ });
+  const search = page.getByRole('searchbox', { name: '搜索文件或输入网址', exact: true });
+  if (!await search.count()) {
+    const toggle = page.getByRole('button', { name: sourceWorkspace ? 'Open right sidebar' : 'Toggle side panel', exact: true });
+    if (await toggle.count() && !await newTab.isVisible()) await toggle.click();
+    if (!await search.count()) await newTab.click();
+  }
+  const navigation = sourceWorkspace ? page.getByRole('group', { name: 'Navigation', exact: true }) : page.getByRole('tabpanel').filter({ has: page.getByRole('button', { name: /^(返回|Back)$/ }) });
+  const address = page.getByRole('textbox', { name: /^(搜索或输入网址|Search or enter (?:a )?URL)$/ });
   assert.equal(await address.count(), 0);
   assert.equal(await navigation.count(), 0);
+  assert.equal(webRequests.length, requestsAfterInitialLink, 'Opening the tool picker does not fetch another site.');
   await capture('00-new-tab');
-  if (hasFixtureLink) await page.getByRole('link', { name: '右栏链接', exact: true }).click();
-  else {
-    await page.getByRole('searchbox', { name: '搜索文件或输入网址', exact: true }).fill(site + '/one');
-    await page.getByRole('searchbox', { name: '搜索文件或输入网址', exact: true }).press('Enter');
+  if (sourceWorkspace) {
+    await search.fill(site.replace('://', '://example:password@') + '/one'); await search.press('Enter');
+    await page.getByRole('alert').filter({ hasText: '暂时无法打开网页' }).waitFor();
+    assert.equal(webRequests.length, requestsAfterInitialLink, 'A URL containing credentials must not reach the site.');
   }
+  await search.fill(site + '/one'); await search.press('Enter');
   await frame().getByRole('heading', { name: '客户端直接渲染' }).waitFor();
-  assert.ok(await frame().getByText('本地会话：已保留', { exact: true }).isVisible());
+  if (!sourceWorkspace) assert.ok(await frame().getByText('本地会话：已保留', { exact: true }).isVisible());
   assert.equal(context.pages().length, 1);
   assert.equal(await page.getByLabel('浏览器所在电脑').count(), 0);
   assert.equal(await page.getByRole('button', { name: '连接 Chrome', exact: true }).count(), 0);
   assert.equal(await page.locator('summary').filter({ hasText: '页面帮助' }).count(), 0);
-  assert.ok(await address.isVisible());
+  await address.waitFor();
   assert.equal(await page.getByRole('searchbox', { name: '搜索文件或输入网址', exact: true }).count(), 0);
   const pageBounds = await page.getByRole('region', { name: '浏览器页面', exact: true }).boundingBox();
   const frameBounds = await page.locator('iframe[title="网页内容"]:visible').boundingBox();
@@ -188,10 +204,44 @@ try {
     assert.equal(context.pages().length, 1);
     checks.push('An actual blue conversation link opens in the right panel; Control-click still opens an external browser tab');
   }
+  checks.push('The New tab search opens a real client-rendered page inside Yard without pairing or an external tab');
+  if (compactProbe) {
+    const enterFull = page.getByRole('button', { name: 'Enter full screen', exact: true });
+    const wasDocked = await enterFull.isVisible();
+    const originalEditor = sourceWorkspace ? await editor.elementHandle() : undefined;
+    if (wasDocked) await enterFull.click();
+    await editor.waitFor({ timeout: 8_000 }).catch(async error => { await capture('compact-unavailable'); throw error; });
+    assert.equal(await editor.textContent(), '网页切换后保留的草稿');
+    if (originalEditor) assert.equal(await editor.evaluate((node, before) => node === before, originalEditor), true);
+    await capture('compact-composer');
+    await writeFile(join(output, 'compact-composer.html'), await editor.evaluate(element =>
+      element.closest('[data-codex-composer-root]')?.outerHTML ?? ''));
+    if (sourceWorkspace) {
+      const viewport = page.viewportSize()!;
+      for (const width of [1280, 800, 390, 320]) {
+        await page.setViewportSize({ ...viewport, width });
+        for (const control of [editor, full, page.getByRole('button', { name: 'Show sidebar', exact: true }),
+          page.getByRole('tab', { name: '127.0.0.1', exact: true, selected: true }), page.getByRole('button', { name: 'Add files and more', exact: true })]) {
+          assert.ok(await control.evaluate(element => {
+            const { x, y, width, height } = element.getBoundingClientRect();
+            return !!width && !!height && element.contains(document.elementFromPoint(x + width / 2, y + height / 2));
+          }), (await control.getAttribute('aria-label') ?? await control.textContent()) + ' must be reachable at ' + width + 'px');
+        }
+        await capture('compact-composer-' + width);
+      }
+      await page.setViewportSize(viewport);
+    }
+    await editor.fill('网页切换后保留的草稿，继续输入');
+    if (wasDocked) await full.click();
+    assert.equal(await editor.textContent(), '网页切换后保留的草稿，继续输入');
+    await editor.fill('网页切换后保留的草稿');
+    checks.push('The full browser panel has a working composer with the same draft as the docked view');
+  }
   await frame().getByRole('textbox', { name: '页面输入' }).fill('中文原生输入 123');
-  await frame().getByRole('button', { name: '确认输入', exact: true }).tap();
+  await activate(frame().getByRole('button', { name: '确认输入', exact: true }));
+  await frame().locator('output').filter({ hasText: '中文原生输入 123' }).waitFor();
   assert.equal(await frame().locator('output').innerText(), '中文原生输入 123');
-  await frame().getByRole('button', { name: '替换主页面', exact: true }).tap();
+  await activate(frame().getByRole('button', { name: '替换主页面', exact: true }));
   assert.ok(page.url().startsWith(appUrl));
   await capture('01-client-page');
   const body = frame().locator('body');
@@ -204,27 +254,26 @@ try {
     }; check();
   }));
   assert.ok(await body.evaluate(element => element.ownerDocument.defaultView!.scrollY > 100), 'The embedded page must scroll');
-  checks.push('Chinese input, touch buttons and native document scrolling work while top navigation remains inside the frame');
+  checks.push('Chinese input, page buttons and native document scrolling work while top navigation remains inside the frame');
   await navigate(site + '/two');
   await frame().getByRole('heading', { name: '客户端直接渲染' }).waitFor();
   await navigation.getByRole('button', { name: /^(返回|Back)$/ }).click();
   await page.locator('iframe[title="网页内容"]:visible').evaluate((element, url) => { if ((element as HTMLIFrameElement).src !== url) throw new Error('Back did not restore the first submitted URL'); }, (tailscale ? new URL((await page.locator('iframe[title="网页内容"]:visible').getAttribute('src'))!).origin : site) + '/one');
-  await navigation.getByRole('button', { name: /^(前进|Forward)$/ }).click();
+  await navigation.getByRole('button', { name: /^(前进|Forward|Next)$/ }).click();
   await frame().getByRole('textbox', { name: '页面输入' }).fill('刷新前');
   await navigation.getByRole('button', { name: /^(重新加载页面|Reload page)$/ }).click();
   await frame().getByRole('textbox', { name: '页面输入' }).waitFor();
   assert.equal(await frame().getByRole('textbox', { name: '页面输入' }).inputValue(), '');
   await frame().getByRole('textbox', { name: '页面输入' }).fill('表单中文');
-  await frame().getByRole('button', { name: '提交表单', exact: true }).tap();
+  await activate(frame().getByRole('button', { name: '提交表单', exact: true }));
   await frame().getByRole('heading', { name: '表单已提交' }).waitFor();
   assert.ok(page.url().startsWith(appUrl));
   checks.push('The original address controls navigate submitted URLs and reload the frame; forms navigate within the right panel');
-  const firstPageTab = await page.getByRole('tab', { name: '127.0.0.1', exact: true }).getAttribute('id');
+  const firstPageTab = await page.getByRole('tab', { name: '127.0.0.1', exact: true, selected: true }).getAttribute('id');
   assert.ok(firstPageTab);
   await newTab.click();
   assert.equal(await address.count(), 0);
   assert.equal(await navigation.count(), 0);
-  const search = page.getByRole('searchbox', { name: '搜索文件或输入网址', exact: true });
   await search.waitFor({ timeout: 60000 });
   assert.equal(await address.count(), 0);
   assert.equal(await navigation.count(), 0);
@@ -235,20 +284,39 @@ try {
   await frame().getByRole('heading', { name: '表单已提交' }).waitFor();
   assert.ok(await address.isVisible());
   checks.push('A second New tab opens separately and switching back preserves the first document');
-  for (const viewport of [{ width: 800, height: 1100 }, { width: 1280, height: 800 }]) {
+  if (sourceWorkspace) {
+    const tab = page.locator('[id="' + firstPageTab + '"]');
+    await tab.press('ArrowRight');
+    await frame().getByRole('heading', { name: '客户端直接渲染' }).waitFor();
+    await page.keyboard.press('ArrowLeft');
+    await frame().getByRole('heading', { name: '表单已提交' }).waitFor();
+    await page.getByRole('button', { name: 'Enter full screen', exact: true }).click();
+    await frame().getByRole('heading', { name: '表单已提交' }).waitFor();
+    await full.click();
+    await page.getByRole('button', { name: 'Close right sidebar', exact: true }).click();
+    assert.ok((await editor.innerText()).includes('网页切换后保留的草稿'));
+    await page.getByRole('button', { name: 'Open right sidebar', exact: true }).click();
+    await frame().getByRole('heading', { name: '表单已提交' }).waitFor();
+    checks.push('Keyboard tab switching, expanding, and hiding the panel preserve both documents and the parent draft');
+  }
+  const viewports = [{ width: 800, height: 1100 }, { width: 1280, height: 800 }];
+  if (sourceWorkspace) viewports.splice(1, 0, { width: 390, height: 844 });
+  for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     assert.ok(await page.locator('iframe[title="网页内容"]:visible').isVisible());
     assert.ok(await address.isVisible());
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await capture('02-tablet-' + viewport.width);
   }
-  await page.reload({ waitUntil: 'commit' });
-  await frame().getByRole('heading', { name: '客户端直接渲染' }).waitFor({ timeout: 60000 });
-  const hideSidebar = page.getByRole('button', { name: /^(隐藏侧边栏|Hide sidebar)$/ });
-  if (await hideSidebar.count()) await hideSidebar.click();
-  assert.ok((await editor.innerText()).includes('网页切换后保留的草稿'));
-  assert.deepEqual(commands, []);
-  checks.push('Portrait, landscape and refresh retain the submitted page and chat draft without Chrome host requests');
+  if (!sourceWorkspace) {
+    await page.reload({ waitUntil: 'commit' });
+    await frame().getByRole('heading', { name: '客户端直接渲染' }).waitFor({ timeout: 60000 });
+    const hideSidebar = page.getByRole('button', { name: /^(隐藏侧边栏|Hide sidebar)$/ });
+    if (await hideSidebar.count()) await hideSidebar.click();
+    assert.ok((await editor.innerText()).includes('网页切换后保留的草稿'));
+    assert.deepEqual(commands, []);
+    checks.push('Portrait, landscape and refresh retain the submitted page and chat draft without Chrome host requests');
+  }
   const denied = page.waitForEvent('console', message => /frame-ancestors|X-Frame-Options/.test(message.text()));
   await navigate((deniedLease?.origin ?? site) + '/blocked'); await denied;
   assert.equal(await frame().getByRole('heading', { name: '此页面禁止嵌入' }).count(), 0);

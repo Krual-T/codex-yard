@@ -1,8 +1,10 @@
 import { build } from 'esbuild';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
+import { readPinnedProjectEmojis, readPinnedWorkspaceIcons } from './build-workspace-icons.ts';
 await build({
   absWorkingDir: fileURLToPath(new URL('..', import.meta.url)),
   entryPoints: ['src/native/visualization-sandbox.ts'], outfile: '.local/visualization-sandbox.js',
@@ -45,6 +47,34 @@ await build({
   bundle: true, format: 'esm', target: ['safari17', 'chrome120'], sourcemap: true,
   minify: true, define: { 'process.env.NODE_ENV': '"production"' },
   logLevel: 'info',
+});
+const workspaceChunks = await build({
+  absWorkingDir: project, entryPoints: {
+    'output-files': 'src/workspace/output-files.ts',
+    'terminal-runtime': 'src/workspace/terminal-runtime.ts',
+    'port-forwarding-view': 'src/native/port-forwarding-view.tsx',
+  }, outdir: '.local/source-chunks',
+  entryNames: '[name]-[hash]', metafile: true, bundle: true, format: 'esm', target: ['safari17', 'chrome120'],
+  minify: true, logLevel: 'info',
+});
+function workspaceEntry(filename: string) {
+  const [path, info] = Object.entries(workspaceChunks.metafile.outputs)
+    .find(([, info]) => info.entryPoint === filename)!;
+  return { js: path.slice('.local'.length), css: info.cssBundle?.slice('.local'.length) };
+}
+const terminalEntry = workspaceEntry('src/workspace/terminal-runtime.ts');
+const projectEmojis = JSON.stringify(await readPinnedProjectEmojis());
+const projectEmojiUrl = '/source-chunks/project-emojis-' + createHash('sha256').update(projectEmojis).digest('hex').slice(0, 12) + '.json';
+await writeFile(join(project, '.local', projectEmojiUrl), projectEmojis);
+await build({
+  absWorkingDir: project, entryPoints: ['src/workspace/entry.tsx'], outfile: '.local/source-workspace.js',
+  bundle: true, format: 'esm', target: ['safari17', 'chrome120'], minify: true, logLevel: 'info',
+  external: ['/source-chunks/*'],
+  define: { 'process.env.NODE_ENV': '"production"', __yardOutputParserUrl: JSON.stringify(workspaceEntry('src/workspace/output-files.ts').js),
+    __yardTerminalUrl: JSON.stringify(terminalEntry.js), __yardTerminalCss: JSON.stringify(terminalEntry.css),
+    __yardPortForwardingUrl: JSON.stringify(workspaceEntry('src/native/port-forwarding-view.tsx').js),
+    __yardProjectEmojiUrl: JSON.stringify(projectEmojiUrl),
+    __yardWorkspaceIcons: JSON.stringify(await readPinnedWorkspaceIcons()) },
 });
 execFileSync(process.execPath, ['--max-old-space-size=1400', 'scripts/build-startup-application.ts'], {
   cwd: project, stdio: 'inherit',

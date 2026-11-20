@@ -1,0 +1,167 @@
+.yard-source-sources-summary { margin: 6px 8px 0; padding-block-start: 9px; }
+.yard-source-sources-summary > header { display: flex; align-items: center; justify-content: space-between; padding-inline: 12px 4px; color: var(--color-text-tertiary); font-size: 13px; }
+.yard-source-sources-summary .yard-source-output-add:hover { background: var(--color-background-primary-ghost-hover); }
+.yard-source-sources-list { margin: 0; padding: 0; }
+.yard-source-sources-list > li, .yard-source-sources-view, .yard-source-sources-file {
+  display: flex; align-items: center; gap: 8px; min-height: 30px; min-width: 0; padding: 3px 12px;
+  border-radius: 8px; text-align: start; font-size: 13px;
+}
+.yard-source-sources-list > li:has(> button) { padding: 0; }
+.yard-source-sources-list :is(svg, .yard-source-sources-file > svg) { flex: none; color: var(--color-text-tertiary); }
+.yard-source-sources-view, .yard-source-sources-file { width: 100%; }
+.yard-source-sources-file span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.yard-source-sources-view { color: var(--color-text-secondary); }
+.yard-source-sources-view:hover, .yard-source-sources-file:hover { background: var(--color-background-primary-ghost-hover); }
+
+.yard-source-sources-menu {
+  position: fixed; inset: auto; width: 180px; max-width: calc(100% - 16px); margin: 0; padding: 4px;
+  border: 1px solid var(--color-border); border-radius: 12px; color: var(--color-text-primary);
+  background: var(--color-surface-elevated-secondary); box-shadow: 0 4px 16px var(--alpha-12);
+}
+.yard-source-sources-menu :is(button, a) {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 4px 8px;
+  border-radius: 8px; text-align: start; font-size: 13px;
+}
+.yard-source-sources-menu :is(button, a) span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.yard-source-sources-menu :is(button, a) svg { flex: none; }
+.yard-source-sources-menu :is(button, a):is(:hover, :focus-visible, [aria-expanded="true"]) { background: var(--color-background-primary-ghost-hover); }
+.yard-source-sources-plugins { width: 240px; max-height: min(320px, calc(100svh - 16px)); overflow: auto; }
+.yard-source-sources-plugins label { display: flex; align-items: center; gap: 8px; padding-inline: 8px; color: var(--color-text-tertiary); }
+.yard-source-sources-plugins input { width: 100%; min-width: 0; min-height: 30px; color: var(--color-text-primary); background: transparent; font-size: 13px; }
+.yard-source-sources-plugins p { width: 100%; padding: 6px 8px; font-size: 13px; color: var(--color-text-tertiary); }
+.yard-source-sources-plugins p[role="alert"] { color: var(--color-text-danger); }
+.yard-source-sources-plugins a { margin-block-start: 4px; border-block-start: 1px solid var(--color-border); }
+
+.yard-source-sources-panel { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px; font-size: 13px; }
+.yard-source-sources-panel > ul { margin: 0; padding: 0; }
+.yard-source-sources-panel > ul > li + li { margin-block-start: 9px; padding-block-start: 9px; border-block-start: 1px solid var(--color-border); }
+.yard-source-sources-group > div:first-child { display: flex; align-items: center; gap: 10px; min-height: 28px; font-weight: 500; }
+.yard-source-sources-group > div svg, .yard-source-source-link svg { flex: none; }
+.yard-source-sources-group > ul { padding-inline-start: 24px; }
+.yard-source-source-disclosure > button, .yard-source-source-disclosure .yard-source-source-link {
+  display: inline-flex; align-items: center; gap: 4px; min-height: 30px; max-width: 100%; text-align: start; overflow-wrap: anywhere;
+}
+.yard-source-source-disclosure > button:hover, .yard-source-source-disclosure > button:focus-visible { color: var(--color-text-primary); }
+.yard-source-source-disclosure > button svg { color: var(--color-text-tertiary); flex: none; }
+.yard-source-source-disclosure > ul > li { overflow-wrap: anywhere; min-height: 24px; }
+.yard-source-source-disclosure > ul > li:has(.yard-source-mcp-output) + li { margin-block-start: 14px; }
+.yard-source-sources-web .yard-source-source-disclosure { color: var(--color-text-secondary); }
+.yard-source-sources-web .yard-source-source-link { color: var(--color-text-link, var(--color-text-info)); gap: 7px; }
+.yard-source-source-link:hover span { text-decoration: underline; }
+.yard-source-sidechat[data-expanded="true"] .yard-source-sources-panel { padding-block-end: min(215px, 35svh); }
+.yard-source-sidechat-tabbar .yard-source-labeled-tab {
+  display: flex; align-items: center; flex: 0 1 238px; min-width: 100px; width: 238px; height: 32px;
+  padding-inline-end: 4px; border: 1px solid transparent; border-radius: 8px;
+}
+.yard-source-sidechat-tabbar .yard-source-labeled-tab[data-active="true"] { border-color: var(--color-border); }
+.yard-source-sidechat-tabbar .yard-source-tool-tabs .yard-source-labeled-tab button[role="tab"] { flex: 1; min-width: 0; border: 0; }
+.yard-source-labeled-tab button:focus-visible { outline: 2px solid var(--color-ring); outline-offset: -2px; }
+.yard-source-sidechat-tabbar .yard-source-tool-tabs .yard-source-labeled-tab button:not([role="tab"]) {
+  display: grid; place-items: center; width: 24px; min-width: 24px; height: 24px; padding: 0; border: 0;
+}
+@media (hover: hover) {
+  .yard-source-labeled-tab[data-active="false"]:not(:hover, :focus-within) > button:not([role="tab"]) { opacity: 0; }
+}
+
+.yard-source-mcp-output { position: relative; min-width: 0; display: grid; gap: 6px; margin-block: 4px 12px; font-size: 13px; }
+.yard-source-mcp-output :is(p, figure, pre) { margin: 0; }
+.yard-source-mcp-output figure { min-width: 0; border: 1px solid var(--color-border); background: var(--color-background-primary-ghost-hover); }
+.yard-source-mcp-output figcaption { display: flex; align-items: center; gap: 8px; padding-inline-end: 26px; }
+.yard-source-mcp-text { border-radius: 8px; padding: 5px 8px 8px; color: var(--color-text-secondary); }
+.yard-source-mcp-json { border-radius: 16px; padding: 14px 20px; }
+.yard-source-mcp-json [data-json-token="property"] { color: #b8802b; }
+.yard-source-mcp-json [data-json-token="string"] { color: #3a843f; }
+.yard-source-mcp-json [data-json-token="number"] { color: #ac4f23; }
+.yard-source-mcp-json [data-json-token="literal"] { color: #af4078; }
+:root[data-theme="dark"] .yard-source-mcp-json [data-json-token="property"] { color: #f9dc78; }
+:root[data-theme="dark"] .yard-source-mcp-json [data-json-token="string"] { color: #83d197; }
+:root[data-theme="dark"] .yard-source-mcp-json [data-json-token="number"] { color: #f1a275; }
+:root[data-theme="dark"] .yard-source-mcp-json [data-json-token="literal"] { color: #eda5d2; }
+.yard-source-mcp-output pre { overflow: auto; max-height: 320px; white-space: pre-wrap; overflow-wrap: anywhere; padding-block-start: 10px; font: 13px/1.5 var(--font-mono-default), monospace; }
+.yard-source-mcp-output img { max-width: 100%; max-height: 320px; object-fit: contain; }
+.yard-source-mcp-output > [role="alert"] { padding: 6px 28px 6px 0; color: var(--color-text-danger); }
+.yard-source-mcp-progress { display: flex; align-items: center; gap: 6px; padding-inline-end: 26px; color: var(--color-text-tertiary); }
+.yard-source-mcp-raw, .yard-source-mcp-dialog header button {
+  display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--color-text-tertiary);
+}
+.yard-source-mcp-raw { position: absolute; inset: 3px 4px auto auto; opacity: 0; }
+.yard-source-mcp-output:is(:hover, :focus-within) .yard-source-mcp-raw { opacity: 1; }
+.yard-source-mcp-output:not(:has(figure, img)) { min-height: 28px; }
+.yard-source-mcp-output:not(:has(figure, img)) .yard-source-mcp-raw { opacity: 1; }
+.yard-source-mcp-raw:hover, .yard-source-mcp-dialog header button:hover { background: var(--color-background-primary-ghost-hover); color: var(--color-text-primary); }
+@media (hover: none) { .yard-source-mcp-raw { opacity: 1; } }
+.yard-source-mcp-dialog {
+  position: fixed; inset: 0; margin: auto; width: min(520px, 92vw); max-width: none; max-height: calc(100% - 24px); padding: 0;
+  border: 0; border-radius: 25px;
+  background: color-mix(in oklab, var(--color-surface-elevated-secondary) 90%, transparent);
+  backdrop-filter: blur(12px);
+  color: var(--color-text-primary); box-shadow: 0 4px 10px var(--alpha-12);
+}
+.yard-source-mcp-dialog::backdrop { background: rgb(0 0 0 / .15); }
+.yard-source-mcp-dialog > div { padding: 20px; }
+.yard-source-mcp-dialog header { padding-block-end: 12px; }
+.yard-source-mcp-dialog header button { position: absolute; inset-block-start: 16px; inset-inline-end: 16px; }
+.yard-source-mcp-dialog h2 { margin: 0; font-size: 20px; line-height: 28px; font-weight: 600; padding-inline-end: 14px; overflow-wrap: anywhere; }
+.yard-source-mcp-dialog figure { padding: 0; border-radius: 20px; overflow: clip; }
+.yard-source-mcp-dialog figcaption { padding-inline: 20px 12px; min-height: 48px; font-size: 14px; }
+.yard-source-mcp-dialog figcaption span:first-of-type { flex: 1; }
+.yard-source-mcp-dialog pre {
+  max-height: min(512px, calc(100dvh - 160px)); padding: 0 20px 10px;
+  font: 12px/20px var(--font-mono-default), monospace; white-space: pre;
+}
+.yard-source-mcp-dialog pre > code { display: block; }
+.yard-source-mcp-dialog figcaption .yard-source-message-icon { color: var(--color-text-primary); }
+@media (width < 768px) {
+  .yard-source-mcp-dialog :is(figcaption, pre) { padding-inline-start: 16px; }
+  .yard-source-mcp-dialog pre { padding-inline-end: 16px; }
+}
+.yard-source-mcp-app { display: grid; gap: 6px; min-width: 0; }
+.yard-source-mcp-app-heading {
+  display: flex; align-items: center; gap: 6px; min-height: 24px;
+  color: var(--color-text-tertiary); font-size: var(--text-size-chat, 14px);
+}
+.yard-source-mcp-app-heading > svg { flex: none; }
+.yard-source-mcp-app-heading > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.yard-source-mcp-app-heading > button {
+  display: grid; flex: none; place-items: center; width: 24px; height: 24px; border-radius: 6px;
+}
+.yard-source-mcp-app-heading > button:is(:hover, :focus-visible) {
+  background: var(--color-background-primary-ghost-hover); color: var(--color-text-primary);
+}
+.yard-source-mcp-app-card > .yard-source-mcp-raw { inset: auto 4px 4px auto; }
+.yard-source-mcp-app-card:is(:hover, :focus-within) > .yard-source-mcp-raw { opacity: 1; }
+.yard-source-mcp-app-card { position: relative; min-width: 0; border-radius: 8px; overflow: clip; }
+.yard-source-mcp-app-card[data-bordered="true"][data-docked="false"] { border: 1px solid var(--color-border-strong); background: var(--color-surface); }
+.yard-source-mcp-app-card[data-bordered="true"][data-docked="false"] > .yard-source-mcp-app-heading { padding: 12px 16px 0; }
+.yard-source-mcp-app-tab-content, .yard-source-mcp-app-tab-content > .yard-source-mcp-app-host {
+  flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+}
+.yard-source-mcp-app-tab-content .yard-source-mcp-app-surface { flex: 1; min-height: 0; }
+.yard-source-mcp-app-tab-content .yard-source-mcp-app-placeholder { flex: 1; height: auto; }
+.yard-source-mcp-app-tab-content .yard-source-mcp-app-failed { margin: 16px; }
+.yard-source-mcp-app-tab-content .yard-source-mcp-output { margin-inline: 16px; overflow: auto; }
+.yard-source-sidechat[data-tool-kind="mcp-app"] .yard-source-sidechat-tabbar { padding-inline-start: 8px; }
+@media (min-width: 768px) {
+  .yard-source-frame:has(.yard-source-sidechat[data-tool-kind="mcp-app"][data-expanded="true"]:not([hidden]))
+    > .yard-source-titlebar > button:is([aria-label="Back"], [aria-label="Forward"]) { visibility: visible; }
+}
+@container workspace (width < 768px) {
+  .yard-source-sidechat[data-tool-kind="mcp-app"][data-expanded="true"] { inset-block-start: 0; z-index: 29; }
+  .yard-source-right-controls:has(~ .yard-source-sidechat[data-tool-kind="mcp-app"][data-expanded="true"]:not([hidden])) > button:first-child { display: none; }
+  .yard-source-right-controls:has(~ .yard-source-sidechat[data-tool-kind="mcp-app"][data-expanded="true"]:not([hidden])) > button + button { margin-inline-start: 0; }
+  .yard-source-sidechat[data-tool-kind="mcp-app"][data-expanded="true"] .yard-source-sidechat-tabbar {
+    min-height: 46px; padding-inline-end: 80px;
+  }
+  .yard-source-frame[data-app-shell-sidebar-open="false"] .yard-source-sidechat[data-tool-kind="mcp-app"][data-expanded="true"] .yard-source-sidechat-tabbar {
+    padding-inline-start: min(124px, 32cqw);
+  }
+  .yard-source-sidechat[data-tool-kind="mcp-app"][data-expanded="true"] .yard-source-labeled-tab { min-width: 0; }
+  .yard-source-sidechat[data-tool-kind="mcp-app"][data-expanded="true"] .yard-source-tool-expand { margin-inline-start: 0; }
+}
+.yard-source-mcp-app-surface { position: relative; }
+.yard-source-mcp-app-surface > iframe { display: block; width: 100%; height: 100%; border: 0; }
+.yard-source-mcp-app-surface > iframe[data-app-ready="false"] { visibility: hidden; }
+.yard-source-mcp-app-placeholder { height: 176px; }
+.yard-source-mcp-app-surface > .yard-source-mcp-app-placeholder { position: absolute; inset: 0; }
+.yard-source-mcp-app-failed { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: 13px; color: var(--color-text-secondary); }
+.yard-source-mcp-app-failed button { text-decoration: underline; }

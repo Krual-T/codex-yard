@@ -1,0 +1,31 @@
+/* Pinned gallery Mt/wt and schema I: 56px thumbnails, 8px gap, 16px image radius. */
+.yard-source-generated-images { display: flex; align-items: flex-start; gap: 8px; min-width: 0; width: 100%; }
+.yard-source-generated-main { min-width: 0; flex: 1; overflow: hidden; }
+.yard-source-generated-image { display: block; width: 100%; aspect-ratio: var(--yard-generated-ratio); overflow: hidden;
+  border-radius: 16px; background: var(--color-surface); cursor: pointer; }
+.yard-source-generated-image img { display: block; height: 100%; width: 100%; object-fit: contain; background-size: 36px 36px; }
+.yard-source-generated-image:is(:hover, :focus-within) img { background-image: repeating-conic-gradient(
+  var(--color-surface-secondary) 0 25%, var(--color-surface) 0 50%); }
+.yard-source-generated-image:focus-visible,
+.yard-source-generated-thumbnails button:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 0; }
+.yard-source-generated-thumbnails { display: flex; flex: 0 0 64px; flex-direction: column; gap: 8px;
+  padding: 4px; overflow-y: auto; scrollbar-width: none; }
+.yard-source-generated-thumbnails button { flex-shrink: 0; width: 56px; height: 56px; overflow: hidden; border-radius: 8px;
+  border: 1px solid var(--color-border); background: var(--color-surface); cursor: pointer; }
+.yard-source-generated-thumbnails button[aria-pressed="true"] { outline: 2px solid var(--color-ring); }
+.yard-source-generated-thumbnails img { width: 100%; height: 100%; object-fit: cover; }
+.yard-source-generated-pending { width: calc((100% - 24px) / 4); aspect-ratio: 1; }
+.yard-source-generated-images[data-thumbnails] > .yard-source-generated-pending { flex: 1; }
+.yard-source-generated-pending-thumbnail { flex-shrink: 0; width: 56px; height: 56px; border-radius: 8px; overflow: hidden; }
+.yard-source-image-generation-loading { position: relative; width: 100%; height: 100%; overflow: hidden; border-radius: 16px;
+  background: var(--color-primary-soft-active); color: var(--color-text-secondary); }
+.yard-source-generated-pending-thumbnail .yard-source-image-generation-loading { border-radius: 8px; }
+.dark .yard-source-image-generation-loading { background: var(--color-primary-ghost-hover); color: rgb(255 255 255 / .7); }
+.yard-source-image-generation-dots { position: absolute; inset: 0; opacity: .38; overflow: hidden;
+  mask-image: linear-gradient(to top left, transparent 0%, black 30% 70%, transparent 100%);
+  mask-size: 100% 100%; mask-repeat: no-repeat; }
+.yard-source-image-generation-dots canvas { display: block; width: 100%; height: 100%; }
+@keyframes yard-image-generation-opacity { 50% { opacity: .56; } }
+@media (prefers-reduced-motion: no-preference) {
+  :root:not([data-reduced-motion="true"]) .yard-source-image-generation-dots { animation: yard-image-generation-opacity 1.75s ease-in-out infinite; }
+}

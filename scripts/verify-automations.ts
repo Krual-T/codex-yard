@@ -9,6 +9,7 @@ import { createFakeCodex, fixtureThread, fixtureTurn, agentItem, NO_REPLY } from
 
 const root = await mkdtemp('/tmp/yard-schedule-ui-'), dataDir = join(root, 'data');
 const output = resolve(process.env.AGENTS_AUTOMATIONS_EVIDENCE ?? '.local/automations-ui');
+const sourceWorkspace = process.argv.includes('--source-workspace');
 await mkdir(dataDir); await mkdir(output, { recursive: true });
 if (process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT) await cp(process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT, join(dataDir, 'configuration-snapshot'), { recursive: true });
 await writeFile(join(dataDir, 'projects.json'), JSON.stringify([{ name: 'Schedule project', path: root }]));
@@ -27,12 +28,12 @@ fake.threads.set('00000000-0000-4000-8000-000000000001', fixtureThread('00000000
   turns: [fixtureTurn('previous', [agentItem('previous-answer', 'Schedule fixture response')])] }));
 const app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: process.env.AGENTS_TEST_CODEX_SOCKET ?? fake.socketPath,
   codexHome: process.env.AGENTS_TEST_CODEX_HOME ?? join(root, 'codex'), hostCatalog: { hosts: [], projects: [], assignments: {} },
-  httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
+  sourceWorkspace, httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
 const browser = process.env.AGENTS_TEST_BROWSER_WS ? await chromium.connect(process.env.AGENTS_TEST_BROWSER_WS)
   : await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? '/usr/bin/google-chrome', headless: true,
     args: ['--no-sandbox', '--disable-dev-shm-usage'] });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-const errors: string[] = [], report: Record<string, unknown> = { errors, realCli: !!process.env.AGENTS_TEST_CODEX_SOCKET };
+const errors: string[] = [], report: Record<string, unknown> = { errors, realCli: !!process.env.AGENTS_TEST_CODEX_SOCKET, sourceWorkspace };
 const calls: unknown[] = [], requestIds = new Set<string>();
 page.on('websocket', socket => {
   socket.on('framesent', frame => { const message = JSON.parse(String(frame.payload));
@@ -41,7 +42,21 @@ page.on('websocket', socket => {
 });
 page.on('pageerror', error => errors.push(error.message));
 try {
-  await page.goto(app.url + '/?initialRoute=%2Fautomations', { waitUntil: 'commit' });
+  if (sourceWorkspace) {
+    const startingConversation = '00000000-0000-4000-8000-000000000001';
+    const initial = app.url + '/local/' + startingConversation;
+    const editor = page.locator('[data-codex-composer="true"][contenteditable="true"]').first();
+    await page.goto(initial, { waitUntil: 'commit' });
+    await editor.fill('Conversation draft while managing schedules');
+    await page.getByRole('button', { name: 'Search', exact: true }).click();
+    await page.getByRole('combobox').fill('Go to scheduled tasks');
+    await page.getByRole('option', { name: 'Go to scheduled tasks' }).click();
+    await page.getByRole('button', { name: 'Create scheduled task options' }).waitFor({ timeout: 45_000 });
+    await page.goBack();
+    assert.equal(await editor.textContent(), 'Conversation draft while managing schedules');
+    await page.goForward();
+    report.draftPreserved = true;
+  } else await page.goto(app.url + '/?initialRoute=%2Fautomations', { waitUntil: 'commit' });
   await page.getByRole('button', { name: /^(Create|创建)$/ }).first().waitFor({ timeout: 45000 });
   await writeFile(join(output, 'initial.txt'), await page.locator('body').ariaSnapshot());
   await page.getByRole('button', { name: 'Create scheduled task options' }).click();
@@ -53,9 +68,15 @@ try {
   await page.getByRole('menuitem', { name: 'Schedule project' }).click();
   await page.getByRole('button', { name: 'Create', exact: true }).click();
   await page.getByText('Independent review fixture', { exact: true }).first().waitFor({ timeout: 10000 });
-  const saved = await app.automations.fetch('list-automations', {}) as { items: { id: string; name: string; target: { projectId: string } }[] };
+  const saved = await app.automations.fetch('list-automations', {}) as {
+    items: { id: string; name: string; target: { type: string; projectId: string }; hostId: string; cwds: string[] }[];
+  };
   assert.equal(saved.items.length, 1); assert.equal(saved.items[0].name, 'Independent review fixture');
-  assert.equal(saved.items[0].target.projectId, root);
+  const nativeProject = [...fake.projects.values()].find(project => project.name === 'Schedule project');
+  assert.equal(saved.items[0].target.type, 'project');
+  if (nativeProject) assert.equal(saved.items[0].target.projectId, nativeProject.id);
+  assert.equal(saved.items[0].hostId, 'local');
+  assert.deepEqual(saved.items[0].cwds, [root]);
   report.created = saved.items[0];
   await page.getByRole('button', { name: 'Scheduled task actions', exact: true }).last().click();
   await page.getByRole('menuitem', { name: 'Run now', exact: true }).click();
@@ -121,6 +142,7 @@ try {
   await runRows.last().click();
   await page.waitForURL(url => decodeURIComponent(url.href).includes(run!.threadId!), { timeout: 10000 });
   await page.getByText('SCHEDULE_STANDALONE_OK', { exact: true }).first().waitFor({ timeout: 10000 });
+  if (sourceWorkspace) await page.locator('.yard-source-frame').waitFor();
   report.chatUrl = page.url();
   assert.deepEqual(errors, []);
   report.ok = true;

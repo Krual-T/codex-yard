@@ -11,8 +11,15 @@ import type { Page } from 'playwright-core';
 import { agentItem, createFakeCodex, fixtureThread, fixtureTurn } from '../test/fake-codex.ts';
 
 const source = resolve(process.env.AGENTS_STARTUP_SOURCE ?? '.');
+const sourceCandidate = process.argv.includes('--source-candidate');
+const directHistory = process.argv.includes('--source-direct-history');
+assert.ok(!directHistory || sourceCandidate, 'Direct-history mode measures only the source workspace.');
+const requireFullUnderOneSecond = process.argv.includes('--require-full-under-1s');
+assert.ok(!sourceCandidate || (!requireFullUnderOneSecond && !process.argv.includes('--check-handoff')),
+  'The source candidate benchmark does not certify the unchanged production renderer or handoff.');
 const { createNativeWorkbench } = await import(pathToFileURL(join(source, 'src/native/server.ts')).href) as typeof import('../src/native/server.ts');
-const output = resolve(process.env.AGENTS_STARTUP_EVIDENCE ?? '.local/sidebar-startup');
+const { rendererAssets } = await import(pathToFileURL(join(source, 'src/native/renderer-assets.ts')).href) as typeof import('../src/native/renderer-assets.ts');
+const output = resolve(process.env.AGENTS_STARTUP_EVIDENCE ?? (sourceCandidate ? '.local/source-startup' : '.local/sidebar-startup'));
 const root = await mkdtemp('/tmp/yard-startup-');
 const dataDir = join(root, 'data');
 await mkdir(output, { recursive: true });
@@ -52,14 +59,14 @@ await writeFile(join(dataDir, 'native-state.json'), JSON.stringify({ globals: {
   'remote-connection-auto-connect-by-host-id': Object.fromEntries(hosts.map(host => [host.hostId, true])),
 } }));
 const app = await createNativeWorkbench({ port: 0, dataDir, workspace: root, socketPath: fake.socketPath,
-  codexHome: join(root, 'codex'), renderer: process.env.AGENTS_STARTUP_RENDERER, hostCatalog: { hosts, projects: [], assignments: {} },
+  codexHome: join(root, 'codex'), renderer: process.env.AGENTS_STARTUP_RENDERER, sourceWorkspace: sourceCandidate,
+  hostCatalog: { hosts, projects: [], assignments: {} },
   sshStream: (_host, onPaths) => {
     onPaths?.({ homeDirectory: root, codexHome: join(root, 'codex') });
     return createConnection(fake.socketPath);
   }, httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
 if (process.env.AGENTS_STARTUP_RENDERER) {
-  const { rendererAssets: assets } = await import(pathToFileURL(join(source, 'src/native/renderer-assets.ts')).href) as
-    typeof import('../src/native/renderer-assets.ts');
+  const assets = rendererAssets;
   await Promise.all([assets.client, assets.shared, assets.rpc, assets.application, assets.primary, assets.locale,
     assets.applicationStyle, assets.userMessageStyle].map(async path => {
     const response = await fetch(new URL(path, app.url), { headers: { 'Accept-Encoding': 'gzip' } });
@@ -72,14 +79,15 @@ const browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_
   args: ['--no-sandbox', '--disable-dev-shm-usage'] });
 const reports: Record<string, unknown>[] = [];
 const earlyInputAt = Number(process.env.AGENTS_STARTUP_EARLY_INPUT_AT ?? '-1');
-const requireFullUnderOneSecond = process.argv.includes('--require-full-under-1s');
+const readyMark = sourceCandidate ? 'startup-probe-source-ready' : 'startup-probe-original-ready';
+const paintMark = sourceCandidate ? readyMark : 'workbench-workspace-visible';
 const coldFullTimings: number[] = [];
-assert.ok(!requireFullUnderOneSecond || earlyInputAt < 0, 'Full-workspace checks do not use the temporary startup input');
+assert.ok(!(requireFullUnderOneSecond || sourceCandidate) || earlyInputAt < 0, 'Workspace checks do not use the temporary startup input');
 try {
   for (let round = 1; round <= Number(process.env.AGENTS_STARTUP_ROUNDS ?? 3); round++) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
-    await page.addInitScript(checkOriginal => {
+    await page.addInitScript(({ checkReadiness, sourceCandidate, readyMark, directHistory }) => {
       const state = { firstRow: 0, paint: 0, inputEvent: 0, inputProcessed: 0, inputPaint: 0, earlyInput: 0, earlyPaint: 0,
         hosts: [] as string[], longTasks: [] as { at: number; ms: number }[] };
       Object.assign(window, { yardStartupProbe: state });
@@ -118,26 +126,36 @@ try {
         });
       });
       observer.observe(document, { childList: true, subtree: true });
-      if (!checkOriginal) return;
-      function probeOriginal() {
-        const root = document.querySelector('#root:not([inert])');
-        const shell = root?.querySelector('[data-app-shell-frame]');
-        const editor = shell?.querySelector<HTMLElement>('[data-codex-composer="true"][contenteditable="true"]');
-        const row = root?.querySelector('#app-shell-sidebar [data-app-action-sidebar-thread-row]');
-        if (root?.getAttribute('aria-hidden') === 'true' || !editor?.isContentEditable || !row?.textContent?.trim() ||
-            row.getBoundingClientRect().height <= 0 || document.getElementById('yard-startup')) {
-          requestAnimationFrame(probeOriginal);
-          return;
-        }
-        const box = editor.getBoundingClientRect();
-        if (box.width <= 0 || box.height <= 0 || !editor.contains(document.elementFromPoint(box.x + 4, box.y + 4))) {
-          requestAnimationFrame(probeOriginal);
-          return;
-        }
-        requestAnimationFrame(() => requestAnimationFrame(() => performance.mark('startup-probe-original-ready')));
+      if (!checkReadiness) return;
+      function isPointerTarget(element: Element) {
+        if (element.closest('[inert], [aria-hidden="true"]')) return false;
+        const { x, y, width, height } = element.getBoundingClientRect();
+        return width > 0 && height > 0 && element.contains(document.elementFromPoint(x + Math.min(8, width / 2), y + height / 2));
       }
-      requestAnimationFrame(probeOriginal);
-    }, requireFullUnderOneSecond);
+      function workspaceIsInteractive() {
+        if (document.getElementById('yard-startup')) return false;
+        const root = document.querySelector('#root:not([inert])');
+        if (!root) return false;
+        if (sourceCandidate && !root.querySelector('.yard-source-frame')) return false;
+        const editor = root.querySelector<HTMLElement>('[data-app-shell-frame] [data-codex-composer="true"][contenteditable="true"]');
+        if (!editor?.isContentEditable || !isPointerTarget(editor)) return false;
+        if (directHistory && ![...root.querySelectorAll('[role="region"][aria-label="Conversation"] p')]
+          .some(paragraph => paragraph.textContent === 'Startup answer 0' && isPointerTarget(paragraph))) return false;
+        return [...root.querySelectorAll('#app-shell-sidebar [data-app-action-sidebar-thread-row]')]
+          .some(row => row.textContent?.trim() && isPointerTarget(row));
+      }
+      function probeWorkspace() {
+        if (!workspaceIsInteractive()) {
+          requestAnimationFrame(probeWorkspace);
+          return;
+        }
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (workspaceIsInteractive()) performance.mark(readyMark);
+          else requestAnimationFrame(probeWorkspace);
+        }));
+      }
+      requestAnimationFrame(probeWorkspace);
+    }, { checkReadiness: requireFullUnderOneSecond || sourceCandidate, sourceCandidate, readyMark, directHistory });
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
     page.on('crash', () => errors.push('Browser renderer process crashed'));
@@ -168,8 +186,12 @@ try {
         await coverage.send('Profiler.enable');
         await coverage.send('Profiler.startPreciseCoverage', { callCount: false, detailed: false });
       }
-      if (warm && page.url() === app.url + '/') await page.reload({ waitUntil: 'commit' });
-      else await page.goto(app.url, { waitUntil: 'commit' });
+      const target = app.url + (directHistory ? '/local/' + ids[0] : '/');
+      const selectedHistoryReads = () => fake.calls('thread/turns/list')
+        .filter(call => call.params.threadId === ids[0] && call.params.cursor == null).length;
+      const previousHistoryReads = directHistory ? selectedHistoryReads() : 0;
+      if (warm && page.url() === target) await page.reload({ waitUntil: 'commit' });
+      else await page.goto(target, { waitUntil: 'commit' });
       const started = Date.now();
       let attempted = 0;
       const earlyDraft = !warm && earlyInputAt >= 0 ? 'Early startup benchmark draft' : undefined;
@@ -201,13 +223,13 @@ try {
           return { name: resource.name, at: resource.startTime, ms: resource.duration, transfer: resource.transferSize, decoded: resource.decodedBodySize };
         }),
       }));
-      const entry = { round, warm, attempted, ...report, errors: [...errors] };
+      const entry = { round, warm, sourceCandidate, directHistory, attempted, ...report, errors: [...errors] };
       reports.push(entry);
       console.log(JSON.stringify({ ...entry, resources: undefined, longTasks: undefined }));
-      if (!warm) await page.screenshot({ path: join(output, `cold-${round}.png`) });
+      if (!warm && !sourceCandidate) await page.screenshot({ path: join(output, `cold-${round}.png`) });
       try {
-        await page.waitForFunction(() => !document.getElementById('yard-startup') &&
-          (!('workbenchStartupSidebar' in window) || performance.getEntriesByName('workbench-workspace-visible').length > 0), undefined, { timeout: 30000 });
+        await page.waitForFunction(mark => !document.getElementById('yard-startup') &&
+          (!('workbenchStartupSidebar' in window) || performance.getEntriesByName(mark).length > 0), paintMark, { timeout: 30000 });
       } catch (error) {
         const name = `${warm ? 'warm' : 'cold'}-${round}-workspace-failure`;
         const diagnostics = await Promise.allSettled([
@@ -227,14 +249,20 @@ try {
         }, null, 2));
         throw error;
       }
-      Object.assign(entry, await page.evaluate(() => ({
-        workspaceVisible: performance.getEntriesByName('workbench-workspace-visible')[0]?.startTime ?? null,
+      Object.assign(entry, await page.evaluate(mark => ({
+        workspaceVisible: performance.getEntriesByName(mark)[0]?.startTime ?? null,
         workspaceMarks: performance.getEntriesByType('mark').map(entry => ({ name: entry.name, at: entry.startTime })),
         workspaceLongTasks: (window as unknown as { yardStartupProbe: { longTasks: object[] } }).yardStartupProbe.longTasks,
         stageMeasures: performance.getEntriesByType('measure').filter(entry => entry.name.startsWith('yard-init:'))
           .map(entry => ({ name: entry.name, at: entry.startTime, ms: entry.duration })),
         workspaceResources: performance.getEntriesByType('resource').map(entry => entry.toJSON()),
-      })));
+      }), paintMark));
+      if (sourceCandidate) {
+        const pinnedModules = [rendererAssets.client, rendererAssets.shared, rendererAssets.application, rendererAssets.primary, '/workbench-pinned-entry.js'];
+        assert.deepEqual(await page.evaluate(paths => performance.getEntriesByType('resource')
+          .map(resource => new URL(resource.name).pathname)
+          .filter(path => paths.includes(path)), pinnedModules), [], 'The interactive source workspace must not need the pinned JavaScript runtime.');
+      }
       if (requireFullUnderOneSecond) {
         await page.waitForFunction(() => performance.getEntriesByName('startup-probe-original-ready').length > 0);
         const observed = await page.evaluate(() => Math.max(
@@ -276,19 +304,27 @@ try {
         resolve();
       }))));
       assert.equal(await editor.textContent(), previousInput + 'y');
-      Object.assign(entry, await page.evaluate(() => {
+      Object.assign(entry, await page.evaluate(mark => {
         const painted = performance.getEntriesByName('startup-probe-input-painted')[0]!.startTime;
         const input = (window as unknown as { yardStartupProbe: { inputEvent: number; inputPaint: number } }).yardStartupProbe;
         return {
           firstInputPaint: painted,
           inputEventToPaintMs: input.inputPaint - input.inputEvent,
           inputRequestToPaintMs: painted - performance.getEntriesByName('startup-probe-input-request')[0]!.startTime,
-          workspaceToInputPaintMs: painted - performance.getEntriesByName('workbench-workspace-visible')[0]!.startTime,
+          workspaceToInputPaintMs: painted - performance.getEntriesByName(mark)[0]!.startTime,
         };
-      }));
+      }, paintMark));
+      if (directHistory) {
+        assert.equal(selectedHistoryReads() - previousHistoryReads, 1, 'The source workspace must consume the initial history read once.');
+        assert.ok(await page.evaluate(() => {
+          const requested = performance.getEntriesByName('workbench-source-history-requested')[0];
+          const consumed = performance.getEntriesByName('workbench-source-history-consumed')[0];
+          return requested && consumed && requested.startTime < consumed.startTime;
+        }), 'Initial history must start in the browser host before React takes it.');
+      }
       await editor.fill('');
-      await conditions?.detach();
-      if (warm || requireFullUnderOneSecond) {
+      if (!directHistory && (warm || requireFullUnderOneSecond || sourceCandidate)) {
+        const previousHistoryReads = selectedHistoryReads();
         await page.evaluate(() => {
           document.addEventListener('click', () => performance.mark('startup-probe-click'), { once: true, capture: true });
         });
@@ -303,16 +339,27 @@ try {
           throw error;
         }
         Object.assign(entry, { clickToHistoryMs: performance.now() - click,
+          firstHistoryPaint: await page.evaluate(() => new Promise<number>(resolve =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now()))))),
           clickDispatchMs: await page.evaluate(() => {
             const event = performance.getEntriesByName('startup-probe-click')[0];
             const ready = (window as unknown as { yardStartupProbe: { paint: number } }).yardStartupProbe.paint;
             return event ? event.startTime - ready : null;
           }) });
         await page.screenshot({ path: join(output, `history-${round}.png`) });
-        await page.waitForFunction(() => (window as unknown as { yardStartupProbe: { hosts: string[] } }).yardStartupProbe.hosts.length === 4,
-          undefined, { timeout: 10000 });
-        assert.ok(fake.calls('thread/list').some(call => call.params.cursor != null), 'background pagination must resume');
+        if (sourceCandidate) {
+          assert.equal(selectedHistoryReads() - previousHistoryReads, 1, 'A selected conversation should read its first history page once.');
+          const connectedHosts = await page.evaluate(() => Reflect.get(window, 'yardStartupProbe').hosts as string[]);
+          Object.assign(entry, { connectedHosts });
+          console.log(JSON.stringify({ round, warm, sourceCandidate, connectedHosts,
+            ...Object.fromEntries(Object.entries(entry).filter(([key]) => ['workspaceVisible', 'firstInputPaint', 'firstHistoryPaint'].includes(key))) }));
+        } else {
+          await page.waitForFunction(() => (window as unknown as { yardStartupProbe: { hosts: string[] } }).yardStartupProbe.hosts.length === 4,
+            undefined, { timeout: 10000 });
+          assert.ok(fake.calls('thread/list').some(call => call.params.cursor != null), 'background pagination must resume');
+        }
       }
+      await conditions?.detach();
       assert.deepEqual(errors, []);
     }
     await context.close();

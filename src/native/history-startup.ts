@@ -4,6 +4,30 @@ export function initialWorkspaceRoute(metadata: string | null | undefined, searc
   return metadata?.trim() || new URLSearchParams(search).get('initialRoute')?.trim() || pathname || '/';
 }
 
+export function sourceWorkspaceRoute({ pathname, search }: Pick<Location, 'pathname' | 'search'>) {
+  return initialWorkspaceRoute(null, search, pathname.startsWith('/local/') ? pathname + search : pathname);
+}
+
+export function workspaceThreadRoute(hostId: string, threadId: string) {
+  return '/' + encodeURIComponent(hostId) + '/' + encodeURIComponent(threadId);
+}
+
+export function usesPinnedToolRenderer(route: string) {
+  return /^\/(?:settings|plugins|skills|automations|avatar-overlay)(?:[/?#]|$)/.test(route);
+}
+
+export function parseWorkspaceThreadRoute(route: string) {
+  const queryAt = route.indexOf('?');
+  const parts = (queryAt < 0 ? route : route.slice(0, queryAt)).split('/');
+  if (parts.length !== 3 || parts[0] !== '' || !parts[1] || !parts[2]) return;
+  try {
+    const host = decodeURIComponent(parts[1]);
+    const legacyHost = host === 'local' && queryAt >= 0 ? new URLSearchParams(route.slice(queryAt)).get('hostId') : null;
+    return { hostId: legacyHost || host, threadId: decodeURIComponent(parts[2]) };
+  }
+  catch { /* Invalid URL. */ }
+}
+
 /** Give a directly opened conversation the first rendering frames. Saved SSH
  * hosts remain visible and keep their original connection preferences. Only
  * background reads wait; user interaction and a bounded fallback release them. */
@@ -21,10 +45,9 @@ export class HistoryStartup {
   constructor(route: string | null, timeoutMs = 15_000, waitForWorkspace = false) {
     this.timeoutMs = timeoutMs;
     this.homepage = waitForWorkspace && (!route || route === '/');
-    const parts = route?.split('/');
-    if (parts?.length === 3 && parts[1] && parts[2]) {
-      try { this.hostId = decodeURIComponent(parts[1]); this.threadId = decodeURIComponent(parts[2]); } catch { /* invalid route */ }
-    }
+    const selected = route ? parseWorkspaceThreadRoute(route) : undefined;
+    this.hostId = selected?.hostId;
+    this.threadId = selected?.threadId;
   }
 
   wait(message: HostMessage): Promise<void> | undefined {

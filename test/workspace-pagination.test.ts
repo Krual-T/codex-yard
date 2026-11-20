@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { HistoryStartup, initialWorkspaceRoute } from '../src/native/history-startup.ts';
+import { HistoryStartup, initialWorkspaceRoute, usesPinnedToolRenderer } from '../src/native/history-startup.ts';
 import type { HostMessage } from '../src/native/protocol.ts';
 
 const list = (cursor: string | null): HostMessage => ({ type: 'mcp-request', hostId: 'local', request: {
@@ -49,6 +49,16 @@ test('workspace paint does not release a directly opened history conversation', 
   startup.interact();
   await waiting;
   assert.equal(resumed, true);
+});
+
+test('only legacy tool routes load the pinned renderer in the source host', () => {
+  for (const route of ['/settings', '/settings/general-settings', '/settings/appearance?tab=theme',
+    '/plugins', '/plugins/example', '/skills', '/automations', '/automations?filter=active', '/avatar-overlay?initialRoute=%2Favatar-overlay']) {
+    assert.ok(usesPinnedToolRenderer(route), route);
+  }
+  for (const route of ['/', '/local/conversation', '/remote-ssh-fixture/plugins', '/settings-preview', '/automations-preview', '//plugins/other']) {
+    assert.ok(!usesPinnedToolRenderer(route), route);
+  }
 });
 
 test('initial route honors metadata, notification query and direct paths', () => {

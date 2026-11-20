@@ -13,6 +13,7 @@ test('equal RPC ids on separate hosts retain separate pending results after the 
   const received: any[] = [], sockets: BrowserSocket[] = [];
   class BrowserSocket extends EventTarget {
     static OPEN = 1;
+    readyState = 0;
     sent: any[] = [];
     constructor() { super(); sockets.push(this); }
     send(value: string) { this.sent.push(JSON.parse(value)); }
@@ -25,6 +26,7 @@ test('equal RPC ids on separate hosts retain separate pending results after the 
     setTimeout() {}, matchMedia: () => ({ matches: false }), performance: { timeOrigin: 0 },
   });
   const socket = sockets[0]!;
+  socket.readyState = BrowserSocket.OPEN;
   socket.dispatchEvent(new Event('open'));
   const remote = 'remote-ssh-discovered:work';
   await Promise.all(['local', remote].map(hostId => window.electronBridge.sendMessageFromView({
@@ -32,6 +34,7 @@ test('equal RPC ids on separate hosts retain separate pending results after the 
   })));
   socket.message({ type: 'mcp-response', hostId: 'local', message: { id: 1, result: {} } });
   socket.message({ type: 'codex-app-server-connection-changed', hostId: remote, state: 'connected', transport: 'websocket' });
+  socket.readyState = 3;
   socket.dispatchEvent(new Event('close'));
   const failures = received.filter(message => message.type === 'mcp-response' && message.message.error);
   assert.equal(failures.length, 1);
@@ -47,6 +50,10 @@ test('equal RPC ids on separate hosts retain separate pending results after the 
   document.dispatchEvent(new Event('visibilitychange'));
   assert.equal(received.at(-1).isFocused, false);
   assert.equal(socket.sent.length, 2, 'focus stays on the visiting browser even when the socket is lost');
+  await assert.rejects(window.electronBridge.sendMessageFromView({
+    type: 'mcp-request', hostId: 'local', request: { id: 2, method: 'thread/resume', params: { threadId: 'shared-id' } },
+  }), /宿主连接已断开/);
+  assert.equal(socket.sent.length, 2, 'reads attempted between close and reconnect must settle without being silently discarded');
 });
 
 test('renderer browser links open on the visiting client before a socket or server round trip', async () => {

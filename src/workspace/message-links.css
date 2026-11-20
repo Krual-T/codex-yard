@@ -1,0 +1,10 @@
+/* The pinned Mention classes supply color, weight, icon baseline and hover.
+ * Override the source workspace's older generic link/icon rules only here. */
+.yard-source-message-markdown .yard-source-message-link {
+  color: inherit;
+  text-decoration: none;
+}
+.yard-source-message-markdown .yard-source-message-link svg {
+  margin: 0;
+  vertical-align: middle;
+}

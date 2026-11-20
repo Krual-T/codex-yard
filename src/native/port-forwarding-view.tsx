@@ -93,7 +93,7 @@ function Icon({ name }: { name: 'close' | 'plus' | 'arrow' | 'play' | 'stop' | '
 
 function initialDevice() { try { return localStorage.getItem(deviceKey) ?? ''; } catch { return ''; } }
 function closeControl(element: HTMLElement) { element.closest('details')?.removeAttribute('open'); }
-function Surface({ request, close }: { request: Request; close(): void }) {
+function Surface({ request, close, openDevices }: { request: Request; close(): void; openDevices?: () => void }) {
   const [data, setData] = React.useState<PortForwardSnapshot>();
   const [device, setDevice] = React.useState(initialDevice);
   const [form, setForm] = React.useState<PortForwardRule>();
@@ -153,7 +153,8 @@ function Surface({ request, close }: { request: Request; close(): void }) {
       targetHostId: currentDevice, serviceHost: '127.0.0.1', servicePort: 3000, localPort: 13000 });
   };
   const manageDevices = () => {
-    window.postMessage({ type: 'navigate-to-route', path: '/settings/connections/ssh' }, location.origin);
+    if (openDevices) openDevices();
+    else window.postMessage({ type: 'navigate-to-route', path: '/settings/connections/ssh' }, location.origin);
     close();
   };
   const options = hosts.map(host => <option key={host.hostId} value={host.hostId}>{host.displayName}</option>);
@@ -220,7 +221,7 @@ function Surface({ request, close }: { request: Request; close(): void }) {
   </section>;
 }
 
-export function installPortForwarding(react: typeof ReactRuntime, dom: { createRoot(container: Element): Root }) {
+export function installPortForwarding(react: typeof ReactRuntime, dom: { createRoot(container: Element): Root }, openDevices?: () => void) {
   React = react;
   const host = window as unknown as PortForwardingWindow;
   let dialog: HTMLDialogElement | undefined;
@@ -246,7 +247,7 @@ export function installPortForwarding(react: typeof ReactRuntime, dom: { createR
       root.unmount(); current.remove(); if (dialog === current) dialog = undefined;
       if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
     }, { once: true });
-    root.render(react.createElement(Surface, { request: host.workbenchPortForwarding, close: () => current.close() }));
+    root.render(react.createElement(Surface, { request: host.workbenchPortForwarding, close: () => current.close(), openDevices }));
     current.showModal();
   };
 }

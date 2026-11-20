@@ -3,7 +3,11 @@ import { targetKey, chromeSnapshot } from './protocol.ts';
 import type { BrowserTarget, ChromeElementComment, ChromePanelState, ChromeRequest, ChromeTransport } from './protocol.ts';
 import type { ChromeConnections, ConnectionRequest } from './client-protocol.ts';
 
-export interface EmbeddedPage { url: string; revision: number; error?: string; src?: string; loading?: boolean }
+export interface EmbeddedPage {
+  readonly url: string; readonly revision: number; readonly error?: string;
+  readonly src?: string; readonly loading?: boolean;
+  readonly history: readonly string[]; readonly index: number;
+}
 
 export class BrowserChrome {
   private readonly listeners = new Map<string, Set<(state: ChromePanelState) => void>>();
@@ -19,7 +23,7 @@ export class BrowserChrome {
   private comments: Record<string, unknown[]> = {};
   private clientKey?: string;
   private embeddedEnabled = false;
-  private readonly embedded = new Map<string, EmbeddedPage & { history: string[]; index: number }>();
+  private readonly embedded = new Map<string, EmbeddedPage>();
   private readonly chromeTargets = new Set<string>();
   private readonly pageListeners = new Map<string, Set<() => void>>();
   private readonly requestHost: (endpoint: string, body: unknown) => Promise<unknown>;
@@ -40,7 +44,7 @@ export class BrowserChrome {
       this.embedded.set(key, page);
       this.preparePage(target, page);
     }
-    return page;
+    return this.embedded.get(key)!;
   }
   subscribePage(target: BrowserTarget, listener: () => void) {
     const key = targetKey(target), listeners = this.pageListeners.get(key) ?? new Set();
@@ -88,7 +92,7 @@ export class BrowserChrome {
       isLoading: page.loading ?? false,
     } });
   }
-  private pageCommand(target: BrowserTarget, command: ChromeRequest['command']) {
+  commandEmbeddedPage(target: BrowserTarget, command: ChromeRequest['command']) {
     this.embeddedPage(target);
     const key = targetKey(target), previous = this.embedded.get(key)!;
     let page = { ...previous, error: undefined as string | undefined, src: undefined, loading: false };
@@ -113,13 +117,14 @@ export class BrowserChrome {
       this.embedded.set(key, page); this.preparePage(target, page); this.publishPage(target);
     }
   }
-  retryEmbeddedPage(target: BrowserTarget) { this.pageCommand(target, { type: 'reload' }); }
+  retryEmbeddedPage(target: BrowserTarget) { this.commandEmbeddedPage(target, { type: 'reload' }); }
   private preparePage(target: BrowserTarget, page: EmbeddedPage) {
     if (page.error || page.url === 'about:blank') return;
     const url = new URL(page.url);
+    if (typeof location !== 'undefined' && url.origin === location.origin) return;
     if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) return;
-    const key = targetKey(target), pending = this.embedded.get(key)!;
-    pending.loading = true;
+    const key = targetKey(target), pending = { ...this.embedded.get(key)!, loading: true };
+    this.embedded.set(key, pending);
     const hostId = this.conversationHosts.get(target.conversationId);
     if (!hostId) {
       const timeout = setTimeout(() => {
@@ -239,7 +244,7 @@ export class BrowserChrome {
     if (['set-design-modifier-pressed', 'clear-comments'].includes((message.command as ChromeRequest['command'])?.type ?? '')) return true;
     const target = { conversationId: String(message.conversationId), browserTabId: String(message.browserTabId) };
     const command = message.command as ChromeRequest['command'];
-    if (this.isEmbedded(target)) { this.pageCommand(target, command); return true; }
+    if (this.isEmbedded(target)) { this.commandEmbeddedPage(target, command); return true; }
     const mountNavigation = () => {
       // A new tab has no webview until a snapshot arrives. Mount the error
       // surface too, so a refused initial connection has a visible retry.

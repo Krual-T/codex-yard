@@ -693,6 +693,49 @@ export function createBackendSidebarState(options: BackendSidebarOptions) {
       await patchMetadata(hostId, id, patch); await refresh(hostId);
     });
   }
+  async function setProjectPinned(hostId: string, projectId: string, pinned: boolean) {
+    if (supportsHost(hostId)) return setProjectMetadata(hostId, projectId, { pinned });
+    return enqueue(hostId, async () => {
+      const ids = strings(legacy['pinned-project-ids']).filter(id => id !== projectId);
+      await saveClientValue('pinned-project-ids', pinned ? [...ids, projectId] : ids);
+    });
+  }
+  async function setProjectAppearance(hostId: string, projectId: string, appearance: unknown) {
+    if (supportsHost(hostId)) return setProjectMetadata(hostId, projectId, { appearance });
+    return enqueue(hostId, async () => {
+      const appearances = { ...record(legacy['project-appearances']) };
+      if (appearance === undefined) delete appearances[projectId];
+      else appearances[projectId] = appearance;
+      await saveClientValue('project-appearances', appearances);
+    });
+  }
+  async function editProject(hostId: string, projectId: string, update: { name: string; roots?: string[] } | null) {
+    await ensureHost(hostId);
+    return enqueue(hostId, async () => {
+      if (supportsHost(hostId)) {
+        const id = resolveProjectId(hostId, projectId);
+        if (!id) throw new Error('项目不存在：' + projectId);
+        await options.request(hostId, update ? 'project/update' : 'project/delete', {
+          projectId: id, ...(update ? { name: update.name, ...(update.roots ? { roots: update.roots.map(path => ({ path })) } : {}) } : {}),
+        }, true);
+        await refresh(hostId);
+      } else if (hostId === 'local') {
+        const projects = { ...record(legacy['local-projects']) };
+        if (!Object.hasOwn(projects, projectId)) throw new Error('项目不存在：' + projectId);
+        if (update) projects[projectId] = { ...record(projects[projectId]), name: update.name, displayName: update.name,
+          ...(update.roots ? { rootPaths: update.roots } : {}) };
+        else delete projects[projectId];
+        await saveClientValue('local-projects', projects);
+      } else {
+        const projects = Array.isArray(legacy['remote-projects']) ? legacy['remote-projects'] : [];
+        await saveClientValue('remote-projects', projects.flatMap(value => {
+          const project = record(value);
+          return project.hostId === hostId && project.id === projectId ? update ? [{ ...project, label: update.name,
+            ...(update.roots ? { remotePath: update.roots[0], rootPaths: update.roots } : {}) }] : [] : [value];
+        }));
+      }
+    });
+  }
   async function setProjectOrder(hostId: string, projectIds: string[]) {
     if (!supportsHost(hostId)) throw new Error('当前主机不支持原生项目排序');
     await ensureHost(hostId);
@@ -883,7 +926,7 @@ export function createBackendSidebarState(options: BackendSidebarOptions) {
   }
   return { supportsHost, ensureHost, refreshHost, observeResponse, observeThreadList: (hostId: string, value: unknown) => observeResponse(hostId, 'thread/list', value),
     observeBackend, persistenceGlobals, snapshotForPersistence: persistenceGlobals, request, pins, sectionSnapshot, cachedSectionSnapshot, setSections,
-    getAssignment, setAssignment, restoreAssignment, resolveProjectId, setProjectMetadata, setProjectOrder, projectThreadIds, ownsGlobal, setGlobal, forgetHost, stageClientAssignments,
+    getAssignment, setAssignment, restoreAssignment, resolveProjectId, setProjectMetadata, setProjectPinned, setProjectAppearance, editProject, setProjectOrder, projectThreadIds, ownsGlobal, setGlobal, forgetHost, stageClientAssignments,
     hostForThread: (threadId: string) => knownThreadHosts.get(threadId) ?? 'local',
     projects: (hostId = 'local') => state(hostId).projects.map(project => ({ ...project })),
     async flush() { await Promise.all([...hosts.values()].map(host => host.pending.catch(() => {}))); },

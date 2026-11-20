@@ -1,0 +1,131 @@
+.yard-source-message-images {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 100%;
+}
+.yard-source-message-images + .yard-source-user-message { margin-block-start: 8px; }
+.yard-source-inspected-images { justify-content: flex-start; flex-wrap: nowrap; overflow-x: auto; padding-block-end: 4px; }
+.yard-source-message-thumbnail {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 80px;
+  height: 80px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 11px;
+  color: var(--color-text-tertiary);
+}
+.yard-source-message-thumbnail:not(:disabled) { cursor: zoom-in; }
+.yard-source-message-thumbnail:focus-visible,
+.yard-source-image-preview button:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 2px; }
+.yard-source-message-thumbnail img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 10px;
+  object-fit: cover;
+}
+.yard-source-message-thumbnail[data-state="loading"] img { visibility: hidden; }
+@media (prefers-reduced-motion: no-preference) {
+  .yard-source-message-thumbnail[data-state="loading"] svg { animation: yard-image-loading 1s linear infinite; }
+}
+@keyframes yard-image-loading { to { transform: rotate(360deg); } }
+
+.yard-source-image-preview {
+  position: fixed;
+  inset: 0;
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: hidden;
+  color: var(--color-text-primary);
+}
+.yard-source-image-preview::backdrop { background: rgb(0 0 0 / 90%); }
+.yard-source-image-preview-viewport {
+  position: absolute;
+  inset: 48px 16px 96px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.yard-source-image-preview[data-gallery="true"] .yard-source-image-preview-viewport { inset-inline: 64px; }
+@media (min-width: 640px) {
+  .yard-source-image-preview-viewport { inset-inline: 32px; }
+  .yard-source-image-preview[data-gallery="true"] .yard-source-image-preview-viewport { inset-inline: 80px; }
+}
+.yard-source-image-preview-plane {
+  display: grid;
+  place-items: center;
+  min-width: 100%;
+  min-height: 100%;
+  width: max-content;
+  height: max-content;
+}
+.yard-source-image-preview-plane img {
+  display: block;
+  max-width: none;
+  border-radius: 12.5px;
+  object-fit: contain;
+}
+.yard-source-image-preview-failed {
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--color-surface-tertiary, var(--color-surface));
+}
+.yard-source-image-preview-toolbar,
+.yard-source-image-previous,
+.yard-source-image-next,
+.yard-source-image-preview-zoom { position: absolute; z-index: 1; }
+.yard-source-image-preview-toolbar { inset: 12px 12px auto auto; display: flex; gap: 8px; }
+.yard-source-image-preview button,
+.yard-source-image-preview-zoom {
+  border-radius: 999px;
+  color: var(--color-text-primary);
+  background: var(--color-surface-tertiary, var(--color-surface));
+  box-shadow: 0 2px 6px rgb(0 0 0 / 14%);
+}
+.yard-source-image-preview button {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  cursor: pointer;
+}
+.yard-source-image-preview button:not(:disabled):hover {
+  background: var(--color-surface-elevated, var(--color-surface));
+  box-shadow: 0 0 0 1px var(--color-ring);
+}
+.yard-source-image-preview button:disabled { opacity: .5; cursor: not-allowed; }
+.yard-source-image-previous,
+.yard-source-image-next { top: 50%; translate: 0 -50%; }
+.yard-source-image-preview :is(.yard-source-image-previous, .yard-source-image-next, .yard-source-image-preview-toolbar button:last-child) { width: 42px; }
+.yard-source-image-previous { left: 12px; }
+.yard-source-image-next { right: 12px; }
+.yard-source-image-preview-zoom {
+  inset: auto auto 32px 50%;
+  translate: -50% 0;
+  display: flex;
+  height: 44px;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+}
+.yard-source-image-preview-zoom button {
+  width: 36px;
+  height: 36px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  box-shadow: none;
+}
+.yard-source-image-preview-zoom button:not(:disabled):hover { background: color-mix(in srgb, currentColor 15%, transparent); }
+.yard-source-image-preview-zoom span { min-width: 64px; text-align: center; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }

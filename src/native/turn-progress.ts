@@ -97,7 +97,7 @@ interface ProgressProps {
 }
 export interface TurnProgressWindow extends Window { workbenchTurnProgress?: (props: ProgressProps) => ReactElement }
 
-export function installTurnProgress(React: typeof import('react')) {
+export function createTurnProgressSurface(React: typeof import('react')) {
   const h = React.createElement;
   function Surface(props: ProgressProps) {
     const latest = React.useRef(props); latest.current = props;
@@ -147,6 +147,10 @@ export function installTurnProgress(React: typeof import('react')) {
       draft ? h('details', { open: true }, h('summary', null, '续接提示（不包含历史图片数据）'),
         h('textarea', { readOnly: true, value: draft, rows: 5, className: 'w-full', 'aria-label': '续接提示', onFocus: (event: { currentTarget: HTMLTextAreaElement }) => event.currentTarget.select() })) : null);
   }
-  (window as TurnProgressWindow).workbenchTurnProgress = props => h(Surface, { ...props,
+  return (props: ProgressProps) => h(Surface, { ...props,
     key: JSON.stringify([props.hostId, props.threadId, props.turnId]) });
+}
+
+export function installTurnProgress(React: typeof import('react')) {
+  (window as TurnProgressWindow).workbenchTurnProgress = createTurnProgressSurface(React);
 }

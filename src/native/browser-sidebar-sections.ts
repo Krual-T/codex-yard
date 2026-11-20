@@ -13,6 +13,9 @@ interface Link { id: string; hostSectionIds: Record<string, string>; mixedItemKe
   pendingDeletionHostIdsByItemKey?: Record<string, string[]>; legacyHostIds?: string[]; itemHostSlots?: (string | null)[] }
 interface Preferences { links: Link[]; collapsedSectionIds: string[]; sectionOrder: string[] }
 interface NativeSection { id: string; name: string; appearance: unknown; threadIds: string[] }
+export interface ProjectSection { id: string; name: string; projectIds: string[] }
+export type ProjectSectionDestination = { id: string } | { name: string } | null;
+const projectKeyPrefix = 'codex:project:';
 type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
 const threadId = (key: string) => key.startsWith('codex:thread:local:') ? key.slice('codex:thread:local:'.length) : null;
@@ -37,7 +40,8 @@ function sectionLink(section: Section): Link {
   const pending = Object.fromEntries(Object.entries(section.pendingDeletionHostIdsByItemKey ?? {}).filter(([key, hosts]) => section.itemKeys.includes(key) && hosts.length));
   return { id: section.id, hostSectionIds, mixedItemKeys,
     ...(Object.keys(pending).length ? { pendingDeletionHostIdsByItemKey: pending } : {}),
-    ...(!Object.keys(hostSectionIds).length && (mixedItemKeys.length || Object.keys(pending).length) ? { name: section.name } : {}) };
+    ...(mixedItemKeys.some(key => key.startsWith(projectKeyPrefix)) ||
+        !Object.keys(hostSectionIds).length && (mixedItemKeys.length || Object.keys(pending).length) ? { name: section.name } : {}) };
 }
 function legacyShape(value: Shape, nativeHosts: Set<string>, links: Link[]): Shape {
   const sections = value.sections.flatMap(section => {
@@ -136,6 +140,45 @@ export class BrowserSidebarSections {
     const task = this.pending.catch(() => {}).then(action); this.pending = task; return task;
   }
   load(): Promise<Record<string, Shape>> { return this.enqueue(() => this.hydrate()); }
+  projectSections(): ProjectSection[] {
+    const saved = this.current[defaultAccount];
+    const preferences = this.preferences[defaultAccount];
+    const keys = new Map(saved?.sections.map(section => [section.id, section]));
+    // Browser-only project placements can be shown from disk before a host connects.
+    for (const link of preferences?.links ?? []) if (!keys.has(link.id) && link.name) {
+      keys.set(link.id, { id: link.id, name: link.name, itemKeys: link.mixedItemKeys });
+    }
+    const order = saved?.sectionOrder ?? preferences?.sectionOrder ?? [];
+    const ids = new Set([...order.filter(key => key.startsWith('custom:')).map(key => key.slice(7)), ...keys.keys()]);
+    return [...ids].flatMap(id => {
+      const section = keys.get(id);
+      return section ? [{ id, name: section.name, projectIds: section.itemKeys.flatMap(key =>
+        key.startsWith(projectKeyPrefix) ? [key.slice(projectKeyPrefix.length)] : []) }] : [];
+    });
+  }
+  moveProject(projectId: string, destination: ProjectSectionDestination): Promise<ProjectSection[]> {
+    return this.enqueue(async () => {
+      // Load the same projection used by the original renderer before changing its mixed entries.
+      await this.hydrate();
+      const state = this.current[defaultAccount] ?? shape(null);
+      const key = projectKeyPrefix + projectId;
+      const sections = state.sections.map(section => ({ ...section, itemKeys: section.itemKeys.filter(item => item !== key) }));
+      let sectionId: string | undefined;
+      if (destination && 'id' in destination) {
+        const target = sections.find(section => section.id === destination.id);
+        if (!target) throw new Error('This section no longer exists.');
+        target.itemKeys.push(key);
+      } else if (destination) {
+        const name = destination.name.trim();
+        if (!name || name.length > 120) throw new Error('Enter a valid section name.');
+        sectionId = crypto.randomUUID();
+        sections.push({ id: sectionId, name, itemKeys: [key] });
+      }
+      const sectionOrder = sectionId ? [...state.sectionOrder, 'custom:' + sectionId] : state.sectionOrder;
+      this.replaceValue({ ...this.current, [defaultAccount]: { ...state, sections, sectionOrder } });
+      return this.projectSections();
+    });
+  }
   retainHosts(hostIds: string[]): Promise<Record<string, Shape>> {
     return this.enqueue(async () => {
       const retained = new Set(['local', ...hostIds]);
@@ -316,25 +359,26 @@ export class BrowserSidebarSections {
     return this.value();
   }
   replace(value: unknown): Promise<Record<string, Shape>> {
-    return this.enqueue(async () => {
-      const input = record(value);
-      const next = Object.fromEntries(Object.entries(input).filter(([account]) => account !== '' || !Object.hasOwn(input, defaultAccount))
-        .map(([account, value]) => [account || defaultAccount, shape(value)]));
-      for (const [account, wanted] of Object.entries(next)) {
-        const nativeHosts = new Set(this.hosts().filter(host => this.snapshots.has(host)));
-        const oldLinks = this.preferences[account]?.links ?? [];
-        const unconfirmed = legacyShape(wanted, nativeHosts, oldLinks);
-        this.preferences[account] = { links: legacyLinks(wanted.sections, unconfirmed, oldLinks, nativeHosts, wanted.threadHostIds),
-          collapsedSectionIds: wanted.collapsedSectionIds, sectionOrder: wanted.sectionOrder };
-        // Hosts without native snapshots still own browser grouping state,
-        // including their members inside a group shared with native hosts.
-        if (unconfirmed.sections.length) this.legacy[account] = unconfirmed;
-        else delete this.legacy[account];
-        this.current[account] = wanted;
-      }
-      this.save();
-      return this.value();
-    });
+    return this.enqueue(() => Promise.resolve(this.replaceValue(value)));
+  }
+  private replaceValue(value: unknown) {
+    const input = record(value);
+    const next = Object.fromEntries(Object.entries(input).filter(([account]) => account !== '' || !Object.hasOwn(input, defaultAccount))
+      .map(([account, value]) => [account || defaultAccount, shape(value)]));
+    for (const [account, wanted] of Object.entries(next)) {
+      const nativeHosts = new Set(this.hosts().filter(host => this.snapshots.has(host)));
+      const oldLinks = this.preferences[account]?.links ?? [];
+      const unconfirmed = legacyShape(wanted, nativeHosts, oldLinks);
+      this.preferences[account] = { links: legacyLinks(wanted.sections, unconfirmed, oldLinks, nativeHosts, wanted.threadHostIds),
+        collapsedSectionIds: wanted.collapsedSectionIds, sectionOrder: wanted.sectionOrder };
+      // Hosts without native snapshots still own browser grouping state,
+      // including their members inside a group shared with native hosts.
+      if (unconfirmed.sections.length) this.legacy[account] = unconfirmed;
+      else delete this.legacy[account];
+      this.current[account] = wanted;
+    }
+    this.save();
+    return this.value();
   }
   private save() {
     this.storage.setItem(preferencesKey, JSON.stringify(this.preferences));

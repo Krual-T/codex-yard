@@ -10,6 +10,8 @@ The project's MIT license applies to project-authored source and excludes `vendo
 
 Changes to Codex App's private module exports or host contracts can require updates to the version boundary in `src/native/renderer-assets.ts` and the corresponding host code. Compatibility with other renderer versions is not assumed. The CLI/daemon versions and the separate UI reference version are documented in README.md.
 
+The React workspace build reads named SVG shapes from the pinned renderer for its chrome icons. The icon artwork retains its upstream terms. The extraction reads literals at build time and does not run or serve the icon catalog's JavaScript to the workspace.
+
 The project-authored New tab surface in `src/native/new-tab-view.tsx` follows the
 layout and action composition inspected in App **26.1111.21308** (Windows package
 **26.1111.2228.0**, `webview/assets/async/350901.9887d1d57a.js`). It uses the

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { startupSidebar } from '../src/native/startup-sidebar.ts';
+import { startupProjectSelection, startupSidebar } from '../src/native/startup-sidebar.ts';
 
 test('startup metadata respects explicit memberships, project roots and bounded titles without exposing history', () => {
   const globals = {
@@ -34,4 +34,12 @@ test('startup home uses the selected local project and preserves an explicit pro
   assert.equal(selected({ type: 'local', projectId: 'removed' }), null);
   assert.equal(selected({ type: 'projectless' }), null);
   assert.equal(selected({ type: 'remote', projectId: 'b' }), null);
+});
+
+test('source startup distinguishes no project from an unavailable saved destination', () => {
+  assert.equal(startupProjectSelection(null), null);
+  assert.deepEqual(startupProjectSelection({ type: 'local', projectId: 'project-1', root: '/private' }),
+    { type: 'local', projectId: 'project-1' });
+  assert.deepEqual(startupProjectSelection({ type: 'local', projectId: '' }), { type: 'unavailable' });
+  assert.deepEqual(startupProjectSelection({ type: 'remote', projectId: 'project-1', hostId: 'remote' }), { type: 'unavailable' });
 });

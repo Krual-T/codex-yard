@@ -362,8 +362,8 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
         return archive ? {} : { thread: { ...thread, turns: [] } };
       }
       case 'thread/turns/list': return {
-        data: [...(threads.get(threadId)?.turns || [])].reverse().map(turn => params.itemsView === 'summary'
-          ? { ...turn, items: [], itemsView: 'summary' } : turn),
+        data: [...(threads.get(threadId)?.turns || [])].reverse().map(turn => params.itemsView === 'notLoaded'
+          ? { ...turn, items: [], itemsView: 'notLoaded' } : params.itemsView === 'summary' ? { ...turn, itemsView: 'summary' } : turn),
         nextCursor: null, backwardsCursor: null,
       };
       case 'thread/items/list': {

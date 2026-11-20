@@ -15,6 +15,30 @@ function storage(initial: Record<string, unknown>) {
   return { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); },
     removeItem: (key: string) => { values.delete(key); }, values };
 }
+test('moving a sidebar project preserves native chat membership and restores the placement from disk', async () => {
+  const local = storage({ 'native-atoms': { draft: 'untouched' } });
+  const requests: Record<string, unknown>[] = [];
+  const request = async (params: Record<string, unknown>) => {
+    requests.push(params);
+    assert.equal(params.operation, 'snapshot');
+    return { sections: [{ id: 'native', name: 'Shared group', appearance: null, threadIds: ['chat'] }] };
+  };
+  const sidebar = new BrowserSidebarSections(local, request, () => ['local']);
+  assert.deepEqual(sidebar.projectSections(), []);
+  assert.equal(requests.length, 0);
+  const created = await sidebar.moveProject('project', { name: 'Projects for later' });
+  assert.deepEqual(created.find(section => section.name === 'Projects for later')?.projectIds, ['project']);
+  const projected = await sidebar.moveProject('project', { id: 'native' });
+  assert.deepEqual(projected.find(section => section.id === 'native')?.projectIds, ['project']);
+  const value = sidebar.value()['yard-app-server']!;
+  assert.deepEqual(value.sections.find(section => section.id === 'native')?.itemKeys, ['codex:thread:local:chat', 'codex:project:project']);
+  const reads = requests.length;
+  const restarted = new BrowserSidebarSections(local, request, () => ['local']);
+  assert.deepEqual(restarted.projectSections().find(section => section.id === 'native')?.projectIds, ['project']);
+  assert.equal(requests.length, reads);
+  assert.equal(JSON.parse(local.getItem('native-atoms')!).draft, 'untouched');
+});
+
 test('custom sections migrate once, keep only independent preferences and refresh external native edits', async t => {
   const root = await mkdtemp('/tmp/yard-sidebar-browser-');
   const fake = await createFakeCodex(root), connection = new CodexConnection(fake.socketPath);

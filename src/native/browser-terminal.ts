@@ -21,6 +21,7 @@ interface RemoteListener {
 
 export class BrowserTerminal {
   private listener: RemoteListener | null = null;
+  private readonly workspaceListeners = new Set<(event: TerminalEvent) => void>();
   private readonly sessions = new Set<string>();
   private readonly request: (operation: TerminalOperation, args: unknown[]) => Promise<unknown>;
   constructor(request: (operation: TerminalOperation, args: unknown[]) => Promise<unknown>) { this.request = request; }
@@ -28,8 +29,13 @@ export class BrowserTerminal {
   receive(event: TerminalEvent) {
     if (event.type === 'attached') this.sessions.add(event.sessionId);
     if (event.type === 'exit' || event.type === 'error') this.sessions.delete(event.sessionId);
+    for (const listener of this.workspaceListeners) listener(event);
     const result = this.listener?.(event);
     if (result) void Promise.resolve(result).catch(() => {}).finally(() => result[Symbol.dispose]?.());
+  }
+  watch(listener: (event: TerminalEvent) => void) {
+    this.workspaceListeners.add(listener);
+    return () => { this.workspaceListeners.delete(listener); };
   }
   disconnected() {
     for (const sessionId of this.sessions) this.receive({ type: 'exit', sessionId, code: null, signal: null,

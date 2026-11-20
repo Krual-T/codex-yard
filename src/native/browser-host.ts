@@ -5,7 +5,7 @@ import { BrowserFiles } from './browser-files.ts';
 import { BrowserClipboard, writeClipboardText } from './browser-clipboard.ts';
 import type { ClipboardImage } from './browser-clipboard.ts';
 import { BrowserTerminal, registerTerminalShortcut, terminalRpcService } from './browser-terminal.ts';
-import type { TerminalEvent } from './terminal-protocol.ts';
+import type { TerminalEvent, TerminalOperation } from './terminal-protocol.ts';
 import { rendererAssets } from './renderer-assets.ts';
 import { createMiniHost, isMiniWindow } from './mini-host.ts';
 import { openClientBrowser } from './client-browser.ts';
@@ -13,17 +13,22 @@ import type { HttpRequest } from './http-fetch.ts';
 import type { AssignmentRequest, MembershipRequest, ProjectAssignment, ProjectlessRequest, ProjectlessThreadUpdate, ThreadProjectOperation } from './thread-projects.ts';
 import { BrowserChrome, chromeRpcService } from '../browser-reuse/browser-bridge.ts';
 import { visualizationService } from './visualizations.ts';
-import { HistoryStartup, initialWorkspaceRoute } from './history-startup.ts';
+import { HistoryStartup, initialWorkspaceRoute, parseWorkspaceThreadRoute, sourceWorkspaceRoute, usesPinnedToolRenderer } from './history-startup.ts';
+import { readWorkspaceHistory } from './browser-workspace-rpc.ts';
 import { BrowserThreadReadState } from './browser-thread-read-state.ts';
 import { BrowserStateConvergence } from './browser-state-convergence.ts';
-import { BrowserSidebarSections, sectionAtom } from './browser-sidebar-sections.ts';
+import { BrowserSidebarSections, sectionAtom, type ProjectSectionDestination } from './browser-sidebar-sections.ts';
 import { BrowserSidebarOrders } from './browser-sidebar-orders.ts';
 import { BrowserSidechatThreads } from './browser-sidechat-threads.ts';
 import { projectService } from './browser-projects.ts';
 
 const version = '26.1013.40934';
-const historyStartup = new HistoryStartup(initialWorkspaceRoute(
-  document.querySelector<HTMLMetaElement>('meta[name="initial-route"]')?.content, location.search, location.pathname), 15_000, !isMiniWindow);
+const sourceWorkspaceDocument = document.querySelector('meta[name="yard-source-workspace"]') !== null;
+const pinnedToolDocument = document.querySelector('meta[name="yard-pinned-tool"]') !== null && !isMiniWindow;
+const pinnedReturn = pinnedToolDocument ? new URLSearchParams(location.search).get('workspaceReturn') : null;
+const initialRoute = sourceWorkspaceDocument ? sourceWorkspaceRoute(location) : initialWorkspaceRoute(
+  document.querySelector<HTMLMetaElement>('meta[name="initial-route"]')?.content, location.search, location.pathname);
+const historyStartup = new HistoryStartup(initialRoute, 15_000, !isMiniWindow);
 window.addEventListener('yard-workspace-ready', () => historyStartup.workspaceReady(), { once: true });
 window.addEventListener('yard-conversation-history-ready', () => {
   requestAnimationFrame(() => requestAnimationFrame(() => historyStartup.release()));
@@ -76,6 +81,9 @@ async function refreshSidebar() {
   if (Date.now() - lastSidebarRefresh < 1000) return;
   lastSidebarRefresh = Date.now();
   sidechatThreads.refresh();
+  // The source workspace fetches its own bounded sidebar per host. It does
+  // not consume the pinned renderer's persisted sections or order atoms.
+  if (sourceWorkspaceDocument) return;
   try {
     await requestHost('sidebar-refresh', {});
     for (const [key, value] of Object.entries(await sidebarOrders.load())) publish({ type: 'persisted-atom-updated', key, value });
@@ -97,6 +105,7 @@ Object.assign(window, { workbenchChrome: chrome });
 Object.assign(window, { workbenchResolveAutomation: (id: string) => requestHost('automation-run-resolve', { id, confirmed: true }) });
 Object.assign(window, { workbenchPortForwarding: (params: unknown) => requestHost('port-forwarding', params) });
 Object.assign(window, { workbenchModelProviders: (params: unknown) => requestHost('model-providers', params) });
+Object.assign(window, { workbenchComposerPermissions: (params: unknown) => requestHost('source-workspace-permissions', params) });
 let socket: WebSocket;
 let opened: Promise<void>;
 let disposed = false;
@@ -135,8 +144,15 @@ function currentOwnerRoute() {
 function syncRoute() {
   const route = currentOwnerRoute();
   if (route == null) return;
-  const url = new URL(location.href);
-  if (route === '/') url.searchParams.delete('initialRoute'); else url.searchParams.set('initialRoute', route);
+  const url = new URL(pinnedToolDocument ? '/' : location.href, location.href);
+  const returning = pinnedToolDocument && !usesPinnedToolRenderer(route) && (route === '/' || parseWorkspaceThreadRoute(route));
+  const target = returning && route === '/' && pinnedReturn && parseWorkspaceThreadRoute(pinnedReturn) ? pinnedReturn : route;
+  if (target === '/') url.searchParams.delete('initialRoute'); else url.searchParams.set('initialRoute', target);
+  if (returning) {
+    location.replace(url);
+    return;
+  }
+  if (pinnedReturn) url.searchParams.set('workspaceReturn', pinnedReturn);
   history.replaceState(null, '', url);
 }
 
@@ -145,6 +161,7 @@ function connect() {
   opened = new Promise((resolve, reject) => {
     socket.addEventListener('open', () => resolve(), { once: true });
     socket.addEventListener('error', () => reject(new Error('无法连接工作台宿主')), { once: true });
+    socket.addEventListener('close', () => reject(new Error('宿主连接已断开')), { once: true });
   });
   // The renderer asks for data during module initialization.
   opened.catch(() => {});
@@ -280,6 +297,10 @@ async function send(message: HostMessage) {
   }
   await historyStartup.wait(message);
   await opened;
+  // A resolved opening promise belongs to the socket's previous connection.
+  // WebSocket.send silently discards messages after close; fail before tracking
+  // or sending so a foreground read cannot block subsequent reconnect recovery.
+  if (socket.readyState !== WebSocket.OPEN) throw new Error('宿主连接已断开，请等待重连后重新读取。');
   if (message.type === 'worker-request' && message.request) pending.set(workerKey(message.workerId, message.request.id), message);
   else if (message.request) {
     threadReadState.begin(message);
@@ -300,9 +321,75 @@ function requestHost(endpoint: string, body: unknown) {
 }
 function requestThreadProjects(operation: ThreadProjectOperation, value?: unknown) { return requestHost('thread-projects', { operation, value }); }
 
+const requestStartupSidebar = (hostId: string, searchTerm?: string, cursor?: string) => requestHost('startup-sidebar', { hostId, searchTerm, cursor });
+// The first bounded read can overlap the source workspace's JS and CSS. Only
+// the first local consumer takes it; reloads and explicit refreshes read again.
+let initialSidebar = sourceWorkspaceDocument
+  ? requestStartupSidebar('local').then(value => {
+    performance.mark('workbench-source-sidebar-arrived');
+    return value;
+  }) : undefined;
+void initialSidebar?.catch(() => {});
+const initialThread = sourceWorkspaceDocument && parseWorkspaceThreadRoute(initialRoute);
+let initialHistory: ReturnType<typeof readWorkspaceHistory> | undefined;
+if (initialThread) {
+  performance.mark('workbench-source-history-requested');
+  initialHistory = readWorkspaceHistory(send, initialThread.threadId, null, initialThread.hostId).then(result => {
+    performance.mark('workbench-source-history-arrived');
+    return result;
+  });
+}
+void initialHistory?.catch(() => {});
+
 Object.assign(window, {
+  workbenchTakeSourceHistory: (threadId: string, hostId: string) => {
+    const first = initialHistory;
+    initialHistory = undefined;
+    if (first && initialThread && initialThread.threadId === threadId && initialThread.hostId === hostId) {
+      performance.mark('workbench-source-history-consumed');
+      return first;
+    }
+  },
+  workbenchProjectlessThreadCwd: () => requestHost('projectless-thread-cwd', {}),
+  workbenchReadWorkspaceDirectory: (workspaceRoot: string, directoryPath: string, hostId = 'local') =>
+    requestHost('workspace-directory-entries', { workspaceRoot, directoryPath, hostId }),
+  workbenchSelectLocalProject: (projectId?: string) => requestHost('set-global-state', {
+    key: 'selected-project', value: projectId ? { type: 'local', projectId } : null,
+  }),
+  workbenchSidebarProject: (hostId: string, projectId: string, fields: Record<string, unknown>) =>
+    requestHost('source-sidebar-project', { ...fields, hostId, projectId }),
+  workbenchFollowUpMode: (value?: 'queue' | 'steer') => requestHost(value ? 'set-setting' : 'get-setting', { key: 'followUpQueueMode', value }),
+  workbenchProjectSections: {
+    snapshot: () => sidebarSections.projectSections(),
+    load: () => sidebarSections.load().then(() => sidebarSections.projectSections()),
+    move: (id: string, destination: ProjectSectionDestination) => sidebarSections.moveProject(id, destination),
+  },
+  workbenchBrowseProjectFolders: (hostId: string, directoryPath?: string) =>
+    requestHost('remote-workspace-directory-entries', { hostId, directoryPath, directoriesOnly: true }),
+  workbenchTerminal: {
+    watch: terminal.watch.bind(terminal),
+    call: (operation: TerminalOperation, args: unknown[]) => {
+      if (socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error('The terminal connection is closed.'));
+      return terminal.call(operation, args);
+    },
+  },
+  workbenchSetThreadPinned: (threadId: string, pinned: boolean, hostId = 'local') => requestHost('set-thread-pinned', { hostId, threadId, pinned }),
+  workbenchRespondToServerRequest: (id: string | number, result: unknown, hostId = 'local') => {
+    // Replies belong to the current daemon connection. Never queue them until reconnect.
+    if (socket.readyState !== WebSocket.OPEN || !connectedHosts.has(hostId)) {
+      throw new Error('The connection closed. Reopen the conversation to check the request.');
+    }
+    const message: HostMessage = { type: 'mcp-response', hostId, response: { id, result } };
+    socket.send(JSON.stringify(message));
+  },
   workbenchStartupSidebar: {
-    load: () => requestHost('startup-sidebar', {}),
+    load: (hostId = 'local', searchTerm?: string, cursor?: string) => {
+      if (searchTerm || cursor !== undefined || hostId !== 'local' || !initialSidebar) return requestStartupSidebar(hostId, searchTerm, cursor);
+      const first = initialSidebar;
+      initialSidebar = undefined;
+      return first.catch(() => requestStartupSidebar(hostId));
+    },
+    hosts: () => requestHost('source-workspace-hosts', {}),
     route: currentOwnerRoute,
     navigate: (route: string) => {
       pendingNotificationRoute = route;

@@ -15,6 +15,7 @@ export type SandboxPolicy = { type: 'dangerFullAccess' }
       excludeTmpdirEnvVar: boolean; excludeSlashTmp: boolean };
 
 export interface SessionConfig {
+  profile?: string | null;
   model?: string | null;
   model_provider?: string | null;
   model_reasoning_effort?: string | null;
@@ -52,10 +53,12 @@ export interface ThreadSettingsResponse {
   model?: string | null;
   modelProvider?: string | null;
   reasoningEffort?: string | null;
+  effort?: string | null;
   approvalPolicy?: ApprovalPolicy | null;
   serviceTier?: string | null;
   approvalsReviewer?: ApprovalsReviewer | null;
   sandbox?: SandboxPolicy;
+  sandboxPolicy?: SandboxPolicy;
   activePermissionProfile?: { id: string } | null;
   collaborationMode?: string | { mode: string } | null;
 }
@@ -64,6 +67,10 @@ export interface TurnSummary {
   id: string;
   items: ThreadItemSummary[];
   status: 'completed' | 'interrupted' | 'failed' | 'inProgress';
+  itemsView?: string;
+  startedAt?: number | null;
+  completedAt?: number | null;
+  durationMs?: number | null;
   error?: { message: string; codexErrorInfo?: unknown; additionalDetails?: string | null } | null;
 }
 export interface ThreadSummary {
@@ -72,6 +79,8 @@ export interface ThreadSummary {
   preview?: string;
   ephemeral?: boolean;
   forkedFromId?: string | null;
+  parentThreadId?: string | null;
+  agentNickname?: string | null;
   /** Experimental in CLI 0.169.1; independent of subagent parentThreadId. */
   attachedToThreadId?: string | null;
   cwd: string;

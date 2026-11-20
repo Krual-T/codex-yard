@@ -15,14 +15,14 @@ interface NewTabProps {
   children?: ReactRuntime.ReactNode;
   onActionSelect(action: TabAction): void;
   onToggleBottomPanel(): void;
-  yardResolveUrl(value: string): string | null;
+  yardResolveUrl?(value: string): string | null;
   yardOpenUrl?(url: string): unknown;
+  onSearchFiles?(query: string): void;
 }
-interface NewTabMenu {
+export interface NewTabMenu {
   Dropdown: ReactRuntime.ComponentType<{ align: 'end'; triggerButton: ReactRuntime.ReactElement; children: ReactRuntime.ReactNode; onCloseAutoFocus(event: { preventDefault(): void }): void }>;
   Item: ReactRuntime.ComponentType<{ onSelect(): void; children: ReactRuntime.ReactNode }>;
 }
-let React: typeof ReactRuntime;
 
 // Layout metrics follow New tab's L/X/ee components in App 26.1111.21308.
 // Keep the pinned renderer's theme tokens and React dispatcher.
@@ -50,7 +50,10 @@ const css = `
 @container (max-width:320px) { .yard-new-tab-cards { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 `;
 
-function NewTab({ actions, children, onActionSelect, onToggleBottomPanel, yardResolveUrl, yardOpenUrl, recentContent, menu }: NewTabProps & { recentContent: ReactRuntime.ReactNode; menu: NewTabMenu }) {
+type NewTabViewProps = NewTabProps & { recentContent?: ReactRuntime.ReactNode; menu: NewTabMenu };
+
+function NewTabView({ runtime: React, actions, children, onActionSelect, onToggleBottomPanel, yardResolveUrl, yardOpenUrl, onSearchFiles, recentContent, menu }:
+  NewTabViewProps & { runtime: typeof ReactRuntime }) {
   const [query, setQuery] = React.useState('');
   const [error, setError] = React.useState('');
   const pendingAction = React.useRef<TabAction | null>(null);
@@ -59,24 +62,27 @@ function NewTab({ actions, children, onActionSelect, onToggleBottomPanel, yardRe
   const cards = ['terminal', 'side-chat', 'open-file'].flatMap(id => available.filter(action => action.id === id));
   const more = available.filter(action => !cards.includes(action));
   const hasFiles = available.some(action => action.id === 'open-file');
-  const searchLabel = hasFiles ? '搜索文件或输入网址' : '输入网址';
+  const searchLabel = hasFiles ? yardResolveUrl ? '搜索文件或输入网址' : '搜索文件' : '输入网址';
   return <div data-new-tab-scroll-root className="yard-new-tab flex h-full min-h-0 flex-col overflow-x-hidden overflow-y-auto bg-surface-canvas select-none">
     <style>{css}</style>
     <div className="yard-new-tab-content">
-      <form className="yard-new-tab-search text-secondary" role="search" onSubmit={event => {
+      {(yardResolveUrl || onSearchFiles) && <form className="yard-new-tab-search text-secondary" role="search" onSubmit={event => {
         event.preventDefault();
         const value = query.trim();
         if (!value) return;
         setError('');
-        const url = yardResolveUrl(value);
+        const url = yardResolveUrl?.(value);
         if (url) {
           if (yardOpenUrl?.(url) == null) setError('暂时无法打开网页，请稍后重试。');
         }
-        else if (hasFiles) window.postMessage({ type: 'file-search-command-menu', query: value }, location.origin);
+        else if (hasFiles) {
+          if (onSearchFiles) onSearchFiles(value);
+          else window.postMessage({ type: 'file-search-command-menu', query: value }, location.origin);
+        }
       }}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7" /><path d="m16 16 4.5 4.5" /></svg>
         <input type="search" aria-label={searchLabel} placeholder={searchLabel} value={query} onChange={event => setQuery(event.target.value)} autoComplete="off" spellCheck={false} />
-      </form>
+      </form>}
       {error ? <p role="alert" className="text-secondary">{error}</p> : null}
       <section className="yard-new-tab-tools" aria-label="新建">
         <div className="yard-new-tab-heading text-secondary">
@@ -104,8 +110,14 @@ function NewTab({ actions, children, onActionSelect, onToggleBottomPanel, yardRe
   </div>;
 }
 
-export function installNewTab(react: typeof ReactRuntime): void {
-  React = react;
+export function createNewTab(React: typeof ReactRuntime) {
+  return function NewTab(props: NewTabViewProps) {
+    return <NewTabView {...props} runtime={React} />;
+  };
+}
+
+export function installNewTab(React: typeof ReactRuntime): void {
+  const NewTab = createNewTab(React);
   const surface = window as Window & {
     workbenchNewTab?: (props: NewTabProps, recentContent: ReactRuntime.ReactNode, menu: NewTabMenu) => ReactRuntime.ReactNode;
     workbenchNewTabIcon?: () => ReactRuntime.ReactNode;
