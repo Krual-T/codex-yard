@@ -23,7 +23,8 @@ const fake = await createFakeCodex(root);
 const id = process.env.AGENTS_TEST_THREAD_ID ?? '00000000-0000-4000-8000-000000000001';
 const userText = '安卓 Chrome 与 iPhone Safari 的测试消息';
 const longText = '长消息换行 ' + 'https://example.test/'.repeat(30);
-const initialThread = fixtureThread(id, root, { name: 'Mobile chat', turns: [fixtureTurn('fixture-turn', [
+const threadName = 'Mobile chat · 手机输入与顶部工具栏长标题布局验证';
+const initialThread = fixtureThread(id, root, { name: threadName, turns: [fixtureTurn('fixture-turn', [
   { id: 'fixture-user', type: 'userMessage', clientId: null, content: [{ type: 'text', text: userText, text_elements: [] }] },
   agentItem('fixture-answer', 'Mobile fixture response'),
 ]), fixtureTurn('long-turn', [
@@ -34,6 +35,11 @@ fake.threads.set(id, structuredClone(initialThread));
 fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.164.0 (Linux)' }));
 fake.handlers.set('getAuthStatus', () => ({ authMethod: 'apikey', authToken: null, requiresOpenaiAuth: false }));
 fake.handlers.set('account/gatewayOAuth/read', () => ({ providerId: 'fixture', providerName: 'Fixture', required: false, status: null, error: null }));
+fake.handlers.set('thread/turns/list', params => ({
+  data: [...fake.threads.get(String(params.threadId))!.turns].reverse().map(turn => ({ ...turn,
+    items: params.itemsView === 'notLoaded' ? [] : turn.items, itemsView: params.itemsView ?? 'full',
+  })), nextCursor: null, backwardsCursor: null,
+}));
 fake.handlers.set('thread/resume', params => ({ ...fake.defaultResult('thread/resume', params), turnsBackwardsCursor: '0', itemsBackwardsCursor: '0' }));
 fake.handlers.set('turn/start', params => {
   const result = fake.defaultResult('turn/start', params);
@@ -67,11 +73,11 @@ const report: Record<string, unknown> = { checks, errors, renderer: '26.1013.409
 async function dismissOnboarding(page: Page) {
   await page.addLocatorHandler(page.getByRole('button', { name: /^(Continue with current model|继续使用当前模型)$/ }), async button => { await button.click(); });
 }
-async function ready(page: Page) {
+async function ready(page: Page, dismissNotice = true) {
   await page.locator('[data-codex-composer="true"]').waitFor({ timeout: 20000 });
   await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   const notice = page.getByRole('button', { name: /^(不再显示|Don’t show again|Don't show again)$/ });
-  if (await notice.isVisible()) await notice.click();
+  if (dismissNotice && await notice.isVisible()) await notice.click();
 }
 async function resize(page: Page, metrics: ViewportMetrics) {
   await page.evaluate(metrics => (window as TestWindow).setTestViewport!(metrics), metrics);
@@ -90,12 +96,56 @@ async function visibleComposer(page: Page, metrics: ViewportMetrics) {
       label + ' must stay above the keyboard: ' + JSON.stringify({ box, metrics }));
   }
 }
+async function readableInput(page: Page) {
+  const sizes = await page.locator('[data-codex-composer="true"]').evaluate(element => {
+    const zoom = Number(getComputedStyle(element.closest('[data-app-shell-frame]')!).zoom);
+    return [element, ...element.querySelectorAll('p, span')].map(node => parseFloat(getComputedStyle(node).fontSize) * zoom);
+  });
+  assert.ok(sizes.length && sizes.every(size => size >= 15.99), 'Focused editor text must be at least 16 rendered pixels: ' + sizes);
+}
+async function windowZoom(page: Page, value: number) {
+  await page.evaluate(async value => {
+    const host = window as unknown as { electronBridge: { sendMessageFromView(message: unknown): Promise<void> } };
+    await host.electronBridge.sendMessageFromView({ type: 'persisted-atom-update', key: 'electron:window-zoom', value });
+  }, value);
+  await page.waitForFunction(value => Number(getComputedStyle(document.documentElement)
+    .getPropertyValue('--codex-window-zoom') || 1) === value, value);
+}
+async function phoneHeader(page: Page) {
+  const layout = await page.evaluate(() => {
+    const header = document.querySelector<HTMLElement>('[data-app-shell-titlebar]')!;
+    const buttons = [...header.querySelectorAll<HTMLElement>('button')]
+      .filter(element => !element.closest('[aria-hidden="true"], [inert]') && element.checkVisibility({ visibilityProperty: true, opacityProperty: true }))
+      // Tabs keep overflowed controls mounted in their horizontal scroller.
+      // Inspect the controls that are actually painted and receive a tap.
+      .filter(element => {
+        const box = element.getBoundingClientRect();
+        return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)?.closest('button') === element;
+      })
+      .map(element => ({ label: element.getAttribute('aria-label'), ...element.getBoundingClientRect().toJSON() }));
+    const trigger = buttons.find(button => button.label === '显示侧边栏');
+    const slots = [...document.querySelectorAll<HTMLElement>('[data-app-shell-titlebar] > [data-app-shell-header-slot], [data-app-shell-main-toolbar-trailing-slot]')]
+      .filter(element => element.checkVisibility({ visibilityProperty: true })).map(element => getComputedStyle(element).backgroundColor);
+    return { buttons, trigger, slots, width: innerWidth, header: header.getBoundingClientRect().toJSON(),
+      scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth };
+  });
+  if (layout.width < 768) assert.ok(layout.trigger && layout.trigger.x < 24, 'The sidebar trigger must use the phone’s left edge');
+  assert.ok(layout.buttons.every(button => button.x >= -1 && button.right <= layout.width + 1 && button.y >= layout.header.y - 1
+    && button.bottom <= layout.header.bottom + 1), 'Header controls must fit: ' + JSON.stringify(layout));
+  if (layout.width < 768) assert.ok(layout.slots.every(color => color !== 'rgba(0, 0, 0, 0)' && color !== 'transparent'),
+    'Narrow header slots must cover scrolled text');
+  assert.ok(layout.scrollWidth <= layout.clientWidth + 1, 'The phone page must not scroll horizontally');
+}
 
 try {
-  for (const viewport of [{ width: 1280, height: 800 }, { width: 800, height: 1280 }, { width: 390, height: 844 }, { width: 844, height: 390 }]) {
+  // iPhone 15: 393×852; iPhone 17: 402×874 CSS pixels at DPR 3, in both orientations.
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 800, height: 1280 }, { width: 390, height: 844 },
+    { width: 393, height: 852 }, { width: 402, height: 874 }, { width: 360, height: 800 },
+    { width: 844, height: 390 }, { width: 852, height: 393 }, { width: 874, height: 402 }]) {
     if (!process.env.AGENTS_TEST_CODEX_SOCKET) fake.threads.set(id, structuredClone(initialThread));
     app = await createApp('case-' + viewport.width);
-    const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true });
+    const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true,
+      deviceScaleFactor: viewport.width < 500 || viewport.height < 500 ? 3 : 1 });
     await context.addInitScript(() => {
       const viewport = window.visualViewport!;
       let metrics: ViewportMetrics | null = null;
@@ -117,13 +167,26 @@ try {
     let editor = page.locator('[data-codex-composer="true"]');
     assert.equal(await editor.evaluate(element => element === document.activeElement), false, 'Home must not focus the composer');
     const row = page.locator('[data-app-action-sidebar-thread-row]').filter({ hasText: 'Mobile chat' }).first();
-    if (await row.isVisible()) await row.tap();
+    if (await row.evaluate(element => !element.closest('[inert]'))) await row.tap();
     else await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/local/' + id), { waitUntil: 'commit' });
     await page.getByText('Mobile fixture response', { exact: true }).waitFor({ timeout: 20000 });
     await ready(page);
     editor = page.locator('[data-codex-composer="true"]');
     assert.equal(await editor.evaluate(element => element === document.activeElement), false, 'Entering a conversation must not focus the composer');
     checks.push(`${viewport.width}×${viewport.height}: home and conversation entry keep the keyboard closed`);
+    await readableInput(page);
+    if (viewport.width < 768 || viewport.height < 500) {
+      await phoneHeader(page);
+      const hideTabs = page.getByRole('button', { name: '隐藏标签页', exact: true });
+      if (!await hideTabs.isVisible()) {
+        await page.getByRole('button', { name: '退出完整视图', exact: true }).tap();
+        await phoneHeader(page);
+      }
+      await hideTabs.tap();
+      await phoneHeader(page);
+      await page.screenshot({ path: join(output, `${viewport.width}-header.png`) });
+      checks.push(`${viewport.width}×${viewport.height}: long-title header and controls fit with tabs shown and hidden`);
+    }
 
     const bubble = page.locator('.bg-user-message').first();
     const bubbleStyle = await bubble.evaluate(element => {
@@ -139,10 +202,19 @@ try {
     assert.equal(await editor.evaluate(element => element === document.activeElement), true, 'A direct tap must focus the editor');
     const draft = '输入第一行，确认能看见\n第二行保留中文与 Safari';
     await editor.fill(draft);
+    await readableInput(page);
     const draftHtml = await editor.innerHTML();
     const keyboard = { height: Math.max(240, Math.round(viewport.height * .55)), offsetTop: 0, scale: 1 };
     await resize(page, keyboard);
     await visibleComposer(page, keyboard);
+    if (viewport.width === 393 || viewport.width === 402) {
+      for (const zoom of [0.8, 1.25, 1]) {
+        await windowZoom(page, zoom);
+        await readableInput(page);
+        await visibleComposer(page, keyboard);
+      }
+      checks.push(`${viewport.width}×${viewport.height}: editor text stays at least 16 rendered pixels at 80%, 125% and 100% app zoom`);
+    }
     await resize(page, { ...keyboard, offsetTop: 48 });
     await visibleComposer(page, { ...keyboard, offsetTop: 48 });
     assert.equal(await editor.innerHTML(), draftHtml);
@@ -160,7 +232,7 @@ try {
     await page.waitForFunction(() => document.querySelector('[data-codex-composer="true"]')?.textContent?.trim() === '');
     checks.push(`${viewport.width}×${viewport.height}: the draft sends through the existing conversation flow`);
     const newChat = page.getByRole('button', { name: '在 Mobile fixture 中开始新聊天', exact: true });
-    if (await newChat.isVisible()) {
+    if (await newChat.count() && await newChat.evaluate(element => !element.closest('[inert]'))) {
       await newChat.tap();
       await ready(page);
       assert.equal(await page.locator('[data-codex-composer="true"]').evaluate(element => element === document.activeElement), false);
@@ -169,6 +241,36 @@ try {
     await context.close();
     await app.close(); app = undefined;
   }
+  if (!process.env.AGENTS_TEST_CODEX_SOCKET) {
+    app = await createApp('startup-phone');
+    const startup = await browser.newContext({ viewport: { width: 402, height: 874 }, hasTouch: true, isMobile: true, deviceScaleFactor: 3 });
+    const page = await startup.newPage();
+    page.on('pageerror', error => errors.push(error.message));
+    await dismissOnboarding(page);
+    await page.addInitScript(() => localStorage.setItem('native-atoms', JSON.stringify({ 'electron:window-zoom': 0.8 })));
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    await page.route('**/assets/app-shared-*.js', async route => { await pending; await route.continue(); });
+    try {
+      await page.goto(app.url, { waitUntil: 'commit' });
+      const early = page.locator('#pending-yard-home-input');
+      await early.waitFor();
+      const pixels = await early.evaluate(element => parseFloat(getComputedStyle(element).fontSize)
+        * Number(getComputedStyle(document.getElementById('yard-startup')!).zoom));
+      assert.ok(pixels >= 15.99, 'Startup input must also avoid Safari focus zoom: ' + pixels);
+      await early.tap();
+      await early.fill('手机启动阶段输入草稿');
+      await page.screenshot({ path: join(output, 'startup-phone.png') });
+    } finally { release(); }
+    await ready(page);
+    await page.waitForFunction(() => !document.getElementById('yard-startup'));
+    await readableInput(page);
+    assert.equal((await page.locator('[data-codex-composer="true"]').innerText()).trim(), '手机启动阶段输入草稿');
+    checks.push('402×874: startup editor at 80% zoom keeps 16 rendered pixels and transfers its draft to the full composer');
+    await startup.close();
+    await app.close(); app = undefined;
+  }
+  if (!process.env.AGENTS_TEST_CODEX_SOCKET) fake.threads.set(id, structuredClone(initialThread));
   app = await createApp('desktop');
   const desktop = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   await dismissOnboarding(desktop);
@@ -177,7 +279,9 @@ try {
   await ready(desktop);
   await desktop.locator('[data-app-action-sidebar-thread-row]').filter({ hasText: 'Mobile chat' }).first().click();
   await desktop.getByText('Mobile fixture response', { exact: true }).waitFor({ timeout: 20000 });
-  await ready(desktop);
+  // Dismissing the access warning intentionally moves focus away from the
+  // editor. Check the renderer's navigation focus before that user action.
+  await ready(desktop, false);
   await desktop.waitForFunction(() => document.querySelector('[data-codex-composer="true"]') === document.activeElement);
   assert.equal(await desktop.locator('[data-codex-composer="true"]').evaluate(element => element === document.activeElement), true);
   assert.equal(await desktop.evaluate(() => document.documentElement.hasAttribute('data-workbench-mobile-viewport')), false);

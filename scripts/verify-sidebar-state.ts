@@ -13,6 +13,7 @@ import { PINNED_SECTION_ID, sidebarMetadata } from '../src/native/backend-sideba
 import type { SidebarProject, SidebarSection, SidebarSectionInput } from '../src/native/backend-sidebar-state.ts';
 import { record } from '../src/native/protocol.ts';
 import type { ObjectValue } from '../src/native/protocol.ts';
+import { projectService } from '../src/native/browser-projects.ts';
 import { createCliResponsesFixture } from './cli-responses-fixture.ts';
 
 const root = await mkdtemp('/tmp/yard-sidebar-state-'), codexHome = join(root, 'codex'), dataDir = join(root, 'data');
@@ -242,6 +243,24 @@ try {
   assert.equal(Object.values(await global<ObjectValue>('local-projects')).some(value => (record(value).rootPaths as string[]).includes(roots[1])), false);
   assert.equal((await external.request<{ data: SidebarProject[] }>('project/list', {})).data.length, 2);
   checks.push('Yard restart keeps native identities and order; deleting a migrated project stays deleted despite the old projects.json input');
+  const projectServiceHost = projectService(class {}, (endpoint, body) => client!.host(endpoint, record(body)));
+  const duplicate = await client!.rpc<{ project: SidebarProject }>('project/create', {
+    name: native.name, roots: native.roots, idempotencyKey: 'duplicate-project-removal-fixture',
+  });
+  const originalThreads = await client!.rpc<{ data: ThreadSummary[] }>('thread/list', { projectId: native.id, limit: 100 });
+  const removed = await projectServiceHost.removeLocal(duplicate.project.id);
+  assert.deepEqual(removed.previousMemberships, []);
+  assert.equal((await client!.rpc<{ data: SidebarProject[] }>('project/list', {})).data.length, 2);
+  await projectServiceHost.upsertLocal({ projectId: duplicate.project.id, name: native.name, sources: native.roots.map(root => root.path) });
+  assert.equal((await client!.rpc<{ data: SidebarProject[] }>('project/list', {})).data.length, 3);
+  const restoredIds = Object.keys(await global<ObjectValue>('local-projects'));
+  await projectServiceHost.setProjectOrder([...restoredIds, duplicate.project.id]);
+  await projectServiceHost.removeLocal(duplicate.project.id);
+  await restart();
+  assert.equal((await client!.rpc<{ data: SidebarProject[] }>('project/list', {})).data.length, 2);
+  const preserved = await client!.rpc<{ data: ThreadSummary[] }>('thread/list', { projectId: native.id, limit: 100 });
+  assert.deepEqual(preserved.data.map(thread => thread.id).sort(), originalThreads.data.map(thread => thread.id).sort());
+  checks.push('The renderer project service removes an empty duplicate, restores its separate identity and removes it again across a real CLI restart; sibling memberships survive');
   report.providerRequests = provider.requests;
   await writeFile(join(output, 'result.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report, null, 2));
 } catch (error) {

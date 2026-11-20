@@ -54,6 +54,7 @@ import { adaptThreadArchiveModule } from './thread-archives.ts';
 import { automationEndpoints, createAutomations } from './automations.ts';
 import { adaptAutomationModule } from './automation-renderer.ts';
 import { PortForwarding } from './port-forwarding.ts';
+import { DevelopmentPreviews } from './development-previews.ts';
 import { adaptYardMenu } from './app-menu-renderer.ts';
 import { adaptNotificationSettings } from './notification-renderer.ts';
 import { adaptFilePreviewModule } from './file-preview-renderer.ts';
@@ -137,6 +138,10 @@ export async function createNativeWorkbench(options: Options = {}) {
     return readRendererAsset(staged ? join(projectRoot, '.local', startupApplicationFile) : file, path, webRenderer);
   }
   const publicOrigin = options.publicOrigin ?? process.env.AGENTS_PUBLIC_ORIGIN ?? '';
+  const developmentPreviews = new DevelopmentPreviews({ publicOrigin, localOrigin: () => {
+    const address = server.address() as import('node:net').AddressInfo;
+    return 'http://127.0.0.1:' + address.port;
+  } });
   const embeddingOrigins = options.embeddingOrigins ?? (process.env.AGENTS_EMBEDDING_ORIGINS ?? '').split(/\s+/).filter(Boolean);
   for (const origin of embeddingOrigins) {
     let url: URL;
@@ -925,6 +930,10 @@ export async function createNativeWorkbench(options: Options = {}) {
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
     if (automationEndpoints.has(endpoint)) return automations.fetch(endpoint, params);
     switch (endpoint) {
+      case 'development-preview': {
+        if (typeof params.url !== 'string') throw new Error('需要开发预览网址');
+        return developmentPreviews.open(params.url, hostId);
+      }
       case 'model-providers': {
         const connection = await connectedFor(client, connections, hostId);
         if (params.operation === 'set-enabled') {
@@ -1157,14 +1166,14 @@ export async function createNativeWorkbench(options: Options = {}) {
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
     automations.start();
     notifications.start();
-  } catch (error) { prewarmedThreads.close(); clearInterval(reconnectControl); await notifications.close(); await automations.close(); control.close(); await hostTools.close(); throw error; }
+  } catch (error) { prewarmedThreads.close(); clearInterval(reconnectControl); await developmentPreviews.close(); await notifications.close(); await automations.close(); control.close(); await hostTools.close(); throw error; }
   return {
     server, control, automations, notifications,
     url: 'http://127.0.0.1:' + (server.address() as import('node:net').AddressInfo).port,
     async close() {
       prewarmedThreads.close();
       clearInterval(reconnectControl);
-      await portForwarding.close();
+      await Promise.all([portForwarding.close(), developmentPreviews.close()]);
       await automations.close();
       await notifications.close();
       chromeClients.close();

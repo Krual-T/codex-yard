@@ -32,7 +32,7 @@ export function adaptSidebarLayout(path: string, content: Buffer): Buffer {
     // the adjacent sidebar trigger stays under the pointer on rapid reversals.
     ['if(!t&&n&&!r)return null;let u;', 'let u;'],
     ['e[22]=x,e[23]=h,e[24]=S):S=e[24],S}function hBa()',
-      'e[22]=x,e[23]=h,e[24]=S):S=e[24],(0,WJ.jsx)(`div`,{style:{visibility:!t&&n&&!r?`hidden`:void 0},inert:!t&&n&&!r,"aria-hidden":!t&&n&&!r,children:S})}function hBa()'],
+      'e[22]=x,e[23]=h,e[24]=S):S=e[24],(0,WJ.jsx)(`div`,{"data-yard-history-controls":``,style:{visibility:!t&&n&&!r?`hidden`:void 0},inert:!t&&n&&!r,"aria-hidden":!t&&n&&!r,children:S})}function hBa()'],
     // Keep the surface at its full width. Its slot owns the discrete layout
     // width; surface transform/opacity own the transition, including reversals.
     ['let z=!v||y?1:w,B;', 'let z=1,B;'],

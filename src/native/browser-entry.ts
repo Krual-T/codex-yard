@@ -41,6 +41,12 @@ interface RendererRuntime {
   lPt<T>(load: () => Promise<T>, dependencies: string[], from: string): Promise<T>;
   jmt(): void; // Original browser comment conversion initialization.
   Amt(comment: ChromeElementComment, line: number): unknown;
+  sot(): {
+    warning(title: string, options: {
+      id: string; description: string; duration: number;
+      primaryAction: { label: string; onClick(): void };
+    }): void;
+  };
 }
 interface RendererApplication {
   fwr(route: { pathname: string; search: string; routeTemplate: string }): unknown;
@@ -92,6 +98,16 @@ client.n();
 client.t();
 runtime.fPt();
 runtime.uPt();
+// A tab left open across an update can still request a removed lazy chunk.
+// Keep the draft on screen and let the user choose when to reload.
+window.addEventListener('vite:preloadError', () => {
+  runtime.sot().warning('页面组件加载失败', {
+    id: 'yard-component-load-error',
+    description: '刷新页面后重试。',
+    duration: 0,
+    primaryAction: { label: '刷新页面', onClick: () => window.location.reload() },
+  });
+});
 await import(assets.rpc);
 performance.mark('workbench-rpc-ready');
 // Start the local snapshot download while the application initializes. Parse

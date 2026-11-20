@@ -190,6 +190,42 @@ try {
   assert.ok(fake.calls('thread/section/move').length <= 20, 'Native UI actions must settle without a migration write loop');
   checks.push('Deleting a group preserves its threads and does not recreate the group after reload');
   await capture('deleted');
+
+  const projectName = 'Duplicate project fixture';
+  const keptProject = record(record(fake.defaultResult('project/create', {
+    name: projectName, roots: [{ path: root }], idempotencyKey: 'kept-project',
+  })).project);
+  const emptyProject = record(record(fake.defaultResult('project/create', {
+    name: projectName, roots: [{ path: root }], idempotencyKey: 'empty-project',
+  })).project);
+  for (const thread of fake.threads.values()) thread.projectId = keptProject.id;
+  await page.reload({ waitUntil: 'commit' });
+  const projectButtons = () => page!.getByRole('button', { name: projectName, exact: true });
+  await projectButtons().nth(1).waitFor({ timeout: 60000 });
+  await page.waitForFunction(() => !document.getElementById('yard-startup'), undefined, { timeout: 60000 });
+  await projectButtons().nth(1).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: /^(?:Remove project|移除项目)$/ }).click();
+  await page.getByRole('dialog').getByRole('button', { name: /^(?:Remove project|移除项目)$/ }).click();
+  await eventually(() => !fake.projects.has(String(emptyProject.id)), 'Removing the empty duplicate did not reach the backend');
+  assert.ok(fake.projects.has(String(keptProject.id)));
+  assert.ok([...fake.threads.values()].every(thread => thread.projectId === keptProject.id));
+  await projectButtons().first().focus();
+  await page.keyboard.press('Control+z');
+  await eventually(() => fake.projects.size === 2, 'Undo did not restore a distinct project sharing the same directory');
+  await projectButtons().nth(1).waitFor();
+  await page.getByText(/^(?:Project restored|项目已恢复)$/).waitFor();
+  assert.ok([...fake.threads.values()].every(thread => thread.projectId === keptProject.id));
+  await projectButtons().first().focus();
+  await page.keyboard.press('Control+y');
+  await eventually(() => fake.projects.size === 1, 'Redo did not remove the restored project through its original identity');
+  await page.reload({ waitUntil: 'commit' });
+  await projectButtons().first().waitFor({ timeout: 60000 });
+  await page.waitForFunction(() => !document.getElementById('yard-startup'), undefined, { timeout: 60000 });
+  assert.equal(await projectButtons().count(), 1);
+  assert.equal(fake.threads.size, 2);
+  assert.equal(fake.calls('thread/delete').length, 0);
+  checks.push('An empty duplicate project can be removed, undone, redone and reloaded without changing its sibling or chats');
+  await capture('project-removed');
   assert.deepEqual(errors, []);
   report.ok = true;
 } catch (error) {
@@ -200,7 +236,7 @@ try {
   throw error;
 } finally {
   report.nativeSections = [...fake.sections.values()];
-  report.requests = fake.messages.filter(message => message.method?.startsWith('threadSection/') || message.method === 'thread/section/move');
+  report.requests = fake.messages.filter(message => message.method?.startsWith('project/') || message.method?.startsWith('threadSection/') || message.method === 'thread/section/move');
   await writeFile(join(output, 'result.json'), JSON.stringify(report, null, 2));
   await browser?.close(); await app?.close(); await fake.close();
   await rm(root, { recursive: true, force: true });

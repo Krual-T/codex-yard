@@ -19,6 +19,7 @@ import { BrowserStateConvergence } from './browser-state-convergence.ts';
 import { BrowserSidebarSections, sectionAtom } from './browser-sidebar-sections.ts';
 import { BrowserSidebarOrders } from './browser-sidebar-orders.ts';
 import { BrowserSidechatThreads } from './browser-sidechat-threads.ts';
+import { projectService } from './browser-projects.ts';
 
 const version = '26.1013.40934';
 const historyStartup = new HistoryStartup(initialWorkspaceRoute(
@@ -65,7 +66,11 @@ const publish = (message: HostMessage) => {
     else request.resolve(message.body);
   } else window.postMessage(message, location.origin);
 };
-Object.assign(window, { workbenchOpenConversationLink: (message: HostMessage) => openClientBrowser(message, publish) });
+const openConversationLink = (message: HostMessage) => {
+  if (['open-in-browser', 'open-url'].includes(message.type) && typeof message.conversationId === 'string' && typeof message.hostId === 'string') chrome.setConversationHost(message.conversationId, message.hostId);
+  return openClientBrowser(message, publish);
+};
+Object.assign(window, { workbenchOpenConversationLink: openConversationLink });
 let lastSidebarRefresh = 0;
 async function refreshSidebar() {
   if (Date.now() - lastSidebarRefresh < 1000) return;
@@ -219,7 +224,7 @@ async function send(message: HostMessage) {
   if (message.type === 'electron-window-focus-request') { publishFocus(); return; }
   if (mini.handle(message)) return;
   if (chrome.intercept(message)) return;
-  if (openClientBrowser(message, publish)) return;
+  if (openConversationLink(message)) return;
   if (message.type === 'log-message') return;
   if (message.type === 'fetch' && message.url?.endsWith('/automation-create') && typeof message.body === 'string') {
     const body = record(JSON.parse(message.body));
@@ -402,8 +407,9 @@ window.addEventListener('message', async event => {
   const terminalService = terminalRpcService(original.Eot, terminal);
   const browserService = chromeRpcService(original.Eot);
   const visualizations = visualizationService(original.Eot, requestHost);
+  const projects = projectService(original.Eot, requestHost);
   class AppHost extends original.Eot {
-    get services() { return { ...(isMiniWindow ? { avatarOverlay: mini.service(original.Eot), settings: mini.settings(original.Eot, requestHost) } : {}), appInfo: new AppInfo(), httpFetch: new HttpFetch(), workspaceFiles: new WorkspaceFiles(), fileAttachments: new FileAttachments(), clipboard: new Clipboard(), openIn: new OpenIn(), threadProjectAssignments: new ThreadProjects(), pinnedThreads: new PinnedThreads(), customAvatars: new CustomAvatars(), terminal: terminalService, browserHost: browserService, visualizations, requestUserInputAutoResolution: {} }; }
+    get services() { return { ...(isMiniWindow ? { avatarOverlay: mini.service(original.Eot), settings: mini.settings(original.Eot, requestHost) } : {}), appInfo: new AppInfo(), projects, httpFetch: new HttpFetch(), workspaceFiles: new WorkspaceFiles(), fileAttachments: new FileAttachments(), clipboard: new Clipboard(), openIn: new OpenIn(), threadProjectAssignments: new ThreadProjects(), pinnedThreads: new PinnedThreads(), customAvatars: new CustomAvatars(), terminal: terminalService, browserHost: browserService, visualizations, requestUserInputAutoResolution: {} }; }
     onRpcBroken() {}
   }
   original.kot(event.data.port, new AppHost());

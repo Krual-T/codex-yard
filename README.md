@@ -4,8 +4,6 @@
 
 [简体中文](README.zh-CN.md)
 
-Maintained in the LifeKernel repository at `projects/codex-yard/` since 2026-10-30. The standalone repository's `main` history through `bf1ac091` was imported with Git subtree. Day-to-day changes use LifeKernel branches and commits.
-
 A self-hosted browser workspace for Codex. Continue local and SSH-hosted conversations, inspect files, use terminals, and browse web pages from one interface.
 
 **Yard is an independent Codex client and capability host.** Building, starting, chatting, managing plugins and using supported Computer Use must work when Codex App is absent or closed. Yard owns the required runtime services and documents each feature's system dependencies. The Codex CLI and configured model provider remain prerequisites.
@@ -54,10 +52,11 @@ npm install -g @openai/codex@0.169.1
 codex login
 ```
 
-From your LifeKernel checkout:
+Clone this repository and start Yard:
 
 ```bash
-cd projects/codex-yard
+git clone https://github.com/Krual-T/codex-yard.git
+cd codex-yard
 npm ci
 npm start
 ```
@@ -90,9 +89,11 @@ Ordinary clicks on web links in conversations open in the right panel. Modified 
 
 New tab has one central file/URL search. Enter a URL to render it inside Yard using the visiting device's browser; the address bar and navigation controls appear after a page opens. Text entry, scrolling, links and forms run in that page. Reloading Yard restores the submitted URL; the address controls track URLs entered in Yard. Cross-origin navigation within a page cannot update Yard's address bar or navigation history.
 
-Sites must allow embedding with `frame-ancestors` / `X-Frame-Options`. Their login sessions depend on the browser's third-party cookie and storage policies, and HTTPS Yard pages require HTTPS target sites except where the browser permits local origins. Yard preserves the site's policies. Web pages need no companion or desktop App. The page toolbar for Chrome pairing has been removed. Loopback addresses in direct pages refer to the visiting device.
+When `AGENTS_PUBLIC_ORIGIN` is this machine's Tailscale HTTPS address, loopback development links in local conversations automatically receive a temporary HTTPS forwarding entry and open in the right panel. The address field and restored tabs retain the original development URL. HTTP assets, APIs, event streams and WebSockets pass through; these local previews permit framing by the Yard parent. Closing a tab preserves its application and forwarding. An entry expires after 45 minutes without active requests or WebSockets; stopping or crashing Yard removes its own forwarding entries. Failed creation rolls back and offers retry, without replaying POSTs. This requires an installed, connected Tailscale CLI with HTTPS and Serve permission on a Linux/macOS service host. See [development preview behavior and lifecycle](docs/development-previews.md).
 
-Yard itself allows only same-origin embedding by default. To show a separate Yard development preview in the panel, set `AGENTS_EMBEDDING_ORIGINS` **on the preview instance** to the exact trusted parent origins, separated by spaces (for example `"http://127.0.0.1:8765 https://workbench.example.com:8765"`). Different ports count as different origins. Use the preview's HTTPS address when accessing Yard remotely. This permits the trusted site to embed and control the preview UI; it does not add parent origins to the API or WebSocket allowlist. A reverse proxy in front of the preview must also permit document navigation from the trusted parent.
+External sites must allow embedding with `frame-ancestors` / `X-Frame-Options`; Yard preserves their policies. Login sessions depend on the browser's third-party cookie and storage policies, and HTTPS Yard pages require HTTPS target sites except where the browser permits local origins. Web pages need no companion or desktop App. The page toolbar for Chrome pairing has been removed. Local-only deployments render loopback addresses on the visiting device directly.
+
+Yard itself allows only same-origin embedding by default. Automatic Tailscale previews supply the parent permission at their forwarding entry. For a directly accessed preview on another deployment, set `AGENTS_EMBEDDING_ORIGINS` **on the preview instance** to the exact trusted parent origins, separated by spaces (for example `"http://127.0.0.1:8765 https://workbench.example.com:8765"`). Different ports count as different origins. Use the preview's HTTPS address when accessing Yard remotely. This permits the trusted site to embed and control the preview UI; it does not add parent origins to the API or WebSocket allowlist. A reverse proxy in front of the preview must also permit document navigation from the trusted parent.
 
 ## Pasting and dropping files
 
@@ -106,13 +107,15 @@ The checked-in document viewers render `.docx`, `.xlsx`, `.pptx` and PDF. Markdo
 
 Markdown file previews load image references through Yard's file transport on the document's local or registered SSH host. Absolute paths, paths relative to the Markdown file, `file://` URLs, URL-encoded names and reference-style images are supported.
 
-Self-contained `http://localhost:<port>/*.html` links from local conversations also open through Yard, so a visiting computer or tablet reads the page on the Yard machine. These pages use the same 64 MiB ceiling and sandbox as HTML file previews. Yard does not forward browser credentials or follow redirects. Other local services can use Port forwarding. Inline conversation visualizations retain their separate 5 MB limit.
+Self-contained `http://localhost:<port>/*.html` links from local conversations also open through Yard, so a visiting computer or tablet reads the page on the Yard machine. These pages use the same 64 MiB ceiling and sandbox as HTML file previews. Yard does not forward browser credentials or follow redirects. Other local services use automatic Tailscale previews when configured, or manual Port forwarding. Inline conversation visualizations retain their separate 5 MB limit.
 
 Binary document reads use HTTP, so they do not inherit the JSON WebSocket's 10 MiB read limit. The HTTP transfer ceiling is 64 MiB; each viewer can request a smaller limit (the Office importer requests 40 MiB). Text/RPC reads retain their existing 10 MiB limit. Registered SSH hosts use the same bounded reads and retain their selected host identity. Downloads preserve the original file bytes.
 
 Legacy `.doc`, `.xls`, `.ppt` and OpenDocument formats currently download for opening in a local office application. Yard does not install an office conversion service.
 
 ## Port forwarding
+
+Automatic Tailscale website previews use the separate lifecycle described above. The controls in this section manage explicit device-to-device TCP forwarding.
 
 Open the top-left Codex Yard menu → 端口转发管理 (Port forwarding) and associate this browser with its receiving device once. Until association is complete, the panel shows setup. The service list then shows this client's forwarding status; select 转发到本机 (Forward to this device), Stop or the open-web icon. Device settings lets you correct the association. Devices reuse Settings → Connections; the Yard machine is also an explicit option.
 
@@ -186,9 +189,11 @@ Use `AGENTS_PREVIEW_SSH=1 npm run test:previews:ui -- 说明.md` to verify Markd
 
 `npm run test:new-chat:ui` checks that a project's first message opens its conversation and appears while backend creation is still pending. Set `AGENTS_NEW_CHAT_ENTRY=global` to exercise the sidebar's top New chat button, or also set `AGENTS_NEW_CHAT_KEY=Control+Enter` to verify the renderer's background-send shortcut stays on the new-chat page. It uses a synthetic backend by default and supports the same disposable CLI variables; the selected CLI fixture must have a completed assistant message containing exactly `Previous conversation response`.
 
-`npm run test:mobile-input:ui` checks touch entry without composer autofocus, tap-to-type, keyboard resize and scroll, draft preservation, message bubble spacing and wrapping, and desktop focus. It uses four phone/tablet viewport sizes with synthetic `VisualViewport` events in Chromium. It supports the same disposable CLI variables; the selected fixture must be named `Mobile chat`, with a completed reply `Mobile fixture response` and a user message starting with `长消息换行`. Physical Android Chrome and iPhone Safari keyboards still need device validation.
+`npm run test:mobile-input:ui` checks touch entry without composer autofocus, readable input at different app zoom settings, startup draft handoff, narrow headers with long titles, keyboard resize and scroll, sending, message bubble spacing and wrapping, and desktop focus. It uses nine touch viewport sizes with synthetic `VisualViewport` events in Chromium, including iPhone 15 (393×852) and iPhone 17 (402×874) in both orientations at device pixel ratio 3. It supports the same disposable CLI variables; the selected fixture's name must start with `Mobile chat`, with a completed reply `Mobile fixture response` and a user message starting with `长消息换行`. Physical Android Chrome and iPhone Safari focus zoom and keyboards still need device validation.
 
 `npm run test:embedded-browser:ui` uses disposable websites and a synthetic backend to check direct rendering, touch input, forms, scrolling, address navigation, tablet layouts, reload recovery and a site's refusal to embed. Set `AGENTS_EMBEDDED_TEST_SOCKET`, `AGENTS_EMBEDDED_TEST_CODEX_HOME` and `AGENTS_EMBEDDED_TEST_THREAD` to validate against a disposable CLI conversation with a completed reply exactly `内嵌网页验收内容`. The Chromium and anonymous configuration snapshot variables above also apply. Evidence stays under ignored `.local/embedded-browser/`. Physical iPad Safari cookies and keyboard behavior require device validation.
+
+Add `AGENTS_EMBEDDED_TAILSCALE=1` to exercise actual temporary HTTPS Serve entries, source-address restoration after a Yard restart, root-based CSS/scripts/API/WebSocket and a second Yard instance without embedding configuration. This requires this node's connected Tailscale CLI, HTTPS and Serve permission; existing Serve configuration is compared before and after cleanup. `AGENTS_EMBEDDED_CREATE_THREAD=1` can create the disposable CLI conversation through the selected test socket; its scripted provider must return the fixture links from the supplied loopback address. `AGENTS_EMBEDDED_EVIDENCE` selects a separate evidence directory.
 
 | Directory | Purpose |
 | --- | --- |

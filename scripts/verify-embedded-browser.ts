@@ -1,5 +1,6 @@
 // Run under /tmp/agents-workbench-heavy.lock. All pages and backend data are fixtures.
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -7,7 +8,10 @@ import { join, resolve } from 'node:path';
 import { chromium } from 'playwright-core';
 import type { Page } from 'playwright-core';
 import { setTimeout as delay } from 'node:timers/promises';
+import { promisify } from 'node:util';
+import { WebSocketServer } from 'ws';
 import { createNativeWorkbench } from '../src/native/server.ts';
+import { serveLoopback } from '../src/native/development-previews.ts';
 import { agentItem, createFakeCodex, fixtureThread, fixtureTurn } from '../test/fake-codex.ts';
 import type { Page as RpcPage, TurnSummary } from '../lib/codex-protocol.ts';
 
@@ -18,6 +22,15 @@ const fake = process.env.AGENTS_EMBEDDED_TEST_SOCKET ? undefined : await createF
 let threadId = process.env.AGENTS_EMBEDDED_TEST_THREAD ?? '00000000-0000-4000-8000-000000000184';
 const createCliThread = !fake && process.env.AGENTS_EMBEDDED_CREATE_THREAD === '1';
 const hasFixtureLink = !!fake || createCliThread;
+const tailscale = process.env.AGENTS_EMBEDDED_TAILSCALE === '1';
+const execute = promisify(execFile);
+async function tailscaleJson(args: string[]) { return JSON.parse((await execute('tailscale', args, { timeout: 5000 })).stdout); }
+const serveBefore: unknown = tailscale ? await tailscaleJson(['serve', 'status', '--json']) : undefined;
+const dnsName: string = tailscale ? (await tailscaleJson(['status', '--json'])).Self.DNSName.replace(/\.$/, '') : '';
+const reserve = createServer();
+await new Promise<void>(done => reserve.listen(0, '127.0.0.1', done));
+const appPort = (reserve.address() as import('node:net').AddressInfo).port;
+await new Promise<void>(done => reserve.close(() => done()));
 if (fake) {
   fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.164.0 (Linux fixture)' }));
   fake.handlers.set('account/gatewayOAuth/read', () => ({ providerId: 'fixture', providerName: 'Fixture', required: false, status: null, error: null }));
@@ -35,15 +48,24 @@ if (fake) {
 const website = createServer((request, response) => {
   response.setHeader('Content-Type', 'text/html; charset=utf-8');
   response.setHeader('Cache-Control', 'no-store');
+  if (request.url === '/assets/script.js') {
+    response.setHeader('Content-Type', 'text/javascript');
+    response.end(`document.querySelector('#fixture-script').textContent='脚本已加载';fetch('/api/fixture').then(r=>r.json()).then(v=>document.querySelector('#fixture-api').textContent=v.text);const socket=new WebSocket(location.origin.replace(/^http/,'ws')+'/socket');socket.onmessage=e=>document.querySelector('#fixture-ws').textContent=e.data;`); return;
+  }
+  if (request.url === '/assets/style.css') { response.setHeader('Content-Type', 'text/css'); response.end('#fixture-style{color:rgb(12,34,56)}'); return; }
+  if (request.url === '/api/fixture') { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ text: 'API已加载' })); return; }
   if (request.url === '/blocked') {
     response.setHeader('X-Frame-Options', 'DENY');
     response.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
     response.end('<h1>此页面禁止嵌入</h1>'); return;
   }
   const result = request.url?.startsWith('/result');
+  if (tailscale) response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'self'");
   response.setHeader('Set-Cookie', 'yard_fixture=present; HttpOnly; SameSite=Lax; Path=/');
-  response.end(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>客户端网页验收</title><style>body{font:18px system-ui;margin:0;padding:24px;background:#f8faf9;color:#183c31}input,button{font:inherit;max-width:100%;box-sizing:border-box;padding:10px}input{width:100%}button{margin:12px 0}a{color:#276c55}.space{height:1500px}</style><h1>${result ? '表单已提交' : '客户端直接渲染'}</h1><p>本地会话：${request.headers.cookie?.includes('yard_fixture=present') ? '已保留' : '首次建立'}</p><form action="/result"><label>页面输入<input name="text" aria-label="页面输入"></label><button type="button" onclick="document.querySelector('output').textContent=document.querySelector('input').value">确认输入</button><button>提交表单</button></form><output>等待输入</output><p><a href="/linked">页内链接</a></p><button onclick="try{top.location.href='/escape'}catch{}">替换主页面</button><div class="space"></div><p>滚动到底部</p></html>`);
+  response.end(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>客户端网页验收</title><link rel="stylesheet" href="/assets/style.css"><script src="/assets/script.js" defer></script><style>body{font:18px system-ui;margin:0;padding:24px;background:#f8faf9;color:#183c31}input,button{font:inherit;max-width:100%;box-sizing:border-box;padding:10px}input{width:100%}button{margin:12px 0}a{color:#276c55}.space{height:1500px}</style><h1>${result ? '表单已提交' : '客户端直接渲染'}</h1><p>本地会话：${request.headers.cookie?.includes('yard_fixture=present') ? '已保留' : '首次建立'}</p><form action="/result"><label>页面输入<input name="text" aria-label="页面输入"></label><button type="button" onclick="document.querySelector('output').textContent=document.querySelector('input').value">确认输入</button><button>提交表单</button></form><output>等待输入</output><p><a href="/linked">页内链接</a></p><button onclick="try{top.location.href='/escape'}catch{}">替换主页面</button><div class="space"></div><p>滚动到底部</p><p id="fixture-script"></p><p id="fixture-api"></p><p id="fixture-ws"></p><p id="fixture-style">样式已加载</p></html>`);
 });
+const fixtureSockets = new WebSocketServer({ server: website, path: '/socket' });
+fixtureSockets.on('connection', socket => socket.send('WebSocket已连接'));
 await new Promise<void>(done => website.listen(0, '127.0.0.1', done));
 const site = 'http://127.0.0.1:' + (website.address() as import('node:net').AddressInfo).port;
 if (fake) fake.threads.set(threadId, fixtureThread(threadId, root, { name: '内嵌网页验收', turns: [fixtureTurn('embedded-turn', [
@@ -51,10 +73,14 @@ if (fake) fake.threads.set(threadId, fixtureThread(threadId, root, { name: '内�
 ])] }));
 const dataDir = join(root, 'data');
 if (process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT) await cp(process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT, join(dataDir, 'configuration-snapshot'), { recursive: true });
-const app = await createNativeWorkbench({ port: 0, workspace: root, dataDir,
+const createApp = () => createNativeWorkbench({ port: tailscale ? appPort : 0, publicOrigin: tailscale ? `https://${dnsName}:${appPort}` : '', workspace: root, dataDir,
   socketPath: process.env.AGENTS_EMBEDDED_TEST_SOCKET ?? fake!.socketPath,
   codexHome: process.env.AGENTS_EMBEDDED_TEST_CODEX_HOME ?? join(root, 'codex'),
   hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
+let app = await createApp();
+let parentLease = tailscale ? await serveLoopback(appPort, dnsName) : undefined;
+const deniedLease = tailscale ? await serveLoopback(Number(new URL(site).port), dnsName) : undefined;
+const appUrl = parentLease?.origin ?? app.url;
 if (createCliThread) {
   const result = await app.control.request('thread/start', { cwd: root });
   threadId = result.thread.id;
@@ -70,7 +96,7 @@ if (createCliThread) {
 }
 const previewData = join(root, 'preview-data');
 if (process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT) await cp(process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT, join(previewData, 'configuration-snapshot'), { recursive: true });
-const preview = await createNativeWorkbench({ port: 0, workspace: root, dataDir: previewData, embeddingOrigins: [app.url],
+const preview = await createNativeWorkbench({ port: 0, workspace: root, dataDir: previewData, publicOrigin: '', embeddingOrigins: tailscale ? [] : [app.url],
   socketPath: process.env.AGENTS_EMBEDDED_TEST_SOCKET ?? fake!.socketPath,
   codexHome: process.env.AGENTS_EMBEDDED_TEST_CODEX_HOME ?? join(root, 'codex'),
   hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
@@ -78,11 +104,11 @@ const browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_
   headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
 const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, hasTouch: true });
 const seed = await context.newPage();
-await seed.goto(site + '/seed'); await seed.close();
+await seed.goto((deniedLease?.origin ?? site) + '/seed'); await seed.close();
 const page = await context.newPage();
 page.setDefaultTimeout(15000);
 const errors: string[] = [], checks: string[] = [], commands: string[] = [];
-const report: Record<string, unknown> = { renderer: '26.1013.40934', cli: app.control.server?.userAgent, realDaemonUsed: !fake, errors, checks };
+const report: Record<string, unknown> = { renderer: '26.1013.40934', cli: app.control.server?.userAgent, realDaemonUsed: !fake, tailscale, serviceHost: process.platform, errors, checks };
 const consoleMessages: string[] = [];
 page.on('console', message => { if (message.type() === 'error') consoleMessages.push(message.text()); });
 await page.addInitScript(() => {
@@ -108,13 +134,20 @@ async function navigate(url: string) {
 try {
   if (process.env.AGENTS_TEST_MASKED_APP) { assert.deepEqual(await readdir(process.env.AGENTS_TEST_MASKED_APP), []); report.desktopInstallationUnavailable = true; }
   await page.addLocatorHandler(page.getByRole('button', { name: '继续使用当前模型', exact: true }), async button => { await button.click(); });
-  await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/local/' + threadId), { waitUntil: 'commit' });
+  await page.goto(appUrl + '/?initialRoute=' + encodeURIComponent('/local/' + threadId), { waitUntil: 'commit' });
   await page.getByText('内嵌网页验收内容', { exact: true }).waitFor({ timeout: 60000 });
   const editor = page.getByRole('textbox', { name: /^(和 Codex 一起工作|Work with Codex)$/ });
   await editor.fill('网页切换后保留的草稿');
   if (hasFixtureLink) {
     await page.getByRole('link', { name: '右栏链接', exact: true }).click();
     await frame().getByRole('heading', { name: '客户端直接渲染' }).waitFor();
+    await frame().getByText('脚本已加载', { exact: true }).waitFor();
+    await frame().getByText('API已加载', { exact: true }).waitFor();
+    await frame().getByText('WebSocket已连接', { exact: true }).waitFor();
+    assert.equal(await frame().locator('#fixture-style').evaluate(element => getComputedStyle(element).color), 'rgb(12, 34, 56)');
+    assert.equal((await page.getByRole('textbox', { name: /^(搜索或输入网址|Search or enter URL)$/ }).inputValue()).replace(/^http:\/\//, ''), (site + '/one').replace(/^http:\/\//, ''));
+    if (tailscale) assert.equal(new URL((await page.locator('iframe[title="网页内容"]:visible').getAttribute('src'))!).protocol, 'https:');
+    checks.push('A loopback link retains its source address and loads root-based CSS, scripts, API and WebSocket through its resolved origin');
     const chat = await editor.boundingBox(), web = await page.locator('iframe[title="网页内容"]:visible').boundingBox();
     assert.ok(chat && web && web.x >= chat.x + chat.width, 'A blue link must reveal the right panel alongside the chat even from full view');
     checks.push('A link from the initial full chat view reveals the website to the right of the still-visible composer');
@@ -159,7 +192,7 @@ try {
   await frame().getByRole('button', { name: '确认输入', exact: true }).tap();
   assert.equal(await frame().locator('output').innerText(), '中文原生输入 123');
   await frame().getByRole('button', { name: '替换主页面', exact: true }).tap();
-  assert.ok(page.url().startsWith(app.url));
+  assert.ok(page.url().startsWith(appUrl));
   await capture('01-client-page');
   const body = frame().locator('body');
   await body.hover(); await page.mouse.wheel(0, 500);
@@ -175,7 +208,7 @@ try {
   await navigate(site + '/two');
   await frame().getByRole('heading', { name: '客户端直接渲染' }).waitFor();
   await navigation.getByRole('button', { name: /^(返回|Back)$/ }).click();
-  await page.locator('iframe[title="网页内容"]:visible').evaluate((element, url) => { if ((element as HTMLIFrameElement).src !== url) throw new Error('Back did not restore the first submitted URL'); }, site + '/one');
+  await page.locator('iframe[title="网页内容"]:visible').evaluate((element, url) => { if ((element as HTMLIFrameElement).src !== url) throw new Error('Back did not restore the first submitted URL'); }, (tailscale ? new URL((await page.locator('iframe[title="网页内容"]:visible').getAttribute('src'))!).origin : site) + '/one');
   await navigation.getByRole('button', { name: /^(前进|Forward)$/ }).click();
   await frame().getByRole('textbox', { name: '页面输入' }).fill('刷新前');
   await navigation.getByRole('button', { name: /^(重新加载页面|Reload page)$/ }).click();
@@ -184,7 +217,7 @@ try {
   await frame().getByRole('textbox', { name: '页面输入' }).fill('表单中文');
   await frame().getByRole('button', { name: '提交表单', exact: true }).tap();
   await frame().getByRole('heading', { name: '表单已提交' }).waitFor();
-  assert.ok(page.url().startsWith(app.url));
+  assert.ok(page.url().startsWith(appUrl));
   checks.push('The original address controls navigate submitted URLs and reload the frame; forms navigate within the right panel');
   const firstPageTab = await page.getByRole('tab', { name: '127.0.0.1', exact: true }).getAttribute('id');
   assert.ok(firstPageTab);
@@ -217,7 +250,7 @@ try {
   assert.deepEqual(commands, []);
   checks.push('Portrait, landscape and refresh retain the submitted page and chat draft without Chrome host requests');
   const denied = page.waitForEvent('console', message => /frame-ancestors|X-Frame-Options/.test(message.text()));
-  await navigate(site + '/blocked'); await denied;
+  await navigate((deniedLease?.origin ?? site) + '/blocked'); await denied;
   assert.equal(await frame().getByRole('heading', { name: '此页面禁止嵌入' }).count(), 0);
   assert.deepEqual(commands, [], 'A refused embed must not connect or proxy automatically');
   await capture('03-embed-denied');
@@ -244,7 +277,7 @@ try {
     await htmlLink.click();
     await frame().getByRole('heading', { name: '客户端直接渲染' }).waitFor();
     const htmlUrl = new URL((await page.locator('iframe[title="网页内容"]:visible').getAttribute('src'))!);
-    assert.equal(htmlUrl.origin, app.url); assert.equal(htmlUrl.pathname, '/api/local-html-preview');
+    assert.equal(htmlUrl.origin, appUrl); assert.equal(htmlUrl.pathname, '/api/local-html-preview');
     assert.equal(await frame().locator('body').evaluate(() => { try { void parent.document.body; return true; } catch { return false; } }), false);
     await frame().getByRole('textbox', { name: '页面输入' }).fill('HTML 预览保留交互');
     await frame().getByRole('button', { name: '确认输入', exact: true }).click();
@@ -258,6 +291,17 @@ try {
   assert.equal(context.pages().length, 1);
   await capture('05-yard-preview-in-panel');
   checks.push('A separate Yard instance on another port renders its conversation and composer inside the allowed parent panel');
+  if (tailscale) {
+    const source = await address.inputValue();
+    assert.ok(source.replace(/^http:\/\//, '').startsWith(new URL(preview.url).host));
+    await app.close(); await parentLease?.close();
+    app = await createApp(); parentLease = await serveLoopback(appPort, dnsName);
+    await page.reload({ waitUntil: 'commit' });
+    await frame().getByText('内嵌网页验收内容', { exact: true }).waitFor({ timeout: 60000 });
+    assert.equal(await address.inputValue(), source);
+    assert.equal(new URL((await page.locator('iframe[title="网页内容"]:visible').getAttribute('src'))!).protocol, 'https:');
+    checks.push('Restarting Yard restores the original loopback tab and creates a working HTTPS preview without persisting the expired lease URL');
+  }
   assert.deepEqual(errors, []);
   report.ok = true;
 } catch (error) {
@@ -271,7 +315,10 @@ try {
   await capture('failure').catch(() => {}); throw error;
 } finally {
   await writeFile(join(output, 'result.json'), JSON.stringify(report, null, 2));
-  await browser.close(); await preview.close(); await app.close(); await fake?.close();
+  await browser.close(); await preview.close(); await app.close(); await parentLease?.close(); await deniedLease?.close(); await fake?.close();
+  if (tailscale) { assert.deepEqual(await tailscaleJson(['serve', 'status', '--json']), serveBefore); report.existingServeConfigurationPreserved = true; }
+  await writeFile(join(output, 'result.json'), JSON.stringify(report, null, 2));
+  fixtureSockets.close(); website.closeAllConnections();
   await new Promise<void>(done => website.close(() => done()));
   await rm(root, { recursive: true, force: true });
   console.log(JSON.stringify(report));

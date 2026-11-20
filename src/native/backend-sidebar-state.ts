@@ -700,7 +700,9 @@ export function createBackendSidebarState(options: BackendSidebarOptions) {
       await catalog(hostId);
       const host = state(hostId), ids = strings(projectIds).map(id => resolveProjectId(hostId, id));
       if (ids.some(id => !id)) throw new Error('项目顺序包含未知项目');
-      const order = [...ids as string[], ...host.projects.map(project => project.id).filter(id => !ids.includes(id))];
+      // Undo can supply both the old renderer ID and the restored native ID.
+      // Collapse aliases after resolution so a project never moves before itself.
+      const order = strings([...ids as string[], ...host.projects.map(project => project.id).filter(id => !ids.includes(id))]);
       await moveProjectOrder(hostId, order); await refresh(hostId);
     });
   }
@@ -710,7 +712,8 @@ export function createBackendSidebarState(options: BackendSidebarOptions) {
     await ensureHost(hostId);
     const id = resolveProjectId(hostId, projectId);
     if (!id) throw new Error('项目不存在：' + projectId);
-    const threads = await page<SidebarThread>(hostId, 'thread/list', { projectId: id, useStateDbOnly: true });
+    const threads = (await Promise.all([false, true].map(archived =>
+      page<SidebarThread>(hostId, 'thread/list', { projectId: id, archived, useStateDbOnly: true })))).flat();
     for (const thread of threads) remember(hostId, thread);
     projection(); return threads.map(thread => thread.id);
   }
@@ -748,8 +751,10 @@ export function createBackendSidebarState(options: BackendSidebarOptions) {
       try {
         for (const wanted of desired) {
           const legacyId = String(wanted.id), roots = projectRoots(wanted);
-          let project = host.projects.find(project => project.id === resolveProjectId(hostId, legacyId)) ??
-            host.projects.find(project => equal(project.roots, roots));
+          // Catalog edits address project identities. Equal roots can belong
+          // to distinct projects, including a project restored through Undo.
+          // Root matching belongs only to the one-time legacy migration.
+          let project = host.projects.find(project => project.id === resolveProjectId(hostId, legacyId));
           if (!project) {
             const response = record(await options.request(hostId, 'project/create', { name: String(wanted.name ?? wanted.label ?? legacyId), roots,
               metadata: { [sidebarMetadata.legacyIds]: JSON.stringify([legacyId]) }, idempotencyKey: 'yard-project:' + hostId + ':' + legacyId }, true));

@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { createBackendSidebarState, PINNED_SECTION_ID, sidebarMetadata } from '../src/native/backend-sidebar-state.ts';
 import type { BackendSidebarState, SidebarProject, SidebarSection } from '../src/native/backend-sidebar-state.ts';
 import { createThreadProjects } from '../src/native/thread-projects.ts';
+import { projectService } from '../src/native/browser-projects.ts';
 import type { ObjectValue } from '../src/native/protocol.ts';
 
-interface Thread { id: string; projectId: string | null; section: SidebarSection | null; cwd: string }
+interface Thread { id: string; projectId: string | null; section: SidebarSection | null; cwd: string; archived?: boolean }
 function project(id: string, path: string, metadata: Record<string, string> = {}): SidebarProject {
   return { id, name: id, roots: [{ path }], metadata, position: 0, createdAt: 1, updatedAt: 2 };
 }
@@ -35,7 +36,7 @@ function fixture(globals: ObjectValue = {}, hostIds = ['local'], supportedHosts 
       case 'project/read': return { project: structuredClone(requiredProject()) };
       case 'project/create': {
         const existing = store.keys.get(String(params.idempotencyKey));
-        if (existing) return { project: structuredClone(store.projects.find(project => project.id === existing)) };
+        if (existing && store.projects.some(project => project.id === existing)) return { project: structuredClone(store.projects.find(project => project.id === existing)) };
         const p = { ...project('native-' + ++sequence, ''), name: params.name as string,
           roots: params.roots as SidebarProject['roots'], metadata: params.metadata as Record<string, string> ?? {} };
         store.projects.push(p); store.keys.set(String(params.idempotencyKey), p.id); return { project: structuredClone(p) };
@@ -59,7 +60,8 @@ function fixture(globals: ObjectValue = {}, hostIds = ['local'], supportedHosts 
       case 'thread/list': {
         assert.ok(Object.hasOwn(params, 'sectionId') || Object.hasOwn(params, 'projectId'), 'no whole-history scan');
         const ids = params.sectionId ? store.members.get(String(params.sectionId)) ?? [] : [...store.threads.keys()];
-        return paged(ids.map(id => store.threads.get(id)!).filter(thread => params.projectId === undefined || thread.projectId === params.projectId));
+        return paged(ids.map(id => store.threads.get(id)!).filter(thread => (params.projectId === undefined || thread.projectId === params.projectId) &&
+          (thread.archived ?? false) === (params.archived === true)));
       }
       case 'thread/metadata/update': {
         const thread = requiredThread(); if (params.projectId) requiredProject(); thread.projectId = params.projectId ? String(params.projectId) : null; return {};
@@ -96,7 +98,7 @@ function fixture(globals: ObjectValue = {}, hostIds = ['local'], supportedHosts 
     request, publish: event => events.push(event), async persist() { if (diskFailure) throw new Error('disk full'); saved = structuredClone(backend.persistenceGlobals()); } });
   function thread(id: string, { hostId = 'local', projectId = null, sectionId = null }: { hostId?: string; projectId?: string | null; sectionId?: string | null } = {}) {
     const store = stores.get(hostId)!, section = store.sections.find(section => section.id === sectionId) ?? null;
-    const thread = { id, projectId, section, cwd: '/cwd/' + id }; store.threads.set(id, thread);
+    const thread: Thread = { id, projectId, section, cwd: '/cwd/' + id }; store.threads.set(id, thread);
     if (section) store.members.set(section.id, [...store.members.get(section.id) ?? [], id]); return thread;
   }
   return { backend, globals, stores, calls, events, request, thread, get saved() { return saved; },
@@ -282,6 +284,69 @@ test('renderer global writes update native catalog, metadata, order and deletion
   assert.equal(h.saved['local-projects'], undefined); assert.equal(h.saved['project-appearances'], undefined);
   assert.equal(h.saved['sidebar-project-thread-orders'], undefined); assert.equal(h.saved['thread-project-assignments'], undefined);
   assert.equal(h.saved['project-order'], undefined, 'deleting a project cannot turn native same-host ordering into a client-owned copy');
+});
+
+function rendererProjects(h: ReturnType<typeof fixture>) {
+  const memberships = createThreadProjects(h.globals, h.persist, event => h.events.push(event), () => {}, h.backend);
+  return projectService(class {}, async (endpoint, body) => {
+    const value = body as ObjectValue;
+    if (endpoint === 'get-global-state') return { value: structuredClone(h.globals[String(value.key)]) };
+    if (endpoint === 'set-global-state') return h.backend.setGlobal(String(value.key), value.value);
+    if (endpoint === 'thread-projects') return memberships(value.operation as Parameters<typeof memberships>[0], value.value);
+    throw new Error('unexpected host endpoint: ' + endpoint);
+  });
+}
+
+test('removing an empty duplicate preserves the other project and Undo restores a distinct identity', async () => {
+  const h = fixture(), store = h.stores.get('local')!;
+  store.projects.push(project('kept', '/same'), project('empty', '/same'));
+  h.thread('existing', { projectId: 'kept' });
+  await h.backend.ensureHost();
+  const projects = rendererProjects(h);
+  const removed = await projects.removeLocal('empty');
+  assert.deepEqual(removed.previousMemberships, []);
+  assert.deepEqual(store.projects.map(project => project.id), ['kept']);
+  assert.equal(store.threads.get('existing')!.projectId, 'kept');
+  await projects.upsertLocal({ projectId: 'empty', name: 'Restored', sources: ['/same'] });
+  const restored = h.backend.resolveProjectId('local', 'empty');
+  assert.ok(restored && restored !== 'kept');
+  assert.equal(store.projects.length, 2);
+  await projects.setProjectOrder(['kept', 'empty', restored]);
+  assert.ok(h.calls.filter(call => call.method === 'project/move').every(call => call.params.projectId !== call.params.beforeProjectId));
+  assert.deepEqual(store.projects.map(project => project.id), ['kept', restored]);
+  await projects.removeLocal('empty'); // Redo uses the old renderer ID.
+  assert.deepEqual(store.projects.map(project => project.id), ['kept']);
+  assert.equal(store.threads.get('existing')!.projectId, 'kept');
+  assert.equal(h.calls.some(call => call.method === 'thread/delete'), false);
+});
+
+test('local project removal preserves ordinary and archived threads and restores both memberships', async () => {
+  const h = fixture(), store = h.stores.get('local')!;
+  store.projects.push(project('removed', '/removed'));
+  h.thread('ordinary', { projectId: 'removed' });
+  h.thread('archived', { projectId: 'removed' }).archived = true;
+  await h.backend.ensureHost();
+  const projects = rendererProjects(h), memberships = createThreadProjects(h.globals, h.persist, () => {}, () => {}, h.backend);
+  const { previousMemberships } = await projects.removeLocal('removed');
+  assert.equal(store.threads.size, 2);
+  assert.ok([...store.threads.values()].every(thread => thread.projectId === null));
+  await projects.upsertLocal({ projectId: 'removed', name: 'Restored', sources: ['/removed'] });
+  await memberships('restoreMemberships', previousMemberships);
+  const restored = h.backend.resolveProjectId('local', 'removed');
+  assert.ok([...store.threads.values()].every(thread => thread.projectId === restored));
+  assert.deepEqual(h.globals['projectless-thread-ids'], []);
+  assert.equal(store.threads.get('archived')!.archived, true);
+});
+
+test('a rejected project deletion restores the memberships changed before the catalog write', async () => {
+  const h = fixture(), store = h.stores.get('local')!;
+  store.projects.push(project('kept', '/kept')); h.thread('existing', { projectId: 'kept' });
+  await h.backend.ensureHost();
+  h.fail(method => method === 'project/delete' ? new Error('deletion rejected') : undefined);
+  await assert.rejects(rendererProjects(h).removeLocal('kept'), /deletion rejected/);
+  assert.equal(store.projects.length, 1);
+  assert.equal(store.threads.get('existing')!.projectId, 'kept');
+  assert.deepEqual(h.globals['projectless-thread-ids'], []);
 });
 
 test('projectless state stays independent and local persistence failure compensates native assignment', async () => {

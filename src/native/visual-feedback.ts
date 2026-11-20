@@ -57,10 +57,33 @@ const styles = `
   inset: var(--workbench-viewport-top) 0 auto;
   height: var(--workbench-viewport-height);
 }
-/* The desktop shell sets 100svh inline. Use the available height at the
-   renderer's own zoom so its composer moves with the software keyboard. */
+/* Use the viewport's pixel height: percentages already compensate for CSS
+   zoom, so dividing a percentage by the app zoom would apply it twice. */
 :root[data-workbench-mobile-viewport] #root > [data-app-shell-frame] {
-  height: calc(100% / var(--codex-window-zoom, 1)) !important;
+  height: calc(var(--workbench-viewport-height) / var(--codex-window-zoom, 1)) !important;
+}
+@media (pointer: coarse) {
+  :root { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  /* Safari magnifies focused editors below 16 rendered pixels. Account for
+     the app's own zoom and include paragraphs styled by the desktop editor. */
+  #root :is(input, textarea, select, [contenteditable="true"]),
+  #root [data-codex-composer="true"] * {
+    font-size: max(1em, calc(16px / var(--codex-window-zoom, 1)));
+  }
+  :root #yard-startup textarea, :root #yard-startup-draft-recovery textarea {
+    font-size: max(1em, calc(16px / var(--yard-startup-zoom, 1)));
+  }
+}
+@media (max-width: 767px) {
+  /* Retaining hidden history buttons stabilizes desktop sidebar motion;
+     phones need that space for the conversation title and actions. */
+  [data-app-shell-titlebar] [data-yard-history-controls][inert] { display: none; }
+  /* The title is drawn by a separate toolbar beneath the shell header.
+     Give each visible slot its own surface so the title stays visible and
+     scrolled messages cannot show through the controls. */
+  [data-app-shell-titlebar] > [data-app-shell-header-slot],
+  [data-app-shell-main-toolbar-trailing-slot] { background: var(--color-surface); }
+  [data-app-shell-titlebar] { box-shadow: 0 1px 0 var(--color-border-subtle); }
 }
 ${startupContainer} { animation: none; }
 ${startupLogo} {

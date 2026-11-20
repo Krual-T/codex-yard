@@ -4,8 +4,6 @@
 
 [English](README.md)
 
-2026-10-30 起在 LifeKernel 的 `projects/codex-yard/` 统一维护。独立仓库 `main` 截至 `bf1ac091` 的历史已通过 Git subtree 导入，日常开发使用 LifeKernel 的分支和提交。
-
 通过浏览器继续使用本机和 SSH 主机上的 Codex 会话，在同一工作台查看文件、使用终端、浏览网页和查看交互可视化。
 
 **Yard 是独立运行的 Codex 客户端与能力宿主。即使未安装或已关闭 Codex App，构建、启动、对话、插件管理与已支持的 Computer Use 都应正常使用。** Yard 自己提供所需运行服务，各项功能明确列出系统依赖；Codex CLI 和已配置的模型提供方仍是运行前提。这是 Yard 的产品基本定位，也是新增功能的验收要求。
@@ -53,10 +51,11 @@ npm install -g @openai/codex@0.169.1
 codex login
 ```
 
-在 LifeKernel 检出目录执行：
+克隆本仓库后启动 Yard：
 
 ```bash
-cd projects/codex-yard
+git clone https://github.com/Krual-T/codex-yard.git
+cd codex-yard
 npm ci
 npm start
 ```
@@ -83,9 +82,11 @@ npm start
 
 New tab 只保留中间的文件／网址搜索框，打开网页后才显示地址栏和导航按钮。输入网址后，由访问 Yard 的设备浏览器直接在右栏渲染，支持页面内输入、滚动、链接和表单。刷新 Yard 会恢复手动打开的网址；地址栏的前进、后退记录在 Yard 输入的网址，网页内的跨站跳转无法同步到地址栏及其历史。
 
-网站需要允许嵌入（`frame-ancestors` / `X-Frame-Options`），登录状态受浏览器第三方 Cookie 和存储策略影响。HTTPS Yard 通常需要打开 HTTPS 网站，本地来源以浏览器允许的范围为准。站点策略原样保留。网页无需配套程序或桌面 App，已移除 Chrome 配对工具栏。直接网页中的 localhost 指向访问设备。
+当 `AGENTS_PUBLIC_ORIGIN` 配置为本机的 Tailscale HTTPS 地址时，本机会话里的 localhost 开发链接会自动创建临时 HTTPS 转发并在右栏打开。地址栏和刷新恢复保留原始开发地址；静态资源、API、流式响应和 WebSocket 都经过转发，本机预览允许 Yard 父页面嵌入。关标签页保留应用和转发；没有活动请求或 WebSocket、并闲置 45 分钟后回收入口，Yard 停止或崩溃时清理自己的入口。创建失败会回滚并提供重试，POST 不会自动重发。服务主机需要 Linux/macOS，以及已连接、启用 HTTPS、具备 Serve 权限的 Tailscale CLI。[开发预览与生命周期](docs/development-previews.md)
 
-Yard 默认只允许同源嵌入。要在右栏展示另一个 Yard 开发预览，在**预览实例**上设置 `AGENTS_EMBEDDING_ORIGINS`，以空格分隔可信父页面的精确来源，例如 `"http://127.0.0.1:8765 https://workbench.example.com:8765"`。端口不同也属于不同来源；远程访问时使用预览的 HTTPS 地址。这项配置允许指定站点嵌入并操作预览界面，API 和 WebSocket 的来源限制继续生效；预览前的反向代理也需要允许可信父页面的文档导航。
+外部网站需要允许嵌入（`frame-ancestors` / `X-Frame-Options`），其策略原样保留。登录状态受浏览器第三方 Cookie 和存储策略影响；HTTPS Yard 通常需要 HTTPS 目标网站，本地来源以浏览器允许的范围为准。网页无需配套程序或桌面 App，已移除 Chrome 配对工具栏。仅本地部署时，localhost 由访问设备直接加载。
+
+Yard 默认只允许同源嵌入。自动 Tailscale 预览会在转发入口补齐父页面权限。其他部署中直接访问的预览，需要在**预览实例**上设置 `AGENTS_EMBEDDING_ORIGINS`，以空格分隔可信父页面的精确来源，例如 `"http://127.0.0.1:8765 https://workbench.example.com:8765"`。端口不同也属于不同来源；远程访问时使用预览的 HTTPS 地址。这项配置允许指定站点嵌入并操作预览界面，API 和 WebSocket 的来源限制继续生效；预览前的反向代理也需要允许可信父页面的文档导航。
 
 ## 文件粘贴与拖入
 
@@ -95,7 +96,7 @@ Yard 默认只允许同源嵌入。要在右栏展示另一个 Yard 开发预览
 
 ## 文件预览
 
-HTML 文件预览支持最大 64 MiB 的自包含 UTF-8 页面，与会话内可视化的 5 MB 上限分别处理。本机会话中的 `http://localhost:<端口>/*.html`（含 `127.0.0.1`、`[::1]`）通过 Yard 读取，访问 Yard 的电脑和平板可直接打开。预览脚本在隔离环境运行，不转发浏览器凭据、不跟随重定向，也不提供相邻资源文件；其他本机服务可使用端口转发。
+HTML 文件预览支持最大 64 MiB 的自包含 UTF-8 页面，与会话内可视化的 5 MB 上限分别处理。本机会话中的 `http://localhost:<端口>/*.html`（含 `127.0.0.1`、`[::1]`）通过 Yard 读取，访问 Yard 的电脑和平板可直接打开。预览脚本在隔离环境运行，不转发浏览器凭据、不跟随重定向，也不提供相邻资源文件；其他本机服务可使用自动 Tailscale 预览或手动端口转发。
 
 Markdown 文件预览通过 Yard 的文件接口加载引用图片，沿用文档所在的本机或已登记 SSH 主机。支持绝对路径、相对文档目录的路径、`file://` URL、编码文件名及引用式图片写法。
 
@@ -164,6 +165,8 @@ npm run test:app-tools
 `npm run test:host-preferences:ui` 在临时浏览器和数据目录中验证 SSH 新增与聊天置顶，默认使用合成后端。可通过 `AGENTS_TEST_CODEX_SOCKET`、`AGENTS_TEST_CODEX_HOME` 和 `AGENTS_TEST_THREAD_ID` 接入可丢弃的 CLI 夹具；测试聊天需命名为 `SSH and pin fixture` 且已有一轮完成的对话。SSH 传输仍使用本机测试流。`AGENTS_TEST_CHROMIUM` 指定 Chromium，`AGENTS_TEST_CONFIGURATION_SNAPSHOT` 可提供兼容的匿名功能配置快照。
 
 `npm run test:embedded-browser:ui` 使用可丢弃的网站和合成后端，验证网页直接渲染、触控输入、表单、滚动、地址导航、平板布局、刷新恢复及网站拒绝嵌入。设置 `AGENTS_EMBEDDED_TEST_SOCKET`、`AGENTS_EMBEDDED_TEST_CODEX_HOME` 和 `AGENTS_EMBEDDED_TEST_THREAD` 可接入隔离 CLI，测试会话需已有完整回复 `内嵌网页验收内容`。同样支持上述 Chromium 和匿名配置快照变量。证据保存在忽略目录 `.local/embedded-browser/`；实体 iPad Safari 的 Cookie 和键盘仍需设备验证。
+
+加上 `AGENTS_EMBEDDED_TAILSCALE=1` 可验证真正的临时 HTTPS Serve 入口、Yard 重启后的原始地址恢复、根路径 CSS／脚本／API／WebSocket，以及未配置嵌入来源的第二个 Yard 实例。需要本机 Tailscale 已连接并具备 HTTPS 和 Serve 权限，结束时会比较既有 Serve 配置。`AGENTS_EMBEDDED_CREATE_THREAD=1` 可通过指定测试 socket 创建临时 CLI 会话，其本机脚本提供方需按输入的回环地址返回夹具链接；`AGENTS_EMBEDDED_EVIDENCE` 指定独立证据目录。
 
 会话历史由 Codex 保存；网页草稿保存在浏览器；运行状态与自有宿主的构建产物位于 Git 忽略的 `.local/`。固定 App 资源位于 Git 跟踪的 `vendor/codex-app/`。仓库不附带个人账号数据或功能配置快照。
 

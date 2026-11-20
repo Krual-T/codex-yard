@@ -24,10 +24,12 @@ export interface BrowserRenderer { NWt(): void; MWt: { pages: BrowserPages } }
 let React: typeof ReactRuntime;
 
 function BrowserSurface({ target, bridge, initialUrl }: { target: BrowserTarget; bridge: BrowserChrome; initialUrl: string }) {
-  const [page, setPage] = React.useState(() => bridge.embeddedPage(target, initialUrl));
-  React.useEffect(() => bridge.subscribePage(target, () => setPage(bridge.embeddedPage(target))), [bridge, target]);
+  const subscribe = React.useCallback((listener: () => void) => bridge.subscribePage(target, listener), [bridge, target]);
+  const snapshot = React.useCallback(() => bridge.embeddedPage(target, initialUrl), [bridge, target, initialUrl]);
+  const page = React.useSyncExternalStore(subscribe, snapshot);
   return <section aria-label="浏览器页面" data-codex-character-input-boundary style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-    {page.error ? <p role="alert" style={{ padding: 16 }}>{page.error}</p> : <iframe key={page.revision} src={page.url} title="网页内容"
+    {page.error ? <div role="alert" style={{ padding: 16 }}><p>{page.error}</p><button onClick={() => bridge.retryEmbeddedPage(target)}>重试</button></div>
+      : page.loading ? <p role="status" style={{ padding: 16 }}>正在连接预览…</p> : <iframe key={page.revision} src={page.src ?? page.url} title="网页内容"
       sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-popups allow-popups-to-escape-sandbox allow-downloads allow-storage-access-by-user-activation"
       referrerPolicy="strict-origin-when-cross-origin" allowFullScreen
       style={{ border: 0, flex: 1, minHeight: 0, width: '100%', background: '#fff' }} />}

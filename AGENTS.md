@@ -8,7 +8,7 @@ For each integration, verify the actual user action and capability lifecycle wit
 
 ## Development workflow
 
-This module is maintained in the LifeKernel repository at `projects/codex-yard/`. Read LifeKernel's `.agents/development.md` before starting work. Use LifeKernel topic branches and worktrees, then integrate completed changes into local `main`. Run the npm commands below from this module directory. The standalone GitHub repository preserves the project's publication history; this checkout is the development source of truth.
+Run the npm commands below from the repository root. Keep development and validation in a focused topic branch and an isolated worktree, and preserve existing changes. The published repository contains the source, tests and runtime resources needed to build Yard independently.
 
 Read README.md and CONTRIBUTING.md before changing the project. Use a focused topic branch and an isolated worktree for ongoing changes. Preserve existing user changes.
 

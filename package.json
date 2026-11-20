@@ -21,6 +21,8 @@
     "test:app-tools": "node --test test/app-tools.test.mjs",
     "pretest:plugins:cli": "npm run build:host",
     "test:plugins:cli": "node scripts/verify-plugins.ts --ui",
+    "pretest:hooks:ui": "npm run build:host",
+    "test:hooks:ui": "node scripts/verify-hooks-review.ts",
     "pretest:computer:cli": "npm run build:host",
     "test:computer:cli": "node scripts/verify-computer.ts",
     "browser:poc": "node scripts/browser-reuse-poc.ts",

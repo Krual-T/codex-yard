@@ -3,7 +3,7 @@ import { targetKey, chromeSnapshot } from './protocol.ts';
 import type { BrowserTarget, ChromeElementComment, ChromePanelState, ChromeRequest, ChromeTransport } from './protocol.ts';
 import type { ChromeConnections, ConnectionRequest } from './client-protocol.ts';
 
-export interface EmbeddedPage { url: string; revision: number; error?: string }
+export interface EmbeddedPage { url: string; revision: number; error?: string; src?: string; loading?: boolean }
 
 export class BrowserChrome {
   private readonly listeners = new Map<string, Set<(state: ChromePanelState) => void>>();
@@ -13,6 +13,7 @@ export class BrowserChrome {
   private commentConverter?: (comment: ChromeElementComment, line: number) => unknown;
   private commentRouteResolver?: (route: string) => string | null;
   private readonly ownerRoutes = new Map<string, string>();
+  private readonly conversationHosts = new Map<string, string>();
   // This is the Web implementation of the shipped diff_comments shared object.
   // The renderer owns its editing, removal and submission semantics.
   private comments: Record<string, unknown[]> = {};
@@ -37,6 +38,7 @@ export class BrowserChrome {
       try { url = this.pageUrl(initialUrl); } catch (reason) { error = (reason as Error).message; }
       page = { url, revision: 0, history: [url], index: 0, error };
       this.embedded.set(key, page);
+      this.preparePage(target, page);
     }
     return page;
   }
@@ -83,12 +85,13 @@ export class BrowserChrome {
         title: blank ? 'New tab' : new URL(page.url).hostname,
         canGoBack: page.index > 0, canGoForward: page.index < page.history.length - 1 }),
       tabType: blank ? 'new-tab-page' : 'web',
+      isLoading: page.loading ?? false,
     } });
   }
   private pageCommand(target: BrowserTarget, command: ChromeRequest['command']) {
     this.embeddedPage(target);
     const key = targetKey(target), previous = this.embedded.get(key)!;
-    let page = { ...previous, error: undefined as string | undefined };
+    let page = { ...previous, error: undefined as string | undefined, src: undefined, loading: false };
     try {
       if (command?.type === 'navigate' && command.url) {
         const url = this.pageUrl(command.url);
@@ -99,7 +102,45 @@ export class BrowserChrome {
       else if (command?.type === 'go-forward' && page.index < page.history.length - 1) { page.url = page.history[++page.index]!; page.revision++; }
       else return;
     } catch (reason) { page.error = (reason as Error).message; }
-    this.embedded.set(key, page); this.publishPage(target);
+    this.embedded.set(key, page); this.preparePage(target, page); this.publishPage(target);
+  }
+  setConversationHost(conversationId: string, hostId: string) {
+    if (this.conversationHosts.get(conversationId) === hostId) return;
+    this.conversationHosts.set(conversationId, hostId);
+    for (const [key, old] of this.embedded) if (key.startsWith(conversationId + '\0')) {
+      const target = { conversationId, browserTabId: key.slice(conversationId.length + 1) };
+      const page = { ...old, src: undefined, error: undefined };
+      this.embedded.set(key, page); this.preparePage(target, page); this.publishPage(target);
+    }
+  }
+  retryEmbeddedPage(target: BrowserTarget) { this.pageCommand(target, { type: 'reload' }); }
+  private preparePage(target: BrowserTarget, page: EmbeddedPage) {
+    if (page.error || page.url === 'about:blank') return;
+    const url = new URL(page.url);
+    if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) return;
+    const key = targetKey(target), pending = this.embedded.get(key)!;
+    pending.loading = true;
+    const hostId = this.conversationHosts.get(target.conversationId);
+    if (!hostId) {
+      const timeout = setTimeout(() => {
+        if (this.embedded.get(key) !== pending || this.conversationHosts.has(target.conversationId)) return;
+        this.embedded.set(key, { ...pending, loading: false, error: '暂时无法确认网站所在设备，请重新打开当前对话后重试' }); this.publishPage(target);
+      }, 5000);
+      timeout.unref?.(); return;
+    }
+    const timeout = setTimeout(() => {
+      if (this.embedded.get(key) !== pending) return;
+      this.embedded.set(key, { ...pending, loading: false, error: '预览连接超时，请检查 Yard 与 Tailscale 连接后重试' }); this.publishPage(target);
+    }, 20_000);
+    timeout.unref?.();
+    void this.requestHost('development-preview', { url: page.url, hostId }).then(value => {
+      if (this.embedded.get(key) !== pending) return;
+      const src = this.pageUrl((value as { url: string }).url);
+      this.embedded.set(key, { ...pending, src, loading: false }); this.publishPage(target);
+    }).catch(reason => {
+      if (this.embedded.get(key) !== pending) return;
+      this.embedded.set(key, { ...pending, loading: false, error: (reason as Error).message }); this.publishPage(target);
+    }).finally(() => clearTimeout(timeout));
   }
   setCommentConverter(converter: (comment: ChromeElementComment, line: number) => unknown) { this.commentConverter = converter; }
   setCommentRouteResolver(resolver: (route: string) => string | null) { this.commentRouteResolver = resolver; }
@@ -183,6 +224,8 @@ export class BrowserChrome {
   intercept(message: HostMessage) {
     if (message.type === 'browser-sidebar-owner-sync' && typeof message.conversationId === 'string' && typeof message.ownerRoutePath === 'string') {
       this.ownerRoutes.set(message.conversationId, message.ownerRoutePath);
+      const host = message.ownerRoutePath.split('/')[1];
+      if (host) { try { this.setConversationHost(message.conversationId, decodeURIComponent(host)); } catch {} }
       return false; // The host also persists the original owner's route.
     }
     if (message.key === 'diff_comments') {
