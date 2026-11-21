@@ -120,7 +120,7 @@ Plugins 页面通过所选 Codex 主机的原生协议管理 marketplace、安�
 
 Yard 直接运行原版 `node_repl`，使用独立 Node 和 Codex CLI，保留原工具名称、描述、参数和沙箱。marketplace 恢复 `documents`、`pdf`、`spreadsheets`、`presentations`、`template-creator`、`computer-use`、`browser`、`chrome` 八个独立原名包；五项文件能力保留各自原 Skill 和脚本，通过显式复制的原版运行库工作。Linux Computer Use 接原版 Sky 助手，需要明确选择 X11 桌面和它的无障碍会话。
 
-新建、派生、预热、定时和冷恢复的本机会话按目标项目读取配置，再注入会话级覆盖。启动 Yard 不写共享 `config.toml`；已加载会话保留后端原工具和变量。标题整理沿用已有插件，`codex_apps` 连接器另行授权。当前原版可执行资源覆盖 Linux x64；Chrome 仍需官方扩展和独立 native host，原版内嵌 Browser 的宿主尚未提供。[安装、原运行库复制、平台边界与验收步骤](docs/standalone-plugins.md)
+新建、派生、预热、定时和冷恢复的本机会话按目标项目读取配置，再注入会话级覆盖。启动 Yard 不写共享 `config.toml`；已加载会话保留后端原工具和变量。标题整理沿用已有插件，`codex_apps` 连接器另行授权。原版可执行资源覆盖 Linux x64 和 Windows x64；WSL 通过独立交互宿主控制已登录的 Windows 桌面。Yard 的 Agent Browser 使用独立 Chromium，**不需要 GPT／ChatGPT 插件**；接管用户自己的 Chrome 才需要官方扩展和独立 native host。[安装、原运行库复制、平台边界与验收步骤](docs/standalone-plugins.md)
 
 ## 定时任务
 
